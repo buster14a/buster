@@ -7726,6 +7726,47 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value
         }
         return true;
     }
+    // The two constant-valued math intrinsics, folded here for the same
+    // reason c_ir_constant_evaluate folds them: a hosted <math.h> spells
+    // INFINITY and NAN as `__builtin_inff()` and `__builtin_nanf("")`
+    // whenever the compiler advertises the GNU builtins, and every `long
+    // double` table libc-test writes opens with one of them.  The
+    // pointer-arithmetic spellings musl falls back to (`1e5000f`,
+    // `(0.0f/0.0f)`) already fold through the number and operator paths
+    // above; these are the same values written the other way.
+    if (token->kind == C_TOKEN_IDENTIFIER && fold->cursor + 1 < fold->limit &&
+        c_token_is_punctuator(&fold->builder->preprocess.tokens[fold->cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        String8 link_name = c_ir_math_builtin_link_name(c_token_spelling(fold->builder->preprocess.spelling_base, *token));
+        bool quiet_nan = string_equal(link_name, S8("nan")) || string_equal(link_name, S8("nanf"));
+        bool infinity = string_equal(link_name, S8("inff")) || string_equal(link_name, S8("huge_val"));
+        if (quiet_nan || infinity)
+        {
+            u32 open = fold->cursor + 1;
+            u32 close = c_ir_matching_delimiter(fold->builder->preprocess, open, fold->limit, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            if (close == UINT32_MAX)
+            {
+                fold->blame = fold->cursor;
+                return false;
+            }
+            // Only the default payload folds: `__builtin_nan("")` is the
+            // quiet NaN every hosted header spells, and a non-empty payload
+            // string names a different value.
+            String8 payload = close == open + 2 && fold->builder->preprocess.tokens[open + 1].kind == C_TOKEN_STRING_LITERAL
+                                  ? c_token_spelling(fold->builder->preprocess.spelling_base, fold->builder->preprocess.tokens[open + 1])
+                                  : (String8){0};
+            bool empty_payload = payload.length == 2 && payload.pointer[0] == '"' && payload.pointer[1] == '"';
+            if (quiet_nan ? !empty_payload : close != open + 1)
+            {
+                fold->blame = fold->cursor;
+                return false;
+            }
+            u8 rank = string_equal(link_name, S8("nanf")) || string_equal(link_name, S8("inff")) ? C_IR_EXT80_RANK_FLOAT : C_IR_EXT80_RANK_DOUBLE;
+            *value_out = infinity ? c_ir_ext80_value_infinity(false, rank) : c_ir_ext80_value_default_nan(rank);
+            fold->cursor = close + 1;
+            return true;
+        }
+    }
     fold->blame = fold->cursor;
     return false;
 }
@@ -19965,11 +20006,31 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
         return false;
     }
     remaining_depth -= 1;
-    while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-           c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+    // GNU __extension__ is a diagnostic-only marker on the expression that
+    // follows it; it contributes no value and no type of its own, so strip it
+    // the same way a redundant parenthesis is stripped, and keep stripping
+    // both until neither applies.  musl's <complex.h> spells `I` as
+    // `(__extension__ (0.0f+1.0fi))` under __GNUC__, and leaving the marker in
+    // this walk made the whole group resolve as the leading `0.0f` -- so
+    // `0*I` was a float, `2.0+0*I` was a double, and every <tgmath.h> macro
+    // reached through a complex argument selected the real function.
+    bool trimmed = true;
+    while (trimmed)
     {
-        start += 1;
-        end -= 1;
+        trimmed = false;
+        while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+               c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+        {
+            start += 1;
+            end -= 1;
+            trimmed = true;
+        }
+        while (start < end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+               string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]), S8("__extension__")))
+        {
+            start += 1;
+            trimmed = true;
+        }
     }
     if (start >= end)
     {
@@ -24987,12 +25048,37 @@ BUSTER_C_INTERNAL bool c_ir_type_is_integer_domain(IrType* type)
 BUSTER_C_INTERNAL bool c_ir_range_is_null_pointer_constant_attempt(CIntegerIrBuilder* builder, IrTypeId type_id, u32 start, u32 end)
 {
     IrType* type = ir_type_from_id(&builder->program->types, type_id);
-    if (!c_ir_type_is_integer_domain(type))
+    // C11 6.3.2.3p3 gives a null pointer constant two spellings: an integer
+    // constant expression with the value 0, *or* such an expression cast to
+    // `void *`.  The second is not a rewording of the first -- it is the only
+    // one that survives being written as a conditional operand, and musl's
+    // <tgmath.h> is built out of exactly that: `0 ? (t*)0 : (void*)!(c)`
+    // selects `t` or `void` purely on whether the `void *` arm is a null
+    // pointer constant.
+    bool void_pointer = type && type->kind == IR_TYPE_POINTER && !type->is_nullptr;
+    if (void_pointer)
+    {
+        IrType* pointee = ir_type_from_id(&builder->program->types, type->element_type);
+        void_pointer = pointee && pointee->kind == IR_TYPE_VOID;
+    }
+    if (!c_ir_type_is_integer_domain(type) && !void_pointer)
     {
         return false;
     }
     CIrConstantValue value = {0};
-    return c_ir_query_constant(builder, start, end, &value) && value.kind == C_IR_CONSTANT_INTEGER && !value.integer;
+    if (!c_ir_query_constant(builder, start, end, &value))
+    {
+        return false;
+    }
+    // A `void *` operand folds through the cast rule in c_ir_constant_cast,
+    // which turns a zero integer into a symbol-less pointer constant and
+    // fails outright on any other value -- so `(void *)1` never arrives here
+    // as a constant at all.
+    if (void_pointer)
+    {
+        return value.kind == C_IR_CONSTANT_POINTER && value.symbol.value == IR_ID_UNDERLYING_INVALID && !value.addend && !value.integer;
+    }
+    return value.kind == C_IR_CONSTANT_INTEGER && !value.integer;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_conditional_result_type_attempt(CIntegerIrBuilder* builder, IrTypeId true_type, IrTypeId false_type, u32 true_start,
@@ -25072,6 +25158,37 @@ BUSTER_C_INTERNAL IrTypeId c_ir_conditional_result_type_attempt(CIntegerIrBuilde
     else if (false_value->kind == IR_TYPE_POINTER && c_ir_type_is_integer_domain(true_value) && true_null_constant)
     {
         result = false_type;
+    }
+    else if (true_value->kind == IR_TYPE_POINTER && false_value->kind == IR_TYPE_POINTER)
+    {
+        // Two pointers to types that are not compatible (the identical-id
+        // fast path above already took the compatible case).  C11 6.5.15p6
+        // resolves them in one order: a null pointer constant on either side
+        // yields the *other* operand's type, and only if neither is one does
+        // a `void *` operand pull an object pointer to `void *`.  Getting the
+        // second clause wrong is silent -- `0 ? (double *)0 : (void *)1` kept
+        // `double *`, so musl's `__type1(c,t)` named `t` for every `c` and
+        // every <tgmath.h> return cast collapsed onto its first arm.
+        IrType* true_pointee = ir_type_from_id(&builder->program->types, true_value->element_type);
+        IrType* false_pointee = ir_type_from_id(&builder->program->types, false_value->element_type);
+        bool true_void = true_pointee && true_pointee->kind == IR_TYPE_VOID;
+        bool false_void = false_pointee && false_pointee->kind == IR_TYPE_VOID;
+        if (false_null_constant)
+        {
+            result = true_type;
+        }
+        else if (true_null_constant)
+        {
+            result = false_type;
+        }
+        else if (true_void != false_void)
+        {
+            result = true_void ? true_type : false_type;
+        }
+        else
+        {
+            result = true_type;
+        }
     }
     else
     {
@@ -36800,6 +36917,43 @@ BUSTER_C_INTERNAL bool c_ir_constant_offsetof_attempt(CIntegerIrBuilder* builder
         offset += field->offset;
         type = ir_type_from_id(&builder->program->types, field->type);
         index += 1;
+        // C11 7.19p3 lets the member designator subscript as well as select,
+        // and musl's ioctl.c writes `offsetof(struct v4l2_event, ts[0])` in a
+        // *static* initializer -- so this constant walk, not just the value
+        // path, has to follow one.  It only became reachable when __GNUC__
+        // started being predefined in every dialect: <stddef.h> spells
+        // offsetof as pointer arithmetic without it, and that form never
+        // arrives here.
+        while (index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+            if (close >= end || !type || type->kind != IR_TYPE_ARRAY)
+            {
+                return false;
+            }
+            CIrConstantValue subscript = {0};
+            if (!c_ir_query_constant(builder, index + 1, close, &subscript) || subscript.kind != C_IR_CONSTANT_INTEGER)
+            {
+                return false;
+            }
+            IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
+            if (!element || !element->layout.resolved)
+            {
+                return false;
+            }
+            if (element->layout.size && subscript.integer > UINT64_MAX / element->layout.size)
+            {
+                return false;
+            }
+            u64 element_offset = subscript.integer * element->layout.size;
+            if (offset > UINT64_MAX - element_offset)
+            {
+                return false;
+            }
+            offset += element_offset;
+            type = element;
+            index = close + 1;
+        }
     }
     *offset_out = offset;
     return true;

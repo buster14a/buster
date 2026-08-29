@@ -7598,6 +7598,94 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(lazy_operand_temporary);
         }
     }
+    // musl's <tgmath.h> machinery under every allocator.  The fixture's own
+    // comment carries the three rules; what it is here for is that all three
+    // are type-only questions the frontend answers before any code is
+    // generated, so a wrong answer is a silently different program rather
+    // than a diagnostic -- `sizeof pow(2.0, 0.5)` came back as `long double
+    // _Complex` and libc-test's `functional/tgmath` was the only thing that
+    // said so.  -std=c99 is part of the test: it is the dialect libc-test and
+    // musl's own makefile pass, and the `__GNUC__` half of the fixture only
+    // has something to check outside a GNU dialect.
+    {
+        String8 type_generic_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(type_generic_allocators); allocator_index += 1)
+        {
+            Arena* type_generic_conflicts[] = {
+                arguments->arena,
+                c_asm_arena,
+            };
+            TemporalArena type_generic_temporary = scratch_begin(type_generic_conflicts, BUSTER_ARRAY_LENGTH(type_generic_conflicts));
+            Arena* type_generic_arena = type_generic_temporary.arena;
+            String8 type_generic_path = buster_test_temporary_path(type_generic_arena, S8("buster-c-type-generic-math"),
+                                                                   string_format(type_generic_arena, S8("-{u32}"), allocator_index));
+            String8 type_generic_command_line[] = {
+                S8("-std=c99"),
+                string_format(type_generic_arena, S8("-fregister-allocator={S8}"), type_generic_allocators[allocator_index]),
+                S8("-o"),
+                type_generic_path,
+                S8("tests/basic_c_type_generic_math.c"),
+            };
+            CompilerDriverResult type_generic = compiler_driver_execute_invocation(
+                type_generic_arena, compiler_driver_parse_arguments(type_generic_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(type_generic_command_line)));
+            BUSTER_TEST(arguments, type_generic.error == COMPILER_DRIVER_ERROR_NONE);
+            if (type_generic.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {type_generic_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(type_generic_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(type_generic_temporary);
+        }
+    }
+    // The two constructs the __GNUC__ predefine change made reachable in
+    // musl's own sources.  Both are frontend-only questions -- where a
+    // declaration's declarator starts, and what a static initializer folds to
+    // -- so one allocator answers them, unlike the type-generic fixture above
+    // whose sizes reach code generation.  -std=c99 is again part of the test.
+    {
+        String8 gnu_specifier_fixtures[] = {
+            S8("tests/basic_c_local_typedef_attribute.c"),
+            S8("tests/basic_c_offsetof_subscript.c"),
+        };
+        String8 gnu_specifier_names[] = {
+            S8("buster-c-local-typedef-attribute"),
+            S8("buster-c-offsetof-subscript"),
+        };
+        for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(gnu_specifier_fixtures); fixture_index += 1)
+        {
+            Arena* gnu_specifier_conflicts[] = {
+                arguments->arena,
+                c_asm_arena,
+            };
+            TemporalArena gnu_specifier_temporary = scratch_begin(gnu_specifier_conflicts, BUSTER_ARRAY_LENGTH(gnu_specifier_conflicts));
+            Arena* gnu_specifier_arena = gnu_specifier_temporary.arena;
+            String8 gnu_specifier_path = buster_test_temporary_path(gnu_specifier_arena, gnu_specifier_names[fixture_index], S8(""));
+            String8 gnu_specifier_command_line[] = {
+                S8("-std=c99"), S8("-o"), gnu_specifier_path, gnu_specifier_fixtures[fixture_index],
+            };
+            CompilerDriverResult gnu_specifier = compiler_driver_execute_invocation(
+                gnu_specifier_arena, compiler_driver_parse_arguments(gnu_specifier_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(gnu_specifier_command_line)));
+            BUSTER_TEST(arguments, gnu_specifier.error == COMPILER_DRIVER_ERROR_NONE);
+            if (gnu_specifier.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {gnu_specifier_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(gnu_specifier_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(gnu_specifier_temporary);
+        }
+    }
     String8 c_asm_aarch64_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-aarch64"), S8(""));
     String8 c_asm_aarch64_command_line[] = {
         S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_asm_aarch64_path, S8("tests/basic_c_asm.c"),

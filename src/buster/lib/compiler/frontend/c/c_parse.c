@@ -6023,6 +6023,21 @@ BUSTER_C_INTERNAL CTypeId c_parse_qualified_typedef_type(CParseResult* result, C
                 qualifier_index = c_parse_skip_attributes(preprocess, alignment_end, end);
                 continue;
             }
+            // A GNU attribute may follow the typedef name directly, with no
+            // qualifier and no alignment specifier ahead of it to carry the
+            // skip: musl's strlen and its eleven siblings write `typedef
+            // size_t __attribute__((__may_alias__)) word;` in a *block*, where
+            // this is the walk that says where the declarator starts.  Left
+            // in, the attribute became the declared name and the declaration
+            // was rejected.  The run stays inside the specifier range the
+            // caller then hands to c_parse_alignment_specifiers, so an
+            // `aligned` attribute here is still read.
+            u32 attribute_end = c_parse_skip_attributes(preprocess, qualifier_index, end);
+            if (attribute_end != qualifier_index)
+            {
+                qualifier_index = attribute_end;
+                continue;
+            }
             if (c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[qualifier_index], &qualifiers))
             {
                 has_qualifier = true;

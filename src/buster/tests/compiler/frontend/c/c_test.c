@@ -3418,6 +3418,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     BUSTER_TEST(arguments, gnu99_version.diagnostic_count == 0);
     c_test_preprocessed_token(arguments, &result, gnu99_version, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("199901L"));
 
+    // The GNU version macros are not part of that dialect switch.  Both
+    // reference compilers predefine them in every standard mode -- `clang
+    // -std=c99 -dM -E` reports `__GNUC__ 4` beside `__STRICT_ANSI__ 1` -- and
+    // a header that reads them is asking which extensions the compiler
+    // implements, not which ones the dialect permits.  musl's <tgmath.h> is
+    // the case that made the difference visible: without __GNUC__ it drops
+    // every `__typeof__` return cast, so `ide cc -std=c99` and `clang
+    // -std=c99` compiled different source out of one header.
+    CPreprocessResult c99_extension_macros = c_preprocess(arguments->arena,
+                                                          S8("#if defined(__GNUC__) && defined(__STRICT_ANSI__) && !defined(__nonexistent__)\n"
+                                                             "__GNUC__ __GNUC_MINOR__ __GNUC_PATCHLEVEL__\n"
+                                                             "#endif\n"),
+                                                          (CPreprocessOptions){
+                                                              .source_path = S8("c99-extension-macros.c"),
+                                                              .dialect = C_PREPROCESS_DIALECT_C99,
+                                                          });
+    BUSTER_TEST(arguments, c99_extension_macros.diagnostic_count == 0);
+    BUSTER_TEST(arguments, c99_extension_macros.token_count == 4);
+    c_test_preprocessed_token(arguments, &result, c99_extension_macros, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("4"));
+    c_test_preprocessed_token(arguments, &result, c99_extension_macros, 1, C_TOKEN_PREPROCESSING_NUMBER, S8("2"));
+    c_test_preprocessed_token(arguments, &result, c99_extension_macros, 2, C_TOKEN_PREPROCESSING_NUMBER, S8("1"));
+
+    // The GNU dialect keeps __GNUC__ and is the one that must *not* claim
+    // strict conformance.
+    CPreprocessResult gnu99_extension_macros = c_preprocess(arguments->arena,
+                                                            S8("#if defined(__GNUC__) && !defined(__STRICT_ANSI__)\n"
+                                                               "__GNUC__\n"
+                                                               "#endif\n"),
+                                                            (CPreprocessOptions){
+                                                                .source_path = S8("gnu99-extension-macros.c"),
+                                                                .dialect = C_PREPROCESS_DIALECT_GNU99,
+                                                            });
+    BUSTER_TEST(arguments, gnu99_extension_macros.diagnostic_count == 0);
+    BUSTER_TEST(arguments, gnu99_extension_macros.token_count == 2);
+    c_test_preprocessed_token(arguments, &result, gnu99_extension_macros, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("4"));
+
     CPreprocessResult floating_builtins = c_preprocess(arguments->arena,
                                                        S8("__DBL_EPSILON__\n"),
                                                        (CPreprocessOptions){

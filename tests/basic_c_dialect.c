@@ -10,17 +10,21 @@
 #error incorrect __STDC_VERSION__
 #endif
 
-#if EXPECTED_GNU
+/* __GNUC__ is not part of the dialect switch: it says which extensions the
+   compiler implements, not which ones the dialect permits, and both reference
+   compilers predefine it in every standard mode -- `clang -std=c99 -dM -E`
+   reports `__GNUC__ 4` beside `__STRICT_ANSI__ 1`.  musl's <tgmath.h> is what
+   made the difference visible; see tests/basic_c_type_generic_math.c.
+   __STRICT_ANSI__ is the dialect switch, and only it flips here. */
 #ifndef __GNUC__
-#error GNU dialect must define __GNUC__
+#error every dialect must define __GNUC__
 #endif
+
+#if EXPECTED_GNU
 #ifdef __STRICT_ANSI__
 #error GNU dialect must not define __STRICT_ANSI__
 #endif
 #else
-#ifdef __GNUC__
-#error strict C dialect must not define __GNUC__
-#endif
 #ifndef __STRICT_ANSI__
 #error strict C dialect must define __STRICT_ANSI__
 #endif

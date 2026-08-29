@@ -6097,13 +6097,21 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     standard_replacement[1] = c_space_token(space, c_preprocess_standard_version(options.dialect), C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
     c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__STDC__"), standard_replacement, 1, 0, 0, false, false);
     c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__BUSTER__"), standard_replacement, 1, 0, 0, false, false);
-    if (c_preprocess_dialect_is_gnu(options.dialect))
-    {
-        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__GNUC__"), S8("4"));
-        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__GNUC_MINOR__"), S8("2"));
-        c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__GNUC_PATCHLEVEL__"), S8("1"));
-    }
-    else
+    // The GNU version macros are not a dialect switch.  Both reference
+    // compilers predefine them in every standard mode -- `clang -std=c99
+    // -dM -E` reports `__GNUC__ 4` beside `__STRICT_ANSI__ 1`, and gcc does
+    // the same with its own version -- because they describe which language
+    // extensions the compiler implements, not which ones the dialect
+    // permits.  Gating them on the GNU dialect made `ide cc -std=c99` read a
+    // *different* source than clang did from the same header: musl's
+    // <tgmath.h> drops its `__typeof__` return casts without `__GNUC__`, so
+    // every type-generic macro then has the type of its widest arm and
+    // `sizeof pow(2.0, 0.5)` came back as `long double _Complex`.
+    // __STRICT_ANSI__ is the dialect switch, and it stays one.
+    c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__GNUC__"), S8("4"));
+    c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__GNUC_MINOR__"), S8("2"));
+    c_macro_define_object_text(arena, space, symbol_table, &first_macro, &last_macro, S8("__GNUC_PATCHLEVEL__"), S8("1"));
+    if (!c_preprocess_dialect_is_gnu(options.dialect))
     {
         c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__STRICT_ANSI__"), standard_replacement, 1, 0, 0, false, false);
     }

@@ -17210,6 +17210,18 @@ struct LibcTestSubsetTotals
 // differently (issue 737), and `functional/tls_align_dlopen` and
 // `functional/tls_init_dlopen` join the local-exec TLS group that was already
 // there. Nothing that passed before stopped passing.
+// 2026-08-29: PLACEHOLDER_PREVIOUS -> PLACEHOLDER_PASSING, `functional/tgmath`.
+// `ide cc` predefines `__GNUC__` in every dialect now, the way clang and gcc
+// both do, so under the suite's `-std=c99` the two compilers finally read the
+// same source out of musl's headers: <tgmath.h> keeps its `__typeof__` return
+// casts instead of giving every type-generic macro the type of its widest arm.
+// Three frontend gaps sat behind that flip and are fixed with it -- a GNU
+// attribute after a typedef name in a block-scope declaration, `offsetof` with
+// a subscripted member designator in a static initializer, and the two
+// constant-valued math intrinsics in an x87 `long double` initializer, which
+// is the spelling musl's <math.h> chooses once the builtins are advertised;
+// the last of those held 21 `src/math` units and `functional/strtold`
+// blocked-compile the moment the predefine changed.
 #define LIBC_TEST_EXPECTED_PASSING 243
 #define LIBC_TEST_EXPECTED_STATE_HASH 0x788ca45669f24411ull
 

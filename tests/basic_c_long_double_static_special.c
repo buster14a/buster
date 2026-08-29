@@ -4,7 +4,10 @@
 // `(0.0f/0.0f)` whenever the compiler does not advertise the GNU builtins, so
 // libc-test's `long double` tables -- `T(RN, nan, nan, ...)` at the top of
 // nearly every src/math unit -- are made of exactly these two shapes, and a
-// folder that refused them refused those tables whole.
+// folder that refused them refused those tables whole.  It spells them
+// `__builtin_inff()` and `__builtin_nanf("")` when the compiler does advertise
+// the builtins, which is now every dialect, so both spellings are pinned here
+// against one set of expected bytes.
 //
 // basic_c_long_double_static_initializer.c covers the finite arithmetic this
 // one deliberately leaves alone; what is pinned here is where the value stops
@@ -35,6 +38,16 @@
 // rather than a bare `__builtin_inff()`.
 #define FIXTURE_INFINITY 1e5000f
 #define FIXTURE_NAN (0.0f/0.0f)
+
+// And the *other* two spellings of the same two values.  musl picks these
+// whenever the compiler advertises the GNU builtins, which `ide cc` now does
+// in every dialect and not only a GNU one (tests/basic_c_type_generic_math.c
+// carries why).  They are constant-valued intrinsics rather than arithmetic,
+// so they reach the folder by a different door and have to arrive at the
+// identical bytes -- 21 of libc-test's `long double` units failed to compile
+// on the day the header started choosing them.
+#define FIXTURE_BUILTIN_INFINITY __builtin_inff()
+#define FIXTURE_BUILTIN_NAN __builtin_nanf("")
 
 // A literal whose magnitude does not fit its own type is the infinity C
 // gives it, in every one of the three floating types.
@@ -90,6 +103,19 @@ static const long double long_double_underflow = 1e-5000L;
 // because aligning a zero's exponent -- the minimum subnormal's -- against
 // this operand's spans more bits than the folder's bignum holds.
 static const long double zero_plus_huge = -0.0L + 1e4930L;
+// The builtin spellings, whose bytes are checked against the expectations the
+// arithmetic spellings above already pin.  `__builtin_huge_val()` is the
+// double-ranked infinity and widens to the same x87 value.
+static const long double builtin_infinity = FIXTURE_BUILTIN_INFINITY;
+static const long double builtin_negative_infinity = -FIXTURE_BUILTIN_INFINITY;
+static const long double builtin_huge_val = __builtin_huge_val();
+static const long double builtin_quiet_nan = FIXTURE_BUILTIN_NAN;
+static const long double builtin_negative_nan = -FIXTURE_BUILTIN_NAN;
+// An intrinsic as an operand rather than as the whole initializer, which is
+// what libc-test's tables are made of.
+static const long double builtin_infinity_minus_infinity = FIXTURE_BUILTIN_INFINITY - FIXTURE_BUILTIN_INFINITY;
+static const long double builtin_nan_absorbs_addition = FIXTURE_BUILTIN_NAN + 1.0L;
+
 // The two aggregate shapes libc-test writes: a table of `long double`
 // elements, and the row struct its `T(...)` macro expands to, whose padding
 // between an `int` and the two x87 members has to stay zero as well.
@@ -109,6 +135,10 @@ struct Row
 
 static const Row row = {0, FIXTURE_NAN, FIXTURE_NAN, 0.0f, 0};
 static const Row row_infinite = {0, FIXTURE_INFINITY, -FIXTURE_INFINITY, 0.0f, 0};
+// The same two rows in the builtin spelling, which is the shape libc-test's
+// `T(RN, nan, nan, ...)` rows now expand to.
+static const Row builtin_row = {0, FIXTURE_BUILTIN_NAN, FIXTURE_BUILTIN_NAN, 0.0f, 0};
+static const Row builtin_row_infinite = {0, FIXTURE_BUILTIN_INFINITY, -FIXTURE_BUILTIN_INFINITY, 0.0f, 0};
 
 typedef struct Subject Subject;
 struct Subject
@@ -188,6 +218,15 @@ int main(void)
         {(const unsigned char*)table, expected_table, (unsigned)sizeof(table)},
         {(const unsigned char*)&row, expected_row, (unsigned)sizeof(row)},
         {(const unsigned char*)&row_infinite, expected_row_infinite, (unsigned)sizeof(row_infinite)},
+        {(const unsigned char*)&builtin_infinity, expected_infinity, 16},
+        {(const unsigned char*)&builtin_negative_infinity, expected_negative_infinity, 16},
+        {(const unsigned char*)&builtin_huge_val, expected_infinity, 16},
+        {(const unsigned char*)&builtin_quiet_nan, expected_quiet_nan, 16},
+        {(const unsigned char*)&builtin_negative_nan, expected_negative_nan, 16},
+        {(const unsigned char*)&builtin_infinity_minus_infinity, expected_infinity_minus_infinity, 16},
+        {(const unsigned char*)&builtin_nan_absorbs_addition, expected_nan_absorbs_addition, 16},
+        {(const unsigned char*)&builtin_row, expected_row, (unsigned)sizeof(builtin_row)},
+        {(const unsigned char*)&builtin_row_infinite, expected_row_infinite, (unsigned)sizeof(builtin_row_infinite)},
     };
 
     unsigned subject_index = 0;

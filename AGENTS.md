@@ -826,23 +826,31 @@ allocator: the three PC-relative references are checked against the addresses
 they should have produced, and the hand-off ends the process itself because
 nothing after it runs.
 
-One flag the set does not carry is a dialect, and that makes the two compilers
-read different source. `ide cc` predefines `__GNUC__` only in a GNU dialect,
-while Clang predefines it in every one, so under `-std=c99` musl's
-`<stddef.h>` gives Clang `__builtin_offsetof` and gives Buster the portable
-`((size_t)((char *)&(((type *)0)->member) - (char *)0))`. Every `offsetof` in
-the archive is therefore a different expression on the two sides. Nothing
-about the comparison is unsound — both spellings mean the same offset, and
-`tests/basic_c_null_pointer_offsetof.c` pins that they agree — but a class
-that looks like a Buster gap can be a branch Clang never took, so check what
-the unit actually preprocessed to (`ide cc -E` with the same flags) before
-naming a construct.
+One flag the set does not carry is a dialect, and it used to make the two
+compilers read different source: `ide cc` predefined `__GNUC__` only in a GNU
+dialect while Clang predefines it in every one, so under `-std=c99` musl's
+`<stddef.h>` gave Clang `__builtin_offsetof` and gave Buster the portable
+`((size_t)((char *)&(((type *)0)->member) - (char *)0))`, and every `offsetof`
+in the archive was a different expression on the two sides. That is fixed —
+the macro describes which extensions the compiler implements, not which ones
+the dialect permits, and both reference compilers report it beside
+`__STRICT_ANSI__`; `__STRICT_ANSI__` is the switch that still flips. Both
+sides now take the same branch of every one of these headers. The habit the
+divergence taught is still worth keeping: a class that looks like a Buster gap
+can be a branch the reference never took, so check what the unit actually
+preprocessed to (`ide cc -E` with the same flags) before naming a construct.
+`tests/basic_c_null_pointer_offsetof.c` still pins that the two `offsetof`
+spellings agree, and `tests/basic_c_type_generic_math.c` pins the predefines
+themselves.
 
 `<math.h>` splits on the same macro, and there the two branches are not
-interchangeable. `NAN` is `__builtin_nanf("")` for Clang and `(0.0f/0.0f)`
-for Buster, so every `NAN` in the archive is an operation that creates a NaN
-rather than a constant that already is one — and IEEE-754 leaves the sign of
-an invalid operation's NaN unspecified, which the two available answers use:
+interchangeable, which is why the fold below outlived the divergence. `NAN` is
+`__builtin_nanf("")` for a compiler that advertises the builtins and
+`(0.0f/0.0f)` for one that does not; both sides take the first branch now, but
+the second is still what any freestanding or older header hands the frontend,
+and it is an operation that creates a NaN rather than a constant that already
+is one — and IEEE-754 leaves the sign of an invalid operation's NaN
+unspecified, which the two available answers use:
 x86 hardware produces the negative default NaN, Clang folds to the positive
 quiet one. The frontend therefore folds the four operations that create a NaN
 out of operands that are not NaN — `0/0` and `inf/inf`, `0*inf`, `inf-inf`
@@ -860,10 +868,16 @@ non-GNU spelling is the overflowing literal `1e5000f`, which the x87 folder
 refused until it learned that an overflow is a value — the infinity C names —
 rather than a failure. Twenty-one `src/math` units and `functional/strtold`
 stopped on that literal, and `fpclassify`'s `1/0.0` on the division by zero
-beside it, which creates an infinity rather than a NaN.
-`tests/basic_c_long_double_static_special.c` carries those bytes, and the
-`long double` bullet under "Platform and backend boundaries" is where the
-folder's whole boundary is written down.
+beside it, which creates an infinity rather than a NaN. The same 21 units and
+the same `strtold` stopped a second time on the *other* spelling when
+`__GNUC__` started being predefined everywhere and the header began choosing
+`__builtin_inff()` and `__builtin_nanf("")`: the folder is a recursive descent
+over arithmetic and knew no calls at all, so the two constant-valued
+intrinsics fold there now the way they already folded in
+`c_ir_constant_evaluate`, with only the empty NaN payload accepted.
+`tests/basic_c_long_double_static_special.c` carries both spellings against one
+set of expected bytes, and the `long double` bullet under "Platform and backend
+boundaries" is where the folder's whole boundary is written down.
 
 One flag the reference carries and Buster does not is
 `-fcomplex-arithmetic=improved`. Clang's default for C lowers a complex
@@ -1420,12 +1434,9 @@ and its own diagnostic never reaches a state count. `buster_compile_failed` on
 the `LIBCTEST_SUBSET` line is the number to read for a compile gap, and it is
 0 in every subset but `api` and `functional` now.
 
-The two failing units are wrong answers rather than missing components.
-`functional/tgmath` exits non-zero and has not been attributed further; it was
-blocked on a link until `vfprintf` compiled, so it is not a regression against
-an earlier pass, and none of the 22 that came in after it joined this list.
-The other, `functional/tls_align`, is the thread-local model described above
-and is the one of the two with a known cause.
+One failing unit is left, and it is a wrong answer rather than a missing
+component: `functional/tls_align`, the thread-local model described above. Its
+cause is known. Every one of the five this stage started with is attributed.
 
 `functional/fcntl` was the fourth of the original five to go, and it was a
 lazy operand inside a call argument. Its child process exits on
@@ -1487,6 +1498,42 @@ transcript back -- and `tests/basic_c_pointer_to_array_place.c` pins the shape
 under all four allocators: the pointee crossing a call boundary by decay and
 the place surviving the return, beside the three store spellings
 `tests/basic_c_packed_layout.c` already carries.
+
+`functional/tgmath` was the last of the original five, and it went the way
+`ide cc` predefines `__GNUC__`: in every dialect now, rather than only in a
+GNU one. That is not a dialect question. Clang and gcc both report `__GNUC__`
+beside `__STRICT_ANSI__` under `-std=c99`, because the macro says which
+extensions the compiler implements and not which ones the dialect permits, and
+without it the two compilers read *different* source out of one musl header
+under the suite's own `-std=c99`. <tgmath.h> is where that shows: it puts
+every `__typeof__` return cast behind `#ifdef __GNUC__` — its own header
+comment says "the return types are only correct with gcc" — so each
+type-generic macro took the type of the widest arm of its selection chain and
+`sizeof pow(2.0, 0.5)` came back as `long double _Complex`, the return type of
+`cpowl`. `tests/basic_c_type_generic_math.c` pins the machinery under all four
+allocators, `-std=c99` included, because the `__GNUC__` half only has
+something to check outside a GNU dialect.
+
+Three frontend gaps sat behind that flip, each of them a construct musl only
+reaches on the GNU path, so each was latent rather than new. `0 ? (t *)0 :
+(void *)1` kept `t *` where C11 6.5.15p6 makes it `void *` — `(void *)0` is
+one of the two spellings of a null pointer constant (6.3.2.3p3) and only the
+integer one was recognized — and that conditional *is* musl's `__type1(c,t)`,
+which is what made every return cast name its first type; the same fixture
+carries it. A GNU attribute directly after a typedef name in a *block-scope*
+declaration ended the specifier run and became the declared name, which is
+musl's `typedef size_t __attribute__((__may_alias__)) word;` in twelve string
+and allocator units (`tests/basic_c_local_typedef_attribute.c`). `offsetof`
+with a subscripted member designator did not fold in a static initializer,
+which is `ioctl.c`'s compatibility table
+(`tests/basic_c_offsetof_subscript.c`). And the x87 `long double` folder knew
+no calls at all, so `__builtin_inff()` and `__builtin_nanf("")` — what a
+hosted <math.h> spells `INFINITY` and `NAN` as once the builtins are
+advertised — refused where `1e5000f` and `(0.0f/0.0f)` already folded, which
+put the same 21 `src/math` units and `functional/strtold` back into
+blocked-compile the moment the predefine changed
+(`tests/basic_c_long_double_static_special.c` now carries both spellings
+against one set of expected bytes).
 
 `regression/malloc-oom`, `regression/malloc-brk-fail`,
 `regression/setenv-oom` and `regression/pthread_create-oom` used to sit here
