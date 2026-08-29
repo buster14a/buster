@@ -13,11 +13,11 @@
 // Reading the objects through `unsigned char` also keeps the fixture inside the
 // static initializer's own territory: what is under test is the ten bytes the
 // compiler wrote and the six padding bytes it left zero, not the x87 arithmetic
-// that basic_c_long_double_arithmetic.c covers.  Each object reaches `main`
-// through a file-scope pointer rather than by naming the object there, because
-// a function that names an x87 aggregate is still refused by the canonical
-// emitter; routing through the pointer keeps every allocator running the same
-// program, and the bytes being compared are the same either way.
+// that basic_c_long_double_arithmetic.c covers.  `main` names each object
+// directly, including the arrays and the struct: a function one of whose values
+// had a type that merely *contained* an x87 `long double` was once refused by
+// the canonical emitter, so reaching the objects here rather than through a
+// file-scope pointer is also what keeps that refusal from coming back.
 
 // System V on x86-64 is the one target whose `long double` is the 80-bit x87
 // format; Win64 and the AArch64 ABIs give it a narrower or a different
@@ -132,31 +132,9 @@ static const unsigned char expected_calibration[48] = {
     0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static const Subject subjects[] = {
-    {(const unsigned char*)&toint, expected_toint, 16},
-    {(const unsigned char*)&toint_half, expected_toint_half, 16},
-    {(const unsigned char*)&third, expected_third, 16},
-    {(const unsigned char*)&chained, expected_chained, 16},
-    {(const unsigned char*)&blended, expected_blended, 16},
-    {(const unsigned char*)&reduced, expected_reduced, 16},
-    {(const unsigned char*)&grouped, expected_grouped, 16},
-    {(const unsigned char*)&negated, expected_negated, 16},
-    {(const unsigned char*)&from_float, expected_from_float, 16},
-    {(const unsigned char*)&from_double, expected_from_double, 16},
-    {(const unsigned char*)&from_integer, expected_from_integer, 16},
-    {(const unsigned char*)&from_unsigned, expected_from_unsigned, 16},
-    {(const unsigned char*)&hex_scaled, expected_hex_scaled, 16},
-    {(const unsigned char*)&cancels, expected_cancels, 16},
-    {(const unsigned char*)&negative_zero, expected_negative_zero, 16},
-    {(const unsigned char*)atanhi, expected_atanhi, 64},
-    {(const unsigned char*)coefficients, expected_coefficients, 48},
-    {(const unsigned char*)sparse, expected_sparse, 64},
-    {(const unsigned char*)&calibration, expected_calibration, 48},
-};
-
 // A function-local static folds the same way a file-scope object does, and its
 // address is not a constant expression, so it is checked separately from the
-// table above.  The value is the one `third` holds.
+// table `main` builds.  The value is the one `third` holds.
 static const unsigned char* local_static_bytes(void)
 {
     static const long double local = 1.0L/3.0L;
@@ -165,6 +143,31 @@ static const unsigned char* local_static_bytes(void)
 
 int main(void)
 {
+    // The table is built here, naming each object, rather than at file scope
+    // holding pointers to them: a function that names an x87 aggregate was
+    // once refused outright, and this is what would catch that again.
+    const Subject subjects[] = {
+        {(const unsigned char*)&toint, expected_toint, 16},
+        {(const unsigned char*)&toint_half, expected_toint_half, 16},
+        {(const unsigned char*)&third, expected_third, 16},
+        {(const unsigned char*)&chained, expected_chained, 16},
+        {(const unsigned char*)&blended, expected_blended, 16},
+        {(const unsigned char*)&reduced, expected_reduced, 16},
+        {(const unsigned char*)&grouped, expected_grouped, 16},
+        {(const unsigned char*)&negated, expected_negated, 16},
+        {(const unsigned char*)&from_float, expected_from_float, 16},
+        {(const unsigned char*)&from_double, expected_from_double, 16},
+        {(const unsigned char*)&from_integer, expected_from_integer, 16},
+        {(const unsigned char*)&from_unsigned, expected_from_unsigned, 16},
+        {(const unsigned char*)&hex_scaled, expected_hex_scaled, 16},
+        {(const unsigned char*)&cancels, expected_cancels, 16},
+        {(const unsigned char*)&negative_zero, expected_negative_zero, 16},
+        {(const unsigned char*)atanhi, expected_atanhi, 64},
+        {(const unsigned char*)coefficients, expected_coefficients, 48},
+        {(const unsigned char*)sparse, expected_sparse, 64},
+        {(const unsigned char*)&calibration, expected_calibration, 48},
+    };
+
     unsigned subject_index = 0;
     for (; subject_index < sizeof(subjects)/sizeof(subjects[0]); subject_index++)
     {

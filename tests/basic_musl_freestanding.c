@@ -43,6 +43,30 @@ extern char* stpcpy(char* restrict, const char* restrict);
 extern char* stpncpy(char* restrict, const char* restrict, size_type);
 extern char* strchrnul(const char*, int);
 extern void* memrchr(const void*, int, size_type);
+// Sixteen of the seventeen x87 `long double` units musl's src/math could not
+// compile until the frontend learned to fold a static x87 initializer and the
+// classifier learned that an aggregate of wide floats is ordinary addressable
+// storage.  Linking them proves nothing on its own; what the transcript below
+// says is that they compute musl's answers.
+extern long double floorl(long double);
+extern long double ceill(long double);
+extern long double truncl(long double);
+extern long double roundl(long double);
+extern long double rintl(long double);
+extern long double modfl(long double, long double*);
+extern long double atanl(long double);
+extern long double expl(long double);
+extern long double logl(long double);
+extern long double log2l(long double);
+extern long double log10l(long double);
+extern long double log1pl(long double);
+extern long double powl(long double, long double);
+extern long double erfl(long double);
+extern long double tgammal(long double);
+extern long double exp10l(long double);
+// The seventeenth is __rem_pio2l, the argument reduction the wide trigonometric
+// routines share, which no caller outside src/math names directly.
+extern long double sinl(long double);
 
 void _start(void);
 
@@ -105,6 +129,36 @@ static void record(const char* name, long value)
     append(name);
     append("=");
     append_signed(value);
+    append("\n");
+}
+
+// musl's own `union ldshape`, which is how its src/math reads a wide value's
+// sign, exponent and significand.  The transcript records those fields rather
+// than a rendered decimal: a result that is one ulp off has to fail the
+// comparison, and the probe has no formatter that could show it otherwise.
+union wide_shape
+{
+    long double f;
+    struct
+    {
+        unsigned long m;
+        unsigned short se;
+    } i;
+};
+
+// The significand goes out as two 32-bit halves because append_signed takes a
+// long, and a normalized x87 significand has its top bit set.
+static void record_wide(const char* name, long double value)
+{
+    union wide_shape shape;
+    shape.f = value;
+    append(name);
+    append("=");
+    append_signed((long)(shape.i.m >> 32));
+    append(":");
+    append_signed((long)(shape.i.m & 0xffffffffUL));
+    append(":");
+    append_signed((long)shape.i.se);
     append("\n");
 }
 
@@ -178,6 +232,47 @@ static void run(void)
     record("toupper", toupper('q'));
     record("isalpha", isalpha('q') != 0);
     record("isdigit", isdigit('q') != 0);
+
+    // The wide routines.  Each argument arrives through a volatile object so
+    // that neither compiler folds the call away and compares its own
+    // arithmetic against musl's instead of running musl's.
+    volatile long double wide_input;
+    long double wide_integral;
+    wide_input = -2.5L;
+    record_wide("floorl", floorl(wide_input));
+    wide_input = 2.5L;
+    record_wide("ceill", ceill(wide_input));
+    wide_input = -3.75L;
+    record_wide("truncl", truncl(wide_input));
+    wide_input = 2.5L;
+    record_wide("roundl", roundl(wide_input));
+    wide_input = 2.5L;
+    record_wide("rintl", rintl(wide_input));
+    wide_input = 3.75L;
+    record_wide("modfl", modfl(wide_input, &wide_integral));
+    record_wide("modfl_integral", wide_integral);
+    wide_input = 0.5L;
+    record_wide("atanl", atanl(wide_input));
+    wide_input = 1.0L;
+    record_wide("expl", expl(wide_input));
+    wide_input = 2.0L;
+    record_wide("logl", logl(wide_input));
+    wide_input = 10.0L;
+    record_wide("log2l", log2l(wide_input));
+    wide_input = 1000.0L;
+    record_wide("log10l", log10l(wide_input));
+    wide_input = 0.5L;
+    record_wide("log1pl", log1pl(wide_input));
+    wide_input = 3.0L;
+    record_wide("powl", powl(wide_input, 0.5L));
+    wide_input = 0.5L;
+    record_wide("erfl", erfl(wide_input));
+    wide_input = 5.5L;
+    record_wide("tgammal", tgammal(wide_input));
+    wide_input = 2.0L;
+    record_wide("exp10l", exp10l(wide_input));
+    wide_input = 1.0L;
+    record_wide("sinl", sinl(wide_input));
 
     append("hello from a Buster-built musl\n");
 }

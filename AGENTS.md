@@ -842,8 +842,11 @@ of any kind: it is compiled `-nostdinc` against musl's own headers, entered at
 `_start`, and linked with `ld -static` and nothing else, so no compiler driver,
 no startup file and no host libc are on the link line and everything it
 resolves comes out of the musl archive. It exercises the string, memory,
-search and character routines and writes a transcript through raw `write` and
-`exit` system calls; the Clang-built and Buster-built transcripts must be
+search and character routines, and the seventeen x87 `long double` units named
+below -- sixteen of them called directly and `__rem_pio2l` through `sinl`, each
+wide result recorded as the sign, exponent and significand fields of musl's own
+`union ldshape` so that a result one ulp off cannot pass -- and writes a
+transcript through raw `write` and `exit` system calls; the Clang-built and Buster-built transcripts must be
 identical byte for byte, so a routine that computes a different answer fails
 the run where a link-and-exit check would not. The probe runs under FAST, NONE,
 MIR_STACK and QUALITY against the one Buster-built archive, because the four

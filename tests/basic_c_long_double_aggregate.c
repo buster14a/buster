@@ -125,6 +125,19 @@ static long double array_sum(long double a, long double b)
     return locals[0] + locals[1] + wide_globals[0] - wide_globals[1];
 }
 
+// A file-scope `long double` table read at a runtime index, which is how
+// atanl.c reaches `atanhi[id]`.  The object is addressable storage of four wide
+// floats -- neither the scalar x87 shape nor anything an ABI decision ever sees
+// -- and the element load still has to carry all ten bytes.
+static const long double table[4] = {
+    4.63647609000806116202e-01L,
+    7.85398163397448309628e-01L,
+    9.82793723247329067985e-01L,
+    1.57079632679489661926e+00L,
+};
+
+static long double table_at(int index) { return table[index]; }
+
 // C permits an object of incomplete type to be declared and addressed without
 // ever being completed, which is how musl's src/include/stdio.h reaches
 // `stderr`: it suppresses the definition of `struct _IO_FILE` and then
@@ -206,6 +219,14 @@ int main(void)
     if (wide_globals[0] != 1.25L) return 23;
 
     if (incomplete_address() != &incomplete_definition) return 24;
+
+    // 1.5707963267948966 is the double nearest pi/2, so the subtraction below
+    // is zero exactly when the element arrived through a 53-bit significand and
+    // non-zero when all ten bytes did.  The index is volatile so the load stays
+    // in the program rather than being folded into the comparison.
+    volatile int table_index = 3;
+    if (table_at(table_index) - 1.5707963267948966 == 0.0L) return 25;
+    if (table_at(table_index) != 1.57079632679489661926e+00L) return 26;
 
     return 0;
 }
