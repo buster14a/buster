@@ -151,6 +151,7 @@ BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
 BUSTER_C_EXTERN bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out);
 BUSTER_C_EXTERN CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId base, CType qualifiers);
+BUSTER_C_EXTERN bool c_parse_atomic_drops_type_alignment(CParseResult const* result, CTypeId base, bool adds_atomic);
 BUSTER_C_EXTERN bool c_parse_type_qualifier_word(String8 spelling, CType* type);
 BUSTER_C_EXTERN u32 c_preprocess_token_source(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor);
 BUSTER_C_EXTERN CSourceLocation c_preprocess_token_location_cursor(CPreprocessResult const* preprocess, CToken token,

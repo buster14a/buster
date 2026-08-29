@@ -4541,6 +4541,35 @@ BUSTER_C_SHARED bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine
     return true;
 }
 
+/* Whether adding `_Atomic` to `base` takes an alignment request `base` carries
+   away from the type the step builds.  It is the one place the two reference
+   compilers disagree: Clang treats `_Atomic T` as *constructing* a type rather
+   than qualifying one, so `typedef int cache_line __attribute__((aligned(64)))`
+   gives `_Atomic cache_line` the alignment an atomic of that width gets (4),
+   while GCC keeps the alias's 64.  Clang is this repository's oracle, and it
+   is also the answer this frontend already gave through a typedef of the
+   atomic type.  `_Atomic` written on a type that is *already* atomic keeps the
+   request in both references, which is why the test is on the step rather than
+   on the result.
+
+   Two places build that type and both ask here, because one type answering two
+   alignments depending on how it is spelled is what #726 was:
+   c_parse_add_qualified_type below builds the copy a declaration makes, and
+   c_ir_type_name_prefix in c_gen.c resolves the type name an expression
+   spells, which builds no C type at all and answered with the alias's own
+   number.  The empty table is the guard, so a translation unit without an
+   aligned typedef -- almost every one -- pays one compare. */
+BUSTER_C_SHARED bool c_parse_atomic_drops_type_alignment(CParseResult const* result, CTypeId base, bool adds_atomic)
+{
+    bool drops = false;
+    if (adds_atomic && result && result->type_alignment_count && base.value < result->type_count && !result->types[base.value].is_atomic)
+    {
+        drops = c_parse_type_alignment(result, base) != 0;
+    }
+
+    return drops;
+}
+
 /* Qualifying a type makes a copy of it, and the copy points at the *fully*
    unqualified type rather than at the type it qualifies, so a qualified alias
    of `typedef int cache_line __attribute__((aligned(64)))` reaches `int`
@@ -4564,14 +4593,11 @@ BUSTER_C_SHARED CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId
         qualified.is_atomic |= qualifiers.is_atomic;
         qualified.unqualified_type = qualified.has_unqualified_type ? qualified.unqualified_type : base;
         qualified.has_unqualified_type = true;
-        // `_Atomic` applied *to* the alias is the exception, and it is the one
-        // place the two oracles disagree: Clang gives `_Atomic cache_line` the
-        // alignment an atomic of that width gets (4) and GCC keeps the alias's
-        // 64.  Clang is this repository's oracle, and it is also the answer
-        // this frontend already gave.  `_Atomic` written on a typedef that was
-        // *already* atomic keeps the request in both, which is why the test is
-        // on the step rather than on the result.
-        bool atomic_applied = qualifiers.is_atomic && !result->types[base.value].is_atomic;
+        // `_Atomic` applied *to* the alias is the exception; see
+        // c_parse_atomic_drops_type_alignment above, which is also what the
+        // type-name resolver in c_gen.c asks so the two cannot answer
+        // differently.
+        bool atomic_applied = c_parse_atomic_drops_type_alignment(result, base, qualifiers.is_atomic);
         CTypeAlignment const* base_alignment = result->type_alignment_count && !atomic_applied ? c_parse_type_alignment(result, base) : 0;
         u32 alignment_start = base_alignment ? base_alignment->alignment_start : 0;
         u32 alignment_count = base_alignment ? base_alignment->alignment_count : 0;

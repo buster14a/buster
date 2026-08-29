@@ -2555,7 +2555,32 @@ on a commit you already know is incomplete tells nobody anything.
   aligned alias is the exception, and it is the one place the two references
   disagree: Clang gives `_Atomic cache_line` the alignment an atomic of that
   width gets and GCC keeps the alias's, so the record is inherited only when
-  the step does not add `_Atomic`. A *qualified* copy is built where the
+  the step does not add `_Atomic`. **Two places build that type and one rule
+  answers for both**, `c_parse_atomic_drops_type_alignment`: the copy a
+  declaration makes goes through `c_parse_add_qualified_type`, while a type
+  name in an expression is resolved during lowering by
+  `c_ir_type_name_prefix` in `c_gen.c`, which builds no `CType` at all and so
+  reached the aligned alias's own `IrType` and kept the request the typedef
+  spelling had already dropped -- one type answering `_Alignof` 64 written
+  inline and 4 written through a typedef of it, which is two layouts for one
+  object across two translation units (issue #726).
+  `c_ir_atomic_over_aligned_alias` is the lowering half, and both of that
+  resolver's spellings ask it: `_Atomic` as a qualifier before or after the
+  name, and the `_Atomic ( T )` operator, whose branch reads its operand's
+  typedef out of the tokens because an alias and the type it aliases can map
+  to one `IrType`. It rebuilds from the alias's *unqualified* type exactly as
+  the type-mapping pass builds the typedef spelling, so
+  `c_ir_add_qualified_type`'s dedup hands back the very `IrType` that spelling
+  mapped to; the qualifier spelling runs before the pointer run because
+  `_Atomic cache_line *` qualifies the pointee. The `_Atomic` shapes in
+  `tests/basic_c_packed_layout.c` are written twice, once each way, and pin
+  the pair rather than only the number; they stay out of the cross-linked
+  `basic_c_packed_layout_shapes.h`, whose other half is whichever host
+  compiler the platform has and where a GCC host answers the alias's number.
+  Clang's `_Atomic` of an aggregate whose size is not a power of two is also
+  *padded* to one -- `_Atomic` of a three-byte struct is four bytes aligned
+  four where this answers three aligned one -- which is a divergence of its
+  own and not part of that rule. A *qualified* copy is built where the
   qualifier is written, which is after the aggregate that embeds it, so the
   scalar seed in `c_lower_to_ir` is cleared for every recorded type: the
   mapping round that lays the aggregate out would otherwise read the seed's

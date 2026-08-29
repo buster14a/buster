@@ -661,11 +661,7 @@ static struct padded_element (*tag_pointer_to_array)[2] = &padded_pairs[1];
 // losing it there was #696's defect reached through one more spelling: a
 // header handing out a cache-line-aligned scalar produced an underaligned
 // object the moment a program wrote `const` in front of it, in every position
-// and with no diagnostic (#714).  `_Atomic` is deliberately absent from all of
-// this: it builds a type rather than qualifying one, and the two reference
-// compilers disagree about what happens to the request there, so nothing here
-// pins it -- and this frontend answers it two ways depending on the spelling,
-// which is #726 rather than this.
+// and with no diagnostic (#714).
 struct const_typedef_member
 {
     char byte;
@@ -711,6 +707,84 @@ typedef const lowered_scalar const_lowered_pair[2];
 typedef const exact_scalar const_exact_pair[2];
 static const_lowered_pair const_lowered_array;
 static const_exact_pair const_exact_array;
+
+// `_Atomic` is the one that does take it away, and it is the one place the two
+// reference compilers disagree: Clang treats `_Atomic T` as constructing a type
+// rather than qualifying one, so the alias's request does not travel into it,
+// while GCC keeps it.  Clang is the oracle here, and it was already the answer
+// this frontend gave through a typedef of the atomic type -- while the *inline*
+// spelling in a type name answered the alias's own number, so one type had two
+// alignments depending on how it was written (#726).  Every shape below is
+// therefore written twice, once each way, and the pair is what the fixture
+// pins; the numbers are Clang's.  None of it joins the cross-linked pair in
+// basic_c_packed_layout_shapes.h: that half is compiled by whichever host
+// compiler the platform has, and a GCC host answers 32 where a Clang host
+// answers 4.
+struct atomic_typedef_member
+{
+    char byte;
+    _Atomic raised_scalar value;
+};
+
+union atomic_typedef_union
+{
+    char byte;
+    _Atomic raised_scalar value;
+};
+
+// The lowering direction, where the alias asked for *less* than the natural
+// alignment and `_Atomic` hands the natural one back: the member sits at four
+// rather than at two, which is the opposite move from the `const` spelling
+// above and is why dropping the request is not the same as ignoring it.
+struct atomic_lowered_typedef_member
+{
+    char byte;
+    _Atomic lowered_scalar value;
+    char tail;
+};
+
+struct atomic_aggregate_member
+{
+    char byte;
+    _Atomic raised_aggregate value;
+    char tail;
+};
+
+typedef _Atomic raised_scalar atomic_raised_alias;
+typedef _Atomic lowered_scalar atomic_lowered_alias;
+
+// `_Atomic ( T )` is the operator spelling of the same type, resolved by a
+// branch of its own that reaches the alias's IrType the same way the qualifier
+// spelling did.
+typedef _Atomic(raised_scalar) atomic_operator_alias;
+
+// `_Atomic` written on a type that is *already* atomic keeps the request in
+// both references, which is why the rule tests the step rather than the
+// result: nothing is being constructed there, so nothing takes the request
+// away.
+typedef _Atomic int atomic_int_scalar;
+typedef atomic_int_scalar atomic_raised_atomic __attribute__((aligned(32)));
+
+static _Atomic raised_scalar file_atomic_raised_object;
+static char between_atomic_typedef_objects = 13;
+
+// The array element position, where dropping the request is what makes the
+// element tile at all: `raised_scalar a[2]` is the over-aligned element #703
+// refuses, and the atomic of it is four-byte aligned and four bytes wide.  GCC
+// refuses both spellings of this array for the same reason it refuses the
+// unqualified one, which is the second opinion rather than the target.
+typedef _Atomic raised_scalar atomic_raised_pair[2];
+static atomic_raised_pair atomic_raised_array;
+
+// The parse-time layout engine folds a `_Static_assert` where the lowering one
+// folds the same expression inside main, and the two must agree or a folded
+// `_Alignof` contradicts the object it measures.  These are the shapes that
+// disagreed, stated once for each engine.
+_Static_assert(_Alignof(_Atomic raised_scalar) == _Alignof(atomic_raised_alias), "one type, one alignment");
+_Static_assert(_Alignof(_Atomic(raised_scalar)) == _Alignof(atomic_operator_alias), "the operator spelling too");
+_Static_assert(sizeof(_Atomic raised_scalar) == sizeof(atomic_raised_alias), "one type, one size");
+_Static_assert(_Alignof(_Atomic raised_scalar) == 4, "_Atomic drops the request");
+_Static_assert(_Alignof(_Atomic atomic_raised_atomic) == 32, "an already atomic type keeps it");
 
 int main(void)
 {
@@ -1265,5 +1339,49 @@ int main(void)
     if ((char *)&const_lowered_array[1] - (char *)&const_lowered_array[0] != 4) return 178;
     if ((char *)&const_exact_array[1] - (char *)&const_exact_array[0] != 4) return 179;
     if ((unsigned long long)(void *)const_lowered_array % 2) return 180;
+
+    // `_Atomic` written in a type name and `_Atomic` reached through a typedef
+    // of it are the same type, so every pair below has to answer once (#726).
+    if (sizeof(_Atomic raised_scalar) != 4 || _Alignof(_Atomic raised_scalar) != 4) return 181;
+    if (sizeof(atomic_raised_alias) != 4 || _Alignof(atomic_raised_alias) != 4) return 182;
+    if (_Alignof(_Atomic raised_scalar) != _Alignof(atomic_raised_alias)) return 183;
+    if (_Alignof(_Atomic(raised_scalar)) != 4 || sizeof(_Atomic(raised_scalar)) != 4) return 208;
+    if (_Alignof(atomic_operator_alias) != 4 || sizeof(atomic_operator_alias) != 4) return 209;
+    if (_Alignof(const _Atomic raised_scalar) != 4 || _Alignof(_Atomic const raised_scalar) != 4) return 184;
+    if (_Alignof(volatile _Atomic raised_scalar) != 4) return 185;
+    if (_Alignof(_Atomic lowered_scalar) != 4 || _Alignof(atomic_lowered_alias) != 4) return 186;
+    if (sizeof(_Atomic raised_aggregate) != 1 || _Alignof(_Atomic raised_aggregate) != 1) return 187;
+    // And the alias itself still has the request every other spelling reads.
+    if (_Alignof(raised_scalar) != 32 || _Alignof(lowered_scalar) != 2) return 188;
+    if (_Alignof(atomic_raised_atomic) != 32 || _Alignof(_Atomic atomic_raised_atomic) != 32) return 189;
+
+    if (sizeof(struct atomic_typedef_member) != 8 || _Alignof(struct atomic_typedef_member) != 4) return 190;
+    if (sizeof(union atomic_typedef_union) != 4 || _Alignof(union atomic_typedef_union) != 4) return 191;
+    if (sizeof(struct atomic_lowered_typedef_member) != 12 || _Alignof(struct atomic_lowered_typedef_member) != 4) return 192;
+    if (sizeof(struct atomic_aggregate_member) != 3 || _Alignof(struct atomic_aggregate_member) != 1) return 193;
+
+    struct atomic_typedef_member atomic_member = {0};
+    if ((char *)&atomic_member.value - (char *)&atomic_member != 4) return 194;
+    struct atomic_lowered_typedef_member atomic_lowered_member = {0};
+    if ((char *)&atomic_lowered_member.value - (char *)&atomic_lowered_member != 4) return 195;
+    if ((char *)&atomic_lowered_member.tail - (char *)&atomic_lowered_member != 8) return 196;
+    struct atomic_aggregate_member atomic_aggregate = {0};
+    if ((char *)&atomic_aggregate.value - (char *)&atomic_aggregate != 1) return 197;
+    if ((char *)&atomic_aggregate.tail - (char *)&atomic_aggregate != 2) return 198;
+
+    if ((unsigned long long)(void *)&file_atomic_raised_object % 4) return 199;
+    if (between_atomic_typedef_objects != 13) return 200;
+
+    typedef int block_atomic __attribute__((aligned(64)));
+    _Atomic block_atomic block_atomic_object = 5;
+    char between_block_atomic = 12;
+    if (_Alignof(_Atomic block_atomic) != 4 || sizeof(_Atomic block_atomic) != 4) return 201;
+    if (_Alignof(block_atomic) != 64) return 202;
+    if (block_atomic_object != 5 || between_block_atomic != 12) return 203;
+
+    if (sizeof(atomic_raised_pair) != 8 || _Alignof(atomic_raised_pair) != 4) return 204;
+    if (sizeof(_Atomic raised_scalar[2]) != 8) return 205;
+    if ((char *)&atomic_raised_array[1] - (char *)&atomic_raised_array[0] != 4) return 206;
+    if ((unsigned long long)(void *)atomic_raised_array % 4) return 207;
     return 0;
 }

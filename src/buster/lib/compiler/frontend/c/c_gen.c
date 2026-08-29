@@ -17459,6 +17459,54 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* build
 // apart, and only here: the declaration path parses it through the type
 // machine, but a cast reaches this type-name reader, where an unrecognized
 // specifier left `(_Atomic(uint32_t) *)ptr` to be lowered as an expression.
+// The IrType `_Atomic` builds over the typedef name `named_type`, or invalid
+// when the name is not one whose alignment request `_Atomic` takes away.  A
+// type name builds no `CType`, so it reaches the aligned alias's own IrType
+// and would keep a request the same type spelled through a typedef of the
+// atomic type had already dropped -- one type answering `_Alignof` 64 written
+// inline and 4 written through the typedef (#726).
+// c_parse_atomic_drops_type_alignment owns that rule for the declaration side
+// too, so the two cannot answer differently, and the replacement is built from
+// the alias's *unqualified* type exactly as the type-mapping pass builds the
+// typedef spelling: c_ir_add_qualified_type's dedup then hands back the very
+// IrType that spelling mapped to.
+BUSTER_C_INTERNAL IrTypeId c_ir_atomic_over_aligned_alias(CIntegerIrBuilder* builder, CTypeId named_type)
+{
+    IrTypeId replacement = IR_TYPE_ID_INVALID;
+    if (c_parse_atomic_drops_type_alignment(&builder->parse, named_type, true))
+    {
+        CType* named = builder->parse.types + named_type.value;
+        IrTypeId unqualified = named->unqualified_type.value < builder->parse.type_count
+                                   ? builder->c_type_ir_map[named->unqualified_type.value]
+                                   : IR_TYPE_ID_INVALID;
+        if (unqualified.value != IR_ID_UNDERLYING_INVALID)
+        {
+            replacement = c_ir_add_qualified_type(builder->program, unqualified, true, named->is_volatile);
+        }
+    }
+
+    return replacement;
+}
+
+// The typedef a single-identifier type name names, or invalid.  The `_Atomic (
+// T )` operator spells its operand as a type name of its own, so the rule
+// above has to reach it through the tokens rather than through the IrType the
+// operand resolved to: an alias and the type it aliases can map to one IrType.
+BUSTER_C_INTERNAL CTypeId c_ir_named_typedef_type(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    CTypeId named = C_TYPE_ID_INVALID;
+    if (start + 1 == end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+    {
+        CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
+        if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_TYPEDEF)
+        {
+            named = builder->parse.entities[entity.value].type;
+        }
+    }
+
+    return named;
+}
+
 BUSTER_C_INTERNAL bool c_ir_atomic_type_specifier_at(CIntegerIrBuilder* builder, u32 index, u32 end)
 {
     return index + 2 < end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
@@ -17474,6 +17522,10 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
     }
     IrTypeId type = IR_TYPE_ID_INVALID;
     u32 index = start;
+    // The typedef name this prefix resolves, kept so the atomic rule below can
+    // ask about the C type rather than about the IrType it mapped to: the
+    // alignment request is recorded against the former.
+    CTypeId named_type = C_TYPE_ID_INVALID;
     CType qualifiers = {
         .element_type = C_TYPE_ID_INVALID,
         .return_type = C_TYPE_ID_INVALID,
@@ -17507,8 +17559,13 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
         IrTypeId atomic_type = close < end && index + 2 < close ? c_ir_type_name(builder, index + 2, close) : IR_TYPE_ID_INVALID;
         // The atomicity has to reach the IR type, not just the C qualifier
         // record: an atomic builtin reads it off the place its pointer
-        // argument dereferences to.
-        IrTypeId qualified_type = atomic_type.value != IR_ID_UNDERLYING_INVALID
+        // argument dereferences to.  An aligned alias named as the operand is
+        // the one type that is not merely qualified here; see
+        // c_ir_atomic_over_aligned_alias.
+        IrTypeId alias_replacement =
+            close < end && index + 2 < close ? c_ir_atomic_over_aligned_alias(builder, c_ir_named_typedef_type(builder, index + 2, close)) : IR_TYPE_ID_INVALID;
+        IrTypeId qualified_type = alias_replacement.value != IR_ID_UNDERLYING_INVALID ? alias_replacement
+                                  : atomic_type.value != IR_ID_UNDERLYING_INVALID
                                       ? c_ir_add_qualified_type(builder->program, atomic_type, true, false)
                                       : IR_TYPE_ID_INVALID;
         if (qualified_type.value != IR_ID_UNDERLYING_INVALID)
@@ -17637,6 +17694,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
         CTypeId c_type = builder->parse.entities[entity.value].type;
         if (c_type.value < builder->parse.type_count)
         {
+            named_type = c_type;
             type = builder->c_type_ir_map[c_type.value];
             if (type.value == IR_ID_UNDERLYING_INVALID && c_type.value < builder->parse.type_count)
             {
@@ -17740,6 +17798,15 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
                c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), &qualifiers))
         {
             index += 1;
+        }
+        // `_Atomic` written as a qualifier before or after the typedef name,
+        // which is the other spelling c_ir_atomic_over_aligned_alias answers
+        // for.  It runs before the pointer run below because
+        // `_Atomic cache_line *` qualifies the pointee, not the pointer.
+        IrTypeId atomic_alias = qualifiers.is_atomic ? c_ir_atomic_over_aligned_alias(builder, named_type) : IR_TYPE_ID_INVALID;
+        if (atomic_alias.value != IR_ID_UNDERLYING_INVALID)
+        {
+            type = atomic_alias;
         }
         while (index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_STAR))
         {
