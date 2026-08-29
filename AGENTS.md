@@ -802,6 +802,30 @@ this assembler reads one as a comment, so the inline-assembly path rewrites
 the separators, folding `lock ; insn` into the single statement the assembler
 wants and splitting the rest onto their own lines.
 
+Two more things a template may do, and they are what a libc's startup and its
+dynamic loader are written in rather than its atomics. It may **name a
+symbol**: a line beginning with a dot goes through the same directive table
+module-level assembly uses, and every other line reaches `assembly_encode`
+with the relocations it reports recorded against the module, so musl's
+`GETFUNCSYM` -- `.hidden sym` followed by `lea sym(%rip),%0` -- reaches the
+object as a PC-relative relocation against a hidden symbol the block may be
+the only thing that names. The name a new symbol record keeps is the one in
+the instruction's IR literal rather than the one in the substituted copy: the
+retry that grows the code buffer rewinds the attempt arena, and a record that
+outlives the attempt cannot point into it (`codegen_assembly_durable_name`).
+And it may **write the stack pointer**, on the one condition that its last
+statement is an unconditional `jmp`, which is musl's
+`CRTJMP` -- `mov %1,%%rsp ; jmp *%0`. The rule the exception hangs on is not
+where the name appears but that nothing the emitter puts after the block is
+reached: RSP is never handed to an operand, so writing it cannot land under
+one, and the frame it does move is never read again. The AT&T dereference star
+comes with it and only directly in front of an operand reference, so `*` can
+only ever dereference a value the C side computed.
+`tests/basic_c_inline_asm_symbol.c` carries all of it, run under every
+allocator: the three PC-relative references are checked against the addresses
+they should have produced, and the hand-off ends the process itself because
+nothing after it runs.
+
 One flag the set does not carry is a dialect, and that makes the two compilers
 read different source. `ide cc` predefines `__GNUC__` only in a GNU dialect,
 while Clang predefines it in every one, so under `-std=c99` musl's
@@ -889,15 +913,17 @@ because x86-64 supplies the implementation in assembly (`crt/crti`,
 `src/signal/sigsetjmp`, `src/thread/syscall_cp`, `src/thread/tls`).
 Thirty-two files are `architecture-assembly`: musl would prefer them over a
 portable C unit, and since the Buster driver takes no assembly input the
-harness compiles the portable C instead and lists each one. The remaining 27
+harness compiles the portable C instead and lists each one. The remaining 23
 are the `MUSL_UNSUPPORTED` units, and their classes are, in order of size: 18
 for a `long double _Complex` result, which is every remaining unit under
-`src/complex` and is described with the type below; 4 that reach code
-generation and fail on an inline assembly block (`crt/rcrt1`, `ldso/dlstart`,
-`ldso/dynlink`, `src/thread/__unmapself`); 1 static initializer
+`src/complex` and is described with the type below; 1 static initializer
 (`src/misc/ioctl`'s `compat_map`); and 4 singletons -- `res_msend` (an
 over-aligned automatic), `lsearch` (a pointer to a VLA), and
-`vfprintf`/`vfwprintf` (wide floating-point `va_arg`). Conflicting
+`vfprintf`/`vfwprintf` (wide floating-point `va_arg`). Inline assembly is no
+longer a class: `crt/rcrt1`, `ldso/dlstart`, `ldso/dynlink` and
+`src/thread/__unmapself` were the four units that reached code generation and
+stopped on a template, and they compile now that the inline path relocates a
+symbol reference and takes musl's two hand-off shapes. Conflicting
 declarations are no longer a class: C11 6.2.7p3 makes an unprototyped
 `long f();` compatible with a non-variadic prototype for the same function,
 which is what musl's `pthread_cancel.c` and `__libc_start_main.c` write
@@ -946,10 +972,13 @@ them was refused whether or not it carried an initializer. Classifying those
 aggregates by the ABI rather than by that shape test released them along with
 every unit reaching a value through musl's `union ldshape`: 54 units, 1192 to
 1246, and the whole x87 code-generation class with them. The four left in
-that class are inline assembly: `crt/rcrt1` and `ldso/dlstart` on
-`GETFUNCSYM`, described below, `src/thread/__unmapself`, and `ldso/dynlink`,
-which joined them once the portable `offsetof` in its `MIN_TLS_ALIGN` folded
-and it stopped failing earlier.
+that class were inline assembly -- `crt/rcrt1` and `ldso/dlstart` on
+`GETFUNCSYM`, `src/thread/__unmapself` and `ldso/dynlink` on `CRTJMP`, the
+last of them having joined once the portable `offsetof` in its `MIN_TLS_ALIGN`
+folded and it stopped failing earlier -- and they closed together, 1322 to
+1326, when the inline-assembly path learned to relocate a symbol reference and
+to take a stack hand-off. Nothing in the inventory stops on an assembly
+template now.
 
 musl's startup objects are their own report now that module-level assembly
 goes through the real assembler. `crt/crt1.c` and `crt/Scrt1.c` compile, and
@@ -961,15 +990,18 @@ with the reason. The produced `crt1.o` is a complete startup object:
 `_fini` are weak undefined, and `ld -static` links it into a program the
 kernel enters and that exits cleanly.
 
-Three objects are still absent, for two reasons that are not the module-level
-path. `crt/rcrt1.c` and `ldso/dlstart.c` stop on x86-64's `GETFUNCSYM` in
-`arch/x86_64/reloc.h`, which is *inline* assembly carrying a `.hidden`
-directive and a RIP-relative `lea` against a symbol with an output operand:
-`codegen_generate_canonical_module_attempt`'s inline-assembly arm still
-refuses any encode that reports a relocation, so the same relocation plumbing
-has to reach that path before those two build. `crti.o` and `crtn.o` come from
-`crt/x86_64/crti.s` and `crtn.s`, which have no portable C to fall back to,
-and the driver takes no assembly input.
+`rcrt1.o` joined them once the inline-assembly arm learned the same
+relocation plumbing: `crt/rcrt1.c` and `ldso/dlstart.c` stop on x86-64's
+`GETFUNCSYM` in `arch/x86_64/reloc.h`, which is *inline* assembly carrying a
+`.hidden` directive and a RIP-relative `lea` against a symbol with an output
+operand, and that shape now reaches the object as a relocation like any other.
+Two objects are still absent, and the reason is not the assembly path at all:
+`crti.o` and `crtn.o` come from `crt/x86_64/crti.s` and `crtn.s`, which have
+no portable C to fall back to, and the driver takes no assembly input.
+
+`ldso/dlstart.c` and `ldso/dynlink.c` compile now too, and stay out of
+`libc.a` under musl's own `AOBJS` rule rather than because of anything Buster
+cannot build, for the reason the archive note above gives.
 
 The archive is linkable, which it was not until `__attribute__((weak))` and
 `__attribute__((alias))` reached the object writer. musl publishes `malloc`,
@@ -2338,9 +2370,17 @@ on a commit you already know is incomplete tells nobody anything.
   not an ADRP/ADD page pair. A block that fails reports through
   `CodegenModule.failed_in_assembly` and the block/line beside it, which is what
   keeps the driver's diagnostic off the next C function in the file. The
-  *inline*-assembly arm of `codegen_generate_canonical_module_attempt` is a
-  separate path and still refuses any encode that reports a relocation, which
-  is what a `lea sym(%rip),%0` in a GNU asm template needs.
+  *inline*-assembly arm of `codegen_generate_canonical_module_attempt` shares
+  the last two of those: once its template is substituted,
+  `codegen_emit_inline_assembly` walks the result a line at a time and hands a
+  leading-dot line to the same directive table and everything else to the same
+  `codegen_global_assembly_encode_instruction`, so a `lea sym(%rip),%0` in a
+  GNU asm template becomes the same relocation. What the two do not share is
+  where a new symbol's name may point: an inline template is a copy the
+  code-generation attempt owns and the retry rewinds, so the name recorded is
+  the one in the instruction's IR literal (`codegen_assembly_durable_name`).
+  Labels are refused inside a template rather than defined, because a template
+  is emitted once per instruction rather than once per file.
 - The Wasm64 backend consumes canonical IR directly. Unsupported ABI or
   instruction shapes must be diagnosed; never silently fall back to a native
   backend.

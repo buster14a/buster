@@ -7256,6 +7256,72 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
     }
+    // The same two questions asked of an inline template rather than a
+    // module-level block: a symbol named inside a function body, which is what
+    // musl's GETFUNCSYM and CRTJMP are. The object is what a linker reads -- a
+    // PC-relative relocation out of the template, and the weak hidden binding
+    // a `.weak`/`.hidden` pair inside the template asked for -- and the image
+    // is what the linker did with it, because a reference that lands one
+    // instruction off still assembles and hands back an address that is merely
+    // wrong. The program is run under every allocator: the addresses the
+    // templates produce are checked in C, and each allocator places the
+    // operands that carry them differently.
+#if BUSTER_CPU_ARCH_X86_64
+    {
+        String8 inline_symbol_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-inline-asm-symbol"), S8(".o"));
+        String8 inline_symbol_command_line[] = {
+            S8("-c"), S8("-g0"), S8("-o"), inline_symbol_path, S8("tests/basic_c_inline_asm_symbol.c"),
+        };
+        CompilerDriverResult inline_symbol = compiler_driver_execute_invocation(
+            c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inline_symbol_command_line)));
+        BUSTER_TEST(arguments, inline_symbol.error == COMPILER_DRIVER_ERROR_NONE);
+        if (inline_symbol.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            ObjectSymbol const* absent_symbol = compiler_driver_test_object_symbol(&inline_symbol.object, S8("inline_asm_symbol_absent"));
+            BUSTER_TEST(arguments, absent_symbol && absent_symbol->weak && absent_symbol->hidden && absent_symbol->global &&
+                                       absent_symbol->section == OBJECT_SECTION_UNDEFINED);
+            BUSTER_TEST(arguments, compiler_driver_test_object_relocates(&inline_symbol.object, S8("inline_asm_symbol_absent"),
+                                                                        OBJECT_RELOCATION_X86_64_PC32));
+            BUSTER_TEST(arguments, compiler_driver_test_object_relocates(&inline_symbol.object, S8("inline_asm_symbol_answer"),
+                                                                        OBJECT_RELOCATION_X86_64_PC32));
+            BUSTER_TEST(arguments, compiler_driver_test_object_relocates(&inline_symbol.object, S8("inline_asm_symbol_cell"),
+                                                                        OBJECT_RELOCATION_X86_64_PC32));
+        }
+    }
+#endif
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    {
+        String8 inline_symbol_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(inline_symbol_allocators); allocator_index += 1)
+        {
+            String8 inline_symbol_run_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-inline-asm-symbol-run"),
+                                                                        string_format(c_asm_arena, S8("-{u32}"), allocator_index));
+            String8 inline_symbol_run_command_line[] = {
+                string_format(c_asm_arena, S8("-fregister-allocator={S8}"), inline_symbol_allocators[allocator_index]),
+                S8("-o"),
+                inline_symbol_run_path,
+                S8("tests/basic_c_inline_asm_symbol.c"),
+            };
+            CompilerDriverResult inline_symbol_run = compiler_driver_execute_invocation(
+                c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inline_symbol_run_command_line)));
+            BUSTER_TEST(arguments, inline_symbol_run.error == COMPILER_DRIVER_ERROR_NONE);
+            if (inline_symbol_run.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 inline_symbol_run_arguments[] = {inline_symbol_run_path};
+                ProcessSpawnResult inline_symbol_spawn =
+                    os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(inline_symbol_run_arguments), (SliceString8){0}, (SliceString8){0},
+                                     (ProcessSpawnOptions){
+                                         .use_process_environment = true,
+                                     });
+                BUSTER_TEST(arguments, inline_symbol_spawn.handle != 0);
+                if (inline_symbol_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(c_asm_arena, inline_symbol_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+    }
+#endif
     // The hosted half of the same question. `__attribute__((weak))` on a
     // declaration must reach the object as STB_WEAK, and in an image that has
     // a shared library the three references part company: the one libc

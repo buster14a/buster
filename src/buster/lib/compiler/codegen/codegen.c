@@ -187,16 +187,35 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     S8_INITIALIZER("cmpxchgq"), S8_INITIALIZER("xadd"), S8_INITIALIZER("xaddb"), S8_INITIALIZER("xaddw"), S8_INITIALIZER("xaddl"),
     S8_INITIALIZER("xaddq"), S8_INITIALIZER("bsf"), S8_INITIALIZER("bsfl"), S8_INITIALIZER("bsfq"), S8_INITIALIZER("bsr"),
     S8_INITIALIZER("bsrl"), S8_INITIALIZER("bsrq"), S8_INITIALIZER("hlt"),
+    // LEA computes an address into its destination and reads no memory, so it
+    // needs none of the machinery the memory forms above are kept out for. It
+    // is how a template names a symbol -- `lea sym(%rip),%0` is musl's
+    // GETFUNCSYM, which is the position-independent way to take the address of
+    // a hidden function before the program is relocated.
+    S8_INITIALIZER("lea"), S8_INITIALIZER("leaw"), S8_INITIALIZER("leal"), S8_INITIALIZER("leaq"),
+    // JMP writes no operand at all: it leaves the block, and with it the
+    // function. Everything the emitter would have put after the template is
+    // unreachable, which is the whole point at a libc's two entry hand-offs --
+    // a loader jumping to the program it relocated, and a thread jumping onto
+    // a stack that is not the one it is unmapping.
+    S8_INITIALIZER("jmp"),
 };
 
 // The registers a template may name literally. The rule the ban exists for is
 // aliasing: a literal register that the emitter can also hand to an operand
 // could be overwritten under the template's feet. These four can never be
 // handed out -- RSP is the stack pointer and FS/GS are segment selectors --
-// and each is allowed only in the one position where it cannot do anything
-// else: RSP as a memory base, which is the fence idiom `lock orl $0,(%rsp)`,
-// and FS/GS before a colon, which is the segment override a thread-pointer
-// read is spelled with.
+// and each is allowed only in a position where it cannot do anything else:
+// RSP as a memory base, which is the fence idiom `lock orl $0,(%rsp)`, and
+// FS/GS before a colon, which is the segment override a thread-pointer read
+// is spelled with.
+//
+// RSP has one further position, and what bounds it is the block leaving the
+// function rather than where the name appears: a template whose last
+// statement is an unconditional jump may also write the stack pointer,
+// because the frame the emitter built is never read again. That is musl's
+// CRTJMP -- `mov %1,%%rsp ; jmp *%0` -- and
+// codegen_inline_assembly_transfers_control is what decides it.
 BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_literal_base_registers[] = {
     S8_INITIALIZER("rsp"),
     S8_INITIALIZER("esp"),
@@ -390,6 +409,54 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_name_in_set(String8 name, Strin
     return false;
 }
 
+// True when the template's last statement is an unconditional jump, so control
+// leaves the block and nothing the emitter puts after it is ever reached.
+//
+// It is what licenses a template to write the stack pointer. RSP is a register
+// no operand is ever allocated, so writing it cannot land under another
+// operand's feet; what it does destroy is the frame the emitter built, and a
+// block that jumps away is a block after which that frame is not read again.
+// musl's CRTJMP is the shape: a dynamic loader entering the program it just
+// relocated, and a thread jumping onto a borrowed stack before unmapping the
+// one it was running on.
+//
+// Statements are separated the way the rest of this path separates them, by a
+// newline or a GNU semicolon, and a directive line is skipped rather than
+// counted: `.hidden sym` says nothing about control flow.
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_transfers_control(String8 source)
+{
+    bool result = false;
+    u64 index = 0;
+    while (index < source.length)
+    {
+        while (index < source.length && (source.pointer[index] == ' ' || source.pointer[index] == '\t' || source.pointer[index] == '\r' ||
+                                         source.pointer[index] == '\n' || source.pointer[index] == ';'))
+        {
+            index += 1;
+        }
+        u64 mnemonic_start = index;
+        while (index < source.length && source.pointer[index] != ' ' && source.pointer[index] != '\t' && source.pointer[index] != '\r' &&
+               source.pointer[index] != '\n' && source.pointer[index] != ';' && source.pointer[index] != ',')
+        {
+            index += 1;
+        }
+        String8 mnemonic = {
+            .pointer = source.pointer + mnemonic_start,
+            .length = index - mnemonic_start,
+        };
+        if (mnemonic.length && mnemonic.pointer[0] != '.')
+        {
+            result = string_equal(mnemonic, S8("jmp"));
+        }
+        while (index < source.length && source.pointer[index] != '\n' && source.pointer[index] != ';')
+        {
+            index += 1;
+        }
+    }
+
+    return result;
+}
+
 // What the template itself is allowed to spell, checked before any operand is
 // substituted. The distinction matters: substituting a memory operand produces
 // a parenthesized register, and the source is not allowed to write one by hand,
@@ -401,18 +468,38 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_name_in_set(String8 name, Strin
 // never hand out, each allowed only in the position where it cannot alias
 // anything -- see codegen_x64_asm_literal_base_registers.
 //
-// Bracketed memory and the dereference star stay out entirely. In Intel syntax
-// a register is spelled without a sigil, so `[rax]` carries no marker this scan
-// could recognize, and refusing the brackets is what keeps that syntax as safe
-// as the AT&T one.
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(String8 source)
+// Bracketed memory stays out entirely. In Intel syntax a register is spelled
+// without a sigil, so `[rax]` carries no marker this scan could recognize, and
+// refusing the brackets is what keeps that syntax as safe as the AT&T one.
+//
+// The AT&T dereference star is allowed in exactly one place, directly in front
+// of an operand reference: `jmp *%0` is how a template leaves the function
+// through an address the C side computed. In front of anything else -- a
+// literal register, a bare name -- it would be an addressing mode none of the
+// passes here has seen.
+//
+// `transfers_control` is the caller's answer for this same template, and it is
+// what the stack-pointer exception hangs on; see
+// codegen_x64_asm_literal_base_registers.
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(String8 source, bool transfers_control)
 {
     for (u64 index = 0; index < source.length; index += 1)
     {
         u8 character = (u8)source.pointer[index];
-        if (character == '[' || character == ']' || character == '*')
+        if (character == '[' || character == ']')
         {
             return false;
+        }
+        if (character == '*')
+        {
+            u64 marked = index + 1;
+            bool operand_reference = marked + 1 < source.length && source.pointer[marked] == '%' &&
+                                     (source.pointer[marked + 1] == '[' || (source.pointer[marked + 1] >= '0' && source.pointer[marked + 1] <= '9'));
+            if (!operand_reference)
+            {
+                return false;
+            }
+            continue;
         }
         if (character != '%')
         {
@@ -466,7 +553,12 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(String8 
             bool segment_override = token_end < source.length && source.pointer[token_end] == ':' &&
                                     codegen_inline_assembly_name_in_set(name, codegen_x64_asm_literal_segment_registers,
                                                                         BUSTER_ARRAY_LENGTH(codegen_x64_asm_literal_segment_registers));
-            if (!memory_base && !segment_override)
+            // The stack pointer written outright, which only a block that
+            // jumps away may do: after it, the frame it moved is never the one
+            // anything reads.
+            bool stack_hand_off = transfers_control && codegen_inline_assembly_name_in_set(name, codegen_x64_asm_literal_base_registers,
+                                                                                          BUSTER_ARRAY_LENGTH(codegen_x64_asm_literal_base_registers));
+            if (!memory_base && !segment_override && !stack_hand_off)
             {
                 return false;
             }
@@ -482,6 +574,12 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(String8 
 // validator already cleared. The punctuation rules live on the template rather
 // than here, because by this point a memory operand has legitimately become a
 // parenthesized register.
+//
+// A statement starting with a dot is a directive rather than an instruction:
+// it names no register and emits nothing here, so it passes through to the
+// emitter, where the same table module-level assembly uses decides which
+// directives exist. `.hidden sym` in front of a PC-relative reference is what
+// a libc's GETFUNCSYM writes.
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(String8 source)
 {
     u64 index = 0;
@@ -502,7 +600,12 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(String8 so
         {
             index += 1;
         }
-        if (!codegen_inline_assembly_mnemonic_allowed((String8){.pointer = source.pointer + mnemonic_start, .length = index - mnemonic_start}))
+        String8 mnemonic = {
+            .pointer = source.pointer + mnemonic_start,
+            .length = index - mnemonic_start,
+        };
+        bool directive = mnemonic.length && mnemonic.pointer[0] == '.';
+        if (!directive && !codegen_inline_assembly_mnemonic_allowed(mnemonic))
         {
             return false;
         }
@@ -511,7 +614,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(String8 so
         {
             line_end += 1;
         }
-        while (index < line_end)
+        while (!directive && index < line_end)
         {
             while (index < line_end && (source.pointer[index] == ' ' || source.pointer[index] == '\t' || source.pointer[index] == ','))
             {
@@ -608,7 +711,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, 
                                                                    String8* source_out)
 {
     String8 template_source = extra.literal;
-    if (!codegen_inline_assembly_template_literal_valid(template_source))
+    if (!codegen_inline_assembly_template_literal_valid(template_source, codegen_inline_assembly_transfers_control(template_source)))
     {
         return false;
     }
@@ -5099,6 +5202,37 @@ BUSTER_GLOBAL_LOCAL IrSymbolId codegen_global_assembly_symbol(IrProgram* program
     return result;
 }
 
+// Where a symbol name the assembler reported has to live before it is written
+// into a record. A symbol created during code generation outlives the attempt
+// that created it -- the retry that grows the code buffer rewinds the attempt
+// arena and finds the record again by name on the next pass -- so a name in
+// memory that attempt owns would be read after it was released.
+//
+// A module-level block hands the assembler a line of the module's own text, so
+// the reported name already points somewhere durable and `durable` is empty.
+// An inline template hands over a substituted copy the attempt arena owns, and
+// names the instruction's IR literal here: every symbol spelling reaches the
+// substitution verbatim, so the same bytes sit in the literal, which nothing
+// rewinds. A name that is not there is refused rather than recorded, because
+// the only thing left to record would be the copy.
+BUSTER_GLOBAL_LOCAL bool codegen_assembly_durable_name(String8 durable, String8* name)
+{
+    if (!durable.length)
+    {
+        return true;
+    }
+    for (u64 index = 0; index + name->length <= durable.length; index += 1)
+    {
+        if (memcmp(durable.pointer + index, name->pointer, name->length) == 0)
+        {
+            name->pointer = durable.pointer + index;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // True when every byte can appear in an assembler symbol name. It is what
 // separates a label from a colon inside an operand: `%fs:0` is a segment
 // override, not a definition of `%fs`.
@@ -5264,8 +5398,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_directive(String8 line, String8
 }
 
 // Applies one symbol directive. `recognized` stays false for a line no entry
-// in the table claims, which the caller reports as unsupported.
-BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_apply_symbol_directive(IrProgram* program, Target target, String8 line, bool* recognized)
+// in the table claims, which the caller reports as unsupported. `durable_names`
+// is where a name a new symbol record keeps has to live; see
+// codegen_assembly_durable_name.
+BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_apply_symbol_directive(IrProgram* program, Target target, String8 line, String8 durable_names,
+                                                                        bool* recognized)
 {
     bool valid = true;
     for (u32 directive_index = 0; directive_index < BUSTER_ARRAY_LENGTH(codegen_global_assembly_symbol_directives) && !*recognized; directive_index += 1)
@@ -5293,7 +5430,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_apply_symbol_directive(IrProgra
         // A directive alone never says "function": `.weak` on a data symbol is
         // what a position-independent crt writes about `_DYNAMIC`. Only a
         // label definition, or an explicit `.type`, promotes the kind.
-        IrSymbolId symbol = codegen_global_assembly_name(name) ? codegen_global_assembly_symbol(program, name, target, IR_SYMBOL_DATA) : IR_SYMBOL_ID_INVALID;
+        // The record keeps `durable`, while `name` stays pointing into the line
+        // so the `.type` operand after it can still be found.
+        String8 durable = name;
+        bool named = codegen_global_assembly_name(name) && codegen_assembly_durable_name(durable_names, &durable);
+        IrSymbolId symbol = named ? codegen_global_assembly_symbol(program, durable, target, IR_SYMBOL_DATA) : IR_SYMBOL_ID_INVALID;
         if (symbol.value == IR_ID_UNDERLYING_INVALID)
         {
             valid = false;
@@ -5463,7 +5604,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_relocation_kind(AssemblyRelocat
 // the block does not define. `call sym` and `lea sym(%rip),%reg` -- what a
 // crt's entry point is made of -- are the two shapes this exists for.
 BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_encode_instruction(Arena* arena, IrProgram* program, Target target, CodegenModuleOptions options, String8 line,
-                                                                     CodegenBuffer* buffer, CodegenModule* result, u32 relocation_capacity)
+                                                                     String8 durable_names, CodegenBuffer* buffer, CodegenModule* result,
+                                                                     u32 relocation_capacity)
 {
     u32 instruction_offset = (u32)buffer->count;
     AssemblyEncodeResult encoded = assembly_encode(arena, line,
@@ -5504,8 +5646,13 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_encode_instruction(Arena* arena
         }
         if (valid)
         {
-            symbol = codegen_global_assembly_symbol(program, encoded.symbols[relocation.symbol].name, target, IR_SYMBOL_DATA);
-            valid = symbol.value != IR_ID_UNDERLYING_INVALID;
+            String8 name = encoded.symbols[relocation.symbol].name;
+            valid = codegen_assembly_durable_name(durable_names, &name);
+            if (valid)
+            {
+                symbol = codegen_global_assembly_symbol(program, name, target, IR_SYMBOL_DATA);
+                valid = symbol.value != IR_ID_UNDERLYING_INVALID;
+            }
         }
         if (valid)
         {
@@ -5585,7 +5732,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_emit_global_assembly(Arena* arena, IrProgram* p
             }
             else if (!recognized)
             {
-                valid = codegen_global_assembly_apply_symbol_directive(program, target, line, &recognized);
+                valid = codegen_global_assembly_apply_symbol_directive(program, target, line, (String8){0}, &recognized);
             }
             valid = valid && recognized;
             line.length = 0;
@@ -5611,11 +5758,65 @@ BUSTER_GLOBAL_LOCAL bool codegen_emit_global_assembly(Arena* arena, IrProgram* p
             // The assembler sees the untouched line rather than the
             // whitespace-stripped spelling the comparisons above want.
             valid = valid &&
-                    (emitted || codegen_global_assembly_encode_instruction(arena, program, target, options, line, buffer, result, relocation_capacity));
+                    (emitted ||
+                     codegen_global_assembly_encode_instruction(arena, program, target, options, line, (String8){0}, buffer, result, relocation_capacity));
         }
         valid = valid && buffer->error == CODEGEN_ERROR_NONE;
     }
     *failed_line = valid ? 0 : *failed_line;
+
+    return valid;
+}
+
+// Emits one already-resolved inline-assembly template into the function's text.
+//
+// It is codegen_emit_global_assembly's arm for a block that sits inside a
+// function body, and it recognizes the same two kinds of line. A leading-dot
+// line speaks about a symbol and goes through the same directive table, which
+// is how `.hidden sym` in front of a PC-relative reference reaches the object;
+// every other line is an instruction the assembler encodes, with the
+// relocations it reports recorded against the module. That last part is the
+// difference from what this path did before: a template naming a symbol was
+// refused outright rather than relocated, which is what kept a libc's
+// GETFUNCSYM out.
+//
+// Labels are deliberately not defined. A module-level block is emitted once
+// per file, while a template is emitted once per instruction that carries it,
+// so a label here would collide with itself the second time the same block
+// appears; codegen_inline_assembly_register_only_source has already refused
+// one for that reason.
+//
+// `source` is the substituted text, which the attempt arena owns; `literal` is
+// the template it came from, which the IR owns. Both are needed because a
+// symbol outlives the attempt -- see codegen_assembly_durable_name.
+BUSTER_GLOBAL_LOCAL bool codegen_emit_inline_assembly(Arena* arena, IrProgram* program, Target target, CodegenModuleOptions options, String8 source,
+                                                      String8 literal, CodegenBuffer* buffer, CodegenModule* result, u32 relocation_capacity)
+{
+    bool valid = true;
+    u64 line_start = 0;
+    while (line_start < source.length && valid)
+    {
+        u64 line_end = line_start;
+        while (line_end < source.length && source.pointer[line_end] != '\n')
+        {
+            line_end += 1;
+        }
+        String8 line = codegen_global_assembly_trim((String8){
+            .pointer = source.pointer + line_start,
+            .length = line_end - line_start,
+        });
+        line_start = line_end < source.length ? line_end + 1 : source.length;
+        if (line.length && line.pointer[0] == '.')
+        {
+            bool recognized = false;
+            valid = codegen_global_assembly_apply_symbol_directive(program, target, line, literal, &recognized) && recognized;
+        }
+        else if (line.length)
+        {
+            valid = codegen_global_assembly_encode_instruction(arena, program, target, options, line, literal, buffer, result, relocation_capacity);
+        }
+        valid = valid && buffer->error == CODEGEN_ERROR_NONE;
+    }
 
     return valid;
 }
@@ -7976,10 +8177,27 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     u64 debug_location_capacity_64 = 0;
     u64 stack_probe_capacity = 0;
     u64 aligned_argument_capacity = 0;
+    // What the inline-assembly templates in this module can add to the
+    // relocation array, on the same argument the module-level blocks are
+    // bounded by: a template reports at most one relocation per symbol
+    // reference and a reference costs at least one source byte. The opcode
+    // summary answers for every function that carries no template, which is
+    // all but a handful in any module.
+    u64 inline_assembly_capacity = 0;
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
         instruction_count += function->instruction_count;
+        if (ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)))
+        {
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                if (function->instructions[instruction_index].opcode == IR_OPCODE_INLINE_ASSEMBLY)
+                {
+                    inline_assembly_capacity += ir_instruction_extra(function, (IrInstructionId){.value = instruction_index}).literal.length;
+                }
+            }
+        }
         u64 local_capacity = function->debug_local_count ? function->debug_local_count : function->local_count;
         debug_location_capacity_64 += local_capacity * ((u64)function->block_count + 1);
         if (debug_location_capacity_64 > UINT32_MAX)
@@ -8049,12 +8267,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         global_relocation_count += global->relocation_count;
         global_relocation_count += global->initializer_kind == IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS;
     }
-    // A module-level assembly block reports at most one relocation per symbol
-    // reference, and a reference costs at least one source byte, so the
-    // block's own length bounds what it can add on top of the per-instruction
-    // and per-global terms. The total is carried into the emitter, which is
-    // the only producer that appends after this array is sized.
-    u32 relocation_capacity = instruction_count * 3 + global_relocation_count + (u32)BUSTER_MIN(assembly_capacity, UINT32_MAX - global_relocation_count);
+    // An assembly block reports at most one relocation per symbol reference,
+    // and a reference costs at least one source byte, so the source's own
+    // length bounds what it can add on top of the per-instruction and
+    // per-global terms -- for a module-level block and for an inline template
+    // alike. The total is carried into both emitters, which are the only
+    // producers that append after this array is sized.
+    u32 relocation_capacity = instruction_count * 3 + global_relocation_count +
+                              (u32)BUSTER_MIN(assembly_capacity + inline_assembly_capacity, UINT32_MAX - global_relocation_count);
     result.relocations = arena_allocate(arena, CodegenModuleRelocation, relocation_capacity);
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
     {
@@ -15398,33 +15618,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            AssemblyEncodeResult encoded = assembly_encode(arena, source,
-                                                                            (AssemblyEncodeOptions){
-                                                                                .target = target,
-                                                                                .syntax = codegen_inline_assembly_syntax(options),
-                                                                            });
-                            if (encoded.diagnostic_count || encoded.relocation_count)
+                            if (!codegen_emit_inline_assembly(arena, program, target, options, source, asm_extra.literal, &buffer, &result,
+                                                             relocation_capacity))
                             {
-                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
-                            }
-                            for (u32 symbol_index = 0; symbol_index < encoded.symbol_count; symbol_index += 1)
-                            {
-                                if (!encoded.symbols[symbol_index].defined)
-                                {
-                                    result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-                                    return result;
-                                }
-                            }
-                            u8* encoded_bytes = 0;
-                            if (!codegen_buffer_reserve(&buffer, encoded.bytes.length, &encoded_bytes))
-                            {
-                                result.error = CODEGEN_ERROR_CAPACITY;
-                                return result;
-                            }
-                            if (encoded.bytes.length)
-                            {
-                                memcpy(encoded_bytes, encoded.bytes.pointer, encoded.bytes.length);
                             }
                         }
                         for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
