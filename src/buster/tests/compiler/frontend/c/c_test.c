@@ -8828,6 +8828,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             S8("_Alignas(16) int function(void);\n"),
             S8("int function(_Alignas(16) int value);\n"),
             S8("struct Value { _Alignas(8) unsigned field : 1; };\n"),
+            S8("struct Value { unsigned field : 1 __attribute__((aligned(8))); };\n"),
             S8("int function(void) { register _Alignas(16) int value; return 0; }\n"),
         };
         for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_alignment_sources); source_index += 1)
@@ -11098,6 +11099,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
         }
     }
     scratch_end(record_temporary);
+
+    // A bit-field declarator has exactly one place to carry a list of its own,
+    // after the width, and reading that list as part of the width -- #693 --
+    // left the width unfoldable, so the aggregate never reached a layout at
+    // all. The numbers below are what it reaches now: `b` crosses the storage
+    // unit `a` opened, so the packed spelling takes the next bit while the
+    // unpacked one starts a new unit two bytes further on, and `tail` is the
+    // member that separates them. `leading_bits` writes the list on the first
+    // declarator of the same list instead, where packing a field that already
+    // sits on a boundary moves nothing.
+    TemporalArena bit_attribute_temporary = scratch_begin(0, 0);
+    CPreprocessResult bit_attribute_preprocess = {0};
+    CParseResult bit_attribute_parse = {0};
+    CIRLowerResult bit_attribute =
+        c_test_lower_source(bit_attribute_temporary.arena,
+                            S8("struct trailing_bits { char byte; int a : 8; int b : 24 __attribute__((packed)); char tail; };\n"
+                               "struct leading_bits { char byte; int a : 8 __attribute__((packed)), b : 24; char tail; };\n"
+                               "struct trailing_bits trailing_bits_object;\n"
+                               "struct leading_bits leading_bits_object;\n"
+                               "_Static_assert(sizeof(struct trailing_bits) == 8, \"trailing bits\");\n"
+                               "_Static_assert(_Alignof(struct trailing_bits) == 4, \"trailing bits alignment\");\n"
+                               "_Static_assert(__builtin_offsetof(struct trailing_bits, tail) == 5, \"trailing bits tail\");\n"
+                               "_Static_assert(sizeof(struct leading_bits) == 8, \"leading bits\");\n"
+                               "_Static_assert(_Alignof(struct leading_bits) == 4, \"leading bits alignment\");\n"
+                               "_Static_assert(__builtin_offsetof(struct leading_bits, tail) == 7, \"leading bits tail\");\n"),
+                            S8("packed-bit-attribute.c"), target_native, &bit_attribute_preprocess, &bit_attribute_parse);
+    BUSTER_TEST(arguments, bit_attribute_preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, bit_attribute_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, bit_attribute.diagnostic_count == 0);
+    if (bit_attribute.program)
+    {
+        // The unpacked field names the storage unit that contains it and its
+        // position inside; the packed one names the byte its bits start in.
+        // So the (offset, bit_offset) pair of each bit-field is also which of
+        // the two carries the attribute, and no other member has to be read
+        // to tell the two declarations apart.
+        struct
+        {
+            String8 object;
+            u64 first_bit_field_offset;
+            u32 first_bit_field_bit_offset;
+            u64 second_bit_field_offset;
+            u64 tail_offset;
+        } bit_attribute_aggregates[] = {
+            {S8("trailing_bits_object"), 0, 8, 2, 5},
+            {S8("leading_bits_object"), 1, 0, 4, 7},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bit_attribute_aggregates); index += 1)
+        {
+            IrGlobal* global = c_test_find_ir_global(bit_attribute.program->modules, bit_attribute.program, bit_attribute_aggregates[index].object);
+            IrType* type = global ? ir_type_from_id(&bit_attribute.program->types, global->type) : 0;
+            BUSTER_TEST(arguments, type != 0 && type->field_count == 4);
+            if (type && type->field_count == 4)
+            {
+                BUSTER_TEST(arguments, type->layout.size == 8 && type->layout.alignment == 4);
+                BUSTER_TEST(arguments, type->fields[1].is_bit_field && type->fields[1].bit_width == 8);
+                BUSTER_TEST(arguments, type->fields[1].offset == bit_attribute_aggregates[index].first_bit_field_offset);
+                BUSTER_TEST(arguments, type->fields[1].bit_offset == bit_attribute_aggregates[index].first_bit_field_bit_offset);
+                BUSTER_TEST(arguments, type->fields[2].is_bit_field && type->fields[2].bit_width == 24);
+                BUSTER_TEST(arguments, type->fields[2].offset == bit_attribute_aggregates[index].second_bit_field_offset);
+                BUSTER_TEST(arguments, type->fields[2].bit_offset == 0);
+                BUSTER_TEST(arguments, type->fields[3].offset == bit_attribute_aggregates[index].tail_offset);
+            }
+        }
+    }
+    scratch_end(bit_attribute_temporary);
 
     // A packed bit-field whose bits cross every storage unit of its declared
     // type has no single-unit access at all: a read-modify-write through the

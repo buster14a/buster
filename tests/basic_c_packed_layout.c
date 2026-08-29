@@ -11,7 +11,9 @@
 // question asked by a directive and shares the ceiling this implements.
 // A member's own list has three positions of its own -- before the shared
 // specifiers, after a plain declarator, and after a parenthesized one -- and
-// a declarator that is not the first of its list has a fourth.  Which
+// a declarator that is not the first of its list has a fourth.  A bit-field
+// declarator has a fifth, after the width, which is also the only one it has:
+// the reference compilers reject a list written before the colon.  Which
 // declarator of a list the attribute sits on is a separate question from
 // where in that declarator it is written, and it decides which members move.
 // An object declarator reaches the last two positions as well, at file scope
@@ -220,6 +222,53 @@ struct member_below_and_above
     __attribute__((aligned(2))) char pad[3];
 };
 
+// A bit-field declarator's own attribute list is written *after* the width --
+// `int b __attribute__((packed)) : 5` is a syntax error, so this is the only
+// spelling there is -- and reading the list as part of the width (#693) left
+// the width unfoldable: `sizeof` still answered while `_Alignof` failed to
+// lower and `offsetof` rejected the designator, on a declaration both
+// reference compilers accept.  `b` is what makes the packing observable: it
+// crosses the storage unit `a` opened, so packed it takes the next bit and
+// unpacked it starts a new unit two bytes further on.  `tail` is where the
+// two answers separate.
+struct packed_bits_declarator
+{
+    char byte;
+    int a : 8;
+    int b : 24 __attribute__((packed));
+    char tail;
+};
+
+struct packed_bits_list_declarator
+{
+    char byte;
+    int a : 8, b : 24 __attribute__((packed));
+    char tail;
+};
+
+// The same list with the attribute on the *first* declarator: `a` already
+// starts at a unit boundary, so packing it moves nothing and `b` keeps the
+// unpacked placement.  Whose declarator the list sits on is a separate
+// question from where in that declarator it is written, and this is the shape
+// that answers the first one for a bit-field.
+struct packed_bits_first_declarator
+{
+    char byte;
+    int a : 8 __attribute__((packed)), b : 24;
+    char tail;
+};
+
+// The shared-specifier position, which packs every declarator of the list and
+// so agrees with the trailing one here; it is the control that shows the
+// trailing position is read at all rather than dropped.
+struct packed_bits_shared_specifier
+{
+    char byte;
+    int a : 8;
+    __attribute__((packed)) int b : 24;
+    char tail;
+};
+
 #pragma pack(push, 1)
 struct pragma_packed
 {
@@ -285,6 +334,10 @@ int main(void)
     if (sizeof(struct declarator_below_natural) != 8 || _Alignof(struct declarator_below_natural) != 4) return 69;
     if (sizeof(struct aggregate_below_natural) != 8 || _Alignof(struct aggregate_below_natural) != 4) return 70;
     if (sizeof(struct member_below_and_above) != 6 || _Alignof(struct member_below_and_above) != 2) return 71;
+    if (sizeof(struct packed_bits_declarator) != 8 || _Alignof(struct packed_bits_declarator) != 4) return 78;
+    if (sizeof(struct packed_bits_list_declarator) != 8 || _Alignof(struct packed_bits_list_declarator) != 4) return 79;
+    if (sizeof(struct packed_bits_first_declarator) != 8 || _Alignof(struct packed_bits_first_declarator) != 4) return 80;
+    if (sizeof(struct packed_bits_shared_specifier) != 8 || _Alignof(struct packed_bits_shared_specifier) != 4) return 81;
 
     // Offsets, read through addresses so a size that happens to match cannot
     // hide a member in the wrong place.
@@ -422,5 +475,29 @@ int main(void)
     if ((char *)&below_and_above.pad - (char *)&below_and_above != 2) return 75;
     if ((unsigned long long)(void *)&object_below_natural % 2) return 76;
     if (object_below_natural != 7) return 77;
+
+    // Where a bit-field's own attribute list sits decides where the members
+    // after it land, and `tail` is the one address that separates the four
+    // positions: the sizes above agree for all of them.
+    struct packed_bits_declarator bits_declarator;
+    if ((char *)&bits_declarator.tail - (char *)&bits_declarator != 5) return 82;
+    struct packed_bits_list_declarator bits_list;
+    if ((char *)&bits_list.tail - (char *)&bits_list != 5) return 83;
+    struct packed_bits_first_declarator bits_first;
+    if ((char *)&bits_first.tail - (char *)&bits_first != 7) return 84;
+    struct packed_bits_shared_specifier bits_shared;
+    if ((char *)&bits_shared.tail - (char *)&bits_shared != 5) return 85;
+
+    // The widths have to fold to the ones that were written, which is what
+    // the attribute's tokens stopped happening: a field read back through the
+    // unit the packing chose returns the value stored in it.
+    bits_declarator.a = -8;
+    bits_declarator.b = -0x123456;
+    bits_declarator.tail = 'w';
+    if (bits_declarator.a != -8 || bits_declarator.b != -0x123456 || bits_declarator.tail != 'w') return 86;
+    bits_first.a = 100;
+    bits_first.b = 0x7fffff;
+    bits_first.tail = 'x';
+    if (bits_first.a != 100 || bits_first.b != 0x7fffff || bits_first.tail != 'x') return 87;
     return 0;
 }

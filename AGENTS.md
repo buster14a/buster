@@ -2317,6 +2317,16 @@ on a commit you already know is incomplete tells nobody anything.
   stop agreeing with nobody in silence. A zero-width bit-field keeps aligning
   to its declared type even inside a packed aggregate, which is also what Clang
   and GCC do.
+  A bit-field declarator carries a list of its own in exactly one place, *after*
+  the width -- Clang rejects `int b __attribute__((packed)) : 5` -- so
+  `c_type_parse_aggregate_segment_step` trims the width's token range with
+  `c_parse_trailing_attribute_start`, the helper the parenthesized-declarator
+  path already uses. Left untrimmed the list is part of the constant expression
+  and the width never folds, which loses the aggregate's whole layout while
+  `sizeof` still answers (issue #693). The trimmed tokens stay inside
+  `[declarator_start, declarator_end)`, which is the range the per-declarator
+  `packed` and `aligned` scans read, so the attribute reaches the layout with no
+  second pass.
 - `__typeof` is accepted alongside `__typeof__` and `typeof`, because musl's
   `weak_alias` macro is written with it. **A function declared through a type
   name rather than a parameter-list declarator** -- `extern __typeof(f) g;`,

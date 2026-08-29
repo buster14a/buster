@@ -6401,8 +6401,18 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     if (declarator < frame->declarator_end && c_token_is_punctuator(&preprocess.tokens[declarator], C_PUNCTUATOR_COLON))
     {
         declarator += 1;
+        // A declarator's own attribute list is written *after* the width --
+        // clang rejects `int b __attribute__((packed)) : 5`, so this is the
+        // only spelling there is -- and the width is a constant expression, so
+        // the list has to come off the range the way a parenthesized
+        // declarator's does. Left on, the one-token literal fast path below
+        // stops firing and the token range is evaluated with the attribute's
+        // tokens in it, which fails to fold the width at all. The trim is
+        // bounded by this declarator's own comma boundary, so a sibling's list
+        // is never taken for this one's, and the layout scans below read the
+        // trimmed tokens from `[declarator_start, declarator_end)` as usual.
         bit_width_token_start = declarator;
-        bit_width_token_count = frame->declarator_end - declarator;
+        bit_width_token_count = c_parse_trailing_attribute_start(preprocess, declarator, frame->declarator_end) - declarator;
         if (!bit_width_token_count)
         {
             c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
