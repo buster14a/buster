@@ -2090,6 +2090,24 @@ struct CIrLowerMachine
     u8 reserved[7];
 };
 
+// The one report the array-type-name resolver can make.  An array type name
+// that appears only inside an expression -- `sizeof(cache_line[2])`, the
+// compound literal `(cache_line[2]){1, 2}` -- never reaches the parse type
+// table, so the settled-table scan at the end of c_lower_to_ir cannot see it
+// and the resolver has to record the violation itself.  The resolver runs
+// inside speculative attempts that are rolled back and revisits the same
+// tokens many times, so what is kept is the earliest offending bracket rather
+// than one record per visit: keying on the token index makes the report
+// independent of the order the attempts happen to run in, and one report is
+// all a refused translation unit needs.
+typedef struct CIrOverAlignedArrayName CIrOverAlignedArrayName;
+struct CIrOverAlignedArrayName
+{
+    u64 element_size;
+    u32 bracket_token_plus_one;
+    u32 element_alignment;
+};
+
 struct CIntegerIrBuilder
 {
     Arena* arena;
@@ -2113,6 +2131,7 @@ struct CIntegerIrBuilder
     CIrFunctionNameIndex* function_names;
     CIrPointerTypeCache* pointer_types;
     CIrWideFloatCache* wide_float_cache;
+    CIrOverAlignedArrayName* over_aligned_array_name;
     u32* prepared_call_indices;
     u32* matching_delimiters;
     // Whole-stream matching-delimiter array borrowed from the parse position
@@ -17898,6 +17917,37 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_suffix(CIntegerIrBuilder* builder, IrT
                 string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), S8("restrict"))))
         {
             index += 1;
+        }
+    }
+    // An array element has to be addressable at its own alignment in every
+    // slot, which requires its size to be a multiple of that alignment.  A
+    // typedef's `aligned` is the one spelling that can break that, and it
+    // breaks it here as much as in a declarator: `sizeof(cache_line[2])` would
+    // otherwise answer the honest product of an element the type says may not
+    // sit four bytes in.  The declarator spellings are refused by the scan
+    // over the settled type table at the end of c_lower_to_ir; a type name in
+    // an expression never reaches that table, so the violation is recorded
+    // here for the one report c_lower_to_ir makes at the end.  Clang points
+    // its own caret at the first bracket, which is this index.
+    //
+    // The type is still built.  That scan does not refuse the types it reports
+    // either -- the report is what refuses the translation unit, and nothing
+    // downstream of a refused one runs -- and returning invalid here would
+    // instead leave the enclosing expression looking like an ordinary one, so
+    // the compound literal `(cache_line[2]){1, 2}` reported its type name as
+    // an unlowerable identifier before this diagnostic could be reached.
+    IrType* element = ir_type_from_id(&builder->program->types, type);
+    if (index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET) && element &&
+        element->layout.resolved && element->layout.alignment && element->layout.size % element->layout.alignment)
+    {
+        CIrOverAlignedArrayName* record = builder->over_aligned_array_name;
+        if (record && (!record->bracket_token_plus_one || index + 1 < record->bracket_token_plus_one))
+        {
+            *record = (CIrOverAlignedArrayName){
+                .element_size = element->layout.size,
+                .bracket_token_plus_one = index + 1,
+                .element_alignment = element->layout.alignment,
+            };
         }
     }
     u64* array_counts = arena_allocate(builder->temporary_arena, u64, end - index);
@@ -37995,10 +38045,12 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     // typedef of one are copies carrying the same bound record, and one report
     // per written `[N]` is what Clang produces; counting it on the bound is
     // also what keeps it out of the per-type budget the aggregate and alias
-    // reports share.
+    // reports share. The trailing two slots are the funnel's own and the
+    // single report the array-type-name resolver makes for an array type name
+    // that never reached the type table, and so has no bound record either.
     result.diagnostics = arena_allocate(arena, CDiagnostic,
                                         2 * parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
-                                            parse.array_bound_count + 1);
+                                            parse.array_bound_count + 2);
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
     *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);
@@ -38248,8 +38300,10 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         entity_symbols[entity_index] = IR_SYMBOL_ID_INVALID;
     }
     CIrConstantEntityIndex constant_entity_index = {0};
+    CIrOverAlignedArrayName over_aligned_array_name = {0};
     CIntegerIrBuilder constant_builder = {
         .arena = arena,
+        .over_aligned_array_name = &over_aligned_array_name,
         .scratch_arena = temporary_arena,
         .temporary_arena = temporary_arena,
         .program = program,
@@ -40140,6 +40194,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         CIntegerIrBuilder builder = {
         .location_cursor = {.memo_offset = UINT32_MAX},
             .arena = arena,
+            .over_aligned_array_name = &over_aligned_array_name,
             .scratch_arena = lowering_arena,
             .temporary_arena = temporary_arena,
             .program = program,
@@ -40412,6 +40467,21 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                 .symbol = alias_symbol,
                                 .target = target_symbol,
                             });
+    }
+    // The array-type-name resolver's own report, made after every declaration
+    // has been lowered because that is when the earliest offending bracket is
+    // settled -- the resolver runs inside attempts that are rolled back, and a
+    // later declaration may hold an earlier bracket than the one recorded so
+    // far.  Its message and caret are the settled-table scan's: the constraint
+    // is the same one, only the spelling that reaches it differs.
+    if (over_aligned_array_name.bracket_token_plus_one && over_aligned_array_name.bracket_token_plus_one <= preprocess.token_count)
+    {
+        result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+            .message = string_format(arena, S8("size of array element ({u64} bytes) is not a multiple of the alignment of {u32} that __attribute__((aligned)) gave its type"),
+                                     over_aligned_array_name.element_size, over_aligned_array_name.element_alignment),
+            .location = c_preprocess_token_location(&preprocess, preprocess.tokens[over_aligned_array_name.bracket_token_plus_one - 1]),
+            .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
+        };
     }
     arena_destroy(lowering_arena, 1);
     scratch_end(temporary);

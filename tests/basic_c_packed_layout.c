@@ -625,11 +625,14 @@ static padded_alias padded_alias_array[2];
 static lowered_scalar_pair lowered_scalar_array;
 static exact_scalar_pair exact_scalar_array;
 
-// The well-formed form of the spelling of an array of an over-aligned element
-// that the check above could not see (#713).  A parenthesized declarator whose
-// base is a typedef name or a tag was read as a function declaration named by
-// that base, so neither pointer below existed at all: no definition emitted,
-// and a `sizeof` of the pointee that folded nothing.
+// The two spellings of an array of an over-aligned element that the check
+// above could not see, in their well-formed form (#713).  A parenthesized
+// declarator whose base is a typedef name or a tag was read as a function
+// declaration named by that base, so neither pointer below existed at all --
+// no definition emitted, and a `sizeof` of the pointee that folded nothing --
+// while the array type name in an expression is resolved during lowering and
+// never reaches the type table.  Both are ordinary shapes with an element
+// whose size divides its alignment, so both stay accepted.
 typedef int plain_scalar;
 static plain_scalar file_rows[2][3];
 static plain_scalar (*typedef_pointer_to_array)[3] = &file_rows[1];
@@ -1120,5 +1123,11 @@ int main(void)
     // `int (*p)[3]` at block scope has always done it.
     typedef_pointer_to_array[0][2] = 9;
     if (file_rows[1][2] != 9 || (*typedef_pointer_to_array)[2] != 9) return 135;
+
+    // The array type name in an expression: the size and alignment of one the
+    // compiler never places, and the compound literal that does place one.
+    if (sizeof(lowered_scalar[2]) != 8 || _Alignof(lowered_scalar[2]) != 2) return 136;
+    if (sizeof(struct padded_element[2]) != 32) return 137;
+    if (((lowered_scalar[2]){3, 4})[1] != 4) return 138;
     return 0;
 }

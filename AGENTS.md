@@ -2525,14 +2525,22 @@ on a commit you already know is incomplete tells nobody anything.
   on the *bound record* rather than on the type, because a qualified array and
   a typedef of an array are copies carrying the same bound, and one report per
   written `[N]` is what Clang produces; two identical declarations that intern
-  to one array type therefore report once where Clang reports twice. A
-  parenthesized declarator's `cache_line (*p)[2]` reaches that report down a
-  different road (issue #713): it builds a `C_TYPE_ARRAY` at all only once the
-  syntax scan stops reading a top-level `(` after an identifier as the
-  parameter list of a function that identifier names -- see the declarator note
-  below. An array type name in an expression, `sizeof(cache_line[2])` and the
-  compound literal, still escapes it: that one is resolved during lowering and
-  never reaches the type table.
+  to one array type therefore report once where Clang reports twice. Two
+  spellings reach that report down a different road (issue #713), because
+  neither reaches the type table as a `C_TYPE_ARRAY`. A parenthesized
+  declarator's `cache_line (*p)[2]` builds one only once the syntax scan stops
+  reading a top-level `(` after an identifier as the parameter list of a
+  function that identifier names -- see the declarator note below. An array
+  type name in an expression, `sizeof(cache_line[2])` and the compound literal,
+  is resolved during lowering and never reaches the table at all, so
+  `c_ir_type_name_suffix` records the earliest offending bracket on the builder
+  and `c_lower_to_ir` makes one report from it at the very end, after every
+  declaration has been lowered: that resolver runs inside speculative attempts
+  that are rolled back and revisits the same tokens many times, so keying on
+  the token index is what makes the report independent of the order the
+  attempts run in, and it has no bound record to count on. It records without
+  refusing the type, the way the settled-table scan reports without refusing
+  one: the report is what refuses the translation unit.
 - **A top-level `(` right after an identifier** is the parameter list of a
   function that identifier names in `T f(int)`, and a parenthesized declarator
   in `T (*p)[2]`, whose `T` is the last word of the declaration specifiers.

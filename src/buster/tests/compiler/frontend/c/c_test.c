@@ -11420,9 +11420,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     // in a slot narrower than it claims. The column is the opening bracket,
     // which is where Clang's own caret points.
     //
-    // The parenthesized declarator reaches the same message down a different
-    // road (#713): it builds its array type at all only once the syntax scan
-    // stops reading `cache_line (` as a function named `cache_line`.
+    // The last three reach the same message down a different road (#713).  The
+    // parenthesized declarator builds its array type only once the syntax scan
+    // stops reading `cache_line (` as a function named `cache_line`; the array
+    // type name in an expression never reaches the parse type table at all, so
+    // it is the lowering-time resolver that records it and c_lower_to_ir that
+    // reports it once at the end.
     struct
     {
         String8 source;
@@ -11446,6 +11449,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
         {S8("typedef int cache_line __attribute__((aligned(64)));\n"
             "cache_line (*pointer)[2];\n"),
          S8("over-aligned-parenthesized.c"), 2, 22},
+        {S8("typedef int cache_line __attribute__((aligned(64)));\n"
+            "int measure(void) { return (int)sizeof(cache_line[2]); }\n"),
+         S8("over-aligned-type-name.c"), 2, 50},
+        {S8("typedef int cache_line __attribute__((aligned(64)));\n"
+            "int* literal(void) { return (cache_line[2]){1, 2}; }\n"),
+         S8("over-aligned-compound-literal.c"), 2, 40},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(over_aligned_elements); index += 1)
     {
