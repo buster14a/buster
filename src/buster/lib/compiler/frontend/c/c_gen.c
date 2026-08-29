@@ -5037,7 +5037,8 @@ BUSTER_C_INTERNAL CArrayBound c_ir_vla_bound_expression(CPreprocessResult prepro
     return bound;
 }
 
-BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, CIrVlaLayout* result);
+BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, bool pointer,
+                                                CIrVlaLayout* result);
 
 BUSTER_C_INTERNAL bool c_ir_integer_literal_fits(CIntegerIrBuilder* builder, CTypeKind kind, u64 value)
 {
@@ -8534,7 +8535,12 @@ struct CIrLowerVlaLayoutState
     u32 dimension;
     u64 temporary_mark;
     bool parameter;
-    u8 reserved[3];
+    // A pointer to a variably modified array is laid out as the array
+    // parameter it is the adjusted form of: `char (*p)[w]` and `char p[][w]`
+    // are one type, so the walk prepends the absent outermost dimension the
+    // spelling leaves out.
+    bool pointer;
+    u8 reserved[2];
 };
 
 typedef struct CIrBodyTask CIrBodyTask;
@@ -9099,6 +9105,7 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
         c_ir_lower_frame_finish_index(builder, false, IR_VALUE_ID_INVALID, frame->as.vla_index_place.index);
         return;
     }
+    u32 subscripts = frame->as.vla_index_place.dimension;
     while (frame->as.vla_index_place.dimension < local->vla_dimension_count)
     {
         IrValueId count = local->vla_dimension_counts[frame->as.vla_index_place.dimension++];
@@ -9115,6 +9122,17 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
     IrValueId place = pointer.value == IR_ID_UNDERLYING_INVALID
                           ? IR_VALUE_ID_INVALID
                           : c_ir_emit_index_place(builder, pointer, frame->as.vla_index_place.linear_index, frame->as.vla_index_place.source);
+    // Fewer subscripts than dimensions leaves an array, and an array is the
+    // address of its first element everywhere but `sizeof` and `&`. The walk
+    // above produced the *element* place at that address, because a
+    // variably modified array has no IR array type for the ordinary decay to
+    // recognise, so the decay is performed here: without it `p[i]` on
+    // `char (*p)[width]` -- and on the `char p[][width]` parameter it is the
+    // adjusted form of -- loaded one byte where musl's lsearch passes a row.
+    if (place.value != IR_ID_UNDERLYING_INVALID && subscripts < local->vla_dimension_count)
+    {
+        place = c_ir_emit_address_of_place(builder, place, local->vla_element_type, frame->as.vla_index_place.source);
+    }
     c_ir_lower_frame_finish_index(builder, place.value != IR_ID_UNDERLYING_INVALID, place, frame->as.vla_index_place.index);
 }
 
@@ -22277,9 +22295,18 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        u32 capacity = builder->parse.type_count;
+        u32 capacity = builder->parse.type_count + 1;
         state->bounds = arena_allocate(builder->scratch_arena, CArrayBound, capacity);
         CTypeId type_id = state->array_type;
+        if (state->pointer)
+        {
+            // The dimension the pointer spelling leaves out. It is absent
+            // rather than unknown, which is exactly the outermost bound of an
+            // array parameter, so the walk below skips it and leaves
+            // dimension_counts[0] and suffix_sizes[0] invalid -- `sizeof p` is
+            // the pointer's, and indexing scales by suffix_sizes[1].
+            state->bounds[result->dimension_count++] = (CArrayBound){0};
+        }
         while (type_id.value < builder->parse.type_count && builder->parse.types[type_id.value].kind == C_TYPE_ARRAY)
         {
             CType* type = &builder->parse.types[type_id.value];
@@ -23093,14 +23120,16 @@ BUSTER_C_INTERNAL CIrLowerFrameResult c_ir_lower_dispatch(CIntegerIrBuilder* bui
     return c_ir_lower_dispatch_run(builder, request_mark, outermost);
 }
 
-BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, CIrVlaLayout* result)
+BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, bool pointer,
+                                                CIrVlaLayout* result)
 {
     CIrLowerVlaLayoutState* state = arena_allocate(builder->scratch_arena, CIrLowerVlaLayoutState, 1);
     *state = (CIrLowerVlaLayoutState){
         .result = result,
         .array_type = array_type,
         .token = token,
-        .parameter = parameter,
+        .parameter = parameter || pointer,
+        .pointer = pointer,
     };
     CIrLowerFrameResult lowered = c_ir_lower_dispatch(builder, (CIrLowerFrame){
                                                                     .kind = C_IR_LOWER_FRAME_BODY_VLA_LAYOUT,
@@ -26871,7 +26900,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
         // checkpoint the allocation needs is taken by c_ir_lower_body_advance
         // before it hands the list over, because only it holds the task.
         CIrVlaLayout layout = {0};
-        if (!c_ir_prepare_vla_layout(builder, local_entity->type, name, false, &layout))
+        if (!c_ir_prepare_vla_layout(builder, local_entity->type, name, false, false, &layout))
         {
             builder->failure_message = string_format(builder->arena, S8("could not lower the bounds of variable-length array '{S8}'"),
                                                      c_token_spelling(builder->preprocess.spelling_base, name));
@@ -29008,6 +29037,42 @@ BUSTER_C_INTERNAL bool c_ir_declaration_declares_vla(CIntegerIrBuilder* builder,
     return result;
 }
 
+// Is this C type a pointer to a variably modified array -- `char (*p)[width]`,
+// which musl's lsearch and lfind walk their tables with? Such a pointer never
+// reaches c_type_ir_map, because the array it addresses has no constant size.
+// It is the type `char p[][width]` adjusts to, so the local it becomes is the
+// same one an array parameter becomes: a pointer to the innermost element,
+// carrying the runtime dimension table that scales an index by the row size.
+// The pointee is what the caller hands the layout walk, which prepends the
+// absent outermost dimension.
+BUSTER_C_INTERNAL bool c_ir_pointer_to_variable_array(CIntegerIrBuilder* builder, CTypeId type, CTypeId* array_out, IrTypeId* element_out)
+{
+    bool result = false;
+    CType* pointer = c_type_from_id(&builder->parse, type);
+    CTypeId array_type = pointer && pointer->kind == C_TYPE_POINTER ? pointer->element_type : C_TYPE_ID_INVALID;
+    CType* array = c_type_from_id(&builder->parse, array_type);
+    if (array && array->kind == C_TYPE_ARRAY && builder->c_type_ir_map[array_type.value].value == IR_ID_UNDERLYING_INVALID)
+    {
+        CTypeId element_c_type = array_type;
+        CType* element_c = array;
+        while (element_c && element_c->kind == C_TYPE_ARRAY)
+        {
+            element_c_type = element_c->element_type;
+            element_c = c_type_from_id(&builder->parse, element_c_type);
+        }
+        IrTypeId element_type = element_c ? builder->c_type_ir_map[element_c_type.value] : IR_TYPE_ID_INVALID;
+        IrType* element = ir_type_from_id(&builder->program->types, element_type);
+        result = element && element->layout.resolved && element->layout.size;
+        if (result)
+        {
+            *array_out = array_type;
+            *element_out = element_type;
+        }
+    }
+
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_lower_body_finish_vla_declaration(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
     return c_ir_emit_vla_storage(builder, state->vla_layout, state->vla_pointer_type, state->vla_element_type, state->vla_entity, state->vla_name,
@@ -30561,6 +30626,18 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         local_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, variable_element_type);
                     }
                 }
+                CTypeId variable_array_type = C_TYPE_ID_INVALID;
+                bool pointer_to_variable_array = local_type.value == IR_ID_UNDERLYING_INVALID &&
+                                                 c_ir_pointer_to_variable_array(builder, local_c_type_id, &variable_array_type, &variable_element_type);
+                if (pointer_to_variable_array)
+                {
+                    // An ordinary pointer local: it holds an address the
+                    // initializer computes rather than storage this
+                    // declaration allocates, so no stack checkpoint and no
+                    // ALLOCATE. Only the dimension table below is added, and
+                    // it is added once the local exists.
+                    local_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, variable_element_type);
+                }
                 if (local_type.value == IR_ID_UNDERLYING_INVALID)
                 {
                     builder->failure_message = string_format(builder->arena, S8("could not resolve the IR type of local '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, name));
@@ -30754,6 +30831,25 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 if (place.value == IR_ID_UNDERLYING_INVALID || !local)
                 {
                     return false;
+                }
+                if (pointer_to_variable_array)
+                {
+                    CIrVlaLayout pointer_layout = {0};
+                    if (!c_ir_prepare_vla_layout(builder, variable_array_type, name, false, true, &pointer_layout))
+                    {
+                        builder->failure_message = string_format(builder->arena, S8("could not lower the bounds of the array '{S8}' points to"),
+                                                                 c_token_spelling(builder->preprocess.spelling_base, name));
+                        return false;
+                    }
+                    // runtime_size stays invalid, as it does for an array
+                    // parameter: `sizeof p` is the pointer's, and the sizeof
+                    // arm refuses suffix 0 for an is_vla_parameter local.
+                    local->vla_element_type = pointer_layout.element_type;
+                    local->vla_dimension_counts = pointer_layout.dimension_counts;
+                    local->vla_suffix_sizes = pointer_layout.suffix_sizes;
+                    local->vla_dimension_count = pointer_layout.dimension_count;
+                    local->is_variable_length_array = true;
+                    local->is_vla_parameter = true;
                 }
                 u32 initializer_index = end;
                 u32 declarator_brackets = 0;
@@ -39252,7 +39348,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                     CIntegerIrLocal* local = c_ir_find_local_by_entity(&builder, parameter.entity);
                     CIrVlaLayout layout = {0};
                     CToken parameter_token = c_ir_space_name_token(&builder, parameter.name);
-                    if (!local || !c_ir_prepare_vla_layout(&builder, parameter.type, parameter_token, true, &layout))
+                    if (!local || !c_ir_prepare_vla_layout(&builder, parameter.type, parameter_token, true, false, &layout))
                     {
                         builder.failure_message = S8("could not lower variable-length array parameter bounds");
                         parameters_lowered = false;

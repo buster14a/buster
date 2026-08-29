@@ -5432,14 +5432,16 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // under every register allocator because three of the four are lowering
     // rather than parsing defects.
     String8 c_musl_singleton_paths[] = {
-        S8("tests/basic_c_nested_control_substatement.c"),
-        S8("tests/basic_c_inline_aggregate_sizeof.c"),
         S8("tests/basic_c_vla_declarator_list.c"),
+        S8("tests/basic_c_pointer_to_vla.c"),
+        S8("tests/basic_c_inline_aggregate_sizeof.c"),
+        S8("tests/basic_c_nested_control_substatement.c"),
     };
     String8 c_musl_singleton_names[] = {
-        S8("buster-nested-control-substatement"),
-        S8("buster-inline-aggregate-sizeof"),
-        S8("buster-vla-declarator-list"),
+        S8("buster-c-vla-declarator-list"),
+        S8("buster-c-pointer-to-vla"),
+        S8("buster-c-inline-aggregate-sizeof"),
+        S8("buster-c-nested-control-substatement"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_musl_singleton_paths); fixture_index += 1)
     {
