@@ -304,7 +304,14 @@ struct IrField
     u32 bit_offset;
     u32 bit_width;
     bool is_bit_field;
-    u8 reserved[7];
+    // The bytes a bit-field is read and written through, when packing left
+    // the aggregate too small for a unit of the field's declared type:
+    // `struct __attribute__((packed)) { char c; int b : 5; char t; }` is
+    // three bytes, so `b` is read through the byte at offset one. Zero means
+    // the declared type's size, which is what every other field uses;
+    // `ir_field_access_size` resolves the two.
+    u8 access_size;
+    u8 reserved[6];
 };
 
 typedef struct IrEnumMember IrEnumMember;
@@ -455,6 +462,10 @@ struct IrSourceTable
 };
 
 BUSTER_F_DECL IrType* ir_type_from_id(IrTypeTable* table, IrTypeId id);
+// The storage unit a field is accessed through: its own narrowed one when
+// packing forced it, the declared type's size otherwise. Zero when the type
+// is unresolved, which every caller already treats as unusable.
+BUSTER_F_DECL u64 ir_field_access_size(IrTypeTable* table, IrField const* field);
 BUSTER_F_DECL IrSymbol* ir_symbol_from_id(IrSymbolTable* table, IrSymbolId id);
 BUSTER_F_DECL IrSource* ir_source_from_id(IrSourceTable* table, IrSourceId id);
 

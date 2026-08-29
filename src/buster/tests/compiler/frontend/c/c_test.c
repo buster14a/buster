@@ -10945,6 +10945,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
                         "struct __attribute__((packed)) packed_bits { unsigned char low : 3; unsigned char high : 5; char tail; };\n"
                         "struct __attribute__((packed)) offset_bits { char lead; int value : 24; };\n"
                         "struct __attribute__((packed)) zero_width_bits { int before : 3; int : 0; int after : 3; };\n"
+                        "struct __attribute__((packed)) narrow_unit { char lead; int value : 5; char tail; };\n"
+                        "struct narrow_unit_member { char lead; __attribute__((packed)) int value : 5; char tail; };\n"
+                        "struct narrow_unit_declarator { char lead; int value : 5 __attribute__((packed)); char tail; };\n"
                         "#pragma pack(push, 1)\n"
                         "struct pragma_packed { char byte; int value; };\n"
                         "#pragma pack(pop)\n"
@@ -10957,6 +10960,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
                         "struct packed_bits packed_bits_object;\n"
                         "struct offset_bits offset_bits_object;\n"
                         "struct zero_width_bits zero_width_bits_object;\n"
+                        "struct narrow_unit narrow_unit_object;\n"
+                        "struct narrow_unit_member narrow_unit_member_object;\n"
+                        "struct narrow_unit_declarator narrow_unit_declarator_object;\n"
                         "struct pragma_packed pragma_packed_object;\n"
                         "char trailing_aligned[3] __attribute__((aligned(64)));\n"
                         "__attribute__((aligned(128))) char specifier_aligned[3];\n"
@@ -10974,6 +10980,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
                         "_Static_assert(sizeof(struct packed_bits) == 2, \"packed bits\");\n"
                         "_Static_assert(sizeof(struct offset_bits) == 4, \"offset bits\");\n"
                         "_Static_assert(sizeof(struct zero_width_bits) == 5, \"zero width bits\");\n"
+                        "_Static_assert(sizeof(struct narrow_unit) == 3, \"narrow unit\");\n"
+                        "_Static_assert(_Alignof(struct narrow_unit) == 1, \"narrow unit alignment\");\n"
+                        "_Static_assert(sizeof(struct narrow_unit_member) == 3, \"narrow unit member\");\n"
+                        "_Static_assert(sizeof(struct narrow_unit_declarator) == 3, \"narrow unit declarator\");\n"
                         "_Static_assert(sizeof(struct pragma_packed) == 5, \"pragma packed\");\n");
     TemporalArena temporary = scratch_begin(0, 0);
     CPreprocessResult preprocess = {0};
@@ -11051,6 +11061,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
             BUSTER_TEST(arguments, zero_width_bits_type->fields[0].offset == 0 && zero_width_bits_type->fields[0].bit_offset == 0);
             BUSTER_TEST(arguments, zero_width_bits_type->fields[2].offset == 1 && zero_width_bits_type->fields[2].bit_offset == 24);
         }
+        // A field the aggregate leaves no room for a declared-type unit of is
+        // read through a narrower one rather than refused: three bytes hold no
+        // int anywhere, so `value` takes the byte at offset one, which is what
+        // Clang and GCC do. All three spellings of the same request -- the
+        // whole aggregate packed, the shared specifier, and the declarator's
+        // own list after the width -- record the same unit.
+        String8 narrow_objects[] = {S8("narrow_unit_object"), S8("narrow_unit_member_object"), S8("narrow_unit_declarator_object")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(narrow_objects); index += 1)
+        {
+            IrGlobal* narrow_object = c_test_find_ir_global(module, lowered.program, narrow_objects[index]);
+            IrType* narrow_type = narrow_object ? ir_type_from_id(&lowered.program->types, narrow_object->type) : 0;
+            BUSTER_TEST(arguments, narrow_type != 0 && narrow_type->field_count == 3);
+            if (narrow_type && narrow_type->field_count == 3)
+            {
+                BUSTER_TEST(arguments, narrow_type->layout.size == 3 && narrow_type->layout.alignment == 1);
+                BUSTER_TEST(arguments, narrow_type->fields[1].offset == 1 && narrow_type->fields[1].bit_offset == 0);
+                BUSTER_TEST(arguments, narrow_type->fields[1].access_size == 1);
+                BUSTER_TEST(arguments, ir_field_access_size(&lowered.program->types, narrow_type->fields + 1) == 1);
+                BUSTER_TEST(arguments, narrow_type->fields[2].offset == 2);
+            }
+        }
+        // Every other bit-field keeps the declared type's unit, so the
+        // narrowing is confined to the layout that has no other answer.
+        BUSTER_TEST(arguments, offset_bits_type != 0 && offset_bits_type->field_count == 2 && offset_bits_type->fields[1].access_size == 0);
+
         // The object-declarator attribute reaches the global's alignment from
         // either side of the name.
         IrGlobal* trailing_aligned = c_test_find_ir_global(module, lowered.program, S8("trailing_aligned"));
@@ -11166,12 +11201,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     }
     scratch_end(bit_attribute_temporary);
 
-    // A packed bit-field whose bits cross every storage unit of its declared
-    // type has no single-unit access at all: a read-modify-write through the
-    // unit that covers it would reach past the aggregate. It is refused
-    // rather than laid out differently from every other compiler on the
-    // target -- silently agreeing with nobody is the failure mode this whole
-    // change exists to remove.
+    // A packed bit-field whose bits cross every storage unit that fits has no
+    // single-unit access at all -- not even a narrower one: thirty bits at bit
+    // three of a five-byte aggregate leave no position for a four-byte unit
+    // and do not fit in a smaller one. It is refused rather than laid out
+    // differently from every other compiler on the target -- silently agreeing
+    // with nobody is the failure mode this whole change exists to remove.
     TemporalArena straddle_temporary = scratch_begin(0, 0);
     CPreprocessResult straddle_preprocess = {0};
     CParseResult straddle_parse = {0};

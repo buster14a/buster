@@ -2305,8 +2305,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_bit_field_unit(MachineX64Selector* s
     for (u32 sibling = first; sibling < instruction->operand_count && selected; sibling += 1)
     {
         u64 sibling_field = instruction->immediates[sibling];
+        // Siblings share a unit only when they share both its start and its
+        // width: packing can narrow one field's unit and not the next one's.
         if (!member_emitted[sibling] && sibling_field < type->field_count && type->fields[sibling_field].is_bit_field &&
-            type->fields[sibling_field].offset == field_offset)
+            type->fields[sibling_field].offset == field_offset &&
+            ir_field_access_size(&selector->program->types, type->fields + sibling_field) == field_size)
         {
             u32 bit_offset = type->fields[sibling_field].bit_offset;
             u32 bit_width = type->fields[sibling_field].bit_width;
@@ -2442,8 +2445,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_aggregate(MachineX64Selector* select
             else if (!member_emitted[index])
             {
                 u64 field_offset = type->fields[field_index].offset;
-                IrType* field_type = ir_type_from_id(&program->types, type->fields[field_index].type);
-                u64 field_size = field_type && field_type->layout.resolved ? field_type->layout.size : 0;
+                // The unit a member is written through: a bit-field packing
+                // left no room for a declared-type unit of carries a narrower
+                // one, and every other field reads its own size back.
+                u64 field_size = ir_field_access_size(&program->types, type->fields + field_index);
                 u16 unit_store_opcode = field_size == 1   ? MACHINE_X64_STORE_FRAME8
                                         : field_size == 2 ? MACHINE_X64_STORE_FRAME16
                                         : field_size == 4 ? MACHINE_X64_STORE_FRAME32

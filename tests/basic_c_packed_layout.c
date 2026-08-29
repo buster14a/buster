@@ -94,6 +94,46 @@ struct __attribute__((packed)) zero_width_bits
     int after : 3;
 };
 
+// Three bytes hold no `int` at any offset, so the unit `value` is read through
+// narrows to the byte it lands in rather than the declaration being refused --
+// which is what Clang and GCC do with it.  The other two spellings ask for the
+// same layout through different parses: the shared specifier, and the
+// declarator's own list after the width, which is the only place a bit-field
+// declarator can carry one.
+struct __attribute__((packed)) narrow_unit
+{
+    char lead;
+    int value : 5;
+    char tail;
+};
+
+struct narrow_unit_member
+{
+    char lead;
+    __attribute__((packed)) int value : 5;
+    char tail;
+};
+
+struct narrow_unit_declarator
+{
+    char lead;
+    int value : 5 __attribute__((packed));
+    char tail;
+};
+
+// A wider field in a wider unit, so the narrowing is not only the byte case:
+// twelve bits at bit eight of a four-byte object have no `int` unit either and
+// take the two bytes at offset one.
+struct __attribute__((packed)) narrow_unit_wide
+{
+    char lead;
+    unsigned int value : 12;
+    char tail;
+};
+
+static struct narrow_unit narrow_unit_initialized = {1, -6, 2};
+static struct narrow_unit narrow_unit_designated = {.value = 5, .tail = 6};
+
 // A member declarator may carry an attribute list of its own, in two places
 // the shared-specifier position does not cover: after a parenthesized
 // declarator, where the list follows the whole derivation rather than the
@@ -317,6 +357,10 @@ int main(void)
     if (sizeof(struct packed_bits) != 2) return 7;
     if (sizeof(struct offset_bits) != 4) return 8;
     if (sizeof(struct zero_width_bits) != 5) return 9;
+    if (sizeof(struct narrow_unit) != 3 || _Alignof(struct narrow_unit) != 1) return 68;
+    if (sizeof(struct narrow_unit_member) != 3 || _Alignof(struct narrow_unit_member) != 1) return 69;
+    if (sizeof(struct narrow_unit_declarator) != 3 || _Alignof(struct narrow_unit_declarator) != 1) return 80;
+    if (sizeof(struct narrow_unit_wide) != 4 || _Alignof(struct narrow_unit_wide) != 1) return 70;
     if (sizeof(struct pragma_packed) != 5 || _Alignof(struct pragma_packed) != 1) return 10;
     if (sizeof(struct pragma_packed_two) != 6 || _Alignof(struct pragma_packed_two) != 2) return 11;
     if (sizeof(struct member_pointer_aligned) != 64 || _Alignof(struct member_pointer_aligned) != 32) return 28;
@@ -376,6 +420,43 @@ int main(void)
     zero_width.before = -3;
     zero_width.after = 2;
     if (zero_width.before != -3 || zero_width.after != 2) return 21;
+
+    // The narrowed unit addresses the same bits the platform compiler does:
+    // the neighbours on either side are what make a value that survives a
+    // read-modify-write a claim about the unit rather than about the field.
+    struct narrow_unit narrow;
+    narrow.lead = 'a';
+    narrow.value = -6;
+    narrow.tail = 'b';
+    if (narrow.lead != 'a' || narrow.value != -6 || narrow.tail != 'b') return 71;
+    for (int narrow_value = -16; narrow_value < 16; narrow_value += 1)
+    {
+        narrow.value = narrow_value;
+        if (narrow.value != narrow_value || narrow.lead != 'a' || narrow.tail != 'b') return 72;
+    }
+    if ((char *)&narrow.tail - (char *)&narrow != 2) return 73;
+    struct narrow_unit_member narrow_member;
+    narrow_member.lead = 'c';
+    narrow_member.value = 7;
+    narrow_member.tail = 'd';
+    if (narrow_member.lead != 'c' || narrow_member.value != 7 || narrow_member.tail != 'd') return 74;
+    if ((char *)&narrow_member.tail - (char *)&narrow_member != 2) return 75;
+    struct narrow_unit_declarator narrow_declarator;
+    narrow_declarator.lead = 'g';
+    narrow_declarator.value = -9;
+    narrow_declarator.tail = 'h';
+    if (narrow_declarator.lead != 'g' || narrow_declarator.value != -9 || narrow_declarator.tail != 'h') return 81;
+    if ((char *)&narrow_declarator.tail - (char *)&narrow_declarator != 2) return 82;
+    struct narrow_unit_wide narrow_wide;
+    narrow_wide.lead = 'e';
+    narrow_wide.value = 4095;
+    narrow_wide.tail = 'f';
+    if (narrow_wide.lead != 'e' || narrow_wide.value != 4095u || narrow_wide.tail != 'f') return 76;
+    if ((char *)&narrow_wide.tail - (char *)&narrow_wide != 3) return 77;
+    // The folds that write a bit-field into static bytes read the same unit:
+    // through the declared type they would run off the end of the object.
+    if (narrow_unit_initialized.lead != 1 || narrow_unit_initialized.value != -6 || narrow_unit_initialized.tail != 2) return 78;
+    if (narrow_unit_designated.lead != 0 || narrow_unit_designated.value != 5 || narrow_unit_designated.tail != 6) return 79;
 
     // Objects the linker placed, and one automatic object.
     char automatic_aligned[3] __attribute__((aligned(64)));

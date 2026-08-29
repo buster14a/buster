@@ -2336,19 +2336,31 @@ on a commit you already know is incomplete tells nobody anything.
   unit such a field is *read* through is chosen after the aggregate's size is
   known, by sliding it back until it lies inside the object -- a
   read-modify-write through a unit hanging off the end would clobber the next
-  object. A field whose bits cross every unit that fits has no single-unit
-  access at all; it is diagnosed rather than laid out differently from every
-  other compiler on the target, because the whole point of the change is to
-  stop agreeing with nobody in silence. A zero-width bit-field keeps aligning
-  to its declared type even inside a packed aggregate, which is also what Clang
-  and GCC do.
+  object -- and where the object is too small for the declared type to sit
+  anywhere, by narrowing the unit to the smallest power of two that covers the
+  field: `struct __attribute__((packed)) { char c; int b : 5; char t; }` is
+  three bytes, so `b` is read through the byte at offset one, which is again
+  what Clang and GCC do. **The narrowed width lives on `IrField.access_size`**,
+  zero meaning the declared type's size, and `ir_field_access_size` is what
+  every reader asks: the load and the read-modify-write in `c_gen.c`, the four
+  constant-initializer folds there, the `IR_OPCODE_AGGREGATE` selectors in
+  `machine_x86_64.c` and `machine_aarch64.c`, and the two canonical emitters in
+  `codegen.c`. It is also the one place a `LOAD` or `STORE` may disagree with
+  its place's type, which `ir_place_narrow_bit_field_access` is what validation
+  admits it through. A field whose bits cross every unit that fits has no
+  single-unit access even then; it is diagnosed rather than laid out
+  differently from every other compiler on the target, because the whole point
+  of the change is to stop agreeing with nobody in silence. A zero-width
+  bit-field keeps aligning to its declared type even inside a packed aggregate,
+  which is also what Clang and GCC do.
   A bit-field declarator carries a list of its own in exactly one place, *after*
   the width -- Clang rejects `int b __attribute__((packed)) : 5` -- so
   `c_type_parse_aggregate_segment_step` trims the width's token range with
   `c_parse_trailing_attribute_start`, the helper the parenthesized-declarator
   path already uses. Left untrimmed the list is part of the constant expression
   and the width never folds, which loses the aggregate's whole layout while
-  `sizeof` still answers (issue #693). The trimmed tokens stay inside
+  `sizeof` still answers (issue #693). It is the third spelling of the packed
+  bit-field layout above, and reaches the same narrowed unit as the other two. The trimmed tokens stay inside
   `[declarator_start, declarator_end)`, which is the range the per-declarator
   `packed` and `aligned` scans read, so the attribute reaches the layout with no
   second pass.

@@ -33,6 +33,25 @@ IrType* ir_type_from_id(IrTypeTable* table, IrTypeId id)
     return result;
 }
 
+u64 ir_field_access_size(IrTypeTable* table, IrField const* field)
+{
+    u64 result = 0;
+    if (field)
+    {
+        IrType* type = ir_type_from_id(table, field->type);
+        if (field->access_size)
+        {
+            result = field->access_size;
+        }
+        else if (type && type->layout.resolved)
+        {
+            result = type->layout.size;
+        }
+    }
+
+    return result;
+}
+
 IrSymbol* ir_symbol_from_id(IrSymbolTable* table, IrSymbolId id)
 {
     IrSymbol* result;
@@ -4124,6 +4143,32 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameters(IrFunction* 
     return result;
 }
 
+// A packed bit-field the aggregate left no room for a declared-type unit of is
+// read and written through a narrower one, recorded on the field as
+// `access_size` by the slide loop at the end of the aggregate case of
+// `c_ir_lower`. The place still names the member, so it keeps the declared
+// type and is wider than the access: the one place a load or store may
+// disagree with its place, and only for an integer of exactly the recorded
+// width.
+BUSTER_GLOBAL_LOCAL bool ir_place_narrow_bit_field_access(IrProgram* program, IrFunction* function, IrValueId place, IrTypeId access)
+{
+    bool result = false;
+    IrType* access_type = ir_type_from_id(&program->types, access);
+    IrInstructionId definition = place.value < function->value_count ? function->values[place.value].definition : IR_INSTRUCTION_ID_INVALID;
+    IrInstruction* field_instruction = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+    if (access_type && access_type->kind == IR_TYPE_INTEGER && access_type->layout.resolved && field_instruction &&
+        field_instruction->opcode == IR_OPCODE_FIELD && field_instruction->operand_count == 1 && field_instruction->immediate_count == 1 &&
+        field_instruction->operands[0].value < function->value_count)
+    {
+        IrType* aggregate = ir_type_from_id(&program->types, function->values[field_instruction->operands[0].value].canonical_type);
+        u64 field_index = field_instruction->immediates[0];
+        IrField* field = aggregate && field_index < aggregate->field_count ? aggregate->fields + field_index : 0;
+        result = field && field->is_bit_field && field->access_size && access_type->layout.size == field->access_size;
+    }
+
+    return result;
+}
+
 // The per-opcode obligations: operand counts and types, immediates, targets and
 // result shape. Every fault here names the instruction the caller is holding, so
 // only the kind comes back.
@@ -4195,7 +4240,9 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
     else if (instruction->opcode == IR_OPCODE_LOAD)
     {
         IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
-        if (!place || place->category != IR_VALUE_PLACE || place->canonical_type.value != instruction->canonical_type.value ||
+        bool narrow = place && place->canonical_type.value != instruction->canonical_type.value &&
+                      ir_place_narrow_bit_field_access(program, function, instruction->operands[0], instruction->canonical_type);
+        if (!place || place->category != IR_VALUE_PLACE || (place->canonical_type.value != instruction->canonical_type.value && !narrow) ||
             instruction->operand_count != 1 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
         {
             error = IR_VALIDATION_OPERAND_TYPE;
@@ -4206,9 +4253,11 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
         IrValue* value = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
         IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        bool narrow = place && value && place->canonical_type.value != value->canonical_type.value &&
+                      ir_place_narrow_bit_field_access(program, function, instruction->operands[0], value->canonical_type);
         if (!place || !value || place->category != IR_VALUE_PLACE || value->category != IR_VALUE_VALUE ||
-            place->canonical_type.value != value->canonical_type.value || !instruction_type || instruction_type->kind != IR_TYPE_VOID ||
-            instruction->result.value != IR_ID_UNDERLYING_INVALID)
+            (place->canonical_type.value != value->canonical_type.value && !narrow) || !instruction_type ||
+            instruction_type->kind != IR_TYPE_VOID || instruction->result.value != IR_ID_UNDERLYING_INVALID)
         {
             error = IR_VALIDATION_OPERAND_TYPE;
         }

@@ -13733,8 +13733,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 {
                                     continue;
                                 }
-                                if (field_type->layout.size != 1 && field_type->layout.size != 2 && field_type->layout.size != 4 &&
-                                    field_type->layout.size != 8)
+                                // The unit the field is written through, which
+                                // packing may have narrowed below the declared
+                                // type; `field->offset` names that unit.
+                                u64 field_unit = ir_field_access_size(&program->types, field);
+                                if (field_unit != 1 && field_unit != 2 && field_unit != 4 && field_unit != 8)
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                     return result;
@@ -13779,9 +13782,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     }
                                 }
                                 BusterX86MetadataPhysicalOperand bitfield_store_operands[2] = {
-                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)(field_type->layout.size * 8),
-                                                                          field_displacement),
-                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)(field_type->layout.size * 8)),
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)(field_unit * 8), field_displacement),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)(field_unit * 8)),
                                 };
                                 if (!codegen_canonical_x64_metadata_emit(&buffer, S8("OR"), bitfield_store_operands,
                                                                            BUSTER_ARRAY_LENGTH(bitfield_store_operands)))
@@ -17726,7 +17728,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 {
                                     continue;
                                 }
-                                u32 field_size = (u32)field_type->layout.size;
+                                // The unit the field is written through, which
+                                // packing may have narrowed below the declared
+                                // type; `field->offset` names that unit.
+                                u32 field_size = (u32)ir_field_access_size(&program->types, field);
                                 if (field_size != 1 && field_size != 2 && field_size != 4 && field_size != 8)
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
