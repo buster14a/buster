@@ -11484,8 +11484,8 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
 
 BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* machine, Arena* scratch_arena, Arena* result_arena,
                                                               CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration);
-BUSTER_C_INTERNAL void c_parse_bind_function_expression_aggregates(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                                     CDeclaration* declaration);
+BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                            CScopeId root_scope, u32 start, u32 end);
 
 BUSTER_C_SHARED bool c_parse_label_address_prefix_proven(CPreprocessResult const* preprocess, u32 body_start, u32 index)
 {
@@ -12368,7 +12368,8 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
         TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
         c_parse_bind_function_static_asserts(machine, temporary.arena, result_arena, result, preprocess, declaration);
         // After the walk above, because it needs the block scopes that walk creates.
-        c_parse_bind_function_expression_aggregates(machine, result, preprocess, declaration);
+        c_parse_bind_expression_aggregates(machine, result, preprocess, declaration->scope, declaration->body_start,
+                                           declaration->body_start + declaration->body_token_count);
         scratch_end(temporary);
     }
 }
@@ -12540,15 +12541,22 @@ BUSTER_C_SHARED CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId 
 // cannot be preceded by one, so nothing a declaration owns is registered twice
 // here, and the check that no type already carries this definition keeps a
 // range that is somehow reached twice from defining two types.
-BUSTER_C_INTERNAL void c_parse_bind_function_expression_aggregates(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                                     CDeclaration* declaration)
+//
+// The range is a token range rather than a function body because a file-scope
+// initializer is written the same way and is not walked by anything else:
+// musl's `ioctl.c` sizes its `compat_map` entries with
+// `sizeof(struct { int i; time_t t; char c[64]; })`, an anonymous aggregate
+// defined inside the initializer of a file-scope object. Left unregistered,
+// the sizeof fold has no type to resolve and the whole initializer is refused.
+BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                            CScopeId root_scope, u32 start, u32 end)
 {
-    u32 body_end = declaration->body_start + declaration->body_token_count;
+    u32 body_end = end;
     if (body_end > preprocess.token_count)
     {
         body_end = (u32)preprocess.token_count;
     }
-    for (u32 index = declaration->body_start; index + 2 < body_end; index += 1)
+    for (u32 index = start; index + 2 < body_end; index += 1)
     {
         if (!c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -12576,7 +12584,7 @@ BUSTER_C_INTERNAL void c_parse_bind_function_expression_aggregates(CTypeParseMac
             continue;
         }
         u32 declarator_start = 0;
-        CScopeId scope = c_parse_scope_for_token(result, declaration->scope, keyword);
+        CScopeId scope = c_parse_scope_for_token(result, root_scope, keyword);
         c_parse_scalar_type_in_scope(machine, result, preprocess, scope, keyword, close + 1, &declarator_start);
         index = close;
     }
@@ -14139,6 +14147,23 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
                                      },
                                      entity);
         }
+    }
+    // A file-scope declaration's initializer may define an aggregate the same
+    // way a function body's expression does, and nothing else walks it. This
+    // runs ahead of the array-bound inference below because a bound may be the
+    // sizeof of such a definition.
+    for (u32 declaration_index = 0; declaration_index < result.declaration_count; declaration_index += 1)
+    {
+        CDeclaration* declaration = &result.declarations[declaration_index];
+        if (declaration->kind == C_DECLARATION_FUNCTION)
+        {
+            continue;
+        }
+        c_parse_bind_expression_aggregates(&machine, &result, preprocess,
+                                           (CScopeId){
+                                               .value = 0,
+                                           },
+                                           declaration->token_start, declaration->token_start + declaration->token_count);
     }
     for (u32 declaration_index = 0; declaration_index < result.declaration_count; declaration_index += 1)
     {
