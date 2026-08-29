@@ -26096,40 +26096,6 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 
     return UINT32_MAX;
 }
 
-// True when this statement is a control statement whose body is a brace group,
-// which is then what ends the statement rather than a semicolon.  The body is
-// found past the header, and past the headers of any control statements nested
-// in it, because a brace group inside an expression is not a body: glibc's
-// assert() expands to a GNU statement expression, so
-// `if (p) for (i = 0; i < n; i++) assert(p[i] == 0);` -- SQLite's debug builds
-// are full of that shape -- would otherwise be measured as ending at the
-// assert's closing brace instead of at its semicolon.
-BUSTER_C_INTERNAL bool c_ir_control_statement_ends_with_body(CPreprocessResult preprocess, u32 start, u32 end)
-{
-    u32 cursor = start;
-    bool control = false;
-    while (cursor < end && preprocess.tokens[cursor].kind == C_TOKEN_IDENTIFIER)
-    {
-        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor]);
-        if (!string_equal(spelling, S8("switch")) && !string_equal(spelling, S8("for")) && !string_equal(spelling, S8("while")))
-        {
-            break;
-        }
-        if (cursor + 1 >= end || !c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            return false;
-        }
-        u32 header_close = c_ir_matching_delimiter(preprocess, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if (header_close == UINT32_MAX)
-        {
-            return false;
-        }
-        control = true;
-        cursor = header_close + 1;
-    }
-    return control && cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACE);
-}
-
 /* The prefix a statement may carry before its unlabelled form. `name :`,
    `default :`, and `case <constant> :` may repeat before the statement they
    label, and a controlled substatement is allowed to carry them — `if (c)
@@ -26201,254 +26167,311 @@ BUSTER_C_INTERNAL u32 c_ir_statement_labels_end(CPreprocessResult preprocess, u3
     return result;
 }
 
-BUSTER_C_INTERNAL u32 c_ir_if_statement_end(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end)
+// One statement's extent, as far as it can be measured without looking at the
+// statement's own substatements. `if` is the one form whose extent depends on
+// a chain of them -- an `else` picks up where the then-substatement ended --
+// so it is reported back rather than measured here, and `c_ir_statement_end`
+// is what walks that chain. Everything else either ends at a brace group, ends
+// at a semicolon, or hands the question straight to the statement it controls:
+// the extent of `for (...) while (...) x;` is the extent of `x;`, so the
+// headers are peeled and the walk continues past them. `do` is the exception
+// in the other direction, because its extent runs past the `while (...) ;`
+// that follows its body rather than ending with it; `pending_do` counts the
+// tails the caller still owes, which `c_ir_statement_do_tail_end` consumes.
+//
+// A brace group only ends a statement when it is the controlled body, never
+// when it sits inside an expression: glibc's assert() expands to a GNU
+// statement expression, so `if (p) for (i = 0; i < n; i++) assert(p[i] == 0);`
+// -- SQLite's debug builds are full of that shape -- must be measured as
+// ending at the assert's semicolon and not at its closing brace. Peeling stops
+// at the first token that is not a header keyword, which is the '(' of that
+// expansion, so the semicolon scan below is what measures it.
+typedef struct CIrStatementSpan CIrStatementSpan;
+struct CIrStatementSpan
+{
+    // One past the statement, when it did not reduce to an `if`.
+    u32 end;
+    // The `if` whose extent is this statement's, or UINT32_MAX.
+    u32 if_start;
+    // `do` headers whose `while (...) ;` tails follow the extent above.
+    u32 pending_do;
+    bool valid;
+};
+
+BUSTER_C_INTERNAL CIrStatementSpan c_ir_statement_span(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    CIrStatementSpan span = {
+        .end = UINT32_MAX,
+        .if_start = UINT32_MAX,
+    };
+    u32 cursor = start;
+    bool measured = false;
+    while (!measured && cursor < end)
+    {
+        // A controlled substatement may carry label prefixes, so its extent is
+        // measured from the statement they label.
+        cursor = c_ir_statement_labels_end(preprocess, cursor, end);
+        if (cursor >= end)
+        {
+            measured = true;
+            continue;
+        }
+        CToken token = preprocess.tokens[cursor];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            u32 close = c_ir_matching_delimiter(preprocess, cursor, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+            span.end = close == UINT32_MAX ? UINT32_MAX : close + 1;
+            span.valid = close != UINT32_MAX;
+            measured = true;
+            continue;
+        }
+        if (token.kind != C_TOKEN_IDENTIFIER)
+        {
+            break;
+        }
+        if (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_IF))
+        {
+            span.if_start = cursor;
+            span.valid = true;
+            measured = true;
+            continue;
+        }
+        if (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_DO))
+        {
+            span.pending_do += 1;
+            cursor += 1;
+            continue;
+        }
+        if (!c_token_in_well_known_set(preprocess.spelling_base, token,
+                                       C_SYMBOL_WELL_KNOWN_BIT(FOR) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) | C_SYMBOL_WELL_KNOWN_BIT(SWITCH)))
+        {
+            break;
+        }
+        if (cursor + 1 >= end || !c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            measured = true;
+            continue;
+        }
+        u32 header_close =
+            c_ir_matching_delimiter(preprocess, cursor + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (header_close == UINT32_MAX)
+        {
+            measured = true;
+            continue;
+        }
+        cursor = header_close + 1;
+    }
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    u32 braces = 0;
+    for (u32 index = cursor; !measured && index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            parentheses += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+        {
+            parentheses -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            brackets += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
+        {
+            brackets -= 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            braces += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            if (!braces)
+            {
+                measured = true;
+                continue;
+            }
+            braces -= 1;
+        }
+        else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
+        {
+            span.end = index + 1;
+            span.valid = true;
+            measured = true;
+        }
+    }
+
+    return span;
+}
+
+// The `while (...) ;` tails owed by the `do` headers a span peeled, consumed
+// in the order the statement writes them: `do do x; while (a); while (b);`
+// closes the inner loop first.
+BUSTER_C_INTERNAL u32 c_ir_statement_do_tail_end(CPreprocessResult preprocess, u32 start, u32 end, u32 pending)
+{
+    u32 result = start;
+    while (pending && result != UINT32_MAX)
+    {
+        if (result >= end || preprocess.tokens[result].kind != C_TOKEN_IDENTIFIER ||
+            !c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[result], C_SYMBOL_WELL_KNOWN_WHILE) || result + 1 >= end ||
+            !c_token_is_punctuator(&preprocess.tokens[result + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            result = UINT32_MAX;
+            continue;
+        }
+        u32 close = c_ir_matching_delimiter(preprocess, result + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close == UINT32_MAX || close + 1 >= end || !c_token_is_punctuator(&preprocess.tokens[close + 1], C_PUNCTUATOR_SEMICOLON))
+        {
+            result = UINT32_MAX;
+            continue;
+        }
+        result = close + 2;
+        pending -= 1;
+    }
+
+    return result;
+}
+
+// One past the whole statement at `start`. Only `if` needs a stack: its extent
+// is its else-chain's, and each arm is a statement in its own right, so the
+// arms are walked with explicit frames rather than by recursing.
+BUSTER_C_INTERNAL u32 c_ir_statement_end(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end)
 {
     typedef struct CIfEndFrame CIfEndFrame;
     struct CIfEndFrame
     {
         u32 start;
         u32 child_end;
+        u32 pending_do;
         u8 phase;
     };
-    if (start >= end)
-    {
-        return UINT32_MAX;
-    }
-    CIfEndFrame* frames = arena_allocate(arena, CIfEndFrame, end - start + 1);
-    u32 frame_count = 1;
     u32 completed = UINT32_MAX;
-    frames[0] = (CIfEndFrame){
-        .start = start,
-    };
-    while (frame_count)
+    CIrStatementSpan span = start < end ? c_ir_statement_span(preprocess, start, end) : (CIrStatementSpan){.end = UINT32_MAX, .if_start = UINT32_MAX};
+    if (span.valid && span.if_start == UINT32_MAX)
     {
-        CIfEndFrame* frame = &frames[frame_count - 1];
-        u32 child_start = UINT32_MAX;
-        if (frame->phase == 0)
+        completed = c_ir_statement_do_tail_end(preprocess, span.end, end, span.pending_do);
+    }
+    else if (span.valid)
+    {
+        CIfEndFrame* frames = arena_allocate(arena, CIfEndFrame, end - start + 1);
+        u32 frame_count = 1;
+        bool failed = false;
+        frames[0] = (CIfEndFrame){
+            .start = span.if_start,
+            .pending_do = span.pending_do,
+        };
+        while (frame_count && !failed)
         {
-            if (frame->start + 1 >= end || preprocess.tokens[frame->start].kind != C_TOKEN_IDENTIFIER ||
-                !string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[frame->start]), S8("if")) ||
-                !c_token_is_punctuator(&preprocess.tokens[frame->start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            CIfEndFrame* frame = &frames[frame_count - 1];
+            u32 child_start = UINT32_MAX;
+            if (frame->phase == 0)
             {
-                return UINT32_MAX;
+                u32 condition_close =
+                    frame->start + 1 < end && c_token_is_punctuator(&preprocess.tokens[frame->start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)
+                        ? c_ir_matching_delimiter(preprocess, frame->start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS)
+                        : UINT32_MAX;
+                failed = condition_close == UINT32_MAX;
+                child_start = failed ? UINT32_MAX : condition_close + 1;
+                frame->phase = 1;
             }
-            u32 condition_close = c_ir_matching_delimiter(preprocess, frame->start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            if (condition_close == UINT32_MAX)
+            else if (frame->phase == 1)
             {
-                return UINT32_MAX;
+                u32 after = frame->child_end;
+                bool has_else = after < end && preprocess.tokens[after].kind == C_TOKEN_IDENTIFIER &&
+                                c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[after], C_SYMBOL_WELL_KNOWN_ELSE);
+                if (has_else)
+                {
+                    child_start = after + 1;
+                    frame->phase = 2;
+                }
+                else
+                {
+                    completed = c_ir_statement_do_tail_end(preprocess, after, end, frame->pending_do);
+                    failed = completed == UINT32_MAX;
+                    frame_count -= 1;
+                    if (frame_count && !failed)
+                    {
+                        frames[frame_count - 1].child_end = completed;
+                    }
+                }
             }
-            child_start = condition_close + 1;
-            frame->phase = 1;
-        }
-        else if (frame->phase == 1)
-        {
-            u32 after = frame->child_end;
-            bool has_else = after < end && preprocess.tokens[after].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[after]), S8("else"));
-            if (!has_else)
+            else
             {
-                completed = after;
+                completed = c_ir_statement_do_tail_end(preprocess, frame->child_end, end, frame->pending_do);
+                failed = completed == UINT32_MAX;
                 frame_count -= 1;
-                if (frame_count)
+                if (frame_count && !failed)
                 {
                     frames[frame_count - 1].child_end = completed;
                 }
+            }
+            if (failed || child_start == UINT32_MAX)
+            {
                 continue;
             }
-            child_start = after + 1;
-            frame->phase = 2;
-        }
-        else
-        {
-            completed = frame->child_end;
-            frame_count -= 1;
-            if (frame_count)
+            CIrStatementSpan child = c_ir_statement_span(preprocess, child_start, end);
+            if (!child.valid)
             {
-                frames[frame_count - 1].child_end = completed;
+                failed = true;
             }
-            continue;
-        }
-        // The controlled substatement may carry label prefixes, so its extent
-        // is measured from the statement they label.
-        child_start = c_ir_statement_labels_end(preprocess, child_start, end);
-        if (child_start >= end)
-        {
-            return UINT32_MAX;
-        }
-        if (preprocess.tokens[child_start].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[child_start]), S8("if")))
-        {
-            frames[frame_count++] = (CIfEndFrame){
-                .start = child_start,
-            };
-            continue;
-        }
-        if (c_token_is_punctuator(&preprocess.tokens[child_start], C_PUNCTUATOR_LEFT_BRACE))
-        {
-            u32 close = c_ir_matching_delimiter(preprocess, child_start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-            if (close == UINT32_MAX)
+            else if (child.if_start != UINT32_MAX)
             {
-                return UINT32_MAX;
+                frames[frame_count++] = (CIfEndFrame){
+                    .start = child.if_start,
+                    .pending_do = child.pending_do,
+                };
             }
-            frame->child_end = close + 1;
-            continue;
-        }
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
-        bool ends_with_body = c_ir_control_statement_ends_with_body(preprocess, child_start, end);
-        u32 statement_end = child_start;
-        for (; statement_end < end; statement_end += 1)
-        {
-            CToken token = preprocess.tokens[statement_end];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            else
             {
-                parentheses += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-            {
-                parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-            {
-                brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-            {
-                if (!braces)
-                {
-                    return UINT32_MAX;
-                }
-                braces -= 1;
-                if (!braces && ends_with_body)
-                {
-                    statement_end += 1;
-                    break;
-                }
-            }
-            else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
-            {
-                statement_end += 1;
-                break;
+                u32 child_end = c_ir_statement_do_tail_end(preprocess, child.end, end, child.pending_do);
+                failed = child_end == UINT32_MAX || child_end <= child_start;
+                frame->child_end = child_end;
             }
         }
-        if (statement_end > end || statement_end == child_start)
-        {
-            return UINT32_MAX;
-        }
-        frame->child_end = statement_end;
+        completed = failed ? UINT32_MAX : completed;
     }
+
     return completed;
 }
 
 BUSTER_C_INTERNAL bool c_ir_controlled_body_range(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, u32* content_start, u32* content_end,
                                                     u32* after)
 {
-    if (start < end)
+    bool result = false;
+    // Labels prefixing the substatement are part of it, so the extent is
+    // measured from the statement they label while the range still opens
+    // at the first label — that is what lowering has to walk.
+    u32 statement = start < end ? c_ir_statement_labels_end(preprocess, start, end) : end;
+    if (statement < end && c_token_is_punctuator(&preprocess.tokens[statement], C_PUNCTUATOR_LEFT_BRACE))
     {
-        // Labels prefixing the substatement are part of it, so the extent is
-        // measured from the statement they label while the range still opens
-        // at the first label — that is what lowering has to walk.
-        u32 statement = c_ir_statement_labels_end(preprocess, start, end);
-        if (statement >= end)
+        u32 close = c_ir_matching_delimiter(preprocess, statement, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+        if (close != UINT32_MAX)
         {
-            return false;
-        }
-        if (c_token_is_punctuator(&preprocess.tokens[statement], C_PUNCTUATOR_LEFT_BRACE))
-        {
-            u32 close = c_ir_matching_delimiter(preprocess, statement, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-            if (close == UINT32_MAX)
-            {
-                return false;
-            }
             // An unlabelled compound statement hands its interior straight to
             // the caller; a labelled one keeps its braces so the stream lowers
             // the labels first and then the block.
             *content_start = statement == start ? start + 1 : start;
             *content_end = statement == start ? close : close + 1;
             *after = close + 1;
-            return true;
+            result = true;
         }
-        if (preprocess.tokens[statement].kind == C_TOKEN_IDENTIFIER &&
-            string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[statement]), S8("if")))
+    }
+    else if (statement < end)
+    {
+        u32 statement_end = c_ir_statement_end(arena, preprocess, statement, end);
+        if (statement_end != UINT32_MAX)
         {
-            u32 statement_end = c_ir_if_statement_end(arena, preprocess, statement, end);
-            if (statement_end == UINT32_MAX)
-            {
-                return false;
-            }
             *content_start = start;
             *content_end = statement_end;
             *after = statement_end;
-            return true;
-        }
-        u32 parentheses = 0;
-        u32 brackets = 0;
-        u32 braces = 0;
-        bool ends_with_body = c_ir_control_statement_ends_with_body(preprocess, statement, end);
-        for (u32 index = statement; index < end; index += 1)
-        {
-            CToken token = preprocess.tokens[index];
-            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-            {
-                parentheses += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                if (!parentheses)
-                {
-                    return false;
-                }
-                parentheses -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
-            {
-                brackets += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
-            {
-                if (!brackets)
-                {
-                    return false;
-                }
-                brackets -= 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
-            {
-                braces += 1;
-            }
-            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-            {
-                if (!braces)
-                {
-                    return false;
-                }
-                braces -= 1;
-                if (!braces && ends_with_body)
-                {
-                    *content_start = start;
-                    *content_end = index + 1;
-                    *after = index + 1;
-                    return true;
-                }
-            }
-            else if (!parentheses && !brackets && !braces && c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON))
-            {
-                *content_start = start;
-                *content_end = index + 1;
-                *after = index + 1;
-                return true;
-            }
+            result = true;
         }
     }
 
-    return false;
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_ir_builder_controlled_body_range(CIntegerIrBuilder* builder, u32 start, u32 end, u32* content_start, u32* content_end, u32* after)

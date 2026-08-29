@@ -5422,6 +5422,50 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
+    // The musl compatibility inventory reduced four independent frontend
+    // singletons to these fixtures: a variable-length array declared in a
+    // comma-separated declarator list, a pointer to a variably modified array
+    // and the partially subscripted array that decays out of one, an inline
+    // aggregate definition sized in a file-scope initializer, and a control
+    // statement standing as another one's unbraced substatement.  Each source
+    // is separate so a regression names the contract that broke, and each runs
+    // under every register allocator because three of the four are lowering
+    // rather than parsing defects.
+    String8 c_musl_singleton_paths[] = {
+        S8("tests/basic_c_nested_control_substatement.c"),
+    };
+    String8 c_musl_singleton_names[] = {
+        S8("buster-nested-control-substatement"),
+    };
+    for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_musl_singleton_paths); fixture_index += 1)
+    {
+        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            // Scratch-arena compilation for the reason the table above gives:
+            // the module arena is never rewound, and one whole in-process
+            // compilation per fixture per allocator would spend it.
+            TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+            String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, c_musl_singleton_names[fixture_index], S8(""));
+            String8 fixture_command_line[] = {
+                c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_musl_singleton_paths[fixture_index],
+            };
+            CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+            if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 fixture_arguments[] = {fixture_path};
+                ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                if (fixture_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(fixture_temporary);
+        }
+    }
     // A call through a noreturn function pointer type ends control flow, and
     // nothing after it in the block is emitted.  The defect that motivated the
     // fixture only ever produced dead code, so running the program cannot see
