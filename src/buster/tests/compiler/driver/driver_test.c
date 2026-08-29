@@ -7882,8 +7882,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         TemporalArena asm_unit_temporary = scratch_begin(&arguments->arena, 1);
         Arena* asm_unit_arena = asm_unit_temporary.arena;
         String8 asm_unit_object_path = buster_test_temporary_path(asm_unit_arena, S8("buster-asm-unit"), S8(".o"));
+        // The fixture is x86-64 assembly, so the object half is asked for
+        // that target explicitly rather than for the host's: it is then the
+        // same check on every platform in the matrix, and only the half that
+        // runs the program depends on where the test is running.
         String8 asm_unit_command_line[] = {
-            S8("-c"), S8("-o"), asm_unit_object_path, S8("tests/basic_asm_unit.s"),
+            S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), asm_unit_object_path, S8("tests/basic_asm_unit.s"),
         };
         CompilerDriverResult asm_unit = compiler_driver_execute_invocation(
             asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(asm_unit_command_line)));
@@ -7981,13 +7985,38 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, os_process_wait_sync(asm_unit_arena, asm_unit_spawn).result == PROCESS_RESULT_SUCCESS);
             }
         }
+        // The same unit linked against a C one. A compiled module carries one
+        // section per kind and an assembled one carries only the sections its
+        // file named, so this is what proves the merge reads a section's kind
+        // rather than its position.
+        String8 asm_unit_mixed_path = buster_test_temporary_path(asm_unit_arena, S8("buster-asm-unit-mixed"), S8(""));
+        String8 asm_unit_mixed_command_line[] = {
+            S8("-o"), asm_unit_mixed_path, S8("tests/basic_asm_unit_caller.c"), S8("tests/basic_asm_unit.s"),
+        };
+        CompilerDriverResult asm_unit_mixed = compiler_driver_execute_invocation(
+            asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(asm_unit_mixed_command_line)));
+        BUSTER_TEST(arguments, asm_unit_mixed.error == COMPILER_DRIVER_ERROR_NONE);
+        if (asm_unit_mixed.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 asm_unit_mixed_arguments[] = {asm_unit_mixed_path};
+            ProcessSpawnResult asm_unit_mixed_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(asm_unit_mixed_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){
+                                     .use_process_environment = true,
+                                 });
+            BUSTER_TEST(arguments, asm_unit_mixed_spawn.handle != 0);
+            if (asm_unit_mixed_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(asm_unit_arena, asm_unit_mixed_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
 #endif
         // A directive the vocabulary does not cover is refused by name and by
         // line, rather than dropped from an object that then quietly lacks
         // whatever it was there to do.
         String8 unsupported_path = buster_test_temporary_path(asm_unit_arena, S8("buster-asm-unsupported"), S8(".o"));
         String8 unsupported_command_line[] = {
-            S8("-c"), S8("-o"), unsupported_path, S8("tests/basic_asm_unsupported.s"),
+            S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), unsupported_path, S8("tests/basic_asm_unsupported.s"),
         };
         CompilerDriverResult unsupported = compiler_driver_execute_invocation(
             asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unsupported_command_line)));
@@ -7999,7 +8028,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         // assembling the macro spellings as if they were instructions.
         String8 preprocessed_path = buster_test_temporary_path(asm_unit_arena, S8("buster-asm-preprocessed"), S8(".o"));
         String8 preprocessed_command_line[] = {
-            S8("-c"), S8("-o"), preprocessed_path, S8("tests/basic_asm_preprocessed.S"),
+            S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), preprocessed_path, S8("tests/basic_asm_preprocessed.S"),
         };
         CompilerDriverResult preprocessed = compiler_driver_execute_invocation(
             asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocessed_command_line)));
