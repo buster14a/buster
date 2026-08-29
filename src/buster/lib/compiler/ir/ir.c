@@ -578,6 +578,26 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_inline_assembly_types_compatible(IrType* o
     return output_class != IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID && output_class == input_class && output->layout.size == input->layout.size;
 }
 
+// One type up to a `volatile` qualifier, in either order. The qualified copy
+// keeps the base's layout and kind, so a value of one is already a value of the
+// other; only the object's access rules differ, and those travel on the place
+// and on the access instead. See the declaration in model.h for why `_Atomic`
+// is not admitted here.
+bool ir_types_differ_only_in_volatile(IrTypeTable* table, IrTypeId left, IrTypeId right)
+{
+    IrType* left_type = ir_type_from_id(table, left);
+    IrType* right_type = ir_type_from_id(table, right);
+    bool result = false;
+    if (left_type && right_type && left.value != right.value && !left_type->is_atomic && !right_type->is_atomic)
+    {
+        IrTypeId left_base = left_type->is_volatile ? left_type->unqualified_type : left;
+        IrTypeId right_base = right_type->is_volatile ? right_type->unqualified_type : right;
+        result = left_base.value == right_base.value;
+    }
+
+    return result;
+}
+
 // The three operand shapes the 512-bit vocabulary speaks in. A vector is any
 // 64-byte IR vector — the element type carries the lane width the frontend
 // chose and never reaches the encoding — a mask is a u64, and an address is
@@ -4335,8 +4355,10 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrValue* place = instruction->operand_count ? function->values + instruction->operands[0].value : 0;
         bool narrow = place && place->canonical_type.value != instruction->canonical_type.value &&
                       ir_place_narrow_bit_field_access(program, function, instruction->operands[0], instruction->canonical_type);
-        if (!place || place->category != IR_VALUE_PLACE || (place->canonical_type.value != instruction->canonical_type.value && !narrow) ||
-            instruction->operand_count != 1 || instruction->result.value == IR_ID_UNDERLYING_INVALID)
+        bool unqualified = place && ir_types_differ_only_in_volatile(&program->types, place->canonical_type, instruction->canonical_type);
+        if (!place || place->category != IR_VALUE_PLACE ||
+            (place->canonical_type.value != instruction->canonical_type.value && !narrow && !unqualified) || instruction->operand_count != 1 ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID)
         {
             error = IR_VALIDATION_OPERAND_TYPE;
         }
@@ -4348,8 +4370,9 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrType* instruction_type = ir_type_from_id(&program->types, instruction->canonical_type);
         bool narrow = place && value && place->canonical_type.value != value->canonical_type.value &&
                       ir_place_narrow_bit_field_access(program, function, instruction->operands[0], value->canonical_type);
+        bool unqualified = place && value && ir_types_differ_only_in_volatile(&program->types, place->canonical_type, value->canonical_type);
         if (!place || !value || place->category != IR_VALUE_PLACE || value->category != IR_VALUE_VALUE ||
-            (place->canonical_type.value != value->canonical_type.value && !narrow) || !instruction_type ||
+            (place->canonical_type.value != value->canonical_type.value && !narrow && !unqualified) || !instruction_type ||
             instruction_type->kind != IR_TYPE_VOID || instruction->result.value != IR_ID_UNDERLYING_INVALID)
         {
             error = IR_VALIDATION_OPERAND_TYPE;

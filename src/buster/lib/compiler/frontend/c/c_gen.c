@@ -4181,7 +4181,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntegerI
 {
     IrType* place_type = ir_type_from_id(&builder->program->types, local->type);
     bool atomic = place_type && place_type->is_atomic;
-    IrTypeId result_type = atomic ? place_type->unqualified_type : local->type;
+    // The named-local load reads a qualified place at its unqualified type the
+    // same way c_ir_emit_load_place_raw does; the two must agree or the same
+    // object read through the two paths produces two different value types.
+    IrTypeId result_type = place_type && (atomic || place_type->is_volatile) ? place_type->unqualified_type : local->type;
     IrValueId result = c_ir_add_result(builder, result_type);
     if (local->place.value < builder->function->value_count)
     {
@@ -4289,7 +4292,15 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builder,
         builder->failure_message = S8("C IR lowering does not yet support atomic wide floating-point loads");
         return IR_VALUE_ID_INVALID;
     }
-    IrTypeId result_type = atomic ? place_type->unqualified_type : type;
+    // A qualified place is read at its unqualified type: what an lvalue
+    // conversion yields is the unqualified type of the object, and the access
+    // itself stays volatile through `volatile_access` below, which reads the
+    // place's own flag rather than the type. Doing this for `_Atomic` alone
+    // left a `volatile` aggregate's value carrying the qualified copy of the
+    // struct, and assigning it to the plain struct then had no conversion to
+    // reach for -- the ladder in c_ir_emit_cast only spans the scalar kinds
+    // (#735).
+    IrTypeId result_type = place_type && (atomic || place_type->is_volatile) ? place_type->unqualified_type : type;
     IrValueId result = c_ir_add_result(builder, result_type);
     if (place.value < builder->function->value_count)
     {
@@ -4795,6 +4806,18 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     {
         return value;
     }
+    // Two types that differ only in a `volatile` qualifier are one type as far
+    // as a value is concerned: the qualifier constrains how the object behind a
+    // place is accessed, and the access itself carries `volatile_access`. The
+    // ladder below spans the scalar kinds only, so an aggregate that crossed
+    // the qualifier -- `volatile sigset_t oldset = set2` in libc-test's
+    // functional/setjmp -- had no conversion to reach for and was refused
+    // (#735). Nothing is emitted: the value already has the representation the
+    // target asks for, and the load/store validation admits the difference.
+    if (ir_types_differ_only_in_volatile(&builder->program->types, source_type, target_type))
+    {
+        return value;
+    }
     // A complex type on either end converts half by half, and the halves are
     // what the ladders below can reason about: the wide-float arm sees only a
     // FLOAT kind, so a `(long double)z` -- which is how <complex.h> spells
@@ -4957,14 +4980,18 @@ BUSTER_C_INTERNAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrValue
         builder->failure_message = S8("assignment operand is not a modifiable place");
         return false;
     }
-    IrType* atomic_place_type = ir_type_from_id(&builder->program->types, type);
-    bool atomic = atomic_place_type && atomic_place_type->is_atomic;
+    IrType* qualified_place_type = ir_type_from_id(&builder->program->types, type);
+    bool atomic = qualified_place_type && qualified_place_type->is_atomic;
     if (atomic && c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, type))
     {
         builder->failure_message = S8("C IR lowering does not yet support atomic wide floating-point stores");
         return false;
     }
-    IrTypeId stored_type = atomic ? atomic_place_type->unqualified_type : type;
+    // The stored value is converted to the unqualified type of the place, the
+    // conversion C gives an assignment, which is also the type the loads above
+    // produce. See c_ir_emit_load_place_raw for why `volatile` joins `_Atomic`
+    // here.
+    IrTypeId stored_type = qualified_place_type && (atomic || qualified_place_type->is_volatile) ? qualified_place_type->unqualified_type : type;
     if (value.value < builder->function->value_count)
     {
         IrType* source_type = ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type);

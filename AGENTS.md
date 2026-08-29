@@ -2679,6 +2679,25 @@ on a commit you already know is incomplete tells nobody anything.
   if the copy comes back. The parenthesized spellings of the same walk still
   emit one — `(*o).a.b` and `(((T *)0)->a).b` load the intermediate through the
   group that produced it, where this arm cannot see the `.` that follows (#741).
+- **A value never carries a qualifier.** The frontend builds a qualified copy
+  of a type wherever a qualifier is written, because a place, a pointee or a
+  member has to carry it, and that copy keeps the base's kind and layout: it is
+  one representation under two ids. Both load emitters and the store emitter
+  therefore unqualify a `volatile` place the way they already unqualified
+  `_Atomic` -- an lvalue conversion yields the unqualified type of the object
+  (C 6.3.2.1p2) and an assignment converts to the unqualified type of the left
+  operand (C 6.5.16.1p2) -- and `c_ir_emit_cast` treats a difference of only
+  `volatile` as no conversion at all. The value ladder there spans the scalar
+  kinds, so while a struct crossing the qualifier had to find an arm in it,
+  `volatile sigset_t oldset = set2` was refused outright and every unit written
+  around `setjmp` failed to compile (#735). Volatility itself never travelled on
+  the type: a load and a store carry `volatile_access`, taken from the place's
+  own flag, which is why none of this changes which accesses are volatile.
+  `ir_types_differ_only_in_volatile` is the one predicate, and
+  `ir_validate_canonical_module` admits exactly that difference between a plain
+  `IR_OPCODE_LOAD` or `IR_OPCODE_STORE` and its place -- the pairing the atomic
+  opcodes were always validated with. `tests/basic_c_volatile_aggregate.c` pins
+  both directions of the qualifier under all four register allocators.
 - Native lowering is `canonical IR -> machine IR -> scheduling/register
   allocation -> encoding`. Selection patterns and scheduling classes remain
   separate metadata domains even when they share instruction-form IDs.

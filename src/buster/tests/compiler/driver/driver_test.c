@@ -7732,6 +7732,51 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(member_chain_temporary);
         }
     }
+    // An aggregate crossing a `volatile` qualifier under every allocator.  The
+    // qualified copy of a struct is a second IR type with the same layout, and
+    // the frontend's value conversion only spanned the scalar kinds, so
+    // `oldset = set2` with a volatile destination -- libc-test's
+    // `functional/setjmp`, whose `sigset_t` is a struct -- was refused before
+    // any code was generated.  The allocators are here because the store that
+    // replaces the refusal is an aggregate copy whose two ends now disagree in
+    // type, and each allocator materializes that copy its own way.  The
+    // fixture exits non-zero at its first wrong answer, naming the case.
+    {
+        String8 volatile_aggregate_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(volatile_aggregate_allocators); allocator_index += 1)
+        {
+            Arena* volatile_aggregate_conflicts[] = {
+                arguments->arena,
+                c_asm_arena,
+            };
+            TemporalArena volatile_aggregate_temporary = scratch_begin(volatile_aggregate_conflicts, BUSTER_ARRAY_LENGTH(volatile_aggregate_conflicts));
+            Arena* volatile_aggregate_arena = volatile_aggregate_temporary.arena;
+            String8 volatile_aggregate_path = buster_test_temporary_path(volatile_aggregate_arena, S8("buster-c-volatile-aggregate"),
+                                                                        string_format(volatile_aggregate_arena, S8("-{u32}"), allocator_index));
+            String8 volatile_aggregate_command_line[] = {
+                string_format(volatile_aggregate_arena, S8("-fregister-allocator={S8}"), volatile_aggregate_allocators[allocator_index]),
+                S8("-o"),
+                volatile_aggregate_path,
+                S8("tests/basic_c_volatile_aggregate.c"),
+            };
+            CompilerDriverResult volatile_aggregate = compiler_driver_execute_invocation(
+                volatile_aggregate_arena,
+                compiler_driver_parse_arguments(volatile_aggregate_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(volatile_aggregate_command_line)));
+            BUSTER_TEST(arguments, volatile_aggregate.error == COMPILER_DRIVER_ERROR_NONE);
+            if (volatile_aggregate.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {volatile_aggregate_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(volatile_aggregate_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(volatile_aggregate_temporary);
+        }
+    }
     String8 c_asm_aarch64_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-aarch64"), S8(""));
     String8 c_asm_aarch64_command_line[] = {
         S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_asm_aarch64_path, S8("tests/basic_c_asm.c"),

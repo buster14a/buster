@@ -499,6 +499,16 @@ BUSTER_F_DECL u64 ir_field_access_size(IrTypeTable* table, IrField const* field)
 // is every field but a packed one the aggregate left no single unit for; zero
 // when the span is unusable, which is what a caller that cannot split checks.
 BUSTER_F_DECL u32 ir_field_access_pieces(u64 access_size, IrFieldAccessPiece* pieces);
+// Whether two *different* types are one type up to a `volatile` qualifier: the
+// qualified copy a frontend builds for `volatile T` paired with `T` itself, in
+// either order. Two identical ids answer false, because every caller has
+// already answered that case. The qualifier belongs to the object, not to a
+// value read out of it or written into it, and an access carries its own
+// `volatile_access` flag, so a load, a store, and the frontend's value
+// conversions all let the difference pass. An `_Atomic` type is excluded: its
+// accesses are the atomic opcodes, which pair the qualified place with the
+// unqualified value themselves.
+BUSTER_F_DECL bool ir_types_differ_only_in_volatile(IrTypeTable* table, IrTypeId left, IrTypeId right);
 BUSTER_F_DECL IrSymbol* ir_symbol_from_id(IrSymbolTable* table, IrSymbolId id);
 BUSTER_F_DECL IrSource* ir_source_from_id(IrSourceTable* table, IrSourceId id);
 
