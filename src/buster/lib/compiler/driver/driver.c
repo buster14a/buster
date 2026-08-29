@@ -2118,6 +2118,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_target_dynami
     return result;
 }
 
+// Splits a `-D` operand at its first `=`. The `=` decides the value, not the
+// text after it: `-DNAME=` leaves an empty replacement list, and only the form
+// with no `=` at all takes the `1` default -- the split clang and GCC make.
 BUSTER_GLOBAL_LOCAL CPreprocessorDefinition compiler_driver_c_definition(String8 definition)
 {
     for (u64 index = 0; index < definition.length; index += 1)

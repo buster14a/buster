@@ -2984,6 +2984,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     BUSTER_TEST(arguments, command_preprocess.diagnostic_count == 0);
     c_test_preprocessed_token(arguments, &result, command_preprocess, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("9"));
 
+    // An empty value is a replacement list with nothing in it, not a missing
+    // one: `-DNAME=` expands to nothing, and the `1` a valueless `-DNAME` means
+    // is the driver's default, resolved before the option reaches here.
+    CPreprocessorDefinition empty_definition = {
+        .name = S8("COMMAND_EMPTY"),
+    };
+    CPreprocessResult empty_preprocess = c_preprocess(arguments->arena, S8("int probe = 0 COMMAND_EMPTY;\n"),
+                                                      (CPreprocessOptions){
+                                                          .definitions = &empty_definition,
+                                                          .definition_count = 1,
+                                                      });
+    BUSTER_TEST(arguments, empty_preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, empty_preprocess.token_count == 6);
+    c_test_preprocessed_token(arguments, &result, empty_preprocess, 3, C_TOKEN_PREPROCESSING_NUMBER, S8("0"));
+    c_test_preprocessed_token(arguments, &result, empty_preprocess, 4, C_TOKEN_PUNCTUATOR, S8(";"));
+
     CPreprocessResult function_macro = c_preprocess(arguments->arena,
                                                     S8("#define ADD(x, y) x + y\n"
                                                        "ADD(1, 2)\n"),

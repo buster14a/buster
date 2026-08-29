@@ -1669,6 +1669,50 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverResult preprocess = compiler_driver_execute_invocation(arguments->arena, preprocess_invocation);
     BUSTER_TEST(arguments, preprocess.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(preprocess.output, S8("int answer = 37 ;")) != BUSTER_STRING_NO_MATCH);
+    // `-D` values: an `=` with nothing after it is an empty replacement list --
+    // the spelling a build uses to switch a decoration off -- while the form
+    // with no `=` at all is the one that means `1`.
+    {
+        TemporalArena define_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* define_arena = define_temporary.arena;
+        String8 define_source_path = buster_test_temporary_path(define_arena, S8("buster-driver-define-value"), S8(".c"));
+        String8 define_source = S8("int probe = 0 DECORATION;\n");
+        BUSTER_TEST(arguments, file_write(define_source_path, (ByteSlice){.pointer = (u8*)define_source.pointer, .length = define_source.length}));
+        String8 define_values[] = {
+            S8("-DDECORATION="),
+            S8("-DDECORATION"),
+            S8("-DDECORATION=7"),
+        };
+        String8 define_expected[] = {
+            S8("int probe = 0 ;"),
+            S8("int probe = 0 1 ;"),
+            S8("int probe = 0 7 ;"),
+        };
+        for (u32 define_index = 0; define_index < BUSTER_ARRAY_LENGTH(define_values); define_index += 1)
+        {
+            String8 define_command_line[] = {
+                S8("-E"),
+                define_values[define_index],
+                define_source_path,
+            };
+            CompilerDriverResult define_preprocess = compiler_driver_execute_invocation(
+                define_arena, compiler_driver_parse_arguments(define_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(define_command_line)));
+            BUSTER_TEST(arguments, define_preprocess.error == COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, string_first_sequence(define_preprocess.output, define_expected[define_index]) != BUSTER_STRING_NO_MATCH);
+        }
+        // The separated spelling reaches the same splitter.
+        String8 separated_command_line[] = {
+            S8("-E"),
+            S8("-D"),
+            S8("DECORATION="),
+            define_source_path,
+        };
+        CompilerDriverResult separated_preprocess = compiler_driver_execute_invocation(
+            define_arena, compiler_driver_parse_arguments(define_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(separated_command_line)));
+        BUSTER_TEST(arguments, separated_preprocess.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, string_first_sequence(separated_preprocess.output, S8("int probe = 0 ;")) != BUSTER_STRING_NO_MATCH);
+        scratch_end(define_temporary);
+    }
     String8 warning_command_line[] = {
         S8("-fsyntax-only"),
         S8("tests/basic_c_preprocessor_warning.c"),

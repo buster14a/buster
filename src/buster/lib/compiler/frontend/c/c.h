@@ -419,6 +419,9 @@ typedef struct CPreprocessorDefinition CPreprocessorDefinition;
 struct CPreprocessorDefinition
 {
     String8 name;
+    // The replacement list, taken verbatim: an empty value defines an
+    // object-like macro that expands to nothing, the way `-DNAME=` does. A
+    // caller that wants the `1` a valueless `-DNAME` means must spell it.
     String8 value;
 };
 

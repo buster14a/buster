@@ -5703,8 +5703,11 @@ BUSTER_C_INTERNAL void c_preprocess_command_definitions(Arena* arena, CSpellingS
     for (u32 definition_index = 0; definition_index < options.definition_count; definition_index += 1)
     {
         CPreprocessorDefinition definition = options.definitions[definition_index];
-        String8 value = definition.value.length ? definition.value : S8("1");
-        CLexResult lex = c_lex_space(arena, space, value);
+        // The value is the replacement list verbatim, empty included: `-DNAME=`
+        // defines NAME as nothing, which is how a build switches a decoration
+        // off. Only a `-D` with no `=` at all means `1`, and the driver that
+        // reads the spelling resolves that default before it gets here.
+        CLexResult lex = c_lex_space(arena, space, definition.value);
         c_symbols_intern_tokens(symbols, lex.spelling_base, lex.tokens, lex.token_count);
         u32 replacement_count = 0;
         for (u64 token_index = 0; token_index < lex.token_count; token_index += 1)
