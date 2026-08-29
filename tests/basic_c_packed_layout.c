@@ -147,6 +147,44 @@ struct shared_and_declarator_aligned
     __attribute__((aligned(4))) int first __attribute__((aligned(64))), second __attribute__((aligned(8)));
 };
 
+// `packed` splits a declarator list the same way `aligned` does, and the same
+// four positions disagree: only the shared-specifier one packs the whole list.
+// Reading a declarator's own `packed` as the segment's -- #688 -- gave all
+// four the numbers of `packed_shared_specifier` alone, which packed `first`
+// even where the attribute was written on the declarator *after* it.
+struct packed_first_declarator
+{
+    char byte;
+    int first __attribute__((packed)), second;
+};
+
+struct packed_second_declarator
+{
+    char byte;
+    int first, second __attribute__((packed));
+};
+
+struct packed_list_declarator
+{
+    char byte;
+    int first, __attribute__((packed)) second;
+};
+
+struct packed_shared_specifier
+{
+    char byte;
+    __attribute__((packed)) int first, second;
+};
+
+// The parenthesized-declarator position, where the list follows the whole
+// derivation rather than the name: `handler` packs and `tail` does not.
+struct packed_member_pointer
+{
+    char byte;
+    void (*handler)(int) __attribute__((packed));
+    int tail;
+};
+
 #pragma pack(push, 1)
 struct pragma_packed
 {
@@ -187,6 +225,11 @@ int main(void)
     if (sizeof(struct first_declarator_aligned) != 64 || _Alignof(struct first_declarator_aligned) != 32) return 35;
     if (sizeof(struct shared_specifier_aligned) != 96 || _Alignof(struct shared_specifier_aligned) != 32) return 36;
     if (sizeof(struct shared_and_declarator_aligned) != 128 || _Alignof(struct shared_and_declarator_aligned) != 64) return 37;
+    if (sizeof(struct packed_first_declarator) != 12 || _Alignof(struct packed_first_declarator) != 4) return 46;
+    if (sizeof(struct packed_second_declarator) != 12 || _Alignof(struct packed_second_declarator) != 4) return 47;
+    if (sizeof(struct packed_list_declarator) != 12 || _Alignof(struct packed_list_declarator) != 4) return 48;
+    if (sizeof(struct packed_shared_specifier) != 9 || _Alignof(struct packed_shared_specifier) != 1) return 49;
+    if (sizeof(struct packed_member_pointer) != 16 || _Alignof(struct packed_member_pointer) != 4) return 50;
 
     // Offsets, read through addresses so a size that happens to match cannot
     // hide a member in the wrong place.
@@ -260,5 +303,33 @@ int main(void)
     struct shared_and_declarator_aligned shared_and_declarator;
     if ((char *)&shared_and_declarator.first - (char *)&shared_and_declarator != 64) return 44;
     if ((char *)&shared_and_declarator.second - (char *)&shared_and_declarator != 72) return 45;
+
+    // Which declarator of the list carries the `packed` decides which members
+    // move, and the offsets are what separate the four positions: the sizes
+    // above agree for the three that pack one member.
+    struct packed_first_declarator packed_first;
+    if ((char *)&packed_first.first - (char *)&packed_first != 1) return 51;
+    if ((char *)&packed_first.second - (char *)&packed_first != 8) return 52;
+    struct packed_second_declarator packed_second;
+    if ((char *)&packed_second.first - (char *)&packed_second != 4) return 53;
+    if ((char *)&packed_second.second - (char *)&packed_second != 8) return 54;
+    struct packed_list_declarator packed_list;
+    if ((char *)&packed_list.first - (char *)&packed_list != 4) return 55;
+    if ((char *)&packed_list.second - (char *)&packed_list != 8) return 56;
+    struct packed_shared_specifier packed_shared;
+    if ((char *)&packed_shared.first - (char *)&packed_shared != 1) return 57;
+    if ((char *)&packed_shared.second - (char *)&packed_shared != 5) return 58;
+    struct packed_member_pointer packed_pointer;
+    if ((char *)&packed_pointer.handler - (char *)&packed_pointer != 1) return 59;
+    if ((char *)&packed_pointer.tail - (char *)&packed_pointer != 12) return 60;
+
+    // The values survive the unaligned placement the attribute asks for, so a
+    // layout the compiler agrees with itself about is also one it can address.
+    packed_first.first = -654321;
+    packed_first.second = 0x11223344;
+    if (packed_first.first != -654321 || packed_first.second != 0x11223344) return 61;
+    packed_shared.first = 0x55667788;
+    packed_shared.second = -1;
+    if (packed_shared.first != 0x55667788 || packed_shared.second != -1) return 62;
     return 0;
 }

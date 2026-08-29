@@ -546,8 +546,10 @@ struct CTypeParseFrame
     bool inner_variadic;
     bool inner_unprototyped;
     bool nested;
-    // A GNU `packed` attribute on this aggregate segment, scanned once when
-    // the segment opens and applied to every member it declares.
+    // A GNU `packed` attribute among the specifiers this segment's declarator
+    // list shares. Every member the segment declares takes it; a `packed` a
+    // single declarator carries is scanned separately and belongs to that
+    // member alone.
     bool is_packed;
 };
 

@@ -6163,11 +6163,6 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     {
         frame->checkpoint = *result;
         frame->mutation_mark = machine->mutation_count;
-        // A `packed` attribute anywhere in the segment places every member it
-        // declares at byte alignment. The scan runs before the alignment child
-        // frame appends anything, and it records no alignment specifiers of
-        // its own, so the run that frame owns stays contiguous.
-        c_parse_layout_attributes(result, preprocess, frame->start, frame->end, &frame->is_packed, 0, 0);
         frame->stage = C_TYPE_PARSE_STAGE_CHILD;
         if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                   .result = result,
@@ -6226,6 +6221,15 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         frame->base_type = machine->result_type;
         frame->declarator_start = machine->result_index;
         frame->shared_specifier_end = machine->result_index;
+        // The `packed` the whole declarator list shares, which is every member
+        // of the segment's; the one a single declarator carries is scanned at
+        // the member row below and is that member's alone. The scan is here
+        // rather than at the segment's head because the shared range is only
+        // known once the base type has been parsed, and it may follow the
+        // alignment child frame freely: a null alignment run declines the
+        // records, so it appends nothing and the run that frame owns stays
+        // contiguous.
+        c_parse_layout_attributes(result, preprocess, frame->start, frame->shared_specifier_end, &frame->is_packed, 0, 0);
         if (frame->declarator_start == frame->end && frame->base_type.value < result->type_count &&
             (result->types[frame->base_type.value].kind == C_TYPE_STRUCT || result->types[frame->base_type.value].kind == C_TYPE_UNION))
         {
@@ -6400,6 +6404,15 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
         return;
     }
+    // `packed` splits the segment the same way `aligned` just did, and needs
+    // none of the re-appending: it is one bool rather than a run, so the
+    // shared answer the frame already holds is simply OR'd with a scan of this
+    // declarator. `struct s { int a __attribute__((packed)), b; };` packs `a`
+    // alone, exactly as clang lays it out, where handing every member the
+    // segment's answer moved `b` -- and, for a `packed` written on the *last*
+    // declarator, reached backwards and moved every member before it.
+    bool member_packed = frame->is_packed;
+    c_parse_layout_attributes(result, preprocess, frame->declarator_start, frame->declarator_end, &member_packed, 0, 0);
     if (is_bit_field && alignment_count)
     {
         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, frame->first), C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("alignment specifier cannot be applied to a bit-field"));
@@ -6444,7 +6457,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         .bit_width_token_start = bit_width_token_start,
         .bit_width_token_count = bit_width_token_count,
         .is_bit_field = is_bit_field,
-        .is_packed = frame->is_packed,
+        .is_packed = member_packed,
     };
     frame->declarator_start = frame->declarator_end < frame->end ? frame->declarator_end + 1 : frame->end;
     frame->stage = C_TYPE_PARSE_STAGE_FINISH;
