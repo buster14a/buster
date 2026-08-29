@@ -735,7 +735,12 @@ struct CMember
     u32 bit_width_token_start;
     u32 bit_width_token_count;
     bool is_bit_field;
-    u8 reserved[3];
+    // A GNU `packed` attribute on this member alone
+    // (`struct { char c; int i __attribute__((packed)); }`): the member is
+    // placed at byte alignment, which also stops it from raising the
+    // aggregate's own alignment.
+    bool is_packed;
+    u8 reserved[2];
 };
 
 typedef struct CAlignmentSpecifier CAlignmentSpecifier;
@@ -744,6 +749,26 @@ struct CAlignmentSpecifier
     CTypeId type;
     u32 token_start;
     u32 token_count;
+};
+
+// The GNU attributes a struct or union definition carries on the definition
+// itself, either before the tag (`struct __attribute__((packed)) P { ... }`)
+// or after the closing brace (`struct P { ... } __attribute__((packed));`).
+// They live in a side table rather than in CType because the population is a
+// handful of aggregates in a translation unit while the type table is tens of
+// thousands of entries: a flag word per type would grow every one of them.
+// Both layout engines -- the sizeof folding in c_parse.c and the IR layout in
+// c_gen.c -- read this table, and they must agree or a folded sizeof
+// contradicts the object it sizes.
+typedef struct CAggregateAttributes CAggregateAttributes;
+struct CAggregateAttributes
+{
+    u32 type_index;
+    // Range into CParseResult.alignments, as CMember/CDeclaration name theirs.
+    u32 alignment_start;
+    u32 alignment_count;
+    bool is_packed;
+    u8 reserved[3];
 };
 
 typedef struct CEnumMember CEnumMember;
@@ -1063,6 +1088,7 @@ struct CParseResult
     CEnumMember* enum_members;
     CArrayBound* array_bounds;
     CAlignmentSpecifier* alignments;
+    CAggregateAttributes* aggregate_attributes;
     CEntity* entities;
     CScope* scopes;
     CEntityId* entity_lookup_buckets;
@@ -1098,6 +1124,7 @@ struct CParseResult
     u32 enum_member_count;
     u32 array_bound_count;
     u32 alignment_count;
+    u32 aggregate_attribute_count;
     u32 entity_count;
     u32 scope_count;
     u32 identifier_use_count;
@@ -1110,6 +1137,7 @@ struct CParseResult
     u32 enum_member_capacity;
     u32 array_bound_capacity;
     u32 alignment_capacity;
+    u32 aggregate_attribute_capacity;
     u32 entity_capacity;
     u32 scope_capacity;
     u32 entity_lookup_bucket_count;
@@ -1205,6 +1233,11 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenShape c_preprocess_to
 {
     return shapes ? shapes[token_index] : preprocess && preprocess->tokens ? c_token_shape_from_token(preprocess->tokens[token_index]) : C_TOKEN_INVALID;
 }
+// The definition attributes recorded for an aggregate type, or an all-zero
+// record when it carries none. The table holds one entry per attributed
+// aggregate and is empty in almost every translation unit, so the scan is a
+// count test in the common case.
+BUSTER_F_DECL CAggregateAttributes c_parse_aggregate_attributes(CParseResult const* result, CTypeId type);
 BUSTER_F_DECL CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 BUSTER_F_DECL CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target);

@@ -36272,12 +36272,14 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         .operator_capacity = (u32)query_frame_capacity,
     };
     // One per declaration for the lowering failures, one per entity for the
-    // definition failures, one per deferred static assertion, and a second
-    // per declaration for an __attribute__((alias)) naming a target this unit
+    // definition failures, one per deferred static assertion, a second per
+    // declaration for an __attribute__((alias)) naming a target this unit
     // never declares -- which is diagnosed before the entity's own pass runs
-    // and so cannot share that budget.
+    // and so cannot share that budget -- and one per type for an aggregate
+    // whose packed bit-field has no storage unit, which is reported while the
+    // type table resolves and before any declaration is lowered.
     result.diagnostics = arena_allocate(arena, CDiagnostic,
-                                        2 * parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + 1);
+                                        2 * parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + parse.type_count + 1);
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
     *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);
@@ -36774,6 +36776,21 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 // where every other C compiler on the target measures 4.
                 u64 bit_position = 0;
                 u32 alignment = 1;
+                // `__attribute__((packed))` on the definition and `#pragma
+                // pack(N)` around it ask the same question: the ceiling a
+                // member's alignment is clamped to. Packed is that ceiling at
+                // one byte. c_parse_type_layout folds sizeof through the same
+                // two inputs, and the two must agree or a folded size
+                // contradicts the object it sizes.
+                CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(&parse, (CTypeId){.value = type_index});
+                u32 pack_alignment = c_type->definition_start < preprocess.token_count
+                                         ? c_preprocess_pack_alignment(&preprocess, c_type->definition_start)
+                                         : 0;
+                if (aggregate_attributes.is_packed)
+                {
+                    pack_alignment = 1;
+                }
+                bool packed_fields = false;
                 bool fields_resolved = true;
                 for (u32 field_index = 0; field_index < c_type->member_count; field_index += 1)
                 {
@@ -36817,7 +36834,23 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                         fields_resolved = false;
                         break;
                     }
-                    u32 field_alignment = field_type->layout.alignment;
+                    u32 natural_alignment = field_type->layout.alignment;
+                    u32 field_alignment = natural_alignment;
+                    // A byte ceiling is what makes a bit-field take the next
+                    // bit rather than the next storage unit, so the predicate
+                    // is "packed to one byte", not "ended up byte-aligned": an
+                    // `unsigned char` bit-field is naturally byte-aligned and
+                    // still obeys the storage-unit rule.
+                    bool packed_field = member->is_packed || pack_alignment == 1;
+                    if (packed_field)
+                    {
+                        field_alignment = 1;
+                    }
+                    else if (pack_alignment)
+                    {
+                        field_alignment = BUSTER_MIN(field_alignment, pack_alignment);
+                    }
+                    packed_fields |= packed_field;
                     if (!c_ir_alignment_evaluate(&constant_builder, member->alignment_start, member->alignment_count, field_alignment, &field_alignment))
                     {
                         fields_resolved = false;
@@ -36867,12 +36900,28 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                         {
                             // A zero-width bit-field places nothing and only
                             // moves the next member to its type's boundary.
-                            u64 remainder = bit_position % alignment_bits;
+                            // Packing does not move it: GCC and Clang keep
+                            // aligning it to the declared type even inside a
+                            // packed aggregate.
+                            u64 zero_width_bits = (u64)natural_alignment * 8;
+                            u64 remainder = zero_width_bits ? bit_position % zero_width_bits : 0;
                             if (remainder)
                             {
-                                bit_position += alignment_bits - remainder;
+                                bit_position += zero_width_bits - remainder;
                             }
                             offset = bit_position / 8;
+                        }
+                        else if (packed_field)
+                        {
+                            // A packed bit-field takes the next bit and has no
+                            // storage unit to straddle. The unit it is read
+                            // through is chosen once the aggregate's size is
+                            // known, below; the byte-granular pair recorded
+                            // here carries the absolute bit position until
+                            // then.
+                            offset = bit_position / 8;
+                            bit_offset = (u32)(bit_position - offset * 8);
+                            bit_position += member_bit_width;
                         }
                         else
                         {
@@ -36925,11 +36974,61 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 {
                     continue;
                 }
+                // The definition's own `aligned(N)` raises the aggregate above
+                // what its members ask for, and the size rounds up to it.
+                if (!c_ir_alignment_evaluate(&constant_builder, aggregate_attributes.alignment_start, aggregate_attributes.alignment_count, alignment,
+                                             &alignment))
+                {
+                    continue;
+                }
                 u64 size = (bit_position + 7) / 8;
                 u64 remainder = size % alignment;
                 if (remainder)
                 {
                     size += alignment - remainder;
+                }
+                // Packing can leave a bit-field's storage unit hanging off the
+                // end of the aggregate -- `struct __attribute__((packed)) { int
+                // a : 3; int : 0; int b : 3; }` is five bytes with `b` in the
+                // fifth -- and a read-modify-write through that unit would
+                // clobber whatever follows the object. Slide each unit back
+                // until it lies inside the aggregate while still covering the
+                // field's bits. A field wider than any unit that fits has no
+                // single-unit access at all and is refused rather than laid
+                // out differently from every other compiler on the target.
+                for (u32 field_index = 0; packed_fields && field_index < c_type->member_count; field_index += 1)
+                {
+                    IrField* field = aggregate_type->fields + field_index;
+                    IrType* field_type = ir_type_from_id(&program->types, field->type);
+                    if (!field->is_bit_field || !field->bit_width || !field_type)
+                    {
+                        continue;
+                    }
+                    u64 unit = field_type->layout.size;
+                    u64 unit_bits = unit * 8;
+                    u64 absolute = field->offset * 8 + field->bit_offset;
+                    if (field->offset + unit <= size && field->bit_offset + field->bit_width <= unit_bits)
+                    {
+                        continue;
+                    }
+                    u64 lowest = absolute + field->bit_width > unit_bits ? (absolute + field->bit_width - unit_bits + 7) / 8 : 0;
+                    u64 highest = BUSTER_MIN(absolute / 8, size >= unit ? size - unit : 0);
+                    if (size < unit || lowest > highest)
+                    {
+                        // One report per aggregate: the diagnostic budget is
+                        // counted per declaration and per type, not per
+                        // member, and the first field names the layout the
+                        // whole definition cannot have.
+                        CMember* member = &parse.members[c_type->member_start + field_index];
+                        result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                            .message = string_format(arena, S8("packed bit-field '{S8}' straddles every storage unit of its declared type"), member->name),
+                            .location = member->location,
+                            .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                        };
+                        break;
+                    }
+                    field->offset = highest;
+                    field->bit_offset = (u32)(absolute - highest * 8);
                 }
                 aggregate_type->layout = (IrTypeLayout){
                     .size = size,

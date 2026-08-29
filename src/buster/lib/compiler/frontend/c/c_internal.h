@@ -539,7 +539,9 @@ struct CTypeParseFrame
     bool inner_variadic;
     bool inner_unprototyped;
     bool nested;
-    u8 reserved[1];
+    // A GNU `packed` attribute on this aggregate segment, scanned once when
+    // the segment opens and applied to every member it declares.
+    bool is_packed;
 };
 
 typedef struct CTypeLayoutCache CTypeLayoutCache;

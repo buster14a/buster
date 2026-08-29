@@ -10408,6 +10408,205 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
 // Compare the indexed probe with the historical ascending entity-table scan
 // while forcing the probe through local names, including a nested shadow, and
 // through a hand-built collision bucket with two different spellings.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    // The layout the IR carries, member by member. The runtime fixtures under
+    // tests/ check that a program built from these numbers behaves; this
+    // checks the numbers themselves, so a regression names the field whose
+    // offset moved instead of an exit status.
+    String8 source = S8("struct __attribute__((packed)) leading { char byte; int value; };\n"
+                        "struct trailing { char byte; int value; } __attribute__((packed));\n"
+                        "struct member_packed { char byte; int value __attribute__((packed)); };\n"
+                        "struct __attribute__((packed, aligned(8))) packed_then_aligned { char byte; int value; };\n"
+                        "struct plain { char byte; int value; };\n"
+                        "union __attribute__((packed)) packed_union { char byte; int value; };\n"
+                        "struct __attribute__((packed)) packed_bits { unsigned char low : 3; unsigned char high : 5; char tail; };\n"
+                        "struct __attribute__((packed)) offset_bits { char lead; int value : 24; };\n"
+                        "struct __attribute__((packed)) zero_width_bits { int before : 3; int : 0; int after : 3; };\n"
+                        "#pragma pack(push, 1)\n"
+                        "struct pragma_packed { char byte; int value; };\n"
+                        "#pragma pack(pop)\n"
+                        "struct leading leading_object;\n"
+                        "struct trailing trailing_object;\n"
+                        "struct member_packed member_packed_object;\n"
+                        "struct packed_then_aligned packed_then_aligned_object;\n"
+                        "struct plain plain_object;\n"
+                        "union packed_union packed_union_object;\n"
+                        "struct packed_bits packed_bits_object;\n"
+                        "struct offset_bits offset_bits_object;\n"
+                        "struct zero_width_bits zero_width_bits_object;\n"
+                        "struct pragma_packed pragma_packed_object;\n"
+                        "char trailing_aligned[3] __attribute__((aligned(64)));\n"
+                        "__attribute__((aligned(128))) char specifier_aligned[3];\n"
+                        "char plain_object_array[3];\n"
+                        // The folded sizes have to agree with the IR layout
+                        // above, or a sizeof contradicts the object it sizes.
+                        "_Static_assert(sizeof(struct leading) == 5, \"leading\");\n"
+                        "_Static_assert(_Alignof(struct leading) == 1, \"leading alignment\");\n"
+                        "_Static_assert(sizeof(struct trailing) == 5, \"trailing\");\n"
+                        "_Static_assert(sizeof(struct member_packed) == 5, \"member packed\");\n"
+                        "_Static_assert(sizeof(struct packed_then_aligned) == 8, \"packed then aligned\");\n"
+                        "_Static_assert(_Alignof(struct packed_then_aligned) == 8, \"packed then aligned alignment\");\n"
+                        "_Static_assert(sizeof(struct plain) == 8, \"plain\");\n"
+                        "_Static_assert(sizeof(union packed_union) == 4, \"packed union\");\n"
+                        "_Static_assert(sizeof(struct packed_bits) == 2, \"packed bits\");\n"
+                        "_Static_assert(sizeof(struct offset_bits) == 4, \"offset bits\");\n"
+                        "_Static_assert(sizeof(struct zero_width_bits) == 5, \"zero width bits\");\n"
+                        "_Static_assert(sizeof(struct pragma_packed) == 5, \"pragma packed\");\n");
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult preprocess = {0};
+    CParseResult parse = {0};
+    CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("packed-layout.c"), target_native, &preprocess, &parse);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.program != 0);
+    if (lowered.program)
+    {
+        IrModule* module = lowered.program->modules;
+        struct
+        {
+            String8 object;
+            u64 size;
+            u32 alignment;
+            u64 second_field_offset;
+        } aggregates[] = {
+            {S8("leading_object"), 5, 1, 1},
+            {S8("trailing_object"), 5, 1, 1},
+            {S8("member_packed_object"), 5, 1, 1},
+            {S8("packed_then_aligned_object"), 8, 8, 1},
+            {S8("plain_object"), 8, 4, 4},
+            {S8("pragma_packed_object"), 5, 1, 1},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(aggregates); index += 1)
+        {
+            IrGlobal* global = c_test_find_ir_global(module, lowered.program, aggregates[index].object);
+            IrType* type = global ? ir_type_from_id(&lowered.program->types, global->type) : 0;
+            BUSTER_TEST(arguments, type != 0 && type->field_count == 2);
+            if (type && type->field_count == 2)
+            {
+                BUSTER_TEST(arguments, type->layout.size == aggregates[index].size);
+                BUSTER_TEST(arguments, type->layout.alignment == aggregates[index].alignment);
+                BUSTER_TEST(arguments, type->fields[0].offset == 0);
+                BUSTER_TEST(arguments, type->fields[1].offset == aggregates[index].second_field_offset);
+            }
+        }
+        IrGlobal* packed_union_object = c_test_find_ir_global(module, lowered.program, S8("packed_union_object"));
+        IrType* packed_union_type = packed_union_object ? ir_type_from_id(&lowered.program->types, packed_union_object->type) : 0;
+        BUSTER_TEST(arguments, packed_union_type != 0);
+        if (packed_union_type)
+        {
+            BUSTER_TEST(arguments, packed_union_type->layout.size == 4 && packed_union_type->layout.alignment == 1);
+        }
+        // The three packed bit-field shapes: contiguous bits, a field read
+        // through a unit that starts before it, and a zero-width one that
+        // still aligns to its declared type. The last one's storage unit is
+        // slid back so it lies inside the five-byte aggregate.
+        IrGlobal* packed_bits_object = c_test_find_ir_global(module, lowered.program, S8("packed_bits_object"));
+        IrType* packed_bits_type = packed_bits_object ? ir_type_from_id(&lowered.program->types, packed_bits_object->type) : 0;
+        BUSTER_TEST(arguments, packed_bits_type != 0 && packed_bits_type->field_count == 3);
+        if (packed_bits_type && packed_bits_type->field_count == 3)
+        {
+            BUSTER_TEST(arguments, packed_bits_type->layout.size == 2 && packed_bits_type->layout.alignment == 1);
+            BUSTER_TEST(arguments, packed_bits_type->fields[0].offset == 0 && packed_bits_type->fields[0].bit_offset == 0);
+            BUSTER_TEST(arguments, packed_bits_type->fields[1].offset == 0 && packed_bits_type->fields[1].bit_offset == 3);
+            BUSTER_TEST(arguments, packed_bits_type->fields[2].offset == 1);
+        }
+        IrGlobal* offset_bits_object = c_test_find_ir_global(module, lowered.program, S8("offset_bits_object"));
+        IrType* offset_bits_type = offset_bits_object ? ir_type_from_id(&lowered.program->types, offset_bits_object->type) : 0;
+        BUSTER_TEST(arguments, offset_bits_type != 0 && offset_bits_type->field_count == 2);
+        if (offset_bits_type && offset_bits_type->field_count == 2)
+        {
+            BUSTER_TEST(arguments, offset_bits_type->layout.size == 4 && offset_bits_type->layout.alignment == 1);
+            BUSTER_TEST(arguments, offset_bits_type->fields[1].offset == 0 && offset_bits_type->fields[1].bit_offset == 8);
+        }
+        IrGlobal* zero_width_bits_object = c_test_find_ir_global(module, lowered.program, S8("zero_width_bits_object"));
+        IrType* zero_width_bits_type = zero_width_bits_object ? ir_type_from_id(&lowered.program->types, zero_width_bits_object->type) : 0;
+        BUSTER_TEST(arguments, zero_width_bits_type != 0 && zero_width_bits_type->field_count == 3);
+        if (zero_width_bits_type && zero_width_bits_type->field_count == 3)
+        {
+            BUSTER_TEST(arguments, zero_width_bits_type->layout.size == 5 && zero_width_bits_type->layout.alignment == 1);
+            BUSTER_TEST(arguments, zero_width_bits_type->fields[0].offset == 0 && zero_width_bits_type->fields[0].bit_offset == 0);
+            BUSTER_TEST(arguments, zero_width_bits_type->fields[2].offset == 1 && zero_width_bits_type->fields[2].bit_offset == 24);
+        }
+        // The object-declarator attribute reaches the global's alignment from
+        // either side of the name.
+        IrGlobal* trailing_aligned = c_test_find_ir_global(module, lowered.program, S8("trailing_aligned"));
+        IrGlobal* specifier_aligned = c_test_find_ir_global(module, lowered.program, S8("specifier_aligned"));
+        IrGlobal* plain_object_array = c_test_find_ir_global(module, lowered.program, S8("plain_object_array"));
+        BUSTER_TEST(arguments, trailing_aligned != 0 && trailing_aligned->alignment == 64);
+        BUSTER_TEST(arguments, specifier_aligned != 0 && specifier_aligned->alignment == 128);
+        BUSTER_TEST(arguments, plain_object_array != 0 && plain_object_array->alignment == 1);
+    }
+    scratch_end(temporary);
+
+    // The attribute is recorded against the aggregate it decorates and no
+    // other, whichever side of the body it is written on.
+    TemporalArena record_temporary = scratch_begin(0, 0);
+    CPreprocessResult record_preprocess = c_preprocess(record_temporary.arena,
+                                                       S8("struct __attribute__((packed)) before { char c; int i; };\n"
+                                                          "struct after { char c; int i; } __attribute__((aligned(32)));\n"
+                                                          "struct neither { char c; int i; };\n"),
+                                                       (CPreprocessOptions){
+                                                           .target = target_native,
+                                                           .data_layout = target_data_layout(target_native),
+                                                       });
+    CParseResult record_parse = c_parse(record_temporary.arena, record_preprocess);
+    BUSTER_TEST(arguments, record_preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, record_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, record_parse.aggregate_attribute_count == 2);
+    for (u32 type_index = 0; type_index < record_parse.type_count; type_index += 1)
+    {
+        CType* type = record_parse.types + type_index;
+        if (type->kind != C_TYPE_STRUCT || !type->is_complete)
+        {
+            continue;
+        }
+        CAggregateAttributes attributes = c_parse_aggregate_attributes(&record_parse, (CTypeId){.value = type_index});
+        if (string_equal(type->tag, S8("before")))
+        {
+            BUSTER_TEST(arguments, attributes.is_packed && attributes.alignment_count == 0);
+        }
+        else if (string_equal(type->tag, S8("after")))
+        {
+            BUSTER_TEST(arguments, !attributes.is_packed && attributes.alignment_count == 1);
+        }
+        else if (string_equal(type->tag, S8("neither")))
+        {
+            BUSTER_TEST(arguments, !attributes.is_packed && attributes.alignment_count == 0);
+        }
+    }
+    scratch_end(record_temporary);
+
+    // A packed bit-field whose bits cross every storage unit of its declared
+    // type has no single-unit access at all: a read-modify-write through the
+    // unit that covers it would reach past the aggregate. It is refused
+    // rather than laid out differently from every other compiler on the
+    // target -- silently agreeing with nobody is the failure mode this whole
+    // change exists to remove.
+    TemporalArena straddle_temporary = scratch_begin(0, 0);
+    CPreprocessResult straddle_preprocess = {0};
+    CParseResult straddle_parse = {0};
+    CIRLowerResult straddle = c_test_lower_source(straddle_temporary.arena,
+                                                  S8("struct __attribute__((packed)) straddling { int low : 3; int high : 30; };\n"
+                                                     "struct straddling straddling_object;\n"),
+                                                  S8("packed-straddle.c"), target_native, &straddle_preprocess, &straddle_parse);
+    BUSTER_TEST(arguments, straddle_preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, straddle_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, straddle.diagnostic_count == 1);
+    if (straddle.diagnostic_count == 1)
+    {
+        BUSTER_TEST(arguments, straddle.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+        BUSTER_STRING_TEST(arguments, straddle.diagnostics[0].message,
+                           S8("packed bit-field 'high' straddles every storage unit of its declared type"));
+    }
+    scratch_end(straddle_temporary);
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -11221,6 +11420,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, arena_destroy(array_bound_arena, 1));
     }
     c_test_result_add(&result, c_test_repeated_incomplete_arrays(arguments));
+
+    c_test_result_add(&result, c_test_packed_and_aligned_layout(arguments));
 
     TemporalArena nested_temporary = scratch_begin(0, 0);
     String8 nested_prefix = S8("static int identity(int value)"

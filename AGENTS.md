@@ -740,11 +740,10 @@ between the keyword and the tag), `_Atomic` as a type specifier and the
 `__builtin_signbit`, the constant math builtins hidden behind `<math.h>`'s
 `NAN` and `INFINITY`, computed goto, packed structs, bit-fields of enumerated
 type, `_GNU_SOURCE` libc and POSIX interfaces from `<dlfcn.h>` to
-`<sys/wait.h>`, and pthreads for its worker threads. Two gaps are known and
-QuickJS does not depend on either: `__attribute__((packed))` and
-`__attribute__((aligned(N)))` on an aggregate are parsed and then ignored, so
-a packed layout still has its natural alignment and padding. QuickJS's packed
-structs each hold a single scalar, where the two layouts agree.
+`<sys/wait.h>`, and pthreads for its worker threads. `__attribute__((packed))`
+and `__attribute__((aligned(N)))` now reach both layout engines; QuickJS's
+packed structs each hold a single scalar, where the packed and natural layouts
+agree, so the harness never depended on it.
 
 The opt-in musl compatibility harness takes an external, pristine musl v1.2.6
 checkout; upstream sources are never copied into or patched in this repository:
@@ -2152,6 +2151,36 @@ on a commit you already know is incomplete tells nobody anything.
   but records only the defined `STT_OBJECT` entries a copy relocation needs
   and only for a link that imports data, so it cannot answer for a function
   or for a link that imports none (issue #656).
+- **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
+  representation, so ignoring them is an ABI divergence rather than a missing
+  optimization: a Buster-only program agrees with itself whatever it agrees on,
+  and the disagreement only appears against another compiler's object or an
+  offset a program computes by hand. `packed` and the aggregate's own
+  `aligned` live in `CParseResult.aggregate_attributes`, a side table keyed by
+  type index rather than a field on every `CType`: the population is a handful
+  of aggregates against tens of thousands of types. A member's `packed` is a
+  bit on `CMember`; an object declarator's `aligned` joins the specifier-level
+  alignment specifiers in the one contiguous run `alignment_start`/
+  `alignment_count` names, which is why the trailing scan runs immediately
+  after the specifier one. `#pragma pack(N)` asks the same question -- the
+  ceiling a member's alignment is clamped to -- and `packed` is that ceiling at
+  one byte, so both feed one knob. **Two layout engines read it and must agree**:
+  `c_parse_type_layout` in `c_parse.c` folds `sizeof`/`_Alignof` during the
+  parse and `c_lower_to_ir` in `c_gen.c` builds the `IrType`. They disagreed
+  about `#pragma pack` before this: the fold packed and the IR did not, so a
+  folded size contradicted the object it sized.
+  A packed bit-field takes the next bit rather than the next storage unit of
+  its declared type, which is what Clang and GCC do and what makes
+  `struct __attribute__((packed)) { int a : 3; int b : 30; }` five bytes. The
+  unit such a field is *read* through is chosen after the aggregate's size is
+  known, by sliding it back until it lies inside the object -- a
+  read-modify-write through a unit hanging off the end would clobber the next
+  object. A field whose bits cross every unit that fits has no single-unit
+  access at all; it is diagnosed rather than laid out differently from every
+  other compiler on the target, because the whole point of the change is to
+  stop agreeing with nobody in silence. A zero-width bit-field keeps aligning
+  to its declared type even inside a packed aggregate, which is also what Clang
+  and GCC do.
 - `__typeof` is accepted alongside `__typeof__` and `typeof`, because musl's
   `weak_alias` macro is written with it. **A function declared through a type
   name rather than a parameter-list declarator** -- `extern __typeof(f) g;`,

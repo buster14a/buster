@@ -879,6 +879,100 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CP
 BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                                    u32 start, u32 end, u64* size_out, u32* alignment_out);
 
+typedef struct CParseLayoutContext CParseLayoutContext;
+struct CParseLayoutContext
+{
+    CTypeParseMachine* machine;
+    Arena* arena;
+    CPreprocessResult preprocess;
+    CParseResult* result;
+    u32* alignments;
+    bool* resolved;
+    bool* provisional;
+    u32 type_count;
+};
+
+// Raises `*alignment` to each alignment specifier of [start, start + count),
+// which is what c_ir_alignment_evaluate does for the IR layout; the two run
+// over the same records and must agree. Answers false when a specifier names
+// a type whose own layout is still unresolved, which sends the aggregate back
+// to a later pass, or when the request is not a power of two at least as
+// large as the natural alignment.
+BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* context, u32 start, u32 count, u32* alignment, bool* provisional_out)
+{
+    bool valid = true;
+    for (u32 specifier_index = 0; specifier_index < count; specifier_index += 1)
+    {
+        if (start > context->result->alignment_count || specifier_index >= context->result->alignment_count - start)
+        {
+            valid = false;
+            break;
+        }
+        CAlignmentSpecifier specifier = context->result->alignments[start + specifier_index];
+        u64 requested_alignment = 0;
+        if (specifier.type.value < context->type_count)
+        {
+            if (!context->resolved[specifier.type.value])
+            {
+                valid = false;
+                break;
+            }
+            *provisional_out |= context->provisional[specifier.type.value];
+            requested_alignment = context->alignments[specifier.type.value];
+        }
+        else
+        {
+            u32 specifier_end = specifier.token_start + specifier.token_count;
+            bool alignof_type = specifier.token_count >= 4 && context->preprocess.tokens[specifier.token_start].kind == C_TOKEN_IDENTIFIER &&
+                                c_parse_alignof_word(c_token_spelling(context->preprocess.spelling_base, context->preprocess.tokens[specifier.token_start])) &&
+                                c_token_is_punctuator(&context->preprocess.tokens[specifier.token_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                                c_token_is_punctuator(&context->preprocess.tokens[specifier_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            if (alignof_type)
+            {
+                u32 type_start = specifier.token_start + 2;
+                u32 type_end = specifier_end - 1;
+                u32 aligned_type_index = type_start;
+                CTypeId aligned_type = c_parse_scalar_type(context->machine, context->result, context->preprocess, type_start, type_end, &aligned_type_index);
+                if (aligned_type.value != C_ID_UNDERLYING_INVALID)
+                {
+                    aligned_type = c_parse_pointer_chain(context->result, context->preprocess, aligned_type, &aligned_type_index, type_end);
+                    aligned_type = c_parse_array_suffixes(context->result, context->preprocess, aligned_type, &aligned_type_index, type_end);
+                }
+                if (aligned_type.value >= context->type_count || aligned_type_index != type_end || !context->resolved[aligned_type.value])
+                {
+                    valid = false;
+                    break;
+                }
+                *provisional_out |= context->provisional[aligned_type.value];
+                requested_alignment = context->alignments[aligned_type.value];
+            }
+            else
+            {
+                CPreprocessResult evaluation = {
+                    .diagnostics = arena_allocate(context->arena, CDiagnostic, specifier.token_count + 1),
+                    .target = context->preprocess.target,
+                    .dialect = context->preprocess.dialect,
+                };
+                if (!c_integer_expression_evaluate(context->arena, context->preprocess.spelling_base, context->preprocess.tokens + specifier.token_start, specifier.token_count, 65536, &evaluation,
+                                                   &requested_alignment) ||
+                    evaluation.diagnostic_count)
+                {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if (requested_alignment > UINT32_MAX || (requested_alignment && (requested_alignment & (requested_alignment - 1))) ||
+            requested_alignment < *alignment)
+        {
+            valid = false;
+            break;
+        }
+        *alignment = BUSTER_MAX(*alignment, (u32)requested_alignment);
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                              CTypeId requested, u64* size_out, u32* alignment_out)
 {
@@ -926,6 +1020,16 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
     bool* provisional = arena_allocate(arena, bool, type_count);
     memset(resolved, 0, sizeof(*resolved) * type_count);
     memset(provisional, 0, sizeof(*provisional) * type_count);
+    CParseLayoutContext layout_context = {
+        .machine = machine,
+        .arena = arena,
+        .preprocess = preprocess,
+        .result = result,
+        .alignments = alignments,
+        .resolved = resolved,
+        .provisional = provisional,
+        .type_count = type_count,
+    };
     for (u32 type_index = 0; type_index < type_count; type_index += 1)
     {
         if (cache && type_index < cache->capacity && cache->states[type_index])
@@ -1273,6 +1377,11 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
             u64 bit_position = 0;
             u32 alignment = 1;
             u32 pack_alignment = type.definition_start < preprocess.token_count ? c_preprocess_pack_alignment(&preprocess, type.definition_start) : 0;
+            CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(result, (CTypeId){.value = type_index});
+            if (aggregate_attributes.is_packed)
+            {
+                pack_alignment = 1;
+            }
             bool fields_resolved = true;
             bool aggregate_provisional = false;
             for (u32 member_index = 0; member_index < type.member_count; member_index += 1)
@@ -1293,81 +1402,23 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                 }
                 aggregate_provisional |= provisional[layout_type.value];
                 u64 member_size = flexible ? 0 : sizes[layout_type.value];
-                u32 member_alignment = alignments[layout_type.value];
-                if (pack_alignment)
+                u32 natural_alignment = alignments[layout_type.value];
+                u32 member_alignment = natural_alignment;
+                // A byte ceiling is what makes a bit-field take the next bit
+                // rather than the next storage unit, so the predicate is
+                // "packed to one byte", not "ended up byte-aligned"; the IR
+                // layout in c_gen splits the same way.
+                bool packed_member = member.is_packed || pack_alignment == 1;
+                if (packed_member)
+                {
+                    member_alignment = 1;
+                }
+                else if (pack_alignment)
                 {
                     member_alignment = BUSTER_MIN(member_alignment, pack_alignment);
                 }
-                bool alignment_resolved = true;
-                for (u32 specifier_index = 0; specifier_index < member.alignment_count; specifier_index += 1)
-                {
-                    if (member.alignment_start > result->alignment_count || specifier_index >= result->alignment_count - member.alignment_start)
-                    {
-                        alignment_resolved = false;
-                        break;
-                    }
-                    CAlignmentSpecifier specifier = result->alignments[member.alignment_start + specifier_index];
-                    u64 requested_alignment = 0;
-                    if (specifier.type.value < type_count)
-                    {
-                        if (!resolved[specifier.type.value])
-                        {
-                            alignment_resolved = false;
-                            break;
-                        }
-                        aggregate_provisional |= provisional[specifier.type.value];
-                        requested_alignment = alignments[specifier.type.value];
-                    }
-                    else
-                    {
-                        u32 specifier_end = specifier.token_start + specifier.token_count;
-                        bool alignof_type = specifier.token_count >= 4 && preprocess.tokens[specifier.token_start].kind == C_TOKEN_IDENTIFIER &&
-                                            c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[specifier.token_start])) &&
-                                            c_token_is_punctuator(&preprocess.tokens[specifier.token_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
-                                            c_token_is_punctuator(&preprocess.tokens[specifier_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                        if (alignof_type)
-                        {
-                            u32 type_start = specifier.token_start + 2;
-                            u32 type_end = specifier_end - 1;
-                            u32 aligned_type_index = type_start;
-                            CTypeId aligned_type = c_parse_scalar_type(machine, result, preprocess, type_start, type_end, &aligned_type_index);
-                            if (aligned_type.value != C_ID_UNDERLYING_INVALID)
-                            {
-                                aligned_type = c_parse_pointer_chain(result, preprocess, aligned_type, &aligned_type_index, type_end);
-                                aligned_type = c_parse_array_suffixes(result, preprocess, aligned_type, &aligned_type_index, type_end);
-                            }
-                            if (aligned_type.value >= type_count || aligned_type_index != type_end || !resolved[aligned_type.value])
-                            {
-                                alignment_resolved = false;
-                                break;
-                            }
-                            aggregate_provisional |= provisional[aligned_type.value];
-                            requested_alignment = alignments[aligned_type.value];
-                        }
-                        else
-                        {
-                            CPreprocessResult evaluation = {
-                                .diagnostics = arena_allocate(arena, CDiagnostic, specifier.token_count + 1),
-                                .target = preprocess.target,
-                                .dialect = preprocess.dialect,
-                            };
-                            if (!c_integer_expression_evaluate(arena, preprocess.spelling_base, preprocess.tokens + specifier.token_start, specifier.token_count, 65536, &evaluation,
-                                                               &requested_alignment) ||
-                                evaluation.diagnostic_count)
-                            {
-                                alignment_resolved = false;
-                                break;
-                            }
-                        }
-                    }
-                    if (requested_alignment > UINT32_MAX || (requested_alignment && (requested_alignment & (requested_alignment - 1))) ||
-                        requested_alignment < member_alignment)
-                    {
-                        alignment_resolved = false;
-                        break;
-                    }
-                    member_alignment = BUSTER_MAX(member_alignment, (u32)requested_alignment);
-                }
+                bool alignment_resolved = c_parse_layout_alignment_specifiers(&layout_context, member.alignment_start, member.alignment_count,
+                                                                              &member_alignment, &aggregate_provisional);
                 if (!alignment_resolved)
                 {
                     fields_resolved = false;
@@ -1401,15 +1452,29 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                         }
                         continue;
                     }
-                    u64 bit_remainder = bit_position % alignment_bits;
                     if (!member.bit_width)
                     {
-                        if (bit_remainder)
+                        // Packing does not move a zero-width bit-field: GCC
+                        // and Clang keep aligning it to its declared type, so
+                        // `struct __attribute__((packed)) { int a : 3; int : 0;
+                        // int b : 3; }` still measures five bytes.
+                        u64 zero_width_bits = (u64)natural_alignment * 8;
+                        u64 zero_width_remainder = zero_width_bits ? bit_position % zero_width_bits : 0;
+                        if (zero_width_remainder)
                         {
-                            bit_position += alignment_bits - bit_remainder;
+                            bit_position += zero_width_bits - zero_width_remainder;
                         }
                         continue;
                     }
+                    if (packed_member)
+                    {
+                        // A packed bit-field takes the next bit, with no
+                        // storage unit to straddle; the IR layout picks the
+                        // unit it is read through from the same position.
+                        bit_position += member.bit_width;
+                        continue;
+                    }
+                    u64 bit_remainder = bit_position % alignment_bits;
                     if (bit_remainder + member.bit_width > unit_bits)
                     {
                         bit_position += alignment_bits - bit_remainder;
@@ -1432,6 +1497,11 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                 bit_position += member_size * 8;
             }
             if (!fields_resolved)
+            {
+                continue;
+            }
+            if (!c_parse_layout_alignment_specifiers(&layout_context, aggregate_attributes.alignment_start, aggregate_attributes.alignment_count,
+                                                     &alignment, &aggregate_provisional))
             {
                 continue;
             }
@@ -5032,6 +5102,186 @@ BUSTER_C_INTERNAL void c_parse_cleanup_attribute_scan(CPreprocessResult preproce
     }
 }
 
+// One GNU attribute list, decomposed: `payload_start`/`payload_end` bound the
+// comma-separated attribute names inside the double parentheses and
+// `group_end` lands one past the whole `__attribute__((...))` group.
+typedef struct CAttributeGroup CAttributeGroup;
+struct CAttributeGroup
+{
+    u32 payload_start;
+    u32 payload_end;
+    u32 group_end;
+};
+
+// Decomposes the attribute list at `index`, or answers false when no group
+// starts there. The inner parentheses are unwrapped only when they close the
+// payload exactly, which is how `__attribute__((packed))` and the single-paren
+// `__attribute((packed))` spelling both reduce to the same payload range.
+BUSTER_C_INTERNAL bool c_parse_attribute_group_at(CPreprocessResult preprocess, u32 index, u32 end, CAttributeGroup* group)
+{
+    if (index + 1 >= end || preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER ||
+        !c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_PARSE_ATTRIBUTE_KEYWORDS) ||
+        !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        return false;
+    }
+    u32 group_open = index + 1;
+    u32 group_close = UINT32_MAX;
+    u32 depth = 0;
+    for (u32 cursor = group_open; cursor < end; cursor += 1)
+    {
+        if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            if (!depth)
+            {
+                break;
+            }
+            depth -= 1;
+            if (!depth)
+            {
+                group_close = cursor;
+                break;
+            }
+        }
+    }
+    if (group_close == UINT32_MAX)
+    {
+        return false;
+    }
+    u32 payload_start = group_open + 1;
+    u32 payload_end = group_close;
+    if (payload_start < payload_end && c_token_is_punctuator(&preprocess.tokens[payload_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 nested_close = c_parse_matching_delimiter(preprocess, payload_start, payload_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (nested_close + 1 == payload_end)
+        {
+            payload_start += 1;
+            payload_end = nested_close;
+        }
+    }
+    *group = (CAttributeGroup){
+        .payload_start = payload_start,
+        .payload_end = payload_end,
+        .group_end = group_close + 1,
+    };
+    return true;
+}
+
+BUSTER_C_INTERNAL bool c_parse_packed_word(String8 spelling)
+{
+    return string_equal(spelling, S8("packed")) || string_equal(spelling, S8("__packed")) || string_equal(spelling, S8("__packed__"));
+}
+
+// Collects the layout-bearing GNU attributes of [start, end): `packed`, and
+// every `aligned(N)` whose argument tokens are appended to the result's
+// alignment run. `*alignment_count` counts the records appended starting at
+// `*alignment_start`; a caller that scans two ranges back to back gets one
+// contiguous run, because this is the only writer of that array between them.
+// Either answer may be declined by passing a null pointer for it: a null
+// `alignment_start` asks for `packed` alone and appends nothing, which is what
+// a caller whose range a separate alignment scan already owns wants, and a
+// null `is_packed` asks for the alignment records alone, which is what an
+// object declarator wants -- `packed` decides an aggregate's member placement
+// and means nothing on a variable.
+//
+// The walk steps over whole attribute groups rather than looking for the two
+// spellings anywhere in the range: a declarator carries parenthesized token
+// runs of its own -- a function-pointer parameter list, an array bound -- and
+// a loose identifier scan reads an attribute written inside one of those as
+// belonging to the declaration. Brace-enclosed bodies are skipped for the same
+// reason, so a nested aggregate's own attributes stay its own.
+BUSTER_C_INTERNAL void c_parse_layout_attributes(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, bool* is_packed,
+                                                    u32* alignment_start, u32* alignment_count)
+{
+    bool record = alignment_start != 0;
+    if (record)
+    {
+        *alignment_start = result->alignment_count;
+        *alignment_count = 0;
+    }
+    u32 braces = 0;
+    for (u32 index = start; index < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            braces += 1;
+            continue;
+        }
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            braces -= braces != 0;
+            continue;
+        }
+        CAttributeGroup group = {0};
+        if (braces || token.kind != C_TOKEN_IDENTIFIER || !c_parse_attribute_group_at(preprocess, index, end, &group))
+        {
+            continue;
+        }
+        u32 segment_start = group.payload_start;
+        u32 depth = 0;
+        for (u32 cursor = group.payload_start; cursor <= group.payload_end; cursor += 1)
+        {
+            bool separator = cursor == group.payload_end || (!depth && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_COMMA));
+            if (!separator)
+            {
+                if (c_punctuator_in_set(preprocess.tokens[cursor].punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+                {
+                    depth += 1;
+                }
+                else if (c_punctuator_in_set(preprocess.tokens[cursor].punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE))
+                {
+                    depth -= depth != 0;
+                }
+                continue;
+            }
+            if (segment_start < cursor && preprocess.tokens[segment_start].kind == C_TOKEN_IDENTIFIER)
+            {
+                String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[segment_start]);
+                if (is_packed && c_parse_packed_word(name))
+                {
+                    *is_packed = true;
+                }
+                else if (record && c_parse_alignment_word(name) && segment_start + 3 < cursor &&
+                         c_token_is_punctuator(&preprocess.tokens[segment_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                         c_token_is_punctuator(&preprocess.tokens[cursor - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                         result->alignment_count < result->alignment_capacity)
+                {
+                    result->alignments[result->alignment_count++] = (CAlignmentSpecifier){
+                        .type = C_TYPE_ID_INVALID,
+                        .token_start = segment_start + 2,
+                        .token_count = cursor - 1 - (segment_start + 2),
+                    };
+                    *alignment_count += 1;
+                }
+            }
+            segment_start = cursor + 1;
+        }
+        index = group.group_end - 1;
+    }
+}
+
+CAggregateAttributes c_parse_aggregate_attributes(CParseResult const* result, CTypeId type)
+{
+    CAggregateAttributes attributes = {0};
+    if (result && type.value < result->type_count)
+    {
+        for (u32 index = 0; index < result->aggregate_attribute_count; index += 1)
+        {
+            if (result->aggregate_attributes[index].type_index == type.value)
+            {
+                attributes = result->aggregate_attributes[index];
+                break;
+            }
+        }
+    }
+    return attributes;
+}
+
 BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start)
 {
     bool seen_type = false;
@@ -5770,6 +6020,11 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     {
         frame->checkpoint = *result;
         frame->mutation_mark = machine->mutation_count;
+        // A `packed` attribute anywhere in the segment places every member it
+        // declares at byte alignment. The scan runs before the alignment child
+        // frame appends anything, and it records no alignment specifiers of
+        // its own, so the run that frame owns stays contiguous.
+        c_parse_layout_attributes(result, preprocess, frame->start, frame->end, &frame->is_packed, 0, 0);
         frame->stage = C_TYPE_PARSE_STAGE_CHILD;
         if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                   .result = result,
@@ -6001,6 +6256,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         .bit_width_token_start = bit_width_token_start,
         .bit_width_token_count = bit_width_token_count,
         .is_bit_field = is_bit_field,
+        .is_packed = frame->is_packed,
     };
     frame->declarator_start = frame->declarator_end < frame->end ? frame->declarator_end + 1 : frame->end;
     frame->stage = C_TYPE_PARSE_STAGE_FINISH;
@@ -7880,6 +8136,51 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     }
     if (kind != C_TYPE_ENUM)
     {
+        // The definition's own attributes sit on either side of the body:
+        // `struct __attribute__((packed)) P { ... }` writes them between the
+        // keyword and the brace, `struct P { ... } __attribute__((packed));`
+        // after the closing one. Both ranges are scanned back to back so the
+        // alignment records they append stay one contiguous run.
+        bool is_packed = false;
+        u32 attribute_alignment_start = 0;
+        u32 attribute_alignment_count = 0;
+        u32 suffix_end = c_parse_skip_attributes(preprocess, close + 1, end);
+        c_parse_layout_attributes(result, preprocess, aggregate_index + 1, open, &is_packed, &attribute_alignment_start, &attribute_alignment_count);
+        {
+            bool suffix_packed = false;
+            u32 suffix_alignment_start = 0;
+            u32 suffix_alignment_count = 0;
+            c_parse_layout_attributes(result, preprocess, close + 1, suffix_end, &suffix_packed, &suffix_alignment_start, &suffix_alignment_count);
+            is_packed |= suffix_packed;
+            if (!attribute_alignment_count)
+            {
+                attribute_alignment_start = suffix_alignment_start;
+            }
+            attribute_alignment_count += suffix_alignment_count;
+        }
+        if (is_packed || attribute_alignment_count)
+        {
+            // One entry per aggregate, rewritten rather than appended when
+            // the definition is parsed again: the type machine rolls a
+            // speculative parse back and retries it, and a table that grew on
+            // every attempt could outrun the one-per-definition bound its
+            // capacity is sized to and start dropping the answer.
+            u32 record_index = 0;
+            while (record_index < result->aggregate_attribute_count && result->aggregate_attributes[record_index].type_index != type.value)
+            {
+                record_index += 1;
+            }
+            if (record_index < result->aggregate_attribute_count || result->aggregate_attribute_count < result->aggregate_attribute_capacity)
+            {
+                result->aggregate_attribute_count += record_index == result->aggregate_attribute_count;
+                result->aggregate_attributes[record_index] = (CAggregateAttributes){
+                    .type_index = type.value,
+                    .alignment_start = attribute_alignment_start,
+                    .alignment_count = attribute_alignment_count,
+                    .is_packed = is_packed,
+                };
+            }
+        }
         frame->type = type;
         frame->original_type_id = type;
         frame->original_type_valid = true;
@@ -8347,6 +8648,23 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                                declaration->kind == C_DECLARATION_FUNCTION ? S8("alignment specifier cannot be applied to a function")
                                                                            : S8("alignment specifier cannot be applied to a typedef"));
             declaration->alignment_count = 0;
+        }
+        // A GNU `aligned` attribute may also follow the declarator
+        // (`static char buf[8] __attribute__((aligned(64)));`), which is where
+        // musl's thread-local buffers and SQLite's aligned scratch write it.
+        // The scan runs right after the specifier one so both runs land in the
+        // single contiguous range alignment_start/alignment_count name, and it
+        // stops at the initializer, which is expression territory.
+        if (declaration->kind == C_DECLARATION_OBJECT && name_index + 1 < name_search_end)
+        {
+            u32 trailing_start = 0;
+            u32 trailing_count = 0;
+            c_parse_layout_attributes(result, preprocess, name_index + 1, name_search_end, 0, &trailing_start, &trailing_count);
+            if (!declaration->alignment_count)
+            {
+                declaration->alignment_start = trailing_start;
+            }
+            declaration->alignment_count += trailing_count;
         }
         u32 declarator_start = declaration->token_start;
         CTypeId base = inherited_base;
@@ -10516,6 +10834,25 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 break;
             }
         }
+        // A GNU `aligned` attribute may follow the declarator rather than the
+        // specifiers (`char scratch[64] __attribute__((aligned(8)));`). The
+        // records it appends have to end up in one contiguous run with the
+        // specifier-level ones, which the shared declaration-level scan
+        // appended before this loop and before any other declarator's, so the
+        // specifier records are copied in behind these when both exist. The
+        // aggregate is a maximum, so the order inside the run does not matter.
+        u32 segment_alignment_start = 0;
+        u32 segment_alignment_count = 0;
+        c_parse_layout_attributes(result, preprocess, segment_start, suffix_end, 0, &segment_alignment_start, &segment_alignment_count);
+        for (u32 copy_index = 0; segment_alignment_count && copy_index < alignment_count; copy_index += 1)
+        {
+            if (result->alignment_count >= result->alignment_capacity)
+            {
+                break;
+            }
+            result->alignments[result->alignment_count++] = result->alignments[alignment_start + copy_index];
+            segment_alignment_count += 1;
+        }
         CCleanupAttributeInfo cleanup = declaration_cleanup;
         CCleanupAttributeInfo segment_cleanup = {0};
         c_parse_cleanup_attribute_scan(preprocess, segment_start, suffix_end, true, &segment_cleanup);
@@ -10732,8 +11069,8 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             .declaration_token_plus_one = name_index + 1,
             .declaration_token_start = segment_start,
             .declaration_token_count = segment_end - segment_start,
-            .alignment_start = alignment_start,
-            .alignment_count = alignment_count,
+            .alignment_start = segment_alignment_count ? segment_alignment_start : alignment_start,
+            .alignment_count = segment_alignment_count ? segment_alignment_count : alignment_count,
             .kind = is_typedef ? C_ENTITY_TYPEDEF : C_ENTITY_LOCAL,
             .is_definition = true,
             .is_static_storage = is_static_storage,
@@ -13070,6 +13407,9 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     result.enum_member_capacity = identifier_count + 1;
     result.array_bound_capacity = open_bracket_count + 1;
     result.alignment_capacity = token_count + 1;
+    // One entry per aggregate definition bounds the table; almost every
+    // translation unit fills a handful of them or none at all.
+    result.aggregate_attribute_capacity = open_brace_count + 1;
     result.entity_capacity = identifier_count + 1;
     result.scope_capacity = open_brace_count + open_parenthesis_count + for_count + 1;
     result.identifier_use_capacity = identifier_count + 1;
@@ -13083,6 +13423,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     result.enum_members = arena_allocate(arena, CEnumMember, result.enum_member_capacity);
     result.array_bounds = arena_allocate(arena, CArrayBound, result.array_bound_capacity);
     result.alignments = arena_allocate(arena, CAlignmentSpecifier, result.alignment_capacity);
+    result.aggregate_attributes = arena_allocate(arena, CAggregateAttributes, result.aggregate_attribute_capacity);
     result.entities = arena_allocate(arena, CEntity, result.entity_capacity);
     result.scopes = arena_allocate(arena, CScope, result.scope_capacity);
     result.deferred_static_asserts = arena_allocate(arena, CDeferredStaticAssert, result.deferred_static_assert_capacity);
