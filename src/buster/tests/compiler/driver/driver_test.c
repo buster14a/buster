@@ -5728,13 +5728,17 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(packed_temporary);
     }
-#if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
     // The single translation unit above cannot see a layout divergence: a
     // program that ignores both attributes agrees with itself.  Pair the
     // halves with the host compiler in both directions, which is the only
     // thing that pins the layout to the platform's.  Verified by stripping
     // `packed` from the shared header on one side: the one-file fixture and
-    // the Buster/Buster link still pass while the mixed link fails.
+    // the Buster/Buster link still pass while the mixed link fails.  The
+    // layout rules are target-independent and the one-file fixture runs
+    // everywhere; the mixed link is held to the host/target pair the x87 pair
+    // above already links objects across, because -fno-pic and this linker's
+    // reach are what the pairing depends on rather than the layout.
     {
         TemporalArena packed_pair_temporary = scratch_begin(&arguments->arena, 1);
         Arena* packed_pair_arena = packed_pair_temporary.arena;

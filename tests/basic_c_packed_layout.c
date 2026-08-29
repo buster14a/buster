@@ -161,10 +161,10 @@ int main(void)
     // Objects the linker placed, and one automatic object.
     char automatic_aligned[3] __attribute__((aligned(64)));
     static char static_aligned[3] __attribute__((aligned(32)));
-    if ((unsigned long)(void *)leading_aligned % 64) return 22;
-    if ((unsigned long)(void *)specifier_aligned % 128) return 23;
-    if ((unsigned long)(void *)automatic_aligned % 64) return 24;
-    if ((unsigned long)(void *)static_aligned % 32) return 25;
+    if ((unsigned long long)(void *)leading_aligned % 64) return 22;
+    if ((unsigned long long)(void *)specifier_aligned % 128) return 23;
+    if ((unsigned long long)(void *)automatic_aligned % 64) return 24;
+    if ((unsigned long long)(void *)static_aligned % 32) return 25;
     if (between_them != 1) return 26;
 
     automatic_aligned[0] = 1;

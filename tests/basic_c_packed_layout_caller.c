@@ -30,7 +30,7 @@ int main(void)
 
     struct packed_aligned_record aligned = packed_layout_make_aligned_record('a', 24680);
     if (aligned.tag != 'a' || aligned.value != 24680) return 9;
-    if ((unsigned long)(void *)&aligned % 16) return 10;
+    if ((unsigned long long)(void *)&aligned % 16) return 10;
 
     struct packed_bit_record bits;
     bits.low = 6;
@@ -44,6 +44,6 @@ int main(void)
     {
         return 12;
     }
-    if ((unsigned long)(void *)packed_layout_aligned_object % 64) return 13;
+    if ((unsigned long long)(void *)packed_layout_aligned_object % 64) return 13;
     return 0;
 }

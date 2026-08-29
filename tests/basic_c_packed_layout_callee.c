@@ -6,28 +6,28 @@
 
 char packed_layout_aligned_object[3] __attribute__((aligned(64)));
 
-unsigned long packed_layout_record_size(void)
+unsigned long long packed_layout_record_size(void)
 {
     return sizeof(struct packed_record);
 }
 
-unsigned long packed_layout_record_value_offset(void)
+unsigned long long packed_layout_record_value_offset(void)
 {
     struct packed_record record;
-    return (unsigned long)((char *)&record.value - (char *)&record);
+    return (unsigned long long)((char *)&record.value - (char *)&record);
 }
 
-unsigned long packed_layout_aligned_record_size(void)
+unsigned long long packed_layout_aligned_record_size(void)
 {
     return sizeof(struct packed_aligned_record);
 }
 
-unsigned long packed_layout_aligned_record_alignment(void)
+unsigned long long packed_layout_aligned_record_alignment(void)
 {
     return _Alignof(struct packed_aligned_record);
 }
 
-unsigned long packed_layout_bit_record_size(void)
+unsigned long long packed_layout_bit_record_size(void)
 {
     return sizeof(struct packed_bit_record);
 }

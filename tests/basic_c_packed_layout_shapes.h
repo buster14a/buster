@@ -29,11 +29,11 @@ struct __attribute__((packed)) packed_bit_record
 // The declarator-position attribute, on an object both halves address.
 extern char packed_layout_aligned_object[3] __attribute__((aligned(64)));
 
-extern unsigned long packed_layout_record_size(void);
-extern unsigned long packed_layout_record_value_offset(void);
-extern unsigned long packed_layout_aligned_record_size(void);
-extern unsigned long packed_layout_aligned_record_alignment(void);
-extern unsigned long packed_layout_bit_record_size(void);
+extern unsigned long long packed_layout_record_size(void);
+extern unsigned long long packed_layout_record_value_offset(void);
+extern unsigned long long packed_layout_aligned_record_size(void);
+extern unsigned long long packed_layout_aligned_record_alignment(void);
+extern unsigned long long packed_layout_bit_record_size(void);
 extern struct packed_record packed_layout_make_record(char tag, int value, short trailer);
 extern int packed_layout_record_middle(struct packed_record record);
 extern struct packed_aligned_record packed_layout_make_aligned_record(char tag, int value);
