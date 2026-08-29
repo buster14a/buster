@@ -968,9 +968,8 @@ three of those are musl's own.
 - `--no-undefined`, because a shared object may carry unresolved names and
   musl's loader will not. It reports each one it cannot relocate and leaves at
   exit 127, before the program's first instruction; upstream's `configure` asks
-  for the flag for exactly that reason, and here it turns the assembly-only
-  translation units from a silent runtime death into a link error naming the
-  symbol.
+  for the flag for exactly that reason, and here it turns a name the object set
+  is missing from a silent runtime death into a link error naming the symbol.
 - `-Bsymbolic`, because neither compiler is asked for position-independent
   code: the harness drives one flag set and Buster has no `-fPIC` to give.
   What both of them do emit is PC-relative, so the only references `ld` refuses

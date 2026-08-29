@@ -37,6 +37,8 @@ enum
     ASSEMBLY_UNIT_SECTION_CAPACITY = 32,
     ASSEMBLY_UNIT_DIAGNOSTIC_CAPACITY = 16,
     ASSEMBLY_UNIT_OPERAND_CAPACITY = 64,
+    // `.Lnum.` plus a 20-digit value, a dot, and a 10-digit ordinal.
+    ASSEMBLY_UNIT_GENERATED_NAME_MAX = 40,
 };
 
 typedef struct AssemblyUnitPiece AssemblyUnitPiece;
@@ -914,7 +916,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
         *rewritten = line;
         return true;
     }
-    u64 capacity = line.length * 2 + 64;
+    // A generated local-label name is longer than the `1f` it replaces, so the
+    // copy is sized for every character of the line becoming one.
+    u64 capacity = line.length * ASSEMBLY_UNIT_GENERATED_NAME_MAX + 64;
     char8* text = arena_allocate(builder->arena, char8, capacity);
     u64 length = 0;
     u64 index = 0;
@@ -960,6 +964,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
                 }
                 if (length + name.length >= capacity)
                 {
+                    assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("too many local label references on one line"));
                     return false;
                 }
                 memcpy(text + length, name.pointer, name.length);
