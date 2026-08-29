@@ -5711,6 +5711,43 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(static_initializer_temporary);
     }
+    // The same static x87 territory where the value stops being finite: an
+    // overflowing literal, a zero-over-zero NaN, the infinity algebra and the
+    // signed zeros.  libc-test's `long double` tables are built out of musl's
+    // `INFINITY` and `NAN` macros, which spell themselves `1e5000f` and
+    // `(0.0f/0.0f)` for a compiler without the GNU builtins, so this is what
+    // decides whether those tables compile at all.  It compares object bytes
+    // rather than values because a NaN is not equal to itself and the two
+    // signed zeros are equal to each other.
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_static_allocators); allocator_index += 1)
+    {
+        TemporalArena static_special_temporary = scratch_begin(&arguments->arena, 1);
+        String8 static_special_path =
+            buster_test_temporary_path(static_special_temporary.arena, S8("buster-c-long-double-static-special"), S8(""));
+        String8 static_special_command_line[] = {
+            c_long_double_static_allocators[allocator_index], S8("-o"), static_special_path,
+            S8("tests/basic_c_long_double_static_special.c"),
+        };
+        CompilerDriverResult static_special = compiler_driver_execute_invocation(
+            static_special_temporary.arena,
+            compiler_driver_parse_arguments(static_special_temporary.arena,
+                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(static_special_command_line)));
+        BUSTER_TEST(arguments, static_special.error == COMPILER_DRIVER_ERROR_NONE);
+        if (static_special.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 static_special_arguments[] = {static_special_path};
+            ProcessSpawnResult static_special_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(static_special_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, static_special_spawn.handle != 0);
+            if (static_special_spawn.handle)
+            {
+                BUSTER_TEST(arguments,
+                            os_process_wait_sync(static_special_temporary.arena, static_special_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(static_special_temporary);
+    }
     // An aggregate carrying an 80-bit x87 payload.  musl's `union ldshape`
     // -- a `long double` overlaid with `struct { uint64_t m; uint16_t se; }`
     // -- is what essentially every `long double` routine in musl's src/math

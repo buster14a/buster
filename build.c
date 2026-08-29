@@ -16918,8 +16918,16 @@ struct LibcTestSubsetTotals
 // sign-extended on its way to one, so no caller of `mmap` could ever see a
 // failure and libc-test's `t_vmfill` mapped memory forever. Nothing in the
 // suite is blocked on a link any more.
-#define LIBC_TEST_EXPECTED_PASSING 216
-#define LIBC_TEST_EXPECTED_STATE_HASH 0x871b3c0438107ac7ull
+// 2026-08-29: 216 -> 238, the last 22 blocked-compile units. The x87
+// static-initializer folder learned the rest of what musl's `INFINITY` macro
+// expands to for a compiler without the GNU builtins -- the overflowing
+// literal `1e5000f` -- and the division by zero beside it. Every `long double`
+// table libc-test writes opens with one of those, so 21 `src/math` units and
+// `functional/strtold` refused at their first row; all 22 now compile, link,
+// run and pass. Nothing in the suite is blocked on a compile any more either,
+// and `src/math` passes every one of the 55 units the reference can run.
+#define LIBC_TEST_EXPECTED_PASSING 238
+#define LIBC_TEST_EXPECTED_STATE_HASH 0x0ccacdf0c3b8c365ull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it

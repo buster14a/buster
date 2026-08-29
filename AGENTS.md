@@ -855,12 +855,15 @@ operations fold, because only their answer is a compatibility choice rather
 than a value. `tests/basic_c_created_nan_sign.c` carries the created and the
 propagated signs, and the created NaN's bytes are in
 `tests/basic_c_long_double_static_initializer.c` beside the rest of the x87
-initializer bytes Clang writes. `INFINITY` splits the same way and does not
-fold yet: its non-GNU spelling is the overflowing literal `1e5000f`, which
-the x87 folder refuses. That refusal is what libc-test's `src/math`
-`long double` tables now stop at — seven of them moved onto it from the NaN
-fold, taking it from 14 units to 21 — and the one divide still refused there
-is `fpclassify`'s `1/0.0`, which creates an infinity rather than a NaN.
+initializer bytes Clang writes. `INFINITY` splits the same way, and its
+non-GNU spelling is the overflowing literal `1e5000f`, which the x87 folder
+refused until it learned that an overflow is a value — the infinity C names —
+rather than a failure. Twenty-one `src/math` units and `functional/strtold`
+stopped on that literal, and `fpclassify`'s `1/0.0` on the division by zero
+beside it, which creates an infinity rather than a NaN.
+`tests/basic_c_long_double_static_special.c` carries those bytes, and the
+`long double` bullet under "Platform and backend boundaries" is where the
+folder's whole boundary is written down.
 
 One flag the reference carries and Buster does not is
 `-fcomplex-arithmetic=improved`. Clang's default for C lowers a complex
@@ -1191,10 +1194,13 @@ sides do, not written down:
 - `pass` — it ran and matched, or, in `src/api`, it compiled.
 
 Buster compiles every unit first and unconditionally, before the reference
-decides reach, because its diagnostic is inventory in its own right — the
-`long double` test tables under `src/math` are a compile gap whether or not
-the reference could have run them — and `buster_compile_failed` on each
-`LIBCTEST_SUBSET` line reports that count independently of the state.
+decides reach, because its diagnostic is inventory in its own right, and
+`buster_compile_failed` on each `LIBCTEST_SUBSET` line reports that count
+independently of the state. The `long double` test tables under `src/math`
+are what that separation was for: 63 of the 199 units failed to compile while
+only 21 of them were classified `blocked-compile`, the rest being
+`excluded-reference` already, so the state counts alone would have hidden
+two thirds of one compile gap.
 
 The four subsets are reported separately rather than as one total.
 `src/api` is compile-only by upstream's own design: its units are declaration
@@ -1233,23 +1239,36 @@ by how many tests wanted each. It is the work list in the order that unblocks
 the most tests, and it is why this stage grows by itself as the compiler
 improves rather than needing to be extended by hand.
 
-Today 216 of 424 units pass (measured 2026-08-29). Seventy-eight are
+Today 238 of 424 units pass (measured 2026-08-29). Seventy-eight are
 `src/api`: 78 of its 79 units compile against musl's headers under both
 compilers, and one — `api/unistd` — is held out because musl defines neither
 `_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the reference fails on
-too. The other 138 are runtime tests that link and run green: `src/functional`
-is 50 passing against 4 failing, 7 dynamic, 15 excluded-reference and 1
-blocked-compile; `src/math` is 34 passing, 144 excluded-reference and 21
-blocked-compile; `src/regression` is 54 passing against 1 failing, 2 dynamic
-and 12 excluded-reference, with nothing it cannot compile. **Nothing anywhere
-in the suite is blocked on a link any more**, which is why `LIBCTEST_BLOCKER`
-now prints nothing at all: the work list this stage generates for itself is
-empty, and what is left is the compile gap under `src/math` and five wrong
-answers.
+too. The other 160 are runtime tests that link and run green: `src/functional`
+is 51 passing against 4 failing, 7 dynamic and 15 excluded-reference;
+`src/math` is 55 passing and 144 excluded-reference; `src/regression` is 54
+passing against 1 failing, 2 dynamic and 12 excluded-reference. **Nothing
+anywhere in the suite is blocked on a link or on a compile any more**, which
+is why `LIBCTEST_BLOCKER` now prints nothing at all: the work list this stage
+generates for itself is empty, and what is left is five wrong answers.
+`src/math` passes every one of the 55 units the reference can run.
+
+The last 22 blocked-compile units went together, 21 in `src/math` and
+`functional/strtold`, when the x87 static-initializer folder stopped refusing
+an overflowing literal and a division by zero. musl spells `INFINITY` as
+`1e5000f` and `NAN` as `(0.0f/0.0f)` for a compiler that does not advertise
+the GNU builtins, and every `long double` table libc-test writes opens with
+one of them, so those units refused at their first element and all 22 pass
+now. The state counts had understated that gap by three: 63 of the 199
+`src/math` units failed to compile while only 21 were `blocked-compile`,
+because an `excluded-reference` unit is classified by the reference's reach
+and its own diagnostic never reaches a state count. `buster_compile_failed` on
+the `LIBCTEST_SUBSET` line is the number to read for a compile gap, and it is
+0 in every subset but `api` and `functional` now.
 
 The five failing units are wrong answers rather than missing components; each
 was blocked on a link until `vfprintf` compiled, so none is a regression
-against an earlier pass. `regression/sem_close-unmap`, `functional/fcntl`,
+against an earlier pass, and none of the 22 that came in after them joined
+this list. `regression/sem_close-unmap`, `functional/fcntl`,
 `functional/mntent`, `functional/strftime` and `functional/tgmath` exit
 non-zero and have not been attributed further.
 
@@ -2600,8 +2619,39 @@ on a commit you already know is incomplete tells nobody anything.
   path. `tests/basic_c_va_arg_long_double.c` pins both under all four
   allocators, including a read through a `va_list *` and one past a `va_copy`
   — the spellings musl's `pop_arg` uses, and the ones the canonical emitter
-  alone has the x87 vocabulary for. Still refused with a source diagnostic: a
-  fixed wide-float parameter of a variadic *definition* (the SysV `va_start`
+  alone has the x87 vocabulary for.
+  A *static* x87 initializer is folded rather than emitted:
+  `c_ir_ext80_fold_initializer` in `c_gen.c` evaluates a constant expression
+  over numeric literals — `+ - * /`, unary sign, parentheses — straight into
+  the 64-bit significand and sign/exponent pair the object writer stores, for a
+  scalar global, a function-local static, and each x87 element of an aggregate.
+  Every leaf rounds in its own declared type and every operation rounds in the
+  common real type the usual arithmetic conversions pick, which is what
+  reproduces C's per-operation rounding and makes the bytes Clang-identical; a
+  decimal fold would not, because `1/LDBL_EPSILON` is exactly 2^63 only once
+  musl's spelling of the epsilon has rounded to 2^-63 first. Overflow becomes
+  an infinity, underflow a signed zero, and the invalid operations — infinity
+  minus infinity, infinity times zero, infinity over infinity, zero over zero —
+  the default *positive* quiet NaN whatever the operand signs were, which is
+  the answer Clang's own folder gives and the one
+  `c_ir_fold_float_invalid_operation` gives the same expression inside a
+  function; the two have to stay together, because a disagreement prints `nan`
+  from one and `-nan` from the other. Those last two matter because musl spells
+  `INFINITY` as `1e5000f` and `NAN` as `(0.0f/0.0f)` for a compiler that does
+  not advertise the GNU builtins, so they are what a `long double` table in
+  libc-test is made of. An operation between two *integer* operands is refused
+  on purpose: it does not round at all, and `1/3` would need its own truncating
+  semantics rather than 0.5 — which is also why `0/0` between two integer
+  literals is a diagnostic here rather than the NaN its floating spellings fold
+  to, Clang rejecting that initializer outright. So is an addition that aligns
+  a genuine subnormal against a near-maximum operand, which spans more of the
+  x87 exponent range than the folder's bignum holds — a zero operand is taken
+  as the exact identity instead of aligned, so only a real subnormal reaches
+  that edge. `tests/basic_c_long_double_static_initializer.c` pins the finite
+  arithmetic and `tests/basic_c_long_double_static_special.c` everything from
+  the infinities out, both against bytes read out of Clang's own object.
+  Still refused with a source diagnostic: a fixed wide-float parameter of a
+  variadic *definition* (the SysV `va_start`
   register-save area does not account for it), an aggregate whose
   classification carries an X87 class without being the ABI-proven single-f80
   shape, and every wide float on a target whose `long double` is not this

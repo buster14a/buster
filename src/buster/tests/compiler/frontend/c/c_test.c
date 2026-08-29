@@ -10657,9 +10657,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
     String8 sources[] = {
         S8("long double cast_value = (long double)1; int main(void) { return 0; }"),
         S8("long double conditional_value = 1.0L ? 2.0L : 3.0L; int main(void) { return 0; }"),
-        S8("long double narrow_arithmetic = 1.0 + 2.0; int main(void) { return 0; }"),
         S8("long double integer_arithmetic = 1 + 2; int main(void) { return 0; }"),
-        S8("long double divide_by_zero = 1.0L/0.0L; int main(void) { return 0; }"),
         S8("void atomic_local(void) { _Atomic(long double) value = 0.0L; (void)value; } int main(void) { return 0; }"),
         S8("long double atomic_load(_Atomic(long double) *value) { return __c11_atomic_load(value, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
         S8("void atomic_store(_Atomic(long double) *value) { __c11_atomic_store(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
@@ -10672,12 +10670,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         // payload -- are named here rather than at code generation.
         S8("typedef void *va_list; int take(int count, ...) { va_list arguments; long double _Complex value = __builtin_va_arg(arguments, long double _Complex); return value != 0; } int main(void) { return 0; }"),
         S8("typedef void *va_list; struct ldlarge { long double f; int tail; }; int take(int count, ...) { va_list arguments; struct ldlarge value = __builtin_va_arg(arguments, struct ldlarge); return value.tail; } int main(void) { return 0; }"),
-        S8("long double overflow = 0x1p+16384L; int main(void) { return 0; }"),
-        S8("long double underflow = 0x1p-16446L; int main(void) { return 0; }"),
         S8("long double malformed_exponent = 0x1pL; int main(void) { return 0; }"),
-        S8("long double hex_f64_underflow = 0x0.ep-10000; int main(void) { return 0; }"),
-        S8("long double hex_f32_underflow = 0x0.ep-1000f; int main(void) { return 0; }"),
-        S8("long double decimal_underflow = 1e-10000; int main(void) { return 0; }"),
         S8("long double invalid_i_suffix = 123i; int main(void) { return 0; }"),
         S8("long double invalid_i65_suffix = 123i65; int main(void) { return 0; }"),
         S8("long double invalid_u64_suffix = 123u64; int main(void) { return 0; }"),
@@ -10718,6 +10711,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         // an aggregate of them.  They are checked here, beside the shapes
         // that still refuse, so the boundary between the two stays one list
         // to read.
+        //
+        // The last group is where the value stops being finite.  C gives an
+        // overflowing spelling an infinity, an underflowing one a signed zero,
+        // and a division by zero an infinity of the operands' combined sign,
+        // and Clang folds all three; a narrower operation rounds in its own
+        // format and is folded too.  Only integer arithmetic still refuses,
+        // because it does not round at all.
         String8 accepted[] = {
             S8("long double negate_variable(long double value) { return -value; } int main(void) { return 0; }"),
             S8("int truth_variable(long double value) { return value ? 1 : 0; } int main(void) { return 0; }"),
@@ -10733,6 +10733,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
             S8("long double parenthesized_arithmetic = (1.0L + 2.0L); int main(void) { return 0; }"),
             S8("long double aggregate[1] = { 1.0L }; int main(void) { return 0; }"),
             S8("void local_static(void) { static long double local = 1.0L; } int main(void) { return 0; }"),
+            S8("long double narrow_arithmetic = 1.0 + 2.0; int main(void) { return 0; }"),
+            S8("long double divide_by_zero = 1.0L/0.0L; int main(void) { return 0; }"),
+            S8("long double overflow = 0x1p+16384L; int main(void) { return 0; }"),
+            S8("long double underflow = 0x1p-16446L; int main(void) { return 0; }"),
+            S8("long double hex_f64_underflow = 0x0.ep-10000; int main(void) { return 0; }"),
+            S8("long double hex_f32_underflow = 0x0.ep-1000f; int main(void) { return 0; }"),
+            S8("long double decimal_underflow = 1e-10000; int main(void) { return 0; }"),
+            S8("long double decimal_overflow = 1e5000L; int main(void) { return 0; }"),
+            S8("long double float_overflow = 1e5000f; int main(void) { return 0; }"),
+            S8("long double quiet_nan = 0.0f/0.0f; int main(void) { return 0; }"),
+            S8("long double local_overflow(void) { return 1e5000L; } int main(void) { return 0; }"),
         };
         for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(accepted); source_index += 1)
         {
