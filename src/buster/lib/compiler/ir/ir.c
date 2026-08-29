@@ -2706,6 +2706,51 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_is_complex_x87(IrProgram* program, IrTy
     return element && element->kind == IR_TYPE_FLOAT && element->bit_width == 80 && element->layout.resolved && element->layout.size == 16;
 }
 
+// A bit-field is not a field for System V's unaligned-field rule, and its
+// declared type is not what it occupies: `int value : 20` at bit eight of a
+// packed record occupies twenty bits inside the first eightbyte, not four
+// bytes at an offset no `int` would ever sit at.  Asking the declared type
+// where it sits sent every such record to memory, so a five-byte aggregate
+// System V returns in `rax` came back through a hidden pointer (issue #721).
+// Merge INTEGER into each eightbyte the field's bits fall in and leave the
+// declared type out of it, which is the rule the psABI writes and what clang
+// and GCC compile; the class is always INTEGER because C admits no bit-field
+// of floating type.
+//
+// An *unnamed* bit-field is padding and contributes no class at all, which the
+// reference compilers agree on and which is observable: clang returns
+// `struct { float f; int : 20; }` in `xmm0` and `struct { float f; int x : 20; }`
+// in `rax`, because only the named field merges INTEGER into the eightbyte the
+// float already claimed.
+//
+// `offset` is the byte offset of the aggregate holding the field, so the bits
+// are `(offset + field->offset) * 8 + field->bit_offset`; the storage-unit
+// slide that packing performs moves those two halves against each other and
+// leaves that sum alone.
+BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classify_bit_field(IrField const* field, u64 offset, IrAbiClass classes[2])
+{
+    bool result = true;
+    if (field->name.length && field->bit_width)
+    {
+        u64 start = (offset + field->offset) * 8 + field->bit_offset;
+        u64 first = start / 64;
+        u64 last = (start + field->bit_width - 1) / 64;
+        if (last >= 2)
+        {
+            result = false;
+        }
+        else
+        {
+            for (u64 part = first; part <= last; part += 1)
+            {
+                classes[part] = ir_system_v_abi_class_merge(classes[part], IR_ABI_CLASS_INTEGER);
+            }
+        }
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId root_type, IrAbiClass classes[2])
 {
     IrType* root = ir_type_from_id(&program->types, root_type);
@@ -2749,6 +2794,15 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
                 for (u32 index = 0; index < type->field_count; index += 1)
                 {
                     IrField* field = type->fields + index;
+                    if (field->is_bit_field)
+                    {
+                        valid = ir_system_v_abi_classify_bit_field(field, task.offset, classes);
+                        if (!valid)
+                        {
+                            break;
+                        }
+                        continue;
+                    }
                     tasks[count++] = (IrAbiClassificationTask){
                         .type = field->type,
                         .offset = task.offset + field->offset,

@@ -54,9 +54,9 @@ int main(void)
     // The split access, written by one half and read by the other: a half that
     // refused the declaration never compiles at all, and one that chose a
     // different span for the forty bits reads a neighbouring member's byte as
-    // part of the value.  The record crosses by address because how an
-    // aggregate holding a bit-field is *passed* is a disagreement of its own
-    // (#721), and this is the layout question rather than that one.
+    // part of the value.  The record crosses by address here and by value
+    // below, so a change to how such a record is classified cannot quietly
+    // take the layout question with it.
     if (sizeof(struct packed_split_record) != 7) return 30;
     if (packed_layout_split_size() != sizeof(struct packed_split_record)) return 31;
     if (packed_layout_split_tail_offset() != 6) return 32;
@@ -68,6 +68,52 @@ int main(void)
     built_split.value = 0x7fedcba987LL;
     built_split.tail = 5;
     if (packed_layout_read_split(&built_split) != 0x7fedcba987LL + 5 + 'M') return 34;
+
+    // How an aggregate holding a bit-field is *passed* (#721).  System V
+    // classifies the eightbytes the bit-field's bits fall in, so all four
+    // records below ride registers; a half that asked the bit-field's declared
+    // type where it sits returned them through a hidden pointer instead and
+    // the other half read whatever its own buffer happened to hold.  Every
+    // record crosses in both directions, since the result convention and the
+    // argument convention are separate answers to the same classification.
+    struct packed_split_record passed_split = packed_layout_make_split(-0x1234567890LL);
+    if (passed_split.lead != 'S' || passed_split.value != -0x1234567890LL || passed_split.tail != 'v') return 40;
+    if (packed_layout_split_sum(built_split) != 0x7fedcba987LL + 5 + 'M') return 41;
+
+    struct packed_bit_pass_record pass = packed_layout_make_bit_pass(7, 0x12345, 9);
+    if (pass.lead != 7 || pass.value != 0x12345 || pass.tail != 9) return 42;
+    struct packed_bit_pass_record built_pass;
+    built_pass.lead = 11;
+    built_pass.value = -12345;
+    built_pass.tail = 13;
+    if (packed_layout_bit_pass_sum(built_pass) != 11000000LL - 12345 + 13) return 43;
+
+    // The bits straddle the eightbyte boundary, which is the shape only the
+    // eightbyte merge answers: `value` occupies bits 56 through 75.
+    if (sizeof(struct packed_bit_cross_record) != 11) return 44;
+    struct packed_bit_cross_record cross = packed_layout_make_bit_cross(-98765);
+    if (cross.lead[0] != 1 || cross.lead[6] != 7 || cross.value != -98765 || cross.tail != 'c') return 45;
+    struct packed_bit_cross_record built_cross;
+    for (int index = 0; index < 7; index += 1) built_cross.lead[index] = (char)(index + 2);
+    built_cross.value = 54321;
+    built_cross.tail = 'd';
+    if (packed_layout_bit_cross_sum(built_cross) != 2000000LL + 800000 + 54321 + 'd') return 46;
+
+    // A named bit-field merges INTEGER into the eightbyte the float already
+    // claimed and an unnamed one does not, so the first record rides a
+    // general-purpose register and the second rides `xmm0`.
+    struct packed_bit_named_record named = packed_layout_make_bit_named(2.5f, -3);
+    if (named.lead != 2.5f || named.value != -3) return 47;
+    struct packed_bit_named_record built_named;
+    built_named.lead = -1.25f;
+    built_named.value = 400;
+    if (packed_layout_bit_named_sum(built_named) != -5 + 400) return 48;
+
+    struct packed_bit_padded_record padded = packed_layout_make_bit_padded(6.25f);
+    if (padded.lead != 6.25f) return 49;
+    struct packed_bit_padded_record built_padded;
+    built_padded.lead = -8.5f;
+    if (packed_layout_bit_padded_lead(built_padded) != -8.5f) return 50;
 
     packed_layout_fill_aligned_object('m');
     if (packed_layout_aligned_object[0] != 'm' || packed_layout_aligned_object[1] != 'n' ||

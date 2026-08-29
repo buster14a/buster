@@ -47,14 +47,56 @@ struct __attribute__((packed)) packed_bit_union_record
 // and written as several ordinary accesses.  A half that refused the
 // declaration cannot build this at all, and one that chose a different span
 // reads a neighbouring member's byte as part of the value (#709).  It crosses
-// the boundary by address rather than by value, which is the layout question
-// on its own: how an aggregate holding a bit-field is *passed* is a separate
-// disagreement with the reference compilers (#721).
+// the boundary by address *and* by value: the by-address form is the layout
+// question on its own, so a change to how such a record is classified cannot
+// silently take the layout with it.
 struct __attribute__((packed)) packed_split_record
 {
     char lead;
     long long value : 40;
     char tail;
+};
+
+// How an aggregate holding a bit-field is *passed*, which is a question of its
+// own (#721).  System V classifies the eightbytes a bit-field's bits fall in
+// and never asks its declared type where it sits, so these five bytes are one
+// INTEGER eightbyte and the record rides `rax` and the positional
+// general-purpose register.  A half that asked the declared type where it sits
+// -- `int value : 20` is not four bytes at offset one -- classified the whole
+// record MEMORY and returned it through a hidden pointer, so the other half
+// read an uninitialized buffer.
+struct __attribute__((packed)) packed_bit_pass_record
+{
+    char lead;
+    int value : 20;
+    char tail;
+};
+
+// The same question with the bits straddling the eightbyte boundary: `value`
+// occupies bits 56 through 75, so both eightbytes are INTEGER and the record
+// rides two registers.  Only merging the eightbytes the bits fall in answers
+// this one; a rule written in terms of the field's declared type cannot.
+struct __attribute__((packed)) packed_bit_cross_record
+{
+    char lead[7];
+    int value : 20;
+    char tail;
+};
+
+// An *unnamed* bit-field is padding for the classification and contributes no
+// class at all, which is observable beside a float: this record comes back in
+// `xmm0` where the named spelling below comes back in `rax`, because only the
+// named field merges INTEGER into the eightbyte the float already claimed.
+struct packed_bit_named_record
+{
+    float lead;
+    int value : 20;
+};
+
+struct packed_bit_padded_record
+{
+    float lead;
+    int : 20;
 };
 
 // A member asking for less alignment than its type already has, which GNU
@@ -112,6 +154,16 @@ extern unsigned long long packed_layout_split_size(void);
 extern unsigned long long packed_layout_split_tail_offset(void);
 extern void packed_layout_write_split(struct packed_split_record* record, long long value);
 extern long long packed_layout_read_split(const struct packed_split_record* record);
+extern struct packed_split_record packed_layout_make_split(long long value);
+extern long long packed_layout_split_sum(struct packed_split_record record);
+extern struct packed_bit_pass_record packed_layout_make_bit_pass(char lead, int value, char tail);
+extern long long packed_layout_bit_pass_sum(struct packed_bit_pass_record record);
+extern struct packed_bit_cross_record packed_layout_make_bit_cross(int value);
+extern long long packed_layout_bit_cross_sum(struct packed_bit_cross_record record);
+extern struct packed_bit_named_record packed_layout_make_bit_named(float lead, int value);
+extern long long packed_layout_bit_named_sum(struct packed_bit_named_record record);
+extern struct packed_bit_padded_record packed_layout_make_bit_padded(float lead);
+extern float packed_layout_bit_padded_lead(struct packed_bit_padded_record record);
 extern unsigned long long packed_layout_below_natural_size(void);
 extern unsigned long long packed_layout_below_natural_offset(void);
 extern struct below_natural_record packed_layout_make_below_natural(char tag, int value);

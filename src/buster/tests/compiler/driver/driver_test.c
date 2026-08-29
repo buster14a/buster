@@ -6133,7 +6133,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // typedef shapes were verified the same way, and they pin the argument
     // classification as well as the layout: a lowered alignment leaves a field
     // unaligned for System V's purposes, so the record rides memory rather
-    // than a register.  The
+    // than a register.  The records holding a bit-field pin the other half of
+    // that question (#721) -- a bit-field's bits decide which eightbytes it
+    // merges into, never its declared type -- and were verified the same way:
+    // against the compiler that asked the declared type, the Buster caller
+    // fails at the first record and the Clang caller faults on a hidden
+    // pointer that is really an argument, while the one-file fixture and the
+    // Buster/Buster link still pass.  The
     // layout rules are target-independent and the one-file fixture runs
     // everywhere; the mixed link is held to the host/target pair the x87 pair
     // above already links objects across, because -fno-pic and this linker's

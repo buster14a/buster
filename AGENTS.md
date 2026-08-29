@@ -2466,11 +2466,23 @@ on a commit you already know is incomplete tells nobody anything.
   and materializes the address beyond that. It used to fail the whole
   compilation instead, which `struct __attribute__((packed)) { char a; int v :
   32; }` already reached before any of this.
-  A packed record's *layout* agrees with the platform; how one is **passed**
-  does not yet, and issue #721 is that: the System V classifier asks each
-  bit-field's declared type where it sits, so a record System V returns in
-  `rax` comes back through a hidden pointer. The cross-linked pair passes such
-  a record by address for that reason.
+  **A bit-field is not a field for System V's unaligned-field rule.** Its
+  declared type is not what it occupies -- `int value : 20` at bit eight of a
+  packed record occupies twenty bits inside the first eightbyte, not four
+  bytes at an offset no `int` would sit at -- so
+  `ir_system_v_abi_classify_bit_field` merges INTEGER into each eightbyte the
+  field's *bits* fall in and leaves the declared type out of it, which is what
+  the psABI writes and what clang and GCC compile. Asking the declared type
+  instead sent every such record to memory, so the five bytes of
+  `struct __attribute__((packed)) { char lead; int value : 20; char tail; }`
+  came back through a hidden pointer where System V returns them in `rax`
+  (issue #721); a program agreed with itself and disagreed with the object
+  next to it. An *unnamed* bit-field is padding for this and contributes no
+  class at all, which is observable beside a float: clang returns
+  `struct { float f; int : 20; }` in `xmm0` and the same record with the field
+  named in `rax`. The class is always INTEGER, since C admits no bit-field of
+  floating type. AArch64 never asked: its aggregates up to sixteen bytes take
+  INTEGER parts by size once `ir_homogeneous_float_abi` declines them.
   **A union member starts at bit zero whichever kind it is**, so a union sizes
   to the bits its widest member *occupies* rather than to that member's
   declared type: `union __attribute__((packed)) { char c; int b : 5; }` is one

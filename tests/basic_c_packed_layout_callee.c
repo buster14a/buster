@@ -82,6 +82,76 @@ long long packed_layout_read_split(const struct packed_split_record* record)
     return record->value + record->tail + record->lead;
 }
 
+struct packed_split_record packed_layout_make_split(long long value)
+{
+    struct packed_split_record record;
+    record.lead = 'S';
+    record.value = value;
+    record.tail = 'v';
+    return record;
+}
+
+long long packed_layout_split_sum(struct packed_split_record record)
+{
+    return record.value + record.tail + record.lead;
+}
+
+struct packed_bit_pass_record packed_layout_make_bit_pass(char lead, int value, char tail)
+{
+    struct packed_bit_pass_record record;
+    record.lead = lead;
+    record.value = value;
+    record.tail = tail;
+    return record;
+}
+
+long long packed_layout_bit_pass_sum(struct packed_bit_pass_record record)
+{
+    return (long long)record.lead * 1000000 + record.value + record.tail;
+}
+
+struct packed_bit_cross_record packed_layout_make_bit_cross(int value)
+{
+    struct packed_bit_cross_record record;
+    for (int index = 0; index < 7; index += 1)
+    {
+        record.lead[index] = (char)(index + 1);
+    }
+    record.value = value;
+    record.tail = 'c';
+    return record;
+}
+
+long long packed_layout_bit_cross_sum(struct packed_bit_cross_record record)
+{
+    return (long long)record.lead[0] * 1000000 + (long long)record.lead[6] * 100000 + record.value + record.tail;
+}
+
+struct packed_bit_named_record packed_layout_make_bit_named(float lead, int value)
+{
+    struct packed_bit_named_record record;
+    record.lead = lead;
+    record.value = value;
+    return record;
+}
+
+long long packed_layout_bit_named_sum(struct packed_bit_named_record record)
+{
+    return (long long)(record.lead * 4) + record.value;
+}
+
+struct packed_bit_padded_record packed_layout_make_bit_padded(float lead)
+{
+    struct packed_bit_padded_record record;
+    record.lead = lead;
+    return record;
+}
+
+float packed_layout_bit_padded_lead(struct packed_bit_padded_record record)
+{
+    return record.lead;
+}
+
 unsigned long long packed_layout_below_natural_size(void)
 {
     return sizeof(struct below_natural_record);
