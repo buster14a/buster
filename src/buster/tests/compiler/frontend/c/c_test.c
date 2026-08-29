@@ -9450,6 +9450,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
         scratch_end(constexpr_temporary);
     }
     {
+        // A C99 `static` array bound is a bound qualifier on a parameter, not
+        // a storage class on the function that declares it, so it must not
+        // reach the symbol's linkage. The specifier walk sees the whole
+        // parameter list, which is why every one of these spellings used to
+        // come out internal. The two genuinely `static` functions are the
+        // other half of the answer: a walk that simply stopped finding
+        // `static` would make the external count right and this one wrong.
+        TemporalArena static_bound_temporary = scratch_begin(0, 0);
+        CPreprocessResult static_bound_tokens =
+            c_preprocess(static_bound_temporary.arena,
+                         S8("void prototyped(char buffer[static 8], unsigned value);\n"
+                            "void prototyped(char* buffer, unsigned value) { buffer[0] = (char)value; }\n"
+                            "int defined(int values[static 4]) { return values[0]; }\n"
+                            "long qualified(long values[const static 2]) { return values[1]; }\n"
+                            "__attribute__((visibility(\"hidden\"))) int attributed(int values[static 2]) { return values[0]; }\n"
+                            "static int internal_bound(int values[static 2]) { return values[1]; }\n"
+                            "static int internal_plain(int value) { return value; }\n"
+                            "int use(int* values) { return internal_bound(values) + internal_plain(values[0]); }\n"),
+                         (CPreprocessOptions){0});
+        CParseResult static_bound_parse = c_parse(static_bound_temporary.arena, static_bound_tokens);
+        CIRLowerResult static_bound_ir =
+            c_lower_to_ir(static_bound_temporary.arena, S8("static-array-bound.c"), static_bound_tokens, static_bound_parse, target_native);
+        BUSTER_TEST(arguments, static_bound_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, static_bound_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, static_bound_ir.diagnostic_count == 0);
+        if (static_bound_ir.program)
+        {
+            IrModule* static_bound_module = &static_bound_ir.program->modules[0];
+            u32 external_definitions = 0;
+            u32 internal_definitions = 0;
+            for (u32 function_index = 0; function_index < static_bound_module->function_count; function_index += 1)
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&static_bound_ir.program->symbols, static_bound_module->functions[function_index].symbol);
+                if (!symbol || !symbol->is_definition)
+                {
+                    continue;
+                }
+                external_definitions += symbol->linkage == IR_LINKAGE_EXTERNAL;
+                internal_definitions += symbol->linkage == IR_LINKAGE_INTERNAL;
+            }
+            BUSTER_TEST(arguments, external_definitions == 5);
+            BUSTER_TEST(arguments, internal_definitions == 2);
+        }
+        scratch_end(static_bound_temporary);
+    }
+    {
         TemporalArena c17_constexpr_temporary = scratch_begin(0, 0);
         CPreprocessResult c17_constexpr_tokens = c_preprocess(c17_constexpr_temporary.arena,
                                                               S8("int constexpr = 3;"

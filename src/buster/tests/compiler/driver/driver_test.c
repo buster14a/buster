@@ -4556,6 +4556,44 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_extern_incomplete_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // A C99 `static` array bound on a parameter is a bound qualifier, not a
+    // storage class, so it must not make the function it belongs to internal.
+    // Only a two-file link can see that: an internal definition the same unit
+    // calls still works, and one nothing in its unit calls is dropped before
+    // it reaches the object. The link itself succeeds either way -- the
+    // missing definitions become dynamic imports -- so the run is the gate.
+    String8 c_static_array_parameter_path = buster_test_temporary_path(arguments->arena, S8("buster-c-static-array-parameter"),
+#if BUSTER_WINDOWS
+                                                                       S8(".exe"));
+#else
+                                                                       S8(""));
+#endif
+    String8 c_static_array_parameter_command_line[] = {
+        S8("-o"),
+        c_static_array_parameter_path,
+        S8("tests/basic_c_static_array_parameter.c"),
+        S8("tests/basic_c_static_array_parameter_def.c"),
+    };
+    CompilerDriverResult c_static_array_parameter = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_static_array_parameter_command_line)));
+    BUSTER_TEST(arguments, c_static_array_parameter.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_static_array_parameter.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_static_array_parameter_arguments[] = {
+            c_static_array_parameter_path,
+        };
+        ProcessSpawnResult c_static_array_parameter_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_static_array_parameter_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .use_process_environment = true,
+                             });
+        BUSTER_TEST(arguments, c_static_array_parameter_spawn.handle != 0);
+        if (c_static_array_parameter_spawn.handle)
+        {
+            ProcessWaitResult c_static_array_parameter_wait = os_process_wait_sync(arguments->arena, c_static_array_parameter_spawn);
+            BUSTER_TEST(arguments, c_static_array_parameter_wait.result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // The 512-bit vocabulary. The fixture is self-contained and guards itself
     // on the predefined feature macros, so it builds for every target and
     // compiles its body out where the vocabulary is unavailable; that is what

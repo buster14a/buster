@@ -86,14 +86,30 @@ BUSTER_C_INTERNAL IrSourceRange c_ir_source_range(CSourceLocation location, u64 
 // so a missed path costs speed and never correctness. Every spelling the
 // callers ask about is identifier-shaped, so non-identifier tokens cannot
 // match and are skipped without materializing their spelling.
+// Every caller asks about declaration specifiers — storage class, `inline`,
+// thread locality — and those stand outside every delimiter, so a nested
+// token cannot answer this question and must not be counted. The depth is
+// what separates a specifier from an array parameter's `[static 3]`, where
+// `static` is a bound qualifier, and from a statement expression inside an
+// initializer, which carries declarations of its own.
+// `c_parse_local_declarations` tracks the same depth over the same range for
+// the same reason. An `__attribute__((...))` list is why the walk cannot
+// simply stop at the first delimiter instead: musl spells `hidden` as one,
+// ahead of the specifiers it must still find.
 BUSTER_C_INTERNAL u64 c_declaration_well_known_set(CPreprocessResult preprocess, CDeclaration declaration, u64 interesting)
 {
     u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
     u64 result = 0;
+    u32 group_depth = 0;
     for (u32 index = declaration.token_start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if (token.kind == C_TOKEN_IDENTIFIER)
+        if (token.kind != C_TOKEN_IDENTIFIER)
+        {
+            group_depth += c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN) ? 1 : 0;
+            group_depth -= group_depth && c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE) ? 1 : 0;
+        }
+        else if (!group_depth)
         {
             if (token.symbol)
             {

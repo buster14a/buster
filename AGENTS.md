@@ -1126,12 +1126,15 @@ blocked-link; `src/math` is 144 excluded-reference, 21 blocked-compile and 34
 blocked-link; `src/regression` is 2 dynamic, 12 excluded-reference, 1
 blocked-compile and 53 blocked-link.
 
-The ranked blockers are now `vfprintf` (140 tests) and `__procfdname` (15),
-then a tail of ones and twos. `__libc_start_main` (141) and `__syscall_cp`
-(107) headed this list until the singleton fixes above let their units
-compile, which is what turned the stage from three walls into one:
-`src/stdio/vfprintf.c` stops on wide floating-point `va_arg`, and it alone
-gates 140 of the 424.
+The ranked blocker is now `vfprintf` (140 tests), then a tail of ones.
+`__libc_start_main` (141) and `__syscall_cp` (107) headed this list until the
+singleton fixes above let their units compile, which is what turned the stage
+from three walls into one: `src/stdio/vfprintf.c` stops on wide floating-point
+`va_arg`, and it alone gates 140 of the 424. `__procfdname` (15) stood second
+until a `[static N]` array parameter stopped making its function's definition
+internal; removing it moved no unit, because all 15 wanted `vfprintf` as well.
+That is the shape of this list while one symbol gates a third of the suite —
+a blocker can be real, fixed, and still not move the passing count.
 
 For scale, one recorded run without libc-test left 26 MB behind: the
 Buster pass spent 57,8 seconds of child time over 1349 units — 43 ms each — for
