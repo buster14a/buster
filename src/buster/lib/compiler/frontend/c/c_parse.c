@@ -5203,18 +5203,18 @@ BUSTER_C_INTERNAL void c_parse_layout_attributes(CParseResult* result, CPreproce
         *alignment_start = result->alignment_count;
         *alignment_count = 0;
     }
+    // The outer walk runs over every declarator and every aggregate member of
+    // the translation unit and asks one question per token, so the token kind
+    // is read once and the two answers -- brace nesting and "does an attribute
+    // list start here" -- branch off that single load.
     u32 braces = 0;
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        if (token.kind == C_TOKEN_PUNCTUATOR)
         {
-            braces += 1;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
-        {
-            braces -= braces != 0;
+            braces += token.punctuator == C_PUNCTUATOR_LEFT_BRACE;
+            braces -= braces != 0 && token.punctuator == C_PUNCTUATOR_RIGHT_BRACE;
             continue;
         }
         CAttributeGroup group = {0};
