@@ -5752,9 +5752,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // out a different object than every other compiler on the target while
     // agreeing with itself.  The single translation unit covers the four
     // positions the two attributes reach a layout from -- before the tag,
-    // after the body, on one member, on an object declarator -- plus the
-    // `#pragma pack` ceiling they share, and runs under every allocator
-    // because packed bit-fields are lowering rather than parsing work.
+    // after the body, on one member, on an object declarator -- the two
+    // member-declarator positions the shared-specifier one does not cover
+    // (after a parenthesized declarator, and at the head of a declarator that
+    // is not the first of its list), plus the `#pragma pack` ceiling they
+    // share, and runs under every allocator because packed bit-fields are
+    // lowering rather than parsing work.
     for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators); allocator_index += 1)
     {
         TemporalArena packed_temporary = scratch_begin(&arguments->arena, 1);

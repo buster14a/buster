@@ -9,6 +9,9 @@
 // aggregate before the tag, on the aggregate after the closing brace, on one
 // member alone, and on an object declarator.  `#pragma pack` is the same
 // question asked by a directive and shares the ceiling this implements.
+// A member's own list has three positions of its own -- before the shared
+// specifiers, after a plain declarator, and after a parenthesized one -- and
+// a declarator that is not the first of its list has a fourth.
 
 // Packed before the tag, which is how QuickJS spells its unaligned readers.
 struct __attribute__((packed)) leading
@@ -85,6 +88,29 @@ struct __attribute__((packed)) zero_width_bits
     int after : 3;
 };
 
+// A member declarator may carry an attribute list of its own, in two places
+// the shared-specifier position does not cover: after a parenthesized
+// declarator, where the list follows the whole derivation rather than the
+// name, and at the head of a declarator that is not the first of its list.
+// Reading either as part of the declarator failed the segment, which left the
+// aggregate with no members at all and blamed the first member access.
+struct member_pointer_aligned
+{
+    char byte;
+    void (*handler)(int) __attribute__((aligned(32)));
+};
+
+// The attributed declarator is the second of its list, so it also pins the
+// list boundary: the attribute reaches `second` and stops there.  `first` sits
+// at offset zero, where every alignment is already satisfied, so these numbers
+// hold whether the attribute is read as this declarator's or -- as buster
+// still reads it, #680 -- as the whole segment's.
+struct list_declarator_aligned
+{
+    int first, __attribute__((aligned(32))) second;
+    char tail;
+};
+
 #pragma pack(push, 1)
 struct pragma_packed
 {
@@ -119,6 +145,8 @@ int main(void)
     if (sizeof(struct zero_width_bits) != 5) return 9;
     if (sizeof(struct pragma_packed) != 5 || _Alignof(struct pragma_packed) != 1) return 10;
     if (sizeof(struct pragma_packed_two) != 6 || _Alignof(struct pragma_packed_two) != 2) return 11;
+    if (sizeof(struct member_pointer_aligned) != 64 || _Alignof(struct member_pointer_aligned) != 32) return 28;
+    if (sizeof(struct list_declarator_aligned) != 64 || _Alignof(struct list_declarator_aligned) != 32) return 29;
 
     // Offsets, read through addresses so a size that happens to match cannot
     // hide a member in the wrong place.
@@ -169,5 +197,15 @@ int main(void)
 
     automatic_aligned[0] = 1;
     if (automatic_aligned[0] != 1) return 27;
+
+    // The two member-declarator attribute positions, read through addresses:
+    // the aggregate sizes above match without the members being where the
+    // platform compiler puts them.
+    struct member_pointer_aligned pointer_aligned;
+    if ((char *)&pointer_aligned.handler - (char *)&pointer_aligned != 32) return 30;
+    struct list_declarator_aligned list_aligned;
+    if ((char *)&list_aligned.first - (char *)&list_aligned != 0) return 31;
+    if ((char *)&list_aligned.second - (char *)&list_aligned != 32) return 32;
+    if ((char *)&list_aligned.tail - (char *)&list_aligned != 36) return 33;
     return 0;
 }

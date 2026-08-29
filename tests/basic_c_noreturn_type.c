@@ -91,6 +91,29 @@ static void through_second_of_member_list(int status, struct member_list* ops)
     must_not_be_reached();
 }
 
+// A member declarator may also spell the marker after a parenthesized
+// declarator, where it follows the whole derivation rather than the shared
+// specifiers.  Written there it belongs to that declarator alone, so the
+// sibling beside it keeps the code after a call through it: the declarator
+// boundary the segment scans is the top-level comma, and reading past it would
+// mark `ok` as well and delete the return `through_declarator_sibling` needs.
+struct declarator_list
+{
+    void (*fail)(int) __attribute__((noreturn)), (*ok)(int);
+};
+
+static void through_marked_declarator(int status, struct declarator_list* ops)
+{
+    ops->fail(status);
+    must_not_be_reached();
+}
+
+static int through_declarator_sibling(int status, struct declarator_list* ops)
+{
+    ops->ok(status);
+    return status + 4;
+}
+
 // A plain function pointer initialized from a noreturn function is not itself
 // noreturn -- the marker is on the function, not on the type the call reads --
 // and clang agrees.  The counterexamples below must keep falling through, so
@@ -152,11 +175,20 @@ int main(int argc, char** argv)
     {
         return 3;
     }
+    struct declarator_list sibling_list = {exit, returns_normally};
+    if (through_declarator_sibling(1, &sibling_list) != 5)
+    {
+        return 4;
+    }
     struct member_ops member_ops = {exit};
     union member_union member_union = {exit};
     struct member_list member_list = {exit, exit};
     // Only one of these ever runs, and each ends in exit(0); the point of the
-    // fixture is that all eight bodies lower at all.
+    // fixture is that all nine bodies lower at all.
+    if (argc > 8)
+    {
+        through_marked_declarator(0, &sibling_list);
+    }
     if (argc > 7)
     {
         through_typedef_pointer(0, exit);
@@ -186,5 +218,5 @@ int main(int argc, char** argv)
         through_second_of_member_list(0, &member_list);
     }
     through_local_typedef(0, exit);
-    return 4;
+    return 5;
 }

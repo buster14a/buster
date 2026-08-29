@@ -4899,6 +4899,39 @@ BUSTER_C_SHARED u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 in
     return index;
 }
 
+// The index at which the run of attribute lists a declarator ends with begins,
+// or `end` when it ends with something else. `(*f)(int) __attribute__((aligned(8)))`
+// writes the list after the whole derivation, where a declarator parser that
+// requires the declarator to end exactly at the range it is given reads it as a
+// suffix it does not know and fails. Handing that parser the trimmed range
+// leaves the list to the caller, which already walks it.
+//
+// The range is walked forwards because an attribute list is only recognizable
+// from its head; a list that is not trailing -- a leading one, or one written
+// between a group and its parameter list -- is hopped over rather than
+// returned, so only a run that reaches `end` is trimmed. The walk is bounded
+// by the caller's own comma boundary, so a sibling declarator's list is never
+// taken for this one's.
+BUSTER_C_INTERNAL u32 c_parse_trailing_attribute_start(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 index = start;
+    while (index < end)
+    {
+        u32 after = c_parse_skip_attributes(preprocess, index, end);
+        if (after == index)
+        {
+            index += 1;
+            continue;
+        }
+        if (after == end)
+        {
+            return index;
+        }
+        index = after;
+    }
+    return end;
+}
+
 // The three aggregate introducers as one membership test, for the specifier
 // scans that ask "does an aggregate head start here" per identifier token.
 #define C_PARSE_AGGREGATE_KEYWORDS (C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM))
@@ -6202,12 +6235,25 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                 c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
                 return;
             }
-            declarator = frame->declarator_start;
+            // The segment head skips the attributes shared by the whole
+            // list once, before the base type is parsed, so only the first
+            // declarator is covered by it. A declarator after a comma may
+            // carry a list of its own -- `struct s { int a, __attribute__((aligned(8))) b; };`
+            // -- and reading that list as the declarator fails the segment,
+            // which drops every member the aggregate has.
+            declarator = c_parse_skip_attributes(preprocess, frame->declarator_start, frame->declarator_end);
             declarator_type = c_parse_pointer_chain(result, preprocess, frame->base_type, &declarator, frame->declarator_end);
             if (declarator < frame->declarator_end && c_token_is_punctuator(&preprocess.tokens[declarator], C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
+                // The parenthesized frame requires the declarator to end
+                // exactly at the range it is given and knows nothing about a
+                // trailing attribute list, so the child is handed the range
+                // trimmed of one. The finish stage below resumes at
+                // frame->declarator_end, which is where the trimmed tokens
+                // end, so the list needs no second pass.
+                u32 declarator_end = c_parse_trailing_attribute_start(preprocess, declarator, frame->declarator_end);
                 u32 name_index = 0;
-                if (!c_parse_parenthesized_declarator_name(preprocess, declarator, frame->declarator_end, &name_index))
+                if (!c_parse_parenthesized_declarator_name(preprocess, declarator, declarator_end, &name_index))
                 {
                     c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
                     c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
@@ -6220,7 +6266,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                                                           .preprocess = preprocess,
                                                           .type = declarator_type,
                                                           .start = declarator,
-                                                          .end = frame->declarator_end,
+                                                          .end = declarator_end,
                                                           .declarator_start = declarator,
                                                           .name_index = name_index,
                                                           .kind = C_TYPE_PARSE_FRAME_PARENTHESIZED,
