@@ -6701,6 +6701,15 @@ BUSTER_C_INTERNAL bool c_ir_ext80_value_binary(CPunctuator op, CIrExt80Value lef
 // would not round at all, so neither is folded here and both keep the refusal.
 BUSTER_C_INTERNAL bool c_ir_ext80_fold_apply(CPunctuator op, CIrExt80Value left, CIrExt80Value right, CIrExt80Value* result_out)
 {
+    // An invalid operation is the one case that does not care where it would
+    // round: the NaN it creates is the same value at every precision and
+    // widens to this format exactly.  That is not a technicality -- musl's
+    // <math.h> spells NAN as `(0.0f/0.0f)`, at float rank, and libc-test's
+    // `long double` tables are full of it.
+    if (c_ir_ext80_value_invalid_operation(op, left, right, result_out))
+    {
+        return true;
+    }
     u8 rank = left.rank > right.rank ? left.rank : right.rank;
     if (rank != C_IR_EXT80_RANK_LONG_DOUBLE)
     {

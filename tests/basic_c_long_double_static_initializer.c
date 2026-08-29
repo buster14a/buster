@@ -60,6 +60,11 @@ static const long double negative_zero = -0.0L;
 // spells NAN as `(0.0f/0.0f)` for a compiler that does not define __GNUC__.
 static const long double created_nan = 0.0L/0.0L;
 static const long double created_nan_negative_operand = -0.0L/0.0L;
+// The operands' own rank does not decide this one: a NaN is the same value at
+// every precision and widens exactly, and musl's NAN is a float spelling that
+// libc-test's `long double` tables are written in.
+static const long double created_nan_from_float = 0.0f/0.0f;
+static const long double created_nan_from_double = 0.0/0.0;
 
 // The table musl's atanl.c opens with, an array whose elements are folded
 // rather than spelled, a designated one, and a struct that mixes x87 members
@@ -172,6 +177,8 @@ int main(void)
         {(const unsigned char*)&negative_zero, expected_negative_zero, 16},
         {(const unsigned char*)&created_nan, expected_created_nan, 16},
         {(const unsigned char*)&created_nan_negative_operand, expected_created_nan, 16},
+        {(const unsigned char*)&created_nan_from_float, expected_created_nan, 16},
+        {(const unsigned char*)&created_nan_from_double, expected_created_nan, 16},
         {(const unsigned char*)atanhi, expected_atanhi, 64},
         {(const unsigned char*)coefficients, expected_coefficients, 48},
         {(const unsigned char*)sparse, expected_sparse, 64},

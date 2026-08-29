@@ -838,6 +838,30 @@ that looks like a Buster gap can be a branch Clang never took, so check what
 the unit actually preprocessed to (`ide cc -E` with the same flags) before
 naming a construct.
 
+`<math.h>` splits on the same macro, and there the two branches are not
+interchangeable. `NAN` is `__builtin_nanf("")` for Clang and `(0.0f/0.0f)`
+for Buster, so every `NAN` in the archive is an operation that creates a NaN
+rather than a constant that already is one — and IEEE-754 leaves the sign of
+an invalid operation's NaN unspecified, which the two available answers use:
+x86 hardware produces the negative default NaN, Clang folds to the positive
+quiet one. The frontend therefore folds the four operations that create a NaN
+out of operands that are not NaN — `0/0` and `inf/inf`, `0*inf`, `inf-inf`
+and `inf+(-inf)` — to the positive quiet NaN at every width, in the
+in-function path and in the x87 static-initializer folder alike, and reads
+constant operands through a negate and through a conversion between float
+widths so a source-level `-0.0f` and a widened literal fold the same way.
+Ordinary constant arithmetic is still left to the backend: only the invalid
+operations fold, because only their answer is a compatibility choice rather
+than a value. `tests/basic_c_created_nan_sign.c` carries the created and the
+propagated signs, and the created NaN's bytes are in
+`tests/basic_c_long_double_static_initializer.c` beside the rest of the x87
+initializer bytes Clang writes. `INFINITY` splits the same way and does not
+fold yet: its non-GNU spelling is the overflowing literal `1e5000f`, which
+the x87 folder refuses. That refusal is what libc-test's `src/math`
+`long double` tables now stop at — seven of them moved onto it from the NaN
+fold, taking it from 14 units to 21 — and the one divide still refused there
+is `fpclassify`'s `1/0.0`, which creates an infinity rather than a NaN.
+
 One flag the reference carries and Buster does not is
 `-fcomplex-arithmetic=improved`. Clang's default for C lowers a complex
 multiply or divide to the compiler-runtime helpers -- `__mulxc3`, `__divxc3`
