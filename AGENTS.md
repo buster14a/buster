@@ -953,11 +953,28 @@ because x86-64 supplies the implementation in assembly (`crt/crti`,
 `src/signal/sigsetjmp`, `src/thread/syscall_cp`, `src/thread/tls`).
 Thirty-two files are `architecture-assembly`: musl would prefer them over a
 portable C unit, and since the Buster driver takes no assembly input the
-harness compiles the portable C instead and lists each one. The remaining 5
-are the `MUSL_UNSUPPORTED` units, and their classes are, in order of size: 1
-static initializer (`src/misc/ioctl`'s `compat_map`); and 4 singletons --
-`res_msend` (an over-aligned automatic), `lsearch` (a pointer to a VLA), and
-`vfprintf`/`vfwprintf` (wide floating-point `va_arg`). Inline assembly is no
+harness compiles the portable C instead and lists each one. The remaining 2
+are the `MUSL_UNSUPPORTED` units, and they are one class:
+`vfprintf`/`vfwprintf`, both on wide floating-point `va_arg`.
+
+Static initializers are no longer a class, and neither are the three
+singletons that stood beside them: 1344 to 1347. `src/misc/ioctl`'s
+`compat_map` sizes its entries with `sizeof(struct { ... })`, and the parser
+registered an aggregate an expression defines only inside a function body, so
+the same definition in a file-scope initializer had no type for the sizeof
+fold to resolve and the whole initializer was refused. `res_msend` writes
+`int qpos[nqueries], apos[nqueries];`, a variable-length array in a
+comma-separated declarator list, which the list path could not lower --
+its diagnostic named an alignment, which is what an unresolved layout leaves
+behind, and not the over-aligned automatic that reads like. `lsearch` and
+`lfind` walk their tables through `char (*p)[width]`, a pointer to a variably
+modified array, which is the type `char p[][width]` adjusts to and now becomes
+the same local an array parameter does. Fixing the third also fixed a
+wrong-code defect the compile inventory could not see: indexing either shape
+with fewer subscripts than it has dimensions leaves an array, and the decay
+that turns one into the address of its first element keys on the IR array
+type a variably modified array does not have, so `p[i]` loaded one element
+where the row's address was meant. Inline assembly is no
 longer a class: `crt/rcrt1`, `ldso/dlstart`, `ldso/dynlink` and
 `src/thread/__unmapself` were the four units that reached code generation and
 stopped on a template, and they compile now that the inline path relocates a
@@ -1219,14 +1236,22 @@ too. The seventy-ninth is the first runtime test to link and run green, in
 `src/regression`. The rest of the three runtime subsets still does not link:
 `src/functional` is 7 dynamic, 15 excluded-reference, 1 blocked-compile and 54
 blocked-link; `src/math` is 144 excluded-reference, 21 blocked-compile and 34
-blocked-link; `src/regression` is 2 dynamic, 12 excluded-reference, 1
-blocked-compile and 53 blocked-link.
+blocked-link; `src/regression` is 2 dynamic, 12 excluded-reference and 54
+blocked-link, with nothing left that Buster cannot compile: its one
+`blocked-compile` was `flockfile-list`, whose `checkfreed` writes an unbraced
+`if` controlling a loop whose own unbraced `if` carries the compound body, and
+the statement-extent walk measured that as ending at the next semicolon rather
+than at the brace. It moved to `blocked-link` behind `vfprintf` and the
+passing count did not move with it, which is the shape of this list while one
+symbol gates a third of the suite.
 
-The ranked blocker is now `vfprintf` (141 tests), then a tail of ones.
+The list is down to `vfprintf` (142 tests) and `vfwprintf` (1), and nothing
+else: the tail of ones went with the singletons above, and `lsearch`/`lfind`
+were the last two entries to leave it.
 `__libc_start_main` (141) and `__syscall_cp` (107) headed this list until the
 singleton fixes above let their units compile, which is what turned the stage
 from three walls into one: `src/stdio/vfprintf.c` stops on wide floating-point
-`va_arg`, and it alone gates 141 of the 424. `__procfdname` (15) stood second
+`va_arg`, and it alone gates 142 of the 424. `__procfdname` (15) stood second
 until a `[static N]` array parameter stopped making its function's definition
 internal, and `__unmapself` until the inline-assembly fix above; removing
 either moved no unit, because everything that wanted them wanted `vfprintf`
@@ -1236,7 +1261,7 @@ suite — a blocker can be real, fixed, and still not move the passing count.
 For scale, one recorded run without libc-test left 26 MB behind: the
 Buster pass spent 57,5 seconds of child time over 1349 units — 43 ms each — for
 116,0 MB of preprocessed source, 4.273.705 lines and 5.125.840 tokens, and
-produced 1339 archive members in 5.582.884 bytes against Clang's 1344 in
+produced 1342 archive members in 5.631.530 bytes against Clang's 1344 in
 2.600.342. Both counts are the manifest minus its `crt/` and `ldso/` units,
 which the startup-object and archive notes above keep out. The Buster archive
 is the larger of the two despite holding fewer members, which is what an

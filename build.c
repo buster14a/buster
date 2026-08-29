@@ -16110,8 +16110,8 @@ struct MuslManifest
 // class (ST(0) real over ST(1) imaginary) reaching the canonical emitter.
 // cpowl came with them once the inline Smith division learned to take the
 // magnitude of an x87 value through its sign/exponent halfword.
-#define MUSL_EXPECTED_COMPILED_UNITS 1344
-#define MUSL_EXPECTED_FAILURE_HASH 0xbd789c126b3c6dd5ull
+#define MUSL_EXPECTED_COMPILED_UNITS 1347
+#define MUSL_EXPECTED_FAILURE_HASH 0x6810e005bc27ac9dull
 
 BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, bool print)
 {
@@ -16911,7 +16911,7 @@ struct LibcTestSubsetTotals
 // _Complex` calls through the frontend. It is now behind `vfprintf` with the
 // other 139, so the passing count is unchanged.
 #define LIBC_TEST_EXPECTED_PASSING 79
-#define LIBC_TEST_EXPECTED_STATE_HASH 0x9f218339bcb337a8ull
+#define LIBC_TEST_EXPECTED_STATE_HASH 0x7816cb509ce25261ull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it
