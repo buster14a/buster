@@ -1018,12 +1018,16 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
     {
         return false;
     }
+    // Almost no translation unit has an aligned typedef in it, and the two
+    // scans below run once per type of the table, so the empty case is one
+    // register test rather than a call that finds nothing.
+    bool any_type_alignment = result->type_alignment_count != 0;
     // The seed pass below resolves builtin scalars and incomplete enums from
     // the requested record alone and takes the early exit, so answer those
     // without walking the table.  A type a typedef gave an alignment of its own
     // is the one exception: its answer is not derivable from its kind, so it
     // falls through to the solve, where the alias branch reads the request.
-    if (!c_parse_type_alignment(result, requested))
+    if (!any_type_alignment || !c_parse_type_alignment(result, requested))
     {
         CType requested_type = result->types[requested.value];
         u64 direct_size = 0;
@@ -1080,13 +1084,6 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
             resolved[type_index] = true;
             continue;
         }
-        // An aligned alias keeps the kind it copied, so the seed would answer
-        // it with the natural layout; the alias branch of the solve below owns
-        // it instead.
-        if (c_parse_type_alignment(result, (CTypeId){.value = type_index}))
-        {
-            continue;
-        }
         CTypeKind kind = result->types[type_index].kind;
         u64 size = 0;
         u32 alignment = 0;
@@ -1102,6 +1099,20 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
             sizes[type_index] = size;
             alignments[type_index] = alignment;
             resolved[type_index] = true;
+        }
+    }
+    // An aligned alias keeps the kind it copied, so the seed just answered it
+    // with the natural layout; hand those few back to the solve below, which
+    // owns them.  Walking the records rather than testing every type in the
+    // seed is what keeps the empty case -- almost every translation unit --
+    // free: the seed runs over the whole table on every uncached query.  A
+    // cached answer already carries the replacement and is left alone.
+    for (u32 alias_index = 0; alias_index < result->type_alignment_count; alias_index += 1)
+    {
+        u32 alias_type = result->type_alignments[alias_index].type_index;
+        if (alias_type < type_count && !(cache && alias_type < cache->capacity && cache->states[alias_type]))
+        {
+            resolved[alias_type] = false;
         }
     }
     if (resolved[requested.value])
@@ -1125,7 +1136,12 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
             // one-byte struct aliased at sixteen -- and the natural layout is
             // read off the type the alias copied, which is what makes the
             // replacement a single lookup here and in c_gen's mapping pass.
-            CTypeAlignment const* requested_type_alignment = c_parse_type_alignment(result, (CTypeId){.value = type_index});
+            // The step is claimed before every branch below because an alias
+            // keeps the kind it copied and each of them would otherwise answer
+            // it with the natural layout.  Moving the body out of line to
+            // shrink this loop measured 2,7 M instructions *worse* on the
+            // self-host corpus than leaving it here for the guard to skip.
+            CTypeAlignment const* requested_type_alignment = any_type_alignment ? c_parse_type_alignment(result, (CTypeId){.value = type_index}) : 0;
             if (requested_type_alignment)
             {
                 if (!type.has_unqualified_type || type.unqualified_type.value >= type_count || !resolved[type.unqualified_type.value])

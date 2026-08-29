@@ -37755,7 +37755,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                     // ascending type index and an alias is built where the
                     // typedef is written, so it is remapped before any
                     // aggregate that embeds it is laid out in the same round.
-                    CTypeAlignment const* type_alignment = c_parse_type_alignment(&parse, (CTypeId){.value = type_index});
+                    CTypeAlignment const* type_alignment = parse.type_alignment_count ? c_parse_type_alignment(&parse, (CTypeId){.value = type_index}) : 0;
                     if (type_alignment)
                     {
                         u32 alias_index = (u32)(type_alignment - parse.type_alignments);
