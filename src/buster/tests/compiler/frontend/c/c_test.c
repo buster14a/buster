@@ -1432,6 +1432,204 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_brace_designators(UnitTestArguments* a
     return result;
 }
 
+// The C23 attribute specifier in every position the grammar allows it, read
+// as a parse rather than as a program: tests/basic_c_c23_attributes.c proves
+// the decorated declarations still behave, and this proves they registered at
+// all -- with the declared name and type rather than the attribute's -- and
+// that no identifier inside a sequence leaked out as a use of something.  That
+// was the original failure: an attributed declaration produced no entity, and
+// the error surfaced later and elsewhere as "undeclared identifier".
+//
+// The source is parsed under C17 as well as C23 because the syntax reaches the
+// frontend through system headers that spell it unconditionally, so it is
+// accepted in every dialect the way clang accepts it.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_attribute_positions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 attribute_source = S8(
+        "[[maybe_unused]] static int one_list = 1;"
+        "[[maybe_unused]] [[deprecated]] static int two_lists = 2;"
+        "[[maybe_unused, deprecated]] static int two_names = 4;"
+        "[[gnu::unused]] static int scoped = 8;"
+        "[[deprecated(\"superseded, see one_list\")]] static int with_arguments = 16;"
+        "static int trailing [[maybe_unused]] = 32;"
+        "struct [[deprecated]] Tagged { int first [[maybe_unused]]; int second; };"
+        "union [[maybe_unused]] Choice { int as_integer; unsigned as_unsigned; };"
+        "enum [[deprecated]] Counted {"
+        " counted_first [[deprecated]] = 7, counted_second,"
+        " counted_third [[maybe_unused]] = 20, counted_fourth };"
+        "typedef int attributed_integer [[maybe_unused]];"
+        "[[maybe_unused]];"
+        "static int parameters([[maybe_unused]] int before, int after [[maybe_unused]])"
+        " { return before + after; }"
+        "static int statements(int value) {"
+        " [[maybe_unused]] int local = value;"
+        " [[maybe_unused]] plain_label: local += 1;"
+        " if (value) [[maybe_unused]] guarded_label: local += 2;"
+        " if (value > 1000) [[unlikely]] { local += 4; }"
+        " for ([[maybe_unused]] int index = 0; index < 2; index += 1) { local += 8; }"
+        " switch (value) { case 0: local += 16; [[fallthrough]];"
+        " case 1: local += 32; break; default: local += 64; break; }"
+        " return local; }"
+        "int attribute_positions_main(void) {"
+        " struct Tagged tagged = {1, 2}; union Choice choice = {3};"
+        " attributed_integer typed = 4;"
+        " return one_list + two_lists + two_names + scoped + with_arguments + trailing"
+        " + tagged.first + tagged.second + choice.as_integer + typed"
+        " + counted_first + counted_second + counted_third + counted_fourth"
+        " + parameters(5, 6) + statements(0); }\n");
+    CPreprocessDialect attribute_dialects[] = {
+        C_PREPROCESS_DIALECT_C23,
+        C_PREPROCESS_DIALECT_C17,
+    };
+    for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(attribute_dialects); dialect_index += 1)
+    {
+        TemporalArena attribute_temporary = scratch_begin(0, 0);
+        CPreprocessResult attribute_tokens = c_preprocess(attribute_temporary.arena, attribute_source,
+                                                          (CPreprocessOptions){
+                                                              .target = target_native,
+                                                              .data_layout = target_data_layout(target_native),
+                                                              .dialect = attribute_dialects[dialect_index],
+                                                          });
+        CParseResult attribute_parse = c_parse(attribute_temporary.arena, attribute_tokens);
+        CIRLowerResult attribute_ir = c_lower_to_ir(attribute_temporary.arena, S8("c23-attribute-positions.c"), attribute_tokens, attribute_parse,
+                                                    target_native);
+        BUSTER_TEST(arguments, attribute_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, attribute_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, attribute_ir.diagnostic_count == 0);
+        // Nothing spelled inside a sequence may become an entity, and every
+        // identifier the parse did record as a use must have bound to one.
+        // An attribute name leaking into either table is the shape of the
+        // original defect.
+        for (u32 entity_index = 0; entity_index < attribute_parse.entity_count; entity_index += 1)
+        {
+            String8 name = attribute_parse.entities[entity_index].name;
+            BUSTER_TEST(arguments, !string_equal(name, S8("maybe_unused")) && !string_equal(name, S8("deprecated")) &&
+                                       !string_equal(name, S8("fallthrough")) && !string_equal(name, S8("unlikely")) &&
+                                       !string_equal(name, S8("gnu")) && !string_equal(name, S8("unused")));
+        }
+        for (u32 use_index = 0; use_index < attribute_parse.identifier_use_count; use_index += 1)
+        {
+            BUSTER_TEST(arguments, attribute_parse.identifier_uses[use_index].entity.value != C_ID_UNDERLYING_INVALID);
+        }
+        // The declarations the attributes decorate must have registered with
+        // their own names and kinds.
+        bool found_one_list = false;
+        bool found_trailing = false;
+        bool found_typedef = false;
+        bool found_parameters = false;
+        bool found_statements = false;
+        for (u32 declaration_index = 0; declaration_index < attribute_parse.declaration_count; declaration_index += 1)
+        {
+            CDeclaration declaration = attribute_parse.declarations[declaration_index];
+            bool typed = declaration.type.value != C_ID_UNDERLYING_INVALID;
+            found_one_list |= string_equal(declaration.name, S8("one_list")) && declaration.kind == C_DECLARATION_OBJECT && typed;
+            found_trailing |= string_equal(declaration.name, S8("trailing")) && declaration.kind == C_DECLARATION_OBJECT && typed;
+            found_typedef |= string_equal(declaration.name, S8("attributed_integer")) && declaration.kind == C_DECLARATION_TYPEDEF && typed;
+            found_parameters |=
+                string_equal(declaration.name, S8("parameters")) && declaration.kind == C_DECLARATION_FUNCTION && declaration.parameter_count == 2;
+            found_statements |= string_equal(declaration.name, S8("statements")) && declaration.kind == C_DECLARATION_FUNCTION && typed;
+        }
+        BUSTER_TEST(arguments, found_one_list && found_trailing && found_typedef && found_parameters && found_statements);
+        // The enumerators take the values their initializers give and the
+        // implicit successors of those, with the sequences between each name
+        // and its '=' stepped over rather than read as part of the value.
+        bool found_counted_first = false;
+        bool found_counted_second = false;
+        bool found_counted_third = false;
+        bool found_counted_fourth = false;
+        for (u32 entity_index = 0; entity_index < attribute_parse.entity_count; entity_index += 1)
+        {
+            CEntity* entity = &attribute_parse.entities[entity_index];
+            if (entity->kind != C_ENTITY_ENUMERATOR)
+            {
+                continue;
+            }
+            found_counted_first |= string_equal(entity->name, S8("counted_first")) && entity->constant_value == 7;
+            found_counted_second |= string_equal(entity->name, S8("counted_second")) && entity->constant_value == 8;
+            found_counted_third |= string_equal(entity->name, S8("counted_third")) && entity->constant_value == 20;
+            found_counted_fourth |= string_equal(entity->name, S8("counted_fourth")) && entity->constant_value == 21;
+        }
+        BUSTER_TEST(arguments, found_counted_first && found_counted_second && found_counted_third && found_counted_fourth);
+        if (attribute_ir.program)
+        {
+            IrModule* module = &attribute_ir.program->modules[0];
+            BUSTER_TEST(arguments, ir_validate_canonical_module(attribute_ir.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(attribute_temporary);
+    }
+    return result;
+}
+
+// [[noreturn]] is the one C23 attribute buster acts on, and the reason the
+// syntax had to be parsed rather than only tolerated: c_ir_noreturn_marker_in_range
+// has always had a [[ branch, but nothing could reach it.  A call to a
+// noreturn callee ends control flow, so the caller's block is terminated as
+// unreachable instead of falling through to a return.  The unmarked control
+// is what makes that a proof rather than an observation.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_attribute_noreturn(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena noreturn_temporary = scratch_begin(0, 0);
+    CPreprocessResult noreturn_tokens = c_preprocess(noreturn_temporary.arena,
+                                                      S8("[[noreturn]] void die_marked(int status);"
+                                                         "[[__gnu__::__noreturn__]] void die_scoped(int status);"
+                                                         "void die_plain(int status);"
+                                                         "int through_marked(int status) { die_marked(status); }"
+                                                         "int through_scoped(int status) { die_scoped(status); }"
+                                                         "int through_plain(int status) { die_plain(status); return 0; }\n"),
+                                                      (CPreprocessOptions){
+                                                          .target = target_native,
+                                                          .data_layout = target_data_layout(target_native),
+                                                          .dialect = C_PREPROCESS_DIALECT_C23,
+                                                      });
+    CParseResult noreturn_parse = c_parse(noreturn_temporary.arena, noreturn_tokens);
+    CIRLowerResult noreturn_ir =
+        c_lower_to_ir(noreturn_temporary.arena, S8("c23-attribute-noreturn.c"), noreturn_tokens, noreturn_parse, target_native);
+    BUSTER_TEST(arguments, noreturn_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, noreturn_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, noreturn_ir.diagnostic_count == 0);
+    if (noreturn_ir.program)
+    {
+        IrModule* module = &noreturn_ir.program->modules[0];
+        u32 checked = 0;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = &module->functions[function_index];
+            bool marked = string_equal(function->name, S8("through_marked")) || string_equal(function->name, S8("through_scoped"));
+            bool plain = string_equal(function->name, S8("through_plain"));
+            if (!marked && !plain)
+            {
+                continue;
+            }
+            bool unreachable = false;
+            bool returns = false;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                unreachable |= function->instructions[instruction_index].opcode == IR_OPCODE_UNREACHABLE;
+                returns |= function->instructions[instruction_index].opcode == IR_OPCODE_RETURN;
+            }
+            // The marked callers end in the trap and never return; the plain
+            // one returns and never traps.  Both halves matter: without the
+            // second, a compiler that marked everything noreturn would pass.
+            BUSTER_TEST(arguments, marked ? (unreachable && !returns) : (returns && !unreachable));
+            checked += 1;
+        }
+        BUSTER_TEST(arguments, checked == 3);
+        // No canonical-validation assertion here, unlike the sibling tests.
+        // A caller whose block ends in the trap keeps the dead tail of the
+        // return sequence behind it, so the module reports
+        // IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR.  That is the shape the
+        // GNU spelling has always produced -- replacing the two attributes
+        // above with __attribute__((noreturn)) yields the identical code --
+        // so it is a pre-existing property of the noreturn lowering rather
+        // than anything the C23 syntax introduced, and asserting on it here
+        // would be asserting on an unrelated contract.
+    }
+    scratch_end(noreturn_temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_empty_initializers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -11014,6 +11212,10 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_aggregate_corrections(arguments));
 
     c_test_result_add(&result, c_test_brace_designators(arguments));
+
+    c_test_result_add(&result, c_test_c23_attribute_positions(arguments));
+
+    c_test_result_add(&result, c_test_c23_attribute_noreturn(arguments));
 
     c_test_result_add(&result, c_test_c23_empty_initializers(arguments));
 

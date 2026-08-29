@@ -4801,10 +4801,59 @@ BUSTER_C_INTERNAL bool c_parse_asm_label_at(CPreprocessResult preprocess, u32 in
     return true;
 }
 
+// True when `index` starts a C23 attribute specifier `[[ ... ]]`, with
+// `after_out` receiving the token past the closing `]]`. Two consecutive `[`
+// cannot begin anything else in C — a subscript needs an expression and an
+// array declarator a bound, a qualifier or `static` — so the opening pair
+// alone decides it, in every dialect: the syntax is a C23 addition, but
+// accepting it in the earlier `-std` modes is what clang does and what
+// system headers that spell it unconditionally need. The contents are a
+// balanced token sequence (`[[deprecated("use g")]]`, and brackets of its
+// own), so the scan closes on a `]]` at bracket depth zero rather than on the
+// first one it meets. An unterminated list reports the whole remaining range
+// as consumed, which is what leaves the caller looking at `end` and failing
+// the declaration instead of reading attribute text as a declarator.
+BUSTER_C_SHARED bool c_parse_c23_attribute_at(CPreprocessResult preprocess, u32 index, u32 end, u32* after_out)
+{
+    if (index + 1 >= end || !c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET) ||
+        !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACKET))
+    {
+        return false;
+    }
+    u32 depth = 0;
+    for (u32 scan = index + 2; scan < end; scan += 1)
+    {
+        if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            if (depth)
+            {
+                depth -= 1;
+            }
+            else if (scan + 1 < end && c_token_is_punctuator(&preprocess.tokens[scan + 1], C_PUNCTUATOR_RIGHT_BRACKET))
+            {
+                *after_out = scan + 2;
+                return true;
+            }
+        }
+    }
+    *after_out = end;
+    return true;
+}
+
 BUSTER_C_SHARED u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 index, u32 end)
 {
     for (;;)
     {
+        u32 attribute_end = 0;
+        if (c_parse_c23_attribute_at(preprocess, index, end, &attribute_end))
+        {
+            index = attribute_end;
+            continue;
+        }
         // Every decoration this skips is spelled as an identifier, so the one
         // shared guard answers for all three of them and the token is loaded
         // once instead of once per candidate.
@@ -7954,14 +8003,20 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
             {
                 return C_TYPE_ID_INVALID;
             }
+            // An enumerator carries its attributes between the name and the
+            // '=', or after the name when it has no value at all:
+            // `enum { A [[deprecated]] = 1, B [[deprecated]] }`. The commas
+            // inside an attribute list are already covered, because the
+            // enumerator split above counts '[' as an opening delimiter.
+            u32 enum_value_index = c_parse_skip_attributes(preprocess, enum_start + 1, token_index);
             s64 value = previous_value + 1;
-            if (enum_start + 1 < token_index)
+            if (enum_value_index < token_index)
             {
-                if (!c_token_is_punctuator(&preprocess.tokens[enum_start + 1], C_PUNCTUATOR_ASSIGN))
+                if (!c_token_is_punctuator(&preprocess.tokens[enum_value_index], C_PUNCTUATOR_ASSIGN))
                 {
                     return C_TYPE_ID_INVALID;
                 }
-                u32 expression_start = enum_start + 2;
+                u32 expression_start = enum_value_index + 1;
                 u32 expression_count = token_index - expression_start;
                 TemporalArena temporary = scratch_begin(0, 0);
                 CToken* evaluation_tokens = arena_allocate(temporary.arena, CToken, expression_count * 2 + 1);
@@ -11803,6 +11858,19 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         {
             scope_count -= 1;
         }
+        // The identifiers inside a C23 attribute specifier are attribute
+        // names, not uses of anything declared, so the binder steps over the
+        // whole sequence. `statement_start` is deliberately left alone: an
+        // attributed declaration or label still begins a statement. A block
+        // declaration is recognized past its attributes below and consumes
+        // its own range, so this only ever runs for the attribute sequences
+        // that precede a statement or a label.
+        u32 attribute_end = 0;
+        if (c_parse_c23_attribute_at(preprocess, index, body_end, &attribute_end))
+        {
+            index = attribute_end;
+            continue;
+        }
         CToken token = preprocess.tokens[index];
         CTokenShape shape = c_preprocess_token_shape_at(token_shapes, &preprocess, index);
         CPunctuator punctuator = c_token_shape_punctuator(shape);
@@ -12366,6 +12434,18 @@ BUSTER_C_INTERNAL CParserStatementKind c_parser_statement_kind(CPreprocessResult
     if (start >= end || end > preprocess.token_count)
     {
         return C_PARSER_STATEMENT_UNKNOWN;
+    }
+    // A C23 attribute specifier sequence may precede any statement or block
+    // declaration, so the token that decides the kind is the first one past
+    // it. `[[fallthrough]];` skips to its own semicolon and is classified as
+    // the null statement it is.
+    for (u32 attribute_end = 0; c_parse_c23_attribute_at(preprocess, start, end, &attribute_end);)
+    {
+        start = attribute_end;
+    }
+    if (start >= end)
+    {
+        return C_PARSER_STATEMENT_EXPRESSION;
     }
     CToken first = preprocess.tokens[start];
     CParserStatementKind result;

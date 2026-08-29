@@ -25677,6 +25677,48 @@ BUSTER_C_SHARED bool c_ir_control_substatement_position(CPreprocessResult const*
     return result;
 }
 
+/* The backward twin of c_parse_c23_attribute_at: true when a C23 attribute
+   specifier ends at `index - 1`, with `start_out` receiving its opening '['.
+   Every scan that skips one reads forwards, because a forward skip is a loop
+   step; the label proof below is the one question in the frontend asked from
+   the far side, and `[[maybe_unused]] again:` puts a ']' where it expects a
+   statement boundary. The walk mirrors the forward one -- depth over
+   brackets, closing on the '[[' that is not nested -- because the contents
+   are a balanced token sequence that may carry brackets of its own. */
+BUSTER_C_INTERNAL bool c_ir_c23_attribute_ends_before(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32* start_out)
+{
+    if (index < body_start + 4 || !c_token_is_punctuator(&preprocess->tokens[index - 1], C_PUNCTUATOR_RIGHT_BRACKET) ||
+        !c_token_is_punctuator(&preprocess->tokens[index - 2], C_PUNCTUATOR_RIGHT_BRACKET))
+    {
+        return false;
+    }
+    u32 depth = 0;
+    for (u32 scan = index - 3; scan > body_start; scan -= 1)
+    {
+        if (c_token_is_punctuator(&preprocess->tokens[scan], C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&preprocess->tokens[scan], C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            if (depth)
+            {
+                depth -= 1;
+            }
+            else if (c_token_is_punctuator(&preprocess->tokens[scan - 1], C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                *start_out = scan - 1;
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
 BUSTER_C_SHARED bool c_ir_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end)
 {
     bool result = false;
@@ -25686,10 +25728,19 @@ BUSTER_C_SHARED bool c_ir_named_label_proven_at(CPreprocessResult const* preproc
           c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_DEFAULT) ||
           !c_token_is_punctuator(&preprocess->tokens[index + 1], C_PUNCTUATOR_COLON)))
     {
-        CToken previous = index > body_start ? preprocess->tokens[index - 1] : (CToken){0};
-        result = index == body_start || c_punctuator_in_set(previous.punctuator, C_PUNCTUATOR_SET_STATEMENT_BOUNDARY) ||
-                 (previous.punctuator == C_PUNCTUATOR_COLON && c_ir_label_colon_at(preprocess->tokens, body_start, index - 1)) ||
-                 c_ir_control_substatement_position(preprocess, body_start, index);
+        // Peel any attribute sequence prefixing the label, so the three
+        // proofs below see the token that really precedes the statement.
+        // `if (c) [[unlikely]] again:` needs it twice over: the peel is what
+        // leaves the control-substatement test looking at the ')'.
+        u32 candidate = index;
+        for (u32 attribute_start = 0; c_ir_c23_attribute_ends_before(preprocess, body_start, candidate, &attribute_start);)
+        {
+            candidate = attribute_start;
+        }
+        CToken previous = candidate > body_start ? preprocess->tokens[candidate - 1] : (CToken){0};
+        result = candidate == body_start || c_punctuator_in_set(previous.punctuator, C_PUNCTUATOR_SET_STATEMENT_BOUNDARY) ||
+                 (previous.punctuator == C_PUNCTUATOR_COLON && c_ir_label_colon_at(preprocess->tokens, body_start, candidate - 1)) ||
+                 c_ir_control_substatement_position(preprocess, body_start, candidate);
     }
 
     return result;
@@ -25775,12 +25826,16 @@ BUSTER_C_INTERNAL bool c_ir_control_statement_ends_with_body(CPreprocessResult p
     return control && cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACE);
 }
 
-/* The label prefixes of a statement, if any. `name :`, `default :`, and
-   `case <constant> :` may repeat before the statement they label, and a
-   controlled substatement is allowed to carry them — `if (c) case 1: { ... }`
-   is the Duff's-device fallthrough shape. Measuring the statement has to start
-   past them, because the extent of `case 1: { ... }` is the closing brace and
-   not the next semicolon after it. */
+/* The prefix a statement may carry before its unlabelled form. `name :`,
+   `default :`, and `case <constant> :` may repeat before the statement they
+   label, and a controlled substatement is allowed to carry them — `if (c)
+   case 1: { ... }` is the Duff's-device fallthrough shape. C23 adds attribute
+   specifiers to the same prefix, both on a label and directly on the
+   statement, so `if (c) [[unlikely]] { ... }` reaches here too. Measuring the
+   statement has to start past all of it, because the extent of
+   `case 1: { ... }` is the closing brace and not the next semicolon after it,
+   and because a leading '[' would otherwise hide the '{' that says this
+   substatement ends with a body rather than at a semicolon. */
 BUSTER_C_INTERNAL u32 c_ir_statement_labels_end(CPreprocessResult preprocess, u32 start, u32 end)
 {
     u32 result = start;
@@ -25788,6 +25843,13 @@ BUSTER_C_INTERNAL u32 c_ir_statement_labels_end(CPreprocessResult preprocess, u3
     while (scanning)
     {
         scanning = false;
+        u32 attribute_end = 0;
+        if (c_parse_c23_attribute_at(preprocess, result, end, &attribute_end))
+        {
+            result = attribute_end;
+            scanning = result < end;
+            continue;
+        }
         CToken token = preprocess.tokens[result];
         bool is_case = token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_CASE);
         if (is_case)
@@ -28902,6 +28964,15 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             while (index < task.end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_RIGHT_BRACE))
             {
                 index += 1;
+            }
+            // A C23 attribute specifier sequence may precede a statement, a
+            // label, or a block-scope declaration. None of them is lowered
+            // from the attribute's own tokens, so the walker steps over the
+            // sequence and classifies the statement from the token past it;
+            // `[[fallthrough]];` reduces to the null statement below.
+            for (u32 attribute_end = 0; c_parse_c23_attribute_at(builder->preprocess, index, task.end, &attribute_end);)
+            {
+                index = attribute_end;
             }
             if (index >= task.end)
             {

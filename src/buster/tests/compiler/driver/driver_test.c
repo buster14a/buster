@@ -5972,6 +5972,67 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(quickjs_temporary);
         }
     }
+    // The C23 attribute syntax, which the frontend did not parse at all: an
+    // attributed declaration failed to register and the error surfaced later
+    // as an unrelated "undeclared identifier".  Two fixtures, because the two
+    // halves fail differently.  The first covers every position the grammar
+    // allows a sequence in and asserts the decorated declarations, layouts
+    // and control flow are unchanged, which is the silent failure mode.  The
+    // second covers [[noreturn]], the one attribute buster acts on, and is
+    // checked in the assembly below as well as run.  Both run under every
+    // register allocator: the statement and label positions are lowering
+    // rather than parsing defects.
+    String8 c_c23_attribute_paths[] = {
+        S8("tests/basic_c_c23_attributes.c"),
+        S8("tests/basic_c_c23_noreturn.c"),
+    };
+    String8 c_c23_attribute_names[] = {
+        S8("buster-c-c23-attributes"),
+        S8("buster-c-c23-noreturn"),
+    };
+    for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_c23_attribute_paths); fixture_index += 1)
+    {
+        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            TemporalArena c23_temporary = scratch_begin(&arguments->arena, 1);
+            String8 fixture_path = buster_test_temporary_path(c23_temporary.arena, c_c23_attribute_names[fixture_index], S8(""));
+            String8 fixture_command_line[] = {
+                c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_c23_attribute_paths[fixture_index],
+            };
+            CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                c23_temporary.arena, compiler_driver_parse_arguments(c23_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+            if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 fixture_arguments[] = {fixture_path};
+                ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                if (fixture_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(c23_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(c23_temporary);
+        }
+    }
+    // Running the fixture cannot tell whether [[noreturn]] was read: a caller
+    // that ignored it still returns normally and still exits 0.  The proof is
+    // that the call is followed by a trap rather than by a return sequence,
+    // and the fixture supplies the control -- die_marked and die_plain differ
+    // in nothing but the attribute.  0x0f 0x0b is ud2, which the emitter
+    // writes as raw bytes rather than as a mnemonic.  Pinning an explicit
+    // target keeps the assertion deterministic on any host.
+    String8 c23_noreturn_assembly_command_line[] = {
+        S8("-S"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_c23_noreturn.c"),
+    };
+    CompilerDriverResult c23_noreturn_assembly = compiler_driver_execute_invocation(
+        arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c23_noreturn_assembly_command_line)));
+    BUSTER_TEST(arguments, c23_noreturn_assembly.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_marked\"\n\t.byte 0x0f, 0x0b")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_scoped\"\n\t.byte 0x0f, 0x0b")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_plain\"\n\tmov eax, 0x0")) != BUSTER_STRING_NO_MATCH);
     // Decimal literals with a large exponent still require correctly rounded
     // binary conversion.  This exact bit pattern is the value Clang emits
     // for 123e+127; an accumulated decimal f64 can drift by two ulps.
