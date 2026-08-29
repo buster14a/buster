@@ -2930,6 +2930,100 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, copy_alias_unknown_size == 8);
     BUSTER_TEST(arguments, !link_test_elf_dynamic_symbol(copy_alias_unknown_executable.executable, S8("__tzname"), 0, 0, 0));
     BUSTER_TEST(arguments, link_test_elf_relocation_count(copy_alias_unknown_executable.executable, 5) == 2);
+    // The same image for AArch64.  That writer builds by patching the x86-64
+    // writer's output, and its fix-up loop walks the PLT range only, so a copy
+    // relocation left behind keeps R_X86_64_COPY -- type 5, which numbered as
+    // an AArch64 type is a 16-bit absolute move the loader would apply over
+    // the slot rather than filling it from the library.
+    //
+    // How many entries that range holds is the number of slots and not the
+    // number of data imports, so `environ` and `__environ` are both imported
+    // here: they share one object, one slot, and one relocation.  The alias
+    // dynamic symbols the slot defines carry no relocation at all, which a
+    // recount over dynamic symbols rather than over the copy range would walk
+    // into.
+    u32 aarch64_copy_words[] = {
+        0xd65f03c0, 0xd503201f, 0, 0, 0, 0, 0, 0,
+    };
+    ObjectSymbol aarch64_copy_symbols[] = {
+        {
+            .name = S8("main"),
+            .size = sizeof(aarch64_copy_words),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8("environ"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+        {
+            .name = S8("tzname"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+        {
+            .name = S8("__environ"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+    };
+    ObjectRelocation aarch64_copy_relocations[] = {
+        {.offset = 8, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        {.offset = 16, .section = OBJECT_SECTION_TEXT, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        {.offset = 24, .section = OBJECT_SECTION_TEXT, .symbol = 3, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+    };
+    ObjectFile aarch64_copy_object = link_test_object_make(arguments->arena, aarch64_target,
+                                                          (ByteSlice){
+                                                              .pointer = (u8*)aarch64_copy_words,
+                                                              .length = sizeof(aarch64_copy_words),
+                                                          },
+                                                          aarch64_copy_symbols, BUSTER_ARRAY_LENGTH(aarch64_copy_symbols), aarch64_copy_relocations,
+                                                          BUSTER_ARRAY_LENGTH(aarch64_copy_relocations));
+    NativeExecutableLinkResult aarch64_copy_executable = link_native_executable(arguments->arena, &aarch64_copy_object,
+                                                                               (NativeExecutableLinkOptions){
+                                                                                   .entry_symbol = S8("main"),
+                                                                                   .runtime_data_symbols = copy_alias_exports,
+                                                                                   .runtime_data_symbol_count = BUSTER_ARRAY_LENGTH(copy_alias_exports),
+                                                                               });
+    BUSTER_TEST(arguments, aarch64_copy_executable.error == LINK_ERROR_NONE);
+    // Two slots -- environ with tzname -- and one jump slot per import, the
+    // three data names plus the hosted stub's `exit`.  No x86-64 type of
+    // either kind survives.
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_executable.executable, 1024) == 2);
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_executable.executable, 1026) == 4);
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_executable.executable, 5) == 0);
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_executable.executable, 7) == 0);
+    u64 aarch64_copy_environ = 0;
+    u64 aarch64_copy_environ_pair = 0;
+    u64 aarch64_copy_environ_alias = 0;
+    u64 aarch64_copy_tzname = 0;
+    u64 aarch64_copy_tzname_size = 0;
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(aarch64_copy_executable.executable, S8("environ"), &aarch64_copy_environ, 0, 0));
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(aarch64_copy_executable.executable, S8("__environ"), &aarch64_copy_environ_pair, 0, 0));
+    BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(aarch64_copy_executable.executable, S8("_environ"), &aarch64_copy_environ_alias, 0, 0));
+    BUSTER_TEST(arguments, aarch64_copy_environ && aarch64_copy_environ == aarch64_copy_environ_pair && aarch64_copy_environ == aarch64_copy_environ_alias);
+    BUSTER_TEST(arguments,
+                link_test_elf_dynamic_symbol(aarch64_copy_executable.executable, S8("tzname"), &aarch64_copy_tzname, &aarch64_copy_tzname_size, 0));
+    BUSTER_TEST(arguments, aarch64_copy_tzname && aarch64_copy_tzname != aarch64_copy_environ && aarch64_copy_tzname_size == 16);
+    // The same object without an export table: the driver could not read the
+    // library, so each import keeps a pointer-sized slot of its own -- three
+    // slots, three copy relocations, still the AArch64 type.
+    NativeExecutableLinkResult aarch64_copy_unknown = link_native_executable(arguments->arena, &aarch64_copy_object,
+                                                                            (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+    BUSTER_TEST(arguments, aarch64_copy_unknown.error == LINK_ERROR_NONE);
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_unknown.executable, 1024) == 3);
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_unknown.executable, 1026) == 4);
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_unknown.executable, 5) == 0);
+    // An AArch64 image with no imported data at all keeps its jump slots and
+    // gains no copy range: the dynamic array is two entries shorter there, and
+    // walking it to DT_NULL is what keeps both lengths readable.
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_libc_executable.executable, 1024) == 0);
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_libc_executable.executable, 1026) == 2);
     ObjectFile aarch64_tls_object = aarch64_libc_object;
     ObjectSection* aarch64_tls_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
     memcpy(aarch64_tls_sections, aarch64_libc_object.sections, sizeof(*aarch64_tls_sections) * OBJECT_SECTION_COUNT);

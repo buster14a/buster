@@ -2044,6 +2044,20 @@ enum
     ELF_GOT_RESERVED_COUNT = 3,
 };
 
+// Dynamic relocation types.  The two machines number theirs independently, and
+// the AArch64 dynamic writer builds its image by patching the x86-64 writer's
+// output, so every type that writer stamped has to be translated on the way
+// out.  Naming them here keeps that translation table in one place: a type
+// left behind is not a link failure but a loader applying the wrong machine's
+// rule, which on AArch64 turns a copy relocation into a 16-bit absolute move.
+enum
+{
+    ELF_RELOCATION_TYPE_X86_64_COPY = 5,
+    ELF_RELOCATION_TYPE_X86_64_JUMP_SLOT = 7,
+    ELF_RELOCATION_TYPE_AARCH64_COPY = 1024,
+    ELF_RELOCATION_TYPE_AARCH64_JUMP_SLOT = 1026,
+};
+
 // An undefined symbol only weak references name resolves to address zero
 // rather than to anything in the image: ELF gives an unresolved weak
 // reference the value 0, which is how a program asks whether a symbol is
@@ -2845,7 +2859,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         // gets its address through the ordinary RELA entry emitted below;
         // a harmless JUMP_SLOT for its reserved, otherwise-unused thunk
         // keeps the PLT relocation table valid for the system loader.
-        link_write_u64(bytes, relocation_entry + 8, ((u64)(import_index + 1) << 32) | 7);
+        link_write_u64(bytes, relocation_entry + 8, ((u64)(import_index + 1) << 32) | ELF_RELOCATION_TYPE_X86_64_JUMP_SLOT);
     }
     ObjectSymbol* entry_symbol = &object->symbols[entry_symbol_index];
     u64 entry_address = image_base + section_offsets[entry_symbol->section] + entry_symbol->value;
@@ -3037,7 +3051,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         u64 relocation_entry = relocation_offset + plt_relocation_size + (u64)copy_relocation_cursor * ELF_RELOCATION_SIZE;
         link_write_u64(bytes, relocation_entry, copy_slot_addresses[import_index]);
-        link_write_u64(bytes, relocation_entry + 8, ((u64)(import_index + 1) << 32) | 5);
+        link_write_u64(bytes, relocation_entry + 8, ((u64)(import_index + 1) << 32) | ELF_RELOCATION_TYPE_X86_64_COPY);
         link_write_u64(bytes, relocation_entry + 16, 0);
         copy_relocation_cursor += 1;
     }
@@ -3421,6 +3435,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     enum
     {
         ELF_DYNAMIC_COUNT = 12,
+        // The two entries the x86-64 writer appends -- DT_RELA and DT_RELASZ
+        // -- when the image carries copy relocations.
+        ELF_DYNAMIC_COPY_COUNT = 2,
     };
     // ldr x0,[sp] / add x1,sp,#8 / add x2,x1,x0,lsl #3 / add x2,x2,#8 —
     // argc, argv and envp — then `bl main`, `bl exit` and a trap.  The hosted
@@ -3501,11 +3518,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     u64 dynamic_program_header = ELF_HEADER_SIZE + 4 * ELF_PROGRAM_HEADER_SIZE;
     u64 dynamic_offset = link_read_u64(bytes, dynamic_program_header + 8);
     u64 relocation_offset = 0;
-    u32 dynamic_count = ELF_DYNAMIC_COUNT + options.dynamic_library_count;
-    for (u32 index = 0; index < dynamic_count; index += 1)
+    u64 copy_relocation_offset = 0;
+    u64 copy_relocation_size = 0;
+    // Walked to its DT_NULL terminator rather than to a recomputed length: the
+    // array grows by ELF_DYNAMIC_COPY_COUNT when the image carries copy
+    // relocations, and DT_RELA/DT_RELASZ are exactly the two entries a fixed
+    // count stops short of.  They are also how the copy range's extent is
+    // learned at all -- it counts slots, not data imports, because two
+    // imported names for one library object share one slot.
+    u64 dynamic_count = (u64)ELF_DYNAMIC_COUNT + options.dynamic_library_count + ELF_DYNAMIC_COPY_COUNT;
+    for (u64 index = 0; index < dynamic_count; index += 1)
     {
-        u64 entry = dynamic_offset + (u64)index * ELF_DYNAMIC_SIZE;
+        u64 entry = dynamic_offset + index * ELF_DYNAMIC_SIZE;
         u64 tag = link_read_u64(bytes, entry);
+        if (!tag)
+        {
+            break;
+        }
         if (tag == 3)
         {
             link_write_u64(bytes, entry, 24);
@@ -3516,8 +3545,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             u64 address = link_read_u64(bytes, entry + 8);
             relocation_offset = address - image_base;
         }
+        else if (tag == 7)
+        {
+            u64 address = link_read_u64(bytes, entry + 8);
+            copy_relocation_offset = address - image_base;
+        }
+        else if (tag == 8)
+        {
+            copy_relocation_size = link_read_u64(bytes, entry + 8);
+        }
     }
-    if (!relocation_offset)
+    if (!relocation_offset || (copy_relocation_offset != 0) != (copy_relocation_size != 0))
     {
         result.error = LINK_ERROR_RELOCATION;
         return result;
@@ -3527,7 +3565,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     {
         u64 relocation = relocation_offset + (u64)import_index * ELF_RELOCATION_SIZE;
         u64 slot_address = link_read_u64(bytes, relocation);
-        link_write_u64(bytes, relocation + 8, ((u64)(import_index + 1) << 32) | 1026);
+        link_write_u64(bytes, relocation + 8, ((u64)(import_index + 1) << 32) | ELF_RELOCATION_TYPE_AARCH64_JUMP_SLOT);
         u64 thunk_offset = plt_offset + (u64)(import_index + 1) * ELF_PLT_ENTRY_SIZE;
         u64 thunk_address = image_base + thunk_offset;
         u64 page_offset = slot_address & 0xfff;
@@ -3541,6 +3579,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         link_write_u32(bytes, thunk_offset + 8, 0xd61f0220);
         link_write_u32(bytes, thunk_offset + 12, 0xd503201f);
         link_write_u64(bytes, (slot_address - image_base), 0);
+    }
+    // The copy relocations sit past the PLT range the loop above walks, so
+    // they still carry the type the staging x86-64 writer stamped -- which on
+    // AArch64 is not a copy but a 16-bit absolute move the loader would apply
+    // over the slot.  Only the type is wrong: the slot address and the dynamic
+    // symbol index the entry already holds are machine-independent, and the
+    // alias dynamic symbols carry no relocation of their own to fix up.
+    for (u64 entry = 0; entry + ELF_RELOCATION_SIZE <= copy_relocation_size; entry += ELF_RELOCATION_SIZE)
+    {
+        u64 relocation = copy_relocation_offset + entry;
+        u64 info = link_read_u64(bytes, relocation + 8);
+        link_write_u64(bytes, relocation + 8, (info & ~(u64)UINT32_MAX) | ELF_RELOCATION_TYPE_AARCH64_COPY);
     }
     String8 entry_name = options.entry_symbol.length ? options.entry_symbol : S8("main");
     u32 entry_symbol_index = link_symbol_find(object, entry_name);
