@@ -38479,24 +38479,37 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                     {
                         continue;
                     }
-                    // The C type this one strips to may already carry the
-                    // qualifier in the IR -- `typedef _Atomic int ai` builds
-                    // `_Atomic int` from its specifiers rather than as a
-                    // qualified copy, so an alias or a further qualification of
-                    // it maps onto an IR type that is atomic already.
-                    // c_ir_add_qualified_type refuses to stack a qualifier on a
-                    // qualified type, so the request is made against the IR
-                    // operand with the union of both sides' qualifiers; the
-                    // dedup there gives back the very type the seed built when
-                    // there is nothing to add.
-                    IrType* unqualified_value = ir_type_from_id(&program->types, unqualified);
-                    bool is_atomic = c_type->is_atomic || (unqualified_value && unqualified_value->is_atomic);
-                    bool is_volatile = c_type->is_volatile || (unqualified_value && unqualified_value->is_volatile);
-                    IrTypeId operand = unqualified_value && (unqualified_value->is_atomic || unqualified_value->is_volatile) &&
-                                               unqualified_value->unqualified_type.value != IR_ID_UNDERLYING_INVALID
-                                           ? unqualified_value->unqualified_type
-                                           : unqualified;
-                    IrTypeId qualified = (is_atomic || is_volatile) ? c_ir_add_qualified_type(program, operand, is_atomic, is_volatile) : unqualified;
+                    IrTypeId qualified = unqualified;
+                    if (c_type->is_atomic || c_type->is_volatile)
+                    {
+                        qualified = c_ir_add_qualified_type(program, unqualified, c_type->is_atomic, c_type->is_volatile);
+                        // Refused for one of two reasons, and the second is
+                        // recoverable: the operand's layout is not resolved yet
+                        // -- a retry, which the worklist performs -- or the
+                        // operand is qualified already.  `typedef _Atomic int
+                        // ai` builds `_Atomic int` from its specifiers rather
+                        // than as a qualified copy, so an alias of it, or a
+                        // further qualification of that alias, maps onto an IR
+                        // type that is atomic already, and stacking a qualifier
+                        // on a qualified type is what the call refuses.  Asking
+                        // again against its operand with the union of both
+                        // sides' qualifiers is the same question spelled the
+                        // way the constructor accepts, and its dedup then hands
+                        // back the very type the first alias built.  Left on
+                        // the failure path so the common qualified type costs
+                        // exactly what it did before.
+                        if (qualified.value == IR_ID_UNDERLYING_INVALID)
+                        {
+                            IrType* operand_value = ir_type_from_id(&program->types, unqualified);
+                            if (operand_value && (operand_value->is_atomic || operand_value->is_volatile) &&
+                                operand_value->unqualified_type.value != IR_ID_UNDERLYING_INVALID)
+                            {
+                                qualified = c_ir_add_qualified_type(program, operand_value->unqualified_type,
+                                                                    c_type->is_atomic || operand_value->is_atomic,
+                                                                    c_type->is_volatile || operand_value->is_volatile);
+                            }
+                        }
+                    }
                     if (qualified.value == IR_ID_UNDERLYING_INVALID)
                     {
                         continue;

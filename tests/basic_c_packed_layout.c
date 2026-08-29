@@ -664,7 +664,8 @@ static struct padded_element (*tag_pointer_to_array)[2] = &padded_pairs[1];
 // and with no diagnostic (#714).  `_Atomic` is deliberately absent from all of
 // this: it builds a type rather than qualifying one, and the two reference
 // compilers disagree about what happens to the request there, so nothing here
-// pins it.
+// pins it -- and this frontend answers it two ways depending on the spelling,
+// which is #726 rather than this.
 struct const_typedef_member
 {
     char byte;
