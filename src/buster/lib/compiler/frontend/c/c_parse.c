@@ -701,6 +701,49 @@ BUSTER_C_INTERNAL bool c_parse_alignment_specifiers(CTypeParseMachine* machine, 
     return valid;
 }
 
+// A typedef declaration is the one place the two alignment spellings mean
+// different things in the same position. `_Alignas` applies to a *declaration*
+// and a typedef declares no object, so C forbids it there (C23 6.7.6p2) and
+// clang and gcc both refuse `typedef _Alignas(16) int t;`; a GNU
+// `aligned(16)` written among the same specifiers is an ordinary type
+// attribute, which both compilers accept and give to every name of the
+// declarator list. Rejecting the run by its position alone dropped the whole
+// declaration for the second spelling (issue #715).
+//
+// The record does not carry which keyword wrote it -- the table is sized at
+// one per token of the unit -- so c_alignment_specifier_is_standard reads it
+// back out of the token stream, the way #689's below-natural rule does. The
+// standard-spelled records are compacted out of the run and reported by the
+// caller, which owns the location to blame, and the rest is left for the type.
+// The run is whatever c_parse_alignment_specifiers just appended, so both
+// callers hold it while it is still the table's tail; the tail is rewound with
+// it there, which is what keeps the declarator-position records they append
+// next contiguous with what survives here.
+BUSTER_C_INTERNAL bool c_parse_typedef_alignment_run(CParseResult* result, CPreprocessResult preprocess, u32 alignment_start, u32* alignment_count)
+{
+    u32 kept = 0;
+    bool rejected = false;
+    for (u32 index = 0; index < *alignment_count; index += 1)
+    {
+        CAlignmentSpecifier specifier = result->alignments[alignment_start + index];
+        if (c_alignment_specifier_is_standard(preprocess, specifier))
+        {
+            rejected = true;
+        }
+        else
+        {
+            result->alignments[alignment_start + kept] = specifier;
+            kept += 1;
+        }
+    }
+    if (result->alignment_count == alignment_start + *alignment_count)
+    {
+        result->alignment_count = alignment_start + kept;
+    }
+    *alignment_count = kept;
+    return rejected;
+}
+
 
 BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
 BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end);
@@ -9070,12 +9113,21 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]), C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("invalid alignment specifier"));
             return;
         }
-        if (declaration->alignment_count && (declaration->kind == C_DECLARATION_FUNCTION || declaration->kind == C_DECLARATION_TYPEDEF))
+        if (declaration->alignment_count && declaration->kind == C_DECLARATION_FUNCTION)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
-                               declaration->kind == C_DECLARATION_FUNCTION ? S8("alignment specifier cannot be applied to a function")
-                                                                           : S8("alignment specifier cannot be applied to a typedef"));
+                               S8("alignment specifier cannot be applied to a function"));
             declaration->alignment_count = 0;
+        }
+        // Neither spelling raises a function's alignment through the specifier
+        // position in clang or gcc, so the whole run goes above; a typedef
+        // keeps the GNU half that c_parse_typedef_alignment_run separates from
+        // the `_Alignas` records this reports.
+        else if (declaration->alignment_count && declaration->kind == C_DECLARATION_TYPEDEF &&
+                 c_parse_typedef_alignment_run(result, preprocess, declaration->alignment_start, &declaration->alignment_count))
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                               S8("alignment specifier cannot be applied to a typedef"));
         }
         // A GNU `aligned` attribute may also sit on the declarator rather than
         // among the specifiers: after it
@@ -9093,9 +9145,11 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
         // A typedef reaches them too, and there the request belongs to the
         // type the declarator names rather than to any object: the run is left
         // on the declaration for c_parse_declaration_type to move onto the
-        // type and clear.  The specifier-position run above is already gone by
-        // then -- `_Alignas` may not appear in a typedef declaration at all --
-        // so what survives here is exactly the declarator's own attributes.
+        // type and clear.  Whatever survived the specifier-position rejection
+        // above is in front of it in the same run, and that half is shared:
+        // every declarator of the list scans the specifiers for itself, so
+        // `typedef int __attribute__((aligned(16))) t5, t6;` records the
+        // request once per name.
         if (declaration->kind == C_DECLARATION_OBJECT || declaration->kind == C_DECLARATION_TYPEDEF)
         {
             u32 declarator_alignment_start = 0;
@@ -11230,12 +11284,19 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
     {
         return false;
     }
-    if (alignment_count && (is_typedef || is_register))
+    if (alignment_count && is_register)
     {
         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
-                           is_typedef ? S8("alignment specifier cannot be applied to a typedef")
-                                      : S8("alignment specifier cannot be applied to a register object"));
+                           S8("alignment specifier cannot be applied to a register object"));
         alignment_count = 0;
+    }
+    // A block-scope typedef splits the run the file-scope path does: the
+    // `_Alignas` records are the ones C forbids on a typedef, and the GNU
+    // `aligned` ones stay for the type every declarator of the list names.
+    else if (alignment_count && is_typedef && c_parse_typedef_alignment_run(result, preprocess, alignment_start, &alignment_count))
+    {
+        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                           S8("alignment specifier cannot be applied to a typedef"));
     }
     CCleanupAttributeInfo declaration_cleanup = {0};
     c_parse_cleanup_attribute_scan(preprocess, start, declarator_start, true, &declaration_cleanup);
@@ -11484,15 +11545,20 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         // A block-scope `typedef int cache_line __attribute__((aligned(64)));`
         // writes the request on the type it declares, not on an object, so it
         // moves onto the type the way the file-scope path in
-        // c_parse_declaration_type does.  The run is the declarator's alone:
-        // the specifier-position one is diagnosed and cleared above, which is
-        // also why nothing was copied into this segment's run.
-        if (is_typedef && segment_alignment_count)
+        // c_parse_declaration_type does.  Which run carries it is the question
+        // the object rows below answer the same way: a declarator that wrote a
+        // list of its own has the shared records copied in behind it, and one
+        // that wrote none reads the shared run directly.
+        u32 declarator_alignment_start = segment_alignment_count ? segment_alignment_start : alignment_start;
+        u32 declarator_alignment_count = segment_alignment_count ? segment_alignment_count : alignment_count;
+        if (is_typedef && declarator_alignment_count)
         {
-            type = c_parse_add_type_alignment(result, type, segment_alignment_start, segment_alignment_count);
-            segment_alignment_start = 0;
-            segment_alignment_count = 0;
+            type = c_parse_add_type_alignment(result, type, declarator_alignment_start, declarator_alignment_count);
         }
+        // The type carries a typedef's request from here, so the name itself
+        // asks for no alignment: a typedef declares no object to align.
+        declarator_alignment_start = is_typedef ? 0 : declarator_alignment_start;
+        declarator_alignment_count = is_typedef ? 0 : declarator_alignment_count;
         // A block-scope declarator with a parameter list declares a function
         // with external linkage rather than an object -- DoomGeneric's
         // i_video.c declares `extern void I_InitInput(void);` inside
@@ -11574,8 +11640,8 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             .declaration_token_plus_one = name_index + 1,
             .declaration_token_start = segment_start,
             .declaration_token_count = segment_end - segment_start,
-            .alignment_start = segment_alignment_count ? segment_alignment_start : alignment_start,
-            .alignment_count = segment_alignment_count ? segment_alignment_count : alignment_count,
+            .alignment_start = declarator_alignment_start,
+            .alignment_count = declarator_alignment_count,
             .kind = is_typedef ? C_ENTITY_TYPEDEF : C_ENTITY_LOCAL,
             .is_definition = true,
             .is_static_storage = is_static_storage,

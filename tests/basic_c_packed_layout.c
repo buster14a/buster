@@ -572,6 +572,23 @@ typedef raised_scalar raised_again;
 typedef int typedef_list_raised __attribute__((aligned(64))), typedef_list_plain;
 typedef int typedef_list_plain_first, typedef_list_raised_second __attribute__((aligned(64)));
 
+// The specifier position of the same list, where the request belongs to the
+// declaration's type rather than to one declarator, so Clang and GCC give
+// *every* name of the list the alignment.  Buster refused the declaration by
+// the position alone (#715): the diagnostic is right that `_Alignas` may not
+// appear in a typedef declaration -- a typedef declares no object for a
+// declaration's alignment to apply to, and both reference compilers reject
+// `typedef _Alignas(16) int t;` -- and a GNU `aligned` written there is an
+// ordinary type attribute instead.
+typedef int __attribute__((aligned(16))) typedef_specifier_first, typedef_specifier_second;
+
+// Both positions in one declaration: the shared request reaches both names and
+// a declarator's own raises the name that wrote it alone.  This is the one
+// shape here the two reference compilers answer differently -- GCC drops the
+// declarator's own and leaves `typedef_specifier_raised` at 8 -- and Clang is
+// the oracle, as it is for every other alignment answer in this file.
+typedef int __attribute__((aligned(8))) typedef_specifier_shared, typedef_specifier_raised __attribute__((aligned(64)));
+
 struct raised_typedef_member
 {
     char byte;
@@ -1129,5 +1146,13 @@ int main(void)
     if (sizeof(lowered_scalar[2]) != 8 || _Alignof(lowered_scalar[2]) != 2) return 136;
     if (sizeof(struct padded_element[2]) != 32) return 137;
     if (((lowered_scalar[2]){3, 4})[1] != 4) return 138;
+
+    // The specifier position, which is shared by the whole list rather than
+    // owned by one declarator, at both scopes for the same reason the
+    // declarator position is asked at both.
+    if (_Alignof(typedef_specifier_first) != 16 || _Alignof(typedef_specifier_second) != 16) return 139;
+    if (_Alignof(typedef_specifier_shared) != 8 || _Alignof(typedef_specifier_raised) != 64) return 140;
+    typedef int __attribute__((aligned(16))) block_typedef_specifier_first, block_typedef_specifier_second;
+    if (_Alignof(block_typedef_specifier_first) != 16 || _Alignof(block_typedef_specifier_second) != 16) return 141;
     return 0;
 }

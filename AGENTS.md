@@ -2506,7 +2506,23 @@ on a commit you already know is incomplete tells nobody anything.
   `int`, so marking that would realign every `int` in the translation unit.
   The copy carries `has_unqualified_type`, which is what gives both layout
   engines one place to read the natural alignment from and keeps the alias
-  compatible with what it aliases. On the System V side one more rule follows:
+  compatible with what it aliases. **Which of the two positions it is written
+  in decides how many names it reaches**: after the declarator it belongs to
+  that declarator alone, and among the specifiers it belongs to the
+  declaration's type, so `typedef int __attribute__((aligned(16))) t5, t6;`
+  aligns both names. That position is also where `_Alignas` is a constraint
+  violation rather than a request -- a typedef declares no object for a
+  declaration's alignment to apply to, and Clang and GCC both refuse
+  `typedef _Alignas(16) int t;` -- so the run is *partitioned* by spelling
+  rather than rejected by position, which had dropped the whole declaration
+  (issue #715). `c_parse_typedef_alignment_run` in `c_parse.c` does that for
+  both the file-scope and the block-scope parser, reading the spelling back
+  out of the token stream with `c_alignment_specifier_is_standard`, and it
+  rewinds the specifier table with the records it drops so the
+  declarator-position ones each parser appends next stay contiguous with what
+  survives. A **function** keeps the position rejection whole: neither
+  reference compiler raises a function's alignment through it.
+  On the System V side one more rule follows:
   "contains unaligned fields" there means unaligned for the field's *natural*
   alignment, so `struct { char tag; pair value; }` is passed in memory even
   though `value` sits where its type asked. `IrTypeLayout::natural_alignment`
