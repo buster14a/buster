@@ -38595,16 +38595,19 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 bool fields_resolved = true;
                 // One report per aggregate, whatever the definition got wrong:
                 // the diagnostic budget allows one diagnostic per type, and the
-                // straddling-bit-field report below shares it. The member that
-                // carried the rejected specifier is kept as an index rather
+                // rejected alignment specifier and the named zero-width
+                // bit-field share it, so the kind travels with the message
+                // rather than being fixed at the emission site. The member that
+                // carried the rejected construct is kept as an index rather
                 // than as a location, so an aggregate that lays out cleanly --
                 // every aggregate of a working translation unit -- does not
                 // recover a source location it will not use. The out-of-line
                 // rejection string is written only on rejection, which is why
                 // it is initialized once here rather than per member.
-                String8 alignment_rejection = {0};
+                String8 definition_rejection = {0};
                 String8 member_rejection = {0};
-                u32 alignment_rejection_member = UINT32_MAX;
+                u32 definition_rejection_member = UINT32_MAX;
+                CDiagnosticKind definition_rejection_kind = C_DIAGNOSTIC_INVALID_ALIGNMENT;
                 for (u32 field_index = 0; field_index < c_type->member_count; field_index += 1)
                 {
                     CMember* member = &parse.members[c_type->member_start + field_index];
@@ -38681,10 +38684,10 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                         fields_resolved = false;
                         break;
                     }
-                    if (member_status == C_IR_ALIGNMENT_REJECTED && !alignment_rejection.length)
+                    if (member_status == C_IR_ALIGNMENT_REJECTED && !definition_rejection.length)
                     {
-                        alignment_rejection = member_rejection;
-                        alignment_rejection_member = field_index;
+                        definition_rejection = member_rejection;
+                        definition_rejection_member = field_index;
                     }
                     u32 member_bit_width = member->bit_width;
                     if (member->is_bit_field && member->bit_width_token_count)
@@ -38701,6 +38704,27 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                             break;
                         }
                         member_bit_width = (u32)evaluated_width;
+                    }
+                    // C requires the width of a *named* bit-field to be at
+                    // least one bit (C23 6.7.3.2p4); zero is reserved for the
+                    // unnamed `int : 0;`, where the width is not a width at all
+                    // but the request to move the next member to a boundary
+                    // that the layout below performs. Accepted, the named
+                    // spelling laid out a member occupying no bits that could
+                    // still be assigned and read back. The check sits here,
+                    // where the constant expression has just been folded, so
+                    // `int b : 1 - 1;` is refused with the literal `int b : 0;`
+                    // rather than only the spelling the parse fast path folds.
+                    // The layout below still runs, the same way a rejected
+                    // alignment specifier still hands back an alignment: the
+                    // definition finishes and the program hears about the
+                    // member it wrote rather than about a type without a
+                    // layout.
+                    if (member->is_bit_field && member->name.length && !member_bit_width && !definition_rejection.length)
+                    {
+                        definition_rejection = string_format(arena, S8("named bit-field '{S8}' has zero width"), member->name);
+                        definition_rejection_member = field_index;
+                        definition_rejection_kind = C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH;
                     }
                     u64 offset = 0;
                     u32 bit_offset = 0;
@@ -38821,20 +38845,20 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 {
                     continue;
                 }
-                if (aggregate_status == C_IR_ALIGNMENT_REJECTED && !alignment_rejection.length)
+                if (aggregate_status == C_IR_ALIGNMENT_REJECTED && !definition_rejection.length)
                 {
-                    alignment_rejection = aggregate_rejection;
+                    definition_rejection = aggregate_rejection;
                 }
-                if (alignment_rejection.length)
+                if (definition_rejection.length)
                 {
                     result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
-                        .message = alignment_rejection,
-                        .location = alignment_rejection_member < c_type->member_count
-                                        ? parse.members[c_type->member_start + alignment_rejection_member].location
+                        .message = definition_rejection,
+                        .location = definition_rejection_member < c_type->member_count
+                                        ? parse.members[c_type->member_start + definition_rejection_member].location
                                     : c_type->definition_start < preprocess.token_count
                                         ? c_preprocess_token_location(&preprocess, preprocess.tokens[c_type->definition_start])
                                         : (CSourceLocation){0},
-                        .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                        .kind = definition_rejection_kind,
                     };
                 }
                 u64 size = (bit_position + 7) / 8;

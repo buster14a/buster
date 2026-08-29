@@ -11495,6 +11495,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     }
     scratch_end(tiling_temporary);
 
+    // C reserves the zero width for the *unnamed* bit-field, where it declares
+    // no member at all and only moves the next one to its type's boundary; a
+    // named member of zero width is refused (C23 6.7.3.2p4), as it is by both
+    // reference compilers. Accepted, it laid out a member that occupies no
+    // bits and could still be assigned and read back. Each spelling is its own
+    // lowering because one report is issued per aggregate: the literal width,
+    // which the parse fast path also folds, the constant expression, which
+    // only the lowering below folds, and the union, whose members never share
+    // a storage unit and so reach the width along a different arm.
+    struct
+    {
+        String8 source;
+        String8 path;
+    } zero_width_named_sources[] = {
+        {S8("struct named_zero_width { char c; int b : 0; };\n"), S8("named-zero-width.c")},
+        {S8("struct named_zero_width_expression { char c; int b : 1 - 1; };\n"), S8("named-zero-width-expression.c")},
+        {S8("union __attribute__((packed)) named_zero_width_union { char c; int b : 0; };\n"), S8("named-zero-width-union.c")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(zero_width_named_sources); index += 1)
+    {
+        TemporalArena named_zero_temporary = scratch_begin(0, 0);
+        CPreprocessResult named_zero_preprocess = {0};
+        CParseResult named_zero_parse = {0};
+        CIRLowerResult named_zero = c_test_lower_source(named_zero_temporary.arena, zero_width_named_sources[index].source,
+                                                        zero_width_named_sources[index].path, target_native, &named_zero_preprocess, &named_zero_parse);
+        BUSTER_TEST(arguments, named_zero_preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, named_zero_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, named_zero.diagnostic_count == 1);
+        if (named_zero.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, named_zero.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH);
+            BUSTER_STRING_TEST(arguments, named_zero.diagnostics[0].message, S8("named bit-field 'b' has zero width"));
+        }
+        scratch_end(named_zero_temporary);
+    }
+
+    // The unnamed spelling is the one the rule exists for, and it keeps the
+    // layout it has always had: three bits, a boundary, three more bits in the
+    // second storage unit. `struct __attribute__((packed)) zero_width_bits` in
+    // tests/basic_c_packed_layout.c covers the packed half of the same rule.
+    TemporalArena unnamed_zero_temporary = scratch_begin(0, 0);
+    CPreprocessResult unnamed_zero_preprocess = {0};
+    CParseResult unnamed_zero_parse = {0};
+    CIRLowerResult unnamed_zero = c_test_lower_source(unnamed_zero_temporary.arena,
+                                                      S8("struct unnamed_zero_width { int a : 3; int : 0; int b : 3; };\n"
+                                                         "struct unnamed_zero_width unnamed_zero_width_object;\n"
+                                                         "_Static_assert(sizeof(struct unnamed_zero_width) == 8, \"unnamed zero width\");\n"),
+                                                      S8("unnamed-zero-width.c"), target_native, &unnamed_zero_preprocess, &unnamed_zero_parse);
+    BUSTER_TEST(arguments, unnamed_zero_preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, unnamed_zero_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, unnamed_zero.diagnostic_count == 0);
+    if (unnamed_zero.program)
+    {
+        IrGlobal* unnamed_zero_global = c_test_find_ir_global(unnamed_zero.program->modules, unnamed_zero.program, S8("unnamed_zero_width_object"));
+        IrType* unnamed_zero_type = unnamed_zero_global ? ir_type_from_id(&unnamed_zero.program->types, unnamed_zero_global->type) : 0;
+        BUSTER_TEST(arguments, unnamed_zero_type != 0 && unnamed_zero_type->field_count == 3);
+        if (unnamed_zero_type && unnamed_zero_type->field_count == 3)
+        {
+            BUSTER_TEST(arguments, unnamed_zero_type->layout.size == 8 && unnamed_zero_type->layout.alignment == 4);
+            BUSTER_TEST(arguments, unnamed_zero_type->fields[1].is_bit_field && unnamed_zero_type->fields[1].bit_width == 0);
+            BUSTER_TEST(arguments, unnamed_zero_type->fields[2].offset == 4 && unnamed_zero_type->fields[2].bit_offset == 0);
+        }
+    }
+    scratch_end(unnamed_zero_temporary);
+
     return result;
 }
 

@@ -3730,6 +3730,36 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                            c_invalid_labels.analysis_diagnostic_count == 1 && !c_invalid_labels.has_object);
     BUSTER_TEST(arguments, string_starts_with_sequence(c_invalid_labels.diagnostic,
                                                        S8("tests/basic_c_invalid_labels.c:17:11: in function 'invalid_unsafe_branch': computed goto requires a function-local void pointer label value")));
+    // A named bit-field of zero width is not a declaration C has: the zero
+    // width belongs to the unnamed spelling, which declares no member and only
+    // moves the next one to its type's boundary.  Accepted, it laid out a
+    // member that occupies no bits and could still be assigned and read back,
+    // which is a layout no other compiler on the target produces.  The fixture
+    // carries both the literal and the constant-expression width -- the parse
+    // folds only the literal one -- plus the unnamed spelling that stays
+    // legal, so a diagnostic that reached too far fails this test rather than
+    // passing it.  One report is issued per aggregate, so the two rejected
+    // definitions are two diagnostics and the first is the one reported.
+    String8 c_invalid_bit_field_width_path = buster_test_temporary_path(arguments->arena, S8("buster-c-invalid-bit-field-width"),
+#if BUSTER_WINDOWS
+                                                                        S8(".exe"));
+#else
+                                                                        S8(""));
+#endif
+    String8 c_invalid_bit_field_width_command_line[] = {
+        S8("-g0"),
+        S8("-o"),
+        c_invalid_bit_field_width_path,
+        S8("tests/basic_c_invalid_bit_field_width.c"),
+    };
+    CompilerDriverResult c_invalid_bit_field_width = compiler_driver_execute_invocation(
+        arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_invalid_bit_field_width_command_line)));
+    BUSTER_TEST(arguments, c_invalid_bit_field_width.error == COMPILER_DRIVER_ERROR_ANALYSIS);
+    BUSTER_TEST(arguments, c_invalid_bit_field_width.tokenizer_error_count == 0 && c_invalid_bit_field_width.parser_diagnostic_count == 0 &&
+                           c_invalid_bit_field_width.analysis_diagnostic_count == 2 && !c_invalid_bit_field_width.has_object);
+    BUSTER_TEST(arguments, string_starts_with_sequence(c_invalid_bit_field_width.diagnostic,
+                                                       S8("tests/basic_c_invalid_bit_field_width.c:17:9: named bit-field 'b' has zero width")));
     String8 c_labels_aarch64_path = buster_test_temporary_path(arguments->arena, S8("buster-c-labels-aarch64"), S8(".o"));
     String8 c_labels_aarch64_command_line[] = {
         S8("-c"),

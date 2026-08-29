@@ -2435,6 +2435,18 @@ on a commit you already know is incomplete tells nobody anything.
   written through is the unsigned integer of the same width, because the shift
   has to see the raw byte. A zero-width bit-field keeps aligning to its declared
   type even inside a packed aggregate, which is also what Clang and GCC do.
+  **A zero width belongs to the *unnamed* bit-field alone**: C requires a named
+  one to be at least one bit wide (C23 6.7.3.2p4) and both reference compilers
+  refuse `int b : 0;`, where accepting it laid out a member that occupies no
+  bits and can still be assigned and read back (issue #710). The width is
+  checked in `c_lower_to_ir` where the constant expression is folded, so the
+  expression spelling `int b : 1 - 1;` is refused with the literal one rather
+  than only the spelling the parse fast path folds. The report shares the
+  one-diagnostic-per-type budget with the rejected alignment specifier -- they
+  are one `definition_rejection` slot whose kind travels with the message --
+  and the definition still lays out, the way a rejected alignment specifier
+  still hands back an alignment, so the program hears about the member it wrote
+  rather than about a type that never got a layout.
   On AArch64 the accesses this reaches land at whatever byte offset packing
   chose, and the scaled unsigned-immediate load/store addresses only multiples
   of its own width, so `codegen_canonical_a64_memory_operation_base` falls back
