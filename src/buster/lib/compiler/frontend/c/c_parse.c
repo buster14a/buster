@@ -8906,6 +8906,16 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                 // declarator parser the function body as a declarator suffix
                 // and fail every parenthesized definition.
                 u32 suffix_end = c_parse_declarator_segment_end(preprocess, declarator_start, declarator_end);
+                // The parenthesized frame requires the declarator to end
+                // exactly at the range it is given and knows nothing about a
+                // trailing attribute list, so what it is given is trimmed of
+                // one (`void (*fp)(int) __attribute__((aligned(64)));`).  The
+                // trailing-attribute scan above already read the list off the
+                // untrimmed range, so the trimmed tokens need no second pass.
+                // The trim stays inside the segment end, itself the top-level
+                // comma boundary, so a sibling declarator's own list is never
+                // taken for this one's.
+                suffix_end = c_parse_trailing_attribute_start(preprocess, declarator_start, suffix_end);
                 declaration->type =
                     c_parse_parenthesized_declaration_type(machine, result, preprocess, base, declarator_start, name_index, suffix_end, true);
                 // The parenthesized declarator parser owns the parameter
@@ -11076,7 +11086,16 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 cleanup.last_end = segment_cleanup.last_end;
             }
         }
-        u32 index = segment_start;
+        // The specifiers are walked once, before this loop, so the attribute
+        // skip that follows them covers the first declarator alone.  A
+        // declarator after a comma may carry a list of its own --
+        // `int a = 1, __attribute__((aligned(8))) b = 2;` -- and reading that
+        // list as the declarator fails the whole declaration.  The layout scan
+        // above already read it, and its range is this segment's, so the
+        // attribute lands on the declarator that wrote it.  Only a segment
+        // that did not start the list pays the scan; the first one begins
+        // exactly where the specifier walk left off, past its own list.
+        u32 index = segment_start == declarator_start ? segment_start : c_parse_skip_attributes(preprocess, segment_start, suffix_end);
         u32 derived_start = result->type_count;
         CTypeId type = is_auto_type ? auto_type : c_parse_pointer_chain(result, preprocess, base, &index, suffix_end);
         CToken name = {0};
@@ -11107,7 +11126,17 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             {
                 return false;
             }
-            if (c_parse_parenthesized_declarator_name(preprocess, index, suffix_end, &parenthesized_name))
+            // The parenthesized frame requires the declarator to end exactly
+            // at the range it is given and knows nothing about a trailing
+            // attribute list, so the child is handed the range trimmed of one
+            // (`void (*fp)(int) __attribute__((aligned(64))) = 0;`).  The
+            // segment's layout scan above already read the list off the
+            // untrimmed range, and `index` still resumes at suffix_end below,
+            // so the trimmed tokens need no second pass.  The trim stays
+            // inside suffix_end, itself bounded by the top-level comma, so a
+            // sibling declarator's own list is never taken for this one's.
+            u32 group_end = c_parse_trailing_attribute_start(preprocess, index, suffix_end);
+            if (c_parse_parenthesized_declarator_name(preprocess, index, group_end, &parenthesized_name))
             {
                 // The name may be a group deeper than this one:
                 // `void (*(*x)(void *, const char *))(void)` declares a
@@ -11124,7 +11153,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 return false;
             }
             name = preprocess.tokens[name_index];
-            type = c_parse_parenthesized_declaration_type(machine, result, preprocess, type, index, name_index, suffix_end, true);
+            type = c_parse_parenthesized_declaration_type(machine, result, preprocess, type, index, name_index, group_end, true);
             index = suffix_end;
         }
         else

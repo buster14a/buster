@@ -5935,12 +5935,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // agreeing with itself.  The single translation unit covers the four
     // positions the two attributes reach a layout from -- before the tag,
     // after the body, on one member, on an object declarator -- the two
-    // member-declarator positions the shared-specifier one does not cover
-    // (after a parenthesized declarator, and at the head of a declarator that
-    // is not the first of its list), which declarator of a list an `aligned`
-    // attribute belongs to, plus the `#pragma pack` ceiling they share, and
-    // runs under every allocator because packed bit-fields are lowering rather
-    // than parsing work.
+    // declarator positions the shared-specifier one does not cover (after a
+    // parenthesized declarator, and at the head of a declarator that is not
+    // the first of its list), each on a member and on an object declarator at
+    // file and block scope because a separate parser reads each, which
+    // declarator of a list an `aligned` attribute belongs to, plus the
+    // `#pragma pack` ceiling they share, and runs under every allocator
+    // because packed bit-fields are lowering rather than parsing work.
     for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators); allocator_index += 1)
     {
         TemporalArena packed_temporary = scratch_begin(&arguments->arena, 1);

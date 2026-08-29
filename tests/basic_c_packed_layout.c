@@ -14,6 +14,8 @@
 // a declarator that is not the first of its list has a fourth.  Which
 // declarator of a list the attribute sits on is a separate question from
 // where in that declarator it is written, and it decides which members move.
+// An object declarator reaches the last two positions as well, at file scope
+// and at block scope, each parsed by code of its own.
 
 // Packed before the tag, which is how QuickJS spells its unaligned readers.
 struct __attribute__((packed)) leading
@@ -206,6 +208,15 @@ static char leading_aligned[3] __attribute__((aligned(64)));
 __attribute__((aligned(128))) static char specifier_aligned[3];
 static char between_them = 1;
 
+// The same list written after a parenthesized object declarator, where it
+// follows the whole derivation rather than the name.  The neighbours on either
+// side are what make the boundary below a claim about the attribute: without
+// it the pointer is placed at its natural alignment of 8, immediately after
+// `before_file_pointer`.
+static char before_file_pointer = 2;
+static void (*file_pointer_aligned)(int) __attribute__((aligned(64)));
+static char after_file_pointer = 3;
+
 int main(void)
 {
     if (sizeof(struct leading) != 5 || _Alignof(struct leading) != 1) return 1;
@@ -331,5 +342,28 @@ int main(void)
     packed_shared.first = 0x55667788;
     packed_shared.second = -1;
     if (packed_shared.first != 0x55667788 || packed_shared.second != -1) return 62;
+
+    // The same two positions on an object declarator rather than a member one:
+    // after a parenthesized declarator, at file scope just above and at block
+    // scope here, and at the head of a declarator that is not the first of its
+    // list.  Reading either list as part of the declarator dropped the whole
+    // declaration, so the names below looked undeclared rather than
+    // misaligned.  The padding around the two automatic objects gives the
+    // frame something to place them after, so a satisfied boundary is the
+    // attribute's doing.  Only the attributed declarator's own boundary is
+    // checked: whose alignment an object declarator's list raises is the
+    // question #680 answered for a member, and these numbers hold under
+    // either answer.
+    char local_pad[3];
+    void (*local_pointer_aligned)(int) __attribute__((aligned(64))) = 0;
+    char local_pad_two[5];
+    int list_first = 1, __attribute__((aligned(32))) list_second = 2;
+    local_pad[0] = 4;
+    local_pad_two[0] = 5;
+    if ((unsigned long long)(void *)&file_pointer_aligned % 64) return 63;
+    if ((unsigned long long)(void *)&local_pointer_aligned % 64) return 64;
+    if ((unsigned long long)(void *)&list_second % 32) return 65;
+    if (local_pointer_aligned != 0 || list_first != 1 || list_second != 2) return 66;
+    if (before_file_pointer != 2 || after_file_pointer != 3 || local_pad[0] != 4 || local_pad_two[0] != 5) return 67;
     return 0;
 }
