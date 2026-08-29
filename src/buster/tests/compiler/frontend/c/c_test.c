@@ -5261,6 +5261,69 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
         BUSTER_TEST(arguments, dereference_count == 1);
         BUSTER_TEST(arguments, ir_validate_canonical_module(pointer_body_ir.program, module).error == IR_VALIDATION_NONE);
     }
+    // `*p` on a pointer to an array designates the array object, so the
+    // dereference is a place and nothing reads it: a `LOAD` of the array type
+    // would copy the whole object into a temporary, and the subscript that
+    // follows would then index the copy -- which is how `(*p)[1] = v` stored
+    // into a frame slot and dropped the assignment (#719).  Both bodies below
+    // dereference and index once; only the reading one loads, and neither
+    // loads anything of array type.
+    CPreprocessResult pointer_to_array_tokens = c_preprocess(scalar_arena,
+                                                             S8("void store_element(int (*p)[3], int v)\n"
+                                                                "{ (*p)[1] = v; }\n"
+                                                                "int read_element(int (*p)[3])\n"
+                                                                "{ return (*p)[1]; }\n"),
+                                                             (CPreprocessOptions){0});
+    CParseResult pointer_to_array_parse = c_parse(scalar_arena, pointer_to_array_tokens);
+    CIRLowerResult pointer_to_array_ir =
+        c_lower_to_ir(scalar_arena, S8("pointer-to-array.c"), pointer_to_array_tokens, pointer_to_array_parse, lp64_target);
+    BUSTER_TEST(arguments, pointer_to_array_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, pointer_to_array_ir.diagnostic_count == 0);
+    if (pointer_to_array_ir.program)
+    {
+        IrModule* module = &pointer_to_array_ir.program->modules[0];
+        BUSTER_TEST(arguments, module->function_count == 2);
+        if (module->function_count == 2)
+        {
+            u32 aggregate_load_count = 0;
+            u32 store_dereference_count = 0;
+            u32 store_index_count = 0;
+            u32 store_load_count = 0;
+            u32 read_load_count = 0;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = &module->functions[function_index];
+                BUSTER_TEST(arguments, function->state == IR_FUNCTION_LOWERED);
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    IrType* type = ir_type_from_id(&pointer_to_array_ir.program->types, instruction->canonical_type);
+                    if (instruction->opcode == IR_OPCODE_LOAD && type && type->kind == IR_TYPE_ARRAY)
+                    {
+                        aggregate_load_count += 1;
+                    }
+                    if (!function_index)
+                    {
+                        store_dereference_count += instruction->opcode == IR_OPCODE_DEREFERENCE;
+                        store_index_count += instruction->opcode == IR_OPCODE_INDEX;
+                        store_load_count += instruction->opcode == IR_OPCODE_LOAD;
+                    }
+                    else
+                    {
+                        read_load_count += instruction->opcode == IR_OPCODE_LOAD;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, aggregate_load_count == 0);
+            BUSTER_TEST(arguments, store_dereference_count == 1);
+            BUSTER_TEST(arguments, store_index_count == 1);
+            // The pointer and the stored value are the only things read.
+            BUSTER_TEST(arguments, store_load_count == 2);
+            // The pointer and the element it names.
+            BUSTER_TEST(arguments, read_load_count == 2);
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(pointer_to_array_ir.program, module).error == IR_VALIDATION_NONE);
+    }
     CPreprocessResult function_pointer_tokens =
         c_preprocess(scalar_arena,
                      S8("extern int launch(void *(*)(void *), void *);\n"

@@ -16788,7 +16788,17 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
                 {
                     return false;
                 }
-                result = c_ir_emit_load_place(builder, place, element, pointer_source);
+                // `*p` on a pointer to an array designates the array object,
+                // exactly the way a named array does (C 6.5.3.2p4), and an
+                // array lvalue is never loaded: it decays, or a subscript
+                // indexes it in place.  Loading one copies the whole object
+                // into a temporary, and `(*p)[i] = v` then stored into that
+                // copy and dropped the assignment.  The walk keeps array and
+                // aggregate lvalues as places for the same reason -- see the
+                // address-of arm above -- so hand the place straight back.
+                result = element_type_value && element_type_value->kind == IR_TYPE_ARRAY
+                             ? place
+                             : c_ir_emit_load_place(builder, place, element, pointer_source);
             }
         }
         if (result.value == IR_ID_UNDERLYING_INVALID)

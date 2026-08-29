@@ -2323,6 +2323,18 @@ on a commit you already know is incomplete tells nobody anything.
   requiring it of all of them cost eight musl units with an
   `INVALID_IR` blamed on whichever function happened to be first in the
   module.
+- **An array lvalue is never loaded**, whichever expression names it. A named
+  array keeps its place, and so does `*p` on a pointer to an array: C 6.5.3.2p4
+  says the dereference designates the array object, and what follows either
+  decays it or indexes it in place, neither of which reads anything. Loading
+  one instead emits an `IR_OPCODE_LOAD` of the array type, which the code
+  generator honours by copying the whole object into a frame temporary — so
+  `(*p)[1] = v` indexed the copy and the store was dropped with no diagnostic
+  (#719), while `p[0][1] = v` next to it worked. The expression walk in
+  `c_gen.c` returns the place from its dereference arm for the same reason its
+  address-of arm accepts one; `tests/basic_c_packed_layout.c` runs all three
+  spellings of the store and `c_test_frontend_global_types` pins that no lowered
+  function holds a load of array type.
 - Native lowering is `canonical IR -> machine IR -> scheduling/register
   allocation -> encoding`. Selection patterns and scheduling classes remain
   separate metadata domains even when they share instruction-form IDs.

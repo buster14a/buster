@@ -1133,13 +1133,25 @@ int main(void)
     if (sizeof(*tag_pointer_to_array) != 32 || _Alignof(struct padded_element[2]) != 16) return 132;
     if ((char *)typedef_pointer_to_array - (char *)file_rows != 12) return 133;
     if ((char *)tag_pointer_to_array - (char *)padded_pairs != 32) return 134;
-    // The store goes through the subscript spelling rather than
-    // `(*typedef_pointer_to_array)[2] = 9`, which is dropped whole (#719): the
-    // dereference materializes a copy of the array and the store lands in it.
-    // That is a pre-existing defect of the deref, not of this declaration --
-    // `int (*p)[3]` at block scope has always done it.
-    typedef_pointer_to_array[0][2] = 9;
+    // The store goes through the dereference spelling, which used to be
+    // dropped whole (#719): `*p` materialized a copy of the array and the
+    // subscript indexed the copy, so the assignment reached a temporary and
+    // the object kept its old value.  All three spellings of the same store
+    // reach the object, and the subscript spelling that stood in for them
+    // still does.
+    (*typedef_pointer_to_array)[2] = 9;
     if (file_rows[1][2] != 9 || (*typedef_pointer_to_array)[2] != 9) return 135;
+    *(*typedef_pointer_to_array + 1) = 8;
+    if (file_rows[1][1] != 8 || typedef_pointer_to_array[0][1] != 8) return 144;
+    (*(typedef_pointer_to_array + 0))[0] = 7;
+    if (file_rows[1][0] != 7) return 145;
+    typedef_pointer_to_array[0][2] = 6;
+    if (file_rows[1][2] != 6 || (*typedef_pointer_to_array)[2] != 6) return 146;
+    // The same store through a pointer to an array of an over-aligned
+    // aggregate, whose element the dereference would have copied sixteen
+    // bytes at a time.
+    (*tag_pointer_to_array)[1].byte = 5;
+    if (padded_pairs[1][1].byte != 5 || (*tag_pointer_to_array)[1].byte != 5) return 147;
 
     // The array type name in an expression: the size and alignment of one the
     // compiler never places, and the compound literal that does place one.
