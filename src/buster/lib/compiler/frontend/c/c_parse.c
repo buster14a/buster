@@ -12767,6 +12767,26 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
             {
                 declaration->type = c_parse_variable_argument_list_type(&result);
             }
+            // A declarator with no parameter list still declares a function
+            // when its type is one -- `extern __typeof(f) g;`, musl's
+            // weak_alias spelling, and the same shape through a typedef
+            // (`typedef int F(int); extern F g;`).  The kind above is decided
+            // by the declarator's function-name token, which these do not
+            // have, so the declaration arrives here filed as an object.  File
+            // it as a function instead, taking the parameter range from the
+            // type: the call-target index, the signature, and the entity kind
+            // all read the declaration, and only the type knows the
+            // parameters.  The same handoff is what the parenthesized
+            // declarator path and the block-scope function declarator do.
+            if (kind == C_DECLARATION_OBJECT && declaration->type.value < result.type_count && result.types[declaration->type.value].kind == C_TYPE_FUNCTION)
+            {
+                CType* declared_function = &result.types[declaration->type.value];
+                kind = C_DECLARATION_FUNCTION;
+                declaration->kind = kind;
+                declaration->parameter_start = declared_function->parameter_start;
+                declaration->parameter_count = declared_function->parameter_count;
+                declaration->is_variadic = declared_function->is_variadic;
+            }
         }
         if (!static_assertion && !declaration->name.length && c_preprocess_dialect_is_c23(preprocess.dialect))
         {
@@ -12913,7 +12933,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         CEntityId entity = {
             .value = result.entity_count,
         };
-        u32 declaration_name_token = kind == C_DECLARATION_FUNCTION ? syntax_declaration->function_name_token : syntax_declaration->name_token;
+        // A function filed from a type name has no function-name token; its
+        // name is the object declarator's, which is the token the entity has
+        // to point at.
+        u32 declaration_name_token = kind == C_DECLARATION_FUNCTION && syntax_declaration->function_name_token < token_count
+                                         ? syntax_declaration->function_name_token
+                                         : syntax_declaration->name_token;
         bool is_thread_local = false;
         if (kind == C_DECLARATION_OBJECT)
         {

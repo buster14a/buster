@@ -2067,15 +2067,33 @@ on a commit you already know is incomplete tells nobody anything.
   `alias` are ordinary identifiers, so `int weak;` must stay a strong
   definition.
 - `__typeof` is accepted alongside `__typeof__` and `typeof`, because musl's
-  `weak_alias` macro is written with it. A function declared through a type
-  name rather than a parameter-list declarator -- `extern __typeof(f) g;`, or
-  the same through a typedef -- is an *object* declaration to the parser, and
-  the call-target index only holds function declarations, so such a name
-  cannot be called by name (issue #641). Its address works, which is what an
-  alias needs and what another translation unit's call resolves against.
-  `c_parse_entity_kind_redeclares` in `c_parse.c` is what keeps the two
-  spellings one entity, so a name that also has an ordinary prototype -- which
-  in musl is all of them -- is called through that prototype.
+  `weak_alias` macro is written with it. **A function declared through a type
+  name rather than a parameter-list declarator** -- `extern __typeof(f) g;`,
+  or the same through a typedef -- has no function-name token, and that token
+  is what the declaration kind is otherwise decided by. `c_analyze_semantics`
+  in `c_parse.c` therefore reclassifies on the resolved type: a declarator
+  whose type is a function is filed `C_DECLARATION_FUNCTION` with the
+  parameter range taken from the `CType`, because the declarator has no
+  parameter list and only the type knows the parameters. Everything
+  downstream reads the declaration -- `c_ir_build_function_name_index` indexes
+  it, `c_ir_function_signature` gives it an arity, and the entity is a
+  `C_ENTITY_FUNCTION` -- so the name is callable and not merely addressable
+  (issue #641). The same handoff from type to declaration is what the
+  parenthesized declarator path and the block-scope function declarator in
+  `c_parse_declaration_type` already do.
+  `c_parse_entity_kind_redeclares` in `c_parse.c` is what keeps this spelling
+  and an ordinary prototype one entity, which in musl every published name
+  has.
+- **A failed call blames the call, not the declaration.** A direct call's
+  callee token is not an identifier *use*: it resolves through the
+  call-target index, so the parser records no binding for it and
+  `c_ir_identifier_entity` misses. The lowering failure in
+  `c_ir_lower_expression_core_step` looks the name up before reporting, and
+  keeps the identifier's own token index rather than the one the call arm
+  advanced to the closing parenthesis, so an object called as a function is
+  reported as one instead of as an unbound identifier. A name nothing
+  declares still reports as unbound, which is what a SIMD builtin missing
+  from `c_symbol_predefined` looks like.
 - The generic JIT loads already-produced host-native objects and resolves
   explicit bindings. It is not a second source-language compiler and must stay
   independent of frontend semantic structures.

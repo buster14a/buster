@@ -19165,6 +19165,10 @@ c_ir_expression_core_loop:
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
+            // The arms below advance `index` past what they consumed -- a
+            // failed call leaves it on the closing parenthesis -- so the
+            // failure report keeps the identifier's own token index.
+            u32 identifier_index = index;
             IrValueId value = IR_VALUE_ID_INVALID;
             IrValueId value_place = IR_VALUE_ID_INVALID;
             if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) &&
@@ -19364,12 +19368,23 @@ c_ir_expression_core_loop:
             {
                 if (!builder->failure_message.length)
                 {
-                    CEntityId failed_entity = c_ir_identifier_entity(builder, index);
+                    // A callee token is not an identifier *use*: a direct call
+                    // resolves through the function-name index, so the parser
+                    // records no binding for it, and reporting the name as
+                    // unbound blames the declaration when it is the call that
+                    // could not be resolved.  Look the name up before saying
+                    // so, and say which of the two failed.
+                    CEntityId failed_entity = c_ir_identifier_entity_or_lookup(builder, identifier_index);
+                    bool called = identifier_index + 1 < end &&
+                                  c_token_is_punctuator(&builder->preprocess.tokens[identifier_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+                    String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
                     builder->failure_message =
-                        failed_entity.value < builder->parse.entity_count
-                            ? string_format(builder->arena, S8("could not lower identifier '{S8}' bound to C entity {u32} of kind {u32}"), c_token_spelling(builder->preprocess.spelling_base, token),
-                                            failed_entity.value, (u32)builder->parse.entities[failed_entity.value].kind)
-                            : string_format(builder->arena, S8("could not lower unbound identifier '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, token));
+                        failed_entity.value >= builder->parse.entity_count
+                            ? string_format(builder->arena, S8("could not lower unbound identifier '{S8}'"), spelling)
+                        : called ? string_format(builder->arena, S8("could not lower call to '{S8}' bound to C entity {u32} of kind {u32}"), spelling,
+                                                 failed_entity.value, (u32)builder->parse.entities[failed_entity.value].kind)
+                                 : string_format(builder->arena, S8("could not lower identifier '{S8}' bound to C entity {u32} of kind {u32}"), spelling,
+                                                 failed_entity.value, (u32)builder->parse.entities[failed_entity.value].kind);
                 }
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;

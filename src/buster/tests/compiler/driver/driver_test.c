@@ -167,6 +167,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_weak_alias_symb
         {.name = S8("alias"), .global = true},
         {.name = S8("alias_function"), .target = S8("alias_target_function"), .global = true, .weak = true},
         {.name = S8("alias_function_typeof"), .target = S8("alias_target_function"), .global = true, .weak = true},
+        {.name = S8("alias_function_typedef"), .target = S8("alias_target_function"), .global = true},
         {.name = S8("alias_of_static"), .target = S8("alias_static_target"), .global = true},
         {.name = S8("alias_object"), .target = S8("alias_target_object"), .global = true},
         {.name = S8("alias_object_long"), .target = S8("alias_target_object"), .global = true},
