@@ -1303,7 +1303,10 @@ BUSTER_C_INTERNAL u32 c_ir_skip_balanced_group(CPreprocessResult preprocess, u32
 /* Where the declaration specifiers of a declarator list end, which is where
    the leading declarator begins. Every declarator of the list shares the
    specifiers, so a marker in [start, this) marks all of them while a marker
-   past it belongs to the one declarator whose own range holds it.
+   past it belongs to the one declarator whose own range holds it. Two things
+   are split at this boundary: the `noreturn` marker below, and the alignment
+   run c_parse_declaration_type_derive collects for a declarator that did not
+   start the list.
 
    The declarator starts at the first punctuator that cannot be part of the
    specifiers -- the '*' of a pointer or the '(' of a parenthesized declarator
@@ -1322,8 +1325,11 @@ BUSTER_C_INTERNAL u32 c_ir_skip_balanced_group(CPreprocessResult preprocess, u32
    A boundary landing earlier than the real one only drops a shared marker,
    which costs the unreachable code after a call and never emits any. Landing
    later is what would let one declarator's marker reach its siblings, so
-   every step above stops at the first proof it has gone far enough. */
-BUSTER_C_INTERNAL u32 c_ir_declarator_list_specifier_end(CPreprocessResult preprocess, u32 start, u32 end)
+   every step above stops at the first proof it has gone far enough. The
+   alignment reader wants the same direction for a different reason: a dropped
+   shared `aligned` underaligns every declarator of the list equally, while a
+   late boundary silently overaligns whichever ones did not ask. */
+BUSTER_C_SHARED u32 c_ir_declarator_list_specifier_end(CPreprocessResult preprocess, u32 start, u32 end)
 {
     u32 index = start;
     bool declarator_reached = false;

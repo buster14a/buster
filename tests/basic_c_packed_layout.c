@@ -17,11 +17,12 @@
 // declarator of a list the attribute sits on is a separate question from
 // where in that declarator it is written, and it decides which members move.
 // An object declarator reaches the last two positions as well, at file scope
-// and at block scope, each parsed by code of its own.  A typedef declarator
-// reaches them too, and there the request belongs to the type the name
-// declares rather than to any object: it replaces the natural alignment
-// instead of raising it, which makes it the one place `aligned` lowers one
-// without `packed`.
+// and at block scope, each parsed by code of its own, and which declarator of
+// a list carries the attribute decides which objects move there too.  A
+// typedef declarator reaches them too, and there the request belongs to the
+// type the name declares rather than to any object: it replaces the natural
+// alignment instead of raising it, which makes it the one place `aligned`
+// lowers one without `packed`.
 
 // Packed before the tag, which is how QuickJS spells its unaligned readers.
 struct __attribute__((packed)) leading
@@ -498,6 +499,32 @@ static char leading_aligned[3] __attribute__((aligned(64)));
 __attribute__((aligned(128))) static char specifier_aligned[3];
 static char between_them = 1;
 
+// Which declarator of a list an `aligned` sits on decides which objects move,
+// the same question #680 answered for a member and #701 for these: the scan
+// that collects a declaration's alignment specifiers runs from the
+// declaration's start, so every declarator but the first read the ones its
+// siblings wrote and the whole list was raised.  Three unattributed names are
+// what make that observable without an exact offset, which separate objects
+// do not have: three four-byte objects cannot all sit on a 64-byte boundary,
+// while a list raised as a whole puts every one of them there.
+static int object_list_leader __attribute__((aligned(64))), object_list_second, object_list_third, object_list_fourth;
+
+// The three specifier-position spellings, which are the ones that *do* raise
+// the whole list and so are the control that the partition above keeps the
+// shared half rather than dropping it: a GNU attribute before the specifiers,
+// one among them, and `_Alignas`, which is a declaration specifier and never
+// a declarator's.
+__attribute__((aligned(64))) static int shared_list_first, shared_list_second;
+static int __attribute__((aligned(64))) middle_list_first, middle_list_second;
+static _Alignas(64) int alignas_list_first, alignas_list_second;
+
+// A declarator that is not the first of its list carries its own list in the
+// two positions any declarator has, at its head and after its name.  Both
+// reached it before the partition, by way of the range that also reached its
+// siblings; they have to still reach it and no longer reach them.
+static int head_list_first, __attribute__((aligned(64))) head_list_second;
+static int tail_list_first, tail_list_second __attribute__((aligned(64)));
+
 // The same list written after a parenthesized object declarator, where it
 // follows the whole derivation rather than the name.  The neighbours on either
 // side are what make the boundary below a claim about the attribute: without
@@ -534,6 +561,16 @@ typedef struct one_byte
 // natural alignments, and a typedef of the alias inherits the request rather
 // than losing it.
 typedef raised_scalar raised_again;
+
+// The typedef spelling of the same declarator list, where raising the whole
+// list was worse than silent: the leader's attribute landed in the
+// specifier-position run that `alignment specifier cannot be applied to a
+// typedef` rejects by name, so the declaration was dropped and both names
+// went undeclared.  The diagnostic is right about `_Alignas`, which may not
+// appear in a typedef declaration at all, and was reading a declarator's GNU
+// attribute as one.
+typedef int typedef_list_raised __attribute__((aligned(64))), typedef_list_plain;
+typedef int typedef_list_plain_first, typedef_list_raised_second __attribute__((aligned(64)));
 
 struct raised_typedef_member
 {
@@ -922,10 +959,7 @@ int main(void)
     // declaration, so the names below looked undeclared rather than
     // misaligned.  The padding around the two automatic objects gives the
     // frame something to place them after, so a satisfied boundary is the
-    // attribute's doing.  Only the attributed declarator's own boundary is
-    // checked: whose alignment an object declarator's list raises is the
-    // question #680 answered for a member, and these numbers hold under
-    // either answer.
+    // attribute's doing.
     char local_pad[3];
     void (*local_pointer_aligned)(int) __attribute__((aligned(64))) = 0;
     char local_pad_two[5];
@@ -1032,5 +1066,35 @@ int main(void)
     if ((char *)&exact_scalar_array[1] - (char *)&exact_scalar_array[0] != 4) return 115;
     if ((unsigned long long)(void *)padded_element_array % 16) return 116;
     if ((unsigned long long)(void *)lowered_scalar_array % 2) return 117;
+
+    // Whose declarator of a list the attribute belongs to, at file scope and
+    // at block scope.  The block-scope path scans each declarator's own
+    // segment already and the file-scope one did not (#701); the two have to
+    // agree, so both are asked the same question here.
+    if ((unsigned long long)(void *)&object_list_leader % 64) return 118;
+    if (!((unsigned long long)(void *)&object_list_second % 64) + !((unsigned long long)(void *)&object_list_third % 64) +
+            !((unsigned long long)(void *)&object_list_fourth % 64) ==
+        3)
+        return 119;
+    if ((unsigned long long)(void *)&shared_list_first % 64 || (unsigned long long)(void *)&shared_list_second % 64) return 120;
+    if ((unsigned long long)(void *)&middle_list_first % 64 || (unsigned long long)(void *)&middle_list_second % 64) return 121;
+    if ((unsigned long long)(void *)&alignas_list_first % 64 || (unsigned long long)(void *)&alignas_list_second % 64) return 122;
+    if ((unsigned long long)(void *)&head_list_second % 64 || !((unsigned long long)(void *)&head_list_first % 64)) return 123;
+    if ((unsigned long long)(void *)&tail_list_second % 64 || !((unsigned long long)(void *)&tail_list_first % 64)) return 124;
+
+    int block_list_leader __attribute__((aligned(64))) = 1, block_list_second = 2, block_list_third = 3, block_list_fourth = 4;
+    if ((unsigned long long)(void *)&block_list_leader % 64) return 125;
+    if (!((unsigned long long)(void *)&block_list_second % 64) + !((unsigned long long)(void *)&block_list_third % 64) +
+            !((unsigned long long)(void *)&block_list_fourth % 64) ==
+        3)
+        return 126;
+    if (block_list_leader != 1 || block_list_second != 2 || block_list_third != 3 || block_list_fourth != 4) return 127;
+
+    // The typedef spelling of the list, which is exact: the alias carries the
+    // request and the name beside it keeps the aliased type's own alignment.
+    if (_Alignof(typedef_list_raised) != 64 || _Alignof(typedef_list_plain) != 4) return 128;
+    if (_Alignof(typedef_list_plain_first) != 4 || _Alignof(typedef_list_raised_second) != 64) return 129;
+    typedef int block_typedef_list_raised __attribute__((aligned(64))), block_typedef_list_plain;
+    if (_Alignof(block_typedef_list_raised) != 64 || _Alignof(block_typedef_list_plain) != 4) return 130;
     return 0;
 }

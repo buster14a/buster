@@ -3240,6 +3240,7 @@ BUSTER_C_SHARED bool c_parse_type_is_noreturn(CParseResult const* result, CTypeI
 
 BUSTER_C_SHARED bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration);
+BUSTER_C_SHARED u32 c_ir_declarator_list_specifier_end(CPreprocessResult preprocess, u32 start, u32 end);
 
 /* The function type a declarator arrives at, following only the derivations a
    declarator can write around one: pointers, arrays of them, and the
@@ -9033,7 +9034,23 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
     }
     if (name_index != declarator_end)
     {
-        if (!c_parse_alignment_specifiers(machine, result, preprocess, declaration->token_start, name_index, &declaration->alignment_start,
+        // token_start/token_count span the whole comma-separated declarator
+        // list rather than the specifiers it shares, so for a declarator that
+        // is not the first of one, [token_start, name_index) covers its
+        // siblings and every attribute list they carry.  Only the specifiers
+        // reach every declarator, and the range past them belongs to the one
+        // declarator whose own segment holds it --
+        // `int c __attribute__((aligned(64))), d;` raised `d` as well, and the
+        // typedef spelling of the same list dragged the attribute into the
+        // specifier-position run that is rejected by name.  This is the
+        // boundary c_ir_declaration_is_noreturn already splits the same range
+        // at, and the partition c_parse_member_alignment_run makes inside one
+        // aggregate segment.  The first declarator of the list starts exactly
+        // where the specifiers end, so its own scan is already narrow.
+        u32 shared_end = declaration->is_declarator_continuation
+                             ? c_ir_declarator_list_specifier_end(preprocess, declaration->token_start, name_index)
+                             : name_index;
+        if (!c_parse_alignment_specifiers(machine, result, preprocess, declaration->token_start, shared_end, &declaration->alignment_start,
                                           &declaration->alignment_count))
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]), C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("invalid alignment specifier"));
@@ -9046,29 +9063,47 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                                                                            : S8("alignment specifier cannot be applied to a typedef"));
             declaration->alignment_count = 0;
         }
-        // A GNU `aligned` attribute may also follow the declarator
+        // A GNU `aligned` attribute may also sit on the declarator rather than
+        // among the specifiers: after it
         // (`static char buf[8] __attribute__((aligned(64)));`), which is where
-        // musl's thread-local buffers and SQLite's aligned scratch write it.
-        // The scan runs right after the specifier one so both runs land in the
-        // single contiguous range alignment_start/alignment_count name, and it
-        // stops at the initializer, which is expression territory.
+        // musl's thread-local buffers and SQLite's aligned scratch write it,
+        // or before its name (`int a, __attribute__((aligned(8))) b;`).  The
+        // leading half is inside the shared range for the declarator that
+        // starts the list and outside it for every other, so only a
+        // continuation scans for it.  Both ranges are this declarator's own
+        // segment's, and the scans run right after the specifier one, so all
+        // three runs land in the single contiguous range
+        // alignment_start/alignment_count name; the trailing one stops at the
+        // initializer, which is expression territory.
         //
-        // A typedef reaches it too, and there the request belongs to the type
-        // the declarator names rather than to any object: the run is left on
-        // the declaration for c_parse_declaration_type to move onto the type
-        // and clear.  The specifier-position run above is already gone by
+        // A typedef reaches them too, and there the request belongs to the
+        // type the declarator names rather than to any object: the run is left
+        // on the declaration for c_parse_declaration_type to move onto the
+        // type and clear.  The specifier-position run above is already gone by
         // then -- `_Alignas` may not appear in a typedef declaration at all --
         // so what survives here is exactly the declarator's own attributes.
-        if ((declaration->kind == C_DECLARATION_OBJECT || declaration->kind == C_DECLARATION_TYPEDEF) && name_index + 1 < name_search_end)
+        if (declaration->kind == C_DECLARATION_OBJECT || declaration->kind == C_DECLARATION_TYPEDEF)
         {
-            u32 trailing_start = 0;
-            u32 trailing_count = 0;
-            c_parse_layout_attributes(result, preprocess, name_index + 1, name_search_end, 0, &trailing_start, &trailing_count);
-            if (!declaration->alignment_count)
+            u32 declarator_alignment_start = 0;
+            u32 declarator_alignment_count = 0;
+            if (declaration->is_declarator_continuation && declaration->declarator_start < name_index)
             {
-                declaration->alignment_start = trailing_start;
+                c_parse_layout_attributes(result, preprocess, declaration->declarator_start, name_index, 0, &declarator_alignment_start,
+                                          &declarator_alignment_count);
             }
-            declaration->alignment_count += trailing_count;
+            if (name_index + 1 < name_search_end)
+            {
+                u32 trailing_start = 0;
+                u32 trailing_count = 0;
+                c_parse_layout_attributes(result, preprocess, name_index + 1, name_search_end, 0, &trailing_start, &trailing_count);
+                declarator_alignment_start = declarator_alignment_count ? declarator_alignment_start : trailing_start;
+                declarator_alignment_count += trailing_count;
+            }
+            if (declarator_alignment_count)
+            {
+                declaration->alignment_start = declaration->alignment_count ? declaration->alignment_start : declarator_alignment_start;
+                declaration->alignment_count += declarator_alignment_count;
+            }
         }
         u32 declarator_start = declaration->token_start;
         CTypeId base = inherited_base;
