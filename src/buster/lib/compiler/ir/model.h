@@ -291,7 +291,18 @@ struct IrTypeLayout
     u32 alignment;
     IrAbiClass abi_class;
     bool resolved;
-    u8 reserved[3];
+    // The alignment the type would have if nothing had *lowered* it, or zero
+    // when nothing did -- which is every type but the alias a
+    // `typedef int pair __attribute__((aligned(2)))` makes. `alignment` is
+    // where the object goes; this is what the System V argument classifier
+    // asks about, because "contains unaligned fields" there means unaligned
+    // for the field's own natural alignment: Clang passes
+    // `struct { char tag; pair value; }` in memory even though `value` sits at
+    // the two-byte boundary its type asked for. One byte is enough for every
+    // alignment the classifier can reach, since it gives up above sixteen
+    // bytes of object.
+    u8 natural_alignment;
+    u8 reserved[2];
 };
 
 typedef struct IrField IrField;

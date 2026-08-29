@@ -1020,7 +1020,10 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
     }
     // The seed pass below resolves builtin scalars and incomplete enums from
     // the requested record alone and takes the early exit, so answer those
-    // without walking the table.
+    // without walking the table.  A type a typedef gave an alignment of its own
+    // is the one exception: its answer is not derivable from its kind, so it
+    // falls through to the solve, where the alias branch reads the request.
+    if (!c_parse_type_alignment(result, requested))
     {
         CType requested_type = result->types[requested.value];
         u64 direct_size = 0;
@@ -1077,6 +1080,13 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
             resolved[type_index] = true;
             continue;
         }
+        // An aligned alias keeps the kind it copied, so the seed would answer
+        // it with the natural layout; the alias branch of the solve below owns
+        // it instead.
+        if (c_parse_type_alignment(result, (CTypeId){.value = type_index}))
+        {
+            continue;
+        }
         CTypeKind kind = result->types[type_index].kind;
         u64 size = 0;
         u32 alignment = 0;
@@ -1108,6 +1118,38 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                 continue;
             }
             CType type = result->types[type_index];
+            // `typedef int cache_line __attribute__((aligned(64)))` asks for
+            // the alignment of a *type*, which replaces the natural one rather
+            // than raising it and may lower it.  The size is the aliased
+            // type's untouched -- Clang and GCC both answer `sizeof` 1 for a
+            // one-byte struct aliased at sixteen -- and the natural layout is
+            // read off the type the alias copied, which is what makes the
+            // replacement a single lookup here and in c_gen's mapping pass.
+            CTypeAlignment const* requested_type_alignment = c_parse_type_alignment(result, (CTypeId){.value = type_index});
+            if (requested_type_alignment)
+            {
+                if (!type.has_unqualified_type || type.unqualified_type.value >= type_count || !resolved[type.unqualified_type.value])
+                {
+                    continue;
+                }
+                u32 alias_alignment = 1;
+                bool alias_provisional = provisional[type.unqualified_type.value];
+                if (!c_parse_layout_alignment_specifiers(&layout_context, requested_type_alignment->alignment_start,
+                                                         requested_type_alignment->alignment_count, &alias_alignment, &alias_provisional))
+                {
+                    continue;
+                }
+                sizes[type_index] = sizes[type.unqualified_type.value];
+                alignments[type_index] = alias_alignment;
+                provisional[type_index] = alias_provisional;
+                resolved[type_index] = true;
+                if (type_index == requested.value)
+                {
+                    goto requested_resolved;
+                }
+                progress = true;
+                continue;
+            }
             if (type.kind == C_TYPE_ENUM && type.element_type.value < type_count && resolved[type.element_type.value])
             {
                 sizes[type_index] = sizes[type.element_type.value];
@@ -3258,6 +3300,85 @@ BUSTER_C_INTERNAL void c_parse_add_noreturn_function_type(CParseResult* result, 
     {
         result->noreturn_function_types[result->noreturn_function_type_count++] = function;
     }
+}
+
+/* The alignment run a typedef declarator asked for on `type`, or null.  Like
+   the noreturn set above, the table is empty in almost every translation unit,
+   so the count guards the scan and the scan itself is over a handful of ids. */
+CTypeAlignment const* c_parse_type_alignment(CParseResult const* result, CTypeId type)
+{
+    CTypeAlignment const* record = 0;
+    if (result && type.value != C_ID_UNDERLYING_INVALID)
+    {
+        for (u32 index = 0; index < result->type_alignment_count && !record; index += 1)
+        {
+            record = result->type_alignments[index].type_index == type.value ? result->type_alignments + index : 0;
+        }
+    }
+
+    return record;
+}
+
+/* Give the name a typedef declares an alignment of its own.
+
+   The type is *copied* first, always, even when the declarator built it: a
+   declarator that merely names an existing type -- `typedef int raised
+   __attribute__((aligned(16)));` names the one builtin `int` -- would
+   otherwise realign every other declaration in the translation unit written
+   with that type.  This is the anti-infection guard
+   c_parse_noreturn_candidate_function_type applies to the noreturn marker,
+   taken one step further: the copy is unconditional because the layout engines
+   want one place to read the natural alignment from, and pointing every
+   aligned alias at the type it aliases gives them that.
+
+   The copy carries `has_unqualified_type`, which is what makes the alias
+   behave as a variant of the original everywhere else: type compatibility
+   strips back to the same unqualified type, and both layout engines already
+   have an alias branch to hang the replaced alignment off.  A request that
+   cannot be recorded leaves the type as it was, which is the alignment the
+   declaration had before this ran. */
+BUSTER_C_INTERNAL CTypeId c_parse_add_type_alignment(CParseResult* result, CTypeId type, u32 alignment_start, u32 alignment_count)
+{
+    if (!result || !alignment_count || type.value >= result->type_count)
+    {
+        return type;
+    }
+    bool room = result->type_alignment_count < result->type_alignment_capacity;
+    if (!room && result->arena && result->type_alignment_capacity < UINT32_MAX / 2)
+    {
+        u32 capacity = result->type_alignment_capacity ? result->type_alignment_capacity * 2 : 4;
+        u64 allocation_size = (u64)capacity * (u64)sizeof(CTypeAlignment);
+        if (c_parse_arena_can_allocate(result->arena, allocation_size, BUSTER_ALIGN_OF(CTypeAlignment)))
+        {
+            CTypeAlignment* records = (CTypeAlignment*)arena_allocate_bytes(result->arena, allocation_size, BUSTER_ALIGN_OF(CTypeAlignment));
+            if (result->type_alignments && result->type_alignment_count)
+            {
+                memcpy(records, result->type_alignments, sizeof(*records) * result->type_alignment_count);
+            }
+            result->type_alignments = records;
+            result->type_alignment_capacity = capacity;
+            room = true;
+        }
+    }
+    if (!room)
+    {
+        return type;
+    }
+    CType alias = result->types[type.value];
+    alias.unqualified_type = alias.has_unqualified_type ? alias.unqualified_type : type;
+    alias.has_unqualified_type = true;
+    CTypeId aligned = c_parse_add_type(result, alias);
+    if (aligned.value == C_ID_UNDERLYING_INVALID)
+    {
+        return type;
+    }
+    result->type_alignments[result->type_alignment_count++] = (CTypeAlignment){
+        .type_index = aligned.value,
+        .alignment_start = alignment_start,
+        .alignment_count = alignment_count,
+    };
+
+    return aligned;
 }
 
 BUSTER_C_INTERNAL CTypeId c_parse_string_literal_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end)
@@ -8910,7 +9031,14 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
         // The scan runs right after the specifier one so both runs land in the
         // single contiguous range alignment_start/alignment_count name, and it
         // stops at the initializer, which is expression territory.
-        if (declaration->kind == C_DECLARATION_OBJECT && name_index + 1 < name_search_end)
+        //
+        // A typedef reaches it too, and there the request belongs to the type
+        // the declarator names rather than to any object: the run is left on
+        // the declaration for c_parse_declaration_type to move onto the type
+        // and clear.  The specifier-position run above is already gone by
+        // then -- `_Alignas` may not appear in a typedef declaration at all --
+        // so what survives here is exactly the declarator's own attributes.
+        if ((declaration->kind == C_DECLARATION_OBJECT || declaration->kind == C_DECLARATION_TYPEDEF) && name_index + 1 < name_search_end)
         {
             u32 trailing_start = 0;
             u32 trailing_count = 0;
@@ -9154,6 +9282,17 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
     if (function.value != C_ID_UNDERLYING_INVALID && c_ir_declaration_is_noreturn(preprocess, *declaration))
     {
         c_parse_add_noreturn_function_type(result, function);
+    }
+    // The derivation leaves a typedef declarator's `aligned` run on the
+    // declaration because its type is only final here: the derivation reaches
+    // it through half a dozen returns, one per declarator shape.  A typedef
+    // declares no object, so the run has no other reader, and moving it makes
+    // the type carry it instead.
+    if (declaration->kind == C_DECLARATION_TYPEDEF && declaration->alignment_count)
+    {
+        declaration->type = c_parse_add_type_alignment(result, declaration->type, declaration->alignment_start, declaration->alignment_count);
+        declaration->alignment_start = 0;
+        declaration->alignment_count = 0;
     }
 }
 
@@ -11271,6 +11410,18 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         if (is_typedef && c_parse_variable_argument_list_name(c_token_spelling(preprocess.spelling_base, name)))
         {
             type = c_parse_variable_argument_list_type(result);
+        }
+        // A block-scope `typedef int cache_line __attribute__((aligned(64)));`
+        // writes the request on the type it declares, not on an object, so it
+        // moves onto the type the way the file-scope path in
+        // c_parse_declaration_type does.  The run is the declarator's alone:
+        // the specifier-position one is diagnosed and cleared above, which is
+        // also why nothing was copied into this segment's run.
+        if (is_typedef && segment_alignment_count)
+        {
+            type = c_parse_add_type_alignment(result, type, segment_alignment_start, segment_alignment_count);
+            segment_alignment_start = 0;
+            segment_alignment_count = 0;
         }
         // A block-scope declarator with a parameter list declares a function
         // with external linkage rather than an object -- DoomGeneric's

@@ -786,6 +786,49 @@ BUSTER_C_INTERNAL IrTypeId c_ir_add_qualified_type(IrProgram* program, IrTypeId 
     return ir_program_add_type(program, qualified);
 }
 
+// A copy of `base` whose alignment is the one a typedef declarator asked for
+// on the name it declares.  GNU `aligned` on a type replaces the natural
+// alignment rather than raising it, and leaves the size alone -- Clang and GCC
+// both answer `sizeof` 1 for a one-byte struct aliased at sixteen -- so the
+// copy differs from the original in exactly that one field.  The record is not
+// marked as a qualified type: IrType::unqualified_type denotes the operand of
+// an atomic, which the debug and bitcode writers read, and an alignment is not
+// a qualifier.  c_parse_type_layout replaces the alignment the same way, and
+// the two must agree or a folded `_Alignof` contradicts the object it measures.
+BUSTER_C_INTERNAL IrTypeId c_ir_add_aligned_type(IrProgram* program, IrTypeId base_id, u32 alignment)
+{
+    IrType* base = ir_type_from_id(&program->types, base_id);
+    if (!base || !alignment || (alignment & (alignment - 1)) || base->kind == IR_TYPE_FUNCTION)
+    {
+        return IR_TYPE_ID_INVALID;
+    }
+    // An aggregate's mapping exists before its fields are laid out, so copying
+    // then would freeze an unresolved layout into a type nothing revisits.
+    // The mapping pass keeps an alias pending, so refusing here is a retry.
+    if (!base->layout.resolved)
+    {
+        return IR_TYPE_ID_INVALID;
+    }
+    if (base->layout.alignment == alignment)
+    {
+        return base_id;
+    }
+    IrType aligned = *base;
+    aligned.id = IR_TYPE_ID_INVALID;
+    aligned.layout.alignment = alignment;
+    // Lowering an alignment does not make the type any less aligned as far as
+    // the System V argument classifier is concerned; see
+    // IrTypeLayout::natural_alignment. Only the first lowering records it, so
+    // an alias of an alias keeps the alignment the underlying type was born
+    // with.
+    if (!aligned.layout.natural_alignment && alignment < base->layout.alignment && base->layout.alignment <= UINT8_MAX)
+    {
+        aligned.layout.natural_alignment = (u8)base->layout.alignment;
+    }
+
+    return ir_program_add_type(program, aligned);
+}
+
 typedef struct CIrSignature CIrSignature;
 struct CIrSignature
 {
@@ -37614,6 +37657,15 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                      .field_count = c_type->member_count,
                                                                  });
     }
+    // One slot per aligned typedef, not per type: the table behind
+    // c_parse_type_alignment is empty in almost every translation unit, and the
+    // slot is what keeps the mapping pass from minting a fresh IrType for the
+    // same alias on every round it revisits it.
+    IrTypeId* aligned_alias_types = parse.type_alignment_count ? arena_allocate(temporary_arena, IrTypeId, parse.type_alignment_count) : 0;
+    for (u32 alias_index = 0; alias_index < parse.type_alignment_count; alias_index += 1)
+    {
+        aligned_alias_types[alias_index] = IR_TYPE_ID_INVALID;
+    }
     bool* flexible_array_types = arena_allocate(temporary_arena, bool, parse.type_count);
     // The string-literal bound inference below asks for the object
     // declarations of one type; scanning every declaration per unresolved
@@ -37695,6 +37747,63 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                     if (qualified.value == IR_ID_UNDERLYING_INVALID)
                     {
                         continue;
+                    }
+                    // `typedef int cache_line __attribute__((aligned(64)))`
+                    // aliases a type to change its alignment, and the alias is
+                    // the copy the parser made, so the request lands here and
+                    // nowhere near the type it aliases.  The worklist runs in
+                    // ascending type index and an alias is built where the
+                    // typedef is written, so it is remapped before any
+                    // aggregate that embeds it is laid out in the same round.
+                    CTypeAlignment const* type_alignment = c_parse_type_alignment(&parse, (CTypeId){.value = type_index});
+                    if (type_alignment)
+                    {
+                        u32 alias_index = (u32)(type_alignment - parse.type_alignments);
+                        if (aligned_alias_types[alias_index].value == IR_ID_UNDERLYING_INVALID)
+                        {
+                            // The natural alignment is not the floor here: a
+                            // request below it is honoured, which is the one
+                            // place GNU `aligned` lowers without `packed`.
+                            // Handing the evaluation a floor of one is what
+                            // makes the run a replacement rather than a raise,
+                            // and it also puts the `_Alignas` rule out of
+                            // reach, which is right -- `_Alignas` may not
+                            // appear in a typedef declaration at all, so the
+                            // only rejection left is a request that is not a
+                            // power of two.
+                            u32 requested = 1;
+                            String8 alias_rejection = {0};
+                            CIrAlignmentStatus alias_status = c_ir_alignment_evaluate(&constant_builder, type_alignment->alignment_start,
+                                                                                      type_alignment->alignment_count, 1, &requested, &alias_rejection);
+                            if (alias_status == C_IR_ALIGNMENT_PENDING)
+                            {
+                                continue;
+                            }
+                            // Reported here rather than during the parse for
+                            // the reason every other alignment rejection is:
+                            // the fold takes the usable maximum and carries
+                            // on, and this is the pass that can name the
+                            // attribute the program wrote.
+                            if (alias_status == C_IR_ALIGNMENT_REJECTED)
+                            {
+                                u32 rejection_token = type_alignment->alignment_start < parse.alignment_count
+                                                          ? parse.alignments[type_alignment->alignment_start].token_start
+                                                          : (u32)preprocess.token_count;
+                                result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                                    .message = alias_rejection,
+                                    .location = rejection_token < preprocess.token_count
+                                                    ? c_preprocess_token_location(&preprocess, preprocess.tokens[rejection_token])
+                                                    : (CSourceLocation){0},
+                                    .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                                };
+                            }
+                            aligned_alias_types[alias_index] = c_ir_add_aligned_type(program, qualified, requested);
+                        }
+                        if (aligned_alias_types[alias_index].value == IR_ID_UNDERLYING_INVALID)
+                        {
+                            continue;
+                        }
+                        qualified = aligned_alias_types[alias_index];
                     }
                     if (c_type_ir_map[type_index].value != qualified.value)
                     {

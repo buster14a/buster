@@ -36,12 +36,37 @@ struct below_natural_record
     __attribute__((aligned(2))) int value;
 };
 
+// The same request written on a *typedef* rather than on the member is the
+// case that is not ignored: there `aligned` sets the alignment of the type, so
+// it lowers as well as raises.  This is what a header writes for a cache-line-
+// or SIMD-aligned scalar, and the records around them are what cross the
+// compiler boundary -- a half that drops the request puts `value` at offset 4
+// in both, which the other half reads as a different member.
+typedef int packed_layout_raised __attribute__((aligned(16)));
+typedef int packed_layout_lowered __attribute__((aligned(2)));
+
+struct packed_layout_raised_record
+{
+    char tag;
+    packed_layout_raised value;
+};
+
+struct packed_layout_lowered_record
+{
+    char tag;
+    packed_layout_lowered value;
+    char trailer;
+};
+
 // The declarator-position attribute, on an object both halves address.
 extern char packed_layout_aligned_object[3] __attribute__((aligned(64)));
 
 // The same request on an object declarator, which both reference compilers
 // accept and place at the type's own alignment.
 extern int packed_layout_below_natural_object __attribute__((aligned(2)));
+
+// And the typedef position, on an object whose alignment is its type's.
+extern packed_layout_raised packed_layout_raised_object;
 
 extern unsigned long long packed_layout_record_size(void);
 extern unsigned long long packed_layout_record_value_offset(void);
@@ -56,5 +81,13 @@ extern int packed_layout_record_middle(struct packed_record record);
 extern struct packed_aligned_record packed_layout_make_aligned_record(char tag, int value);
 extern int packed_layout_bit_pair(struct packed_bit_record record);
 extern void packed_layout_fill_aligned_object(char first);
+extern unsigned long long packed_layout_raised_record_size(void);
+extern unsigned long long packed_layout_raised_record_alignment(void);
+extern unsigned long long packed_layout_raised_record_value_offset(void);
+extern unsigned long long packed_layout_lowered_record_size(void);
+extern unsigned long long packed_layout_lowered_record_value_offset(void);
+extern struct packed_layout_raised_record packed_layout_make_raised_record(char tag, int value);
+extern int packed_layout_lowered_middle(struct packed_layout_lowered_record record);
+extern void packed_layout_fill_raised_object(int value);
 
 #endif

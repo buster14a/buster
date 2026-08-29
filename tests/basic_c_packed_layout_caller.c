@@ -55,5 +55,30 @@ int main(void)
     struct below_natural_record below = packed_layout_make_below_natural('b', -1234567);
     if (below.tag != 'b' || below.value != -1234567) return 17;
     if (packed_layout_below_natural_object != 31337) return 18;
+
+    // The same request on a typedef, where it is honoured rather than ignored,
+    // in both directions.  A half that drops it lays `value` at offset 4 in
+    // both records and sizes the raised one at 8, so every answer below is the
+    // other compiler's.
+    if (sizeof(struct packed_layout_raised_record) != 32) return 19;
+    if (packed_layout_raised_record_size() != sizeof(struct packed_layout_raised_record)) return 20;
+    if (packed_layout_raised_record_alignment() != 16) return 21;
+    if (packed_layout_raised_record_value_offset() != 16) return 22;
+    if (packed_layout_lowered_record_size() != 8) return 23;
+    if (packed_layout_lowered_record_value_offset() != 2) return 24;
+
+    struct packed_layout_raised_record raised = packed_layout_make_raised_record('v', -13572468);
+    if (raised.tag != 'v' || raised.value != -13572468) return 25;
+    if ((unsigned long long)(void *)&raised % 16) return 26;
+
+    struct packed_layout_lowered_record lowered;
+    lowered.tag = 'w';
+    lowered.value = 0x1a2b3c4d;
+    lowered.trailer = 'x';
+    if (packed_layout_lowered_middle(lowered) != 0x1a2b3c4d) return 27;
+
+    packed_layout_fill_raised_object(864209);
+    if (packed_layout_raised_object != 864209) return 28;
+    if ((unsigned long long)(void *)&packed_layout_raised_object % 16) return 29;
     return 0;
 }

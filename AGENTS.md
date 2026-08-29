@@ -2364,6 +2364,22 @@ on a commit you already know is incomplete tells nobody anything.
   `[declarator_start, declarator_end)`, which is the range the per-declarator
   `packed` and `aligned` scans read, so the attribute reaches the layout with no
   second pass.
+  **`aligned` written on a typedef is a different question**: it sets the
+  alignment of the type the name declares rather than raising a declaration's,
+  which makes it the one spelling that *lowers* an alignment without `packed`
+  -- `typedef int pair __attribute__((aligned(2)))` is two-byte aligned in
+  Clang and GCC alike. The request lives in `CParseResult.type_alignments`, a
+  side table keyed by type index for the reason `noreturn_function_types` is
+  one, and it keys on a *copy* of the type the declarator arrived at:
+  `typedef int cache_line __attribute__((aligned(64)))` names the one builtin
+  `int`, so marking that would realign every `int` in the translation unit.
+  The copy carries `has_unqualified_type`, which is what gives both layout
+  engines one place to read the natural alignment from and keeps the alias
+  compatible with what it aliases. On the System V side one more rule follows:
+  "contains unaligned fields" there means unaligned for the field's *natural*
+  alignment, so `struct { char tag; pair value; }` is passed in memory even
+  though `value` sits where its type asked. `IrTypeLayout::natural_alignment`
+  carries that, and it is zero for every type nothing lowered.
 - `__typeof` is accepted alongside `__typeof__` and `typeof`, because musl's
   `weak_alias` macro is written with it. **A function declared through a type
   name rather than a parameter-list declarator** -- `extern __typeof(f) g;`,

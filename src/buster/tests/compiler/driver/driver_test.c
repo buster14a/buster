@@ -5989,9 +5989,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // parenthesized declarator, and at the head of a declarator that is not
     // the first of its list), each on a member and on an object declarator at
     // file and block scope because a separate parser reads each, which
-    // declarator of a list an `aligned` attribute belongs to, plus the
-    // `#pragma pack` ceiling they share, and runs under every allocator
-    // because packed bit-fields are lowering rather than parsing work.
+    // declarator of a list an `aligned` attribute belongs to, the typedef
+    // position -- where the request belongs to the type the name declares and
+    // may lower its alignment as well as raise it -- plus the `#pragma pack`
+    // ceiling they share, and runs under every allocator because packed
+    // bit-fields are lowering rather than parsing work.
     for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators); allocator_index += 1)
     {
         TemporalArena packed_temporary = scratch_begin(&arguments->arena, 1);
@@ -6022,6 +6024,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // thing that pins the layout to the platform's.  Verified by stripping
     // `packed` from the shared header on one side: the one-file fixture and
     // the Buster/Buster link still pass while the mixed link fails.  The
+    // typedef shapes were verified the same way, and they pin the argument
+    // classification as well as the layout: a lowered alignment leaves a field
+    // unaligned for System V's purposes, so the record rides memory rather
+    // than a register.  The
     // layout rules are target-independent and the one-file fixture runs
     // everywhere; the mixed link is held to the host/target pair the x87 pair
     // above already links objects across, because -fno-pic and this linker's

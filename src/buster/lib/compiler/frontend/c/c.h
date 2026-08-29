@@ -781,6 +781,27 @@ struct CAggregateAttributes
     u8 reserved[3];
 };
 
+// The alignment a declarator wrote on the *type* it declares rather than on an
+// object it declares: `typedef int cache_line __attribute__((aligned(64)))`.
+// GNU `aligned` there sets the alignment of the type, so unlike every other
+// alignment record in this file it *replaces* the natural alignment instead of
+// raising it, and it is the one place the attribute lowers one without
+// `packed` -- `typedef int pair __attribute__((aligned(2)))` is two-byte
+// aligned in both GCC and Clang. The record keys on the alias copy the
+// declarator made, never on the type it aliases, so `int` keeps its own
+// alignment. It lives in a side table for the reason
+// CParseResult.noreturn_function_types does: the population is a handful of
+// typedefs per translation unit against a type table of tens of thousands of
+// entries, so a field on CType would cost every one of them.
+typedef struct CTypeAlignment CTypeAlignment;
+struct CTypeAlignment
+{
+    u32 type_index;
+    // Range into CParseResult.alignments, as CMember/CDeclaration name theirs.
+    u32 alignment_start;
+    u32 alignment_count;
+};
+
 typedef struct CEnumMember CEnumMember;
 struct CEnumMember
 {
@@ -1127,6 +1148,9 @@ struct CParseResult
     // every CType eight bytes to answer a question that is almost always no.
     // c_parse_type_is_noreturn is the only reader.
     CTypeId* noreturn_function_types;
+    // The types a typedef declarator wrote `aligned(N)` on; see CTypeAlignment.
+    // c_parse_type_alignment is the only reader.
+    CTypeAlignment* type_alignments;
     u32 declaration_count;
     u32 type_count;
     u32 parameter_count;
@@ -1157,6 +1181,8 @@ struct CParseResult
     u32 deferred_static_assert_capacity;
     u32 noreturn_function_type_count;
     u32 noreturn_function_type_capacity;
+    u32 type_alignment_count;
+    u32 type_alignment_capacity;
 };
 
 // CParseResult is the compatibility name for the semantic model.  New phase
@@ -1248,6 +1274,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTokenShape c_preprocess_to
 // aggregate and is empty in almost every translation unit, so the scan is a
 // count test in the common case.
 BUSTER_F_DECL CAggregateAttributes c_parse_aggregate_attributes(CParseResult const* result, CTypeId type);
+// The alignment run a typedef declarator asked for on this type, or a null
+// pointer when it asked for none. The table is empty in almost every
+// translation unit, so the scan is a count test in the common case.
+BUSTER_F_DECL CTypeAlignment const* c_parse_type_alignment(CParseResult const* result, CTypeId type);
 BUSTER_F_DECL CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 BUSTER_F_DECL CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target);

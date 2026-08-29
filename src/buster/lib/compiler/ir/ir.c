@@ -2702,7 +2702,13 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
         {
             IrAbiClassificationTask task = tasks[--count];
             IrType* type = ir_type_from_id(&program->types, task.type);
-            if (!type || !type->layout.resolved || task.offset + type->layout.size > 16 || (type->layout.alignment && task.offset % type->layout.alignment))
+            // "Unaligned" here is unaligned for the natural alignment, not for
+            // the one the type carries: a typedef that lowered it still leaves
+            // the field unaligned as far as this rule is concerned, which is
+            // what Clang and GCC both do.  Raising is already covered, since a
+            // raised alignment is a multiple of the natural one.
+            u32 field_alignment = type && type->layout.natural_alignment ? type->layout.natural_alignment : type ? type->layout.alignment : 0;
+            if (!type || !type->layout.resolved || task.offset + type->layout.size > 16 || (field_alignment && task.offset % field_alignment))
             {
                 valid = false;
                 break;

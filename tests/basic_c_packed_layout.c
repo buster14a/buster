@@ -17,7 +17,11 @@
 // declarator of a list the attribute sits on is a separate question from
 // where in that declarator it is written, and it decides which members move.
 // An object declarator reaches the last two positions as well, at file scope
-// and at block scope, each parsed by code of its own.
+// and at block scope, each parsed by code of its own.  A typedef declarator
+// reaches them too, and there the request belongs to the type the name
+// declares rather than to any object: it replaces the natural alignment
+// instead of raising it, which makes it the one place `aligned` lowers one
+// without `packed`.
 
 // Packed before the tag, which is how QuickJS spells its unaligned readers.
 struct __attribute__((packed)) leading
@@ -346,6 +350,53 @@ static char after_file_pointer = 3;
 // as it asked to be.
 static int object_below_natural __attribute__((aligned(2))) = 7;
 
+// The same request on a typedef is the one that is honoured rather than
+// ignored: there `aligned` sets the alignment of the type the name declares,
+// in both directions, and `lowered_scalar` is two-byte aligned in GCC and
+// Clang alike -- which no other spelling of the attribute achieves without
+// `packed`.
+// A header handing out an aligned scalar this way is the ordinary spelling for
+// a cache-line- or SIMD-aligned one, and dropping the request (#696) left
+// every object and every aggregate that embedded it at the alignment of the
+// type it aliases, silently.
+typedef int raised_scalar __attribute__((aligned(32)));
+typedef int lowered_scalar __attribute__((aligned(2)));
+typedef struct one_byte
+{
+    char byte;
+} raised_aggregate __attribute__((aligned(16)));
+
+// The alias is a type of its own: `int` and `struct one_byte` keep their
+// natural alignments, and a typedef of the alias inherits the request rather
+// than losing it.
+typedef raised_scalar raised_again;
+
+struct raised_typedef_member
+{
+    char byte;
+    raised_scalar value;
+};
+
+// The lowering direction, where the member sits *earlier* than its natural
+// alignment would put it and the aggregate's own alignment drops with it.
+struct lowered_typedef_member
+{
+    char byte;
+    lowered_scalar value;
+    char tail;
+};
+
+struct raised_aggregate_member
+{
+    char byte;
+    raised_aggregate value;
+    char tail;
+};
+
+static raised_scalar file_raised_object;
+static char between_typedef_objects = 7;
+static lowered_scalar file_lowered_object;
+
 int main(void)
 {
     if (sizeof(struct leading) != 5 || _Alignof(struct leading) != 1) return 1;
@@ -580,5 +631,47 @@ int main(void)
     bits_first.b = 0x7fffff;
     bits_first.tail = 'x';
     if (bits_first.a != 100 || bits_first.b != 0x7fffff || bits_first.tail != 'x') return 87;
+
+    // The typedef position, in both directions.  The size of the type is the
+    // aliased one's untouched -- only the alignment moves -- so the sizes of
+    // the aggregates below are what separate a request that was honoured from
+    // one that was dropped.
+    if (sizeof(raised_scalar) != 4 || _Alignof(raised_scalar) != 32) return 88;
+    if (sizeof(lowered_scalar) != 4 || _Alignof(lowered_scalar) != 2) return 89;
+    if (sizeof(raised_aggregate) != 1 || _Alignof(raised_aggregate) != 16) return 90;
+    // The alias carries the request; the types it aliases do not.
+    if (_Alignof(int) != 4 || _Alignof(struct one_byte) != 1) return 91;
+    if (_Alignof(raised_again) != 32) return 92;
+
+    if (sizeof(struct raised_typedef_member) != 64 || _Alignof(struct raised_typedef_member) != 32) return 93;
+    if (sizeof(struct lowered_typedef_member) != 8 || _Alignof(struct lowered_typedef_member) != 2) return 94;
+    if (sizeof(struct raised_aggregate_member) != 32 || _Alignof(struct raised_aggregate_member) != 16) return 95;
+
+    struct raised_typedef_member raised_member;
+    if ((char *)&raised_member.value - (char *)&raised_member != 32) return 96;
+    struct lowered_typedef_member lowered_member;
+    if ((char *)&lowered_member.value - (char *)&lowered_member != 2) return 97;
+    if ((char *)&lowered_member.tail - (char *)&lowered_member != 6) return 98;
+    struct raised_aggregate_member aggregate_member;
+    if ((char *)&aggregate_member.value - (char *)&aggregate_member != 16) return 99;
+    if ((char *)&aggregate_member.tail - (char *)&aggregate_member != 17) return 100;
+
+    // Objects declared with the typedef, at file scope and at block scope,
+    // where the alignment is the type's rather than any declarator's.  A
+    // block-scope typedef is read by a parser of its own, and the neighbour
+    // between the two automatic objects is what makes the boundary a claim
+    // about the attribute rather than about where the frame happened to start.
+    if ((unsigned long long)(void *)&file_raised_object % 32) return 101;
+    if ((unsigned long long)(void *)&file_lowered_object % 2) return 102;
+    if (between_typedef_objects != 7) return 103;
+
+    typedef int block_raised __attribute__((aligned(64)));
+    typedef int block_lowered __attribute__((aligned(1)));
+    block_raised block_raised_object = 3;
+    char between_block_objects = 8;
+    block_lowered block_lowered_object = 4;
+    if (_Alignof(block_raised) != 64 || _Alignof(block_lowered) != 1) return 104;
+    if ((unsigned long long)(void *)&block_raised_object % 64) return 105;
+    if (block_raised_object != 3 || block_lowered_object != 4 || between_block_objects != 8) return 106;
     return 0;
 }

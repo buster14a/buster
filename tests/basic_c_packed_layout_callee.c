@@ -5,6 +5,7 @@
 #include "basic_c_packed_layout_shapes.h"
 
 char packed_layout_aligned_object[3] __attribute__((aligned(64)));
+packed_layout_raised packed_layout_raised_object;
 
 int packed_layout_below_natural_object __attribute__((aligned(2))) = 31337;
 
@@ -85,4 +86,49 @@ void packed_layout_fill_aligned_object(char first)
     packed_layout_aligned_object[0] = first;
     packed_layout_aligned_object[1] = (char)(first + 1);
     packed_layout_aligned_object[2] = (char)(first + 2);
+}
+
+unsigned long long packed_layout_raised_record_size(void)
+{
+    return sizeof(struct packed_layout_raised_record);
+}
+
+unsigned long long packed_layout_raised_record_alignment(void)
+{
+    return _Alignof(struct packed_layout_raised_record);
+}
+
+unsigned long long packed_layout_raised_record_value_offset(void)
+{
+    struct packed_layout_raised_record record;
+    return (unsigned long long)((char *)&record.value - (char *)&record);
+}
+
+unsigned long long packed_layout_lowered_record_size(void)
+{
+    return sizeof(struct packed_layout_lowered_record);
+}
+
+unsigned long long packed_layout_lowered_record_value_offset(void)
+{
+    struct packed_layout_lowered_record record;
+    return (unsigned long long)((char *)&record.value - (char *)&record);
+}
+
+struct packed_layout_raised_record packed_layout_make_raised_record(char tag, int value)
+{
+    struct packed_layout_raised_record record;
+    record.tag = tag;
+    record.value = value;
+    return record;
+}
+
+int packed_layout_lowered_middle(struct packed_layout_lowered_record record)
+{
+    return record.value;
+}
+
+void packed_layout_fill_raised_object(int value)
+{
+    packed_layout_raised_object = value;
 }
