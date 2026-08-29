@@ -7360,6 +7360,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_nested_call(UnitT
     return result;
 }
 
+// A statement expression whose body contains control flow evaluates to its
+// final expression statement.  The two tests above only wrap the value in
+// `(void)`, so the value being dropped was invisible: here the tail is
+// `x + 6`, and the function's returned value must be that addition rather
+// than the zero the lowering substituted when it found no trailing
+// expression.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_control_value(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("int statement_expression_control_value(int x)\n"
+                                               "{ return ({ if (x > 100) { x = 1; } x + 6; }); }\n"
+                                               "int statement_expression_loop_value(int x)\n"
+                                               "{ return ({ while (x > 100) { x = 1; } x + 6; }); }\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("statement-expression-control-value.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        IrModule* module = &ir.program->modules[0];
+        String8 value_function_names[] = {
+            S8("statement_expression_control_value"),
+            S8("statement_expression_loop_value"),
+        };
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(value_function_names); name_index += 1)
+        {
+            IrFunction* function = c_test_find_ir_function(module, value_function_names[name_index]);
+            BUSTER_TEST(arguments, function != 0);
+            if (!function)
+            {
+                continue;
+            }
+            u32 return_count = 0;
+            u32 returned_addition_count = 0;
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = &function->instructions[instruction_index];
+                if (instruction->opcode != IR_OPCODE_RETURN || instruction->operand_count != 1)
+                {
+                    continue;
+                }
+                return_count += 1;
+                IrValueId returned = instruction->operands[0];
+                if (returned.value >= function->value_count)
+                {
+                    continue;
+                }
+                IrInstructionId definition = function->values[returned.value].definition;
+                if (definition.value >= function->instruction_count)
+                {
+                    continue;
+                }
+                IrInstruction* returned_definition = &function->instructions[definition.value];
+                returned_addition_count +=
+                    returned_definition->opcode == IR_OPCODE_BINARY && returned_definition->binary_operation == IR_BINARY_INTEGER_ADD;
+            }
+            BUSTER_TEST(arguments, return_count == 1);
+            BUSTER_TEST(arguments, returned_addition_count == 1);
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // Direct identifier updates in a body normally take a local fast path.  A
 // file-scope object has no CIntegerIrLocal entry, but the expression core can
 // still resolve it to a global place; keep prefix and postfix forms covered
@@ -10436,6 +10507,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_conditional_comma_assignment(arguments));
     c_test_result_add(&result, c_test_statement_expression_control_call(arguments));
     c_test_result_add(&result, c_test_statement_expression_nested_call(arguments));
+    c_test_result_add(&result, c_test_statement_expression_control_value(arguments));
     c_test_result_add(&result, c_test_global_identifier_updates(arguments));
     c_test_result_add(&result, c_test_parenthesized_address_assignment_expression(arguments));
     c_test_result_add(&result, c_test_nested_offsetof_pointer_prediction(arguments));

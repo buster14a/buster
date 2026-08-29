@@ -24612,6 +24612,14 @@ BUSTER_C_INTERNAL void c_ir_body_task_inherit_scope(CIrBodyTask* child, CIrBodyT
     child->stack_checkpoint = parent.stack_checkpoint;
     child->has_stack_checkpoint = parent.has_stack_checkpoint;
     child->restore_before_continuation = parent.restore_before_continuation;
+    // Only the remainder of an enclosing region inherits a scope: it starts
+    // after the control statement that split the region and ends where the
+    // enclosing task ended. So the claim "my last statement may be the
+    // trailing expression" travels with it -- a GNU statement expression whose
+    // body contains an `if`, a loop, a `switch`, or a nested block hands its
+    // final expression statement to the remainder task, and without this the
+    // value it produced was dropped and the whole expression read as 0.
+    child->allow_trailing_expression = parent.allow_trailing_expression;
 }
 
 BUSTER_C_INTERNAL u32 c_ir_function_declaration_for_entity(CParseResult* parse, CEntityId entity)

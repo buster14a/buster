@@ -5866,6 +5866,55 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_void_assignment_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // A GNU statement expression whose body contains control flow evaluates to
+    // its final expression statement. The wrong answer was 0 in every context
+    // -- initializer, return, assignment, arithmetic operand, call argument --
+    // with no diagnostic, so the fixture runs, and it runs under all four
+    // register allocators because the value crosses the block boundary the
+    // control statement opened.
+    String8 c_statement_expression_value_allocator_flags[] = {
+        S8("-fregister-allocator=none"),
+        S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"),
+        S8("-fregister-allocator=quality"),
+    };
+    for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_statement_expression_value_allocator_flags); allocator_index += 1)
+    {
+        TemporalArena c_statement_expression_value_temporary = arena_begin_temporal(arguments->arena);
+        String8 c_statement_expression_value_path =
+            buster_test_temporary_path(c_statement_expression_value_temporary.arena, S8("buster-c-statement-expression-value"),
+                                       string_format(c_statement_expression_value_temporary.arena, S8("-{u32}"), allocator_index));
+        String8 c_statement_expression_value_command_line[] = {
+            c_statement_expression_value_allocator_flags[allocator_index],
+            S8("-o"),
+            c_statement_expression_value_path,
+            S8("tests/basic_c_statement_expression_value.c"),
+        };
+        CompilerDriverResult c_statement_expression_value = compiler_driver_execute_invocation(
+            c_statement_expression_value_temporary.arena,
+            compiler_driver_parse_arguments(c_statement_expression_value_temporary.arena,
+                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(c_statement_expression_value_command_line)));
+        BUSTER_TEST(arguments, c_statement_expression_value.error == COMPILER_DRIVER_ERROR_NONE);
+        if (c_statement_expression_value.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 c_statement_expression_value_arguments[] = {
+                c_statement_expression_value_path,
+            };
+            ProcessSpawnResult c_statement_expression_value_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_statement_expression_value_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){
+                                     .use_process_environment = true,
+                                 });
+            BUSTER_TEST(arguments, c_statement_expression_value_spawn.handle != 0);
+            if (c_statement_expression_value_spawn.handle)
+            {
+                ProcessWaitResult c_statement_expression_value_wait =
+                    os_process_wait_sync(c_statement_expression_value_temporary.arena, c_statement_expression_value_spawn);
+                BUSTER_TEST(arguments, c_statement_expression_value_wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(c_statement_expression_value_temporary);
+    }
     // Every fixture here folds a sizeof or _Alignof whose wrong lowering still
     // produces a plausible constant -- an unevaluated operand, an enum constant
     // over an object sizeof, a compound literal, a call-typed array bound, a
