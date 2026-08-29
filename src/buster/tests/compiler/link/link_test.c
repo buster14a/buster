@@ -187,6 +187,29 @@ BUSTER_GLOBAL_LOCAL bool link_test_elf_dynamic_symbol(ByteSlice image, String8 n
     return result;
 }
 
+// What a PC-relative relocation in .text resolved to, read back out of the
+// linked image: the field holds S - P + A, so the symbol address the linker
+// decided on is the field plus this place and less the addend it was given.
+// UINT64_MAX means the image has no .text to read, which no caller expects.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u64 link_test_elf_relative_symbol_address(ByteSlice image, u64 text_offset, s64 addend)
+{
+    u64 result = UINT64_MAX;
+    u64 header = 0;
+    if (link_test_elf_section_find(image, S8(".text"), 0, &header))
+    {
+        u64 text_address = link_read_u64(image.pointer, header + 16);
+        u64 text_file_offset = link_read_u64(image.pointer, header + 24);
+        if (text_file_offset + text_offset + 4 <= image.length)
+        {
+            s32 field = 0;
+            memcpy(&field, image.pointer + text_file_offset + text_offset, sizeof(field));
+            result = (u64)((s64)text_address + (s64)text_offset + field - addend);
+        }
+    }
+    return result;
+}
+
+
 // How many relocations of one type the image carries.  The ELF writer keeps
 // its jump-slot and copy relocations in one `.rela.plt`.
 BUSTER_GLOBAL_LOCAL u32 link_test_elf_relocation_count(ByteSlice image, u32 type)
@@ -211,6 +234,28 @@ BUSTER_GLOBAL_LOCAL u32 link_test_elf_relocation_count(ByteSlice image, u32 type
 
     return result;
 }
+
+// The same question for an AArch64 BL, whose displacement is a signed 26-bit
+// word count rather than a byte field.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u64 link_test_elf_branch_symbol_address(ByteSlice image, u64 text_offset)
+{
+    u64 result = UINT64_MAX;
+    u64 header = 0;
+    if (link_test_elf_section_find(image, S8(".text"), 0, &header))
+    {
+        u64 text_address = link_read_u64(image.pointer, header + 16);
+        u64 text_file_offset = link_read_u64(image.pointer, header + 24);
+        if (text_file_offset + text_offset + 4 <= image.length)
+        {
+            u32 instruction = link_read_u32(image.pointer, text_file_offset + text_offset);
+            u32 immediate = instruction & UINT32_C(0x3ffffff);
+            s64 words = immediate >= UINT32_C(0x2000000) ? (s64)immediate - (s64)UINT32_C(0x4000000) : (s64)immediate;
+            result = (u64)((s64)text_address + (s64)text_offset + words * 4);
+        }
+    }
+    return result;
+}
+
 
 BUSTER_GLOBAL_LOCAL bool link_test_mach_section_find(ByteSlice image, String8 segment_name, String8 section_name, u64* section_header)
 {
@@ -2972,6 +3017,228 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     u64 aarch64_data_text_offset = 0x400 + align_forward(20, 16);
     BUSTER_TEST(arguments, aarch64_data_executable.executable.length > aarch64_data_text_offset + 12 &&
                            link_read_u32(aarch64_data_executable.executable.pointer, aarch64_data_text_offset + 8) == UINT32_C(0x14000002));
+    // An undefined weak symbol is worth address zero, not a dynamic import.
+    // That is ELF's answer for a reference nothing defines, and reading it is
+    // how musl's startup tells a static program from a dynamic one -- it
+    // takes the address of a weak hidden `_DYNAMIC` and finds zero.
+    //
+    // Which party answers is the question of whether the reference can be
+    // preempted, so the same object is put through both shapes. A hidden
+    // reference is settled here and must not be what drags a dynamic loader
+    // into the image; a default-visibility one is left in .dynsym for the
+    // loader, bound weakly so that finding no definition leaves it zero
+    // instead of failing the load.
+    {
+        // lea weak_absent(%rip), %rdi ; ret
+        u8 weak_text[] = {0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0xc3};
+        ObjectSymbol weak_symbols[] = {
+            {
+                .name = S8("main"),
+                .size = sizeof(weak_text),
+                .section = OBJECT_SECTION_TEXT,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            },
+            {
+                .name = S8("weak_absent"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_DATA,
+                .global = true,
+                .weak = true,
+                .hidden = true,
+            },
+            {
+                .name = S8("imported"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            },
+        };
+        ObjectRelocation weak_relocation = {
+            .addend = -4,
+            .offset = 3,
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_X86_64_PC32,
+        };
+        Target weak_target = target;
+        weak_target.cpu_arch = CPU_ARCH_X86_64;
+        weak_target.os = OPERATING_SYSTEM_LINUX;
+        ObjectFile weak_object = link_test_object_make(arguments->arena, weak_target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(weak_text), weak_symbols, 2,
+                                                       &weak_relocation, 1);
+        NativeExecutableLinkResult weak_static = link_native_executable(arguments->arena, &weak_object,
+                                                                       (NativeExecutableLinkOptions){
+                                                                           .entry_symbol = S8("main"),
+                                                                       });
+        BUSTER_TEST(arguments, weak_static.error == LINK_ERROR_NONE);
+        // The reference is the image's only undefined symbol, so a linker that
+        // imported it would have produced the dynamic shape instead.
+        BUSTER_TEST(arguments, !link_test_elf_section_find(weak_static.executable, S8(".dynsym"), 0, 0));
+        BUSTER_TEST(arguments, link_test_elf_relative_symbol_address(weak_static.executable, weak_relocation.offset, weak_relocation.addend) == 0);
+
+        // The same reference in an image that does need the loader, because
+        // something else in it is a real import.
+        ObjectFile weak_hosted_object = weak_object;
+        weak_hosted_object.symbol_count = BUSTER_ARRAY_LENGTH(weak_symbols);
+        NativeExecutableLinkResult weak_hosted = link_native_executable(arguments->arena, &weak_hosted_object,
+                                                                        (NativeExecutableLinkOptions){
+                                                                            .entry_symbol = S8("main"),
+                                                                        });
+        BUSTER_TEST(arguments, weak_hosted.error == LINK_ERROR_NONE);
+        BUSTER_TEST(arguments, link_test_elf_relative_symbol_address(weak_hosted.executable, weak_relocation.offset, weak_relocation.addend) == 0);
+        u64 weak_hosted_dynamic_symbols = 0;
+        BUSTER_TEST(arguments, link_test_elf_section_find(weak_hosted.executable, S8(".dynsym"), 0, &weak_hosted_dynamic_symbols));
+        if (weak_hosted_dynamic_symbols)
+        {
+            // The null entry, `imported`, and the `exit` the hosted entry stub
+            // calls -- and not `weak_absent`, which would make a fourth
+            // 24-byte ELF64 symbol.
+            BUSTER_TEST(arguments, link_read_u64(weak_hosted.executable.pointer, weak_hosted_dynamic_symbols + 32) == 3 * 24);
+        }
+
+        // Default visibility instead: the reference stays an import, and it is
+        // STB_WEAK (0x2 over STT_OBJECT) so that a loader which finds no
+        // definition answers zero rather than refusing the image.
+        ObjectSymbol weak_visible_symbols[BUSTER_ARRAY_LENGTH(weak_symbols)];
+        memcpy(weak_visible_symbols, weak_symbols, sizeof(weak_symbols));
+        weak_visible_symbols[1].hidden = false;
+        ObjectFile weak_visible_object = weak_object;
+        weak_visible_object.symbols = weak_visible_symbols;
+        NativeExecutableLinkResult weak_visible = link_native_executable(arguments->arena, &weak_visible_object,
+                                                                         (NativeExecutableLinkOptions){
+                                                                             .entry_symbol = S8("main"),
+                                                                         });
+        BUSTER_TEST(arguments, weak_visible.error == LINK_ERROR_NONE);
+        u64 weak_visible_dynamic_symbols = 0;
+        BUSTER_TEST(arguments, link_test_elf_section_find(weak_visible.executable, S8(".dynsym"), 0, &weak_visible_dynamic_symbols));
+        if (weak_visible_dynamic_symbols)
+        {
+            // Entry one, the first import, past the null entry an ELF symbol
+            // table opens with; 24 is the ELF64 symbol size and 4 the offset
+            // of st_info within it.
+            u64 dynamic_symbol_offset = link_read_u64(weak_visible.executable.pointer, weak_visible_dynamic_symbols + 24);
+            BUSTER_TEST(arguments, link_read_u64(weak_visible.executable.pointer, weak_visible_dynamic_symbols + 32) == 3 * 24);
+            BUSTER_TEST(arguments, weak_visible.executable.pointer[dynamic_symbol_offset + 24 + 4] == 0x21);
+        }
+
+        // AArch64 asks the question of two more writers. The static one
+        // relocates a 32-bit PC-relative word against zero; the dynamic one
+        // must branch to zero rather than through a PLT thunk it did not
+        // reserve.
+        u32 weak_aarch64_instructions[] = {
+            0x94000000,
+            0xd65f03c0,
+            0,
+        };
+        ObjectSymbol weak_aarch64_symbols[] = {
+            {
+                .name = S8("main"),
+                .size = 8,
+                .section = OBJECT_SECTION_TEXT,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            },
+            {
+                .name = S8("weak_absent"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+                .weak = true,
+                .hidden = true,
+            },
+            {
+                .name = S8("imported"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            },
+        };
+        ObjectRelocation weak_aarch64_relocations[] = {
+            {.section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_CALL26},
+            {.offset = 8, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_AARCH64_PREL32},
+        };
+        Target weak_aarch64_target = target;
+        weak_aarch64_target.cpu_arch = CPU_ARCH_AARCH64;
+        weak_aarch64_target.os = OPERATING_SYSTEM_LINUX;
+        ObjectFile weak_aarch64_object = link_test_object_make(arguments->arena, weak_aarch64_target,
+                                                               (ByteSlice){
+                                                                   .pointer = (u8*)weak_aarch64_instructions,
+                                                                   .length = sizeof(weak_aarch64_instructions),
+                                                               },
+                                                               weak_aarch64_symbols, 2, weak_aarch64_relocations,
+                                                               BUSTER_ARRAY_LENGTH(weak_aarch64_relocations));
+        NativeExecutableLinkResult weak_aarch64_static = link_native_executable(arguments->arena, &weak_aarch64_object,
+                                                                                (NativeExecutableLinkOptions){
+                                                                                    .entry_symbol = S8("main"),
+                                                                                });
+        BUSTER_TEST(arguments, weak_aarch64_static.error == LINK_ERROR_NONE);
+        BUSTER_TEST(arguments, !link_test_elf_section_find(weak_aarch64_static.executable, S8(".dynsym"), 0, 0));
+        BUSTER_TEST(arguments, link_test_elf_relative_symbol_address(weak_aarch64_static.executable, 8, 0) == 0);
+        BUSTER_TEST(arguments, link_test_elf_branch_symbol_address(weak_aarch64_static.executable, 0) == 0);
+        ObjectFile weak_aarch64_hosted_object = weak_aarch64_object;
+        weak_aarch64_hosted_object.symbol_count = BUSTER_ARRAY_LENGTH(weak_aarch64_symbols);
+        NativeExecutableLinkResult weak_aarch64_hosted = link_native_executable(arguments->arena, &weak_aarch64_hosted_object,
+                                                                                (NativeExecutableLinkOptions){
+                                                                                    .entry_symbol = S8("main"),
+                                                                                });
+        BUSTER_TEST(arguments, weak_aarch64_hosted.error == LINK_ERROR_NONE);
+        BUSTER_TEST(arguments, link_test_elf_relative_symbol_address(weak_aarch64_hosted.executable, 8, 0) == 0);
+        BUSTER_TEST(arguments, link_test_elf_branch_symbol_address(weak_aarch64_hosted.executable, 0) == 0);
+
+        // What merging inputs does with the two bits. One strong reference is
+        // what makes a symbol required, whichever object it arrives in, and a
+        // single hidden occurrence keeps the symbol out of .dynsym.
+        ObjectSymbol weak_merge_first[] = {
+            {
+                .name = S8("both_weak"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_DATA,
+                .global = true,
+                .weak = true,
+                .hidden = true,
+            },
+            {
+                .name = S8("weak_then_strong"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_DATA,
+                .global = true,
+                .weak = true,
+                .hidden = true,
+            },
+        };
+        ObjectSymbol weak_merge_second[] = {
+            {
+                .name = S8("both_weak"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_DATA,
+                .global = true,
+                .weak = true,
+            },
+            {
+                .name = S8("weak_then_strong"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_DATA,
+                .global = true,
+            },
+        };
+        u8 weak_merge_text[8] = {0};
+        ObjectFile weak_merge_objects[] = {
+            link_test_object_make(arguments->arena, weak_target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(weak_merge_text), weak_merge_first,
+                                  BUSTER_ARRAY_LENGTH(weak_merge_first), 0, 0),
+            link_test_object_make(arguments->arena, weak_target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(weak_merge_text), weak_merge_second,
+                                  BUSTER_ARRAY_LENGTH(weak_merge_second), 0, 0),
+        };
+        LinkObjectResult weak_merged = link_objects(arguments->arena, weak_merge_objects, BUSTER_ARRAY_LENGTH(weak_merge_objects),
+                                                     (LinkOptions){
+                                                         .allow_undefined_symbols = true,
+                                                     });
+        BUSTER_TEST(arguments, weak_merged.error == LINK_ERROR_NONE && weak_merged.object.symbol_count == 2);
+        if (weak_merged.error == LINK_ERROR_NONE && weak_merged.object.symbol_count == 2)
+        {
+            BUSTER_TEST(arguments, weak_merged.object.symbols[0].weak && weak_merged.object.symbols[0].hidden);
+            BUSTER_TEST(arguments, !weak_merged.object.symbols[1].weak && weak_merged.object.symbols[1].hidden);
+        }
+    }
     ObjectFile aarch64_pe_object = aarch64_object;
     aarch64_pe_object.target.os = OPERATING_SYSTEM_WINDOWS;
     String8 aarch64_pe_output_path = link_test_temporary_executable_path(arguments->arena, S8("buster-native-aarch64-pe-test"), S8(".exe"));

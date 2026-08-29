@@ -2103,6 +2103,28 @@ on a commit you already know is incomplete tells nobody anything.
   marker attribute has no argument shape to recognise it by, and `weak` and
   `alias` are ordinary identifiers, so `int weak;` must stay a strong
   definition.
+- **An undefined weak symbol resolves to address zero**, which is what a
+  program asks for by declaring one: musl's startup takes the address of a
+  weak hidden `_DYNAMIC` and reads zero to learn it is static. Which party
+  answers is the question of whether the reference can be preempted, and the
+  ELF writers decide it with `link_elf_symbol_resolves_to_zero` in `link.c`:
+  a hidden reference, and any reference in a static image, is relocated
+  against zero here, while a default-visibility one in a dynamic image stays
+  an import entered in `.dynsym` as `STB_WEAK`, so the loader binds it when a
+  shared library defines it and leaves it zero rather than refusing the image
+  when none does. `link_elf_symbol_needs_dynamic_import` is the same question
+  asked by the three places that choose between the static and dynamic
+  writers and by the two that number imports; they must not disagree, because
+  the AArch64 dynamic writer re-derives the x86-64 writer's import numbering.
+  Merging inputs follows ELF: a symbol only references name is weak while
+  every one of them is, and one hidden occurrence makes it hidden. The gap
+  left is that a default-visibility weak reference no library actually
+  defines still comes out non-zero — a PLT thunk or a copy slot — because the
+  writer cannot tell it from one libc does define:
+  `compiler_driver_elf_library_exports` reads a shared library's `.dynsym`,
+  but records only the defined `STT_OBJECT` entries a copy relocation needs
+  and only for a link that imports data, so it cannot answer for a function
+  or for a link that imports none (issue #656).
 - `__typeof` is accepted alongside `__typeof__` and `typeof`, because musl's
   `weak_alias` macro is written with it. **A function declared through a type
   name rather than a parameter-list declarator** -- `extern __typeof(f) g;`,

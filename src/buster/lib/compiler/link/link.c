@@ -1,6 +1,7 @@
 // The linker. Two public steps (link.h): link_objects merges ObjectFiles —
 // section merging, symbol resolution (ObjectSymbol.weak decides which of two
-// definitions survives instead of diagnosing a duplicate), relocation
+// definitions survives instead of diagnosing a duplicate, and which
+// references leave a symbol undefined-but-optional), relocation
 // rebasing — into one
 // combined ObjectFile, and link_native_executable lays that file out as a
 // runnable image, dispatching near the bottom to one writer per
@@ -33,6 +34,15 @@
 // only the referenced name leaves the library binding its own post-startup
 // stores — glibc's `__environ = ev` — to its own storage while the program
 // reads a copy taken before startup ran.
+//
+// A third rule crosses every ELF writer: an undefined weak symbol is worth
+// address zero rather than a dynamic import, which is what a startup object
+// reads to tell a static program from a dynamic one.
+// link_elf_symbol_resolves_to_zero and link_elf_symbol_needs_dynamic_import,
+// above the first ELF writer, are the single form of that question; the
+// writers, the dispatcher at the bottom, and the Android writer all ask it,
+// and the AArch64 dynamic writer re-derives the x86-64 writer's import
+// numbering from it, so the two cannot be allowed to disagree.
 
 #include <buster/lib/compiler/link/link.h>
 
@@ -852,6 +862,17 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                     result.symbol = link_string_copy(arena, source->name);
                     return result;
                 }
+                // Binding and visibility survive whichever definition wins,
+                // so they are merged around the replacement rather than
+                // copied with it.  A symbol nothing in the link defines is
+                // weak only while every reference to it is: one strong
+                // reference is what makes the symbol required, whichever side
+                // it arrives on.  Visibility merges the other way -- the most
+                // constraining occurrence wins -- so one reference declaring
+                // the symbol hidden keeps it out of the dynamic symbol table
+                // even when another does not.
+                bool merged_hidden = destination->hidden || source->hidden;
+                bool merged_weak = destination->weak && source->weak;
                 if (source_replaces)
                 {
                     if (!link_symbol_definition_set(destination, source, object, section_offsets + (u64)object_index * OBJECT_SECTION_COUNT, arena))
@@ -859,6 +880,11 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                         result.error = LINK_ERROR_INVALID_INPUT;
                         return result;
                     }
+                }
+                destination->hidden = merged_hidden;
+                if (destination->section == OBJECT_SECTION_UNDEFINED)
+                {
+                    destination->weak = merged_weak;
                 }
             }
             symbol_map[source_index] = destination_index;
@@ -2018,6 +2044,38 @@ enum
     ELF_GOT_RESERVED_COUNT = 3,
 };
 
+// An undefined symbol only weak references name resolves to address zero
+// rather than to anything in the image: ELF gives an unresolved weak
+// reference the value 0, which is how a program asks whether a symbol is
+// present at all. musl's static startup is the case that matters --
+// arch/x86_64/crt_arch.h takes the address of a weak hidden `_DYNAMIC` and
+// reads zero to learn the program is static -- so every startup object a
+// libc ships depends on this.
+//
+// Whether the answer is decided here or by the dynamic loader is exactly the
+// question of whether the reference can be preempted. Hidden visibility says
+// it cannot, and a static image has no loader to ask, so both resolve to zero
+// at link time. A default-visibility weak reference in a dynamic image stays
+// an import instead: the loader binds it when a shared library defines it,
+// and leaves it zero -- rather than failing the load -- when none does,
+// because .dynsym records it as STB_WEAK.
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_resolves_to_zero(ObjectSymbol const* symbol, bool dynamic_image)
+{
+    return symbol->section == OBJECT_SECTION_UNDEFINED && symbol->weak && (symbol->hidden || !dynamic_image);
+}
+
+// Whether an undefined symbol is one the image needs the dynamic shape for.
+// A weak hidden reference is not: it resolves to zero wherever it is linked,
+// so a program whose only undefined symbol is one of those stays the static
+// image it would have been without it. Every ELF path that chooses between
+// the static and dynamic writers asks this, and the dynamic writers ask it
+// again to number their imports, so the two cannot disagree about which
+// symbols reach .dynsym.
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_needs_dynamic_import(ObjectSymbol const* symbol)
+{
+    return symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(symbol, true);
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
@@ -2042,10 +2100,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     }
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
-        if (object->symbols[symbol_index].section == OBJECT_SECTION_UNDEFINED)
+        ObjectSymbol* symbol = &object->symbols[symbol_index];
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(symbol, false))
         {
             result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
-            result.symbol = object->symbols[symbol_index].name;
+            result.symbol = symbol->name;
             return result;
         }
     }
@@ -2137,15 +2196,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-        if (symbol->section >= OBJECT_SECTION_COUNT)
+        // Address zero is the answer for a reference nothing defines and
+        // nothing can define; every other undefined symbol was rejected above.
+        bool absent_weak = link_elf_symbol_resolves_to_zero(symbol, false);
+        if (!absent_weak && symbol->section >= OBJECT_SECTION_COUNT)
         {
             result.error = LINK_ERROR_RELOCATION;
             result.symbol = symbol->name;
             return result;
         }
         u64 symbol_address = 0;
-        if (!link_u64_add(image_base, section_offsets[symbol->section], &symbol_address) ||
-            !link_u64_add(symbol_address, symbol->value, &symbol_address))
+        if (!absent_weak && (!link_u64_add(image_base, section_offsets[symbol->section], &symbol_address) ||
+                             !link_u64_add(symbol_address, symbol->value, &symbol_address)))
         {
             result.error = LINK_ERROR_RELOCATION;
             result.symbol = symbol->name;
@@ -2344,7 +2406,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     bool has_undefined_symbol = false;
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
-        has_undefined_symbol = has_undefined_symbol || object->symbols[symbol_index].section == OBJECT_SECTION_UNDEFINED;
+        has_undefined_symbol = has_undefined_symbol || link_elf_symbol_needs_dynamic_import(&object->symbols[symbol_index]);
     }
     if (!has_undefined_symbol && !has_thread_local_data && !options.dynamic_library_count)
     {
@@ -2373,7 +2435,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         import_indices[symbol_index] = UINT32_MAX;
         ObjectSymbol* symbol = &object->symbols[symbol_index];
-        if (symbol->section != OBJECT_SECTION_UNDEFINED)
+        if (!link_elf_symbol_needs_dynamic_import(symbol))
         {
             continue;
         }
@@ -2535,7 +2597,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-        if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_DATA &&
+        if (link_elf_symbol_needs_dynamic_import(symbol) && symbol->kind == OBJECT_SYMBOL_DATA &&
             relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64)
         {
             result.error = LINK_ERROR_RELOCATION;
@@ -2688,7 +2750,10 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         dynamic_name_cursor += symbol->name.length + 1;
         u64 symbol_offset = dynamic_symbol_offset + (u64)(import_index + 1) * ELF_SYMBOL_SIZE;
         link_write_u32(bytes, symbol_offset, import_name_offsets[import_index]);
-        bytes[symbol_offset + 4] = import_kinds[import_index] == OBJECT_SYMBOL_DATA ? 0x11 : 0x12;
+        // STB_GLOBAL or STB_WEAK over STT_OBJECT or STT_FUNC.  The binding is
+        // the reference's own: a weak one tells the loader that finding no
+        // definition is an answer (address zero) rather than a failed load.
+        bytes[symbol_offset + 4] = (symbol->weak ? 0x20 : 0x10) | (import_kinds[import_index] == OBJECT_SYMBOL_DATA ? 0x1 : 0x2);
         if (import_kinds[import_index] == OBJECT_SYMBOL_DATA)
         {
             // SHN_ABS marks the executable-owned copy slot as defined while
@@ -2840,7 +2905,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
         u64 symbol_address = 0;
-        if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_DATA)
+        if (link_elf_symbol_resolves_to_zero(symbol, true))
+        {
+            // Nothing in the image and nothing the loader can reach defines
+            // it, so the reference is worth zero and the relocation is
+            // applied against that address like any other.
+            symbol_address = 0;
+        }
+        else if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_DATA)
         {
             u32 import_index = import_indices[relocation->symbol];
             if (import_index == UINT32_MAX || copy_slot_addresses[import_index] == 0)
@@ -3107,10 +3179,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     }
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
-        if (object->symbols[symbol_index].section == OBJECT_SECTION_UNDEFINED)
+        ObjectSymbol* symbol = &object->symbols[symbol_index];
+        if (symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(symbol, false))
         {
             result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
-            result.symbol = object->symbols[symbol_index].name;
+            result.symbol = symbol->name;
             return result;
         }
     }
@@ -3203,15 +3276,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             return result;
         }
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-        if (symbol->section >= OBJECT_SECTION_COUNT)
+        // Address zero is the answer for a reference nothing defines and
+        // nothing can define; every other undefined symbol was rejected above.
+        bool absent_weak = link_elf_symbol_resolves_to_zero(symbol, false);
+        if (!absent_weak && symbol->section >= OBJECT_SECTION_COUNT)
         {
             result.error = LINK_ERROR_RELOCATION;
             result.symbol = symbol->name;
             return result;
         }
         u64 symbol_address = 0;
-        if (!link_u64_add(image_base, section_offsets[symbol->section], &symbol_address) ||
-            !link_u64_add(symbol_address, symbol->value, &symbol_address))
+        if (!absent_weak && (!link_u64_add(image_base, section_offsets[symbol->section], &symbol_address) ||
+                             !link_u64_add(symbol_address, symbol->value, &symbol_address)))
         {
             result.error = LINK_ERROR_RELOCATION;
             result.symbol = symbol->name;
@@ -3408,7 +3484,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
         import_indices[symbol_index] = UINT32_MAX;
-        if (object->symbols[symbol_index].section == OBJECT_SECTION_UNDEFINED)
+        if (link_elf_symbol_needs_dynamic_import(&object->symbols[symbol_index]))
         {
             import_indices[symbol_index] = import_count++;
         }
@@ -3548,7 +3624,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             continue;
         }
         u64 symbol_address = 0;
-        if (symbol->section == OBJECT_SECTION_UNDEFINED)
+        if (link_elf_symbol_resolves_to_zero(symbol, true))
+        {
+            // No PLT thunk for a reference nothing can define: the branch is
+            // relocated against address zero, which is what the program asked
+            // for by declaring the symbol weak.
+            symbol_address = 0;
+        }
+        else if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
             if (relocation->addend)
             {
@@ -7785,7 +7868,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
     bool has_import = options.dynamic_library_count != 0;
     for (u32 index = 0; index < object->symbol_count; index += 1)
     {
-        if (object->symbols[index].section == OBJECT_SECTION_UNDEFINED)
+        if (link_elf_symbol_needs_dynamic_import(&object->symbols[index]))
         {
             has_import = true;
             break;
@@ -7876,7 +7959,7 @@ NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* obje
         }
         for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
         {
-            if (object->symbols[symbol_index].section == OBJECT_SECTION_UNDEFINED)
+            if (link_elf_symbol_needs_dynamic_import(&object->symbols[symbol_index]))
             {
                 return link_native_executable_elf64_x86_64_dynamic(arena, object, options);
             }
@@ -7913,7 +7996,7 @@ NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* obje
         }
         for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
         {
-            if (object->symbols[symbol_index].section == OBJECT_SECTION_UNDEFINED)
+            if (link_elf_symbol_needs_dynamic_import(&object->symbols[symbol_index]))
             {
                 return link_native_executable_elf64_aarch64_dynamic(arena, object, options);
             }

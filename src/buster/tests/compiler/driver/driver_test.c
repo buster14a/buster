@@ -6721,9 +6721,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
     // musl's crt_arch.h shape: `.weak` and `.hidden` on a symbol nothing
-    // defines, referenced PC-relatively. Compiled and not linked, because the
-    // undefined weak reference is the point; what the object records for that
-    // symbol is what a linker reads.
+    // defines, referenced PC-relatively. Compiled, and then linked and run
+    // where the host can, because the two halves fail differently. The object
+    // is what a linker reads -- weak binding, hidden visibility, a relocation
+    // into the instruction that names the symbol -- and the image is what the
+    // linker did with it: an undefined weak reference resolves to zero, so
+    // the program that reads it exits zero, and the image stays the static
+    // one a startup object belongs to rather than acquiring a loader.
 #if BUSTER_CPU_ARCH_X86_64
     {
         String8 weak_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-global-asm-weak"), S8(".o"));
@@ -6742,6 +6746,102 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, start_symbol && start_symbol->global && !start_symbol->weak && start_symbol->section == OBJECT_SECTION_TEXT);
             BUSTER_TEST(arguments, compiler_driver_test_object_relocates(&weak.object, S8("global_asm_weak_dynamic"), OBJECT_RELOCATION_X86_64_PC32));
             BUSTER_TEST(arguments, compiler_driver_test_object_relocates(&weak.object, S8("global_asm_weak_start_c"), OBJECT_RELOCATION_X86_64_PC32));
+        }
+    }
+#endif
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    // Every allocator, because the status the program exits with is computed
+    // in C from the address the assembly handed it, and each allocator places
+    // that argument differently.
+    {
+        String8 weak_link_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(weak_link_allocators); allocator_index += 1)
+        {
+            String8 weak_link_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-global-asm-weak-link"),
+                                                                string_format(c_asm_arena, S8("-{u32}"), allocator_index));
+            String8 weak_link_command_line[] = {
+                string_format(c_asm_arena, S8("-fregister-allocator={S8}"), weak_link_allocators[allocator_index]),
+                S8("-e"),
+                S8("global_asm_weak_start"),
+                S8("-o"),
+                weak_link_path,
+                S8("tests/basic_c_global_asm_weak.c"),
+            };
+            CompilerDriverResult weak_link = compiler_driver_execute_invocation(
+                c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_link_command_line)));
+            BUSTER_TEST(arguments, weak_link.error == COMPILER_DRIVER_ERROR_NONE);
+            if (weak_link.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 weak_link_arguments[] = {weak_link_path};
+                ProcessSpawnResult weak_link_spawn =
+                    os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(weak_link_arguments), (SliceString8){0}, (SliceString8){0},
+                                     (ProcessSpawnOptions){
+                                         .use_process_environment = true,
+                                     });
+                BUSTER_TEST(arguments, weak_link_spawn.handle != 0);
+                if (weak_link_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(c_asm_arena, weak_link_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+    }
+    // The hosted half of the same question. `__attribute__((weak))` on a
+    // declaration must reach the object as STB_WEAK, and in an image that has
+    // a shared library the three references part company: the one libc
+    // defines still has to reach it, the two nothing defines must not fail
+    // the load, and the hidden one is still owed zero.
+    {
+        String8 weak_undefined_object_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-weak-undefined"), S8(".o"));
+        String8 weak_undefined_object_command_line[] = {
+            S8("-c"), S8("-g0"), S8("-o"), weak_undefined_object_path, S8("tests/basic_c_weak_undefined.c"),
+        };
+        CompilerDriverResult weak_undefined_object = compiler_driver_execute_invocation(
+            c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_undefined_object_command_line)));
+        BUSTER_TEST(arguments, weak_undefined_object.error == COMPILER_DRIVER_ERROR_NONE);
+        if (weak_undefined_object.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 weak_undefined_names[] = {S8("puts"), S8("weak_undefined_object"), S8("weak_undefined_function")};
+            for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(weak_undefined_names); name_index += 1)
+            {
+                ObjectSymbol const* weak_undefined_symbol =
+                    compiler_driver_test_object_symbol(&weak_undefined_object.object, weak_undefined_names[name_index]);
+                BUSTER_TEST(arguments, weak_undefined_symbol && weak_undefined_symbol->weak && weak_undefined_symbol->global &&
+                                           !weak_undefined_symbol->hidden && weak_undefined_symbol->section == OBJECT_SECTION_UNDEFINED);
+            }
+            ObjectSymbol const* weak_undefined_hidden =
+                compiler_driver_test_object_symbol(&weak_undefined_object.object, S8("weak_undefined_hidden"));
+            BUSTER_TEST(arguments, weak_undefined_hidden && weak_undefined_hidden->weak && weak_undefined_hidden->hidden &&
+                                       weak_undefined_hidden->section == OBJECT_SECTION_UNDEFINED);
+        }
+        String8 weak_undefined_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(weak_undefined_allocators); allocator_index += 1)
+        {
+            String8 weak_undefined_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-weak-undefined-link"),
+                                                                     string_format(c_asm_arena, S8("-{u32}"), allocator_index));
+            String8 weak_undefined_command_line[] = {
+                string_format(c_asm_arena, S8("-fregister-allocator={S8}"), weak_undefined_allocators[allocator_index]),
+                S8("-o"),
+                weak_undefined_path,
+                S8("tests/basic_c_weak_undefined.c"),
+            };
+            CompilerDriverResult weak_undefined = compiler_driver_execute_invocation(
+                c_asm_arena, compiler_driver_parse_arguments(c_asm_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(weak_undefined_command_line)));
+            BUSTER_TEST(arguments, weak_undefined.error == COMPILER_DRIVER_ERROR_NONE);
+            if (weak_undefined.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 weak_undefined_arguments[] = {weak_undefined_path};
+                ProcessSpawnResult weak_undefined_spawn =
+                    os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(weak_undefined_arguments), (SliceString8){0}, (SliceString8){0},
+                                     (ProcessSpawnOptions){
+                                         .use_process_environment = true,
+                                     });
+                BUSTER_TEST(arguments, weak_undefined_spawn.handle != 0);
+                if (weak_undefined_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(c_asm_arena, weak_undefined_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
         }
     }
 #endif
