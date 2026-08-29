@@ -26,6 +26,22 @@ struct __attribute__((packed)) packed_bit_record
     char tail;
 };
 
+// A packed union sizes to the bits its widest member occupies rather than to
+// that member's declared type, so this is one byte and `tail` sits at offset
+// one: a compiler that sized it from the `int` puts `tail` three bytes further
+// on and reads the wrong byte out of a record the other half built (#706).
+union __attribute__((packed)) packed_bit_union
+{
+    char lead;
+    int value : 5;
+};
+
+struct __attribute__((packed)) packed_bit_union_record
+{
+    union packed_bit_union bits;
+    char tail;
+};
+
 // A member asking for less alignment than its type already has, which GNU
 // `aligned` ignores rather than applies: a compiler that lowered `value` to
 // two bytes puts it at offset 2 and makes this a 6-byte record, which is what
@@ -73,6 +89,10 @@ extern unsigned long long packed_layout_record_value_offset(void);
 extern unsigned long long packed_layout_aligned_record_size(void);
 extern unsigned long long packed_layout_aligned_record_alignment(void);
 extern unsigned long long packed_layout_bit_record_size(void);
+extern unsigned long long packed_layout_bit_union_size(void);
+extern unsigned long long packed_layout_bit_union_tail_offset(void);
+extern struct packed_bit_union_record packed_layout_make_bit_union_record(int value, char tail);
+extern int packed_layout_bit_union_value(struct packed_bit_union_record record);
 extern unsigned long long packed_layout_below_natural_size(void);
 extern unsigned long long packed_layout_below_natural_offset(void);
 extern struct below_natural_record packed_layout_make_below_natural(char tag, int value);

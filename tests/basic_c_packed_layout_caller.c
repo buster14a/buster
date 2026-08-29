@@ -38,6 +38,19 @@ int main(void)
     bits.tail = 'b';
     if (packed_layout_bit_pair(bits) != 619) return 11;
 
+    // The packed union, in both halves and across a value passed between them:
+    // the size is where the callee put `tail`, and a caller reading the record
+    // at the other size takes the wrong byte for it.
+    if (sizeof(union packed_bit_union) != 1) return 19;
+    if (packed_layout_bit_union_size() != sizeof(union packed_bit_union)) return 20;
+    if (packed_layout_bit_union_tail_offset() != 1) return 21;
+    struct packed_bit_union_record union_record = packed_layout_make_bit_union_record(-6, 'u');
+    if (union_record.bits.value != -6 || union_record.tail != 'u') return 22;
+    struct packed_bit_union_record built_union;
+    built_union.bits.value = 7;
+    built_union.tail = 3;
+    if (packed_layout_bit_union_value(built_union) != 703) return 23;
+
     packed_layout_fill_aligned_object('m');
     if (packed_layout_aligned_object[0] != 'm' || packed_layout_aligned_object[1] != 'n' ||
         packed_layout_aligned_object[2] != 'o')

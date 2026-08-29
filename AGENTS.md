@@ -2400,6 +2400,18 @@ on a commit you already know is incomplete tells nobody anything.
   of the change is to stop agreeing with nobody in silence. A zero-width
   bit-field keeps aligning to its declared type even inside a packed aggregate,
   which is also what Clang and GCC do.
+  **A union member starts at bit zero whichever kind it is**, so a union sizes
+  to the bits its widest member *occupies* rather than to that member's
+  declared type: `union __attribute__((packed)) { char c; int b : 5; }` is one
+  byte. The unpacked spelling needs no arm of its own -- rounding the size up
+  to the alignment its declared type asks for is what gives it its four bytes
+  back -- and the unit the field is read through is chosen by the same slide a
+  struct's is, so the one-byte union reads its five bits through a byte
+  (issue #706). Sizing it from the declared type is also what hid the
+  single-unit refusal above from unions: a widest bit-field of 17 to 24 or 33
+  to 56 bits sizes the union to a width no power-of-two unit fits inside --
+  three bytes hold no unit covering 24 bits -- and is diagnosed for the same
+  reason the struct spelling of those widths is.
   A bit-field declarator carries a list of its own in exactly one place, *after*
   the width -- Clang rejects `int b __attribute__((packed)) : 5` -- so
   `c_type_parse_aggregate_segment_step` trims the width's token range with

@@ -38207,7 +38207,15 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                         {
                             if (member_bit_width)
                             {
-                                bit_position = BUSTER_MAX(bit_position, field_type->layout.size * 8);
+                                // Every union member starts at bit zero, so the
+                                // size candidate is the bits this one occupies
+                                // rather than its declared type's width: a
+                                // packed `union { char c; int b : 5; }` is one
+                                // byte under Clang and GCC. The rounding to the
+                                // aggregate's alignment below is what gives the
+                                // unpacked spelling its declared type's size
+                                // back, so one arm answers both.
+                                bit_position = BUSTER_MAX(bit_position, (u64)member_bit_width);
                             }
                         }
                         else if (!member_bit_width)

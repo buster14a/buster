@@ -11029,6 +11029,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
                         "struct __attribute__((packed, aligned(8))) packed_then_aligned { char byte; int value; };\n"
                         "struct plain { char byte; int value; };\n"
                         "union __attribute__((packed)) packed_union { char byte; int value; };\n"
+                        "union __attribute__((packed)) packed_bit_union { char lead; int value : 5; };\n"
+                        "union __attribute__((packed)) packed_bit_union_wide { char lead; unsigned int value : 12; };\n"
+                        "union unpacked_bit_union { char lead; int value : 5; };\n"
                         "struct __attribute__((packed)) packed_bits { unsigned char low : 3; unsigned char high : 5; char tail; };\n"
                         "struct __attribute__((packed)) offset_bits { char lead; int value : 24; };\n"
                         "struct __attribute__((packed)) zero_width_bits { int before : 3; int : 0; int after : 3; };\n"
@@ -11044,6 +11047,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
                         "struct packed_then_aligned packed_then_aligned_object;\n"
                         "struct plain plain_object;\n"
                         "union packed_union packed_union_object;\n"
+                        "union packed_bit_union packed_bit_union_object;\n"
+                        "union packed_bit_union_wide packed_bit_union_wide_object;\n"
+                        "union unpacked_bit_union unpacked_bit_union_object;\n"
                         "struct packed_bits packed_bits_object;\n"
                         "struct offset_bits offset_bits_object;\n"
                         "struct zero_width_bits zero_width_bits_object;\n"
@@ -11064,6 +11070,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
                         "_Static_assert(_Alignof(struct packed_then_aligned) == 8, \"packed then aligned alignment\");\n"
                         "_Static_assert(sizeof(struct plain) == 8, \"plain\");\n"
                         "_Static_assert(sizeof(union packed_union) == 4, \"packed union\");\n"
+                        "_Static_assert(sizeof(union packed_bit_union) == 1, \"packed bit union\");\n"
+                        "_Static_assert(_Alignof(union packed_bit_union) == 1, \"packed bit union alignment\");\n"
+                        "_Static_assert(sizeof(union packed_bit_union_wide) == 2, \"packed bit union wide\");\n"
+                        "_Static_assert(sizeof(union unpacked_bit_union) == 4, \"unpacked bit union\");\n"
+                        "_Static_assert(_Alignof(union unpacked_bit_union) == 4, \"unpacked bit union alignment\");\n"
                         "_Static_assert(sizeof(struct packed_bits) == 2, \"packed bits\");\n"
                         "_Static_assert(sizeof(struct offset_bits) == 4, \"offset bits\");\n"
                         "_Static_assert(sizeof(struct zero_width_bits) == 5, \"zero width bits\");\n"
@@ -11116,6 +11127,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
         if (packed_union_type)
         {
             BUSTER_TEST(arguments, packed_union_type->layout.size == 4 && packed_union_type->layout.alignment == 1);
+        }
+        // A union member starts at bit zero whether or not it is a bit-field,
+        // so a packed union sizes to the bits its widest member occupies
+        // rather than to that member's declared type (#706), and the unit the
+        // field is read through narrows to what the union has room for. The
+        // unpacked spelling is the control: the rounding to the alignment its
+        // declared type asks for gives the four bytes and the declared unit
+        // back, which is what one uniform arm has to answer.
+        struct
+        {
+            String8 object;
+            u64 size;
+            u32 alignment;
+            u8 access_size;
+        } bit_unions[] = {
+            {S8("packed_bit_union_object"), 1, 1, 1},
+            {S8("packed_bit_union_wide_object"), 2, 1, 2},
+            {S8("unpacked_bit_union_object"), 4, 4, 0},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bit_unions); index += 1)
+        {
+            IrGlobal* bit_union_object = c_test_find_ir_global(module, lowered.program, bit_unions[index].object);
+            IrType* bit_union_type = bit_union_object ? ir_type_from_id(&lowered.program->types, bit_union_object->type) : 0;
+            BUSTER_TEST(arguments, bit_union_type != 0 && bit_union_type->field_count == 2);
+            if (bit_union_type && bit_union_type->field_count == 2)
+            {
+                BUSTER_TEST(arguments, bit_union_type->layout.size == bit_unions[index].size);
+                BUSTER_TEST(arguments, bit_union_type->layout.alignment == bit_unions[index].alignment);
+                BUSTER_TEST(arguments, bit_union_type->fields[0].offset == 0);
+                BUSTER_TEST(arguments, bit_union_type->fields[1].offset == 0 && bit_union_type->fields[1].bit_offset == 0);
+                BUSTER_TEST(arguments, bit_union_type->fields[1].access_size == bit_unions[index].access_size);
+            }
         }
         // The three packed bit-field shapes: contiguous bits, a field read
         // through a unit that starts before it, and a zero-width one that

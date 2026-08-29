@@ -61,6 +61,55 @@ union __attribute__((packed)) packed_union
     int value;
 };
 
+// A packed union sizes to the bits its widest member occupies rather than to
+// that member's declared type, so `int value : 5` makes this one byte -- which
+// is what Clang and GCC do and what a size taken from the declared type got
+// wrong (#706).  The unpacked spelling below is the control: there the
+// rounding to the alignment its declared type asks for gives the four bytes
+// back, so one uniform rule answers both.
+union __attribute__((packed)) packed_bit_union
+{
+    char lead;
+    int value : 5;
+};
+
+// The same shape a byte wider, so the size is not only the one-byte case: a
+// twelve-bit field occupies two bytes and is read through the two-byte unit
+// the aggregate has room for.
+union __attribute__((packed)) packed_bit_union_wide
+{
+    char lead;
+    unsigned int value : 12;
+};
+
+// A member wider than the union's size, which pins that the unit a union
+// bit-field is read through is chosen from the aggregate the same way a
+// struct's is: four bytes hold the thirty-two-bit field and the byte member
+// both.
+union __attribute__((packed)) packed_bit_union_mixed
+{
+    char lead;
+    int narrow : 5;
+    long long wide : 32;
+};
+
+union unpacked_bit_union
+{
+    char lead;
+    int value : 5;
+};
+
+// The union's size is where the member after it sits, so a union sized from
+// the declared type puts `tail` three bytes further on -- and a `value` read
+// through a four-byte unit would take `tail` with it on every store.
+struct __attribute__((packed)) packed_bit_union_record
+{
+    union packed_bit_union bits;
+    char tail;
+};
+
+static union packed_bit_union packed_bit_union_initialized = {.value = -6};
+
 // Packing is not transitive: the nested aggregate keeps its own natural
 // alignment and only its placement inside the packed parent moves.
 struct __attribute__((packed)) nested
@@ -404,6 +453,11 @@ int main(void)
     if (sizeof(struct member_packed) != 5 || _Alignof(struct member_packed) != 1) return 3;
     if (sizeof(struct packed_then_aligned) != 8 || _Alignof(struct packed_then_aligned) != 8) return 4;
     if (sizeof(union packed_union) != 4 || _Alignof(union packed_union) != 1) return 5;
+    if (sizeof(union packed_bit_union) != 1 || _Alignof(union packed_bit_union) != 1) return 88;
+    if (sizeof(union packed_bit_union_wide) != 2 || _Alignof(union packed_bit_union_wide) != 1) return 89;
+    if (sizeof(union packed_bit_union_mixed) != 4 || _Alignof(union packed_bit_union_mixed) != 1) return 90;
+    if (sizeof(union unpacked_bit_union) != 4 || _Alignof(union unpacked_bit_union) != 4) return 91;
+    if (sizeof(struct packed_bit_union_record) != 2) return 92;
     if (sizeof(struct nested) != 9 || _Alignof(struct nested) != 1) return 6;
     if (sizeof(struct packed_bits) != 2) return 7;
     if (sizeof(struct offset_bits) != 4) return 8;
@@ -508,6 +562,36 @@ int main(void)
     // through the declared type they would run off the end of the object.
     if (narrow_unit_initialized.lead != 1 || narrow_unit_initialized.value != -6 || narrow_unit_initialized.tail != 2) return 78;
     if (narrow_unit_designated.lead != 0 || narrow_unit_designated.value != 5 || narrow_unit_designated.tail != 6) return 79;
+
+    // A packed union's bit-field is read through a unit the union has room
+    // for, and `tail` is what a store through the declared type's unit would
+    // clobber: the field round-trips its thirty-two values with the neighbour
+    // intact, and only a one-byte union puts that neighbour at offset one.
+    struct packed_bit_union_record union_record;
+    union_record.tail = 'z';
+    for (int union_value = -16; union_value < 16; union_value += 1)
+    {
+        union_record.bits.value = union_value;
+        if (union_record.bits.value != union_value || union_record.tail != 'z') return 93;
+    }
+    if ((char *)&union_record.tail - (char *)&union_record != 1) return 94;
+    union_record.bits.lead = 'y';
+    if (union_record.bits.lead != 'y' || union_record.tail != 'z') return 95;
+
+    union packed_bit_union_wide union_wide;
+    union_wide.value = 4095u;
+    if (union_wide.value != 4095u) return 96;
+    union packed_bit_union_mixed union_mixed;
+    union_mixed.wide = -123456789;
+    if (union_mixed.wide != -123456789) return 97;
+    union_mixed.narrow = -6;
+    if (union_mixed.narrow != -6) return 98;
+    union unpacked_bit_union union_unpacked;
+    union_unpacked.value = 7;
+    if (union_unpacked.value != 7) return 99;
+    // The fold that writes a union bit-field into static bytes reads the same
+    // unit the loads above do.
+    if (packed_bit_union_initialized.value != -6) return 100;
 
     // Objects the linker placed, and one automatic object.
     char automatic_aligned[3] __attribute__((aligned(64)));

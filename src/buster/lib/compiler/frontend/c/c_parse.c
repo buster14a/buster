@@ -1544,7 +1544,12 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                     {
                         if (member.bit_width)
                         {
-                            bit_position = BUSTER_MAX(bit_position, member_size * 8);
+                            // The bits the member occupies, not its declared
+                            // type's width: a union member starts at bit zero
+                            // and the size rounds up to the alignment below,
+                            // which is the same arm the IR layout in c_gen
+                            // takes.
+                            bit_position = BUSTER_MAX(bit_position, (u64)member.bit_width);
                         }
                         continue;
                     }

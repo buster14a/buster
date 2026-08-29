@@ -35,6 +35,30 @@ unsigned long long packed_layout_bit_record_size(void)
     return sizeof(struct packed_bit_record);
 }
 
+unsigned long long packed_layout_bit_union_size(void)
+{
+    return sizeof(union packed_bit_union);
+}
+
+unsigned long long packed_layout_bit_union_tail_offset(void)
+{
+    struct packed_bit_union_record record;
+    return (unsigned long long)((char *)&record.tail - (char *)&record);
+}
+
+struct packed_bit_union_record packed_layout_make_bit_union_record(int value, char tail)
+{
+    struct packed_bit_union_record record;
+    record.bits.value = value;
+    record.tail = tail;
+    return record;
+}
+
+int packed_layout_bit_union_value(struct packed_bit_union_record record)
+{
+    return record.bits.value * 100 + record.tail;
+}
+
 unsigned long long packed_layout_below_natural_size(void)
 {
     return sizeof(struct below_natural_record);
