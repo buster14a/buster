@@ -22441,7 +22441,18 @@ c_ir_expression_core_loop:
             }
             IrTypeId field_type = builder->function->values[place.value].canonical_type;
             IrType* field = ir_type_from_id(&builder->program->types, field_type);
-            values[value_count - 1] = field && field->kind == IR_TYPE_ARRAY ? place : c_ir_emit_load_place(builder, place, field_type, source);
+            // An aggregate member that the next `.` walks straight through is
+            // a place, not a value: `((T *)p)->a.b` designates b and never
+            // reads a. Loading the whole of `a` first copies an object the
+            // expression does not name, and the copy is a real read of memory
+            // -- offsetof spelled `&(((T *)0)->a.b)`, which is what a header
+            // writes for a compiler without __builtin_offsetof, then faults on
+            // the null pointer it was never going to dereference. The array arm
+            // beside it is the same rule for C 6.5.3.2p4.
+            bool member_place = field && (field->kind == IR_TYPE_STRUCT || field->kind == IR_TYPE_UNION) && index + 2 < end &&
+                                c_token_is_punctuator(&builder->preprocess.tokens[index + 2], C_PUNCTUATOR_DOT);
+            values[value_count - 1] =
+                field && (field->kind == IR_TYPE_ARRAY || member_place) ? place : c_ir_emit_load_place(builder, place, field_type, source);
             if (values[value_count - 1].value == IR_ID_UNDERLYING_INVALID)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);

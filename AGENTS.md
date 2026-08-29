@@ -2654,6 +2654,31 @@ on a commit you already know is incomplete tells nobody anything.
   it and libc-test's `functional/strftime` failed all 64 of its checks.
   `tests/basic_c_pointer_to_array_place.c` pins that shape under all four
   register allocators.
+- **An aggregate member the next `.` walks through is a place, not a value.**
+  `((T *)p)->a.b` names b, and C 6.5.2.3 gives the route to it no read of its
+  own. The expression walk in `c_gen.c` loaded `a` anyway and then recovered
+  the place it needed from that load's own operand, so every answer was right
+  and the copy was dead — but a dead copy is still a read of memory, and
+  offsetof is written on the null pointer. A compiler that does not advertise
+  `__builtin_offsetof` gets musl's other spelling,
+  `((size_t)( (char *)&(((type *)0)->member) - (char *)0 ))`, so a member named
+  through two accesses copied a whole object out of address zero. musl's
+  `__pthread_exit` takes exactly that offset for every mutex on the robust list
+  — `_m_next` is `__u.__p[4]` — and died there with SIGSEGV, which is what
+  libc-test's `functional/pthread_robust` and `regression/pthread-robust-detach`
+  reported as #737. Predefining `__GNUC__` in every dialect moved musl to
+  `__builtin_offsetof` and closed both units before this rule landed, so the
+  spelling that reaches the walk is now a program's own rather than a libc's:
+  measured 2026-08-30, the libc-test classification is identical with and
+  without this rule. The member arm keeps the place when the following token
+  is a `.`, which is the same rule as the array arm beside it; a chain that
+  ends at the aggregate still loads it, so a by-value read is unchanged.
+  `tests/basic_c_member_chain_place.c` pins the offsets against a live object
+  under all four register allocators, spelling the pointer form directly so it
+  does not depend on which offsetof a header picks, and faults the way musl did
+  if the copy comes back. The parenthesized spellings of the same walk still
+  emit one — `(*o).a.b` and `(((T *)0)->a).b` load the intermediate through the
+  group that produced it, where this arm cannot see the `.` that follows (#741).
 - Native lowering is `canonical IR -> machine IR -> scheduling/register
   allocation -> encoding`. Selection patterns and scheduling classes remain
   separate metadata domains even when they share instruction-form IDs.

@@ -7686,6 +7686,52 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(gnu_specifier_temporary);
         }
     }
+    // Walking through an intermediate aggregate member under every allocator.
+    // `((T *)p)->a.b` names b, and a is only the route: loading a copied a
+    // whole object the expression never reads.  The copy was dead but it was
+    // still a read, so the offsetof spelled `&(((T *)0)->a.b)` -- what a
+    // header writes for a compiler without __builtin_offsetof -- faulted on
+    // the null pointer, which is how libc-test's `functional/pthread_robust`
+    // and `regression/pthread-robust-detach` died inside musl's
+    // `__pthread_exit` (#737) before the __GNUC__ predefine moved musl to the
+    // builtin.  The fixture spells the pointer form itself rather than through
+    // a header, so it faults when the copy comes back whatever <stddef.h>
+    // picks, and exits non-zero on any other wrong answer, naming the case.
+    {
+        String8 member_chain_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(member_chain_allocators); allocator_index += 1)
+        {
+            Arena* member_chain_conflicts[] = {
+                arguments->arena,
+                c_asm_arena,
+            };
+            TemporalArena member_chain_temporary = scratch_begin(member_chain_conflicts, BUSTER_ARRAY_LENGTH(member_chain_conflicts));
+            Arena* member_chain_arena = member_chain_temporary.arena;
+            String8 member_chain_path = buster_test_temporary_path(member_chain_arena, S8("buster-c-member-chain-place"),
+                                                                   string_format(member_chain_arena, S8("-{u32}"), allocator_index));
+            String8 member_chain_command_line[] = {
+                string_format(member_chain_arena, S8("-fregister-allocator={S8}"), member_chain_allocators[allocator_index]),
+                S8("-o"),
+                member_chain_path,
+                S8("tests/basic_c_member_chain_place.c"),
+            };
+            CompilerDriverResult member_chain = compiler_driver_execute_invocation(
+                member_chain_arena, compiler_driver_parse_arguments(member_chain_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(member_chain_command_line)));
+            BUSTER_TEST(arguments, member_chain.error == COMPILER_DRIVER_ERROR_NONE);
+            if (member_chain.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {member_chain_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(member_chain_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(member_chain_temporary);
+        }
+    }
     String8 c_asm_aarch64_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-aarch64"), S8(""));
     String8 c_asm_aarch64_command_line[] = {
         S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_asm_aarch64_path, S8("tests/basic_c_asm.c"),
