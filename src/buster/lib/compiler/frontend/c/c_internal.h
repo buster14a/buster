@@ -522,6 +522,12 @@ struct CTypeParseFrame
     u32 task_mark;
     u32 alignment_start;
     u32 alignment_count;
+    // An aggregate segment declares a comma-separated member list over one set
+    // of declaration specifiers, and this is where those specifiers end -- the
+    // start of the leading declarator.  A marker before it belongs to every
+    // member of the list; a marker past it belongs to the one declarator whose
+    // own range holds it.
+    u32 shared_specifier_end;
     u32 mutation_mark;
     u32 definition_type_start;
     u32 pending_index;

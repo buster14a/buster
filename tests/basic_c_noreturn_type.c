@@ -1,8 +1,8 @@
-// `noreturn` written on a function pointer type or a typedef rather than on a
-// function declaration.  The call site sees only the type -- there is no
-// declaration behind a call through a pointer -- so the marker has to ride on
-// the function type, and a call through one has to end control flow the same
-// way a call to a noreturn declaration does.
+// `noreturn` written on a function pointer type, a typedef, or a struct or
+// union member declarator rather than on a function declaration.  The call site
+// sees only the type -- there is no declaration behind a call through a pointer
+// -- so the marker has to ride on the function type, and a call through one has
+// to end control flow the same way a call to a noreturn declaration does.
 //
 // The defect this guards is dead code only, so the runtime half below cannot
 // see it: every one of these calls really does exit.  The driver test compiles
@@ -47,6 +47,50 @@ static void through_local_typedef(int status, void (*die)(int))
     must_not_be_reached();
 }
 
+// The marker on a struct or union member declarator rides on the member's own
+// function type, which is the only thing the call through the member can read.
+// A list of members shares one set of declaration specifiers, so a marker there
+// reaches every declarator of the list.
+struct member_ops
+{
+    __attribute__((noreturn)) void (*fail)(int);
+};
+
+union member_union
+{
+    __attribute__((noreturn)) void (*fail)(int);
+    int tag;
+};
+
+struct member_list
+{
+    __attribute__((noreturn)) void (*first)(int), (*second)(int);
+};
+
+static void through_struct_member(int status, struct member_ops* ops)
+{
+    ops->fail(status);
+    must_not_be_reached();
+}
+
+static void through_union_member(int status, union member_union* ops)
+{
+    ops->fail(status);
+    must_not_be_reached();
+}
+
+static void through_first_of_member_list(int status, struct member_list* ops)
+{
+    ops->first(status);
+    must_not_be_reached();
+}
+
+static void through_second_of_member_list(int status, struct member_list* ops)
+{
+    ops->second(status);
+    must_not_be_reached();
+}
+
 // A plain function pointer initialized from a noreturn function is not itself
 // noreturn -- the marker is on the function, not on the type the call reads --
 // and clang agrees.  The counterexamples below must keep falling through, so
@@ -64,10 +108,30 @@ static int through_plain_pointer(int status, plain_pointer* other)
 // silently delete the live code after those calls.
 __attribute__((noreturn)) plain_pointer marked_by_its_own_declaration;
 
+// The same guard for a member declarator: the member's type is a pointer to the
+// shared typedef, which the member did not build, so the marker has nothing of
+// its own to ride on and `through_shared_typedef` below must still fall through.
+struct member_over_shared_typedef
+{
+    __attribute__((noreturn)) plain_pointer* marked;
+};
+
 static int through_shared_typedef(int status, plain_pointer* other)
 {
     other(status);
     return status + 2;
+}
+
+// A member whose type carries no marker keeps the code after a call through it.
+struct plain_member_ops
+{
+    void (*other)(int);
+};
+
+static int through_plain_member(int status, struct plain_member_ops* ops)
+{
+    ops->other(status);
+    return status + 3;
 }
 
 static void returns_normally(int status) { (void)status; }
@@ -83,20 +147,44 @@ int main(int argc, char** argv)
     {
         return 2;
     }
+    struct plain_member_ops plain_member = {returns_normally};
+    if (through_plain_member(1, &plain_member) != 4)
+    {
+        return 3;
+    }
+    struct member_ops member_ops = {exit};
+    union member_union member_union = {exit};
+    struct member_list member_list = {exit, exit};
     // Only one of these ever runs, and each ends in exit(0); the point of the
-    // fixture is that all four bodies lower at all.
-    if (argc > 3)
+    // fixture is that all eight bodies lower at all.
+    if (argc > 7)
     {
         through_typedef_pointer(0, exit);
     }
-    if (argc > 2)
+    if (argc > 6)
     {
         through_typedef_function(0, exit);
     }
-    if (argc > 1)
+    if (argc > 5)
     {
         through_parameter(0, exit);
     }
+    if (argc > 4)
+    {
+        through_struct_member(0, &member_ops);
+    }
+    if (argc > 3)
+    {
+        through_union_member(0, &member_union);
+    }
+    if (argc > 2)
+    {
+        through_first_of_member_list(0, &member_list);
+    }
+    if (argc > 1)
+    {
+        through_second_of_member_list(0, &member_list);
+    }
     through_local_typedef(0, exit);
-    return 3;
+    return 4;
 }

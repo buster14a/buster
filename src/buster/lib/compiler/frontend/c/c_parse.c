@@ -6131,6 +6131,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         }
         frame->base_type = machine->result_type;
         frame->declarator_start = machine->result_index;
+        frame->shared_specifier_end = machine->result_index;
         if (frame->declarator_start == frame->end && frame->base_type.value < result->type_count &&
             (result->types[frame->base_type.value].kind == C_TYPE_STRUCT || result->types[frame->base_type.value].kind == C_TYPE_UNION))
         {
@@ -6293,6 +6294,24 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         c_type_parse_rollback(machine, result, frame->checkpoint, frame->mutation_mark);
         c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
         return;
+    }
+    // A member declarator may spell `noreturn` on the function type it derives,
+    // `struct ops { __attribute__((noreturn)) void (*fail)(int); };`, and the
+    // call through the member has only that type to read.  The candidate is
+    // resolved first because it is a handful of loads while the marker scan is
+    // over tokens, and every member of every aggregate reaches here.  Only a
+    // function type this segment built qualifies: a member written with a
+    // shared `typedef void handler(int);` names a type older than the segment,
+    // and marking that would end control flow at every other call written with
+    // the typedef.  The shared specifiers and this declarator are scanned as
+    // two ranges rather than as the span between them, which would read a
+    // preceding declarator's own attribute as this one's; c_ir_declaration_is_noreturn
+    // and the block-scope site split the same way, for the same reason.
+    CTypeId noreturn_function = c_parse_noreturn_candidate_function_type(result, declarator_type, false, frame->checkpoint.type_count);
+    if (noreturn_function.value != C_ID_UNDERLYING_INVALID && (c_ir_noreturn_marker_in_range(preprocess, frame->start, frame->shared_specifier_end) ||
+                                                               c_ir_noreturn_marker_in_range(preprocess, frame->declarator_start, frame->declarator_end)))
+    {
+        c_parse_add_noreturn_function_type(result, noreturn_function);
     }
     BUSTER_CHECK(result->member_count < result->member_capacity);
     result->members[result->member_count++] = (CMember){
