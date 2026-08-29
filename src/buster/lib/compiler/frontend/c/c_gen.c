@@ -2732,6 +2732,160 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder,
     return c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
 }
 
+// The only punctuators the preparation prepasses' deferral scan reacts to,
+// classified once by punctuator id so the scan spends one byte load per token
+// instead of a compare per interesting punctuator.
+typedef enum CIrLazyScanClass
+{
+    C_IR_LAZY_SCAN_OTHER,
+    C_IR_LAZY_SCAN_OPEN,
+    C_IR_LAZY_SCAN_CLOSE,
+    C_IR_LAZY_SCAN_QUESTION,
+    C_IR_LAZY_SCAN_COLON,
+    C_IR_LAZY_SCAN_COMMA,
+    C_IR_LAZY_SCAN_SHORT_CIRCUIT_OR,
+    C_IR_LAZY_SCAN_SHORT_CIRCUIT_AND,
+} CIrLazyScanClass;
+
+BUSTER_C_INTERNAL const u8 c_ir_lazy_scan_classes[C_PUNCTUATOR_COUNT] = {
+    [C_PUNCTUATOR_LEFT_PARENTHESIS] = C_IR_LAZY_SCAN_OPEN,
+    [C_PUNCTUATOR_LEFT_BRACKET] = C_IR_LAZY_SCAN_OPEN,
+    [C_PUNCTUATOR_LEFT_BRACE] = C_IR_LAZY_SCAN_OPEN,
+    [C_PUNCTUATOR_RIGHT_PARENTHESIS] = C_IR_LAZY_SCAN_CLOSE,
+    [C_PUNCTUATOR_RIGHT_BRACKET] = C_IR_LAZY_SCAN_CLOSE,
+    [C_PUNCTUATOR_RIGHT_BRACE] = C_IR_LAZY_SCAN_CLOSE,
+    [C_PUNCTUATOR_QUESTION] = C_IR_LAZY_SCAN_QUESTION,
+    [C_PUNCTUATOR_COLON] = C_IR_LAZY_SCAN_COLON,
+    [C_PUNCTUATOR_COMMA] = C_IR_LAZY_SCAN_COMMA,
+    [C_PUNCTUATOR_PIPE_PIPE] = C_IR_LAZY_SCAN_SHORT_CIRCUIT_OR,
+    [C_PUNCTUATOR_AMPERSAND_AMPERSAND] = C_IR_LAZY_SCAN_SHORT_CIRCUIT_AND,
+};
+
+// An operand that only runs when a branch is taken -- either arm of a
+// conditional, the right operand of && or ||, the body of a GNU statement
+// expression -- may not be prepared ahead of the expression that owns it.
+// c_ir_prepare_calls_discover would hoist its calls and
+// c_ir_prepare_control_expressions_step would lower its groups, and either
+// one runs the operand unconditionally; both prepasses walk the same token
+// range in order, so both carry this one scan and leave such an operand
+// alone. Whichever child expression owns the operand prepares it again
+// inside the block that actually runs.
+//
+// `depth` is the bracket depth, `lazy_depth` the depth the deferral began at
+// (UINT32_MAX outside one) and `questions` counts conditionals still waiting
+// for their colon, so that the comma which ends a conditional restores
+// preparation while a comma inside its second operand does not.
+typedef struct CIrLazyOperandScan CIrLazyOperandScan;
+struct CIrLazyOperandScan
+{
+    u32 depth;
+    u32 lazy_depth;
+    u32 questions;
+};
+
+BUSTER_C_INTERNAL CIrLazyOperandScan c_ir_lazy_operand_scan_start(void)
+{
+    return (CIrLazyOperandScan){.lazy_depth = UINT32_MAX};
+}
+
+BUSTER_C_INTERNAL bool c_ir_lazy_operand_scan_deferred(CIrLazyOperandScan scan)
+{
+    return scan.lazy_depth != UINT32_MAX;
+}
+
+// Fold one token of the range into the scan. A closing delimiter has already
+// left the group it closes; an opening one is still outside the group it
+// opens, so the deferral state a caller reads after this call is the one that
+// governs the token it just passed in.
+BUSTER_C_INTERNAL void c_ir_lazy_operand_scan_advance(CIntegerIrBuilder* builder, CIrLazyOperandScan* scan, u32 start, u32 end, u32 index)
+{
+    CToken token = builder->preprocess.tokens[index];
+    // GNU statement expressions own a complete nested body, and every
+    // statement in it is lowered after the enclosing branch has selected a
+    // block. Treat the balanced `({ ... })` group as a lazy operand.
+    if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index + 1 < end &&
+        c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE))
+    {
+        u32 brace_close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+        if (brace_close < end && brace_close + 1 < end &&
+            c_token_is_punctuator(&builder->preprocess.tokens[brace_close + 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+            scan->lazy_depth == UINT32_MAX)
+        {
+            scan->lazy_depth = scan->depth + 1;
+        }
+    }
+    // One byte load answers this for the whole token stream: every token the
+    // table does not name classifies as C_IR_LAZY_SCAN_OTHER and does no work
+    // at all.
+    switch (c_ir_lazy_scan_classes[token.punctuator])
+    {
+    case C_IR_LAZY_SCAN_OTHER:
+        break;
+    case C_IR_LAZY_SCAN_OPEN:
+        scan->depth += 1;
+        break;
+    case C_IR_LAZY_SCAN_CLOSE:
+        scan->depth -= scan->depth != 0;
+        if (scan->depth < scan->lazy_depth)
+        {
+            scan->lazy_depth = UINT32_MAX;
+            scan->questions = 0;
+        }
+        break;
+    case C_IR_LAZY_SCAN_QUESTION:
+        if (scan->lazy_depth == UINT32_MAX)
+        {
+            scan->lazy_depth = scan->depth;
+            scan->questions = 1;
+        }
+        else if (scan->depth == scan->lazy_depth)
+        {
+            scan->questions += 1;
+        }
+        break;
+    case C_IR_LAZY_SCAN_COLON:
+        if (scan->questions && scan->depth == scan->lazy_depth)
+        {
+            scan->questions -= 1;
+        }
+        break;
+    case C_IR_LAZY_SCAN_COMMA:
+        if (!scan->questions && scan->depth == scan->lazy_depth)
+        {
+            scan->lazy_depth = UINT32_MAX;
+        }
+        break;
+    case C_IR_LAZY_SCAN_SHORT_CIRCUIT_OR:
+        if (scan->lazy_depth == UINT32_MAX)
+        {
+            scan->lazy_depth = scan->depth;
+        }
+        break;
+    case C_IR_LAZY_SCAN_SHORT_CIRCUIT_AND:
+        // && before an operand is the GNU label-address operator, which
+        // evaluates nothing conditionally.
+        if (scan->lazy_depth == UINT32_MAX && !c_ir_label_address_prefix(builder, start, index))
+        {
+            scan->lazy_depth = scan->depth;
+        }
+        break;
+    }
+}
+
+// A prepass that jumps from a group's opening delimiter straight past its
+// close has folded the open into the scan and will never see the matching
+// close; fold that close in here so the depth the scan carries stays the
+// depth the group itself sits at.
+BUSTER_C_INTERNAL void c_ir_lazy_operand_scan_skip_group(CIrLazyOperandScan* scan)
+{
+    scan->depth -= scan->depth != 0;
+    if (scan->depth < scan->lazy_depth)
+    {
+        scan->lazy_depth = UINT32_MAX;
+        scan->questions = 0;
+    }
+}
+
 typedef enum CIrGroupScan
 {
     C_IR_GROUP_SCAN_NOT_OPEN,
@@ -9462,6 +9616,7 @@ struct CIrLowerFrame
         } expression_core;
         struct
         {
+            CIrLazyOperandScan lazy;
             u32 start;
             u32 end;
             u32 index;
@@ -12710,6 +12865,7 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
         frame->as.prepare_control.index = frame->as.prepare_control.start;
+        frame->as.prepare_control.lazy = c_ir_lazy_operand_scan_start();
         frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
     else if (frame->stage == C_IR_LOWER_STAGE_CHILD)
@@ -12725,11 +12881,14 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         expression->lowering = false;
         expression->emitted = true;
         frame->as.prepare_control.index = frame->as.prepare_control.close + 1;
+        c_ir_lazy_operand_scan_skip_group(&frame->as.prepare_control.lazy);
         frame->stage = C_IR_LOWER_STAGE_FINISH;
     }
     while (frame->as.prepare_control.index < frame->as.prepare_control.end)
     {
         u32 index = frame->as.prepare_control.index++;
+        c_ir_lazy_operand_scan_advance(builder, &frame->as.prepare_control.lazy, frame->as.prepare_control.start,
+                                       frame->as.prepare_control.end, index);
         if (index + 1 < frame->as.prepare_control.end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
             string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), S8("_Generic")) &&
             c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
@@ -12758,6 +12917,7 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
             // an inner group a second time and runs its side effects again
             // (tests/basic_c_conditional_operand.c, the nested-call shape).
             frame->as.prepare_control.index = recorded->close_index + 1;
+            c_ir_lazy_operand_scan_skip_group(&frame->as.prepare_control.lazy);
             continue;
         }
         u32 close = c_ir_matching_delimiter_cached(builder, index, frame->as.prepare_control.end,
@@ -12775,6 +12935,7 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         if ((parentheses || brackets) && c_ir_prepared_control_expression_contains_range(builder, index, close))
         {
             frame->as.prepare_control.index = close + 1;
+            c_ir_lazy_operand_scan_skip_group(&frame->as.prepare_control.lazy);
             continue;
         }
         if ((!parentheses && !brackets) ||
@@ -12796,6 +12957,17 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         if (!brackets && !c_ir_has_root_control_operator(builder, index + 1, close) &&
             !c_ir_has_root_assignment(builder, index + 1, close) &&
             !(c_ir_has_top_level_comma(builder, index + 1, close) && c_ir_has_assignment_anywhere(builder, index + 1, close)))
+        {
+            continue;
+        }
+        // The right operand of && or ||, either arm of a conditional, and a
+        // statement-expression body run only when a branch is taken. Lowering
+        // the group here runs it unconditionally -- `f(x || (a = 1))` would
+        // store even when `x` is true -- so leave it alone. The child
+        // expression that owns the operand runs this same prepass over its
+        // own range inside the block the branch selected, and prepares it
+        // there (tests/basic_c_lazy_operand_argument.c).
+        if (c_ir_lazy_operand_scan_deferred(frame->as.prepare_control.lazy))
         {
             continue;
         }
@@ -13162,35 +13334,6 @@ BUSTER_C_INTERNAL bool c_ir_atomic_compare_orders_valid(IrMemoryOrder success, I
     return false;
 }
 
-// The only punctuators c_ir_prepare_calls_discover's deferral scan reacts to,
-// classified once by punctuator id so the scan spends one byte load per token
-// instead of a compare per interesting punctuator.
-typedef enum CIrLazyScanClass
-{
-    C_IR_LAZY_SCAN_OTHER,
-    C_IR_LAZY_SCAN_OPEN,
-    C_IR_LAZY_SCAN_CLOSE,
-    C_IR_LAZY_SCAN_QUESTION,
-    C_IR_LAZY_SCAN_COLON,
-    C_IR_LAZY_SCAN_COMMA,
-    C_IR_LAZY_SCAN_SHORT_CIRCUIT_OR,
-    C_IR_LAZY_SCAN_SHORT_CIRCUIT_AND,
-} CIrLazyScanClass;
-
-BUSTER_C_INTERNAL const u8 c_ir_lazy_scan_classes[C_PUNCTUATOR_COUNT] = {
-    [C_PUNCTUATOR_LEFT_PARENTHESIS] = C_IR_LAZY_SCAN_OPEN,
-    [C_PUNCTUATOR_LEFT_BRACKET] = C_IR_LAZY_SCAN_OPEN,
-    [C_PUNCTUATOR_LEFT_BRACE] = C_IR_LAZY_SCAN_OPEN,
-    [C_PUNCTUATOR_RIGHT_PARENTHESIS] = C_IR_LAZY_SCAN_CLOSE,
-    [C_PUNCTUATOR_RIGHT_BRACKET] = C_IR_LAZY_SCAN_CLOSE,
-    [C_PUNCTUATOR_RIGHT_BRACE] = C_IR_LAZY_SCAN_CLOSE,
-    [C_PUNCTUATOR_QUESTION] = C_IR_LAZY_SCAN_QUESTION,
-    [C_PUNCTUATOR_COLON] = C_IR_LAZY_SCAN_COLON,
-    [C_PUNCTUATOR_COMMA] = C_IR_LAZY_SCAN_COMMA,
-    [C_PUNCTUATOR_PIPE_PIPE] = C_IR_LAZY_SCAN_SHORT_CIRCUIT_OR,
-    [C_PUNCTUATOR_AMPERSAND_AMPERSAND] = C_IR_LAZY_SCAN_SHORT_CIRCUIT_AND,
-};
-
 // The words whose operand is never evaluated, as a well-known set: a call
 // inside one must not be prepared by the discover scan below, or its side
 // effects run even though the operand itself only ever folds to a constant.
@@ -13419,19 +13562,11 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
     u32* active_calls = arena_allocate(builder->temporary_arena, u32, active_capacity);
     u32 active_call_count = 0;
     u32 last_root = UINT32_MAX;
-    // An operand that only runs when a branch is taken -- either arm of a
-    // conditional, the right operand of && or || -- may not have its calls
-    // hoisted here: hoisting runs them unconditionally. Such a call is left
-    // unprepared and the branch's own lowering prepares it inside the block
-    // that runs, the way c_ir_lower_conditional_value_step already lowers a
-    // conditional it reaches directly. lazy_scan_depth is the bracket depth
-    // the deferral began at (UINT32_MAX outside one) and lazy_questions counts
-    // conditionals still waiting for their colon, so that the comma that ends
-    // a conditional restores hoisting while a comma inside its second operand
-    // does not.
-    u32 scan_depth = 0;
-    u32 lazy_scan_depth = UINT32_MAX;
-    u32 lazy_questions = 0;
+    // A call in an operand only a taken branch runs is left unprepared here:
+    // hoisting runs it unconditionally. The branch's own lowering prepares it
+    // inside the block that runs, the way c_ir_lower_conditional_value_step
+    // already lowers a conditional it reaches directly.
+    CIrLazyOperandScan lazy = c_ir_lazy_operand_scan_start();
     for (u32 index = start; index + 1 < end; index += 1)
     {
         while (active_call_count && index > builder->prepared_calls[active_calls[active_call_count - 1]].close_index)
@@ -13448,85 +13583,11 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             index = c_ir_unevaluated_operand_end(builder, index + 1, end) - 1;
             continue;
         }
-        // GNU statement expressions own a complete nested body.  Calls in
-        // that body must be prepared when the body is lowered, after its
-        // enclosing branch has selected a block; discovering them here would
-        // emit (for example) an assert failure call in the parent block before
-        // the statement-expression condition is evaluated.  Treat the
-        // balanced `({ ... })` group as a lazy operand.  Unlike skipping it,
-        // this still records calls in the body as deferred children of an
-        // enclosing call, so the prepared-call emitter can temporarily clear
-        // preparation while lowering that body.
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index + 1 < end &&
-            c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE))
-        {
-            u32 brace_close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
-            if (brace_close < end && brace_close + 1 < end &&
-                c_token_is_punctuator(&builder->preprocess.tokens[brace_close + 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                if (lazy_scan_depth == UINT32_MAX)
-                {
-                    lazy_scan_depth = scan_depth + 1;
-                }
-            }
-        }
-        // One byte load answers this for the whole token stream: every token
-        // the table does not name classifies as C_IR_LAZY_SCAN_OTHER and does
-        // no work at all. A closing delimiter has already left the group it
-        // closes; an opening one is still outside the group it opens.
-        switch (c_ir_lazy_scan_classes[token.punctuator])
-        {
-        case C_IR_LAZY_SCAN_OTHER:
-            break;
-        case C_IR_LAZY_SCAN_OPEN:
-            scan_depth += 1;
-            break;
-        case C_IR_LAZY_SCAN_CLOSE:
-            scan_depth -= scan_depth != 0;
-            if (scan_depth < lazy_scan_depth)
-            {
-                lazy_scan_depth = UINT32_MAX;
-                lazy_questions = 0;
-            }
-            break;
-        case C_IR_LAZY_SCAN_QUESTION:
-            if (lazy_scan_depth == UINT32_MAX)
-            {
-                lazy_scan_depth = scan_depth;
-                lazy_questions = 1;
-            }
-            else if (scan_depth == lazy_scan_depth)
-            {
-                lazy_questions += 1;
-            }
-            break;
-        case C_IR_LAZY_SCAN_COLON:
-            if (lazy_questions && scan_depth == lazy_scan_depth)
-            {
-                lazy_questions -= 1;
-            }
-            break;
-        case C_IR_LAZY_SCAN_COMMA:
-            if (!lazy_questions && scan_depth == lazy_scan_depth)
-            {
-                lazy_scan_depth = UINT32_MAX;
-            }
-            break;
-        case C_IR_LAZY_SCAN_SHORT_CIRCUIT_OR:
-            if (lazy_scan_depth == UINT32_MAX)
-            {
-                lazy_scan_depth = scan_depth;
-            }
-            break;
-        case C_IR_LAZY_SCAN_SHORT_CIRCUIT_AND:
-            // && before an operand is the GNU label-address operator, which
-            // evaluates nothing conditionally.
-            if (lazy_scan_depth == UINT32_MAX && !c_ir_label_address_prefix(builder, start, index))
-            {
-                lazy_scan_depth = scan_depth;
-            }
-            break;
-        }
+        // A `({ ... })` body counts as a lazy operand here rather than being
+        // skipped outright: that still records calls in the body as deferred
+        // children of an enclosing call, so the prepared-call emitter can
+        // temporarily clear preparation while lowering that body.
+        c_ir_lazy_operand_scan_advance(builder, &lazy, start, end, index);
         // Atomic and math names resolve their exact operation by spelling
         // below, but only after c_ir_token_builtin_kind says they are one.
         CSymbolBuiltin builtin_kind = c_ir_token_builtin_kind(builder, token);
@@ -13750,7 +13811,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         {
             continue;
         }
-        if (lazy_scan_depth != UINT32_MAX)
+        if (c_ir_lazy_operand_scan_deferred(lazy))
         {
             if (active_call_count)
             {

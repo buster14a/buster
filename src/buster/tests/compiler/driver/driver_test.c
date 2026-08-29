@@ -7554,6 +7554,48 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(pointer_to_array_temporary);
         }
     }
+    // Short-circuit and conditional operands inside a call argument, under
+    // every allocator.  The fixture's own comment carries the rule; what it is
+    // here for is that a call argument is the position where the arithmetic
+    // core runs the control-expression prepass, so a parenthesized group in a
+    // lazy operand is the one shape both prepasses have to agree to leave
+    // alone.  It exits non-zero on the first wrong answer, naming the case.
+    {
+        String8 lazy_operand_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(lazy_operand_allocators); allocator_index += 1)
+        {
+            Arena* lazy_operand_conflicts[] = {
+                arguments->arena,
+                c_asm_arena,
+            };
+            TemporalArena lazy_operand_temporary = scratch_begin(lazy_operand_conflicts, BUSTER_ARRAY_LENGTH(lazy_operand_conflicts));
+            Arena* lazy_operand_arena = lazy_operand_temporary.arena;
+            String8 lazy_operand_path = buster_test_temporary_path(lazy_operand_arena, S8("buster-c-lazy-operand-argument"),
+                                                                   string_format(lazy_operand_arena, S8("-{u32}"), allocator_index));
+            String8 lazy_operand_command_line[] = {
+                string_format(lazy_operand_arena, S8("-fregister-allocator={S8}"), lazy_operand_allocators[allocator_index]),
+                S8("-o"),
+                lazy_operand_path,
+                S8("tests/basic_c_lazy_operand_argument.c"),
+            };
+            CompilerDriverResult lazy_operand = compiler_driver_execute_invocation(
+                lazy_operand_arena,
+                compiler_driver_parse_arguments(lazy_operand_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(lazy_operand_command_line)));
+            BUSTER_TEST(arguments, lazy_operand.error == COMPILER_DRIVER_ERROR_NONE);
+            if (lazy_operand.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {lazy_operand_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(lazy_operand_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(lazy_operand_temporary);
+        }
+    }
     String8 c_asm_aarch64_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-aarch64"), S8(""));
     String8 c_asm_aarch64_command_line[] = {
         S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_asm_aarch64_path, S8("tests/basic_c_asm.c"),

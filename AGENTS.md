@@ -1350,12 +1350,12 @@ by how many tests wanted each. It is the work list in the order that unblocks
 the most tests, and it is why this stage grows by itself as the compiler
 improves rather than needing to be extended by hand.
 
-Today 242 of 424 units pass (measured 2026-08-29). Seventy-eight are
+Today 243 of 424 units pass (measured 2026-08-29). Seventy-eight are
 `src/api`: 78 of its 79 units compile against musl's headers under both
 compilers, and one — `api/unistd` — is held out because musl defines neither
 `_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the reference fails on
-too. The other 164 are runtime tests that link and run green: `src/functional`
-is 54 passing against 3 failing, 2 blocked-link and 18 excluded-reference;
+too. The other 165 are runtime tests that link and run green: `src/functional`
+is 55 passing against 2 failing, 2 blocked-link and 18 excluded-reference;
 `src/math` is 55 passing and 144 excluded-reference; `src/regression` is 55
 passing against none failing, 1 blocked-link and 13 excluded-reference.
 `src/math` passes every one of the 55 units the reference can run, and
@@ -1384,7 +1384,7 @@ not resolve, and none of those three is short a symbol: each is short a
 relocation the shared object cannot carry, which the unit's own
 `LIBCTEST_UNIT` line carries in the linker's words. The work list this stage
 generates for itself is a list of missing components, and what is left now is
-a code-generation model and three wrong answers.
+a code-generation model and two wrong answers.
 
 The last 22 blocked-compile units went together, 21 in `src/math` and
 `functional/strtold`, when the x87 static-initializer folder stopped refusing
@@ -1399,15 +1399,40 @@ and its own diagnostic never reaches a state count. `buster_compile_failed` on
 the `LIBCTEST_SUBSET` line is the number to read for a compile gap, and it is
 0 in every subset but `api` and `functional` now.
 
-The three failing units are wrong answers rather than missing components.
-`functional/fcntl` and `functional/tgmath` exit non-zero and have not been
-attributed further; each was blocked on a link until `vfprintf` compiled, so
-neither is a regression against an earlier pass, and none of the 22 that came
-in after them joined this list. The third, `functional/tls_align`, is the
-thread-local model described above and is the one of the three with a known
-cause.
+The two failing units are wrong answers rather than missing components.
+`functional/tgmath` exits non-zero and has not been attributed further; it was
+blocked on a link until `vfprintf` compiled, so it is not a regression against
+an earlier pass, and none of the 22 that came in after it joined this list.
+The other, `functional/tls_align`, is the thread-local model described above
+and is the one of the two with a known cause.
 
-Three of the original five went before it arrived. `regression/sem_close-unmap`
+`functional/fcntl` was the fourth of the original five to go, and it was a
+lazy operand inside a call argument. Its child process exits on
+`fcntl(fd, F_SETLK, &fl)==0 || (errno!=EAGAIN && errno!=EACCES)`, and the
+`errno` reads came out ahead of the `fcntl` call that sets them, so the child
+saw the value from before the call — 0, from the parent's own `TESTE` — and
+reported the lock its parent held as not held. Nothing about `struct flock`,
+the syscall wrapper or the fork was involved: Buster's own `fcntl.o` relinked
+against the *reference* archive failed the same way, and the reference's
+object against `libc-buster.a` passed, which named the one translation unit in
+a single link rather than a bisect over members.
+
+Two prepasses run over a statement before its expression is lowered — one
+hoists calls (`c_ir_prepare_calls_discover`), one lowers parenthesized control
+groups (`c_ir_prepare_control_expressions_step`) — and either one runs an
+operand that only a taken branch should run. Only the call prepass had that
+rule; they share one `CIrLazyOperandScan` now, and a prepass that jumps past a
+group it will not enter folds the close it never sees back into the scan so
+the depth it carries stays the group's own. A call argument is where this was
+visible at all: an argument is lowered by the arithmetic core, which is what
+runs the control prepass, while an assignment, an `if` or a `while` condition
+reaches the condition machine directly and was always lazy — so
+`f(x || (n = 1))` stored and `if (x || (n = 1))` did not.
+`tests/basic_c_lazy_operand_argument.c` pins the whole class — both
+short-circuit operators, both conditional arms, a call in a lazy operand, and
+the eager groups that must keep running — under all four allocators.
+
+Three of the original five went before it. `regression/sem_close-unmap`
 and `functional/mntent` had one cause between them: neither `main` contains a
 return statement, and reaching the `}` that terminates `main` returns 0
 (C 5.1.2.2.3) where every other function's fall-off is undefined. The C

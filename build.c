@@ -17146,8 +17146,17 @@ struct LibcTestSubsetTotals
 // object could interpose, which is what -fPIC exists to avoid) and four
 // excluded-reference, all of them tests that call `dlopen`, which needs the
 // `setjmp` neither compiler can build.
-#define LIBC_TEST_EXPECTED_PASSING 242
-#define LIBC_TEST_EXPECTED_STATE_HASH 0x117c4d52052bb00aull
+// 2026-08-29: 242 -> 243. `functional/fcntl` was a lazy operand inside a call
+// argument. Its child exits on
+// `fcntl(fd, F_SETLK, &fl)==0 || (errno!=EAGAIN && errno!=EACCES)`, and the
+// prepass that lowers parenthesized control groups ahead of an expression had
+// no lazy-operand rule -- only the call prepass did -- so the `errno` reads
+// came out ahead of the call that sets them and the child reported the lock
+// its parent held as not held. Both prepasses share one deferral scan now;
+// `tests/basic_c_lazy_operand_argument.c` pins the class under all four
+// allocators.
+#define LIBC_TEST_EXPECTED_PASSING 243
+#define LIBC_TEST_EXPECTED_STATE_HASH 0x788ca45669f24411ull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it
