@@ -874,6 +874,28 @@ BUSTER_GLOBAL_LOCAL bool assembly_expression_parse(AssemblyBuilder* builder, Str
     {
         return false;
     }
+    // A displacement may be written parenthesized -- `(-1-2)(%rdi,%rdx)` --
+    // so strip a pair that encloses the whole expression before reading it.
+    while (text.length > 1 && text.pointer[0] == '(' && text.pointer[text.length - 1] == ')')
+    {
+        u32 depth = 0;
+        bool encloses = true;
+        for (u64 index = 0; index < text.length && encloses; index += 1)
+        {
+            depth += text.pointer[index] == '(';
+            depth -= text.pointer[index] == ')';
+            encloses = depth != 0 || index + 1 == text.length;
+        }
+        if (!encloses)
+        {
+            break;
+        }
+        text = assembly_trim(string_slice(text, 1, text.length - 1));
+        if (!text.length)
+        {
+            return false;
+        }
+    }
     s64 integer = 0;
     if (assembly_parse_s64(text, &integer))
     {
@@ -892,6 +914,48 @@ BUSTER_GLOBAL_LOCAL bool assembly_expression_parse(AssemblyBuilder* builder, Str
             result->unsigned_addend = unsigned_integer;
             result->has_unsigned_addend = true;
         }
+        return true;
+    }
+    // A sum of constants: `0x3fff+13` and `72+8` are how hand-written assembly
+    // spells a field built from named parts. Fold it here; a term that is not
+    // a number falls through to the symbol form below.
+    s64 folded = 0;
+    bool constant_sum = false;
+    u64 term_start = 0;
+    for (u64 index = 1; index <= text.length; index += 1)
+    {
+        if (index != text.length && text.pointer[index] != '+' && text.pointer[index] != '-')
+        {
+            continue;
+        }
+        String8 term = assembly_trim(string_slice(text, term_start, index));
+        s64 sign = 1;
+        if (term.length && (term.pointer[0] == '+' || term.pointer[0] == '-'))
+        {
+            sign = term.pointer[0] == '-' ? -1 : 1;
+            term = assembly_trim(string_slice(term, 1, term.length));
+        }
+        s64 term_value = 0;
+        u64 term_unsigned = 0;
+        if (assembly_parse_s64(term, &term_value))
+        {
+        }
+        else if (assembly_parse_u64(term, &term_unsigned) && term_unsigned <= (u64)INT64_MAX)
+        {
+            term_value = (s64)term_unsigned;
+        }
+        else
+        {
+            constant_sum = false;
+            break;
+        }
+        folded += sign * term_value;
+        constant_sum = index != text.length || term_start != 0;
+        term_start = index;
+    }
+    if (constant_sum)
+    {
+        result->addend = folded;
         return true;
     }
     u64 operator_index = text.length;
@@ -1430,7 +1494,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_memory_parse_att(AssemblyBuilder* builder,
 {
     text = assembly_trim(text);
     text = assembly_x86_memory_strip_segment(text, ASSEMBLY_SYNTAX_ATT, result);
-    u64 open = string_first_code_unit(text, '(');
+    // The base/index group is the trailing parenthesized one, not the first:
+    // a displacement may itself be parenthesized, as in `(-1-2)(%rdi,%rdx)`.
+    u64 open = BUSTER_STRING_NO_MATCH;
+    for (u64 index = text.length; index && open == BUSTER_STRING_NO_MATCH; index -= 1)
+    {
+        open = text.pointer[index - 1] == '(' ? index - 1 : open;
+    }
     if (open == BUSTER_STRING_NO_MATCH)
     {
         // In AT&T syntax '$' is the immediate marker.  Do not let the
@@ -11428,6 +11498,49 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
         String8 alias_statement = string_format(builder->arena, S8("{S8} {S8}"), wait_alias, alias_operands);
         return assembly_x86_metadata_instruction_parse(builder, alias_statement, line, column, offset + 1, target, syntax);
     }
+    // The condition-code aliases the metadata mnemonic table does not spell.
+    // `ja` and `jnbe` are one instruction, and hand-written assembly uses
+    // whichever reads better at the site, so the alias is rewritten to the
+    // canonical spelling the checked selector knows rather than reported as
+    // an unknown instruction.
+    static const struct
+    {
+        String8 alias;
+        String8 canonical;
+    } metadata_condition_aliases[] = {
+        {S8_INITIALIZER("c"), S8_INITIALIZER("b")},     {S8_INITIALIZER("nae"), S8_INITIALIZER("b")},
+        {S8_INITIALIZER("ae"), S8_INITIALIZER("nb")},   {S8_INITIALIZER("nc"), S8_INITIALIZER("nb")},
+        {S8_INITIALIZER("e"), S8_INITIALIZER("z")},     {S8_INITIALIZER("ne"), S8_INITIALIZER("nz")},
+        {S8_INITIALIZER("na"), S8_INITIALIZER("be")},
+        {S8_INITIALIZER("a"), S8_INITIALIZER("nbe")},   {S8_INITIALIZER("pe"), S8_INITIALIZER("p")},
+        {S8_INITIALIZER("po"), S8_INITIALIZER("np")},   {S8_INITIALIZER("nge"), S8_INITIALIZER("l")},
+        {S8_INITIALIZER("ge"), S8_INITIALIZER("nl")},   {S8_INITIALIZER("ng"), S8_INITIALIZER("le")},
+        {S8_INITIALIZER("g"), S8_INITIALIZER("nle")},
+    };
+    static String8 const metadata_condition_families[] = {S8_INITIALIZER("j"), S8_INITIALIZER("set"), S8_INITIALIZER("cmov")};
+    for (u32 family_index = 0; family_index < BUSTER_ARRAY_LENGTH(metadata_condition_families); family_index += 1)
+    {
+        String8 family = metadata_condition_families[family_index];
+        if (first_word.length <= family.length || !assembly_word_equal(string_slice(first_word, 0, family.length), family))
+        {
+            continue;
+        }
+        String8 condition = string_slice(first_word, family.length, first_word.length);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(metadata_condition_aliases); index += 1)
+        {
+            if (!assembly_word_equal(condition, metadata_condition_aliases[index].alias))
+            {
+                continue;
+            }
+            String8 canonical = string_format(builder->arena, S8("{S8}{S8}"), family, metadata_condition_aliases[index].canonical);
+            String8 alias_statement =
+                first_space == trimmed_statement.length
+                    ? canonical
+                    : string_format(builder->arena, S8("{S8} {S8}"), canonical,
+                                    assembly_trim(string_slice(trimmed_statement, first_space, trimmed_statement.length)));
+            return assembly_x86_metadata_instruction_parse(builder, alias_statement, line, column, offset, target, syntax);
+        }
+    }
     // The handwritten x87 front end accepts the traditional omitted-operand
     // spellings (for example `fadd` and `fadd st(2)`).  Metadata rows expose
     // the visible stack operand, so materialize the same canonical operands
@@ -12127,6 +12240,35 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                 physical[index].width = 8;
         }
     }
+    // An AT&T mnemonic with no suffix leaves the memory element implicit, and
+    // the byte rows need it stated: `mov %al,(%rdi)` is a byte store exactly
+    // because its only data register is a byte. Wider widths already resolve
+    // through the operand-size attribute, so only the byte case is filled in
+    // here, and never for a shift or rotate whose count register is not the
+    // data operand.
+    bool byte_data_register = false;
+    bool wide_data_register = false;
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        if (physical[index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER ||
+            physical[index].reg.physical_class != BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR)
+        {
+            continue;
+        }
+        byte_data_register = byte_data_register || physical[index].reg.width == 8;
+        wide_data_register = wide_data_register || physical[index].reg.width != 8;
+    }
+    if (syntax == ASSEMBLY_SYNTAX_ATT && byte_data_register && !wide_data_register &&
+        !assembly_x86_opcode_is_shift(mnemonic_suffix_info.opcode) && !assembly_x86_opcode_is_rotate(mnemonic_suffix_info.opcode))
+    {
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !physical[index].width)
+            {
+                physical[index].width = 8;
+            }
+        }
+    }
     if (assembly_word_equal(mnemonic, S8("imul")) && operand_count == 2 &&
         physical[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
         physical[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
@@ -12192,6 +12334,10 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                              (assembly_word_equal(mnemonic, S8("rstorssp")) || assembly_word_equal(mnemonic, S8("clrssbsy")));
     bool implicit_att_memory = syntax == ASSEMBLY_SYNTAX_ATT;
     if (implicit_att_memory && assembly_word_equal(mnemonic, S8("cldemote"))) implicit_memory_width = 8;
+    else if (implicit_att_memory && (assembly_word_equal(mnemonic, S8("stmxcsr")) || assembly_word_equal(mnemonic, S8("ldmxcsr"))))
+        // MXCSR is one 32-bit control word and AT&T carries no size suffix on
+        // the spelling a libc's <fenv.h> uses.
+        implicit_memory_width = 32;
     else if (implicit_att_memory &&
              (assembly_word_equal(mnemonic, S8("wrssd")) || assembly_word_equal(mnemonic, S8("wrussd"))))
         implicit_memory_width = 32;
@@ -12288,6 +12434,29 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
                 physical[immediate_index].width = width;
                 break;
             }
+        }
+    }
+    // GNU as writes an immediate's bit pattern, not its arithmetic value:
+    // `movl $0xc2820000,-4(%rsp)` and `or $0x8000,%ax` each name a field whose
+    // top bit is set. Re-express such a literal as the signed value that field
+    // holds, so form selection sees a width it can encode instead of a
+    // magnitude past the signed maximum. Only the 16- and 32-bit widths need
+    // it: those are the IMMz fields whose literal is range-checked as signed,
+    // while a byte operand's immediate is the operand's own width and the
+    // unsigned spelling already fits it.
+    for (u32 index = 0; index < operand_count; index += 1)
+    {
+        BusterX86MetadataPhysicalOperand* immediate = physical + index;
+        if (immediate->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE || !immediate->has_value || immediate->value <= 0 ||
+            (immediate->width != 16 && immediate->width != 32))
+        {
+            continue;
+        }
+        u64 limit = (u64)1 << immediate->width;
+        u64 magnitude = (u64)immediate->value;
+        if (magnitude >= limit >> 1 && magnitude < limit)
+        {
+            immediate->value = (s64)magnitude - (s64)limit;
         }
     }
     BusterX86MetadataPhysicalAttributes attributes = {
@@ -12575,6 +12744,16 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_instruction_is_novel(AssemblyInst
     // form and carries symbol relocations through to emission.
     if (assembly_word_equal(instruction.metadata_mnemonic, S8("PUSH")) && instruction.metadata_operand_count == 1 &&
         instruction.metadata_operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
+    {
+        return true;
+    }
+    // PUSH and POP of a memory operand are classic encodings with no
+    // handwritten form. A sigsetjmp that moves a return address in and out of
+    // the jump buffer is written with both, so keep the metadata result rather
+    // than restoring the handwritten operand-form diagnostic.
+    if ((assembly_word_equal(instruction.metadata_mnemonic, S8("PUSH")) || assembly_word_equal(instruction.metadata_mnemonic, S8("POP"))) &&
+        instruction.metadata_operand_count == 1 &&
+        instruction.metadata_operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
     {
         return true;
     }

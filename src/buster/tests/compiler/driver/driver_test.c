@@ -7873,6 +7873,140 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 #endif
     scratch_end(c_asm_temporary);
 #endif
+    // Assembly as driver input. The fixture is one complete translation unit
+    // -- two sections, the symbol and data directives, local numeric labels
+    // resolved forward and backward -- so the object is checked for what a
+    // linker reads and, where the host can run it, the program is checked for
+    // what the assembler actually encoded.
+    {
+        TemporalArena asm_unit_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* asm_unit_arena = asm_unit_temporary.arena;
+        String8 asm_unit_object_path = buster_test_temporary_path(asm_unit_arena, S8("buster-asm-unit"), S8(".o"));
+        String8 asm_unit_command_line[] = {
+            S8("-c"), S8("-o"), asm_unit_object_path, S8("tests/basic_asm_unit.s"),
+        };
+        CompilerDriverResult asm_unit = compiler_driver_execute_invocation(
+            asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(asm_unit_command_line)));
+        BUSTER_TEST(arguments, asm_unit.error == COMPILER_DRIVER_ERROR_NONE);
+        if (asm_unit.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            BUSTER_TEST(arguments, asm_unit.has_object);
+            // `.section .rodata` and `.text`, each under its own name: the
+            // object keeps the file's section names rather than a fixed
+            // kind-indexed table, which is what `.init` in a crt depends on.
+            ObjectSection const* asm_unit_text = 0;
+            ObjectSection const* asm_unit_rodata = 0;
+            u32 asm_unit_text_section = OBJECT_SECTION_UNDEFINED;
+            u32 asm_unit_rodata_section = OBJECT_SECTION_UNDEFINED;
+            for (u32 section_index = 0; section_index < asm_unit.object.section_count; section_index += 1)
+            {
+                ObjectSection* section = asm_unit.object.sections + section_index;
+                bool text = string_equal(section->name, S8(".text"));
+                bool rodata = string_equal(section->name, S8(".rodata"));
+                asm_unit_text = text ? section : asm_unit_text;
+                asm_unit_rodata = rodata ? section : asm_unit_rodata;
+                asm_unit_text_section = text ? section_index : asm_unit_text_section;
+                asm_unit_rodata_section = rodata ? section_index : asm_unit_rodata_section;
+            }
+            BUSTER_TEST(arguments, asm_unit_text && asm_unit_text->kind == OBJECT_SECTION_TEXT && asm_unit_text->data.length != 0);
+            BUSTER_TEST(arguments, asm_unit_rodata && asm_unit_rodata->kind == OBJECT_SECTION_READ_ONLY_DATA && asm_unit_rodata->alignment == 8);
+            // `.long 3`, `.long 5`, `.quad`, `.ascii "buster"`, `.byte 0` and
+            // `.short 1`: 25 bytes, and `.size` computed from `.-symbol` says
+            // the same.
+            ObjectSymbol const* asm_unit_table = compiler_driver_test_object_symbol(&asm_unit.object, S8("basic_asm_unit_table"));
+            BUSTER_TEST(arguments, asm_unit_table && asm_unit_table->global && !asm_unit_table->hidden &&
+                                       asm_unit_table->kind == OBJECT_SYMBOL_DATA && asm_unit_table->size == 25);
+            ObjectSymbol const* asm_unit_helper = compiler_driver_test_object_symbol(&asm_unit.object, S8("basic_asm_unit_helper"));
+            BUSTER_TEST(arguments, asm_unit_helper && asm_unit_helper->global && asm_unit_helper->hidden &&
+                                       asm_unit_helper->kind == OBJECT_SYMBOL_FUNCTION && asm_unit_helper->size == 3);
+            ObjectSymbol const* asm_unit_weak = compiler_driver_test_object_symbol(&asm_unit.object, S8("basic_asm_unit_weak"));
+            BUSTER_TEST(arguments, asm_unit_weak && asm_unit_weak->weak && asm_unit_weak->hidden && asm_unit_weak->global &&
+                                       asm_unit_weak->section == OBJECT_SECTION_UNDEFINED);
+            // A local label is assembler bookkeeping and leaves no name
+            // behind, so the `1:`..`4:` in the fixture are not in the table.
+            for (u32 symbol_index = 0; symbol_index < asm_unit.object.symbol_count; symbol_index += 1)
+            {
+                BUSTER_TEST(arguments, !string_starts_with_sequence(asm_unit.object.symbols[symbol_index].name, S8(".L")));
+            }
+            // `.quad basic_asm_unit_helper` is an absolute relocation the
+            // linker resolves; the two cross-section reads in the code are
+            // PC-relative ones. Every reference to a label in its own section
+            // is already folded into the bytes, so it is not here.
+            // The section a relocation sits in is an index into this object's
+            // own sparse table, not the kind-indexed one a compiled module
+            // has, so the sections found above are what they are checked
+            // against.
+            bool asm_unit_absolute = false;
+            bool asm_unit_pointer_reference = false;
+            bool asm_unit_table_reference = false;
+            for (u32 relocation_index = 0; relocation_index < asm_unit.object.relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation relocation = asm_unit.object.relocations[relocation_index];
+                if (relocation.symbol >= asm_unit.object.symbol_count)
+                {
+                    continue;
+                }
+                String8 relocated = asm_unit.object.symbols[relocation.symbol].name;
+                asm_unit_absolute = asm_unit_absolute || (relocation.section == asm_unit_rodata_section &&
+                                                          relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 &&
+                                                          string_equal(relocated, S8("basic_asm_unit_helper")));
+                asm_unit_pointer_reference = asm_unit_pointer_reference || (relocation.section == asm_unit_text_section &&
+                                                                            relocation.kind == OBJECT_RELOCATION_X86_64_PC32 &&
+                                                                            string_equal(relocated, S8("basic_asm_unit_pointer")));
+                asm_unit_table_reference = asm_unit_table_reference || (relocation.section == asm_unit_text_section &&
+                                                                        relocation.kind == OBJECT_RELOCATION_X86_64_PC32 &&
+                                                                        string_equal(relocated, S8("basic_asm_unit_table")));
+            }
+            BUSTER_TEST(arguments, asm_unit_absolute && asm_unit_pointer_reference && asm_unit_table_reference);
+        }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+        String8 asm_unit_program_path = buster_test_temporary_path(asm_unit_arena, S8("buster-asm-unit-program"), S8(""));
+        String8 asm_unit_link_command_line[] = {
+            S8("-e"), S8("basic_asm_unit_start"), S8("-o"), asm_unit_program_path, S8("tests/basic_asm_unit.s"),
+        };
+        CompilerDriverResult asm_unit_link = compiler_driver_execute_invocation(
+            asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(asm_unit_link_command_line)));
+        BUSTER_TEST(arguments, asm_unit_link.error == COMPILER_DRIVER_ERROR_NONE);
+        if (asm_unit_link.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 asm_unit_program_arguments[] = {asm_unit_program_path};
+            ProcessSpawnResult asm_unit_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(asm_unit_program_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){
+                                     .use_process_environment = true,
+                                 });
+            BUSTER_TEST(arguments, asm_unit_spawn.handle != 0);
+            if (asm_unit_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(asm_unit_arena, asm_unit_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+#endif
+        // A directive the vocabulary does not cover is refused by name and by
+        // line, rather than dropped from an object that then quietly lacks
+        // whatever it was there to do.
+        String8 unsupported_path = buster_test_temporary_path(asm_unit_arena, S8("buster-asm-unsupported"), S8(".o"));
+        String8 unsupported_command_line[] = {
+            S8("-c"), S8("-o"), unsupported_path, S8("tests/basic_asm_unsupported.s"),
+        };
+        CompilerDriverResult unsupported = compiler_driver_execute_invocation(
+            asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unsupported_command_line)));
+        BUSTER_TEST(arguments, unsupported.error != COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, string_first_sequence(unsupported.diagnostic, S8(".subsection")) < unsupported.diagnostic.length);
+        BUSTER_TEST(arguments, string_first_sequence(unsupported.diagnostic, S8(":9:")) < unsupported.diagnostic.length);
+        // A `.S` is asm_unit with the C preprocessor in front of it. This
+        // driver does not run one over asm_unit text, and says so instead of
+        // assembling the macro spellings as if they were instructions.
+        String8 preprocessed_path = buster_test_temporary_path(asm_unit_arena, S8("buster-asm-preprocessed"), S8(".o"));
+        String8 preprocessed_command_line[] = {
+            S8("-c"), S8("-o"), preprocessed_path, S8("tests/basic_asm_preprocessed.S"),
+        };
+        CompilerDriverResult preprocessed = compiler_driver_execute_invocation(
+            asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocessed_command_line)));
+        BUSTER_TEST(arguments, preprocessed.error == COMPILER_DRIVER_ERROR_INVALID_INPUT);
+        BUSTER_TEST(arguments, string_first_sequence(preprocessed.diagnostic, S8("requires the C preprocessor")) < preprocessed.diagnostic.length);
+        scratch_end(asm_unit_temporary);
+    }
     Arena* c_multi_conflicts[] = {
         arguments->arena,
     };

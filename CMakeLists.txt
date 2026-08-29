@@ -834,6 +834,7 @@ buster_register_module(compiler_aarch64_complex_simd "${BUSTER_SOURCE_DIR}/compi
 buster_register_module(compiler_aarch64_memory_semantics "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_memory_semantics${COMMON_EXTENSION}")
 buster_register_module(compiler_aarch64_alias_projection "${BUSTER_SOURCE_DIR}/compiler/assembly/aarch64_alias_projection${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly "${BUSTER_SOURCE_DIR}/compiler/assembly/assembly${COMMON_EXTENSION}")
+buster_register_module(compiler_assembly_unit "${BUSTER_SOURCE_DIR}/compiler/assembly/assembly_unit${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly_metadata "${BUSTER_SOURCE_DIR}/compiler/assembly/x86_64_metadata${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly_completion_census "${BUSTER_SOURCE_DIR}/compiler/assembly/x86_64_completion_census${COMMON_EXTENSION}")
 buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
@@ -1762,6 +1763,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_aarch64_memory_semantics
     compiler_aarch64_alias_projection
     compiler_assembly
+    compiler_assembly_unit
     compiler_assembly_metadata
     compiler_assembly_completion_census
     compiler_ir

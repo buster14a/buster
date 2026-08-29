@@ -11367,6 +11367,9 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureRule const buster_x86_metadata_featu
     {S8_INITIALIZER("SSE"), {S8_INITIALIZER("sse2")}},
     {S8_INITIALIZER("SSE2"), {S8_INITIALIZER("sse2")}},
     {S8_INITIALIZER("SSE3"), {S8_INITIALIZER("sse3")}},
+    // STMXCSR/LDMXCSR carry their own ISA-set token rather than SSE's, and a
+    // freestanding libc reads and writes MXCSR to implement <fenv.h>.
+    {S8_INITIALIZER("SSEMXCSR"), {S8_INITIALIZER("sse2")}},
     {S8_INITIALIZER("ICACHE_PREFETCH"), {S8_INITIALIZER("prefetchi")}},
 };
 

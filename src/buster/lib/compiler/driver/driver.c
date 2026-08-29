@@ -220,6 +220,7 @@ BUSTER_GLOBAL_LOCAL GpuSourceLanguage compiler_driver_gpu_language(CompilerDrive
     case COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY: return GPU_SOURCE_LANGUAGE_SPIRV_BINARY;
     case COMPILER_DRIVER_LANGUAGE_METAL_AIR: return GPU_SOURCE_LANGUAGE_METAL_AIR;
     case COMPILER_DRIVER_LANGUAGE_C:
+    case COMPILER_DRIVER_LANGUAGE_ASSEMBLY:
     case COMPILER_DRIVER_LANGUAGE_COUNT: break;
     }
     return GPU_SOURCE_LANGUAGE_COUNT;
@@ -903,6 +904,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 {
                     invocation.language = COMPILER_DRIVER_LANGUAGE_METAL_AIR;
                 }
+                else if (string_equal(value, S8("assembler")))
+                {
+                    invocation.language = COMPILER_DRIVER_LANGUAGE_ASSEMBLY;
+                }
                 else if (string_equal(value, S8("none")))
                 {
                     invocation.language = COMPILER_DRIVER_LANGUAGE_AUTOMATIC;
@@ -1367,6 +1372,29 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_c_input(CompilerDriverInvocation invoca
     return result;
 }
 
+
+// A `.s` input, or any input under `-x assembler`.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_input(CompilerDriverInvocation invocation, String8 path)
+{
+    if (invocation.language == COMPILER_DRIVER_LANGUAGE_ASSEMBLY)
+    {
+        return true;
+    }
+    if (invocation.language != COMPILER_DRIVER_LANGUAGE_AUTOMATIC || path.length < 2)
+    {
+        return false;
+    }
+    return path.pointer[path.length - 2] == '.' && path.pointer[path.length - 1] == 's';
+}
+
+// GNU's `.S` runs the C preprocessor over assembly text before assembling it.
+// This frontend's preprocessor hands back C tokens, and assembly spellings
+// such as `%rax`, `$1` and `1f` do not survive that round trip, so a `.S` is
+// refused by name rather than assembled from a text it would have mangled.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocessed_assembly_input(String8 path)
+{
+    return path.length >= 2 && path.pointer[path.length - 2] == '.' && path.pointer[path.length - 1] == 'S';
+}
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_object_input(String8 path)
 {
@@ -2546,6 +2574,259 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
     return true;
 }
 
+// What a finished object becomes: textual assembly for -S, a written object
+// file for -c, or a linked executable. It is shared by the C pipeline above
+// and by the assembly front door below, which reach the same three outputs
+// through completely different producers.
+BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, CompilerDriverInvocation invocation, ObjectFile object,
+                                                             bool suppress_object_write, CompilerDriverResult* result)
+{
+    if (invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY)
+    {
+        result->output = object_print_assembly(arena, &object);
+        if (!result->output.length)
+        {
+            result->error = COMPILER_DRIVER_ERROR_OBJECT;
+            result->diagnostic = S8("could not format native object as textual assembly");
+            return;
+        }
+        if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result->output)))
+        {
+            result->error = COMPILER_DRIVER_ERROR_FILE_READ;
+            result->diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
+        }
+        return;
+    }
+    if (invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
+    {
+        if (suppress_object_write)
+        {
+            return;
+        }
+        ObjectArtifact artifact = object_write(arena, &object, object_format_for_target(invocation.target));
+        if (artifact.error != OBJECT_ERROR_NONE)
+        {
+            result->error = COMPILER_DRIVER_ERROR_OBJECT;
+            result->object_error = artifact.error;
+            return;
+        }
+        String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
+        if (!file_write(output, artifact.bytes))
+        {
+            result->error = COMPILER_DRIVER_ERROR_FILE_READ;
+            result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
+        }
+        return;
+    }
+    ObjectFile link_inputs[3] = {object};
+    u32 link_input_count = 1;
+    if (compiler_driver_windows_runtime_object_target(invocation.target))
+    {
+        link_inputs[link_input_count++] = link_windows_runtime_object(arena, invocation.target);
+    }
+    if (compiler_driver_elf_runtime_object_target(invocation.target))
+    {
+        ObjectFile runtime = link_elf_libc_runtime_object(arena, invocation.target);
+        if (runtime.error == OBJECT_ERROR_NONE && compiler_driver_archive_member_needed(&runtime, link_inputs, link_input_count))
+        {
+            link_inputs[link_input_count++] = runtime;
+        }
+    }
+    LinkObjectResult linked = link_objects(arena, link_inputs, link_input_count,
+                                           (LinkOptions){
+                                               .allow_undefined_symbols = true,
+                                           });
+    if (linked.error != LINK_ERROR_NONE)
+    {
+        result->error = COMPILER_DRIVER_ERROR_LINK;
+        result->diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with error {u32} on symbol '{S8}'"), (u32)linked.error, linked.symbol)
+                                                 : string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
+        return;
+    }
+    String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
+    CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object);
+    result->native_link = link_native_executable(arena, &linked.object,
+                                                (NativeExecutableLinkOptions){
+                                                    .output_path = output,
+                                                    .entry_symbol = invocation.entry_symbol.length ? invocation.entry_symbol
+                                                                                                   : compiler_driver_default_entry_symbol(invocation.target),
+                                                    .sysroot = invocation.sysroot,
+                                                    .library_paths = invocation.library_paths,
+                                                    .framework_paths = invocation.framework_paths,
+                                                    .frameworks = invocation.frameworks,
+                                                    .linker_arguments = invocation.linker_arguments,
+                                                    .library_path_count = invocation.library_path_count,
+                                                    .framework_path_count = invocation.framework_path_count,
+                                                    .framework_count = invocation.framework_count,
+                                                    .linker_argument_count = invocation.linker_argument_count,
+                                                    .dynamic_libraries = dynamic_libraries.pointer,
+                                                    .dynamic_library_count = dynamic_libraries.count,
+                                                    .runtime_exported_symbols = dynamic_libraries.runtime.exported_symbols,
+                                                    .runtime_data_symbols = dynamic_libraries.runtime.exported_data_symbols,
+                                                    .runtime_versioned_symbols = dynamic_libraries.runtime.versioned_symbols,
+                                                    .runtime_exported_symbol_count = dynamic_libraries.runtime.exported_symbol_count,
+                                                    .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
+                                                    .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
+                                                    .runtime_exports_known = dynamic_libraries.runtime.exports_known,
+                                                    .debug_info = invocation.debug_info,
+                                                });
+    compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+    if (result->native_link.error != LINK_ERROR_NONE)
+    {
+        result->error = COMPILER_DRIVER_ERROR_LINK;
+        result->diagnostic =
+            string_format(arena, S8("native C link failed with {S8}: {S8}"), link_error_name(result->native_link.error), result->native_link.symbol);
+    }
+}
+
+// The section an assembled unit's kind becomes. The unit keeps the section's
+// own name -- `.init` and `.fini` are neither `.text` nor absent -- and the
+// kind only decides the flags the object writer stamps on it.
+BUSTER_GLOBAL_LOCAL ObjectSectionKind compiler_driver_assembly_section_kind(AssemblyUnitSectionKind kind)
+{
+    switch (kind)
+    {
+    case ASSEMBLY_UNIT_SECTION_TEXT: return OBJECT_SECTION_TEXT;
+    case ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA: return OBJECT_SECTION_READ_ONLY_DATA;
+    case ASSEMBLY_UNIT_SECTION_DATA: return OBJECT_SECTION_DATA;
+    case ASSEMBLY_UNIT_SECTION_ZERO:
+    case ASSEMBLY_UNIT_SECTION_KIND_COUNT: break;
+    }
+    return OBJECT_SECTION_ZERO;
+}
+
+// The assembler reports a relocation in its own vocabulary, which is wider
+// than the object model's. A family the object cannot express is refused
+// rather than written without its relocation.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(AssemblyRelocationKind kind, ObjectRelocationKind* object_kind)
+{
+    switch (kind)
+    {
+    case ASSEMBLY_RELOCATION_X86_PC32: *object_kind = OBJECT_RELOCATION_X86_64_PC32; return true;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32: *object_kind = OBJECT_RELOCATION_ABSOLUTE32; return true;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE64: *object_kind = OBJECT_RELOCATION_ABSOLUTE64; return true;
+    case ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED: *object_kind = OBJECT_RELOCATION_X86_64_ABSOLUTE32S; return true;
+    case ASSEMBLY_RELOCATION_AARCH64_BRANCH26: *object_kind = OBJECT_RELOCATION_AARCH64_JUMP26; return true;
+    case ASSEMBLY_RELOCATION_AARCH64_CALL26: *object_kind = OBJECT_RELOCATION_AARCH64_CALL26; return true;
+    default: break;
+    }
+    return false;
+}
+
+// One assembly input, from source text to the same three outputs a C input
+// reaches. The assembler is the whole front end here: there is no
+// preprocessor, no IR, and no code generation between the file and the object.
+BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_single(Arena* arena, CompilerDriverInvocation invocation,
+                                                                                  bool suppress_object_write)
+{
+    CompilerDriverResult result = {0};
+    String8 path = invocation.input_paths[0];
+    if (invocation.emit_llvm_bitcode || invocation.target.cpu_arch == CPU_ARCH_WASM64 || invocation.target.cpu_arch == CPU_ARCH_BPFEL)
+    {
+        result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+        result.diagnostic = S8("assembly input has no LLVM bitcode, Wasm64, or eBPF emission");
+        return result;
+    }
+    FileMapRead source_file = file_map_read(arena, path, (FileReadOptions){0});
+    if (!source_file.bytes.pointer)
+    {
+        result.error = COMPILER_DRIVER_ERROR_FILE_READ;
+        result.diagnostic = string_format(arena, S8("could not read {S8}"), path);
+        file_map_unmap(source_file);
+        return result;
+    }
+    String8 source = BYTE_SLICE_TO_STRING(8, source_file.bytes);
+    if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
+    {
+        // An assembly unit is already what the preprocessor would have
+        // produced, so -E hands the text back unchanged.
+        result.output = string_duplicate_arena(arena, source, false);
+        if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
+        {
+            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
+            result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
+        }
+        file_map_unmap(source_file);
+        return result;
+    }
+    AssemblyUnitResult unit = assembly_unit_encode(arena, source,
+                                                   (AssemblyEncodeOptions){
+                                                       .target = invocation.target,
+                                                       .syntax = invocation.target.cpu_arch == CPU_ARCH_X86_64 ? invocation.assembly_syntax
+                                                                                                              : ASSEMBLY_SYNTAX_DEFAULT,
+                                                   });
+    file_map_unmap(source_file);
+    if (unit.diagnostic_count)
+    {
+        AssemblyDiagnostic diagnostic = unit.diagnostics[0];
+        result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
+        result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), path, diagnostic.line, diagnostic.column, diagnostic.message);
+        return result;
+    }
+    if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
+    {
+        return result;
+    }
+    ObjectFile object = {
+        .target = invocation.target,
+        .sections = arena_allocate(arena, ObjectSection, unit.section_count ? unit.section_count : 1),
+        .symbols = arena_allocate(arena, ObjectSymbol, unit.symbol_count ? unit.symbol_count : 1),
+        .relocations = arena_allocate(arena, ObjectRelocation, unit.relocation_count ? unit.relocation_count : 1),
+        .section_count = unit.section_count,
+        .symbol_count = unit.symbol_count,
+    };
+    for (u32 index = 0; index < unit.section_count; index += 1)
+    {
+        AssemblyUnitSection section = unit.sections[index];
+        object.sections[index] = (ObjectSection){
+            .name = section.name,
+            .data = section.data,
+            .virtual_size = section.zero_size,
+            .kind = compiler_driver_assembly_section_kind(section.kind),
+            .alignment = section.alignment,
+        };
+    }
+    for (u32 index = 0; index < unit.symbol_count; index += 1)
+    {
+        AssemblyUnitSymbol symbol = unit.symbols[index];
+        object.symbols[index] = (ObjectSymbol){
+            .name = symbol.name,
+            .value = symbol.value,
+            .size = symbol.size,
+            .section = symbol.defined ? symbol.section : OBJECT_SECTION_UNDEFINED,
+            .kind = symbol.function ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
+            .global = symbol.global,
+            .weak = symbol.weak,
+            .hidden = symbol.hidden,
+        };
+    }
+    for (u32 index = 0; index < unit.relocation_count; index += 1)
+    {
+        AssemblyUnitRelocation relocation = unit.relocations[index];
+        ObjectRelocationKind kind = OBJECT_RELOCATION_X86_64_PC32;
+        if (!compiler_driver_assembly_relocation_kind(relocation.kind, &kind))
+        {
+            result.error = COMPILER_DRIVER_ERROR_OBJECT;
+            result.diagnostic = string_format(arena, S8("{S8}: relocation family {u32} has no object representation"), path, (u32)relocation.kind);
+            return result;
+        }
+        object.relocations[object.relocation_count++] = (ObjectRelocation){
+            // The assembler's addend already carries the distance from the
+            // relocated field to the end of its instruction, which is what an
+            // ELF PC-relative addend is; nothing is added or removed here.
+            .addend = relocation.addend,
+            .offset = relocation.offset,
+            .section = relocation.section,
+            .symbol = relocation.symbol,
+            .kind = kind,
+        };
+    }
+    result.object = object;
+    result.has_object = true;
+    compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result);
+    return result;
+}
+
 static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, CompilerDriverInvocation invocation, bool suppress_object_write,
                                                              CompilerDriverWarningCollector* warnings)
 {
@@ -2557,6 +2838,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         return result;
+    }
+    if (invocation.input_count == 1 && compiler_driver_assembly_input(invocation, invocation.input_paths[0]))
+    {
+        return compiler_driver_execute_assembly_single(arena, invocation, suppress_object_write);
     }
     if (invocation.input_count != 1 || !compiler_driver_c_input(invocation, invocation.input_paths[0]))
     {
@@ -2816,102 +3101,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     result.object = object;
     result.has_object = true;
-    if (invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY)
-    {
-        result.output = object_print_assembly(arena, &object);
-        if (!result.output.length)
-        {
-            result.error = COMPILER_DRIVER_ERROR_OBJECT;
-            result.diagnostic = S8("could not format native object as textual assembly");
-            return result;
-        }
-        if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
-        {
-            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
-            result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
-        }
-        return result;
-    }
-    if (invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
-    {
-        if (suppress_object_write)
-        {
-            goto end;
-        }
-        ObjectArtifact artifact = object_write(arena, &object, object_format_for_target(invocation.target));
-        if (artifact.error != OBJECT_ERROR_NONE)
-        {
-            result.error = COMPILER_DRIVER_ERROR_OBJECT;
-            result.object_error = artifact.error;
-            goto end;
-        }
-        String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
-        if (!file_write(output, artifact.bytes))
-        {
-            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
-            result.diagnostic = string_format(arena, S8("could not write {S8}"), output);
-        }
-        goto end;
-    }
-    ObjectFile link_inputs[3] = {object};
-    u32 link_input_count = 1;
-    if (compiler_driver_windows_runtime_object_target(invocation.target))
-    {
-        link_inputs[link_input_count++] = link_windows_runtime_object(arena, invocation.target);
-    }
-    if (compiler_driver_elf_runtime_object_target(invocation.target))
-    {
-        ObjectFile runtime = link_elf_libc_runtime_object(arena, invocation.target);
-        if (runtime.error == OBJECT_ERROR_NONE && compiler_driver_archive_member_needed(&runtime, link_inputs, link_input_count))
-        {
-            link_inputs[link_input_count++] = runtime;
-        }
-    }
-    LinkObjectResult linked = link_objects(arena, link_inputs, link_input_count,
-                                           (LinkOptions){
-                                               .allow_undefined_symbols = true,
-                                           });
-    if (linked.error != LINK_ERROR_NONE)
-    {
-        result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with error {u32} on symbol '{S8}'"), (u32)linked.error, linked.symbol)
-                                                 : string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
-        goto end;
-    }
-    String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
-    CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object);
-    result.native_link = link_native_executable(arena, &linked.object,
-                                                (NativeExecutableLinkOptions){
-                                                    .output_path = output,
-                                                    .entry_symbol = invocation.entry_symbol.length ? invocation.entry_symbol
-                                                                                                   : compiler_driver_default_entry_symbol(invocation.target),
-                                                    .sysroot = invocation.sysroot,
-                                                    .library_paths = invocation.library_paths,
-                                                    .framework_paths = invocation.framework_paths,
-                                                    .frameworks = invocation.frameworks,
-                                                    .linker_arguments = invocation.linker_arguments,
-                                                    .library_path_count = invocation.library_path_count,
-                                                    .framework_path_count = invocation.framework_path_count,
-                                                    .framework_count = invocation.framework_count,
-                                                    .linker_argument_count = invocation.linker_argument_count,
-                                                    .dynamic_libraries = dynamic_libraries.pointer,
-                                                    .dynamic_library_count = dynamic_libraries.count,
-                                                    .runtime_exported_symbols = dynamic_libraries.runtime.exported_symbols,
-                                                    .runtime_data_symbols = dynamic_libraries.runtime.exported_data_symbols,
-                                                    .runtime_versioned_symbols = dynamic_libraries.runtime.versioned_symbols,
-                                                    .runtime_exported_symbol_count = dynamic_libraries.runtime.exported_symbol_count,
-                                                    .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
-                                                    .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
-                                                    .runtime_exports_known = dynamic_libraries.runtime.exports_known,
-                                                    .debug_info = invocation.debug_info,
-                                                });
-    compiler_driver_dynamic_libraries_release(&dynamic_libraries);
-    if (result.native_link.error != LINK_ERROR_NONE)
-    {
-        result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic =
-            string_format(arena, S8("native C link failed with {S8}: {S8}"), link_error_name(result.native_link.error), result.native_link.symbol);
-    }
+    compiler_driver_emit_object_output(arena, invocation, object, suppress_object_write, &result);
 end:
     file_map_unmap(source_file);
     return result;
@@ -3129,10 +3319,14 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.diagnostic = string_format(arena, S8("prebuilt input {S8} is only valid while linking"), path);
             goto finish;
         }
-        if (!object_input && !archive_input && !compiler_driver_c_input(invocation, path))
+        if (!object_input && !archive_input && !compiler_driver_c_input(invocation, path) && !compiler_driver_assembly_input(invocation, path))
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-            result.diagnostic = string_format(arena, S8("unsupported C input {S8}"), path);
+            result.diagnostic = compiler_driver_preprocessed_assembly_input(path)
+                                    ? string_format(arena, S8("assembly input {S8} requires the C preprocessor, which this driver does not run over "
+                                                              "assembly; preprocess it and pass the resulting .s"),
+                                                    path)
+                                    : string_format(arena, S8("unsupported C input {S8}"), path);
             goto finish;
         }
     }

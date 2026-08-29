@@ -1,6 +1,6 @@
 #pragma once
 
-#include <buster/lib/compiler/assembly/assembly.h>
+#include <buster/lib/compiler/assembly/assembly_unit.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/gpu/gpu.h>
@@ -46,6 +46,7 @@ typedef enum CompilerDriverLanguage
     COMPILER_DRIVER_LANGUAGE_LLVM_IR,
     COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY,
     COMPILER_DRIVER_LANGUAGE_METAL_AIR,
+    COMPILER_DRIVER_LANGUAGE_ASSEMBLY,
     COMPILER_DRIVER_LANGUAGE_COUNT,
 } CompilerDriverLanguage;
 

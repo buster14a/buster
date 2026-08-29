@@ -1677,6 +1677,44 @@ reason. Shapes the Win64 subset does not build yet — variadic definitions and
 calls, 128-bit integers, vector signatures, indirect (non 1/2/4/8-byte)
 aggregate arguments, and dynamic stack allocation — fall back per function,
 which `-v`'s `fallback_functions` and `CODEGEN_FALLBACK` lines report.
+A `.s` input, or any input under `-x assembler`, is an assembly translation
+unit rather than a C one. `assembly_unit_encode` (`assembly_unit.c`) is the
+layer above `assembly_encode`: it interprets the directive vocabulary, tracks
+one offset per section, resolves labels, and hands each instruction line to
+the instruction layer beneath, and the driver turns its sections, symbols and
+relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
+`.data`, `.bss`, `.rodata` and `.section`; `.globl`/`.global`, `.weak`,
+`.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
+`.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
+`.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
+`.att_syntax prefix`; and the `.cfi_*` family, accepted and dropped because it
+describes unwinding rather than bytes. Anything else -- a directive the table
+does not claim, or an operand form one of these does not cover -- is a
+diagnostic naming the directive and its line, the way every other unsupported
+construct here is reported rather than silently dropped.
+
+Three things that layer owns rather than the instruction layer. Local numeric
+labels: `1:` becomes a generated name and `1f`/`1b` resolve to the nearest
+following or preceding definition in source order, and those names leave the
+symbol table again once every reference to one is folded, the way GNU as drops
+its own `.L` locals. A repeat or lock prefix alone on a line joins the
+instruction on the next one. And a same-section PC-relative reference to a
+label defined in the file is written into the bytes; only a cross-section or
+undefined name becomes a relocation. `@PLT` is dropped: a static link resolves
+such a call the same way it resolves a plain one. Sections keep their own
+names -- `.init` and `.fini` are neither `.text` nor absent -- and a
+hand-written section gets alignment 1, because `crti.o` and `crtn.o`
+contribute one and two bytes to `.init` and any padding between them would
+run as code.
+
+One deviation from GNU as, and one refusal. A forward branch to a label is
+always the near form, because the instruction layer sizes a statement before
+the label is known and this assembler does not relax; the bytes are correct
+and a few longer than GNU as writes. And a `.S` -- assembly the C
+preprocessor runs over first -- is refused by name: this frontend's
+preprocessor hands back C tokens, and `%rax`, `$1` and `1f` do not survive
+that round trip, so the input is reported rather than mis-assembled.
+
 `-emit-llvm` emits binary LLVM bitcode directly from canonical typed IR for C
 inputs. It writes `<input>.bc` by default, accepts `-o` for a single
 input, and rejects native objects, archives, libraries, frameworks, linker
@@ -3065,7 +3103,7 @@ Compiler (`src/buster/lib/compiler/`):
 | `frontend/c/c_gen.c` | Target-aware lowering from analyzed C into canonical IR. |
 | `frontend/c/c.c` | Unity-build aggregator for the three C frontend implementation files. |
 | `ir/model.h`, `ir/ir.{c,h}` | Canonical typed IR model, construction, validation, and printing. |
-| `assembly/` | Standalone x86-64/AArch64 assembly parsing, metadata, semantics, and encoders. Generated metadata stays under `assembly/generated/`. |
+| `assembly/` | Standalone x86-64/AArch64 assembly parsing, metadata, semantics, and encoders. `assembly_unit.{c,h}` is the whole-file layer above them: sections, directives, labels, and relocations. Generated metadata stays under `assembly/generated/`. |
 | `codegen/machine*.{c,h}` | Machine IR, instruction selection, scheduling, ABI lowering, and target-specific emission. |
 | `codegen/register_allocator_*.c` | Fast and quality register allocators. |
 | `codegen/codegen.{c,h}` | Canonical-IR-to-native-code orchestration and codegen statistics. |
