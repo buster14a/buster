@@ -52,6 +52,32 @@ u64 ir_field_access_size(IrTypeTable* table, IrField const* field)
     return result;
 }
 
+// Greedy descending powers of two, which is both the fewest accesses a span
+// takes and the shape Clang's `i40` load lowers to: a four-byte read followed
+// by a one-byte one.
+u32 ir_field_access_pieces(u64 access_size, IrFieldAccessPiece* pieces)
+{
+    u32 result = 0;
+    if (access_size && access_size <= 9 && pieces)
+    {
+        u64 offset = 0;
+        u64 remaining = access_size;
+        while (remaining && result < IR_FIELD_ACCESS_PIECE_CAPACITY)
+        {
+            u64 piece = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
+            pieces[result++] = (IrFieldAccessPiece){.offset = (u8)offset, .size = (u8)piece};
+            offset += piece;
+            remaining -= piece;
+        }
+        if (remaining)
+        {
+            result = 0;
+        }
+    }
+
+    return result;
+}
+
 IrSymbol* ir_symbol_from_id(IrSymbolTable* table, IrSymbolId id)
 {
     IrSymbol* result;

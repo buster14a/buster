@@ -1809,6 +1809,23 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_metadata_emit(CodegenBuffer* buff
     return codegen_canonical_x64_metadata_emit_features(buffer, mnemonic, operands, operand_count, (BusterX86MetadataFeatureInput){0});
 }
 
+// RAX shifted by a constant. The x86-64 vocabulary this emitter speaks takes
+// its shift count in CL, so the count is materialized first; every caller
+// shifts the accumulator it just loaded, which is always RAX.
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_shift_immediate(CodegenBuffer* buffer, String8 mnemonic, u32 count)
+{
+    BusterX86MetadataPhysicalOperand count_operands[2] = {
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 32),
+        codegen_canonical_x64_metadata_unsigned_immediate(count, 32),
+    };
+    BusterX86MetadataPhysicalOperand shift_operands[2] = {
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 8),
+    };
+    return codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), count_operands, BUSTER_ARRAY_LENGTH(count_operands)) &&
+           codegen_canonical_x64_metadata_emit(buffer, mnemonic, shift_operands, BUSTER_ARRAY_LENGTH(shift_operands));
+}
+
 // Emit one symbol-bearing instruction through the checked metadata bridge.
 // Canonical codegen keeps module relocations in its own format, while the
 // metadata encoder owns the instruction shape and the exact displacement
@@ -6959,15 +6976,33 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_memory_operation_base(CodegenBuff
                                                                      bool sign_extend, u32 base_register)
 {
     u32 scale = size == 8 ? 8 : size == 4 ? 4 : size == 2 ? 2 : size == 1 ? 1 : 0;
-    if (!scale || offset % scale || register_number > 31)
+    if (!scale || register_number > 31)
     {
         return false;
     }
-    bool indirect = offset / scale > A64_IMM12_MAX;
+    // The scaled unsigned-immediate form addresses only multiples of the
+    // access width, and a bit-field's storage unit lands wherever packing put
+    // it: `struct __attribute__((packed)) { char a; int v : 32; }` is read
+    // through the four bytes at offset one, and the pieces of a field with no
+    // single unit land at every offset in turn. The unscaled form -- LDUR and
+    // STUR -- takes any byte offset in a nine-bit field, which is exactly the
+    // offsets the scaled one cannot reach. Beyond that field the address is
+    // materialized, and then the offset is zero and scaled again.
+    bool unscaled = offset % scale != 0;
+    bool indirect = unscaled ? offset > A64_UNSCALED_IMM_MAX : offset / scale > A64_IMM12_MAX;
     if (indirect)
     {
         codegen_canonical_a64_base_address(buffer, 16, base_register, offset);
         offset = 0;
+        unscaled = false;
+    }
+    if (unscaled)
+    {
+        u32 unscaled_instruction = store         ? (size == 8 ? 0xf80003e0 : size == 4 ? 0xb80003e0 : size == 2 ? 0x780003e0 : 0x380003e0)
+                                   : sign_extend ? (size == 4 ? 0xb88003e0 : size == 2 ? 0x788003e0 : size == 1 ? 0x388003e0 : 0xf84003e0)
+                                                 : (size == 8 ? 0xf84003e0 : size == 4 ? 0xb84003e0 : size == 2 ? 0x784003e0 : 0x384003e0);
+        codegen_emit_u32(buffer, (unscaled_instruction & ~(31u << 5)) | (offset << 12) | (base_register << 5) | register_number);
+        return true;
     }
     u32 instruction = 0;
     if (store)
@@ -13796,63 +13831,74 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 {
                                     continue;
                                 }
-                                // The unit the field is written through, which
-                                // packing may have narrowed below the declared
-                                // type; `field->offset` names that unit.
+                                // The storage the field is written through,
+                                // which packing may have narrowed below the
+                                // declared type or left as a span no single
+                                // access covers; `field->offset` names its
+                                // first byte and the pieces walk it. One piece
+                                // is the ordinary case, and the rows it emits
+                                // are the rows a single unit always emitted.
                                 u64 field_unit = ir_field_access_size(&program->types, field);
-                                if (field_unit != 1 && field_unit != 2 && field_unit != 4 && field_unit != 8)
+                                IrFieldAccessPiece field_pieces[IR_FIELD_ACCESS_PIECE_CAPACITY];
+                                u32 field_piece_count = ir_field_access_pieces(field_unit, field_pieces);
+                                if (!field_piece_count || field->bit_width > 64)
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                     return result;
                                 }
-                                c_x64_load(&emitter, 0x85, instruction->operands[operand_index]);
-                                if (field->bit_width < 64)
+                                for (u32 piece_index = 0; piece_index < field_piece_count; piece_index += 1)
                                 {
-                                    BusterX86MetadataPhysicalOperand mask_load_operands[2] = {
-                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
-                                        codegen_canonical_x64_metadata_unsigned_immediate(((u64)1 << field->bit_width) - 1, 64),
-                                    };
-                                    BusterX86MetadataPhysicalOperand mask_operands[2] = {
-                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
-                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
-                                    };
-                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), mask_load_operands,
-                                                                               BUSTER_ARRAY_LENGTH(mask_load_operands)) ||
-                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), mask_operands,
-                                                                               BUSTER_ARRAY_LENGTH(mask_operands)))
+                                    u32 piece_low = (u32)field_pieces[piece_index].offset * 8;
+                                    u32 piece_high = piece_low + (u32)field_pieces[piece_index].size * 8;
+                                    u32 low = BUSTER_MAX(piece_low, field->bit_offset);
+                                    u32 high = BUSTER_MIN(piece_high, field->bit_offset + field->bit_width);
+                                    if (low >= high)
+                                    {
+                                        continue;
+                                    }
+                                    c_x64_load(&emitter, 0x85, instruction->operands[operand_index]);
+                                    if (low > field->bit_offset &&
+                                        !codegen_canonical_x64_shift_immediate(&buffer, S8("SHR"), low - field->bit_offset))
                                     {
                                         result.error = buffer.error;
                                         return result;
                                     }
-                                }
-                                if (field->bit_offset)
-                                {
-                                    BusterX86MetadataPhysicalOperand shift_count_load_operands[2] = {
-                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 32),
-                                        codegen_canonical_x64_metadata_unsigned_immediate(field->bit_offset, 32),
-                                    };
-                                    BusterX86MetadataPhysicalOperand shift_operands[2] = {
-                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
-                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 8),
-                                    };
-                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), shift_count_load_operands,
-                                                                               BUSTER_ARRAY_LENGTH(shift_count_load_operands)) ||
-                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SHL"), shift_operands,
-                                                                               BUSTER_ARRAY_LENGTH(shift_operands)))
+                                    if (high - low < 64)
+                                    {
+                                        BusterX86MetadataPhysicalOperand mask_load_operands[2] = {
+                                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                            codegen_canonical_x64_metadata_unsigned_immediate(((u64)1 << (high - low)) - 1, 64),
+                                        };
+                                        BusterX86MetadataPhysicalOperand mask_operands[2] = {
+                                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                        };
+                                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), mask_load_operands,
+                                                                                   BUSTER_ARRAY_LENGTH(mask_load_operands)) ||
+                                            !codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), mask_operands,
+                                                                                   BUSTER_ARRAY_LENGTH(mask_operands)))
+                                        {
+                                            result.error = buffer.error;
+                                            return result;
+                                        }
+                                    }
+                                    if (low > piece_low && !codegen_canonical_x64_shift_immediate(&buffer, S8("SHL"), low - piece_low))
                                     {
                                         result.error = buffer.error;
                                         return result;
                                     }
-                                }
-                                BusterX86MetadataPhysicalOperand bitfield_store_operands[2] = {
-                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)(field_unit * 8), field_displacement),
-                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, (u16)(field_unit * 8)),
-                                };
-                                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("OR"), bitfield_store_operands,
-                                                                           BUSTER_ARRAY_LENGTH(bitfield_store_operands)))
-                                {
-                                    result.error = buffer.error;
-                                    return result;
+                                    u16 piece_width = (u16)((u32)field_pieces[piece_index].size * 8);
+                                    BusterX86MetadataPhysicalOperand bitfield_store_operands[2] = {
+                                        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, piece_width,
+                                                                              field_displacement + (s32)field_pieces[piece_index].offset),
+                                        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, piece_width),
+                                    };
+                                    if (!codegen_canonical_x64_metadata_emit(&buffer, S8("OR"), bitfield_store_operands,
+                                                                               BUSTER_ARRAY_LENGTH(bitfield_store_operands)))
+                                    {
+                                        result.error = buffer.error;
+                                        return result;
+                                    }
                                 }
                                 continue;
                             }
@@ -17791,36 +17837,62 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 {
                                     continue;
                                 }
-                                // The unit the field is written through, which
-                                // packing may have narrowed below the declared
-                                // type; `field->offset` names that unit.
+                                // The storage the field is written through,
+                                // which packing may have narrowed below the
+                                // declared type or left as a span no single
+                                // access covers; `field->offset` names its
+                                // first byte and the pieces walk it. One piece
+                                // is the ordinary case, and the rows it emits
+                                // are the rows a single unit always emitted.
                                 u32 field_size = (u32)ir_field_access_size(&program->types, field);
-                                if (field_size != 1 && field_size != 2 && field_size != 4 && field_size != 8)
+                                IrFieldAccessPiece field_pieces[IR_FIELD_ACCESS_PIECE_CAPACITY];
+                                u32 field_piece_count = ir_field_access_pieces(field_size, field_pieces);
+                                if (!field_piece_count || field->bit_width > 64)
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                     return result;
                                 }
-                                c_a64_load(&emitter, 9, instruction->operands[operand_index]);
-                                if (field->bit_width < 64)
+                                for (u32 piece_index = 0; piece_index < field_piece_count; piece_index += 1)
                                 {
-                                    a64_emit_constant(&buffer, 10, ((u64)1 << field->bit_width) - 1);
-                                    codegen_emit_u32(&buffer, 0x8a0a0129);
-                                }
-                                if (field->bit_offset)
-                                {
-                                    u32 shift = field->bit_offset;
-                                    codegen_emit_u32(&buffer, 0xd3400000 | ((64 - shift) << 16) | ((63 - shift) << 10) | (9 << 5) | 9);
-                                }
-                                if (!codegen_canonical_a64_frame_memory_operation(&buffer, 10, field_offset, field_size, false, false))
-                                {
-                                    result.error = CODEGEN_ERROR_CAPACITY;
-                                    return result;
-                                }
-                                codegen_emit_u32(&buffer, 0xaa09014a);
-                                if (!codegen_canonical_a64_frame_memory_operation(&buffer, 10, field_offset, field_size, true, false))
-                                {
-                                    result.error = CODEGEN_ERROR_CAPACITY;
-                                    return result;
+                                    u32 piece_low = (u32)field_pieces[piece_index].offset * 8;
+                                    u32 piece_high = piece_low + (u32)field_pieces[piece_index].size * 8;
+                                    u32 low = BUSTER_MAX(piece_low, field->bit_offset);
+                                    u32 high = BUSTER_MIN(piece_high, field->bit_offset + field->bit_width);
+                                    if (low >= high)
+                                    {
+                                        continue;
+                                    }
+                                    u32 piece_offset = field_offset + (u32)field_pieces[piece_index].offset;
+                                    c_a64_load(&emitter, 9, instruction->operands[operand_index]);
+                                    if (low > field->bit_offset)
+                                    {
+                                        // LSR is UBFM with the shift as the
+                                        // rotate and 63 as the width.
+                                        codegen_emit_u32(&buffer, 0xd3400000 | ((low - field->bit_offset) << 16) | (63 << 10) | (9 << 5) | 9);
+                                    }
+                                    if (high - low < 64)
+                                    {
+                                        a64_emit_constant(&buffer, 10, ((u64)1 << (high - low)) - 1);
+                                        codegen_emit_u32(&buffer, 0x8a0a0129);
+                                    }
+                                    if (low > piece_low)
+                                    {
+                                        u32 shift = low - piece_low;
+                                        codegen_emit_u32(&buffer, 0xd3400000 | ((64 - shift) << 16) | ((63 - shift) << 10) | (9 << 5) | 9);
+                                    }
+                                    if (!codegen_canonical_a64_frame_memory_operation(&buffer, 10, piece_offset, (u32)field_pieces[piece_index].size,
+                                                                                      false, false))
+                                    {
+                                        result.error = CODEGEN_ERROR_CAPACITY;
+                                        return result;
+                                    }
+                                    codegen_emit_u32(&buffer, 0xaa09014a);
+                                    if (!codegen_canonical_a64_frame_memory_operation(&buffer, 10, piece_offset, (u32)field_pieces[piece_index].size,
+                                                                                      true, false))
+                                    {
+                                        result.error = CODEGEN_ERROR_CAPACITY;
+                                        return result;
+                                    }
                                 }
                                 continue;
                             }

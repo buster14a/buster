@@ -229,6 +229,79 @@ struct __attribute__((packed)) overlapping_units_reversed
     int narrow : 5;
 };
 
+// A bit-field whose bits fit no power-of-two unit that lies inside the
+// aggregate has no single access at all: five bytes hold no five-byte integer,
+// so forty bits are read and written as a four-byte piece plus a one-byte one
+// -- which is what Clang writes as `i40` and lowers to the same pair.  The
+// widths that land here are exactly the ones whose byte count is not a power
+// of two, so the set below walks one of each: three, five, six, seven and nine
+// bytes.  The neighbours on either side are what make a value that survives a
+// read-modify-write a claim about the pieces rather than about the field.
+struct __attribute__((packed)) split_unit
+{
+    long long value : 40;
+};
+
+union __attribute__((packed)) split_union
+{
+    long long value : 40;
+};
+
+struct __attribute__((packed)) split_neighbours
+{
+    char lead;
+    long long value : 40;
+    char tail;
+};
+
+struct __attribute__((packed)) split_offset
+{
+    long long lead : 1;
+    long long value : 40;
+    char tail;
+};
+
+// A seven-byte span, which is the one that takes three pieces: four, two and
+// one.
+struct __attribute__((packed)) split_three_pieces
+{
+    long long lead : 1;
+    long long value : 55;
+    char tail;
+};
+
+// The widest span there is: sixty-four bits starting one bit in, which no
+// aggregate can hold in fewer than nine bytes.
+struct __attribute__((packed)) split_nine_bytes
+{
+    long long lead : 1;
+    unsigned long long value : 64;
+    char tail;
+};
+
+// Three bytes, the smallest span with no unit, in both signednesses: an
+// unsigned field must not come back sign-extended and a signed one must.
+struct __attribute__((packed)) split_three_bytes
+{
+    char lead;
+    unsigned int value : 17;
+    char tail;
+};
+
+struct __attribute__((packed)) split_six_bytes
+{
+    char lead;
+    long long value : 48;
+    char tail;
+};
+
+static struct split_unit split_unit_initialized = {-0x123456789LL};
+static union split_union split_union_initialized = {-6};
+static struct split_neighbours split_neighbours_initialized = {'a', 0x7fedcba987LL, 'b'};
+static struct split_offset split_offset_designated = {.value = -2, .tail = 'c'};
+static struct split_three_pieces split_three_pieces_initialized = {-1, 0x123456789abcdLL, 'd'};
+static struct split_nine_bytes split_nine_bytes_initialized = {0, 0xfedcba9876543210ULL, 'e'};
+
 // A member declarator may carry an attribute list of its own, in two places
 // the shared-specifier position does not cover: after a parenthesized
 // declarator, where the list follows the whole derivation rather than the
@@ -539,6 +612,16 @@ int main(void)
     if (sizeof(struct trailing_member) != 4 || _Alignof(struct trailing_member) != 1) return 108;
     if (sizeof(struct overlapping_units) != 2 || _Alignof(struct overlapping_units) != 1) return 109;
     if (sizeof(struct overlapping_units_reversed) != 2 || _Alignof(struct overlapping_units_reversed) != 1) return 110;
+    // The split shapes, every one a width whose byte count is not a power of
+    // two, which is what used to be refused outright.
+    if (sizeof(struct split_unit) != 5 || _Alignof(struct split_unit) != 1) return 118;
+    if (sizeof(union split_union) != 5 || _Alignof(union split_union) != 1) return 119;
+    if (sizeof(struct split_neighbours) != 7) return 120;
+    if (sizeof(struct split_offset) != 7) return 121;
+    if (sizeof(struct split_three_pieces) != 8) return 122;
+    if (sizeof(struct split_nine_bytes) != 10) return 123;
+    if (sizeof(struct split_three_bytes) != 5) return 124;
+    if (sizeof(struct split_six_bytes) != 8) return 125;
     if (sizeof(struct pragma_packed) != 5 || _Alignof(struct pragma_packed) != 1) return 10;
     if (sizeof(struct pragma_packed_two) != 6 || _Alignof(struct pragma_packed_two) != 2) return 11;
     if (sizeof(struct member_pointer_aligned) != 64 || _Alignof(struct member_pointer_aligned) != 32) return 28;
@@ -687,6 +770,87 @@ int main(void)
     if (overlapping.narrow != 13 || overlapping.wide != -100) return 116;
     struct overlapping_units_reversed overlapping_reversed = {-100, 13};
     if (overlapping_reversed.wide != -100 || overlapping_reversed.narrow != 13) return 117;
+    // A round trip through every piece, with the neighbours on both sides
+    // checked after each write: a piece that wrote one byte too many takes a
+    // neighbour with it, and a piece that wrote one too few loses the top of
+    // the value.
+    struct split_neighbours split_pair;
+    split_pair.lead = 'a';
+    split_pair.tail = 'b';
+    split_pair.value = 0;
+    for (int split_bit = 0; split_bit < 40; split_bit += 1)
+    {
+        long long split_value = (long long)1 << split_bit;
+        long long split_expected = split_bit == 39 ? -split_value : split_value;
+        split_pair.value = split_value;
+        if (split_pair.value != split_expected || split_pair.lead != 'a' || split_pair.tail != 'b') return 126;
+        split_pair.value = ~split_value;
+        split_expected = (long long)(((unsigned long long)~split_value & 0xffffffffffULL) << 24) >> 24;
+        if (split_pair.value != split_expected || split_pair.lead != 'a' || split_pair.tail != 'b') return 127;
+    }
+
+    struct split_offset split_shifted;
+    split_shifted.lead = -1;
+    split_shifted.tail = 'c';
+    split_shifted.value = -0x123456789LL;
+    if (split_shifted.value != -0x123456789LL || split_shifted.lead != -1 || split_shifted.tail != 'c') return 128;
+    split_shifted.lead = 0;
+    if (split_shifted.value != -0x123456789LL || split_shifted.lead != 0 || split_shifted.tail != 'c') return 129;
+
+    struct split_three_pieces split_three;
+    split_three.lead = -1;
+    split_three.tail = 'd';
+    split_three.value = 0x123456789abcdLL;
+    if (split_three.value != 0x123456789abcdLL || split_three.lead != -1 || split_three.tail != 'd') return 130;
+    split_three.value = -1;
+    if (split_three.value != -1 || split_three.lead != -1 || split_three.tail != 'd') return 131;
+
+    struct split_nine_bytes split_nine;
+    split_nine.lead = 0;
+    split_nine.tail = 'e';
+    split_nine.value = 0xfedcba9876543210ULL;
+    if (split_nine.value != 0xfedcba9876543210ULL || split_nine.lead != 0 || split_nine.tail != 'e') return 132;
+    split_nine.lead = -1;
+    if (split_nine.value != 0xfedcba9876543210ULL || split_nine.lead != -1 || split_nine.tail != 'e') return 133;
+
+    // An unsigned field must not come back sign-extended and a signed one
+    // must, which is the half of the assembly the masks alone do not decide.
+    struct split_three_bytes split_three_byte;
+    split_three_byte.lead = 'f';
+    split_three_byte.tail = 'g';
+    split_three_byte.value = 0x1ffffu;
+    if (split_three_byte.value != 0x1ffffu || split_three_byte.lead != 'f' || split_three_byte.tail != 'g') return 134;
+    struct split_six_bytes split_six;
+    split_six.lead = 'h';
+    split_six.tail = 'i';
+    split_six.value = -1;
+    if (split_six.value != -1 || split_six.lead != 'h' || split_six.tail != 'i') return 135;
+    split_six.value = 0x7fffffffffffLL;
+    if (split_six.value != 0x7fffffffffffLL || split_six.lead != 'h' || split_six.tail != 'i') return 136;
+
+    // The same fields written by an aggregate initializer and by the folds
+    // that build static bytes, which reach the pieces through code of their
+    // own.
+    struct split_neighbours split_local = {'a', 0x7fedcba987LL, 'b'};
+    if (split_local.lead != 'a' || split_local.value != 0x7fedcba987LL || split_local.tail != 'b') return 137;
+    if (split_unit_initialized.value != -0x123456789LL) return 138;
+    if (split_union_initialized.value != -6) return 139;
+    if (split_neighbours_initialized.lead != 'a' || split_neighbours_initialized.value != 0x7fedcba987LL ||
+        split_neighbours_initialized.tail != 'b')
+    {
+        return 140;
+    }
+    if (split_offset_designated.lead != 0 || split_offset_designated.value != -2 || split_offset_designated.tail != 'c') return 141;
+    if (split_three_pieces_initialized.lead != -1 || split_three_pieces_initialized.value != 0x123456789abcdLL ||
+        split_three_pieces_initialized.tail != 'd')
+    {
+        return 142;
+    }
+    if (split_nine_bytes_initialized.lead != 0 || split_nine_bytes_initialized.value != 0xfedcba9876543210ULL ||
+        split_nine_bytes_initialized.tail != 'e')
+    {
+        return 143;
+    }
 
     // Objects the linker placed, and one automatic object.
     char automatic_aligned[3] __attribute__((aligned(64)));

@@ -2394,12 +2394,40 @@ on a commit you already know is incomplete tells nobody anything.
   `machine_x86_64.c` and `machine_aarch64.c`, and the two canonical emitters in
   `codegen.c`. It is also the one place a `LOAD` or `STORE` may disagree with
   its place's type, which `ir_place_narrow_bit_field_access` is what validation
-  admits it through. A field whose bits cross every unit that fits has no
-  single-unit access even then; it is diagnosed rather than laid out
-  differently from every other compiler on the target, because the whole point
-  of the change is to stop agreeing with nobody in silence. A zero-width
-  bit-field keeps aligning to its declared type even inside a packed aggregate,
-  which is also what Clang and GCC do.
+  admits it through. **A field whose bits cross every unit that fits has no
+  single-unit access even then**, which is every width whose byte count is not
+  a power of two: `union __attribute__((packed)) { long long b : 40; }` is five
+  bytes and there is no five-byte load. `access_size` then carries the *span*
+  rather than a unit, and `ir_field_access_pieces` decomposes it into the
+  descending powers of two that cover it -- five is four plus one, seven is
+  four plus two plus one, and nine, the widest span there is, is eight plus
+  one. Clang writes the same access as `i40` and lowers it to the same
+  sequence. Every reader walks the pieces: the frontend assembles a load out of
+  them and read-modify-writes each one in turn, reaching the bytes past the
+  first through a `unsigned char*` taken from the member place, and the
+  constant folds deposit the bits one byte at a time because no integer is nine
+  bytes wide. The `IR_OPCODE_AGGREGATE` selectors decline a span that is not a
+  single unit and the canonical emitters take it, which is a per-function
+  fallback the statistics already count. **A `_Bool` bit-field is extracted
+  like any other**: its declared type is not an integer, so it used to skip the
+  extraction and hand back the whole `_Bool` unit -- every neighbour's bits with
+  it, normalized to one, which is why a `_Bool` that was the only set bit still
+  read correctly -- and the write clobbered them. The unit it is read and
+  written through is the unsigned integer of the same width, because the shift
+  has to see the raw byte. A zero-width bit-field keeps aligning to its declared
+  type even inside a packed aggregate, which is also what Clang and GCC do.
+  On AArch64 the accesses this reaches land at whatever byte offset packing
+  chose, and the scaled unsigned-immediate load/store addresses only multiples
+  of its own width, so `codegen_canonical_a64_memory_operation_base` falls back
+  to the unscaled form -- `LDUR`/`STUR`, any byte offset in a nine-bit field --
+  and materializes the address beyond that. It used to fail the whole
+  compilation instead, which `struct __attribute__((packed)) { char a; int v :
+  32; }` already reached before any of this.
+  A packed record's *layout* agrees with the platform; how one is **passed**
+  does not yet, and issue #721 is that: the System V classifier asks each
+  bit-field's declared type where it sits, so a record System V returns in
+  `rax` comes back through a hidden pointer. The cross-linked pair passes such
+  a record by address for that reason.
   **A union member starts at bit zero whichever kind it is**, so a union sizes
   to the bits its widest member *occupies* rather than to that member's
   declared type: `union __attribute__((packed)) { char c; int b : 5; }` is one

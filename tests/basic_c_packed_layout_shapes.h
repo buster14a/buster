@@ -42,6 +42,21 @@ struct __attribute__((packed)) packed_bit_union_record
     char tail;
 };
 
+// A bit-field whose bits fit no power-of-two storage unit that lies inside the
+// aggregate: five bytes hold no five-byte integer, so the forty bits are read
+// and written as several ordinary accesses.  A half that refused the
+// declaration cannot build this at all, and one that chose a different span
+// reads a neighbouring member's byte as part of the value (#709).  It crosses
+// the boundary by address rather than by value, which is the layout question
+// on its own: how an aggregate holding a bit-field is *passed* is a separate
+// disagreement with the reference compilers (#721).
+struct __attribute__((packed)) packed_split_record
+{
+    char lead;
+    long long value : 40;
+    char tail;
+};
+
 // A member asking for less alignment than its type already has, which GNU
 // `aligned` ignores rather than applies: a compiler that lowered `value` to
 // two bytes puts it at offset 2 and makes this a 6-byte record, which is what
@@ -93,6 +108,10 @@ extern unsigned long long packed_layout_bit_union_size(void);
 extern unsigned long long packed_layout_bit_union_tail_offset(void);
 extern struct packed_bit_union_record packed_layout_make_bit_union_record(int value, char tail);
 extern int packed_layout_bit_union_value(struct packed_bit_union_record record);
+extern unsigned long long packed_layout_split_size(void);
+extern unsigned long long packed_layout_split_tail_offset(void);
+extern void packed_layout_write_split(struct packed_split_record* record, long long value);
+extern long long packed_layout_read_split(const struct packed_split_record* record);
 extern unsigned long long packed_layout_below_natural_size(void);
 extern unsigned long long packed_layout_below_natural_offset(void);
 extern struct below_natural_record packed_layout_make_below_natural(char tag, int value);

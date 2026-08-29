@@ -2602,6 +2602,8 @@ BUSTER_C_INTERNAL void c_ir_constant_store_bits(IrProgram* program, IrType* type
 // The same store through an explicit unit width, which is what a bit-field
 // whose packing narrowed its storage unit writes through.
 BUSTER_C_INTERNAL void c_ir_constant_store_unit_bits(IrProgram* program, u64 size, u8* bytes, u64 offset, u64 bits, bool sign_extend);
+BUSTER_C_INTERNAL void c_ir_constant_deposit_bit_field(IrProgram* program, u8* bytes, u64 offset, u64 unit, u32 bit_offset, u32 bit_width, u64 value,
+                                                       bool clear);
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
 
@@ -4120,6 +4122,236 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builder,
 BUSTER_C_INTERNAL IrValueId c_ir_emit_address_of_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId element_type, IrSourceRange source);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source);
 
+BUSTER_C_INTERNAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, IrValueId base, IrValueId index, IrSourceRange source);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_dereference_place(CIntegerIrBuilder* builder, IrValueId pointer, IrSourceRange source);
+BUSTER_C_INTERNAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrValueId value, IrSourceRange source);
+
+// The address of the bytes a bit-field occupies, as `unsigned char*`.
+// `c_ir_emit_address_of_place` refuses a bit-field place because C does --
+// `&s.b` is not an expression -- but a field with no single storage unit is
+// read and written one piece at a time, and the pieces past the first are
+// bytes the member place cannot name. The place still starts at
+// `field->offset`, which is the first byte of the span.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_bit_field_storage_address(CIntegerIrBuilder* builder, IrValueId place, IrSourceRange source)
+{
+    IrTypeId place_type = builder->function->values[place.value].canonical_type;
+    IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, place_type);
+    IrTypeId byte_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_CHAR));
+    if (pointer_type.value == IR_ID_UNDERLYING_INVALID || byte_pointer_type.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    IrValueId address = c_ir_add_result(builder, pointer_type);
+    if (address.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    builder->function->values[address.value].points_to_read_only = builder->function->values[place.value].is_read_only;
+    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_ADDRESS_OF, pointer_type);
+    instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
+    instruction.operands[0] = place;
+    instruction.operand_count = 1;
+    instruction.result = address;
+    IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+    builder->function->values[address.value].definition = id;
+    return c_ir_emit_cast(builder, address, byte_pointer_type, source);
+}
+
+// One piece of that span as a place of its own width, at `offset` bytes in.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_bit_field_piece_place(CIntegerIrBuilder* builder, IrValueId byte_address, u32 offset, IrTypeId piece_type,
+                                                            IrSourceRange source)
+{
+    IrTypeId byte_type = c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_CHAR);
+    IrValueId address = byte_address;
+    if (offset)
+    {
+        IrValueId index = c_ir_emit_integer_value_typed(builder, offset, false, (CToken){0}, builder->s32_type);
+        IrValueId element = index.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_index_place(builder, byte_address, index, source) : IR_VALUE_ID_INVALID;
+        address = element.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_address_of_place(builder, element, byte_type, source) : IR_VALUE_ID_INVALID;
+    }
+    IrTypeId piece_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, piece_type);
+    IrValueId cast = address.value != IR_ID_UNDERLYING_INVALID && piece_pointer_type.value != IR_ID_UNDERLYING_INVALID
+                         ? c_ir_emit_cast(builder, address, piece_pointer_type, source)
+                         : IR_VALUE_ID_INVALID;
+    return cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+}
+
+// The bits of `field` that lie in one piece of its span, as the half-open
+// range [`low`, `high`) of span bit positions. Empty when the piece holds none
+// of them, which no piece of a span that is exactly the field's bytes does,
+// but a caller that walks pieces should not have to know that.
+BUSTER_C_INTERNAL void c_ir_bit_field_piece_bits(IrField const* field, IrFieldAccessPiece piece, u32* low, u32* high)
+{
+    u32 piece_low = (u32)piece.offset * 8;
+    u32 piece_high = piece_low + (u32)piece.size * 8;
+    u32 field_high = field->bit_offset + field->bit_width;
+    *low = BUSTER_MAX(piece_low, field->bit_offset);
+    *high = BUSTER_MIN(piece_high, field_high);
+}
+
+// A packed bit-field the aggregate left no single storage unit for is read one
+// piece at a time and reassembled: each piece contributes the bits of its own
+// byte range that belong to the field, shifted down to the field's low bit.
+// The assembly runs at sixty-four bits, which covers every bit-field there is,
+// and the result narrows to the declared type on the way out -- the same shape
+// the single-unit extraction has, with the load replaced by a sum of loads.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_split_bit_field_load(CIntegerIrBuilder* builder, IrValueId place, IrField* field, IrTypeId type, u64 access_size,
+                                                           IrSourceRange source)
+{
+    IrFieldAccessPiece pieces[IR_FIELD_ACCESS_PIECE_CAPACITY];
+    u32 piece_count = ir_field_access_pieces(access_size, pieces);
+    IrType* value_type = ir_type_from_id(&builder->program->types, type);
+    IrTypeId wide_type = c_ir_unsigned_type_of_size(builder, 8);
+    IrValueId address = piece_count && value_type && wide_type.value != IR_ID_UNDERLYING_INVALID
+                            ? c_ir_emit_bit_field_storage_address(builder, place, source)
+                            : IR_VALUE_ID_INVALID;
+    if (address.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    CToken token = {0};
+    IrValueId assembled = IR_VALUE_ID_INVALID;
+    for (u32 index = 0; index < piece_count; index += 1)
+    {
+        u32 low = 0;
+        u32 high = 0;
+        c_ir_bit_field_piece_bits(field, pieces[index], &low, &high);
+        if (low >= high)
+        {
+            continue;
+        }
+        IrTypeId piece_type = c_ir_unsigned_type_of_size(builder, pieces[index].size);
+        IrValueId piece_place =
+            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type, source)
+                                                         : IR_VALUE_ID_INVALID;
+        IrValueId loaded = piece_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, piece_place, piece_type, source)
+                                                                        : IR_VALUE_ID_INVALID;
+        IrValueId part = loaded.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, loaded, wide_type, source) : IR_VALUE_ID_INVALID;
+        if (part.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        if (low > (u32)pieces[index].offset * 8)
+        {
+            IrValueId shift = c_ir_emit_integer_value_typed(builder, low - (u32)pieces[index].offset * 8, false, token, wide_type);
+            part = c_ir_emit_binary_value(builder, part, shift, wide_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+        }
+        u64 mask = high - low == 64 ? UINT64_MAX : ((u64)1 << (high - low)) - 1;
+        IrValueId mask_value = c_ir_emit_integer_value_typed(builder, mask, false, token, wide_type);
+        part = c_ir_emit_binary_value(builder, part, mask_value, wide_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+        if (low > field->bit_offset)
+        {
+            IrValueId shift = c_ir_emit_integer_value_typed(builder, low - field->bit_offset, false, token, wide_type);
+            part = c_ir_emit_binary_value(builder, part, shift, wide_type, IR_BINARY_SHIFT_LEFT, source);
+        }
+        assembled = assembled.value == IR_ID_UNDERLYING_INVALID
+                        ? part
+                        : c_ir_emit_binary_value(builder, assembled, part, wide_type, IR_BINARY_INTEGER_BITWISE_OR, source);
+        if (assembled.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+    }
+    if (assembled.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    // The sign lives at the field's own top bit, so it is stretched from
+    // there rather than from the assembly width; an unsigned field already
+    // has zeroes above it from the masks.
+    if (value_type->is_signed && field->bit_width < 64)
+    {
+        IrTypeId signed_type = c_ir_builder_scalar_type(builder, C_TYPE_LONG_LONG);
+        IrType* signed_value_type = ir_type_from_id(&builder->program->types, signed_type);
+        if (!signed_value_type || signed_value_type->bit_width != 64)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        IrValueId shift = c_ir_emit_integer_value_typed(builder, 64 - field->bit_width, false, token, signed_type);
+        assembled = c_ir_emit_cast(builder, assembled, signed_type, source);
+        assembled = c_ir_emit_binary_value(builder, assembled, shift, signed_type, IR_BINARY_SHIFT_LEFT, source);
+        assembled = c_ir_emit_binary_value(builder, assembled, shift, signed_type, IR_BINARY_SIGNED_SHIFT_RIGHT, source);
+    }
+    return c_ir_emit_cast(builder, assembled, type, source);
+}
+
+// The write half of the same split: every piece keeps the bits that are not
+// the field's and takes the field's from the value. A piece the field fills
+// completely needs no read at all.
+BUSTER_C_INTERNAL bool c_ir_emit_split_bit_field_store(CIntegerIrBuilder* builder, IrValueId place, IrField* field, IrValueId value, u64 access_size,
+                                                       IrSourceRange source)
+{
+    IrFieldAccessPiece pieces[IR_FIELD_ACCESS_PIECE_CAPACITY];
+    u32 piece_count = ir_field_access_pieces(access_size, pieces);
+    IrTypeId wide_type = c_ir_unsigned_type_of_size(builder, 8);
+    IrValueId wide = piece_count && wide_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, value, wide_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId address = wide.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_storage_address(builder, place, source) : IR_VALUE_ID_INVALID;
+    if (address.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return false;
+    }
+    CToken token = {0};
+    for (u32 index = 0; index < piece_count; index += 1)
+    {
+        u32 low = 0;
+        u32 high = 0;
+        c_ir_bit_field_piece_bits(field, pieces[index], &low, &high);
+        if (low >= high)
+        {
+            continue;
+        }
+        u32 piece_low = (u32)pieces[index].offset * 8;
+        u32 piece_bits = (u32)pieces[index].size * 8;
+        IrTypeId piece_type = c_ir_unsigned_type_of_size(builder, pieces[index].size);
+        IrValueId piece_place =
+            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type, source)
+                                                         : IR_VALUE_ID_INVALID;
+        if (piece_place.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        IrValueId part = wide;
+        if (low > field->bit_offset)
+        {
+            IrValueId shift = c_ir_emit_integer_value_typed(builder, low - field->bit_offset, false, token, wide_type);
+            part = c_ir_emit_binary_value(builder, part, shift, wide_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+        }
+        u64 value_mask = high - low == 64 ? UINT64_MAX : ((u64)1 << (high - low)) - 1;
+        IrValueId mask_value = c_ir_emit_integer_value_typed(builder, value_mask, false, token, wide_type);
+        part = c_ir_emit_binary_value(builder, part, mask_value, wide_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+        if (low > piece_low)
+        {
+            IrValueId shift = c_ir_emit_integer_value_typed(builder, low - piece_low, false, token, wide_type);
+            part = c_ir_emit_binary_value(builder, part, shift, wide_type, IR_BINARY_SHIFT_LEFT, source);
+        }
+        part = c_ir_emit_cast(builder, part, piece_type, source);
+        if (part.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        if (high - low != piece_bits)
+        {
+            u64 storage_mask = ((high - low == 64 ? UINT64_MAX : ((u64)1 << (high - low)) - 1) << (low - piece_low));
+            IrValueId clear = c_ir_emit_integer_value_typed(builder, ~storage_mask, false, token, piece_type);
+            IrValueId current = c_ir_emit_load_place_raw(builder, piece_place, piece_type, source);
+            current = current.value != IR_ID_UNDERLYING_INVALID
+                          ? c_ir_emit_binary_value(builder, current, clear, piece_type, IR_BINARY_INTEGER_BITWISE_AND, source)
+                          : IR_VALUE_ID_INVALID;
+            part = current.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, current, part, piece_type, IR_BINARY_INTEGER_BITWISE_OR, source)
+                                                             : IR_VALUE_ID_INVALID;
+            if (part.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+        }
+        if (!c_ir_emit_store_place(builder, piece_place, piece_type, part, source))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrSourceRange source)
 {
     // C 6.3.2.1p4: a function designator is converted to a pointer to the
@@ -4134,17 +4366,27 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place(CIntegerIrBuilder* builder, IrV
     }
     IrField* field = c_ir_bit_field_from_place(builder, place);
     IrType* value_type = ir_type_from_id(&builder->program->types, type);
-    bool extract = field && value_type && value_type->kind == IR_TYPE_INTEGER && field->bit_width && field->bit_width <= value_type->bit_width;
+    // A `_Bool` bit-field's bits are extracted like any other's. Its declared
+    // type is not an integer, so the extraction used to be skipped and the
+    // whole `_Bool` unit came back -- every neighbouring field's bits with it,
+    // normalized to one, which is why a `_Bool` that happened to be the only
+    // set bit still read correctly. The unit it is read through has to be an
+    // integer of the same width for the shift to see the raw byte.
+    bool boolean = value_type && value_type->kind == IR_TYPE_BOOLEAN;
+    bool extract =
+        field && value_type && (value_type->kind == IR_TYPE_INTEGER || boolean) && field->bit_width && field->bit_width <= value_type->bit_width;
     // A packed bit-field the aggregate left no room for a declared-type unit
     // of is read through the narrower one its layout recorded; every other
-    // field reads its own type.
+    // field reads its own type. A span that is no integer's width -- five
+    // bytes for `long long b : 40` -- has no such unit and takes several
+    // accesses instead.
     IrTypeId access_type = type;
-    if (extract && field->access_size)
+    if (extract && (field->access_size || boolean))
     {
-        access_type = c_ir_unsigned_type_of_size(builder, field->access_size);
+        access_type = c_ir_unsigned_type_of_size(builder, ir_field_access_size(&builder->program->types, field));
         if (access_type.value == IR_ID_UNDERLYING_INVALID)
         {
-            return IR_VALUE_ID_INVALID;
+            return c_ir_emit_split_bit_field_load(builder, place, field, type, field->access_size, source);
         }
     }
     IrValueId value = c_ir_emit_load_place_raw(builder, place, access_type, source);
@@ -4560,14 +4802,26 @@ BUSTER_C_INTERNAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrValue
     // The read-modify-write runs in the unit the field is accessed through,
     // which is the declared type unless packing narrowed it; the value
     // truncates into that unit first, and the mask keeps only the field's own
-    // bits either way.
-    IrTypeId access_type = bit_field && bit_field->access_size ? c_ir_unsigned_type_of_size(builder, bit_field->access_size) : stored_type;
+    // bits either way. A span no integer is the width of takes one
+    // read-modify-write per piece instead.
+    // A `_Bool` bit-field reaches the read-modify-write like any other, through
+    // the integer its unit is: writing the whole `_Bool` unit instead used to
+    // clear every field sharing it.
+    bool stored_boolean = value_type && value_type->kind == IR_TYPE_BOOLEAN;
+    bool narrowed_access = bit_field && (bit_field->access_size || stored_boolean);
+    IrTypeId access_type =
+        narrowed_access ? c_ir_unsigned_type_of_size(builder, ir_field_access_size(&builder->program->types, bit_field)) : stored_type;
+    if (narrowed_access && access_type.value == IR_ID_UNDERLYING_INVALID && value_type && value_type->kind == IR_TYPE_INTEGER && bit_field->bit_width &&
+        bit_field->bit_width <= value_type->bit_width)
+    {
+        return c_ir_emit_split_bit_field_store(builder, place, bit_field, value, bit_field->access_size, source);
+    }
     IrType* access_value_type = access_type.value == stored_type.value ? value_type : ir_type_from_id(&builder->program->types, access_type);
-    if (bit_field && bit_field->access_size && !access_value_type)
+    if (narrowed_access && !access_value_type)
     {
         return false;
     }
-    if (bit_field && value_type && access_value_type && value_type->kind == IR_TYPE_INTEGER && bit_field->bit_width &&
+    if (bit_field && value_type && access_value_type && (value_type->kind == IR_TYPE_INTEGER || stored_boolean) && bit_field->bit_width &&
         bit_field->bit_width <= value_type->bit_width && bit_field->bit_offset + bit_field->bit_width <= access_value_type->bit_width)
     {
         CToken token = {0};
@@ -31945,16 +32199,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                     if (task.is_bit_field)
                     {
                         u64 unit = task.access_size ? task.access_size : type->layout.size;
-                        if (!task.bit_width || task.bit_offset + task.bit_width > unit * 8 || unit > sizeof(bits)) return false;
-                        u64 storage = 0;
-                        for (u64 byte_index = 0; byte_index < unit; byte_index += 1)
-                        {
-                            u64 storage_index = program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : unit - byte_index - 1;
-                            storage |= (u64)bytes[task.offset + byte_index] << (u32)(storage_index * 8);
-                        }
-                        u64 mask = task.bit_width == 64 ? UINT64_MAX : ((u64)1 << task.bit_width) - 1;
-                        storage |= (bits & mask) << task.bit_offset;
-                        c_ir_constant_store_unit_bits(program, unit, bytes, task.offset, storage, false);
+                        if (!task.bit_width || task.bit_offset + task.bit_width > unit * 8 || task.bit_width > 64) return false;
+                        c_ir_constant_deposit_bit_field(program, bytes, task.offset, unit, task.bit_offset, task.bit_width, bits, false);
                     }
                     else
                     {
@@ -32204,19 +32450,11 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
             if (task.is_bit_field)
             {
                 u64 unit = task.access_size ? task.access_size : type->layout.size;
-                if (!task.bit_width || task.bit_offset + task.bit_width > unit * 8 || unit > sizeof(value))
+                if (!task.bit_width || task.bit_offset + task.bit_width > unit * 8 || task.bit_width > 64)
                 {
                     return false;
                 }
-                u64 storage = 0;
-                for (u64 byte_index = 0; byte_index < unit; byte_index += 1)
-                {
-                    u64 storage_index = program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : unit - byte_index - 1;
-                    storage |= (u64)bytes[task.offset + byte_index] << (u32)(storage_index * 8);
-                }
-                u64 mask = task.bit_width == 64 ? UINT64_MAX : ((u64)1 << task.bit_width) - 1;
-                storage |= (value & mask) << task.bit_offset;
-                c_ir_constant_store_unit_bits(program, unit, bytes, task.offset, storage, false);
+                c_ir_constant_deposit_bit_field(program, bytes, task.offset, unit, task.bit_offset, task.bit_width, value, false);
                 continue;
             }
             c_ir_constant_store_bits(program, type, bytes, task.offset, value, type->is_signed && c_ir_integer_signed_value(value, type) < 0);
@@ -33815,7 +34053,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_apply_materialized_range(CInteg
         if (designator->value_field && designator->value_field->is_bit_field)
         {
             if (!child->layout.size || child->layout.size > sizeof(u64) || designator->value_field->bit_width == 0 ||
-                designator->value_field->bit_width > child->layout.size * 8 ||
+                designator->value_field->bit_width > child->layout.size * 8 || designator->value_field->bit_width > 64 ||
                 designator->value_field->bit_offset + designator->value_field->bit_width > unit * 8)
             {
                 return false;
@@ -33826,15 +34064,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_apply_materialized_range(CInteg
                 u64 target_index = builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : child->layout.size - byte_index - 1;
                 value |= (u64)value_bytes[byte_index] << (u32)(target_index * 8);
             }
-            u64 storage = 0;
-            for (u64 byte_index = 0; byte_index < unit; byte_index += 1)
-            {
-                u64 target_index = builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : unit - byte_index - 1;
-                storage |= (u64)bytes[target_offset + byte_index] << (u32)(target_index * 8);
-            }
-            u64 mask = designator->value_field->bit_width == 64 ? UINT64_MAX : ((u64)1 << designator->value_field->bit_width) - 1;
-            storage = (storage & ~(mask << designator->value_field->bit_offset)) | ((value & mask) << designator->value_field->bit_offset);
-            c_ir_constant_store_unit_bits(builder->program, unit, bytes, target_offset, storage, false);
+            c_ir_constant_deposit_bit_field(builder->program, bytes, target_offset, unit, designator->value_field->bit_offset,
+                                            designator->value_field->bit_width, value, true);
         }
         else
         {
@@ -34295,21 +34526,14 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
             u64 unit = selected_field->access_size ? selected_field->access_size : child->layout.size;
             if (!c_ir_constant_evaluate(builder, value_start, value_end, &value) ||
                 !c_ir_constant_cast(builder, value, child_type, &converted) || !c_ir_constant_type_is_integer(child) || !child->layout.resolved ||
-                unit > sizeof(u64) || !selected_field->bit_width || selected_field->bit_width > child->layout.size * 8 ||
+                selected_field->bit_width > 64 || !selected_field->bit_width || selected_field->bit_width > child->layout.size * 8 ||
                 selected_field->bit_offset + selected_field->bit_width > unit * 8 || child_offset > byte_count ||
                 unit > byte_count - child_offset)
             {
                 return false;
             }
-            u64 storage = 0;
-            for (u64 byte_index = 0; byte_index < unit; byte_index += 1)
-            {
-                u64 target_index = builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : unit - byte_index - 1;
-                storage |= (u64)bytes[child_offset + byte_index] << (u32)(target_index * 8);
-            }
-            u64 mask = selected_field->bit_width == 64 ? UINT64_MAX : ((u64)1 << selected_field->bit_width) - 1;
-            storage = (storage & ~(mask << selected_field->bit_offset)) | ((converted.integer & mask) << selected_field->bit_offset);
-            c_ir_constant_store_unit_bits(builder->program, unit, bytes, child_offset, storage, false);
+            c_ir_constant_deposit_bit_field(builder->program, bytes, child_offset, unit, selected_field->bit_offset, selected_field->bit_width,
+                                            converted.integer, true);
             frame->cursor = value_end;
             if (selected == UINT64_MAX)
             {
@@ -36361,6 +36585,37 @@ BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBu
     return true;
 }
 
+// A bit-field's own bits, deposited into the constant bytes its storage unit
+// occupies. One byte at a time rather than through a `u64` round trip, because
+// a packed field with no single storage unit spans up to nine bytes and no
+// integer of the host or the target is that wide. `clear` says whether the
+// bytes already hold something the field replaces; an initializer building a
+// zeroed object only ever adds to them.
+BUSTER_C_INTERNAL void c_ir_constant_deposit_bit_field(IrProgram* program, u8* bytes, u64 offset, u64 unit, u32 bit_offset, u32 bit_width, u64 value,
+                                                       bool clear)
+{
+    if (!program || !bytes || !bit_width)
+    {
+        return;
+    }
+    u32 end = bit_offset + bit_width;
+    for (u32 bit = bit_offset; bit < end;)
+    {
+        u64 unit_byte = bit / 8;
+        u32 low = bit - (u32)unit_byte * 8;
+        u32 count = BUSTER_MIN(8 - low, end - bit);
+        u8 mask = (u8)((((u32)1 << count) - 1) << low);
+        u8 piece = (u8)((u32)((value >> (bit - bit_offset)) & (((u64)1 << count) - 1)) << low);
+        u64 target = program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? unit_byte : unit - unit_byte - 1;
+        if (clear)
+        {
+            bytes[offset + target] = (u8)(bytes[offset + target] & (u8)~mask);
+        }
+        bytes[offset + target] = (u8)(bytes[offset + target] | piece);
+        bit += count;
+    }
+}
+
 BUSTER_C_INTERNAL void c_ir_constant_store_unit_bits(IrProgram* program, u64 size, u8* bytes, u64 offset, u64 bits, bool sign_extend)
 {
     if (!program)
@@ -38344,9 +38599,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 // exists at all, narrow the unit the way Clang does:
                 // `struct __attribute__((packed)) { char c; int b : 5; char t; }`
                 // is three bytes, so `b` is read through the byte at offset
-                // one. A field whose bits cross every unit that fits has no
-                // single-unit access even then and is refused rather than laid
-                // out differently from every other compiler on the target.
+                // one. A field whose bits cross every unit that fits takes the
+                // bytes they occupy instead, which is more than one access.
                 for (u32 field_index = 0; packed_fields && field_index < c_type->member_count; field_index += 1)
                 {
                     IrField* field = aggregate_type->fields + field_index;
@@ -38386,24 +38640,20 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                     }
                     if (!unit)
                     {
-                        // One report per aggregate: the diagnostic budget is
-                        // counted per declaration and per type, not per
-                        // member, and the first field names the layout the
-                        // whole definition cannot have. A definition that
-                        // already spent its slot on a rejected alignment
-                        // specifier keeps that report and still slides the
-                        // unit back, which is the layout it would have had.
-                        if (alignment_rejection.length)
-                        {
-                            break;
-                        }
-                        CMember* member = &parse.members[c_type->member_start + field_index];
-                        result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
-                            .message = string_format(arena, S8("packed bit-field '{S8}' straddles every storage unit of its declared type"), member->name),
-                            .location = member->location,
-                            .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                        };
-                        break;
+                        // No power-of-two unit both covers the field and fits
+                        // inside the object, which is every field whose bits
+                        // occupy a number of bytes that is not a power of two:
+                        // `union __attribute__((packed)) { long long b : 40; }`
+                        // is five bytes and there is no five-byte load. The
+                        // access is then those bytes themselves, split into
+                        // the pieces `ir_field_access_pieces` names -- Clang
+                        // spells the same thing `i40` and lowers it to a
+                        // four-byte read plus a one-byte one. The span always
+                        // lies inside the object: it ends where the field's
+                        // last bit does, rounded up to a byte, and the object
+                        // is at least that long.
+                        unit_offset = absolute / 8;
+                        unit = (absolute + field->bit_width + 7) / 8 - unit_offset;
                     }
                     field->offset = unit_offset;
                     field->bit_offset = (u32)(absolute - unit_offset * 8);

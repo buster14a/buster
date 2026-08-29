@@ -9,6 +9,10 @@
 // down to 16. Capacity computations that count adjustment chunks must use
 // the same constants as the emitters that produce them.
 #define A64_IMM12_MAX 4095u
+// The unscaled load/store immediate is a signed nine-bit byte offset; every
+// offset this compiler forms is non-negative, so its reach is the positive
+// half.
+#define A64_UNSCALED_IMM_MAX 255u
 #define A64_SP_ADJUST_CHUNK (A64_IMM12_MAX & ~15u)
 
 // Exact architectural forms used at the AArch64 MC boundary. These IDs are

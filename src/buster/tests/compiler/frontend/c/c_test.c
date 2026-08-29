@@ -11334,26 +11334,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     // A packed bit-field whose bits cross every storage unit that fits has no
     // single-unit access at all -- not even a narrower one: thirty bits at bit
     // three of a five-byte aggregate leave no position for a four-byte unit
-    // and do not fit in a smaller one. It is refused rather than laid out
-    // differently from every other compiler on the target -- silently agreeing
-    // with nobody is the failure mode this whole change exists to remove.
-    TemporalArena straddle_temporary = scratch_begin(0, 0);
-    CPreprocessResult straddle_preprocess = {0};
-    CParseResult straddle_parse = {0};
-    CIRLowerResult straddle = c_test_lower_source(straddle_temporary.arena,
-                                                  S8("struct __attribute__((packed)) straddling { int low : 3; int high : 30; };\n"
-                                                     "struct straddling straddling_object;\n"),
-                                                  S8("packed-straddle.c"), target_native, &straddle_preprocess, &straddle_parse);
-    BUSTER_TEST(arguments, straddle_preprocess.diagnostic_count == 0);
-    BUSTER_TEST(arguments, straddle_parse.diagnostic_count == 0);
-    BUSTER_TEST(arguments, straddle.diagnostic_count == 1);
-    if (straddle.diagnostic_count == 1)
+    // and do not fit in a smaller one. The access is then the bytes the bits
+    // occupy, which is what Clang spells `i40` and lowers to a sequence of
+    // ordinary ones; `access_size` carries the span and
+    // `ir_field_access_pieces` names the accesses. The widths that land here
+    // are exactly the ones whose byte count is not a power of two.
+    struct
     {
-        BUSTER_TEST(arguments, straddle.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
-        BUSTER_STRING_TEST(arguments, straddle.diagnostics[0].message,
-                           S8("packed bit-field 'high' straddles every storage unit of its declared type"));
+        String8 source;
+        String8 name;
+        u64 size;
+        u64 offset;
+        u32 bit_offset;
+        u32 field;
+        u32 field_count;
+        u8 access_size;
+        u8 piece_count;
+    } split_units[] = {
+        {S8("struct __attribute__((packed)) straddling { int low : 3; int high : 30; };\n"
+            "struct straddling straddling_object;\n"),
+         S8("straddling_object"), 5, 0, 3, 1, 2, 5, 2},
+        {S8("union __attribute__((packed)) wide_union { long long value : 40; };\n"
+            "union wide_union wide_union_object;\n"),
+         S8("wide_union_object"), 5, 0, 0, 0, 1, 5, 2},
+        {S8("struct __attribute__((packed)) three_pieces { long long lead : 1; long long value : 55; };\n"
+            "struct three_pieces three_pieces_object;\n"),
+         S8("three_pieces_object"), 7, 0, 1, 1, 2, 7, 3},
+        {S8("struct __attribute__((packed)) nine_bytes { long long lead : 1; long long value : 64; };\n"
+            "struct nine_bytes nine_bytes_object;\n"),
+         S8("nine_bytes_object"), 9, 0, 1, 1, 2, 9, 2},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(split_units); index += 1)
+    {
+        TemporalArena straddle_temporary = scratch_begin(0, 0);
+        CPreprocessResult straddle_preprocess = {0};
+        CParseResult straddle_parse = {0};
+        CIRLowerResult straddle = c_test_lower_source(straddle_temporary.arena, split_units[index].source, S8("packed-straddle.c"), target_native,
+                                                      &straddle_preprocess, &straddle_parse);
+        BUSTER_TEST(arguments, straddle_preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, straddle_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, straddle.diagnostic_count == 0);
+        IrModule* straddle_module = straddle.program && straddle.program->module_count ? &straddle.program->modules[0] : 0;
+        IrGlobal* straddle_object = straddle_module ? c_test_find_ir_global(straddle_module, straddle.program, split_units[index].name) : 0;
+        IrType* straddle_type = straddle_object ? ir_type_from_id(&straddle.program->types, straddle_object->type) : 0;
+        BUSTER_TEST(arguments, straddle_type != 0 && straddle_type->field_count == split_units[index].field_count);
+        if (straddle_type && straddle_type->field_count == split_units[index].field_count)
+        {
+            IrField* straddle_field = straddle_type->fields + split_units[index].field;
+            BUSTER_TEST(arguments, straddle_type->layout.size == split_units[index].size && straddle_type->layout.alignment == 1);
+            BUSTER_TEST(arguments, straddle_field->offset == split_units[index].offset && straddle_field->bit_offset == split_units[index].bit_offset);
+            BUSTER_TEST(arguments, straddle_field->access_size == split_units[index].access_size);
+            BUSTER_TEST(arguments, ir_field_access_size(&straddle.program->types, straddle_field) == split_units[index].access_size);
+            IrFieldAccessPiece straddle_pieces[IR_FIELD_ACCESS_PIECE_CAPACITY];
+            u32 straddle_piece_count = ir_field_access_pieces(split_units[index].access_size, straddle_pieces);
+            BUSTER_TEST(arguments, straddle_piece_count == split_units[index].piece_count);
+            u64 straddle_covered = 0;
+            for (u32 piece = 0; piece < straddle_piece_count; piece += 1)
+            {
+                BUSTER_TEST(arguments, straddle_pieces[piece].offset == straddle_covered);
+                straddle_covered += straddle_pieces[piece].size;
+            }
+            BUSTER_TEST(arguments, straddle_covered == split_units[index].access_size);
+        }
+        scratch_end(straddle_temporary);
     }
-    scratch_end(straddle_temporary);
 
     // An array element has to be addressable at its own alignment in every
     // slot, so its size has to be a multiple of that alignment. A typedef's

@@ -59,6 +59,29 @@ int packed_layout_bit_union_value(struct packed_bit_union_record record)
     return record.bits.value * 100 + record.tail;
 }
 
+unsigned long long packed_layout_split_size(void)
+{
+    return sizeof(struct packed_split_record);
+}
+
+unsigned long long packed_layout_split_tail_offset(void)
+{
+    struct packed_split_record record;
+    return (unsigned long long)((char *)&record.tail - (char *)&record);
+}
+
+void packed_layout_write_split(struct packed_split_record* record, long long value)
+{
+    record->lead = 'L';
+    record->value = value;
+    record->tail = 't';
+}
+
+long long packed_layout_read_split(const struct packed_split_record* record)
+{
+    return record->value + record->tail + record->lead;
+}
+
 unsigned long long packed_layout_below_natural_size(void)
 {
     return sizeof(struct below_natural_record);

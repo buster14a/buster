@@ -320,10 +320,27 @@ struct IrField
     // `struct __attribute__((packed)) { char c; int b : 5; char t; }` is
     // three bytes, so `b` is read through the byte at offset one. Zero means
     // the declared type's size, which is what every other field uses;
-    // `ir_field_access_size` resolves the two.
+    // `ir_field_access_size` resolves the two. The span need not be a power
+    // of two -- `union __attribute__((packed)) { long long b : 40; }` is five
+    // bytes and no unit of any width fits inside it -- in which case the
+    // access is the sequence `ir_field_access_pieces` decomposes it into.
     u8 access_size;
     u8 reserved[6];
 };
+
+// One power-of-two access of a bit-field's storage, at `offset` bytes from the
+// field's own offset.
+typedef struct IrFieldAccessPiece IrFieldAccessPiece;
+struct IrFieldAccessPiece
+{
+    u8 offset;
+    u8 size;
+};
+
+// A bit-field spans at most nine bytes -- sixty-four bits starting seven bits
+// into one -- and a descending power-of-two decomposition of nine bytes is
+// eight plus one, so three pieces cover every span.
+#define IR_FIELD_ACCESS_PIECE_CAPACITY 3
 
 typedef struct IrEnumMember IrEnumMember;
 struct IrEnumMember
@@ -477,6 +494,11 @@ BUSTER_F_DECL IrType* ir_type_from_id(IrTypeTable* table, IrTypeId id);
 // packing forced it, the declared type's size otherwise. Zero when the type
 // is unresolved, which every caller already treats as unusable.
 BUSTER_F_DECL u64 ir_field_access_size(IrTypeTable* table, IrField const* field);
+// The accesses `access_size` bytes of storage take, largest first. One piece
+// whenever the span is a power of two no wider than a machine integer, which
+// is every field but a packed one the aggregate left no single unit for; zero
+// when the span is unusable, which is what a caller that cannot split checks.
+BUSTER_F_DECL u32 ir_field_access_pieces(u64 access_size, IrFieldAccessPiece* pieces);
 BUSTER_F_DECL IrSymbol* ir_symbol_from_id(IrSymbolTable* table, IrSymbolId id);
 BUSTER_F_DECL IrSource* ir_source_from_id(IrSourceTable* table, IrSourceId id);
 

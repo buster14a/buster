@@ -51,6 +51,24 @@ int main(void)
     built_union.tail = 3;
     if (packed_layout_bit_union_value(built_union) != 703) return 23;
 
+    // The split access, written by one half and read by the other: a half that
+    // refused the declaration never compiles at all, and one that chose a
+    // different span for the forty bits reads a neighbouring member's byte as
+    // part of the value.  The record crosses by address because how an
+    // aggregate holding a bit-field is *passed* is a disagreement of its own
+    // (#721), and this is the layout question rather than that one.
+    if (sizeof(struct packed_split_record) != 7) return 30;
+    if (packed_layout_split_size() != sizeof(struct packed_split_record)) return 31;
+    if (packed_layout_split_tail_offset() != 6) return 32;
+    struct packed_split_record split_record;
+    packed_layout_write_split(&split_record, -0x123456789LL);
+    if (split_record.lead != 'L' || split_record.value != -0x123456789LL || split_record.tail != 't') return 33;
+    struct packed_split_record built_split;
+    built_split.lead = 'M';
+    built_split.value = 0x7fedcba987LL;
+    built_split.tail = 5;
+    if (packed_layout_read_split(&built_split) != 0x7fedcba987LL + 5 + 'M') return 34;
+
     packed_layout_fill_aligned_object('m');
     if (packed_layout_aligned_object[0] != 'm' || packed_layout_aligned_object[1] != 'n' ||
         packed_layout_aligned_object[2] != 'o')
