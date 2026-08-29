@@ -22,6 +22,7 @@ typedef enum LinkError
     LINK_ERROR_UNSUPPORTED_FEATURE,
     LINK_ERROR_ENTRY_SYMBOL,
     LINK_ERROR_RELOCATION,
+    LINK_ERROR_SYMBOL_VERSION,
     LINK_ERROR_COUNT,
 } LinkError;
 
@@ -55,6 +56,21 @@ struct NativeDynamicDataSymbol
     u64 size;
 };
 
+typedef struct NativeDynamicVersionedSymbol NativeDynamicVersionedSymbol;
+// One name a shared library defines, with the symbol version it publishes that
+// definition under.  `version` is empty when the library exports the name
+// without a version; `has_default` is false for a `name@VER` definition, which
+// an unversioned reference cannot bind to.  One record per dynamic symbol, so
+// a name published under several versions -- glibc has four of `sys_errlist`,
+// all of them non-default -- appears once per version.
+struct NativeDynamicVersionedSymbol
+{
+    String8 name;
+    String8 version;
+    bool has_default;
+    u8 reserved[7];
+};
+
 typedef struct NativeDynamicLibrary NativeDynamicLibrary;
 struct NativeDynamicLibrary
 {
@@ -63,8 +79,14 @@ struct NativeDynamicLibrary
     // ELF only, and read only for links that import data: the PE writers
     // resolve imports by name and need no address.
     NativeDynamicDataSymbol* exported_data_symbols;
+    // ELF only: every name this library defines, with its version.  Read for
+    // every hosted ELF link, because an unversioned reference to a name whose
+    // definitions are all non-default has nothing to bind to and the image
+    // has to record the version of every reference that does bind.
+    NativeDynamicVersionedSymbol* versioned_symbols;
     u32 exported_symbol_count;
     u32 exported_data_symbol_count;
+    u32 versioned_symbol_count;
     bool exports_known;
     u8 reserved[3];
 };
@@ -84,6 +106,7 @@ struct NativeExecutableLinkOptions
     // libc.so.6 for hosted ELF.  Neither appears in dynamic_libraries because
     // the writers name it themselves.
     NativeDynamicDataSymbol* runtime_data_symbols;
+    NativeDynamicVersionedSymbol* runtime_versioned_symbols;
     u32 library_path_count;
     u32 framework_path_count;
     u32 framework_count;
@@ -91,6 +114,7 @@ struct NativeExecutableLinkOptions
     u32 dynamic_library_count;
     u32 runtime_exported_symbol_count;
     u32 runtime_data_symbol_count;
+    u32 runtime_versioned_symbol_count;
     bool runtime_exports_known;
     bool debug_info;
     u8 reserved[6];
@@ -106,6 +130,9 @@ struct NativeExecutableLinkResult
     LinkError error;
 };
 
+// The enumerator's own spelling, so a failed link names its reason rather than
+// only its number.
+BUSTER_F_DECL String8 link_error_name(LinkError error);
 BUSTER_F_DECL LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options);
 // Synthetic compiler-runtime input for hosted Windows executable links only;
 // object and relocatable output paths, UEFI, and non-Windows targets do not use it.

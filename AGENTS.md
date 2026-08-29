@@ -1318,25 +1318,55 @@ input, and rejects native objects, archives, libraries, frameworks, linker
 arguments, `-E`, `-S`, and `-fsyntax-only`. The writer has no LLVM dependency;
 see `LLVM_BITCODE.md` for its target metadata, API, and supported boundary.
 
-A hosted ELF link that references imported data reads the shared libraries'
-own dynamic symbol tables. `compiler_driver_elf_library_exports` looks
-`libc.so.6` and each requested library up where the loader would — the `-L`
-paths, then the sysroot or host `lib`/`usr/lib` roots, multiarch first — and
-rejects a file whose ELF machine disagrees with the target, so a cross link
-never reads the host's own libc. It collects the defined global and weak
-objects with their addresses and sizes into `NativeDynamicDataSymbol` arrays,
-and `link.c` uses them to reserve copy-relocation slots: a slot stands for the
-library's object rather than the one name the program spelled, so it carries
-every name the library exports at that address, takes the library's own size,
-and is shared by two imported names for one object. The alias set is what makes
-`extern char **environ` work. A definition in the executable takes precedence
-over the library's for every one of its names, and glibc stores the environment
-through `__environ` after startup; an executable that defined only `environ`
-left that store in libc's own storage while the program read a copy taken
-before startup ran, which is to say null. The read is skipped entirely for a
-link with no undefined data symbol, which is nearly all of them, and a library
-that cannot be found or parsed leaves the pointer-sized slots the writer
-reserved before alias sets existed.
+Every hosted ELF link reads the shared libraries' own dynamic symbol tables.
+`compiler_driver_elf_library_exports` looks `libc.so.6` and each requested
+library up where the loader would — the `-L` paths, then the sysroot or host
+`lib`/`usr/lib` roots, multiarch first — and rejects a file whose ELF machine
+disagrees with the target, so a cross link never reads the host's own libc.
+`compiler_driver_elf_dynamic_symbols` walks that table once and produces two
+things.
+
+The first is the defined global and weak **objects** with their addresses and
+sizes, as `NativeDynamicDataSymbol` arrays, which `link.c` uses to reserve
+copy-relocation slots: a slot stands for the library's object rather than the
+one name the program spelled, so it carries every name the library exports at
+that address, takes the library's own size, and is shared by two imported names
+for one object. The alias set is what makes `extern char **environ` work. A
+definition in the executable takes precedence over the library's for every one
+of its names, and glibc stores the environment through `__environ` after
+startup; an executable that defined only `environ` left that store in libc's
+own storage while the program read a copy taken before startup ran, which is to
+say null. This half is still collected only for a link with an undefined data
+symbol, since a link with none has nothing to copy, and a library that cannot
+be found or parsed leaves the pointer-sized slots the writer reserved before
+alias sets existed.
+
+The second is the **symbol version** of every defined entry, functions
+included, read from the library's `.gnu.version` and `.gnu.version_d` into
+`NativeDynamicVersionedSymbol` arrays. That half is collected on every hosted
+ELF link, because versioning applies to functions and there is no cheaper way
+to know: reading `libc.so.6` where nothing did before costs about 0,65 M
+instructions, a tenth of a percent of the smallest hosted compile. It buys two
+things in the x86-64 dynamic writer, and the AArch64 one through it:
+
+- **A reference records the version it bound to.** `.gnu.version` carries one
+  index per dynamic symbol, `.gnu.version_r` names per library the versions
+  the image needs, and `DT_VERSYM`/`DT_VERNEED`/`DT_VERNEEDNUM` publish both.
+  The alias names a copy slot defines are versioned too, because each of them
+  is a name the library publishes. Without this the image binds by name to
+  whatever the running glibc calls default, which is the versioning
+  mechanism's whole purpose: `readelf -W --version-info` on a Buster
+  executable now agrees with GNU ld's for the same program, `stat@GLIBC_2.33`
+  included. Both sections are omitted when nothing needed a version, and the
+  layout then collapses to exactly what it was before, so an unversioned
+  library's image is byte-for-byte unchanged.
+- **A name with no default version is refused** rather than linked, as
+  `LINK_ERROR_SYMBOL_VERSION`. glibc publishes `sys_errlist` four times, once
+  per historical layout, and every one of them is a non-default `name@VER`; an
+  unversioned reference has nothing to bind to, GNU ld reports it undefined,
+  and Buster linked it and let the loader pick. **Do not use `sys_errlist` as a
+  Clang-differential fixture** — a harness that reads "Clang refuses, Buster
+  accepts" as a Buster success measures nothing (issue #660).
 
 Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
 drives the simulator), `bench_all` (desktop only — runs `ide bench`),
@@ -2146,11 +2176,11 @@ on a commit you already know is incomplete tells nobody anything.
   every one of them is, and one hidden occurrence makes it hidden. The gap
   left is that a default-visibility weak reference no library actually
   defines still comes out non-zero — a PLT thunk or a copy slot — because the
-  writer cannot tell it from one libc does define:
-  `compiler_driver_elf_library_exports` reads a shared library's `.dynsym`,
-  but records only the defined `STT_OBJECT` entries a copy relocation needs
-  and only for a link that imports data, so it cannot answer for a function
-  or for a link that imports none (issue #656).
+  writer cannot tell it from one libc does define. The information is there
+  now — `compiler_driver_elf_dynamic_symbols` records every defined global and
+  weak entry of every shared library on every hosted ELF link, functions
+  included, for the symbol versions — but nothing consults it to decide a weak
+  reference's fate yet (issue #656).
 - **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
   representation, so ignoring them is an ABI divergence rather than a missing
   optimization: a Buster-only program agrees with itself whatever it agrees on,

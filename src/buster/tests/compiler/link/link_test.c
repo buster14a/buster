@@ -187,6 +187,124 @@ BUSTER_GLOBAL_LOCAL bool link_test_elf_dynamic_symbol(ByteSlice image, String8 n
     return result;
 }
 
+// The value one dynamic array tag holds, read out of .dynamic.  False means
+// the image does not publish that tag at all.
+BUSTER_GLOBAL_LOCAL bool link_test_elf_dynamic_entry(ByteSlice image, u64 tag, u64* value)
+{
+    bool result = false;
+    u64 header = 0;
+    if (link_test_elf_section_find(image, S8(".dynamic"), 0, &header))
+    {
+        u64 offset = link_read_u64(image.pointer, header + 24);
+        u64 size = link_read_u64(image.pointer, header + 32);
+        for (u64 entry = 0; !result && entry + 16 <= size; entry += 16)
+        {
+            u64 entry_tag = link_read_u64(image.pointer, offset + entry);
+            if (!entry_tag)
+            {
+                break;
+            }
+            if (entry_tag == tag)
+            {
+                if (value)
+                {
+                    *value = link_read_u64(image.pointer, offset + entry + 8);
+                }
+                result = true;
+            }
+        }
+    }
+
+    return result;
+}
+
+// The name a dynamic string table holds at one offset.
+BUSTER_GLOBAL_LOCAL String8 link_test_elf_dynamic_string(ByteSlice image, u64 string_offset, u64 string_size, u32 name_offset)
+{
+    String8 result = {0};
+    if (name_offset && name_offset < string_size)
+    {
+        u64 length = 0;
+        while ((u64)name_offset + length < string_size && image.pointer[string_offset + name_offset + length])
+        {
+            length += 1;
+        }
+        result = (String8){.pointer = (char8*)image.pointer + string_offset + name_offset, .length = length};
+    }
+
+    return result;
+}
+
+// The symbol version an image records for one dynamic symbol, and the library
+// it names that version from.  Three sections have to agree for a versioned
+// reference to mean anything: .dynsym gives the symbol its index, .gnu.version
+// gives that index a version number, and .gnu.version_r is where the number
+// gets a name and a library.  False means the image binds the name without a
+// version, which is what an unversioned library's symbols get.
+BUSTER_GLOBAL_LOCAL bool link_test_elf_symbol_version(ByteSlice image, String8 name, String8* version, String8* library)
+{
+    bool result = false;
+    u64 symbol_header = 0;
+    u64 string_header = 0;
+    u64 version_header = 0;
+    u64 need_header = 0;
+    if (!link_test_elf_section_find(image, S8(".dynsym"), 0, &symbol_header) || !link_test_elf_section_find(image, S8(".dynstr"), 0, &string_header) ||
+        !link_test_elf_section_find(image, S8(".gnu.version"), 0, &version_header) || !link_test_elf_section_find(image, S8(".gnu.version_r"), 0, &need_header))
+    {
+        return result;
+    }
+    u64 symbol_offset = link_read_u64(image.pointer, symbol_header + 24);
+    u64 symbol_size = link_read_u64(image.pointer, symbol_header + 32);
+    u64 string_offset = link_read_u64(image.pointer, string_header + 24);
+    u64 string_size = link_read_u64(image.pointer, string_header + 32);
+    u64 version_offset = link_read_u64(image.pointer, version_header + 24);
+    u64 version_size = link_read_u64(image.pointer, version_header + 32);
+    u64 need_offset = link_read_u64(image.pointer, need_header + 24);
+    u32 need_count = link_read_u32(image.pointer, need_header + 44);
+    if (symbol_size / 24 != version_size / sizeof(u16))
+    {
+        return result;
+    }
+    u16 index = 0;
+    for (u64 entry = 0; !index && entry + 24 <= symbol_size; entry += 24)
+    {
+        u32 name_offset = link_read_u32(image.pointer, symbol_offset + entry);
+        if (string_equal(link_test_elf_dynamic_string(image, string_offset, string_size, name_offset), name))
+        {
+            memcpy(&index, image.pointer + version_offset + entry / 24 * sizeof(u16), sizeof(index));
+        }
+    }
+    u64 need = need_offset;
+    for (u32 need_index = 0; !result && need_index < need_count; need_index += 1)
+    {
+        u16 auxiliary_count = 0;
+        u32 file_name = link_read_u32(image.pointer, need + 4);
+        memcpy(&auxiliary_count, image.pointer + need + 2, sizeof(auxiliary_count));
+        u64 auxiliary = need + link_read_u32(image.pointer, need + 8);
+        for (u16 auxiliary_index = 0; !result && auxiliary_index < auxiliary_count; auxiliary_index += 1)
+        {
+            u16 other = 0;
+            memcpy(&other, image.pointer + auxiliary + 6, sizeof(other));
+            if (index && other == index)
+            {
+                if (version)
+                {
+                    *version = link_test_elf_dynamic_string(image, string_offset, string_size, link_read_u32(image.pointer, auxiliary + 8));
+                }
+                if (library)
+                {
+                    *library = link_test_elf_dynamic_string(image, string_offset, string_size, file_name);
+                }
+                result = true;
+            }
+            auxiliary += link_read_u32(image.pointer, auxiliary + 12);
+        }
+        need += link_read_u32(image.pointer, need + 12);
+    }
+
+    return result;
+}
+
 // What a PC-relative relocation in .text resolved to, read back out of the
 // linked image: the field holds S - P + A, so the symbol address the linker
 // decided on is the field plus this place and less the addend it was given.
@@ -3024,6 +3142,179 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     // walking it to DT_NULL is what keeps both lengths readable.
     BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_libc_executable.executable, 1024) == 0);
     BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_libc_executable.executable, 1026) == 2);
+    // Symbol versions.  A shared library publishes a name under a version, and
+    // an image that binds to it has to record which one: .gnu.version indexes
+    // every dynamic symbol, .gnu.version_r names the versions per library, and
+    // DT_VERSYM/DT_VERNEED/DT_VERNEEDNUM publish both to the loader.  The
+    // alias names a copy slot defines are versioned too, because each of them
+    // is a name the library publishes.
+    NativeDynamicVersionedSymbol copy_version_exports[] = {
+        {.name = S8("environ"), .version = S8("GLIBC_2.2.5"), .has_default = true},
+        {.name = S8("_environ"), .version = S8("GLIBC_2.2.5"), .has_default = true},
+        {.name = S8("__environ"), .version = S8("GLIBC_2.2.5"), .has_default = true},
+        {.name = S8("tzname"), .version = S8("GLIBC_2.2.5"), .has_default = true},
+        {.name = S8("__tzname"), .version = S8("GLIBC_2.2.5"), .has_default = true},
+        {.name = S8("exit"), .version = S8("GLIBC_2.34"), .has_default = true},
+        // glibc publishes sys_errlist once per historical layout and every one
+        // of them is a non-default `name@VER`.
+        {.name = S8("sys_errlist"), .version = S8("GLIBC_2.2.5")},
+        {.name = S8("sys_errlist"), .version = S8("GLIBC_2.4")},
+    };
+    NativeExecutableLinkOptions copy_version_options = {
+        .entry_symbol = S8("main"),
+        .runtime_data_symbols = copy_alias_exports,
+        .runtime_versioned_symbols = copy_version_exports,
+        .runtime_data_symbol_count = BUSTER_ARRAY_LENGTH(copy_alias_exports),
+        .runtime_versioned_symbol_count = BUSTER_ARRAY_LENGTH(copy_version_exports),
+    };
+    NativeExecutableLinkResult copy_version_executable = link_native_executable(arguments->arena, &copy_alias_object, copy_version_options);
+    BUSTER_TEST(arguments, copy_version_executable.error == LINK_ERROR_NONE);
+    String8 copy_version_names[] = {S8("environ"), S8("_environ"), S8("__environ"), S8("tzname"), S8("__tzname"), S8("exit")};
+    String8 copy_version_expected[] = {
+        S8("GLIBC_2.2.5"), S8("GLIBC_2.2.5"), S8("GLIBC_2.2.5"), S8("GLIBC_2.2.5"), S8("GLIBC_2.2.5"), S8("GLIBC_2.34"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(copy_version_names); index += 1)
+    {
+        String8 recorded = {0};
+        String8 recorded_library = {0};
+        BUSTER_TEST(arguments, link_test_elf_symbol_version(copy_version_executable.executable, copy_version_names[index], &recorded, &recorded_library));
+        BUSTER_TEST(arguments, string_equal(recorded, copy_version_expected[index]) && string_equal(recorded_library, S8("libc.so.6")));
+    }
+    u64 copy_version_symbol_header = 0;
+    u64 copy_version_header = 0;
+    u64 copy_version_need_header = 0;
+    BUSTER_TEST(arguments, link_test_elf_section_find(copy_version_executable.executable, S8(".dynsym"), 0, &copy_version_symbol_header) &&
+                               link_test_elf_section_find(copy_version_executable.executable, S8(".gnu.version"), 0, &copy_version_header) &&
+                               link_test_elf_section_find(copy_version_executable.executable, S8(".gnu.version_r"), 0, &copy_version_need_header));
+    if (copy_version_symbol_header && copy_version_header && copy_version_need_header)
+    {
+        u32 copy_version_symbol_index = 0;
+        u32 copy_version_string_index = 0;
+        BUSTER_TEST(arguments, link_test_elf_section_find(copy_version_executable.executable, S8(".dynsym"), &copy_version_symbol_index, 0) &&
+                                   link_test_elf_section_find(copy_version_executable.executable, S8(".dynstr"), &copy_version_string_index, 0));
+        // One index per dynamic symbol, or the loader reads a version off the
+        // wrong one.
+        BUSTER_TEST(arguments, link_read_u64(copy_version_executable.executable.pointer, copy_version_header + 32) ==
+                                   link_read_u64(copy_version_executable.executable.pointer, copy_version_symbol_header + 32) / 24 * sizeof(u16));
+        BUSTER_TEST(arguments, link_read_u32(copy_version_executable.executable.pointer, copy_version_header + 40) == copy_version_symbol_index);
+        BUSTER_TEST(arguments, link_read_u32(copy_version_executable.executable.pointer, copy_version_need_header + 40) == copy_version_string_index);
+        BUSTER_TEST(arguments, link_read_u32(copy_version_executable.executable.pointer, copy_version_need_header + 44) == 1);
+    }
+    u64 copy_version_symbol_tag = 0;
+    u64 copy_version_need_tag = 0;
+    u64 copy_version_need_count = 0;
+    BUSTER_TEST(arguments, link_test_elf_dynamic_entry(copy_version_executable.executable, 0x6ffffff0, &copy_version_symbol_tag) &&
+                               link_test_elf_dynamic_entry(copy_version_executable.executable, 0x6ffffffe, &copy_version_need_tag) &&
+                               link_test_elf_dynamic_entry(copy_version_executable.executable, 0x6fffffff, &copy_version_need_count));
+    BUSTER_TEST(arguments, copy_version_need_count == 1 && copy_version_symbol_tag && copy_version_need_tag);
+    if (copy_version_header && copy_version_need_header)
+    {
+        BUSTER_TEST(arguments, copy_version_symbol_tag == link_read_u64(copy_version_executable.executable.pointer, copy_version_header + 16) &&
+                                   copy_version_need_tag == link_read_u64(copy_version_executable.executable.pointer, copy_version_need_header + 16));
+    }
+    // A second library gets its own .gnu.version_r entry, and a name the
+    // runtime does not define is looked for there.
+    ObjectSymbol copy_version_library_symbols[] = {
+        copy_alias_symbols[0],
+        copy_alias_symbols[1],
+        copy_alias_symbols[2],
+        {
+            .name = S8("sqrt"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+    };
+    NativeDynamicVersionedSymbol copy_version_math_exports[] = {
+        {.name = S8("sqrt"), .version = S8("GLIBC_2.2.5"), .has_default = true},
+    };
+    NativeDynamicLibrary copy_version_libraries[] = {
+        {
+            .name = S8("libm.so.6"),
+            .versioned_symbols = copy_version_math_exports,
+            .versioned_symbol_count = BUSTER_ARRAY_LENGTH(copy_version_math_exports),
+        },
+    };
+    ObjectFile copy_version_library_object = copy_alias_object;
+    copy_version_library_object.symbols = copy_version_library_symbols;
+    copy_version_library_object.symbol_count = BUSTER_ARRAY_LENGTH(copy_version_library_symbols);
+    NativeExecutableLinkOptions copy_version_library_options = copy_version_options;
+    copy_version_library_options.dynamic_libraries = copy_version_libraries;
+    copy_version_library_options.dynamic_library_count = BUSTER_ARRAY_LENGTH(copy_version_libraries);
+    NativeExecutableLinkResult copy_version_library_executable =
+        link_native_executable(arguments->arena, &copy_version_library_object, copy_version_library_options);
+    BUSTER_TEST(arguments, copy_version_library_executable.error == LINK_ERROR_NONE);
+    String8 copy_version_math_version = {0};
+    String8 copy_version_math_library = {0};
+    BUSTER_TEST(arguments,
+                link_test_elf_symbol_version(copy_version_library_executable.executable, S8("sqrt"), &copy_version_math_version, &copy_version_math_library));
+    BUSTER_TEST(arguments, string_equal(copy_version_math_version, S8("GLIBC_2.2.5")) && string_equal(copy_version_math_library, S8("libm.so.6")));
+    copy_version_need_count = 0;
+    BUSTER_TEST(arguments, link_test_elf_dynamic_entry(copy_version_library_executable.executable, 0x6fffffff, &copy_version_need_count) &&
+                               copy_version_need_count == 2);
+    // The same version string from two libraries is two records, because the
+    // loader matches a version per library.
+    String8 copy_version_environ_library = {0};
+    BUSTER_TEST(arguments, link_test_elf_symbol_version(copy_version_library_executable.executable, S8("environ"), 0, &copy_version_environ_library) &&
+                               string_equal(copy_version_environ_library, S8("libc.so.6")));
+    // A name whose every definition is a non-default `name@VER` has no default
+    // to bind to.  GNU ld reports it undefined rather than linking it, because
+    // an image that links it anyway leaves the answer to whichever version the
+    // running loader picks -- which is the mechanism's whole purpose.
+    ObjectSymbol copy_version_hidden_symbols[] = {
+        copy_alias_symbols[0],
+        copy_alias_symbols[1],
+        {
+            .name = S8("sys_errlist"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_DATA,
+            .global = true,
+        },
+    };
+    ObjectFile copy_version_hidden_object = copy_alias_object;
+    copy_version_hidden_object.symbols = copy_version_hidden_symbols;
+    NativeExecutableLinkResult copy_version_hidden_executable = link_native_executable(arguments->arena, &copy_version_hidden_object, copy_version_options);
+    BUSTER_TEST(arguments, copy_version_hidden_executable.error == LINK_ERROR_SYMBOL_VERSION);
+    BUSTER_TEST(arguments, string_equal(copy_version_hidden_executable.symbol, S8("sys_errlist")));
+    // A library that publishes its names without versions needs no records at
+    // all, and the image keeps the shape it had before versions existed.
+    NativeDynamicVersionedSymbol copy_version_plain_exports[] = {
+        {.name = S8("environ"), .has_default = true},
+        {.name = S8("_environ"), .has_default = true},
+        {.name = S8("__environ"), .has_default = true},
+        {.name = S8("tzname"), .has_default = true},
+        {.name = S8("__tzname"), .has_default = true},
+        {.name = S8("exit"), .has_default = true},
+    };
+    NativeExecutableLinkOptions copy_version_plain_options = copy_version_options;
+    copy_version_plain_options.runtime_versioned_symbols = copy_version_plain_exports;
+    copy_version_plain_options.runtime_versioned_symbol_count = BUSTER_ARRAY_LENGTH(copy_version_plain_exports);
+    NativeExecutableLinkResult copy_version_plain_executable = link_native_executable(arguments->arena, &copy_alias_object, copy_version_plain_options);
+    BUSTER_TEST(arguments, copy_version_plain_executable.error == LINK_ERROR_NONE);
+    BUSTER_TEST(arguments, !link_test_elf_section_find(copy_version_plain_executable.executable, S8(".gnu.version"), 0, 0));
+    BUSTER_TEST(arguments, !link_test_elf_section_find(copy_version_plain_executable.executable, S8(".gnu.version_r"), 0, 0));
+    BUSTER_TEST(arguments, !link_test_elf_dynamic_entry(copy_version_plain_executable.executable, 0x6ffffff0, 0));
+    BUSTER_TEST(arguments, copy_alias_executable.executable.length == copy_version_plain_executable.executable.length);
+    // AArch64 reaches the same writer and then patches the dynamic array it
+    // produced, so the version entries have to leave that patch intact.
+    NativeDynamicVersionedSymbol aarch64_version_exports[] = {
+        {.name = S8("abs"), .version = S8("GLIBC_2.2.5"), .has_default = true},
+        {.name = S8("exit"), .version = S8("GLIBC_2.34"), .has_default = true},
+    };
+    NativeExecutableLinkResult aarch64_version_executable = link_native_executable(arguments->arena, &aarch64_libc_object,
+                                                                                  (NativeExecutableLinkOptions){
+                                                                                      .entry_symbol = S8("main"),
+                                                                                      .runtime_versioned_symbols = aarch64_version_exports,
+                                                                                      .runtime_versioned_symbol_count =
+                                                                                          BUSTER_ARRAY_LENGTH(aarch64_version_exports),
+                                                                                  });
+    BUSTER_TEST(arguments, aarch64_version_executable.error == LINK_ERROR_NONE);
+    String8 aarch64_version_recorded = {0};
+    BUSTER_TEST(arguments, link_test_elf_symbol_version(aarch64_version_executable.executable, S8("abs"), &aarch64_version_recorded, 0) &&
+                               string_equal(aarch64_version_recorded, S8("GLIBC_2.2.5")));
+    BUSTER_TEST(arguments, link_test_elf_dynamic_entry(aarch64_version_executable.executable, 0x6ffffff0, 0));
+    // R_AARCH64_JUMP_SLOT, still written over the x86-64 writer's entries.
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_version_executable.executable, 1026) == 2);
     ObjectFile aarch64_tls_object = aarch64_libc_object;
     ObjectSection* aarch64_tls_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
     memcpy(aarch64_tls_sections, aarch64_libc_object.sections, sizeof(*aarch64_tls_sections) * OBJECT_SECTION_COUNT);

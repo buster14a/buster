@@ -1531,13 +1531,13 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
         {
             file_map_unmap(file);
         }
-        path = string_format(arena, S8("{S8}/{S8}"), invocation.library_paths[path_index], library->name);
+        path = string_format_z(arena, S8("{S8}/{S8}"), invocation.library_paths[path_index], library->name);
         file = file_map_read(arena, path, (FileReadOptions){0});
         bytes = file.bytes;
     }
     if (!bytes.pointer && invocation.sysroot.length)
     {
-        path = string_format(arena, S8("{S8}/Windows/System32/{S8}"), invocation.sysroot, library->name);
+        path = string_format_z(arena, S8("{S8}/Windows/System32/{S8}"), invocation.sysroot, library->name);
         file_map_unmap(file);
         file = file_map_read(arena, path, (FileReadOptions){0});
         bytes = file.bytes;
@@ -1548,7 +1548,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
         String8 system_root = os_get_environment_variable(S8("SystemRoot"));
         if (system_root.length)
         {
-            path = string_format(arena, S8("{S8}/System32/{S8}"), system_root, library->name);
+            path = string_format_z(arena, S8("{S8}/System32/{S8}"), system_root, library->name);
             file_map_unmap(file);
             file = file_map_read(arena, path, (FileReadOptions){0});
             bytes = file.bytes;
@@ -1558,7 +1558,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
     if (!bytes.pointer)
     {
         file_map_unmap(file);
-        file = file_map_read(arena, library->name, (FileReadOptions){0});
+        file = file_map_read(arena, string_duplicate_arena(arena, library->name, true), (FileReadOptions){0});
         bytes = file.bytes;
     }
     u32 pe_offset = 0;
@@ -1636,19 +1636,32 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_pe_library_exports(Arena* arena, Compil
     *export_map = file;
 }
 
-// The data objects one ELF shared library exports, read from its own dynamic
-// symbol table.  The linker needs them for copy relocations: the address tells
-// it which exported names are one object, so the executable can define every
-// one of them at the slot it reserves, and the size tells it how large that
-// slot has to be.  Only data is collected; imported functions go through the
-// PLT and are resolved by name.
-BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_data_symbols(Arena* arena, ByteSlice bytes, u16 machine, NativeDynamicLibrary* library)
+// What one ELF shared library defines, read from its own dynamic symbol table.
+//
+// Two things the referencing name alone does not carry.  The data objects, for
+// copy relocations: the address tells the linker which exported names are one
+// object, so the executable can define every one of them at the slot it
+// reserves, and the size tells it how large that slot has to be.  Only data is
+// collected there; imported functions go through the PLT.
+//
+// And the symbol version of every definition, functions included.  A reference
+// GNU ld resolves records the version it bound to, so the image keeps that
+// answer for its whole life; an unversioned reference to a name whose
+// definitions are all `name@VER` has no default to bind to at all, which is
+// what makes GNU ld refuse `sys_errlist`.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_symbols(Arena* arena, ByteSlice bytes, u16 machine, bool collect_data, NativeDynamicLibrary* library)
 {
     enum
     {
         DRIVER_ELF_SECTION_HEADER_SIZE = 64,
         DRIVER_ELF_SYMBOL_SIZE = 24,
         DRIVER_ELF_SECTION_TYPE_DYNAMIC_SYMBOLS = 11,
+        DRIVER_ELF_SECTION_TYPE_VERSION_DEFINITIONS = 0x6ffffffd,
+        DRIVER_ELF_SECTION_TYPE_VERSION_SYMBOLS = 0x6fffffff,
+        DRIVER_ELF_VERSION_DEFINITION_SIZE = 20,
+        DRIVER_ELF_VERSION_AUXILIARY_SIZE = 8,
+        DRIVER_ELF_VERSION_HIDDEN = 0x8000,
+        DRIVER_ELF_VERSION_INDEX_MAX = 0x7fff,
         DRIVER_ELF_TYPE_SHARED = 3,
         DRIVER_ELF_SYMBOL_TYPE_OBJECT = 1,
         DRIVER_ELF_SECTION_ABSOLUTE = 0xfff1,
@@ -1669,37 +1682,116 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_data_symbols(Arena* arena, 
     u64 symbol_size = 0;
     u64 string_offset = 0;
     u64 string_size = 0;
-    for (u16 section_index = 0; header_valid && !symbol_size && section_index < section_count; section_index += 1)
+    u64 version_symbol_offset = 0;
+    u64 version_symbol_size = 0;
+    u64 version_definition_offset = 0;
+    u64 version_definition_size = 0;
+    u32 version_definition_count = 0;
+    for (u16 section_index = 0; header_valid && section_index < section_count; section_index += 1)
     {
         u64 section = section_table + (u64)section_index * DRIVER_ELF_SECTION_HEADER_SIZE;
         u32 section_type = 0;
         u32 string_section = 0;
+        u32 definition_count = 0;
         u64 offset = 0;
         u64 size = 0;
         u64 entry_size = 0;
         u64 strings_offset = 0;
         u64 strings_size = 0;
-        if (compiler_driver_read_u32(bytes, section + 4, &section_type) && section_type == DRIVER_ELF_SECTION_TYPE_DYNAMIC_SYMBOLS &&
-            compiler_driver_read_u32(bytes, section + 40, &string_section) && compiler_driver_read_u64(bytes, section + 24, &offset) &&
-            compiler_driver_read_u64(bytes, section + 32, &size) && compiler_driver_read_u64(bytes, section + 56, &entry_size) &&
-            entry_size == DRIVER_ELF_SYMBOL_SIZE && size && !(size % DRIVER_ELF_SYMBOL_SIZE) && offset <= bytes.length && size <= bytes.length - offset &&
-            string_section < section_count)
+        if (!compiler_driver_read_u32(bytes, section + 4, &section_type) || !compiler_driver_read_u64(bytes, section + 24, &offset) ||
+            !compiler_driver_read_u64(bytes, section + 32, &size) || offset > bytes.length || size > bytes.length - offset)
         {
-            u64 strings = section_table + (u64)string_section * DRIVER_ELF_SECTION_HEADER_SIZE;
-            if (compiler_driver_read_u64(bytes, strings + 24, &strings_offset) && compiler_driver_read_u64(bytes, strings + 32, &strings_size) &&
-                strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset)
+            continue;
+        }
+        if (section_type == DRIVER_ELF_SECTION_TYPE_DYNAMIC_SYMBOLS && !symbol_size)
+        {
+            if (compiler_driver_read_u32(bytes, section + 40, &string_section) && compiler_driver_read_u64(bytes, section + 56, &entry_size) &&
+                entry_size == DRIVER_ELF_SYMBOL_SIZE && size && !(size % DRIVER_ELF_SYMBOL_SIZE) && string_section < section_count)
             {
-                symbol_offset = offset;
-                symbol_size = size;
-                string_offset = strings_offset;
-                string_size = strings_size;
+                u64 strings = section_table + (u64)string_section * DRIVER_ELF_SECTION_HEADER_SIZE;
+                if (compiler_driver_read_u64(bytes, strings + 24, &strings_offset) && compiler_driver_read_u64(bytes, strings + 32, &strings_size) &&
+                    strings_offset <= bytes.length && strings_size <= bytes.length - strings_offset)
+                {
+                    symbol_offset = offset;
+                    symbol_size = size;
+                    string_offset = strings_offset;
+                    string_size = strings_size;
+                }
             }
+        }
+        else if (section_type == DRIVER_ELF_SECTION_TYPE_VERSION_SYMBOLS && !version_symbol_size)
+        {
+            version_symbol_offset = offset;
+            version_symbol_size = size;
+        }
+        else if (section_type == DRIVER_ELF_SECTION_TYPE_VERSION_DEFINITIONS && !version_definition_size &&
+                 compiler_driver_read_u32(bytes, section + 44, &definition_count) && definition_count)
+        {
+            version_definition_offset = offset;
+            version_definition_size = size;
+            version_definition_count = definition_count;
+        }
+    }
+    // .gnu.version_d as an index-keyed table.  The definitions form a linked
+    // list whose entries carry their own index, so the highest index decides
+    // how large the table has to be; both walks are over the version count,
+    // which is a few dozen entries even for glibc.  The names live in the
+    // string table .dynsym already named: an ELF section table links both to
+    // the one .dynstr.
+    String8* version_names = 0;
+    u32 version_name_count = 0;
+    for (u32 pass = 0; pass < 2 && version_definition_count; pass += 1)
+    {
+        u64 cursor = version_definition_offset;
+        u64 end = version_definition_offset + version_definition_size;
+        u32 highest = 0;
+        for (u32 definition = 0; definition < version_definition_count && cursor && cursor + DRIVER_ELF_VERSION_DEFINITION_SIZE <= end; definition += 1)
+        {
+            u16 index = 0;
+            u16 flags = 0;
+            u32 auxiliary = 0;
+            u32 next = 0;
+            if (!compiler_driver_read_u16(bytes, cursor + 2, &flags) || !compiler_driver_read_u16(bytes, cursor + 4, &index) ||
+                !compiler_driver_read_u32(bytes, cursor + 12, &auxiliary) || !compiler_driver_read_u32(bytes, cursor + 16, &next))
+            {
+                break;
+            }
+            index = (u16)(index & DRIVER_ELF_VERSION_INDEX_MAX);
+            // VER_FLG_BASE names the library itself rather than a version any
+            // symbol is published under.
+            bool base = (flags & 1) != 0;
+            highest = !base && index > highest ? index : highest;
+            u32 name = 0;
+            u64 auxiliary_offset = cursor + auxiliary;
+            if (pass && !base && index < version_name_count && auxiliary >= DRIVER_ELF_VERSION_DEFINITION_SIZE &&
+                auxiliary_offset + DRIVER_ELF_VERSION_AUXILIARY_SIZE <= end && compiler_driver_read_u32(bytes, auxiliary_offset, &name) && name &&
+                name < string_size)
+            {
+                u64 length = 0;
+                while ((u64)name + length < string_size && bytes.pointer[string_offset + name + length])
+                {
+                    length += 1;
+                }
+                if (length && (u64)name + length < string_size)
+                {
+                    version_names[index] = (String8){.pointer = (char8*)bytes.pointer + string_offset + name, .length = length};
+                }
+            }
+            cursor = next ? cursor + next : 0;
+        }
+        if (!pass)
+        {
+            version_name_count = highest + 1;
+            version_names = arena_allocate(arena, String8, version_name_count);
+            memset(version_names, 0, (u64)version_name_count * sizeof(*version_names));
         }
     }
     if (symbol_size)
     {
         u64 symbol_count = symbol_size / DRIVER_ELF_SYMBOL_SIZE;
-        library->exported_data_symbols = arena_allocate(arena, NativeDynamicDataSymbol, symbol_count);
+        bool versioned = version_symbol_size / sizeof(u16) >= symbol_count;
+        library->exported_data_symbols = collect_data ? arena_allocate(arena, NativeDynamicDataSymbol, symbol_count) : 0;
+        library->versioned_symbols = arena_allocate(arena, NativeDynamicVersionedSymbol, symbol_count);
         for (u64 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
         {
             u64 symbol = symbol_offset + symbol_index * DRIVER_ELF_SYMBOL_SIZE;
@@ -1714,11 +1806,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_data_symbols(Arena* arena, 
             }
             u8 info = bytes.pointer[symbol + 4];
             u8 binding = (u8)(info >> 4);
-            // Defined global or weak objects only: an undefined or local entry
-            // names nothing this executable could copy, and STT_OBJECT is what
-            // a copy relocation applies to.
-            if ((info & 0xf) != DRIVER_ELF_SYMBOL_TYPE_OBJECT || (binding != 1 && binding != 2) || !section || section == DRIVER_ELF_SECTION_ABSOLUTE ||
-                !value || !name || name >= string_size)
+            // Defined global or weak entries only: an undefined or local one
+            // names nothing this executable could bind to.
+            if ((binding != 1 && binding != 2) || !section || !name || name >= string_size)
             {
                 continue;
             }
@@ -1727,10 +1817,30 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_data_symbols(Arena* arena, 
             {
                 length += 1;
             }
-            if (length && (u64)name + length < string_size)
+            if (!length || (u64)name + length >= string_size)
+            {
+                continue;
+            }
+            String8 spelling = {.pointer = (char8*)bytes.pointer + string_offset + name, .length = length};
+            u16 version = 0;
+            if (versioned)
+            {
+                compiler_driver_read_u16(bytes, version_symbol_offset + symbol_index * sizeof(u16), &version);
+            }
+            u32 version_index = version & DRIVER_ELF_VERSION_INDEX_MAX;
+            library->versioned_symbols[library->versioned_symbol_count++] = (NativeDynamicVersionedSymbol){
+                .name = spelling,
+                // VER_NDX_LOCAL and VER_NDX_GLOBAL name no version, so a
+                // reference to such a definition records none either.
+                .version = version_index > 1 && version_index < version_name_count ? version_names[version_index] : (String8){0},
+                .has_default = (version & DRIVER_ELF_VERSION_HIDDEN) == 0,
+            };
+            // STT_OBJECT is what a copy relocation applies to, and an absolute
+            // or address-less entry names no storage to copy.
+            if (collect_data && (info & 0xf) == DRIVER_ELF_SYMBOL_TYPE_OBJECT && section != DRIVER_ELF_SECTION_ABSOLUTE && value)
             {
                 library->exported_data_symbols[library->exported_data_symbol_count++] = (NativeDynamicDataSymbol){
-                    .name = {.pointer = (char8*)bytes.pointer + string_offset + name, .length = length},
+                    .name = spelling,
                     .address = value,
                     .size = size,
                 };
@@ -1746,8 +1856,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_dynamic_data_symbols(Arena* arena, 
 // is looked up where the loader would look for it, and a file whose machine
 // disagrees with the target is skipped rather than believed, so a cross link
 // does not read the host's own libc.
-BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, CompilerDriverInvocation invocation, NativeDynamicLibrary* library,
-                                                             FileMapRead* export_map)
+BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, CompilerDriverInvocation invocation, bool collect_data,
+                                                             NativeDynamicLibrary* library, FileMapRead* export_map)
 {
     String8 multiarch = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? S8("aarch64-linux-gnu") : S8("x86_64-linux-gnu");
     u16 machine = invocation.target.cpu_arch == CPU_ARCH_AARCH64 ? 183 : 62;
@@ -1776,13 +1886,16 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
     u32 candidate_count = invocation.library_path_count + root_count + 1;
     for (u32 path_index = 0; !found && path_index < candidate_count; path_index += 1)
     {
+        // Every candidate is zero-terminated: os_file_open takes the path as a
+        // C string, and the bare library name is one this driver built with a
+        // length and no terminator of its own.
         String8 path = path_index < invocation.library_path_count
-                           ? string_format(arena, S8("{S8}/{S8}"), invocation.library_paths[path_index], library->name)
+                           ? string_format_z(arena, S8("{S8}/{S8}"), invocation.library_paths[path_index], library->name)
                        : path_index < invocation.library_path_count + root_count
-                           ? string_format(arena, S8("{S8}/{S8}"), roots[path_index - invocation.library_path_count], library->name)
-                           : library->name;
+                           ? string_format_z(arena, S8("{S8}/{S8}"), roots[path_index - invocation.library_path_count], library->name)
+                           : string_duplicate_arena(arena, library->name, true);
         FileMapRead file = file_map_read(arena, path, (FileReadOptions){0});
-        found = file.bytes.pointer && compiler_driver_elf_dynamic_data_symbols(arena, file.bytes, machine, library);
+        found = file.bytes.pointer && compiler_driver_elf_dynamic_symbols(arena, file.bytes, machine, collect_data, library);
         if (found)
         {
             *export_map = file;
@@ -1791,6 +1904,8 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_elf_library_exports(Arena* arena, Compi
         {
             library->exported_data_symbols = 0;
             library->exported_data_symbol_count = 0;
+            library->versioned_symbols = 0;
+            library->versioned_symbol_count = 0;
             file_map_unmap(file);
         }
     }
@@ -1949,19 +2064,27 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
             result.export_map_count += export_map->bytes.pointer != 0;
         }
     }
-    else if (imports_data && invocation.target.os == OPERATING_SYSTEM_LINUX)
+    else if (invocation.target.os == OPERATING_SYSTEM_LINUX)
     {
         // libc.so.6 is the library the ELF writers name themselves, so it is
         // read as the runtime rather than as one of the requested ones.
+        //
+        // Every hosted ELF link reads these, not only one that imports data:
+        // symbol versions apply to functions too, and a reference that binds
+        // to a version has to record it.  The data objects -- the half that
+        // needs an address and a size -- stay behind imports_data, since a
+        // link with no undefined data symbol has nothing to copy.  Reading
+        // libc.so.6 where nothing did before costs about 0,65 M instructions
+        // on this host, a tenth of a percent of the smallest hosted compile.
         result.export_maps = arena_allocate(arena, FileMapRead, count + 1);
         result.runtime.name = S8("libc.so.6");
         FileMapRead* export_map = result.export_maps + result.export_map_count;
-        compiler_driver_elf_library_exports(arena, invocation, &result.runtime, export_map);
+        compiler_driver_elf_library_exports(arena, invocation, imports_data, &result.runtime, export_map);
         result.export_map_count += export_map->bytes.pointer != 0;
         for (u32 index = 0; index < count; index += 1)
         {
             export_map = result.export_maps + result.export_map_count;
-            compiler_driver_elf_library_exports(arena, invocation, &libraries[index], export_map);
+            compiler_driver_elf_library_exports(arena, invocation, imports_data, &libraries[index], export_map);
             result.export_map_count += export_map->bytes.pointer != 0;
         }
     }
@@ -2763,8 +2886,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .dynamic_library_count = dynamic_libraries.count,
                                                     .runtime_exported_symbols = dynamic_libraries.runtime.exported_symbols,
                                                     .runtime_data_symbols = dynamic_libraries.runtime.exported_data_symbols,
+                                                    .runtime_versioned_symbols = dynamic_libraries.runtime.versioned_symbols,
                                                     .runtime_exported_symbol_count = dynamic_libraries.runtime.exported_symbol_count,
                                                     .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
+                                                    .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
                                                     .debug_info = invocation.debug_info,
                                                 });
@@ -2772,7 +2897,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (result.native_link.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = string_format(arena, S8("native C link failed with error {u32}: {S8}"), (u32)result.native_link.error, result.native_link.symbol);
+        result.diagnostic =
+            string_format(arena, S8("native C link failed with {S8}: {S8}"), link_error_name(result.native_link.error), result.native_link.symbol);
     }
 end:
     file_map_unmap(source_file);
@@ -3403,8 +3529,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                                     .dynamic_library_count = dynamic_libraries.count,
                                                     .runtime_exported_symbols = dynamic_libraries.runtime.exported_symbols,
                                                     .runtime_data_symbols = dynamic_libraries.runtime.exported_data_symbols,
+                                                    .runtime_versioned_symbols = dynamic_libraries.runtime.versioned_symbols,
                                                     .runtime_exported_symbol_count = dynamic_libraries.runtime.exported_symbol_count,
                                                     .runtime_data_symbol_count = dynamic_libraries.runtime.exported_data_symbol_count,
+                                                    .runtime_versioned_symbol_count = dynamic_libraries.runtime.versioned_symbol_count,
                                                     .runtime_exports_known = dynamic_libraries.runtime.exports_known,
                                                     .debug_info = invocation.debug_info,
                                                 });
@@ -3412,7 +3540,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     if (result.native_link.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
-        result.diagnostic = string_format(arena, S8("native C link failed with error {u32}: {S8}"), (u32)result.native_link.error, result.native_link.symbol);
+        result.diagnostic =
+            string_format(arena, S8("native C link failed with {S8}: {S8}"), link_error_name(result.native_link.error), result.native_link.symbol);
     }
 finish:
     result.warning = compiler_driver_warning_flatten(warnings);

@@ -76,7 +76,9 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind const link_elf_loaded_kinds[] = {
 };
 
 #define BUSTER_LINK_ELF_SECTION_HEADER_SIZE 64
-#define BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT 8
+#define BUSTER_LINK_ELF_SECTION_TYPE_VERSION_NEED 0x6ffffffe
+#define BUSTER_LINK_ELF_SECTION_TYPE_VERSION_SYMBOLS 0x6fffffff
+#define BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT 10
 #define BUSTER_LINK_ELF_SECTION_DESCRIPTOR_CAPACITY                                                                                                          \
     (BUSTER_ARRAY_LENGTH(link_elf_loaded_kinds) + 1 + BUSTER_LINK_ELF_DYNAMIC_SECTION_COUNT + BUSTER_ARRAY_LENGTH(link_elf_debug_kinds))
 
@@ -95,14 +97,19 @@ struct LinkElfSectionTableLayout
     u64 dynamic_symbol_size;
     u64 hash_offset;
     u64 hash_size;
+    u64 version_symbol_offset;
+    u64 version_symbol_size;
+    u64 version_need_offset;
+    u64 version_need_size;
     u64 relocation_offset;
     u64 relocation_size;
     u64 got_offset;
     u64 got_size;
     u64 dynamic_offset;
     u64 dynamic_size;
+    u32 version_need_count;
     bool dynamic;
-    u8 reserved[7];
+    u8 reserved[3];
 };
 
 typedef struct LinkElfEhFrameEntry LinkElfEhFrameEntry;
@@ -1743,7 +1750,11 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             u32 dynamic_base = 1 + descriptor_count;
             u32 dynamic_string_index = dynamic_base + 2;
             u32 dynamic_symbol_index = dynamic_base + 3;
-            u32 got_index = dynamic_base + 6;
+            // The two version sections sit between .hash and .rela.plt, and
+            // only when the image needs them, so everything after them is
+            // numbered from how many of them there are.
+            u32 version_section_count = (u32)(layout.version_symbol_size != 0) + (u32)(layout.version_need_size != 0);
+            u32 got_index = dynamic_base + 6 + version_section_count;
             descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
                 .name = S8(".interp"),
                 .flags = 0x2,
@@ -1794,6 +1805,34 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                 .type = 5,
                 .link = dynamic_symbol_index,
             };
+            if (layout.version_symbol_size)
+            {
+                descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                    .name = S8(".gnu.version"),
+                    .flags = 0x2,
+                    .address = image_base + layout.version_symbol_offset,
+                    .offset = layout.version_symbol_offset,
+                    .size = layout.version_symbol_size,
+                    .alignment = 2,
+                    .entry_size = 2,
+                    .type = BUSTER_LINK_ELF_SECTION_TYPE_VERSION_SYMBOLS,
+                    .link = dynamic_symbol_index,
+                };
+            }
+            if (layout.version_need_size)
+            {
+                descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
+                    .name = S8(".gnu.version_r"),
+                    .flags = 0x2,
+                    .address = image_base + layout.version_need_offset,
+                    .offset = layout.version_need_offset,
+                    .size = layout.version_need_size,
+                    .alignment = 8,
+                    .type = BUSTER_LINK_ELF_SECTION_TYPE_VERSION_NEED,
+                    .link = dynamic_string_index,
+                    .info = layout.version_need_count,
+                };
+            }
             descriptors[descriptor_count++] = (LinkElfSectionDescriptor){
                 .name = S8(".rela.plt"),
                 .flags = 0x2,
@@ -2042,6 +2081,16 @@ enum
     ELF_DYNAMIC_SIZE = 16,
     ELF_PLT_ENTRY_SIZE = 16,
     ELF_GOT_RESERVED_COUNT = 3,
+    ELF_VERSION_NEED_SIZE = 16,
+    ELF_VERSION_AUXILIARY_SIZE = 16,
+    // 0 is VER_NDX_LOCAL and 1 VER_NDX_GLOBAL, so the versions an image needs
+    // are numbered from 2; the top bit of a .gnu.version entry is the hidden
+    // flag and never part of the index.
+    ELF_VERSION_FIRST_INDEX = 2,
+    ELF_VERSION_INDEX_MAX = 0x7fff,
+    ELF_DYNAMIC_TAG_VERSION_SYMBOLS = 0x6ffffff0,
+    ELF_DYNAMIC_TAG_VERSION_NEED = 0x6ffffffe,
+    ELF_DYNAMIC_TAG_VERSION_NEED_COUNT = 0x6fffffff,
 };
 
 // Dynamic relocation types.  The two machines number theirs independently, and
@@ -2391,6 +2440,71 @@ BUSTER_GLOBAL_LOCAL NativeDynamicDataSymbol* link_elf_exported_data_find(NativeD
     return result;
 }
 
+// The System V hash of a version string.  .gnu.version_r records it beside
+// every version it names so the loader can match the library's own
+// .gnu.version_d entry without comparing strings.
+BUSTER_GLOBAL_LOCAL u32 link_elf_hash(String8 name)
+{
+    u32 result = 0;
+    for (u64 index = 0; index < name.length; index += 1)
+    {
+        result = (result << 4) + (u8)name.pointer[index];
+        u32 high = result & UINT32_C(0xf0000000);
+        result ^= high >> 24;
+        result &= ~high;
+    }
+
+    return result;
+}
+
+// The version one library publishes a name's default definition under, and
+// whether the library defines the name at all.  A library that defines it only
+// as `name@VER` reports `defined` without a definition: an unversioned
+// reference has nothing there to bind to, which is what makes GNU ld refuse
+// glibc's `sys_errlist`.
+BUSTER_GLOBAL_LOCAL NativeDynamicVersionedSymbol* link_elf_versioned_find(NativeDynamicVersionedSymbol* symbols, u32 symbol_count, String8 name,
+                                                                         bool* defined)
+{
+    NativeDynamicVersionedSymbol* result = 0;
+    for (u32 index = 0; !result && index < symbol_count; index += 1)
+    {
+        if (string_equal(symbols[index].name, name))
+        {
+            *defined = true;
+            result = symbols[index].has_default ? symbols + index : 0;
+        }
+    }
+
+    return result;
+}
+
+// The same question across every library the image will name, in the order the
+// writers put them in DT_NEEDED -- the runtime first, then the requested ones
+// -- because that is the order the loader searches.  `no_default` separates
+// the two ways this fails: a name no library defines is left alone, since a
+// library the driver could not read defines nothing either, while a name that
+// is defined but never as a default is the divergence worth refusing.
+BUSTER_GLOBAL_LOCAL bool link_elf_symbol_version(NativeExecutableLinkOptions options, String8 name, u32* library_index, String8* version, bool* no_default)
+{
+    bool result = false;
+    bool defined = false;
+    for (u32 index = 0; !result && index < options.dynamic_library_count + 1; index += 1)
+    {
+        NativeDynamicVersionedSymbol* symbols = index ? options.dynamic_libraries[index - 1].versioned_symbols : options.runtime_versioned_symbols;
+        u32 symbol_count = index ? options.dynamic_libraries[index - 1].versioned_symbol_count : options.runtime_versioned_symbol_count;
+        NativeDynamicVersionedSymbol* found = link_elf_versioned_find(symbols, symbol_count, name, &defined);
+        if (found)
+        {
+            *library_index = index;
+            *version = found->version;
+            result = true;
+        }
+    }
+    *no_default = !result && defined;
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64_dynamic(Arena* arena, ObjectFile* object,
                                                                                            NativeExecutableLinkOptions options)
 {
@@ -2669,9 +2783,91 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         library_name_offsets[library_index + 1] = 1 + (u32)library_name_size;
         library_name_size += library.length + 1;
     }
+    // Symbol versions.  A reference GNU ld resolves records the version it
+    // bound to, so the image keeps that one answer for its whole life instead
+    // of taking whatever the running library happens to call default; that is
+    // the versioning mechanism's entire purpose.  Every name the image spells
+    // is versioned here, the imports and the alias names each copy slot
+    // defines alike, because each of them is a name the library publishes.
+    //
+    // The result is a set of distinct (library, version) pairs numbered from
+    // ELF_VERSION_FIRST_INDEX, which is what .gnu.version records per dynamic
+    // symbol and what .gnu.version_r's auxiliary entries name.
+    u64 versioned_name_count = (u64)import_count + alias_count;
+    u32* version_libraries = arena_allocate(arena, u32, versioned_name_count + 1);
+    String8* version_names = arena_allocate(arena, String8, versioned_name_count + 1);
+    u32* version_name_offsets = arena_allocate(arena, u32, versioned_name_count + 1);
+    u16* import_versions = arena_allocate(arena, u16, (u64)import_count + 1);
+    u16* alias_versions = arena_allocate(arena, u16, (u64)alias_count + 1);
+    u32 version_count = 0;
+    u64 version_name_size = 0;
+    for (u64 entry = 0; entry < versioned_name_count; entry += 1)
+    {
+        String8 name = entry < import_count ? import_names[entry] : alias_names[entry - import_count];
+        u32 library_index = 0;
+        String8 version = {0};
+        bool no_default = false;
+        u16 version_index = 0;
+        if (link_elf_symbol_version(options, name, &library_index, &version, &no_default))
+        {
+            for (u32 existing = 0; !version_index && existing < version_count; existing += 1)
+            {
+                if (version_libraries[existing] == library_index && string_equal(version_names[existing], version))
+                {
+                    version_index = (u16)(ELF_VERSION_FIRST_INDEX + existing);
+                }
+            }
+            if (!version_index && version.length)
+            {
+                if (version_count > ELF_VERSION_INDEX_MAX - ELF_VERSION_FIRST_INDEX || version_name_size > UINT32_MAX - version.length - 1)
+                {
+                    result.error = LINK_ERROR_INVALID_INPUT;
+                    result.symbol = name;
+                    return result;
+                }
+                version_libraries[version_count] = library_index;
+                version_names[version_count] = version;
+                version_index = (u16)(ELF_VERSION_FIRST_INDEX + version_count);
+                version_count += 1;
+                version_name_size += version.length + 1;
+            }
+        }
+        else if (no_default && entry < import_count)
+        {
+            // Every definition this library has for the name is a non-default
+            // `name@VER`.  An unversioned reference has nothing to bind to, so
+            // GNU ld reports it undefined; linking it anyway leaves the answer
+            // to whichever version the running loader picks.
+            result.error = LINK_ERROR_SYMBOL_VERSION;
+            result.symbol = name;
+            return result;
+        }
+        if (entry < import_count)
+        {
+            import_versions[entry] = version_index;
+        }
+        else
+        {
+            alias_versions[entry - import_count] = version_index;
+        }
+    }
+    // One .gnu.version_r entry per library that contributes a version, each
+    // followed by its own auxiliary list.
+    u64 version_need_size = 0;
+    u32 version_need_count = 0;
+    for (u32 library_index = 0; version_count && library_index < needed_library_count; library_index += 1)
+    {
+        u32 library_version_count = 0;
+        for (u32 index = 0; index < version_count; index += 1)
+        {
+            library_version_count += version_libraries[index] == library_index;
+        }
+        version_need_size += library_version_count ? ELF_VERSION_NEED_SIZE + (u64)library_version_count * ELF_VERSION_AUXILIARY_SIZE : 0;
+        version_need_count += library_version_count != 0;
+    }
     u64 dynamic_string_offset = interpreter_offset + interpreter_size;
     u32 first_symbol_name_offset = 1 + (u32)library_name_size;
-    u64 dynamic_string_size = 1 + library_name_size + imported_name_size;
+    u64 dynamic_string_size = 1 + library_name_size + imported_name_size + version_name_size;
     u64 dynamic_symbol_offset = align_forward(dynamic_string_offset + dynamic_string_size, 8);
     u64 dynamic_symbol_count = (u64)import_count + 1 + alias_count;
     if (dynamic_symbol_count > UINT32_MAX)
@@ -2683,7 +2879,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 dynamic_symbol_size = dynamic_symbol_count * ELF_SYMBOL_SIZE;
     u64 hash_offset = align_forward(dynamic_symbol_offset + dynamic_symbol_size, 4);
     u64 hash_size = (2 + 1 + dynamic_symbol_count) * sizeof(u32);
-    u64 relocation_offset = align_forward(hash_offset + hash_size, 8);
+    // Both version sections are absent when nothing needed a version, and the
+    // two alignments then collapse into the one .rela always had, so an image
+    // with no versioned reference is laid out exactly as before.
+    u64 version_symbol_offset = align_forward(hash_offset + hash_size, 2);
+    u64 version_symbol_size = version_count ? dynamic_symbol_count * sizeof(u16) : 0;
+    u64 version_need_offset = align_forward(version_symbol_offset + version_symbol_size, 8);
+    u64 relocation_offset = align_forward(version_need_offset + version_need_size, 8);
     u64 plt_relocation_size = (u64)import_count * ELF_RELOCATION_SIZE;
     u64 relocation_size = (u64)(import_count + dynamic_data_relocation_count) * ELF_RELOCATION_SIZE;
     u64 read_only_end = relocation_offset + relocation_size;
@@ -2691,7 +2893,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 got_offset = align_forward(section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length, 8);
     u64 got_size = (u64)(ELF_GOT_RESERVED_COUNT + import_count) * sizeof(u64);
     u64 dynamic_offset = align_forward(got_offset + got_size, 8);
-    u32 dynamic_count = needed_library_count + 11 + (dynamic_data_relocation_count ? 2 : 0);
+    u32 dynamic_count = needed_library_count + 11 + (dynamic_data_relocation_count ? 2 : 0) + (version_count ? 3 : 0);
     u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
     section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] = align_forward(dynamic_offset + dynamic_size, object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment);
     u64 file_size = section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] + object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
@@ -2803,6 +3005,66 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     for (u64 chain_index = 1; chain_index < dynamic_symbol_count; chain_index += 1)
     {
         link_write_u32(bytes, hash_offset + (3 + chain_index) * sizeof(u32), chain_index + 1 == dynamic_symbol_count ? 0 : (u32)chain_index + 1);
+    }
+    if (version_count)
+    {
+        // The version names, then .gnu.version -- one index per dynamic
+        // symbol, parallel to .dynsym, and 0 for both the null entry and every
+        // name that binds without a version -- and .gnu.version_r, which names
+        // per library the versions those indexes stand for.
+        for (u32 index = 0; index < version_count; index += 1)
+        {
+            version_name_offsets[index] = (u32)(dynamic_name_cursor - dynamic_string_offset);
+            memcpy(bytes + dynamic_name_cursor, version_names[index].pointer, version_names[index].length);
+            dynamic_name_cursor += version_names[index].length + 1;
+        }
+        for (u32 import_index = 0; import_index < import_count; import_index += 1)
+        {
+            link_write_u16(bytes, version_symbol_offset + ((u64)import_index + 1) * sizeof(u16), import_versions[import_index]);
+        }
+        for (u32 alias_index = 0; alias_index < alias_count; alias_index += 1)
+        {
+            link_write_u16(bytes, version_symbol_offset + ((u64)import_count + 1 + alias_index) * sizeof(u16), alias_versions[alias_index]);
+        }
+        u64 need_cursor = version_need_offset;
+        u64 previous_need = 0;
+        for (u32 library_index = 0; library_index < needed_library_count; library_index += 1)
+        {
+            u32 library_version_count = 0;
+            for (u32 index = 0; index < version_count; index += 1)
+            {
+                library_version_count += version_libraries[index] == library_index;
+            }
+            if (!library_version_count)
+            {
+                continue;
+            }
+            link_write_u16(bytes, need_cursor, 1);
+            link_write_u16(bytes, need_cursor + 2, (u16)library_version_count);
+            link_write_u32(bytes, need_cursor + 4, library_name_offsets[library_index]);
+            link_write_u32(bytes, need_cursor + 8, ELF_VERSION_NEED_SIZE);
+            if (previous_need)
+            {
+                link_write_u32(bytes, previous_need + 12, (u32)(need_cursor - previous_need));
+            }
+            previous_need = need_cursor;
+            u64 auxiliary = need_cursor + ELF_VERSION_NEED_SIZE;
+            u32 written = 0;
+            for (u32 index = 0; index < version_count; index += 1)
+            {
+                if (version_libraries[index] != library_index)
+                {
+                    continue;
+                }
+                written += 1;
+                link_write_u32(bytes, auxiliary, link_elf_hash(version_names[index]));
+                link_write_u16(bytes, auxiliary + 6, (u16)(ELF_VERSION_FIRST_INDEX + index));
+                link_write_u32(bytes, auxiliary + 8, version_name_offsets[index]);
+                link_write_u32(bytes, auxiliary + 12, written == library_version_count ? 0 : ELF_VERSION_AUXILIARY_SIZE);
+                auxiliary += ELF_VERSION_AUXILIARY_SIZE;
+            }
+            need_cursor = auxiliary;
+        }
     }
     u64 got_address = image_base + got_offset;
     u64 plt_address = image_base + plt_offset;
@@ -3082,6 +3344,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         BUSTER_LINK_DYNAMIC(7, image_base + relocation_offset + plt_relocation_size);
         BUSTER_LINK_DYNAMIC(8, (u64)dynamic_data_relocation_count * ELF_RELOCATION_SIZE);
     }
+    if (version_count)
+    {
+        BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_SYMBOLS, image_base + version_symbol_offset);
+        BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_NEED, image_base + version_need_offset);
+        BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_NEED_COUNT, version_need_count);
+    }
     BUSTER_LINK_DYNAMIC(0, 0);
 #undef BUSTER_LINK_DYNAMIC
     bytes[0] = 0x7f;
@@ -3153,6 +3421,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                       .dynamic_symbol_size = dynamic_symbol_size,
                                       .hash_offset = hash_offset,
                                       .hash_size = hash_size,
+                                      .version_symbol_offset = version_symbol_offset,
+                                      .version_symbol_size = version_symbol_size,
+                                      .version_need_offset = version_need_offset,
+                                      .version_need_size = version_need_size,
+                                      .version_need_count = version_need_count,
                                       .relocation_offset = relocation_offset,
                                       .relocation_size = relocation_size,
                                       .got_offset = got_offset,
@@ -3432,13 +3705,6 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_adrp(u32 destination, u64 instruction_addre
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarch64_dynamic(Arena* arena, ObjectFile* object,
                                                                                             NativeExecutableLinkOptions options)
 {
-    enum
-    {
-        ELF_DYNAMIC_COUNT = 12,
-        // The two entries the x86-64 writer appends -- DT_RELA and DT_RELASZ
-        // -- when the image carries copy relocations.
-        ELF_DYNAMIC_COPY_COUNT = 2,
-    };
     // ldr x0,[sp] / add x1,sp,#8 / add x2,x1,x0,lsl #3 / add x2,x2,#8 —
     // argc, argv and envp — then `bl main`, `bl exit` and a trap.  The hosted
     // shape calls libc's exit for the reason link_x86_build_elf_entry_stub
@@ -3520,13 +3786,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     u64 relocation_offset = 0;
     u64 copy_relocation_offset = 0;
     u64 copy_relocation_size = 0;
-    // Walked to its DT_NULL terminator rather than to a recomputed length: the
-    // array grows by ELF_DYNAMIC_COPY_COUNT when the image carries copy
-    // relocations, and DT_RELA/DT_RELASZ are exactly the two entries a fixed
-    // count stops short of.  They are also how the copy range's extent is
-    // learned at all -- it counts slots, not data imports, because two
-    // imported names for one library object share one slot.
-    u64 dynamic_count = (u64)ELF_DYNAMIC_COUNT + options.dynamic_library_count + ELF_DYNAMIC_COPY_COUNT;
+    // Walked to its DT_NULL terminator, over the extent PT_DYNAMIC states,
+    // rather than to a length this writer recomputes from the other one's
+    // policy: that array grows both with the copy relocations and with the
+    // symbol versions an image needs, and a count that stops short leaves the
+    // tags after it unpatched.  DT_RELA/DT_RELASZ are also how the copy
+    // range's extent is learned at all -- it counts slots, not data imports,
+    // because two imported names for one library object share one slot.
+    u64 dynamic_count = link_read_u64(bytes, dynamic_program_header + 32) / ELF_DYNAMIC_SIZE;
     for (u64 index = 0; index < dynamic_count; index += 1)
     {
         u64 entry = dynamic_offset + index * ELF_DYNAMIC_SIZE;
@@ -7905,10 +8172,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
 
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_elf64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
 {
-    enum
-    {
-        ELF_DYNAMIC_COUNT = 12,
-    };
     static char8 const interpreter[] = "/system/bin/linker64";
     static char8 const library[] = "libc.so";
     NativeExecutableLinkOptions staging_options = options;
@@ -7958,14 +8221,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
             u64 dynamic_program_header = ELF_HEADER_SIZE + 4 * ELF_PROGRAM_HEADER_SIZE;
             u64 dynamic_offset = link_read_u64(bytes, dynamic_program_header + 8);
             u64 string_table_offset = 0;
-            u32 dynamic_count = ELF_DYNAMIC_COUNT + options.dynamic_library_count;
-            for (u32 index = 0; index < dynamic_count; index += 1)
+            u64 dynamic_count = link_read_u64(bytes, dynamic_program_header + 32) / ELF_DYNAMIC_SIZE;
+            for (u64 index = 0; index < dynamic_count && !string_table_offset; index += 1)
             {
-                u64 entry = dynamic_offset + (u64)index * ELF_DYNAMIC_SIZE;
-                if (link_read_u64(bytes, entry) == 5)
+                u64 entry = dynamic_offset + index * ELF_DYNAMIC_SIZE;
+                u64 tag = link_read_u64(bytes, entry);
+                if (!tag)
+                {
+                    break;
+                }
+                if (tag == 5)
                 {
                     string_table_offset = link_read_u64(bytes, entry + 8) - UINT64_C(0x400000);
-                    break;
                 }
             }
             if (!string_table_offset)
@@ -7983,6 +8250,28 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
     }
 
     return result;
+}
+
+String8 link_error_name(LinkError error)
+{
+    static String8 const names[LINK_ERROR_COUNT] = {
+        S8_INITIALIZER("none"),
+        S8_INITIALIZER("invalid input"),
+        S8_INITIALIZER("target mismatch"),
+        S8_INITIALIZER("duplicate symbol"),
+        S8_INITIALIZER("unresolved symbol"),
+        S8_INITIALIZER("object write"),
+        S8_INITIALIZER("file write"),
+        S8_INITIALIZER("process spawn"),
+        S8_INITIALIZER("process failed"),
+        S8_INITIALIZER("unsupported host"),
+        S8_INITIALIZER("unsupported feature"),
+        S8_INITIALIZER("entry symbol"),
+        S8_INITIALIZER("relocation"),
+        S8_INITIALIZER("no default version for symbol"),
+    };
+
+    return error < LINK_ERROR_COUNT ? names[error] : S8("unknown error");
 }
 
 NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
