@@ -32223,6 +32223,21 @@ BUSTER_C_INTERNAL bool c_ir_declaration_initializer_range(CPreprocessResult prep
     return false;
 }
 
+// What c_ir_static_compound_literal_address made of an initializer element.
+// The three states exist because a compound literal has to be told apart from
+// an element that merely is not one: once the `( type-name ) {` shape is
+// recognized, the caller must stop rather than fall through to the shapes it
+// tries next, and the refusal has already named itself.
+typedef enum CIrStaticCompoundLiteral
+{
+    C_IR_STATIC_COMPOUND_LITERAL_ABSENT,
+    C_IR_STATIC_COMPOUND_LITERAL_FOLDED,
+    C_IR_STATIC_COMPOUND_LITERAL_REJECTED,
+} CIrStaticCompoundLiteral;
+
+BUSTER_C_INTERNAL CIrStaticCompoundLiteral c_ir_static_compound_literal_address(CIntegerIrBuilder* builder, u32 start, u32 end, IrSymbolId* symbol_out,
+                                                                               s64* addend_out);
+
 typedef struct CIrConstantInitializerTask CIrConstantInitializerTask;
 struct CIrConstantInitializerTask
 {
@@ -32602,6 +32617,26 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                 if (c_ir_pointer_integer_cast_expression(builder, task.type, task.start, task.end, &raw_pointer))
                 {
                     c_ir_store_pointer_bits(builder, type, bytes, task.offset, raw_pointer);
+                    continue;
+                }
+                IrSymbolId literal_symbol = IR_SYMBOL_ID_INVALID;
+                s64 literal_addend = 0;
+                CIrStaticCompoundLiteral literal_state = c_ir_static_compound_literal_address(builder, task.start, task.end, &literal_symbol, &literal_addend);
+                if (literal_state == C_IR_STATIC_COMPOUND_LITERAL_REJECTED)
+                {
+                    return false;
+                }
+                if (literal_state == C_IR_STATIC_COMPOUND_LITERAL_FOLDED)
+                {
+                    if (!relocations || !relocation_count || *relocation_count >= relocation_capacity || relocation_base > UINT64_MAX - task.offset)
+                    {
+                        return false;
+                    }
+                    relocations[(*relocation_count)++] = (IrGlobalRelocation){
+                        .symbol = literal_symbol,
+                        .addend = literal_addend,
+                        .offset = relocation_base + task.offset,
+                    };
                     continue;
                 }
             }
@@ -33125,6 +33160,43 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
     return true;
 }
 
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_fail(CIntegerIrBuilder* builder, String8 message, u32 token);
+
+// The construct an element the folder could not reduce is, in the words the
+// source spells it with.  An initializer is a list, and a refusal that names
+// only the object -- "unsupported C global initializer for 'scenarios'" --
+// leaves the reader to find which of thirty elements it stopped at.  The
+// shapes named here are the ones a static initializer is actually refused
+// for; anything else is named by the token the element begins with, which is
+// what c_ir_ext80_fold_initializer already does for the x87 grammar.
+BUSTER_C_INTERNAL String8 c_ir_constant_initializer_element_name(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    CPreprocessResult preprocess = builder->preprocess;
+    if (start >= end || end > preprocess.token_count)
+    {
+        return (String8){0};
+    }
+    bool address_of = c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND);
+    u32 cursor = start + (address_of ? 1 : 0);
+    if (cursor + 2 < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        // An unmatched delimiter comes back as UINT32_MAX, so the range test
+        // has to hold before the increment rather than after it.
+        u32 type_close = c_ir_matching_delimiter(preprocess, cursor, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (type_close < end && type_close + 1 < end && c_token_is_punctuator(&preprocess.tokens[type_close + 1], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            return address_of ? S8("the address of a compound literal") : S8("a compound literal");
+        }
+    }
+    if (preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER && start + 1 < end &&
+        c_token_is_punctuator(&preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        return string_format(builder->arena, S8("the call to '{S8}'"), c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]));
+    }
+    String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]);
+    return spelling.length ? string_format(builder->arena, S8("'{S8}'"), spelling) : (String8){0};
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes, u64 byte_count,
                                                                 u64 relocation_base, IrGlobalRelocation* relocations, u32* relocation_count,
                                                                 u32 relocation_capacity)
@@ -33137,6 +33209,18 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilder*
     bool result = c_ir_constant_initializer_bytes_legacy_core(builder, temporary.arena, start, end, root_type, bytes, byte_count, relocation_base,
                                                               relocations, relocation_count, relocation_capacity);
     scratch_end(temporary);
+    // This is the one place every scalar element of an aggregate initializer
+    // passes through, so it is where a refusal the core spelled as a bare
+    // `false` acquires the element it was about.  The core's own messages win:
+    // c_ir_constant_initializer_fail keeps the first one recorded.
+    if (!result)
+    {
+        String8 element = c_ir_constant_initializer_element_name(builder, start, end);
+        c_ir_constant_initializer_fail(builder,
+                                       element.length ? string_format(builder->arena, S8("cannot fold {S8} in a static initializer"), element)
+                                                      : S8("cannot fold this static initializer element"),
+                                       start);
+    }
     return result;
 }
 
@@ -35340,6 +35424,160 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builde
     return result;
 }
 
+// C11 6.5.2.5p5: a compound literal written outside a function body has static
+// storage duration, so `&(int){0}` names an object that outlives the
+// translation unit's startup and is an address constant a static initializer
+// may hold.  Nothing created that object, so every folder saw an element it
+// could not reduce -- which is what refused libc-test's
+// `functional/pthread_cancel-points`, whose last scenario passes `&(int){0}`
+// as its argument.  Inside a function body the same literal has automatic
+// storage duration, and there the address is rejected rather than folded.
+BUSTER_C_INTERNAL CIrStaticCompoundLiteral c_ir_static_compound_literal_address(CIntegerIrBuilder* builder, u32 start, u32 end, IrSymbolId* symbol_out,
+                                                                               s64* addend_out)
+{
+    CPreprocessResult preprocess = builder->preprocess;
+    IrProgram* program = builder->program;
+    if (start >= end || end > preprocess.token_count)
+    {
+        return C_IR_STATIC_COMPOUND_LITERAL_ABSENT;
+    }
+    bool address_of = c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND);
+    u32 cursor = start + (address_of ? 1 : 0);
+    if (cursor + 2 >= end || !c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        return C_IR_STATIC_COMPOUND_LITERAL_ABSENT;
+    }
+    u32 type_close = c_ir_matching_delimiter(preprocess, cursor, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    if (type_close >= end || type_close + 1 >= end || !c_token_is_punctuator(&preprocess.tokens[type_close + 1], C_PUNCTUATOR_LEFT_BRACE))
+    {
+        return C_IR_STATIC_COMPOUND_LITERAL_ABSENT;
+    }
+    u32 open = type_close + 1;
+    u32 close = c_ir_matching_delimiter(preprocess, open, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+    if (close >= end)
+    {
+        return C_IR_STATIC_COMPOUND_LITERAL_ABSENT;
+    }
+    // From here the element is a compound literal, so every way out is a
+    // refusal that names itself rather than a fall-through to the shapes the
+    // caller tries next.
+    if (builder->function)
+    {
+        c_ir_constant_initializer_fail(
+            builder, S8("a compound literal inside a function body has automatic storage duration, so its address is not a constant expression"), start);
+        return C_IR_STATIC_COMPOUND_LITERAL_REJECTED;
+    }
+    IrTypeId literal_type = c_ir_compound_literal_type(builder, cursor + 1, type_close, open, close);
+    IrType* literal = ir_type_from_id(&program->types, literal_type);
+    if (literal_type.value == IR_ID_UNDERLYING_INVALID || !literal || !literal->layout.resolved)
+    {
+        c_ir_constant_initializer_fail(builder, S8("cannot resolve the type of a compound literal in a static initializer"), cursor);
+        return C_IR_STATIC_COMPOUND_LITERAL_REJECTED;
+    }
+    // `&(T){...}.member` reaches a subobject of the same static object, so it
+    // is the same symbol with the member's offset as the addend.  Without the
+    // `&` the only form that yields a pointer is an array decaying to its
+    // first element.
+    s64 addend = 0;
+    IrType* current = literal;
+    for (u32 index = close + 1; index < end; index += 2)
+    {
+        if (!address_of || index + 1 >= end || !c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_DOT) ||
+            preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER || (current->kind != IR_TYPE_STRUCT && current->kind != IR_TYPE_UNION))
+        {
+            c_ir_constant_initializer_fail(builder, S8("only a member designator may follow a compound literal in a static initializer"), index);
+            return C_IR_STATIC_COMPOUND_LITERAL_REJECTED;
+        }
+        String8 member = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]);
+        IrField* field = 0;
+        for (u32 field_index = 0; field_index < current->field_count; field_index += 1)
+        {
+            if (string_equal(current->fields[field_index].name, member))
+            {
+                field = current->fields + field_index;
+                break;
+            }
+        }
+        IrType* member_type = field ? ir_type_from_id(&program->types, field->type) : 0;
+        if (!field || !member_type || field->is_bit_field || field->offset > INT64_MAX || addend > INT64_MAX - (s64)field->offset)
+        {
+            c_ir_constant_initializer_fail(builder, string_format(builder->arena, S8("a compound literal of type '{S8}' has no member named '{S8}'"),
+                                                                  current->name, member),
+                                           index + 1);
+            return C_IR_STATIC_COMPOUND_LITERAL_REJECTED;
+        }
+        addend += (s64)field->offset;
+        current = member_type;
+    }
+    if (!address_of && literal->kind != IR_TYPE_ARRAY)
+    {
+        c_ir_constant_initializer_fail(builder, S8("a compound literal that is not an array does not convert to a pointer"), cursor);
+        return C_IR_STATIC_COMPOUND_LITERAL_REJECTED;
+    }
+    u32 relocation_capacity = 0;
+    if (!c_ir_constant_initializer_relocation_capacity(builder, literal->layout.size, (u64)close + 1 - open, &relocation_capacity))
+    {
+        c_ir_constant_initializer_fail(builder, S8("compound literal initializer nesting exceeds its capacity"), open);
+        return C_IR_STATIC_COMPOUND_LITERAL_REJECTED;
+    }
+    u8* literal_bytes = arena_allocate(builder->arena, u8, literal->layout.size ? literal->layout.size : 1);
+    IrGlobalRelocation* literal_relocations = arena_allocate(builder->arena, IrGlobalRelocation, relocation_capacity);
+    if (!literal_bytes || !literal_relocations)
+    {
+        return C_IR_STATIC_COMPOUND_LITERAL_REJECTED;
+    }
+    memset(literal_bytes, 0, literal->layout.size);
+    u32 literal_relocation_count = 0;
+    // The designator machine holds only aggregates; a scalar literal keeps the
+    // brace-stripping folder, which is the same split c_ir_global_initializer
+    // makes for the object being initialized.
+    bool aggregate = literal->kind == IR_TYPE_ARRAY || literal->kind == IR_TYPE_VECTOR || literal->kind == IR_TYPE_STRUCT || literal->kind == IR_TYPE_UNION;
+    bool folded = aggregate ? c_ir_constant_initializer_bytes(builder, open, close + 1, literal_type, literal_bytes, literal->layout.size,
+                                                              literal_relocations, &literal_relocation_count, relocation_capacity)
+                            : c_ir_constant_initializer_bytes_legacy(builder, open, close + 1, literal_type, literal_bytes, literal->layout.size, 0,
+                                                                     literal_relocations, &literal_relocation_count, relocation_capacity);
+    if (!folded)
+    {
+        return C_IR_STATIC_COMPOUND_LITERAL_REJECTED;
+    }
+    String8 literal_name = string_format(builder->arena, S8(".L.compoundliteral.{u32}"), program->symbols.count);
+    IrSourceRange source = c_ir_source_range(c_preprocess_token_location(&preprocess, preprocess.tokens[cursor]),
+                                             c_token_length(preprocess.spelling_base, preprocess.tokens[cursor]));
+    IrSymbolId literal_symbol = ir_program_add_symbol(program, (IrSymbol){
+                                                                   .name = literal_name,
+                                                                   .link_name = literal_name,
+                                                                   .source = source,
+                                                                   .type = literal_type,
+                                                                   .kind = IR_SYMBOL_DATA,
+                                                                   .linkage = IR_LINKAGE_INTERNAL,
+                                                                   .is_definition = true,
+                                                               });
+    // The object is writable: a compound literal is an ordinary object, and a
+    // program may store through the pointer it took the address of.
+    if (literal_symbol.value == IR_ID_UNDERLYING_INVALID || !ir_module_add_global(builder->arena, builder->module,
+                                                                                  (IrGlobal){
+                                                                                      .bytes =
+                                                                                          {
+                                                                                              .pointer = literal_bytes,
+                                                                                              .length = literal->layout.size,
+                                                                                          },
+                                                                                      .relocations = literal_relocations,
+                                                                                      .symbol = literal_symbol,
+                                                                                      .initializer_symbol = IR_SYMBOL_ID_INVALID,
+                                                                                      .type = literal_type,
+                                                                                      .source = source,
+                                                                                      .relocation_count = literal_relocation_count,
+                                                                                      .alignment = literal->layout.alignment,
+                                                                                      .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES,
+                                                                                  }))
+    {
+        return C_IR_STATIC_COMPOUND_LITERAL_REJECTED;
+    }
+    *symbol_out = literal_symbol;
+    *addend_out = addend;
+    return C_IR_STATIC_COMPOUND_LITERAL_FOLDED;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_type_is_integer(IrType* type)
 {
     return type && (type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_ENUM);
@@ -37529,6 +37767,21 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
             c_ir_store_pointer_bits(builder, type, bytes, 0, raw_pointer);
             global->bytes = (ByteSlice){.pointer = bytes, .length = type->layout.size};
             global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
+            return true;
+        }
+        IrSymbolId compound_literal_symbol = IR_SYMBOL_ID_INVALID;
+        s64 compound_literal_addend = 0;
+        CIrStaticCompoundLiteral compound_literal_state =
+            c_ir_static_compound_literal_address(builder, start, end, &compound_literal_symbol, &compound_literal_addend);
+        if (compound_literal_state == C_IR_STATIC_COMPOUND_LITERAL_REJECTED)
+        {
+            return false;
+        }
+        if (compound_literal_state == C_IR_STATIC_COMPOUND_LITERAL_FOLDED)
+        {
+            global->initializer_kind = IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS;
+            global->initializer_symbol = compound_literal_symbol;
+            global->initializer_addend = compound_literal_addend;
             return true;
         }
         if (end >= start + 2 && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND) &&
@@ -39982,6 +40235,25 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         bool initialized = c_ir_global_initializer(&constant_builder, *definition, type_value, &global);
         if (!initialized)
         {
+            // The aggregate folders record which element they stopped at, and
+            // that message wins.  The scalar paths through
+            // c_ir_global_initializer spell their refusals as a bare `false`
+            // from a dozen places, so the initializer they were handed is
+            // named here rather than the object it belongs to -- which for a
+            // scalar is the whole construct anyway.
+            u32 initializer_start = 0;
+            u32 initializer_end = 0;
+            if (!constant_builder.failure_message.length && !definition->is_constexpr &&
+                c_ir_declaration_initializer_range(preprocess, *definition, &initializer_start, &initializer_end) &&
+                !c_token_is_punctuator(&preprocess.tokens[initializer_start], C_PUNCTUATOR_LEFT_BRACE))
+            {
+                String8 element = c_ir_constant_initializer_element_name(&constant_builder, initializer_start, initializer_end);
+                if (element.length)
+                {
+                    constant_builder.failure_message = string_format(arena, S8("cannot fold {S8} in a static initializer"), element);
+                    constant_builder.failure_token_index = initializer_start;
+                }
+            }
             CSourceLocation failure_location = definition->location;
             if (constant_builder.failure_token_index < preprocess.token_count)
             {

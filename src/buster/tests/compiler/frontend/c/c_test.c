@@ -1962,7 +1962,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_local_static_initializer(UnitT
     {
         BUSTER_TEST(arguments, invalid_static_ir.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
         BUSTER_STRING_TEST(arguments, invalid_static_ir.diagnostics[0].message,
-                           S8("in function 'invalid_static_local': could not lower static initializer for local 'value'"));
+                           S8("in function 'invalid_static_local': could not lower static initializer for local 'value': cannot fold the call to "
+                              "'static_local_runtime' in a static initializer"));
     }
     scratch_end(invalid_static_temporary);
     return result;
@@ -2022,6 +2023,90 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_designators(UnitTestArguments*
     BUSTER_TEST(arguments, found_outside_range);
     BUSTER_TEST(arguments, found_outside_bounds);
     scratch_end(invalid_designator_temporary);
+    return result;
+}
+
+// A file-scope compound literal has static storage duration (C11 6.5.2.5p5),
+// so its address is an address constant a static initializer may hold. The
+// four refusals here are what the folder still cannot reduce, and each one has
+// to name the construct inside the initializer and the position it sits at:
+// naming the object instead -- "unsupported C global initializer for
+// 'scenarios'" -- leaves the reader to find which of a list's elements it
+// stopped at, which is what made libc-test's `functional/pthread_cancel-points`
+// hard to read. The expected columns are computed from the source lines rather
+// than written down, so a line that grows a token does not silently pass.
+//
+// The last line's function has external linkage on purpose: an unreferenced
+// internal one is never lowered, so its body's refusal would not be reached
+// and the case would pass by not being tested.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena static_compound_literal_temporary = scratch_begin(0, 0);
+    String8 static_compound_literal_lines[] = {
+        S8("struct StaticCompoundLiteral { int x; int y; };"),
+        S8("extern int static_compound_literal_call(void);"),
+        S8("static int *static_compound_literal_scalar = &(int){7};"),
+        S8("static struct StaticCompoundLiteral *static_compound_literal_aggregate = &(struct StaticCompoundLiteral){1, 2};"),
+        S8("static int *static_compound_literal_member = &(struct StaticCompoundLiteral){1, 2}.y;"),
+        S8("static int *static_compound_literal_decay = (int[]){1, 2};"),
+        S8("static int static_compound_literal_scalar_call = static_compound_literal_call();"),
+        S8("static int static_compound_literal_element_call[2] = { 0, static_compound_literal_call() };"),
+        S8("static int *static_compound_literal_bad_member = &(struct StaticCompoundLiteral){1, 2}.z;"),
+        S8("void static_compound_literal_local(void) { static int *local = &(int){7}; (void)local; }"),
+    };
+    String8 static_compound_literal_source = (String8){0};
+    for (u32 line_index = 0; line_index < BUSTER_ARRAY_LENGTH(static_compound_literal_lines); line_index += 1)
+    {
+        static_compound_literal_source = string_format(static_compound_literal_temporary.arena, S8("{S8}{S8}\n"), static_compound_literal_source,
+                                                       static_compound_literal_lines[line_index]);
+    }
+    CPreprocessResult static_compound_literal_tokens = c_preprocess(static_compound_literal_temporary.arena, static_compound_literal_source,
+                                                                    (CPreprocessOptions){
+                                                                        .target = target_native,
+                                                                        .data_layout = target_data_layout(target_native),
+                                                                    });
+    CParseResult static_compound_literal_parse = c_parse(static_compound_literal_temporary.arena, static_compound_literal_tokens);
+    CIRLowerResult static_compound_literal_ir =
+        c_lower_to_ir(static_compound_literal_temporary.arena, S8("static-compound-literal.c"), static_compound_literal_tokens,
+                      static_compound_literal_parse, target_native);
+    BUSTER_TEST(arguments, static_compound_literal_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, static_compound_literal_parse.diagnostic_count == 0);
+    // Lines 3 through 6 fold, so only the four refusals below are diagnosed.
+    BUSTER_TEST(arguments, static_compound_literal_ir.diagnostic_count == 4);
+    // The line the refusal belongs to, the token inside it the refusal must
+    // point at, and the words that must name the construct.
+    u32 static_compound_literal_refused_lines[] = {7, 8, 9, 10};
+    String8 static_compound_literal_refused_tokens[] = {
+        S8("static_compound_literal_call("),
+        S8("static_compound_literal_call("),
+        S8("z;"),
+        S8("&(int){7}"),
+    };
+    String8 static_compound_literal_refused_messages[] = {
+        S8("C IR lowering: cannot fold the call to 'static_compound_literal_call' in a static initializer"),
+        S8("C IR lowering: cannot fold the call to 'static_compound_literal_call' in a static initializer"),
+        S8("C IR lowering: a compound literal of type"),
+        S8("in function 'static_compound_literal_local': could not lower static initializer for local 'local': a compound literal inside a function "
+           "body has automatic storage duration, so its address is not a constant expression"),
+    };
+    for (u32 refusal_index = 0; refusal_index < BUSTER_ARRAY_LENGTH(static_compound_literal_refused_lines); refusal_index += 1)
+    {
+        u32 refused_line = static_compound_literal_refused_lines[refusal_index];
+        String8 refused_source = static_compound_literal_lines[refused_line - 1];
+        u64 refused_offset = string_first_sequence(refused_source, static_compound_literal_refused_tokens[refusal_index]);
+        bool found = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < static_compound_literal_ir.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = static_compound_literal_ir.diagnostics[diagnostic_index];
+            found |= diagnostic.location.line == refused_line && diagnostic.location.column == refused_offset + 1 &&
+                     string_starts_with_sequence(diagnostic.message, static_compound_literal_refused_messages[refusal_index]);
+        }
+        BUSTER_TEST(arguments, refused_offset < refused_source.length);
+        BUSTER_TEST(arguments, found);
+    }
+    scratch_end(static_compound_literal_temporary);
     return result;
 }
 
@@ -11962,6 +12047,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_invalid_designators(arguments));
 
     c_test_result_add(&result, c_test_invalid_root_designators(arguments));
+
+    c_test_result_add(&result, c_test_static_compound_literal(arguments));
 
     c_test_result_add(&result, c_test_invalid_block_tls(arguments));
 
