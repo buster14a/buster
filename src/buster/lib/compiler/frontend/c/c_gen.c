@@ -14767,6 +14767,19 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             frame->as.prepared_call.state->separator = separator;
             return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT, index, separator, false);
         }
+        // Too few arguments for the parameters the callee does declare. The
+        // direct call reports this from its name resolution, which never
+        // reaches an indirect callee: without this the shortfall used to
+        // travel to IR validation and be reported as a code generation
+        // failure naming an opcode.
+        if (argument_count < signature.parameter_count)
+        {
+            builder->failure_token_index = selected->open_index;
+            builder->failure_message =
+                c_ir_call_arity_message(builder, selected->indirect ? (String8){0} : c_token_spelling(builder->preprocess.spelling_base, token),
+                                        signature, argument_count);
+            return false;
+        }
         selected->argument_count = argument_count;
         if (selected->indirect)
         {

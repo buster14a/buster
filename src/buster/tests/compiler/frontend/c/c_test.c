@@ -6243,6 +6243,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_arity_diagnostics(UnitTestArgumen
          S8("in function 'call_partial': too few arguments in the call to 'two': it declares 2 parameters")},
         {S8("void tail(int a, ...);\nint call_empty(void) { tail(); return 0; }\n"), C_PREPROCESS_DIALECT_GNU17,
          S8("in function 'call_empty': too few arguments in the call to 'tail': it declares at least 1 parameter")},
+        // An indirect callee has no name to resolve, so its shortfall used to
+        // travel to IR validation and come back as a code generation failure
+        // naming an opcode.
+        {S8("void (*through)(int a, int b);\nint call_short(int x) { through(x); return 0; }\n"), C_PREPROCESS_DIALECT_GNU17,
+         S8("in function 'call_short': too few arguments in the call to '<function pointer>': it declares 2 parameters")},
+        {S8("void (*through)(int a, int b);\nint call_long(int x) { through(x, x, x); return 0; }\n"), C_PREPROCESS_DIALECT_GNU17,
+         S8("in function 'call_long': too many arguments in the call to '<function pointer>': it declares 2 parameters")},
     };
     for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
     {
