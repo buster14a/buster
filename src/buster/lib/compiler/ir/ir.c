@@ -3930,7 +3930,14 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_conversion_valid(IrType* source, IrType* d
         }
         if (source->kind == IR_TYPE_INTEGER && destination->kind == IR_TYPE_POINTER)
         {
-            return operation == IR_CONVERSION_INTEGER_TO_POINTER;
+            // The operand has to already be pointer-width. Every backend
+            // lowers this as a register copy, and LLVM's inttoptr zero-extends
+            // a narrower one, so a signed operand that has not been widened
+            // here loses its sign: `(void *)-1` came out of the C frontend as
+            // the low half of a pointer until the widening became the
+            // frontend's job (c_ir_emit_integer_to_pointer).
+            return operation == IR_CONVERSION_INTEGER_TO_POINTER && destination->layout.resolved &&
+                   source->bit_width == destination->layout.size * 8;
         }
     }
 

@@ -1233,35 +1233,52 @@ by how many tests wanted each. It is the work list in the order that unblocks
 the most tests, and it is why this stage grows by itself as the compiler
 improves rather than needing to be extended by hand.
 
-Today 196 of 424 units pass (measured 2026-08-29). Seventy-eight are
+Today 213 of 424 units pass (measured 2026-08-29). Seventy-eight are
 `src/api`: 78 of its 79 units compile against musl's headers under both
 compilers, and one — `api/unistd` — is held out because musl defines neither
 `_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the reference fails on
-too. The other 118 are runtime tests that link and run green: `src/functional`
-is 39 passing against 2 failing, 7 dynamic, 15 excluded-reference, 2
-blocked-compile and 12 blocked-link; `src/math` is 34 passing, 144
+too. The other 135 are runtime tests that link and run green: `src/functional`
+is 49 passing against 4 failing, 7 dynamic, 15 excluded-reference, 1
+blocked-compile and 1 blocked-link; `src/math` is 34 passing, 144
 excluded-reference and 21 blocked-compile, with nothing blocked on a link any
-more; `src/regression` is 45 passing against 4 failing, 2 dynamic, 12
-excluded-reference, 1 blocked-compile and 5 blocked-link.
+more; `src/regression` is 52 passing against 2 failing, 2 dynamic, 12
+excluded-reference and 1 blocked-compile, also with nothing blocked on a link.
 
-The six failing units are the stage's first real wrong answers rather than
-missing components, and every one of them was blocked on a link until
-`vfprintf` compiled. `regression/fpclassify-invalid-ld80` gets `-nan` where
-the reference gets `nan`: Buster folds `0.0f/0.0f` — which is musl's `NAN` in
-the dialect Buster reads, since it does not predefine `__GNUC__` — to the
-hardware's negative default NaN where Clang folds it positive. That one is in
-the test object rather than in the archive; the reference's own object of the
-same test passes against the Buster-built archive. `regression/malloc-oom`,
-`regression/malloc-brk-fail` and `regression/setenv-oom` hang once the
-allocator is out of memory, and that one is the other way round: the
-reference's own `malloc-oom` object hangs against the Buster-built archive
-too. `functional/fcntl` and `functional/mntent` exit non-zero and have not
-been attributed further.
+The six failing units are the stage's wrong answers rather than missing
+components; each of them was blocked on a link until `vfprintf` compiled, so
+none is a regression against an earlier pass.
+`regression/fpclassify-invalid-ld80` gets `-nan` where the reference gets
+`nan`: Buster folds `0.0f/0.0f` — which is musl's `NAN` in the dialect
+Buster reads, since it does not predefine `__GNUC__` — to the hardware's
+negative default NaN where Clang folds it positive. That one is in the test
+object rather than in the archive; the reference's own object of the same test
+passes against the Buster-built archive. `regression/sem_close-unmap`,
+`functional/fcntl`, `functional/mntent`, `functional/strftime` and
+`functional/tgmath` exit non-zero and have not been attributed further.
 
-The ranked blockers are now `__procfdname` (15 tests) and then a tail of ones.
-`__libc_start_main` (141), `__syscall_cp` (107) and `vfprintf` (140) headed
-this list in turn; the last of them is what turned the stage from three walls
-into a list of individual defects.
+`regression/malloc-oom`, `regression/malloc-brk-fail`,
+`regression/setenv-oom` and `regression/pthread_create-oom` used to sit here
+too, hanging out the ten-second deadline once the allocator was out of memory,
+and none of them was about the allocator. Each fills memory with libc-test's
+`t_memfill`, which mmaps until the kernel refuses; musl's `MAP_FAILED` is
+`((void *) -1)`, and an integer narrower than a pointer reached
+INTEGER_TO_POINTER without being widened first, so the constant arrived as
+`0x00000000ffffffff` and no caller of `mmap` could ever compare equal to it.
+`t_vmfill` therefore mapped memory forever. The C frontend now widens ahead of
+the conversion — sign-extending a signed operand — because all four backends
+lower INTEGER_TO_POINTER as a plain register copy and LLVM's own `inttoptr`
+zero-extends; `ir_canonical_conversion_valid` holds every producer to a
+pointer-width operand so the ambiguous form cannot be built again.
+`tests/basic_c_integer_to_pointer.c` pins it under all four allocators. The
+bisect that found it is worth keeping: the hang reproduced with the
+*reference's* own `malloc-oom.o` against `libc-buster.a`, which named the
+archive, and dropping Clang-built `src/malloc` objects ahead of that archive
+did not move it, which cleared the allocator and left `mmap`'s own return.
+
+The ranked blockers are now `lfind` and `lsearch`, one test each. `vfprintf`
+(140), `__libc_start_main` (141), `__syscall_cp` (107) and `__procfdname` (15)
+headed this list in turn; the walls are gone and what is left is a list of
+individual defects.
 
 For scale, one recorded run without libc-test left 26 MB behind: the
 Buster pass spent 57,5 seconds of child time over 1349 units — 43 ms each — for
@@ -2239,6 +2256,17 @@ on a commit you already know is incomplete tells nobody anything.
   sentinels.
 - Validate IR before machine selection or Wasm emission. A diagnosed frontend
   failure must not publish an apparently valid partial function to codegen.
+- An integer converted to a pointer reaches pointer width in the frontend,
+  before `IR_CONVERSION_INTEGER_TO_POINTER`, sign-extending when the operand is
+  signed. All four backends lower that conversion as a plain register copy and
+  LLVM's own `inttoptr` zero-extends, so a narrower operand that arrives
+  un-widened silently loses its top half: `(void *)-1` — musl's `MAP_FAILED` —
+  came out as `0x00000000ffffffff` and hung four libc-test units for as long as
+  it was expressible. `c_ir_emit_integer_to_pointer` is the one place that
+  performs it, a null pointer constant is built at pointer width so it costs no
+  instruction there, and `ir_canonical_conversion_valid` rejects a
+  non-pointer-width operand outright. `tests/basic_c_integer_to_pointer.c`
+  pins the answers under every allocator.
 - `IrFunction.opcode_summary` answers *may this function contain opcode X*
   without a scan, and it answers only for the `IR_OPCODE_SUMMARY_TRACKED`
   list: an opcode outside that list is never recorded, so

@@ -16908,8 +16908,14 @@ struct LibcTestSubsetTotals
 // sorted by unit name, so the file system's order cannot move it. Both are
 // printed on the LIBCTEST_INVENTORY line, which is what a deliberate
 // rebaseline needs.
-#define LIBC_TEST_EXPECTED_PASSING 196
-#define LIBC_TEST_EXPECTED_STATE_HASH 0xe013369831d6f8deull
+// 2026-08-29: 209 -> 213. Four `src/regression` units -- malloc-oom,
+// malloc-brk-fail, setenv-oom and pthread_create-oom -- ran out the ten-second
+// deadline because `MAP_FAILED` is `((void *) -1)` and an integer narrower
+// than a pointer was not sign-extended on its way to one, so no caller of
+// `mmap` could ever see a failure and libc-test's `t_vmfill` mapped memory
+// forever.
+#define LIBC_TEST_EXPECTED_PASSING 213
+#define LIBC_TEST_EXPECTED_STATE_HASH 0xa5abf50e5f42f650ull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it

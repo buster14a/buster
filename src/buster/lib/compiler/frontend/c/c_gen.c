@@ -4288,6 +4288,41 @@ BUSTER_C_INTERNAL IrTypeId c_ir_complex_result_type(CIntegerIrBuilder* builder, 
 BUSTER_C_INTERNAL bool c_ir_complex_part_operator(CIntegerIrBuilder* builder, CToken token, CConditionalOperator* operation);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_part_operator(CIntegerIrBuilder* builder, IrValueId value, bool imaginary, IrSourceRange source);
 
+// An integer converted to a pointer (6.3.2.3p5, and the null pointer constant
+// with it) reaches pointer width first, sign-extending when the operand is
+// signed: `(void *)-1` is the all-ones pointer, not the low half of one. Every
+// backend lowers INTEGER_TO_POINTER as a plain register copy -- and so does
+// LLVM's inttoptr, which zero-extends -- so the widening is its own
+// instruction here rather than a rule each of the five has to repeat.
+// ir_canonical_conversion_valid holds every producer to it.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_to_pointer(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source)
+{
+    if (value.value >= builder->function->value_count)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    IrType* source_value = ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type);
+    if (!source_value || source_value->kind != IR_TYPE_INTEGER)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    IrTypeId pointer_width_type = source_value->is_signed ? builder->ptrdiff_type : builder->size_type;
+    IrType* pointer_width = ir_type_from_id(&builder->program->types, pointer_width_type);
+    if (pointer_width && pointer_width->kind == IR_TYPE_INTEGER && source_value->bit_width != pointer_width->bit_width)
+    {
+        IrConversionOperation widen = source_value->bit_width < pointer_width->bit_width
+                                          ? (source_value->is_signed ? IR_CONVERSION_INTEGER_SIGN_EXTEND : IR_CONVERSION_INTEGER_ZERO_EXTEND)
+                                          : IR_CONVERSION_INTEGER_TRUNCATE;
+        value = c_ir_emit_cast_instruction(builder, value, pointer_width_type, widen, source);
+        if (value.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+    }
+
+    return c_ir_emit_cast_instruction(builder, value, target_type, IR_CONVERSION_INTEGER_TO_POINTER, source);
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source)
 {
     if (value.value >= builder->function->value_count)
@@ -4424,7 +4459,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     }
     else if (source_value->kind == IR_TYPE_INTEGER && target_value->kind == IR_TYPE_POINTER)
     {
-        operation = IR_CONVERSION_INTEGER_TO_POINTER;
+        return c_ir_emit_integer_to_pointer(builder, value, target_type, source);
     }
     if (operation == IR_CONVERSION_COUNT)
     {
@@ -4444,7 +4479,10 @@ BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIr
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_nullptr(CIntegerIrBuilder* builder, CToken token)
 {
-    IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, token, builder->s32_type);
+    // Built at pointer width rather than as an `int`, so the conversion below
+    // is the bare INTEGER_TO_POINTER a null pointer constant deserves and not
+    // a widening ahead of it: this runs on every `p == 0` and every `if (p)`.
+    IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, token, builder->size_type);
     IrValueId result;
     if (zero.value == IR_ID_UNDERLYING_INVALID)
     {
@@ -4452,7 +4490,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_nullptr(CIntegerIrBuilder* builder, CToken
     }
     else
     {
-        result = c_ir_emit_cast_instruction(builder, zero, builder->nullptr_type, IR_CONVERSION_INTEGER_TO_POINTER, c_ir_token_source_range(builder, token));
+        result = c_ir_emit_integer_to_pointer(builder, zero, builder->nullptr_type, c_ir_token_source_range(builder, token));
     }
 
     return result;
@@ -21810,8 +21848,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValue
     {
         return c_ir_emit_integer_value_typed(builder, 0, false, (CToken){0}, builder->bool_type);
     }
-    IrValueId zero = c_ir_emit_integer_value(builder, 0, false, (CToken){0});
-    if (zero.value != IR_ID_UNDERLYING_INVALID && type_id.value != builder->s32_type.value)
+    // A pointer's zero is built at pointer width for the reason
+    // c_ir_emit_nullptr gives: it saves the widening cast on the hottest
+    // conversion in the language.
+    IrTypeId zero_type = type->kind == IR_TYPE_POINTER ? builder->size_type : builder->s32_type;
+    IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, (CToken){0}, zero_type);
+    if (zero.value != IR_ID_UNDERLYING_INVALID && type_id.value != zero_type.value)
     {
         IrType* integer_type = ir_type_from_id(&builder->program->types, builder->s32_type);
         IrConversionOperation conversion = IR_CONVERSION_COUNT;
@@ -21826,12 +21868,15 @@ BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValue
         {
             conversion = IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT;
         }
-        else if (type->kind == IR_TYPE_POINTER)
+        if (type->kind == IR_TYPE_POINTER)
         {
-            conversion = IR_CONVERSION_INTEGER_TO_POINTER;
+            zero = c_ir_emit_integer_to_pointer(builder, zero, type_id, source);
         }
-        zero = conversion == IR_CONVERSION_COUNT ? IR_VALUE_ID_INVALID
-                                                 : c_ir_emit_cast_instruction(builder, zero, type_id, conversion, source);
+        else
+        {
+            zero = conversion == IR_CONVERSION_COUNT ? IR_VALUE_ID_INVALID
+                                                     : c_ir_emit_cast_instruction(builder, zero, type_id, conversion, source);
+        }
     }
     if (zero.value == IR_ID_UNDERLYING_INVALID)
     {
@@ -24428,8 +24473,7 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
-            value = c_ir_emit_cast_instruction(builder, value, frame->as.conditional.type, IR_CONVERSION_INTEGER_TO_POINTER,
-                                               frame->as.conditional.source);
+            value = c_ir_emit_integer_to_pointer(builder, value, frame->as.conditional.type, frame->as.conditional.source);
         }
         if (value.value == IR_ID_UNDERLYING_INVALID ||
             !c_ir_emit_store_place(builder, frame->as.conditional.place, frame->as.conditional.type, value, frame->as.conditional.source) ||
