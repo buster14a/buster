@@ -1129,7 +1129,7 @@ BUSTER_C_INTERNAL bool c_ir_noreturn_spelling(String8 spelling)
    appear in a declaration; the bare `noreturn` is an ordinary identifier, so
    it is only read inside a GNU `__attribute__`/`__declspec` list or a C23
    `[[...]]` list, where nothing else can be spelled that way. */
-BUSTER_C_INTERNAL bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end)
+BUSTER_C_SHARED bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end)
 {
     bool result = false;
     u32 index = start;
@@ -1202,7 +1202,7 @@ BUSTER_C_INTERNAL bool c_ir_noreturn_marker_in_range(CPreprocessResult preproces
    the compiler carrying a list of library names. Only the declaration's
    specifiers and its declarator are scanned: a body cannot carry the marker,
    and scanning one would find an unrelated identifier. */
-BUSTER_C_INTERNAL bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration)
+BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration)
 {
     u32 limit = preprocess.token_count < UINT32_MAX ? (u32)preprocess.token_count : UINT32_MAX;
     u32 body = declaration.body_token_count ? declaration.body_start : UINT32_MAX;
@@ -9928,6 +9928,25 @@ BUSTER_C_INTERNAL bool c_ir_lowering_resumes_after_call(CIntegerIrBuilder* build
     return result;
 }
 
+/* Close the block after a call the callee cannot return from.  Both call
+   emitters end here: the callee is a noreturn declaration, or -- for a call
+   through a pointer, which has no declaration to read -- a noreturn function
+   type.  GNU statement expressions and branching operands are the exception,
+   because their nested body is resumed by the enclosing expression frame,
+   which emits the proper continuation after this call. */
+BUSTER_C_INTERNAL void c_ir_end_control_flow_after_call(CIntegerIrBuilder* builder, bool noreturn, IrSourceRange source)
+{
+    if (noreturn && !c_ir_lowering_resumes_after_call(builder))
+    {
+        IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
+        c_ir_append_instruction(builder, unreachable, source);
+        if (builder->current_block.value < builder->function->block_count)
+        {
+            builder->function->blocks[builder->current_block.value].terminated = true;
+        }
+    }
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CToken token, IrFunction* target, CIrSignature signature,
                                                      IrValueId* arguments, u32 argument_count)
 {
@@ -9978,21 +9997,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     // answer -- glibc marks exit, abort and longjmp with it -- and the three
     // names remain because a platform's headers may declare the assertion
     // helpers without one, and losing that would silently reintroduce a
-    // fall-through past an assertion failure.  GNU statement expressions are
-    // the exception because their nested body is resumed by the enclosing
-    // expression frame, which emits the proper continuation after this call.
-    bool noreturn = (signature.is_noreturn || string_equal(target->name, S8("abort")) || string_equal(target->name, S8("__assert_fail")) ||
-                     string_equal(target->name, S8("__assert_perror_fail"))) &&
-                    !c_ir_lowering_resumes_after_call(builder);
-    if (noreturn)
-    {
-        IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
-        c_ir_append_instruction(builder, unreachable, call_source);
-        if (builder->current_block.value < builder->function->block_count)
-        {
-            builder->function->blocks[builder->current_block.value].terminated = true;
-        }
-    }
+    // fall-through past an assertion failure.
+    bool noreturn = signature.is_noreturn || string_equal(target->name, S8("abort")) || string_equal(target->name, S8("__assert_fail")) ||
+                    string_equal(target->name, S8("__assert_perror_fail"));
+    c_ir_end_control_flow_after_call(builder, noreturn, call_source);
     if (!signature.returns_void)
     {
         builder->function->values[result.value].definition = call_id;
@@ -14434,6 +14442,10 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     .valid = true,
                     .returns_void = return_type->kind == IR_TYPE_VOID,
                     .is_variadic = function_type->is_variadic,
+                    // No declaration stands behind this call, so the marker
+                    // the declarator spelled on the pointed-to function type
+                    // is the whole answer.
+                    .is_noreturn = function_type->is_noreturn,
                 };
                 signature.body_supported = c_ir_signature_body_supported(builder->program, builder->wide_float_cache, signature.return_type,
                                                                            signature.parameter_types, signature.parameter_count,
@@ -14627,6 +14639,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             call.operand_count = argument_count + 1;
             call.result = result;
             IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
+            c_ir_end_control_flow_after_call(builder, signature.is_noreturn, call_source);
             if (!signature.returns_void)
             {
                 builder->function->values[result.value].definition = call_id;
@@ -36735,6 +36748,10 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                                  .parameter_count = c_type->parameter_count,
                                                                                  .calling_convention = IR_CALLING_CONVENTION_C,
                                                                                  .is_variadic = c_type->is_variadic,
+                                                                                 // The marker a declarator spelled on this type
+                                                                                 // rather than on a declaration; the indirect call
+                                                                                 // site has nothing else to read it from.
+                                                                                 .is_noreturn = c_parse_type_is_noreturn(&parse, (CTypeId){.value = type_index}),
                                                                              });
                     progress = true;
                     continue;

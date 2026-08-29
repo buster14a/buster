@@ -3048,6 +3048,110 @@ BUSTER_C_INTERNAL bool c_parse_result_reserve_array_bounds(CParseResult* result,
     return true;
 }
 
+/* Whether a call through this function type ends control flow because the
+   declarator that derived it spelled `noreturn`.  The set is empty in almost
+   every translation unit -- the marker normally sits on a function
+   declaration, which c_ir_declaration_is_noreturn reads instead -- so the
+   count guards the scan and the scan itself is over a handful of ids. */
+BUSTER_C_SHARED bool c_parse_type_is_noreturn(CParseResult const* result, CTypeId type)
+{
+    bool answer = false;
+    if (result && type.value != C_ID_UNDERLYING_INVALID)
+    {
+        for (u32 index = 0; index < result->noreturn_function_type_count && !answer; index += 1)
+        {
+            answer = result->noreturn_function_types[index].value == type.value;
+        }
+    }
+
+    return answer;
+}
+
+BUSTER_C_SHARED bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess, u32 start, u32 end);
+BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration);
+
+/* The function type a declarator arrives at, following only the derivations a
+   declarator can write around one: pointers, arrays of them, and the
+   qualifiers spelled on either.  `allow_direct` admits the declarator whose
+   own type is the function -- a typedef of a function type -- while every
+   other caller wants the pointer shapes only, because a declaration whose own
+   type is the function is what c_ir_declaration_is_noreturn already reads.
+   The walk moves to a type built before the one in hand, so it terminates on
+   any graph; a chain that does not descend simply stops, which costs a mark
+   rather than risking one. */
+BUSTER_C_INTERNAL CTypeId c_parse_declarator_function_type(CParseResult const* result, CTypeId type, bool allow_direct)
+{
+    CTypeId current = type;
+    bool derived = false;
+    bool walking = current.value < result->type_count;
+    while (walking)
+    {
+        CType const* value = result->types + current.value;
+        CTypeId next = value->has_unqualified_type ? value->unqualified_type
+                       : (value->kind == C_TYPE_POINTER || value->kind == C_TYPE_ARRAY)
+                           ? value->element_type
+                           : C_TYPE_ID_INVALID;
+        walking = next.value < current.value;
+        if (walking)
+        {
+            derived |= value->kind == C_TYPE_POINTER;
+            current = next;
+        }
+    }
+    bool function = (derived || allow_direct) && current.value < result->type_count && result->types[current.value].kind == C_TYPE_FUNCTION;
+
+    return function ? current : C_TYPE_ID_INVALID;
+}
+
+/* The function type this declarator derived and could still be marked
+   noreturn, or an invalid id when there is none -- which is what lets a
+   caller skip the token scan for the marker, the only part of the question
+   that is not a handful of loads.  Only a type the declarator itself built --
+   one added at or after `derived_start` -- qualifies: a declarator that merely
+   names an existing one, as `__attribute__((noreturn)) handler die;` names a
+   shared `typedef void handler(int);`, would otherwise make every other
+   declaration written with that typedef noreturn too, and the live code after
+   a call through one of those would be dropped. */
+BUSTER_C_INTERNAL CTypeId c_parse_noreturn_candidate_function_type(CParseResult const* result, CTypeId type, bool allow_direct, u32 derived_start)
+{
+    CTypeId function = c_parse_declarator_function_type(result, type, allow_direct);
+    bool candidate = function.value >= derived_start && function.value < result->type_count && !c_parse_type_is_noreturn(result, function);
+
+    return candidate ? function : C_TYPE_ID_INVALID;
+}
+
+/* Note that a call through `function` ends control flow.  The table grows one
+   entry at a time from the three declarator sites and is empty in almost every
+   translation unit, so it starts unallocated and doubles from four rather than
+   being sized up front the way the parse tables every declaration writes to
+   are.  Running out of arena drops the note rather than failing the parse: the
+   marker only removes unreachable code, so losing one costs the dead code it
+   would have deleted and nothing else. */
+BUSTER_C_INTERNAL void c_parse_add_noreturn_function_type(CParseResult* result, CTypeId function)
+{
+    bool room = result->noreturn_function_type_count < result->noreturn_function_type_capacity;
+    if (!room && result->arena && result->noreturn_function_type_capacity < UINT32_MAX / 2)
+    {
+        u32 capacity = result->noreturn_function_type_capacity ? result->noreturn_function_type_capacity * 2 : 4;
+        u64 allocation_size = (u64)capacity * (u64)sizeof(CTypeId);
+        if (c_parse_arena_can_allocate(result->arena, allocation_size, BUSTER_ALIGN_OF(CTypeId)))
+        {
+            CTypeId* types = (CTypeId*)arena_allocate_bytes(result->arena, allocation_size, BUSTER_ALIGN_OF(CTypeId));
+            if (result->noreturn_function_types && result->noreturn_function_type_count)
+            {
+                memcpy(types, result->noreturn_function_types, sizeof(*types) * result->noreturn_function_type_count);
+            }
+            result->noreturn_function_types = types;
+            result->noreturn_function_type_capacity = capacity;
+            room = true;
+        }
+    }
+    if (room)
+    {
+        result->noreturn_function_types[result->noreturn_function_type_count++] = function;
+    }
+}
+
 BUSTER_C_INTERNAL CTypeId c_parse_string_literal_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end)
 {
     CIrDecodedString decoded = {0};
@@ -7996,6 +8100,7 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
             return false;
         }
     }
+    u32 derived_start = result->type_count;
     u32 declarator_start = start;
     CTypeId type = c_parse_scalar_type(machine, result, preprocess, start, end, &declarator_start);
     if (type.value == C_ID_UNDERLYING_INVALID)
@@ -8051,6 +8156,14 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
     if (declarator_start != end || type.value == C_ID_UNDERLYING_INVALID)
     {
         return false;
+    }
+    // A parameter declarator may spell the marker on the function type it
+    // derives, `void run(__attribute__((noreturn)) void (*fail)(int))`, and
+    // the call through it has only the type to read.
+    CTypeId noreturn_function = c_parse_noreturn_candidate_function_type(result, type, true, derived_start);
+    if (noreturn_function.value != C_ID_UNDERLYING_INVALID && c_ir_noreturn_marker_in_range(preprocess, start, end))
+    {
+        c_parse_add_noreturn_function_type(result, noreturn_function);
     }
     BUSTER_CHECK(result->parameter_count < result->parameter_capacity);
     result->parameters[result->parameter_count++] = (CParameter){
@@ -8136,8 +8249,8 @@ BUSTER_C_INTERNAL bool c_parse_auto_type_token_in_declaration(CPreprocessResult 
 // declaration, which parses its own specifiers. Reusing the type matters
 // beyond the saved work: "struct { int x; } a, b;" must give a and b the one
 // anonymous type, not one per declarator.
-BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                  CDeclaration* declaration, CTypeId inherited_base)
+BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                        CDeclaration* declaration, CTypeId inherited_base)
 {
     u32 end = declaration->declarator_count ? declaration->declarator_start + declaration->declarator_count
                                             : declaration->token_start + declaration->token_count;
@@ -8441,6 +8554,23 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
                                                              });
             }
         }
+    }
+}
+
+// A declarator may spell `noreturn` on the function type it derives rather
+// than on a function it declares -- the typedef and function-pointer shapes,
+// where the call site sees only the type. The type has to be noted while the
+// declarator that built it is still in hand, so the derivation runs first and
+// the marker is read against the declaration it was written in.
+BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                  CDeclaration* declaration, CTypeId inherited_base)
+{
+    u32 derived_start = result->type_count;
+    c_parse_declaration_type_derive(machine, result, preprocess, declaration, inherited_base);
+    CTypeId function = c_parse_noreturn_candidate_function_type(result, declaration->type, declaration->kind == C_DECLARATION_TYPEDEF, derived_start);
+    if (function.value != C_ID_UNDERLYING_INVALID && c_ir_declaration_is_noreturn(preprocess, *declaration))
+    {
+        c_parse_add_noreturn_function_type(result, function);
     }
 }
 
@@ -10403,6 +10533,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             }
         }
         u32 index = segment_start;
+        u32 derived_start = result->type_count;
         CTypeId type = is_auto_type ? auto_type : c_parse_pointer_chain(result, preprocess, base, &index, suffix_end);
         CToken name = {0};
         u32 name_index = UINT32_MAX;
@@ -10479,6 +10610,20 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         else
         {
             type = c_parse_apply_vector_attribute(result, preprocess, scope, type, segment_start, suffix_end);
+        }
+        // The marker sits either in the specifiers every declarator of the list
+        // shares -- a block-scope
+        // `typedef __attribute__((noreturn)) void (*die)(int);` writes it there
+        // -- or in this declarator.  The two ranges are scanned separately
+        // rather than as the span between them, which would read a preceding
+        // declarator's own attribute as this one's and end control flow at a
+        // call that returns.  c_ir_declaration_is_noreturn splits the file-scope
+        // declaration the same way, for the same reason.
+        CTypeId noreturn_function = c_parse_noreturn_candidate_function_type(result, type, is_typedef, derived_start);
+        if (noreturn_function.value != C_ID_UNDERLYING_INVALID && (c_ir_noreturn_marker_in_range(preprocess, start, declarator_start) ||
+                                                                   c_ir_noreturn_marker_in_range(preprocess, segment_start, suffix_end)))
+        {
+            c_parse_add_noreturn_function_type(result, noreturn_function);
         }
         if (is_constexpr && type.value < result->type_count)
         {

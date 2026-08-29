@@ -5281,11 +5281,15 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Keep each source separate so a future regression identifies the exact
     // language or lowering contract that broke, and run each one under every
     // register allocator, because three of the six are lowering rather than
-    // parsing defects.
+    // parsing defects.  The seventh joined them later: `noreturn` spelled on a
+    // function pointer type or typedef rather than on a declaration, which the
+    // assembly assertion below is what actually gates -- running it only proves
+    // the bodies lower.
     String8 c_lz4_regression_paths[] = {
         S8("tests/basic_c_builtin_memory.c"),
         S8("tests/basic_c_case_substatement.c"),
         S8("tests/basic_c_noreturn_call.c"),
+        S8("tests/basic_c_noreturn_type.c"),
         S8("tests/basic_c_address_of_array.c"),
         S8("tests/basic_c_local_typedef_scope.c"),
         S8("tests/basic_c_goto_into_loop.c"),
@@ -5294,6 +5298,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-builtin-memory"),
         S8("buster-c-case-substatement"),
         S8("buster-c-noreturn-call"),
+        S8("buster-c-noreturn-type"),
         S8("buster-c-address-of-array"),
         S8("buster-c-local-typedef-scope"),
         S8("buster-c-goto-into-loop"),
@@ -5335,6 +5340,21 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
+    // A call through a noreturn function pointer type ends control flow, and
+    // nothing after it in the block is emitted.  The defect that motivated the
+    // fixture only ever produced dead code, so running the program cannot see
+    // it: every shape in the fixture calls `must_not_be_reached` from a spot
+    // its noreturn call dominates, and the whole assertion is that the name
+    // reaches the assembly nowhere.  Clang's own -S output for the same file
+    // does not mention it either.
+    String8 noreturn_type_assembly_command_line[] = {
+        S8("-S"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_noreturn_type.c"),
+    };
+    CompilerDriverResult noreturn_type_assembly = compiler_driver_execute_invocation(
+        arguments->arena,
+        compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(noreturn_type_assembly_command_line)));
+    BUSTER_TEST(arguments, noreturn_type_assembly.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, string_first_sequence(noreturn_type_assembly.output, S8("must_not_be_reached")) == BUSTER_STRING_NO_MATCH);
     // SQLite compatibility reduced its own set of frontend, lowering and
     // linker failures to these fixtures: declarators that return function
     // pointers and the type names that cast to them, case labels inside a

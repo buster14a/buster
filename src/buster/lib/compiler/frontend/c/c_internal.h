@@ -98,6 +98,10 @@ BUSTER_C_EXTERN void c_parse_declaration_type(CTypeParseMachine* machine, CParse
 BUSTER_C_EXTERN bool c_parse_validate_constexpr_declaration(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                             CPreprocessResult preprocess, CDeclaration* declaration);
 BUSTER_C_EXTERN CTypeId c_parse_add_type(CParseResult* result, CType type);
+// Whether a call through this function type ends control flow because the
+// declarator that derived it spelled `noreturn`. The set behind it is empty
+// in almost every translation unit; see CParseResult.noreturn_function_types.
+BUSTER_C_EXTERN bool c_parse_type_is_noreturn(CParseResult const* result, CTypeId type);
 BUSTER_C_EXTERN bool c_parse_validate_constexpr_initializer(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                             CPreprocessResult preprocess, CScopeId scope, CEntityId entity_id,
                                                             u32 initializer_start, u32 initializer_end);

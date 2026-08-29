@@ -344,6 +344,13 @@ struct IrType
     // it as (see c_ir_complex_type). Only the C frontend sets and reads it;
     // to the backends the type is an ordinary aggregate.
     bool is_complex;
+    // A function type whose declarator spelled `noreturn`, so a call through
+    // it ends control flow. The marker written on a function declaration is
+    // read off that declaration instead (c_ir_declaration_is_noreturn); this
+    // carries the one shape no declaration can answer for -- the attribute on
+    // a function pointer type or typedef, where the call site only ever sees
+    // the type. Only the C frontend sets and reads it.
+    bool is_noreturn;
 };
 
 typedef struct IrTypeTable IrTypeTable;

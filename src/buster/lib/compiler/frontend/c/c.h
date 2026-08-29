@@ -1083,6 +1083,14 @@ struct CParseResult
     u32* scope_children;
     CDiagnostic* diagnostics;
     CDeferredStaticAssert* deferred_static_asserts;
+    // The function types a declarator spelled `noreturn` on: the attribute
+    // written on a function pointer or a typedef rather than on a function
+    // declaration. It lives beside the type table instead of as a bit inside
+    // CType because the set is empty in almost every translation unit, while
+    // the type table is large and walked linearly -- a ninth bool would cost
+    // every CType eight bytes to answer a question that is almost always no.
+    // c_parse_type_is_noreturn is the only reader.
+    CTypeId* noreturn_function_types;
     u32 declaration_count;
     u32 type_count;
     u32 parameter_count;
@@ -1109,6 +1117,8 @@ struct CParseResult
     u32 identifier_use_by_token_capacity;
     u32 diagnostic_capacity;
     u32 deferred_static_assert_capacity;
+    u32 noreturn_function_type_count;
+    u32 noreturn_function_type_capacity;
 };
 
 // CParseResult is the compatibility name for the semantic model.  New phase
