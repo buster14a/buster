@@ -625,6 +625,17 @@ static padded_alias padded_alias_array[2];
 static lowered_scalar_pair lowered_scalar_array;
 static exact_scalar_pair exact_scalar_array;
 
+// The well-formed form of the spelling of an array of an over-aligned element
+// that the check above could not see (#713).  A parenthesized declarator whose
+// base is a typedef name or a tag was read as a function declaration named by
+// that base, so neither pointer below existed at all: no definition emitted,
+// and a `sizeof` of the pointee that folded nothing.
+typedef int plain_scalar;
+static plain_scalar file_rows[2][3];
+static plain_scalar (*typedef_pointer_to_array)[3] = &file_rows[1];
+static struct padded_element padded_pairs[2][2];
+static struct padded_element (*tag_pointer_to_array)[2] = &padded_pairs[1];
+
 int main(void)
 {
     if (sizeof(struct leading) != 5 || _Alignof(struct leading) != 1) return 1;
@@ -1096,5 +1107,18 @@ int main(void)
     if (_Alignof(typedef_list_plain_first) != 4 || _Alignof(typedef_list_raised_second) != 64) return 129;
     typedef int block_typedef_list_raised __attribute__((aligned(64))), block_typedef_list_plain;
     if (_Alignof(block_typedef_list_raised) != 64 || _Alignof(block_typedef_list_plain) != 4) return 130;
+
+    // A pointer to an array measures, indexes and moves by the whole array.
+    if (sizeof(*typedef_pointer_to_array) != 12 || sizeof(typedef_pointer_to_array) != sizeof(void *)) return 131;
+    if (sizeof(*tag_pointer_to_array) != 32 || _Alignof(struct padded_element[2]) != 16) return 132;
+    if ((char *)typedef_pointer_to_array - (char *)file_rows != 12) return 133;
+    if ((char *)tag_pointer_to_array - (char *)padded_pairs != 32) return 134;
+    // The store goes through the subscript spelling rather than
+    // `(*typedef_pointer_to_array)[2] = 9`, which is dropped whole (#719): the
+    // dereference materializes a copy of the array and the store lands in it.
+    // That is a pre-existing defect of the deref, not of this declaration --
+    // `int (*p)[3]` at block scope has always done it.
+    typedef_pointer_to_array[0][2] = 9;
+    if (file_rows[1][2] != 9 || (*typedef_pointer_to_array)[2] != 9) return 135;
     return 0;
 }

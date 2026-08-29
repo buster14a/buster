@@ -2525,11 +2525,26 @@ on a commit you already know is incomplete tells nobody anything.
   on the *bound record* rather than on the type, because a qualified array and
   a typedef of an array are copies carrying the same bound, and one report per
   written `[N]` is what Clang produces; two identical declarations that intern
-  to one array type therefore report once where Clang reports twice. Two
-  spellings escape it, because neither reaches the type table as a
-  `C_TYPE_ARRAY`: a parenthesized declarator's `cache_line (*p)[2]`, and an
-  array type name in an expression, `sizeof(cache_line[2])` and the compound
-  literal (issue #713).
+  to one array type therefore report once where Clang reports twice. A
+  parenthesized declarator's `cache_line (*p)[2]` reaches that report down a
+  different road (issue #713): it builds a `C_TYPE_ARRAY` at all only once the
+  syntax scan stops reading a top-level `(` after an identifier as the
+  parameter list of a function that identifier names -- see the declarator note
+  below. An array type name in an expression, `sizeof(cache_line[2])` and the
+  compound literal, still escapes it: that one is resolved during lowering and
+  never reaches the type table.
+- **A top-level `(` right after an identifier** is the parameter list of a
+  function that identifier names in `T f(int)`, and a parenthesized declarator
+  in `T (*p)[2]`, whose `T` is the last word of the declaration specifiers.
+  The syntax scan that finds a declaration's name has no typedef table to tell
+  those two identifiers apart, and does not need one: a parameter is a
+  declaration, so a parameter list can never begin with a `*`, and a group that
+  does is a declarator group whatever precedes it. Without that,
+  `T (*p)[2]` and `struct s (*p)[2]` were read as functions named `T` and `s`
+  and the declaration each really makes was dropped whole -- no definition
+  emitted, no diagnostic, and a `sizeof(*p)` that folded nothing. The redundant
+  `T (p);` is the one shape still left: it needs the typedef table, since
+  `int f(x);` with `x` a typedef name is a real function declaration.
 - `__typeof` is accepted alongside `__typeof__` and `typeof`, because musl's
   `weak_alias` macro is written with it. **A function declared through a type
   name rather than a parameter-list declarator** -- `extern __typeof(f) g;`,

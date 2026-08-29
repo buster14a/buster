@@ -11419,6 +11419,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     // and GCC refuse as well since the element itself would still be laid out
     // in a slot narrower than it claims. The column is the opening bracket,
     // which is where Clang's own caret points.
+    //
+    // The parenthesized declarator reaches the same message down a different
+    // road (#713): it builds its array type at all only once the syntax scan
+    // stops reading `cache_line (` as a function named `cache_line`.
     struct
     {
         String8 source;
@@ -11439,6 +11443,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
         {S8("typedef int cache_line __attribute__((aligned(64)));\n"
             "cache_line single[1];\n"),
          S8("over-aligned-single.c"), 2, 18},
+        {S8("typedef int cache_line __attribute__((aligned(64)));\n"
+            "cache_line (*pointer)[2];\n"),
+         S8("over-aligned-parenthesized.c"), 2, 22},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(over_aligned_elements); index += 1)
     {
@@ -11559,6 +11566,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
         }
     }
     scratch_end(unnamed_zero_temporary);
+
+    // The parse-side half of #713.  A top-level `(` right after an identifier
+    // was read as the parameter list of a function that identifier names, so
+    // `plain (*pointer)[3]` became a function called `plain` and the object
+    // the declaration really makes was dropped whole -- no global, and a
+    // `sizeof(*pointer)` that folded nothing.  A parameter is a declaration
+    // and so can never begin with `*`, which is what tells the two apart
+    // without a typedef table.  The tag spelling took the same road, and the
+    // function-pointer and ordinary-function shapes have to stay where they
+    // were.
+    TemporalArena pointee_temporary = scratch_begin(0, 0);
+    CPreprocessResult pointee_preprocess = {0};
+    CParseResult pointee_parse = {0};
+    CIRLowerResult pointee = c_test_lower_source(pointee_temporary.arena,
+                                                 S8("typedef int plain;\n"
+                                                    "struct tag { int x; int y; };\n"
+                                                    "plain (*typedef_pointer)[3];\n"
+                                                    "struct tag (*tag_pointer)[2];\n"
+                                                    "plain (*function_pointer)(void);\n"
+                                                    "plain ordinary_function(int argument);\n"
+                                                    "_Static_assert(sizeof(*typedef_pointer) == 12, \"typedef pointee\");\n"
+                                                    "_Static_assert(sizeof(*tag_pointer) == 16, \"tag pointee\");\n"
+                                                    "_Static_assert(sizeof(typedef_pointer) == sizeof(void*), \"pointer\");\n"),
+                                                 S8("pointer-to-array.c"), target_native, &pointee_preprocess, &pointee_parse);
+    BUSTER_TEST(arguments, pointee_preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, pointee_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, pointee.diagnostic_count == 0);
+    if (pointee.program)
+    {
+        // The globals exist at all, which is the half of the defect no
+        // diagnostic reported: the dropped declaration was silent.
+        IrGlobal* typedef_pointer = c_test_find_ir_global(pointee.program->modules, pointee.program, S8("typedef_pointer"));
+        IrType* typedef_pointer_type = typedef_pointer ? ir_type_from_id(&pointee.program->types, typedef_pointer->type) : 0;
+        BUSTER_TEST(arguments, typedef_pointer_type != 0 && typedef_pointer_type->kind == IR_TYPE_POINTER);
+        IrType* typedef_pointee = typedef_pointer_type ? ir_type_from_id(&pointee.program->types, typedef_pointer_type->element_type) : 0;
+        BUSTER_TEST(arguments, typedef_pointee != 0 && typedef_pointee->kind == IR_TYPE_ARRAY && typedef_pointee->layout.size == 12);
+        IrGlobal* tag_pointer = c_test_find_ir_global(pointee.program->modules, pointee.program, S8("tag_pointer"));
+        IrType* tag_pointer_type = tag_pointer ? ir_type_from_id(&pointee.program->types, tag_pointer->type) : 0;
+        BUSTER_TEST(arguments, tag_pointer_type != 0 && tag_pointer_type->kind == IR_TYPE_POINTER);
+        IrType* tag_pointee = tag_pointer_type ? ir_type_from_id(&pointee.program->types, tag_pointer_type->element_type) : 0;
+        BUSTER_TEST(arguments, tag_pointee != 0 && tag_pointee->kind == IR_TYPE_ARRAY && tag_pointee->layout.size == 16);
+        IrGlobal* function_pointer = c_test_find_ir_global(pointee.program->modules, pointee.program, S8("function_pointer"));
+        IrType* function_pointer_type = function_pointer ? ir_type_from_id(&pointee.program->types, function_pointer->type) : 0;
+        BUSTER_TEST(arguments, function_pointer_type != 0 && function_pointer_type->kind == IR_TYPE_POINTER);
+    }
+    scratch_end(pointee_temporary);
 
     return result;
 }

@@ -8728,6 +8728,20 @@ BUSTER_C_INTERNAL bool c_parse_declarator_name_has_parameters(CPreprocessResult 
     return name_index + 1 < end && c_token_is_punctuator(&preprocess.tokens[name_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
 }
 
+// A top-level `(` that follows an identifier is a parameter list when that
+// identifier is the name being declared -- `T f(int)` -- and a parenthesized
+// declarator when it is the last word of the declaration specifiers --
+// `T (*p)[2]`, whose `T` names the element type.  The syntax scan has no
+// typedef table to tell those two identifiers apart, but it does not need one
+// here: a parameter is a declaration, so a parameter list can never begin with
+// a `*`, and a group that does is a declarator group whatever precedes it.
+// Without this, `T (*p)[2]` and `struct s (*p)[2]` were read as functions
+// named `T` and `s`, and the declaration they really make was dropped whole.
+BUSTER_C_INTERNAL bool c_parse_pointer_declarator_group(CPreprocessResult preprocess, u32 open, u32 end)
+{
+    return open + 1 < end && c_token_is_punctuator(&preprocess.tokens[open + 1], C_PUNCTUATOR_STAR);
+}
+
 BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end)
 {
     u32 first_bound = result->array_bound_count;
@@ -13214,7 +13228,8 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
             {
                 u32 parenthesized_name_token = C_ID_UNDERLYING_INVALID;
                 bool parenthesized_function = c_parse_parenthesized_function_name(preprocess, index, end, &parenthesized_name_token);
-                bool ordinary_function = index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+                bool pointer_group = c_parse_pointer_declarator_group(preprocess, index, end);
+                bool ordinary_function = !pointer_group && index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
                                          !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]);
                 if (parenthesized_function)
                 {
@@ -13234,7 +13249,7 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
                     declarator.function_name_token = index - 1;
                     declarator.name_token = declarator.function_name_token;
                 }
-                else if (declarator.name_token == C_ID_UNDERLYING_INVALID &&
+                else if ((declarator.name_token == C_ID_UNDERLYING_INVALID || pointer_group) &&
                          c_parse_parenthesized_declarator_name(preprocess, index, end, &parenthesized_name_token))
                 {
                     declarator.name_token = parenthesized_name_token;
@@ -13350,7 +13365,12 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                     {
                         u32 parenthesized_name_token = C_ID_UNDERLYING_INVALID;
                         bool parenthesized_function = c_parse_parenthesized_function_name(preprocess, index, token_count, &parenthesized_name_token);
-                        bool ordinary_function = index > start && c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
+                        // The whole-declaration scan stops updating name_token at the
+                        // first top-level comma, so the override stops there too: a
+                        // later declarator's name belongs to its own segment.
+                        bool pointer_group = !seen_declarator_comma && c_parse_pointer_declarator_group(preprocess, index, token_count);
+                        bool ordinary_function = !pointer_group && index > start &&
+                                                  c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
                                                   !c_declaration_keyword_for_dialect_token(preprocess, preprocess.tokens[index - 1]);
                         if (parenthesized_function)
                         {
@@ -13366,7 +13386,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                             function_name_token = index - 1;
                             name_token = function_name_token;
                         }
-                        else if (name_token == C_ID_UNDERLYING_INVALID &&
+                        else if ((name_token == C_ID_UNDERLYING_INVALID || pointer_group) &&
                                  c_parse_parenthesized_declarator_name(preprocess, index, token_count, &parenthesized_name_token))
                         {
                             name_token = parenthesized_name_token;
