@@ -5434,10 +5434,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     String8 c_musl_singleton_paths[] = {
         S8("tests/basic_c_nested_control_substatement.c"),
         S8("tests/basic_c_inline_aggregate_sizeof.c"),
+        S8("tests/basic_c_vla_declarator_list.c"),
     };
     String8 c_musl_singleton_names[] = {
         S8("buster-nested-control-substatement"),
         S8("buster-inline-aggregate-sizeof"),
+        S8("buster-vla-declarator-list"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_musl_singleton_paths); fixture_index += 1)
     {

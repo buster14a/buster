@@ -26644,6 +26644,54 @@ BUSTER_C_INTERNAL bool c_ir_terminate_switch_ranges(CIntegerIrBuilder* builder, 
     return true;
 }
 
+// The storage a variable-length array declaration allocates, and the local
+// that names it. A VLA local is a pointer variable: the ALLOCATE moves the
+// stack pointer by the runtime size and the pointer it produces is stored into
+// the local's frame slot, which is what every later index and sizeof reads
+// through. Both declaration paths emit it -- the single declarator in
+// c_ir_lower_body_advance and a declarator split out of a list in
+// c_ir_prepare_automatic_declaration -- so it lives here rather than in either.
+BUSTER_C_INTERNAL bool c_ir_emit_vla_storage(CIntegerIrBuilder* builder, CIrVlaLayout* layout, IrTypeId pointer_type_id, IrTypeId element_type,
+                                             CEntityId entity, CToken name, u32 alignment)
+{
+    IrValueId storage = c_ir_add_result(builder, pointer_type_id);
+    bool emitted = layout->runtime_size.value != IR_ID_UNDERLYING_INVALID && storage.value != IR_ID_UNDERLYING_INVALID;
+    IrSourceRange source = c_ir_source_range(c_ir_token_location(builder, name), name.length);
+    if (emitted)
+    {
+        IrInstruction allocation = c_ir_instruction_initialize(IR_OPCODE_STACK_ALLOCATE, pointer_type_id);
+        allocation.operands = arena_allocate(builder->arena, IrValueId, 1);
+        allocation.operands[0] = layout->runtime_size;
+        allocation.operand_count = 1;
+        allocation.immediates = arena_allocate(builder->arena, u64, 1);
+        allocation.immediates[0] = alignment;
+        allocation.immediate_count = 1;
+        allocation.result = storage;
+        builder->function->values[storage.value].definition = c_ir_append_instruction(builder, allocation, source);
+        IrType* pointer_type = ir_type_from_id(&builder->program->types, pointer_type_id);
+        IrValueId place = c_ir_emit_local(builder, name, pointer_type_id, entity, pointer_type ? pointer_type->layout.alignment : alignment);
+        CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+        emitted = place.value != IR_ID_UNDERLYING_INVALID && local;
+        if (emitted)
+        {
+            local->runtime_size = layout->runtime_size;
+            local->vla_element_type = element_type;
+            local->vla_dimension_counts = layout->dimension_counts;
+            local->vla_suffix_sizes = layout->suffix_sizes;
+            local->vla_dimension_count = layout->dimension_count;
+            local->is_variable_length_array = true;
+            emitted = c_ir_emit_store(builder, local, storage, source);
+        }
+        if (emitted)
+        {
+            c_ir_mark_local_read_only(builder, local);
+            emitted = c_ir_activate_cleanup(builder, entity, source);
+        }
+    }
+
+    return emitted;
+}
+
 BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* builder, CIrLowerAutomaticDeclarationState* state,
                                                              u32* expression_start_out, u32* expression_end_out, bool* expression_pending_out)
 {
@@ -26678,7 +26726,32 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
         return false;
     }
     IrTypeId local_type = builder->c_type_ir_map[local_entity->type.value];
+    CType* local_c_type = &builder->parse.types[local_entity->type.value];
+    // An array C type reaches c_type_ir_map only when every bound folded, so an
+    // unmapped one is a variable-length array. The single-declarator path in
+    // c_ir_lower_body_advance recognises the same shape; this one is what a
+    // declarator split out of a comma-separated list arrives through, which is
+    // how musl's res_msend writes `int qpos[nqueries], apos[nqueries];`.
+    bool variable_length_array = false;
+    IrTypeId variable_element_type = IR_TYPE_ID_INVALID;
+    if (local_type.value == IR_ID_UNDERLYING_INVALID && local_c_type->kind == C_TYPE_ARRAY)
+    {
+        CTypeId element_c_type = local_entity->type;
+        CType* element_c = local_c_type;
+        while (element_c && element_c->kind == C_TYPE_ARRAY)
+        {
+            element_c_type = element_c->element_type;
+            element_c = c_type_from_id(&builder->parse, element_c_type);
+        }
+        variable_element_type = element_c ? builder->c_type_ir_map[element_c_type.value] : IR_TYPE_ID_INVALID;
+        variable_length_array = variable_element_type.value != IR_ID_UNDERLYING_INVALID;
+        if (variable_length_array)
+        {
+            local_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, variable_element_type);
+        }
+    }
     IrType* local_type_value = ir_type_from_id(&builder->program->types, local_type);
+    IrType* variable_element = variable_length_array ? ir_type_from_id(&builder->program->types, variable_element_type) : 0;
     CToken name = builder->preprocess.tokens[name_index];
     bool local_extern = false;
     bool local_static = local_entity->is_static_storage;
@@ -26694,14 +26767,23 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
         local_static |= string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("static"));
         local_thread_local |= string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("_Thread_local")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__thread"));
     }
-    u32 local_alignment = local_type_value ? local_type_value->layout.alignment : 0;
+    // A variable-length array's alignment is its element's: the local itself
+    // holds the pointer the ALLOCATE produced, and the ALLOCATE is what carries
+    // the alignment the storage has to meet.
+    u32 local_alignment = variable_element ? variable_element->layout.alignment : local_type_value ? local_type_value->layout.alignment : 0;
     String8 local_alignment_rejection = {0};
     if (!local_type_value || !local_type_value->layout.resolved ||
+        (variable_length_array && (!variable_element || !variable_element->layout.resolved || !variable_element->layout.size)) ||
         c_ir_alignment_evaluate(builder, local_entity->alignment_start, local_entity->alignment_count, local_alignment, &local_alignment,
                                 &local_alignment_rejection) != C_IR_ALIGNMENT_RESOLVED)
     {
         builder->failure_message = local_alignment_rejection.length ? local_alignment_rejection : S8("automatic local declaration has an invalid alignment");
         builder->failure_kind_plus_one = local_alignment_rejection.length ? C_DIAGNOSTIC_INVALID_ALIGNMENT + 1 : 0;
+        return false;
+    }
+    if (variable_length_array && local_static)
+    {
+        builder->failure_message = S8("variable-length array cannot have static storage duration");
         return false;
     }
     if (local_extern && !local_static)
@@ -26766,6 +26848,39 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
                                            ? string_format(builder->arena, S8("could not lower static initializer for local '{S8}': {S8}"), c_token_spelling(builder->preprocess.spelling_base, name),
                                                            builder->failure_message)
                                            : string_format(builder->arena, S8("could not lower static initializer for local '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, name));
+            return false;
+        }
+        return true;
+    }
+    if (variable_length_array)
+    {
+        if (c_ir_declaration_initializer_range(builder->preprocess,
+                                               (CDeclaration){
+                                                   .token_start = start,
+                                                   .token_count = end - start,
+                                               },
+                                               &(u32){0}, &(u32){0}))
+        {
+            builder->failure_message = S8("variable-length array cannot have an initializer");
+            return false;
+        }
+        // The bounds are lowered through a nested run of the lowering machine
+        // rather than through a child frame: this path is already inside a
+        // step, the machine is re-entrant by run depth, and the frame array is
+        // fixed so the caller's frame pointer survives the nesting. The stack
+        // checkpoint the allocation needs is taken by c_ir_lower_body_advance
+        // before it hands the list over, because only it holds the task.
+        CIrVlaLayout layout = {0};
+        if (!c_ir_prepare_vla_layout(builder, local_entity->type, name, false, &layout))
+        {
+            builder->failure_message = string_format(builder->arena, S8("could not lower the bounds of variable-length array '{S8}'"),
+                                                     c_token_spelling(builder->preprocess.spelling_base, name));
+            return false;
+        }
+        if (!c_ir_emit_vla_storage(builder, &layout, local_type, variable_element_type, entity, name, local_alignment))
+        {
+            builder->failure_message = string_format(builder->arena, S8("could not lower automatic local '{S8}'"),
+                                                     c_token_spelling(builder->preprocess.spelling_base, name));
             return false;
         }
         return true;
@@ -28826,45 +28941,77 @@ BUSTER_C_INTERNAL void c_ir_lower_body_yield(CIntegerIrBuilder* builder, CIrLowe
     c_ir_lower_frame_push(builder, child);
 }
 
+// The stack save a variable-length array declaration takes before anything
+// moves the stack pointer. It is taken at the declaration and never at the
+// entry of the enclosing loop body: an entry save does not dominate a label
+// inside the body, so a `goto` into the body would reach the end-of-iteration
+// restore having never executed the save and would load the frame slot's stale
+// contents into RSP. C forbids jumping into the scope of a variably modified
+// declaration, so taking the save at the declaration leaves no conforming
+// program without one.
+BUSTER_C_INTERNAL bool c_ir_body_task_take_stack_checkpoint(CIntegerIrBuilder* builder, CIrBodyTask* task, CToken name)
+{
+    bool taken = true;
+    if (!task->has_stack_checkpoint)
+    {
+        task->stack_checkpoint = c_ir_emit_stack_save(builder, c_ir_token_source_range(builder, name));
+        taken = task->stack_checkpoint.value != IR_ID_UNDERLYING_INVALID;
+        if (taken)
+        {
+            task->has_stack_checkpoint = true;
+            task->restore_before_continuation = true;
+            // The outermost checkpoint inside the loop body is the one `break`
+            // and `continue` restore; a nested block's later checkpoint would
+            // leave everything the body allocated before it on the stack, and
+            // the next iteration would allocate again below it.
+            if (task->checkpoint_is_break && !task->has_break_checkpoint)
+            {
+                task->break_checkpoint = task->stack_checkpoint;
+                task->has_break_checkpoint = true;
+            }
+            if (task->checkpoint_is_continue && !task->has_continue_checkpoint)
+            {
+                task->continue_checkpoint = task->stack_checkpoint;
+                task->has_continue_checkpoint = true;
+            }
+        }
+    }
+
+    return taken;
+}
+
+// Does any declarator in this range declare a variable-length array? An array
+// C type that never mapped to an IR type is one, and the declaration's own
+// bound expressions name locals of other types, so the entity's type is what
+// answers rather than the token shape. The declarator-list path asks before it
+// splits, because the stack checkpoint the allocations need is the task's and
+// the list frame does not carry one.
+BUSTER_C_INTERNAL bool c_ir_declaration_declares_vla(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool result = false;
+    for (u32 index = start; !result && index < end; index += 1)
+    {
+        if (builder->preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
+        {
+            continue;
+        }
+        CEntityId entity = c_ir_local_entity_at(builder, index);
+        if (entity.value >= builder->parse.entity_count || builder->parse.entities[entity.value].kind != C_ENTITY_LOCAL)
+        {
+            continue;
+        }
+        CTypeId type = builder->parse.entities[entity.value].type;
+        result = type.value < builder->parse.type_count && builder->parse.types[type.value].kind == C_TYPE_ARRAY &&
+                 builder->c_type_ir_map[type.value].value == IR_ID_UNDERLYING_INVALID;
+    }
+
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_lower_body_finish_vla_declaration(CIntegerIrBuilder* builder, CIrLowerBodyState* state)
 {
-    CIrVlaLayout* layout = state->vla_layout;
-    IrValueId storage = c_ir_add_result(builder, state->vla_pointer_type);
-    if (layout->runtime_size.value == IR_ID_UNDERLYING_INVALID || storage.value == IR_ID_UNDERLYING_INVALID)
-    {
-        return false;
-    }
-    IrSourceRange source = c_ir_source_range(c_ir_token_location(builder, state->vla_name), state->vla_name.length);
-    IrSourceRange allocation_source = source;
-    IrInstruction allocation = c_ir_instruction_initialize(IR_OPCODE_STACK_ALLOCATE, state->vla_pointer_type);
-    allocation.operands = arena_allocate(builder->arena, IrValueId, 1);
-    allocation.operands[0] = layout->runtime_size;
-    allocation.operand_count = 1;
-    allocation.immediates = arena_allocate(builder->arena, u64, 1);
-    allocation.immediates[0] = state->vla_alignment;
-    allocation.immediate_count = 1;
-    allocation.result = storage;
-    builder->function->values[storage.value].definition = c_ir_append_instruction(builder, allocation, allocation_source);
-    IrType* pointer_type = ir_type_from_id(&builder->program->types, state->vla_pointer_type);
-    IrValueId place = c_ir_emit_local(builder, state->vla_name, state->vla_pointer_type, state->vla_entity,
-                                      pointer_type ? pointer_type->layout.alignment : state->vla_alignment);
-    CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, state->vla_entity);
-    if (place.value == IR_ID_UNDERLYING_INVALID || !local)
-    {
-        return false;
-    }
-    local->runtime_size = layout->runtime_size;
-    local->vla_element_type = state->vla_element_type;
-    local->vla_dimension_counts = layout->dimension_counts;
-    local->vla_suffix_sizes = layout->suffix_sizes;
-    local->vla_dimension_count = layout->dimension_count;
-    local->is_variable_length_array = true;
-    if (!c_ir_emit_store(builder, local, storage, source))
-    {
-        return false;
-    }
-    c_ir_mark_local_read_only(builder, local);
-    return c_ir_activate_cleanup(builder, state->vla_entity, source);
+    return c_ir_emit_vla_storage(builder, state->vla_layout, state->vla_pointer_type, state->vla_element_type, state->vla_entity, state->vla_name,
+                                 state->vla_alignment);
 }
 
 // The keyword groups the statement walker classifies its first token
@@ -30258,6 +30405,15 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 }
                 if (multiple_declarators)
                 {
+                    // A list may declare a variable-length array in any of its
+                    // declarators, and each declarator is lowered from its own
+                    // frame, which has no task to take the checkpoint on. Take
+                    // it here, once, ahead of the whole list.
+                    if (c_ir_declaration_declares_vla(builder, index, end) &&
+                        !c_ir_body_task_take_stack_checkpoint(builder, &task, first))
+                    {
+                        return false;
+                    }
                     CIrLowerAutomaticDeclarationListState* declaration_state =
                         arena_allocate(builder->scratch_arena, CIrLowerAutomaticDeclarationListState, 1);
                     *declaration_state = (CIrLowerAutomaticDeclarationListState){
@@ -30486,40 +30642,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 }
                 if (variable_length_array)
                 {
-                    if (!task.has_stack_checkpoint)
+                    if (!c_ir_body_task_take_stack_checkpoint(builder, &task, name))
                     {
-                        // The save is taken here, at the declaration that
-                        // moves the stack pointer, and never at the entry of
-                        // the enclosing loop body. An entry save does not
-                        // dominate a label inside the body, so a `goto` into
-                        // the body would reach the end-of-iteration restore
-                        // having never executed the save and would load the
-                        // frame slot's stale contents into RSP. C forbids
-                        // jumping into the scope of a variably modified
-                        // declaration, so taking the save at the declaration
-                        // leaves no conforming program without one.
-                        task.stack_checkpoint = c_ir_emit_stack_save(builder, c_ir_token_source_range(builder, name));
-                        if (task.stack_checkpoint.value == IR_ID_UNDERLYING_INVALID)
-                        {
-                            return false;
-                        }
-                        task.has_stack_checkpoint = true;
-                        task.restore_before_continuation = true;
-                        // The outermost checkpoint inside the loop body is the
-                        // one `break` and `continue` restore; a nested block's
-                        // later checkpoint would leave everything the body
-                        // allocated before it on the stack, and the next
-                        // iteration would allocate again below it.
-                        if (task.checkpoint_is_break && !task.has_break_checkpoint)
-                        {
-                            task.break_checkpoint = task.stack_checkpoint;
-                            task.has_break_checkpoint = true;
-                        }
-                        if (task.checkpoint_is_continue && !task.has_continue_checkpoint)
-                        {
-                            task.continue_checkpoint = task.stack_checkpoint;
-                            task.has_continue_checkpoint = true;
-                        }
+                        return false;
                     }
                     if (c_ir_declaration_initializer_range(builder->preprocess,
                                                            (CDeclaration){
