@@ -16079,7 +16079,10 @@ struct MuslUnit
     SelfHostSourceMetrics metrics;
     bool compiled;
     bool clang_compiled;
-    u8 reserved[6];
+    // The source is architecture assembly rather than a C translation unit,
+    // so both sides assemble it and neither measures it.
+    bool assembly;
+    u8 reserved[5];
 };
 
 typedef struct MuslManifest MuslManifest;
@@ -16087,17 +16090,11 @@ struct MuslManifest
 {
     MuslUnit* units;
     u64 unit_count;
-    // Translation units whose .c file is empty because the architecture
-    // supplies the implementation in assembly instead. musl replaces them
-    // wholesale on x86-64; they are reported and left out rather than compiled
-    // into empty objects that would define nothing.
-    String8* assembly_only;
-    u64 assembly_only_count;
-    // The architecture assembly musl would prefer over a portable C unit. The
-    // Buster driver takes no assembly input, so the harness compiles the
-    // portable C instead and reports each of these as an excluded component.
-    String8* architecture_assembly;
-    u64 architecture_assembly_count;
+    // How many of them the architecture supplies as assembly. musl's own
+    // replacement rule is applied, so each of these is the `.s` in the
+    // architecture subdirectory standing in for the portable `.c` of the same
+    // name, and neither the portable unit nor a report of it remains.
+    u64 assembly_unit_count;
 };
 
 // The compiled-unit count and the identity of the failing set, both pinned. The
@@ -16114,7 +16111,15 @@ struct MuslManifest
 // read a wide floating-point value out of the overflow area. That was the last
 // class: every unit in the manifest compiles, so the failing set is empty and
 // its hash is the hash of nothing.
-#define MUSL_EXPECTED_COMPILED_UNITS 1349
+// 2026-08-29: 1349 -> 1356, and the manifest itself moved with it. The driver
+// takes assembly input now, so musl's own replacement rule is applied: the 32
+// `.s` files under the architecture subdirectories are built and the portable
+// units of the same name are not, and the seven units whose `.c` is empty stop
+// being reported and become the assembly that replaces them -- six of them; the
+// seventh, `src/thread/tls`, has no x86-64 assembly either and is the empty
+// translation unit musl itself compiles. The count is the whole manifest
+// because 1324 C units and 32 assembly units all build.
+#define MUSL_EXPECTED_COMPILED_UNITS 1356
 #define MUSL_EXPECTED_FAILURE_HASH 0x0ull
 
 // The environment a dynamically linked program is given. musl's own loader
@@ -16387,26 +16392,49 @@ BUSTER_GLOBAL_LOCAL bool musl_list_directory(Arena* arena, String8 directory, Mu
     return result;
 }
 
+// One source musl would compile for this architecture: the unit it defines,
+// the file it comes from, and which of the two kinds of file that is.
+typedef struct MuslSource MuslSource;
+struct MuslSource
+{
+    // musl-relative path with no extension, for example "src/string/memcpy".
+    String8 unit;
+    String8 source;
+    bool assembly;
+    u8 reserved[7];
+};
+
 typedef struct MuslManifestBuilder MuslManifestBuilder;
 struct MuslManifestBuilder
 {
     Arena* arena;
     String8 root;
     String8 architecture_directory;
-    String8* base;
-    u64 base_count;
-    String8* architecture_assembly;
-    u64 architecture_assembly_count;
+    MuslSource* sources;
+    u64 source_count;
     u64 capacity;
     bool failed;
     u8 reserved[7];
 };
 
+BUSTER_GLOBAL_LOCAL void musl_source_append(MuslManifestBuilder* builder, String8 unit, String8 source, bool assembly)
+{
+    if (builder->source_count >= builder->capacity)
+    {
+        builder->failed = true;
+        return;
+    }
+    builder->sources[builder->source_count++] = (MuslSource){
+        .unit = unit,
+        .source = source,
+        .assembly = assembly,
+    };
+}
+
 // Every `.c` in one directory, and every `.s`/`.S` in its architecture
 // subdirectory. This is musl's own BASE_GLOBS/ARCH_GLOBS pair for a single
-// source directory, with the replacement rule deliberately not applied: musl
-// would drop a portable unit in favour of the architecture assembly, and this
-// harness keeps the portable unit because the driver cannot assemble.
+// source directory; the replacement rule that lets the architecture file win
+// is applied once both are collected, in musl_collect_manifest.
 BUSTER_GLOBAL_LOCAL void musl_collect_directory(MuslManifestBuilder* builder, String8 relative_directory)
 {
     MuslDirectoryEntry* entries = 0;
@@ -16440,13 +16468,13 @@ BUSTER_GLOBAL_LOCAL void musl_collect_directory(MuslManifestBuilder* builder, St
                     {
                         continue;
                     }
-                    if (builder->architecture_assembly_count >= builder->capacity)
+                    String8 stem = string_slice(architecture_name, 0, architecture_name.length - 2);
+                    musl_source_append(builder, path_join(builder->arena, relative_directory, stem),
+                                       path_join(builder->arena, path_join(builder->arena, full, name), architecture_name), true);
+                    if (builder->failed)
                     {
-                        builder->failed = true;
                         return;
                     }
-                    builder->architecture_assembly[builder->architecture_assembly_count++] =
-                        path_join(builder->arena, relative, architecture_name);
                 }
             }
             continue;
@@ -16455,12 +16483,11 @@ BUSTER_GLOBAL_LOCAL void musl_collect_directory(MuslManifestBuilder* builder, St
         {
             continue;
         }
-        if (builder->base_count >= builder->capacity)
+        musl_source_append(builder, string_slice(relative, 0, relative.length - 2), path_join(builder->arena, full, name), false);
+        if (builder->failed)
         {
-            builder->failed = true;
             return;
         }
-        builder->base[builder->base_count++] = string_slice(relative, 0, relative.length - 2);
     }
 }
 
@@ -16473,10 +16500,9 @@ BUSTER_GLOBAL_LOCAL bool musl_collect_manifest(Arena* arena, String8 root, Strin
         .arena = arena,
         .root = root,
         .architecture_directory = S8(MUSL_COMPATIBILITY_ARCHITECTURE),
-        .capacity = 4096,
+        .capacity = 8192,
     };
-    builder.base = arena_allocate(arena, String8, builder.capacity);
-    builder.architecture_assembly = arena_allocate(arena, String8, builder.capacity);
+    builder.sources = arena_allocate(arena, MuslSource, builder.capacity);
 
     MuslDirectoryEntry* source_entries = 0;
     u64 source_entry_count = 0;
@@ -16495,65 +16521,55 @@ BUSTER_GLOBAL_LOCAL bool musl_collect_manifest(Arena* arena, String8 root, Strin
     musl_collect_directory(&builder, S8("src/malloc/" MUSL_COMPATIBILITY_ALLOCATOR));
     musl_collect_directory(&builder, S8("crt"));
     musl_collect_directory(&builder, S8("ldso"));
-    if (builder.failed || !builder.base_count)
+    if (builder.failed || !builder.source_count)
     {
         string_print(S8("error: test_musl could not enumerate the musl source manifest\n"));
         return false;
     }
 
-    for (u64 index = 1; index < builder.base_count; index += 1)
+    // Sorted by unit, and within one unit the architecture file first: that
+    // ordering is what applies musl's replacement rule below, and it is also
+    // what keeps the report and the gate hash independent of the order a
+    // directory happens to be read in.
+    for (u64 index = 1; index < builder.source_count; index += 1)
     {
-        String8 value = builder.base[index];
+        MuslSource value = builder.sources[index];
         u64 position = index;
-        while (position && musl_string_less(value, builder.base[position - 1]))
+        while (position && (musl_string_less(value.unit, builder.sources[position - 1].unit) ||
+                            (string_equal(value.unit, builder.sources[position - 1].unit) && value.assembly &&
+                             !builder.sources[position - 1].assembly)))
         {
-            builder.base[position] = builder.base[position - 1];
+            builder.sources[position] = builder.sources[position - 1];
             position -= 1;
         }
-        builder.base[position] = value;
-    }
-    for (u64 index = 1; index < builder.architecture_assembly_count; index += 1)
-    {
-        String8 value = builder.architecture_assembly[index];
-        u64 position = index;
-        while (position && musl_string_less(value, builder.architecture_assembly[position - 1]))
-        {
-            builder.architecture_assembly[position] = builder.architecture_assembly[position - 1];
-            position -= 1;
-        }
-        builder.architecture_assembly[position] = value;
+        builder.sources[position] = value;
     }
 
     MuslManifest manifest = {
-        .units = arena_allocate(arena, MuslUnit, builder.base_count),
-        .assembly_only = arena_allocate(arena, String8, builder.base_count),
-        .architecture_assembly = builder.architecture_assembly,
-        .architecture_assembly_count = builder.architecture_assembly_count,
+        .units = arena_allocate(arena, MuslUnit, builder.source_count),
     };
     String8 buster_root = path_join(arena, output_directory, S8("buster"));
     String8 clang_root = path_join(arena, output_directory, S8("clang"));
-    for (u64 index = 0; index < builder.base_count; index += 1)
+    for (u64 index = 0; index < builder.source_count; index += 1)
     {
-        String8 relative = builder.base[index];
-        String8 source = string_format(arena, S8("{S8}.c"), path_join(arena, root, relative));
-        TemporalArena temporary = scratch_begin(&arena, 1);
-        ByteSlice bytes = file_read(temporary.arena, string_duplicate_arena(temporary.arena, source, true), (FileReadOptions){0});
-        bool empty = !bytes.length;
-        scratch_end(temporary);
-        if (empty)
+        MuslSource source = builder.sources[index];
+        // musl's REPLACED_OBJS: the architecture file wins and the portable
+        // unit of the same name is not built at all.
+        if (index && string_equal(source.unit, builder.sources[index - 1].unit))
         {
-            manifest.assembly_only[manifest.assembly_only_count++] = relative;
             continue;
         }
-        String8 object_directory = path_join(arena, buster_root, path_parent(arena, relative));
-        String8 clang_object_directory = path_join(arena, clang_root, path_parent(arena, relative));
+        String8 object_directory = path_join(arena, buster_root, path_parent(arena, source.unit));
+        String8 clang_object_directory = path_join(arena, clang_root, path_parent(arena, source.unit));
         make_directory_recursive(arena, object_directory);
         make_directory_recursive(arena, clang_object_directory);
+        manifest.assembly_unit_count += source.assembly;
         manifest.units[manifest.unit_count++] = (MuslUnit){
-            .relative = relative,
-            .source = source,
-            .object = string_format(arena, S8("{S8}.o"), path_join(arena, buster_root, relative)),
-            .clang_object = string_format(arena, S8("{S8}.o"), path_join(arena, clang_root, relative)),
+            .relative = source.unit,
+            .source = source.source,
+            .object = string_format(arena, S8("{S8}.o"), path_join(arena, buster_root, source.unit)),
+            .clang_object = string_format(arena, S8("{S8}.o"), path_join(arena, clang_root, source.unit)),
+            .assembly = source.assembly,
         };
     }
     *manifest_out = manifest;
@@ -16749,6 +16765,32 @@ BUSTER_GLOBAL_LOCAL bool musl_compile_clang(Arena* arena, String8 clang, String8
     os_argument_builder_append(&builder, output);
     os_argument_builder_append(&builder, source);
     MuslCommandResult command = musl_command(arena, os_argument_builder_flush(&builder), S8("."), true, false);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// An assembly unit takes neither the flag set nor the include paths: there is
+// no preprocessor in front of it and nothing to measure in it. Both sides get
+// the same command, which is the whole of what assembling a `.s` is.
+BUSTER_GLOBAL_LOCAL bool musl_assemble_buster(Arena* arena, String8 ide, String8 source, String8 output, u64* elapsed_us, String8* diagnostic)
+{
+    String8 arguments[] = {ide, S8("cc"), S8("-c"), S8("-o"), output, source};
+    u64 start = os_now_microseconds();
+    MuslCommandResult command = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), true, false);
+    if (elapsed_us)
+    {
+        *elapsed_us = os_now_microseconds() - start;
+    }
+    if (diagnostic)
+    {
+        *diagnostic = musl_first_line(command.error.length ? command.error : command.output);
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL bool musl_assemble_clang(Arena* arena, String8 clang, String8 source, String8 output)
+{
+    String8 arguments[] = {clang, S8("-c"), S8("-o"), output, source};
+    MuslCommandResult command = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), true, false);
     return command.result == PROCESS_RESULT_SUCCESS;
 }
 
@@ -17319,8 +17361,6 @@ struct LibcTestBuild
     String8 buster_startup_object;
     bool startup_shared;
     u8 reserved[7];
-    String8 clang_thread_pointer_object;
-    String8 buster_thread_pointer_object;
     String8 clang_archive;
     String8 buster_archive;
     // The shared musl each side built, by absolute path: it is both the
@@ -17407,11 +17447,11 @@ BUSTER_GLOBAL_LOCAL String8 libc_test_parent_directory(String8 path)
 // One test program, or one shared object. Upstream's build has three shapes
 // and the sibling .mk says which one a unit is:
 //
-//   static program   musl's startup object, the thread-pointer replacement,
-//                    the test, upstream's support archive and the libc under
-//                    test, linked with `ld -static` and nothing else. The
-//                    archive order is upstream's: the support library resolves
-//                    against libc, never the other way round.
+//   static program   musl's startup object, the test, upstream's support
+//                    archive and the libc under test, linked with `ld -static`
+//                    and nothing else. The archive order is upstream's: the
+//                    support library resolves against libc, never the other
+//                    way round.
 //   shared object    the test compiled -fPIC, linked -shared against the
 //                    shared musl. Upstream builds these for the tests that
 //                    open them and never runs one itself.
@@ -17419,10 +17459,7 @@ BUSTER_GLOBAL_LOCAL String8 libc_test_parent_directory(String8 path)
 //                    shared musl, with that musl named as the interpreter and
 //                    the program's own directory as the run path -- which is
 //                    upstream's -rpath='$ORIGIN', spelled as the directory
-//                    because this harness knows where it put the file. The
-//                    thread-pointer replacement is not on this line: the
-//                    shared musl already carries it, and a second definition
-//                    would be a duplicate symbol rather than a substitution.
+//                    because this harness knows where it put the file.
 BUSTER_GLOBAL_LOCAL bool libc_test_link(Arena* arena, LibcTestBuild* build, LibcTestManifest* manifest, LibcTestUnit* unit, bool buster,
                                         u64* elapsed_us, String8* error_out)
 {
@@ -17480,10 +17517,6 @@ BUSTER_GLOBAL_LOCAL bool libc_test_link(Arena* arena, LibcTestBuild* build, Libc
     if (!unit->shared)
     {
         os_argument_builder_append(&builder, buster ? build->buster_startup_object : build->clang_startup_object);
-    }
-    if (!unit->shared && !unit->dynamic)
-    {
-        os_argument_builder_append(&builder, buster ? build->buster_thread_pointer_object : build->clang_thread_pointer_object);
     }
     os_argument_builder_append(&builder, buster ? unit->buster_object : unit->clang_object);
     for (u64 index = 0; index < dependency_count; index += 1)
@@ -18224,15 +18257,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
     {
         return PROCESS_RESULT_FAILED;
     }
-    string_print(S8("MUSL_MANIFEST c_units={u64} assembly_only={u64} architecture_assembly={u64} fixture={S8}\n"), manifest.unit_count,
-                 manifest.assembly_only_count, manifest.architecture_assembly_count, fixture);
-    for (u64 index = 0; index < manifest.assembly_only_count; index += 1)
+    string_print(S8("MUSL_MANIFEST units={u64} c_units={u64} assembly_units={u64} fixture={S8}\n"), manifest.unit_count,
+                 manifest.unit_count - manifest.assembly_unit_count, manifest.assembly_unit_count, fixture);
+    // Each architecture-assembly unit and the file it took, which is inventory
+    // rather than exclusion: this is the list of units where the archive holds
+    // musl's own x86-64 implementation instead of a portable sibling.
+    for (u64 index = 0; index < manifest.unit_count; index += 1)
     {
-        string_print(S8("MUSL_EXCLUDED reason=assembly-only unit={S8}\n"), manifest.assembly_only[index]);
-    }
-    for (u64 index = 0; index < manifest.architecture_assembly_count; index += 1)
-    {
-        string_print(S8("MUSL_EXCLUDED reason=architecture-assembly unit={S8}\n"), manifest.architecture_assembly[index]);
+        if (manifest.units[index].assembly)
+        {
+            string_print(S8("MUSL_ASSEMBLY unit={S8} source={S8}\n"), manifest.units[index].relative, manifest.units[index].source);
+        }
     }
 
     // The reference build comes first. A musl unit Clang cannot compile under
@@ -18244,7 +18279,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
         MuslUnit* unit = manifest.units + index;
         TemporalArena temporary = scratch_begin(&arena, 1);
         unit->clang_compiled =
-            musl_compile_clang(temporary.arena, clang, source_directory, object_directory, unit->source, unit->clang_object, (String8){0});
+            unit->assembly ? musl_assemble_clang(temporary.arena, clang, unit->source, unit->clang_object)
+                           : musl_compile_clang(temporary.arena, clang, source_directory, object_directory, unit->source, unit->clang_object,
+                                                (String8){0});
         scratch_end(temporary);
         if (!unit->clang_compiled)
         {
@@ -18267,8 +18304,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
         String8 metrics_path = string_format(arena, S8("{S8}/{u64}.txt"), metrics_directory, index);
         TemporalArena temporary = scratch_begin(&arena, 1);
         String8 diagnostic = {0};
-        unit->compiled = musl_compile_buster(temporary.arena, ide, source_directory, object_directory, unit->source, unit->object, metrics_path,
-                                             S8(MUSL_COMPATIBILITY_ALLOCATOR_MODE), &unit->elapsed_us, &diagnostic);
+        unit->compiled = unit->assembly
+                             ? musl_assemble_buster(temporary.arena, ide, unit->source, unit->object, &unit->elapsed_us, &diagnostic)
+                             : musl_compile_buster(temporary.arena, ide, source_directory, object_directory, unit->source, unit->object, metrics_path,
+                                                   S8(MUSL_COMPATIBILITY_ALLOCATOR_MODE), &unit->elapsed_us, &diagnostic);
         unit->diagnostic = string_duplicate_arena(arena, diagnostic, true);
         scratch_end(temporary);
         compile_us += unit->elapsed_us;
@@ -18276,7 +18315,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
         {
             compiled += 1;
             SelfHostSourceMetrics metrics = {0};
-            if (self_host_source_metrics_read(arena, metrics_path, &metrics))
+            if (!unit->assembly && self_host_source_metrics_read(arena, metrics_path, &metrics))
             {
                 unit->metrics = metrics;
                 totals.bytes += metrics.bytes;
@@ -18378,18 +18417,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
             buster_objects[buster_object_count++] = unit->object;
         }
         clang_objects[clang_object_count++] = unit->clang_object;
-    }
-    // crti.o and crtn.o come from crt/x86_64/crti.s and crtn.s, which have no
-    // portable C to fall back to; the driver takes no assembly input, so the
-    // pair is named here rather than left to be noticed as missing.
-    for (u64 index = 0; index < manifest.architecture_assembly_count; index += 1)
-    {
-        if (string_starts_with_sequence(manifest.architecture_assembly[index], S8("crt/")))
-        {
-            startup_absent += 1;
-            string_print(S8("MUSL_STARTUP unit={S8} object=- status=absent reason=the driver takes no assembly input\n"),
-                         manifest.architecture_assembly[index]);
-        }
     }
     String8 buster_archive = path_join(arena, output_directory, S8("libc-buster.a"));
     String8 clang_archive = path_join(arena, output_directory, S8("libc-clang.a"));
@@ -18543,47 +18570,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
         string_print(S8("MUSL_ABI direction={S8} link_us={u64} bytes={u64} status=pass\n"), abi_directions[index].name, link_us, transcript.length);
     }
 
-    // The two project-owned objects that stand in for architecture assembly.
-    // Each is compiled by both sides with that side's own compiler, so a
-    // program built from one of them is that compiler's code throughout, and
-    // both stages below use the same pair.
-    String8 thread_pointer_fixture = S8("tests/basic_musl_thread_pointer.c");
-    String8 shared_assembly_fixture = S8("tests/basic_musl_shared_assembly.c");
-    String8 missing_fixture = !path_exists(arena, thread_pointer_fixture)  ? thread_pointer_fixture
-                              : !path_exists(arena, shared_assembly_fixture) ? shared_assembly_fixture
-                                                                             : (String8){0};
-    if (missing_fixture.length)
-    {
-        string_print(S8("error: musl compatibility fixture is missing: {S8}\n"), missing_fixture);
-        return PROCESS_RESULT_FAILED;
-    }
-    struct
-    {
-        String8 name;
-        String8 source;
-        String8 clang_object;
-        String8 buster_object;
-    } substitutions[] = {
-        {S8("thread-pointer"), thread_pointer_fixture, path_join(arena, output_directory, S8("thread-pointer-clang.o")),
-         path_join(arena, output_directory, S8("thread-pointer-buster.o"))},
-        {S8("shared-assembly"), shared_assembly_fixture, path_join(arena, output_directory, S8("shared-assembly-clang.o")),
-         path_join(arena, output_directory, S8("shared-assembly-buster.o"))},
-    };
-    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(substitutions); index += 1)
-    {
-        String8 diagnostic = {0};
-        if (!musl_compile_clang(arena, clang, source_directory, object_directory, substitutions[index].source, substitutions[index].clang_object,
-                                (String8){0}) ||
-            !musl_compile_buster(arena, ide, source_directory, object_directory, substitutions[index].source, substitutions[index].buster_object,
-                                 (String8){0}, S8(MUSL_COMPATIBILITY_ALLOCATOR_MODE), 0, &diagnostic))
-        {
-            string_print(S8("error: the musl {S8} replacement did not compile: {S8}\n"), substitutions[index].name, diagnostic);
-            return PROCESS_RESULT_FAILED;
-        }
-    }
-    String8 clang_thread_pointer_object = substitutions[0].clang_object;
-    String8 buster_thread_pointer_object = substitutions[0].buster_object;
-
     // The shared musl. Everything above links -static, which is a whole
     // program resolved before it runs; a shared object is the other half of
     // what a libc is, and a different demand on the compiler. Every reference
@@ -18599,17 +18585,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
     //   loader out of libc.a and its LDSO_OBJS rule puts it into libc.so; the
     //   entry point the shared link names is in the first of the two.
     //
-    //   src/thread/__set_thread_area leaves it, replaced by the object the
-    //   thread-pointer fixture builds. musl's x86-64 unit is assembly, the
-    //   portable sibling this harness compiles in its place returns -ENOSYS,
-    //   and the loader's own startup crashes on that answer before any program
-    //   runs. The archive gets the same replacement by link order, which a
-    //   shared object has no equivalent of, so here it is a substitution in
-    //   the object set.
-    //
-    //   The shared-assembly fixture joins it, for the reason written at the
-    //   top of that file: --no-undefined is on the shared link line, and the
-    //   assembly-only translation units leave six names behind.
+    //   Nothing is substituted into it any more. `--no-undefined` is on the
+    //   shared link line, and until the driver took assembly input the
+    //   assembly-only units left six names behind -- `__syscall_cp_asm` with
+    //   its three window labels, `setjmp` and `longjmp` -- while
+    //   `src/thread/__set_thread_area`'s portable sibling returned -ENOSYS and
+    //   crashed the loader's own startup. Both sets are musl's own assembly
+    //   now, on both sides.
     String8* buster_shared_objects = arena_allocate(arena, String8, manifest.unit_count + 2);
     String8* clang_shared_objects = arena_allocate(arena, String8, manifest.unit_count + 2);
     u64 buster_shared_count = 0;
@@ -18618,7 +18600,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
     {
         MuslUnit* unit = manifest.units + index;
         bool member = string_starts_with_sequence(unit->relative, S8("src/")) || string_starts_with_sequence(unit->relative, S8("ldso/"));
-        if (!member || string_equal(unit->relative, S8("src/thread/__set_thread_area")))
+        if (!member)
         {
             continue;
         }
@@ -18627,11 +18609,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
             buster_shared_objects[buster_shared_count++] = unit->object;
         }
         clang_shared_objects[clang_shared_count++] = unit->clang_object;
-    }
-    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(substitutions); index += 1)
-    {
-        buster_shared_objects[buster_shared_count++] = substitutions[index].buster_object;
-        clang_shared_objects[clang_shared_count++] = substitutions[index].clang_object;
     }
     String8 buster_shared = path_join(arena, output_directory, S8("libc-buster.so"));
     String8 clang_shared = path_join(arena, output_directory, S8("libc-clang.so"));
@@ -18752,8 +18729,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
             // on the LIBCTEST_MANIFEST line rather than left to be inferred.
             .buster_startup_object = buster_startup_object.length ? buster_startup_object : clang_startup_object,
             .startup_shared = !buster_startup_object.length,
-            .clang_thread_pointer_object = clang_thread_pointer_object,
-            .buster_thread_pointer_object = buster_thread_pointer_object,
             .clang_archive = clang_archive,
             .buster_archive = buster_archive,
             .clang_shared = clang_shared_absolute,
@@ -18768,11 +18743,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
         libc_test_ran = true;
     }
 
-    string_print(S8("MUSL_SUMMARY tag={S8} commit={S8} units={u64} compiled={u64} unsupported={u64} assembly_only={u64} architecture_assembly={u64} "
+    string_print(S8("MUSL_SUMMARY tag={S8} commit={S8} units={u64} compiled={u64} unsupported={u64} assembly_units={u64} "
                     "allocators={u64} libc_test={S8}\n"),
                  S8(MUSL_COMPATIBILITY_TAG), S8(MUSL_COMPATIBILITY_COMMIT), manifest.unit_count, compiled, manifest.unit_count - compiled,
-                 manifest.assembly_only_count, manifest.architecture_assembly_count, BUSTER_ARRAY_LENGTH(allocators),
-                 libc_test_ran ? S8("run") : S8("skipped"));
+                 manifest.assembly_unit_count, BUSTER_ARRAY_LENGTH(allocators), libc_test_ran ? S8("run") : S8("skipped"));
     return PROCESS_RESULT_SUCCESS;
 }
 

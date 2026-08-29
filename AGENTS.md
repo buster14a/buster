@@ -954,10 +954,9 @@ what a libc is. `libc.so` is built from the same object set on both sides, with
 the three differences musl's own `libc.so` recipe states. `ldso/dlstart` and
 `ldso/dynlink` join it, because musl's `LDSO_OBJS` rule puts the loader in the
 shared library and its `AOBJS` rule keeps it out of the archive.
-`src/thread/__set_thread_area` leaves it, replaced by the object
-`tests/basic_musl_thread_pointer.c` builds: the archive gets that substitution
-by link order, and an object set that is linked whole has no link order to
-exploit. And `tests/basic_musl_shared_assembly.c` joins it, described below.
+Nothing is substituted into it: `src/thread/__set_thread_area` used to leave
+it for a project-owned object, and six more names used to need one, and both
+sets are musl's own assembly now.
 
 The link is `ld -shared -Bsymbolic --no-undefined -e _dlstart`, and the first
 three of those are musl's own.
@@ -988,23 +987,18 @@ compilers already produced, which keeps the shared stage at two links instead
 of another two thousand compiles, and it is what makes the shared link a
 statement about the code generation the rest of the harness already measured.
 
-`tests/basic_musl_shared_assembly.c` is what `--no-undefined` needs. A static
-link pulls only the archive members a program reaches, so the seven
-assembly-only units cost nothing until something calls one; every object handed
-to `ld -shared` is in the result and every relocation in it is resolved when
-the library loads. Six names are left over -- `__syscall_cp_asm` with the three
-labels `__cp_begin`, `__cp_end` and `__cp_cancel` that bound its cancellation
-window, and `setjmp`/`longjmp` -- and that file defines those six and nothing
-else, compiled by each side with that side's own compiler the way the
-thread-pointer replacement is. The cancellable system call is performed without
-the window, which is what musl itself does whenever cancellation is disabled
-and it is disabled for every thread this configuration can create. `setjmp` and
-`longjmp` trap: saving the callee-saved registers and the return address needs
-the register names an inline template is not allowed to write, and neither
-compiler is given a different file. What that costs is reported rather than
-hidden -- musl's loader saves a jump buffer around `dlopen`, so every libc-test
-unit that opens a library is held out below -- and nothing at startup reaches
-either one.
+`--no-undefined` is what used to need a project-owned file beside the object
+set. A static link pulls only the archive members a program reaches, so the
+seven assembly-only units cost nothing until something calls one; every object
+handed to `ld -shared` is in the result and every relocation in it is resolved
+when the library loads, and six names were left over -- `__syscall_cp_asm` with
+the three labels `__cp_begin`, `__cp_end` and `__cp_cancel` that bound its
+cancellation window, and `setjmp`/`longjmp`. Every one of them is musl's own
+x86-64 assembly now, so the shared object set is the compiled one and nothing
+else. `setjmp` and `longjmp` in particular used to trap -- neither is
+expressible in C -- and musl's loader saves a jump buffer around `dlopen`, so
+that substitution is what held every libc-test unit that opens a library out of
+the comparison.
 
 The dynamic probe is `tests/basic_musl_freestanding.c` again, resolved against
 the shared musl instead of the archive and started by the loader inside it. The
@@ -1028,17 +1022,26 @@ write-when-relocated word on a page the loader maps read-only, which is a
 `DT_TEXTREL` musl's loader does not undo for the file it was itself started
 from.
 
-What Buster cannot yet build is reported rather than worked around, in three
-groups. Seven translation units are `assembly-only`: their `.c` file is empty
-because x86-64 supplies the implementation in assembly (`crt/crti`,
-`crt/crtn`, `src/setjmp/setjmp`, `src/setjmp/longjmp`,
-`src/signal/sigsetjmp`, `src/thread/syscall_cp`, `src/thread/tls`).
-Thirty-two files are `architecture-assembly`: musl would prefer them over a
-portable C unit, and since the Buster driver takes no assembly input the
-harness compiles the portable C instead and lists each one. Every other unit
-in the manifest compiles: there are no `MUSL_UNSUPPORTED` units left, and the
-last class to go was `vfprintf`/`vfwprintf`, both on wide floating-point
-`va_arg`, described with the type below.
+The manifest is musl's own x86-64 configuration, replacement rule included.
+Every `.c` in a source directory and every `.s` in its architecture
+subdirectory is collected, and where the two name the same unit the
+architecture file wins and the portable one is not built at all -- musl's
+`REPLACED_OBJS`. That is 1356 units, 32 of them assembly, and all 1356 build:
+there are no `MUSL_UNSUPPORTED` units and no excluded components. Each
+assembly unit is still named, on a `MUSL_ASSEMBLY` line, because which units
+the archive holds musl's own x86-64 implementation for is inventory worth
+having; it is no longer an exclusion. One unit's `.c` is empty with no
+assembly to replace it -- `src/thread/tls`, which x86-64 does not need -- and
+it is the empty translation unit musl itself compiles rather than a reported
+gap.
+
+Before the driver took assembly input this was three groups of reported
+exclusions: seven `assembly-only` units whose `.c` is empty because the
+architecture supplies the implementation in assembly, thirty-two
+`architecture-assembly` files the harness replaced with the portable C, and
+whatever else failed. The last of the third group to go was
+`vfprintf`/`vfwprintf`, both on wide floating-point `va_arg`, described with
+the type below.
 
 Static initializers are no longer a class, and neither are the three
 singletons that stood beside them: 1344 to 1347. `src/misc/ioctl`'s
@@ -1164,9 +1167,10 @@ relocation plumbing: `crt/rcrt1.c` and `ldso/dlstart.c` stop on x86-64's
 `GETFUNCSYM` in `arch/x86_64/reloc.h`, which is *inline* assembly carrying a
 `.hidden` directive and a RIP-relative `lea` against a symbol with an output
 operand, and that shape now reaches the object as a relocation like any other.
-Two objects are still absent, and the reason is not the assembly path at all:
-`crti.o` and `crtn.o` come from `crt/x86_64/crti.s` and `crtn.s`, which have
-no portable C to fall back to, and the driver takes no assembly input.
+`crti.o` and `crtn.o` are there too, and they are the whole reason a section
+keeps its own name through the assembler: each contributes one and two bytes
+to `.init` and `.fini`, which the system linker concatenates in order.
+`startup_absent` is zero.
 
 `ldso/dlstart.c` and `ldso/dynlink.c` compile now too, and stay out of
 `libc.a` under musl's own `AOBJS` rule rather than because of anything Buster
@@ -1237,17 +1241,14 @@ member on either side — a program links it explicitly and `libc.a` separately 
 so a libc-test program is one compiler's code from `_start` down. If Buster
 ever stops producing it the reference's copy stands in on both sides, and the
 `LIBCTEST_MANIFEST` line says which of the two arrangements is in force rather
-than leaving it to be inferred. `tests/basic_musl_thread_pointer.c` is
-project-owned and is compiled by each side with that side's compiler. It is one instruction sequence:
-`__set_thread_area` is x86-64 assembly in musl, the harness substitutes the
-portable C sibling for every architecture-assembly unit, and that sibling is
-written for architectures with a `SYS_set_thread_area` system call -- x86-64
-has none, so it returns `-ENOSYS`, `__init_tp` fails and `__init_tls` crashes
-the process before `main` in *both* archives. The replacement is the
-`arch_prctl(ARCH_SET_FS)` musl's own assembly performs. It goes ahead of the
-archive on the link line, which is what keeps musl's portable member from
-being pulled in beside it: an archive member is only extracted for a symbol
-that is still undefined.
+than leaving it to be inferred. That is the only such object now. A
+project-owned `__set_thread_area` used to sit beside it, because the harness
+substituted the portable C sibling for every architecture-assembly unit and
+that sibling is written for architectures with a `SYS_set_thread_area` system
+call -- x86-64 has none, so it returned `-ENOSYS`, `__init_tp` failed, and
+`__init_tls` crashed the process before `main` in *both* archives. Both
+archives now hold musl's own `arch_prctl(ARCH_SET_FS)`, and the replacement
+is gone.
 
 Nine units are built differently, and upstream's sibling `.mk` is what says so.
 It is a make fragment of one to four lines, and the harness reads it for the
@@ -1284,11 +1285,14 @@ behind. The classification is derived from the checkout and from what the two
 sides do, not written down:
 
 - `excluded-reference` — the Clang-built musl of this same configuration
-  cannot compile, link or run it green. That is a property of the
-  configuration: musl's x86-64 assembly is in neither archive, so `fenv` is a
-  stub and every `src/math` unit that checks a floating-point exception flag
-  fails on both sides, and `clone` is absent so the thread tests hang. It says
-  nothing about Buster, so it is held out of the comparison.
+  cannot compile, link or run it green. It says nothing about Buster, so it is
+  held out of the comparison. This used to be most of the suite -- musl's
+  x86-64 assembly was in neither archive, so `fenv` was a stub and every
+  `src/math` unit checking a floating-point exception flag failed on both
+  sides, and `clone` was absent so the thread tests hung out their ten-second
+  deadline -- and building the assembly is what released it: 144 of the 199
+  `src/math` units and 34 of the 69 `regression` ones left this state, 31 and
+  1 remain, and the suite's run time fell from 53,6 seconds to 3,9.
 - `blocked-compile` — Buster cannot compile the test itself.
 - `blocked-link` — Buster compiled it and the link against the Buster-built
   libc could not be made. Every undefined symbol is recorded, not just the
@@ -1303,6 +1307,22 @@ sides do, not written down:
   reference. This is the only state that is a defect in generated code.
 - `pass` — it ran and matched; in `src/api` it compiled; in a shared-object
   unit both sides built the library.
+
+Five units are what building the assembly newly put in front of Buster, and
+each is filed rather than absorbed: `functional/setjmp` and
+`functional/pthread_cancel-points` do not compile (issues 735 and 736 -- an
+aggregate assigned to a `volatile`-qualified object, and a file-scope
+designated initializer), and `functional/pthread_robust`,
+`regression/pthread-robust-detach` and `regression/sem_close-unmap` run and
+answer differently from the reference (issue 737). Nothing that passed before
+stopped passing.
+
+One difference from a native musl build is left, and it is not assembly:
+musl's `ARCH_SRCS` also covers the architecture subdirectories' `.c` files --
+eighteen of them under `src/math/x86_64` -- and this manifest still takes the
+portable sibling for those. They were never a reported exclusion, because the
+harness never looked for them; closing that is its own change with its own
+rebaseline.
 
 Buster compiles every unit first and unconditionally, before the reference
 decides reach, because its diagnostic is inventory in its own right, and
