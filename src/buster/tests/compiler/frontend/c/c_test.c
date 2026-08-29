@@ -7431,6 +7431,113 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_control_value(Uni
     return result;
 }
 
+// A declaration inside a value-producing GNU statement expression is visible
+// to the statements that follow it in the same body -- the shape the construct
+// exists for, as in `({ typeof(a) _a = (a); typeof(b) _b = (b); _a > _b ? _a : _b; })`.
+// Where the statement expression stands in a statement, the function-body walk
+// opens the body's scope at its `{` like any other block. Where it stands in a
+// declaration's initializer it does not: that walk hands the whole declaration
+// statement to c_parse_local_declarations and resumes past its semicolon, so
+// the body's scope is opened from the declaration walk or nowhere, and its
+// names resolve in the enclosing block instead.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_declaration_scope(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena statement_scope_temporary = scratch_begin(0, 0);
+    CPreprocessResult statement_scope_tokens =
+        c_preprocess(statement_scope_temporary.arena,
+                     S8("int initializer(int x) { int v = ({ int t = x + 1; t; }); return v; }\n"
+                        "int conditional_arm(int x) { int v = x > 100 ? 1 : ({ int t = x + 1; t; }); return v; }\n"
+                        "int chained(int x) { int v = ({ int a = x + 1; int b = a * 2; b + a; }); return v; }\n"
+                        "int nested(int x) { int v = ({ int t = ({ int s = x; s + 1; }); t * 2; }); return v; }\n"
+                        "int adjacent(int x) { int v = ({ int t = x; t; }) + ({ int u = x; u * 2; }); return v; }\n"
+                        "int declarator_list(int x) { int a = ({ int t = x; t; }), b = ({ int u = x; u; }); return a + b; }\n"
+                        "int loop_initializer(int x) { int s = 0; for (int i = ({ int t = x; t; }); i < 8; i += 1) { s += i; } return s; }\n"
+                        "int braced(int x) { int a[2] = { ({ int t = x; t; }), 9 }; return a[0] + a[1]; }\n"
+                        "int shadowing(int x) { int t = 5; int v = ({ int t = x * 7; t; }); return t + v; }\n"
+                        "int through_typedef(int x) { int v = ({ typedef int Local; Local t = x + 4; t; }); return v; }\n"
+                        "#define STATEMENT_MAX(a, b) ({ __auto_type _a = (a); __auto_type _b = (b); _a > _b ? _a : _b; })\n"
+                        "int macro_shape(int x, int y) { int m = STATEMENT_MAX(x, y); return m; }\n"),
+                     (CPreprocessOptions){0});
+    CParseResult statement_scope_parse = c_parse(statement_scope_temporary.arena, statement_scope_tokens);
+    BUSTER_TEST(arguments, statement_scope_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, statement_scope_parse.diagnostic_count == 0);
+    CIRLowerResult statement_scope_ir = c_lower_to_ir(statement_scope_temporary.arena, S8("statement-expression-declaration-scope.c"),
+                                                      statement_scope_tokens, statement_scope_parse, target_native);
+    BUSTER_TEST(arguments, statement_scope_ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, statement_scope_ir.program != 0);
+    if (statement_scope_ir.program)
+    {
+        IrModule* module = &statement_scope_ir.program->modules[0];
+        BUSTER_TEST(arguments, module->function_count == 11);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(statement_scope_ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    // The body declares its own `t`: two entities of that spelling exist, in
+    // different scopes, and neither is the other's redefinition.
+    u32 statement_scope_t_count = 0;
+    CScopeId statement_scope_first_t = C_SCOPE_ID_INVALID;
+    bool statement_scope_distinct_scopes = false;
+    for (u32 entity_index = 0; entity_index < statement_scope_parse.entity_count; entity_index += 1)
+    {
+        CEntity* entity = &statement_scope_parse.entities[entity_index];
+        if (entity->kind != C_ENTITY_LOCAL || !string_equal(entity->name, S8("t")))
+        {
+            continue;
+        }
+        statement_scope_t_count += 1;
+        if (statement_scope_first_t.value == C_ID_UNDERLYING_INVALID)
+        {
+            statement_scope_first_t = entity->scope;
+        }
+        else
+        {
+            statement_scope_distinct_scopes |= entity->scope.value != statement_scope_first_t.value;
+        }
+    }
+    BUSTER_TEST(arguments, statement_scope_t_count >= 2);
+    BUSTER_TEST(arguments, statement_scope_distinct_scopes);
+    scratch_end(statement_scope_temporary);
+
+    // A storage class or `typedef` written inside the body is a specifier of
+    // the body's own declaration. Read as one of the declaration being
+    // initialized, `v` below becomes a static object and `w` a type name.
+    TemporalArena statement_specifier_temporary = scratch_begin(0, 0);
+    CPreprocessResult statement_specifier_tokens =
+        c_preprocess(statement_specifier_temporary.arena,
+                     S8("int specifiers(int x) { int v = ({ static int s = 3; s + x; }); int w = ({ typedef int Local; Local t = x; t; }); return v + w; }\n"),
+                     (CPreprocessOptions){0});
+    CParseResult statement_specifier_parse = c_parse(statement_specifier_temporary.arena, statement_specifier_tokens);
+    BUSTER_TEST(arguments, statement_specifier_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, statement_specifier_parse.diagnostic_count == 0);
+    bool statement_specifier_v_automatic = false;
+    bool statement_specifier_w_object = false;
+    for (u32 entity_index = 0; entity_index < statement_specifier_parse.entity_count; entity_index += 1)
+    {
+        CEntity* entity = &statement_specifier_parse.entities[entity_index];
+        statement_specifier_v_automatic |= entity->kind == C_ENTITY_LOCAL && string_equal(entity->name, S8("v")) && !entity->is_static_storage;
+        statement_specifier_w_object |= entity->kind == C_ENTITY_LOCAL && string_equal(entity->name, S8("w"));
+    }
+    BUSTER_TEST(arguments, statement_specifier_v_automatic);
+    BUSTER_TEST(arguments, statement_specifier_w_object);
+    CIRLowerResult statement_specifier_ir = c_lower_to_ir(statement_specifier_temporary.arena, S8("statement-expression-specifiers.c"),
+                                                          statement_specifier_tokens, statement_specifier_parse, target_native);
+    BUSTER_TEST(arguments, statement_specifier_ir.diagnostic_count == 0);
+    scratch_end(statement_specifier_temporary);
+
+    // The body's scope ends with the body: a use after it is undeclared, the
+    // same way a block's is.
+    TemporalArena statement_after_temporary = scratch_begin(0, 0);
+    CPreprocessResult statement_after_tokens = c_preprocess(statement_after_temporary.arena,
+                                                            S8("int after(int x) { int v = ({ int t = x + 1; t; }); return v + t; }\n"),
+                                                            (CPreprocessOptions){0});
+    CParseResult statement_after_parse = c_parse(statement_after_temporary.arena, statement_after_tokens);
+    BUSTER_TEST(arguments, statement_after_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, statement_after_parse.diagnostic_count != 0);
+    scratch_end(statement_after_temporary);
+    return result;
+}
+
 // Direct identifier updates in a body normally take a local fast path.  A
 // file-scope object has no CIntegerIrLocal entry, but the expression core can
 // still resolve it to a global place; keep prefix and postfix forms covered
@@ -10508,6 +10615,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_statement_expression_control_call(arguments));
     c_test_result_add(&result, c_test_statement_expression_nested_call(arguments));
     c_test_result_add(&result, c_test_statement_expression_control_value(arguments));
+    c_test_result_add(&result, c_test_statement_expression_declaration_scope(arguments));
     c_test_result_add(&result, c_test_global_identifier_updates(arguments));
     c_test_result_add(&result, c_test_parenthesized_address_assignment_expression(arguments));
     c_test_result_add(&result, c_test_nested_offsetof_pointer_prediction(arguments));

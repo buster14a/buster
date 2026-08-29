@@ -6043,6 +6043,56 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(c_musl_shape_temporary);
         }
     }
+    // A GNU statement expression standing in a declaration's initializer.
+    // The body declares names the statements after it read, and only running
+    // the program proves the reads found them: the scope the body needs is
+    // opened while the declaration is bound, well before code generation, and
+    // a body whose locals resolved to the enclosing block's names of the same
+    // spelling still compiles. It runs under every register allocator for the
+    // same reason the musl shapes do.
+    String8 c_statement_expression_allocator_flags[] = {
+        S8("-fregister-allocator=none"),
+        S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"),
+        S8("-fregister-allocator=quality"),
+    };
+    for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_statement_expression_allocator_flags); allocator_index += 1)
+    {
+        TemporalArena c_statement_expression_temporary = arena_begin_temporal(arguments->arena);
+        String8 c_statement_expression_path = buster_test_temporary_path(
+            c_statement_expression_temporary.arena, S8("buster-c-statement-expression"),
+            string_format(c_statement_expression_temporary.arena, S8("-{u32}"), allocator_index));
+        String8 c_statement_expression_command_line[] = {
+            S8("-std=gnu23"),
+            c_statement_expression_allocator_flags[allocator_index],
+            S8("-o"),
+            c_statement_expression_path,
+            S8("tests/basic_c_statement_expression.c"),
+        };
+        CompilerDriverResult c_statement_expression = compiler_driver_execute_invocation(
+            c_statement_expression_temporary.arena,
+            compiler_driver_parse_arguments(c_statement_expression_temporary.arena,
+                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(c_statement_expression_command_line)));
+        BUSTER_TEST(arguments, c_statement_expression.error == COMPILER_DRIVER_ERROR_NONE);
+        if (c_statement_expression.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 c_statement_expression_arguments[] = {
+                c_statement_expression_path,
+            };
+            ProcessSpawnResult c_statement_expression_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_statement_expression_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){
+                                     .use_process_environment = true,
+                                 });
+            BUSTER_TEST(arguments, c_statement_expression_spawn.handle != 0);
+            if (c_statement_expression_spawn.handle)
+            {
+                ProcessWaitResult c_statement_expression_wait = os_process_wait_sync(c_statement_expression_temporary.arena, c_statement_expression_spawn);
+                BUSTER_TEST(arguments, c_statement_expression_wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(c_statement_expression_temporary);
+    }
     // A negative constant narrower than the global it initializes is folded
     // and written into the data image without ever reaching code generation,
     // so only running the program reads the bytes the object writer emitted.

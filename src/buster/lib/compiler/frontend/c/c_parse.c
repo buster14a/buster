@@ -9954,12 +9954,27 @@ BUSTER_C_INTERNAL bool c_parse_auto_initializer_type(CTypeParseMachine* machine,
     return true;
 }
 
+BUSTER_C_INTERNAL bool c_parse_statement_expression_at(CPreprocessResult preprocess, u32 index, u32 end, u32* body_start, u32* body_end,
+                                                         u32* group_end);
+
 BUSTER_C_INTERNAL void c_parse_bind_auto_initializer_identifiers(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
                                                                     u32 start, u32 end)
 {
     for (u32 use_index = start; use_index < end; use_index += 1)
     {
         CToken use = preprocess.tokens[use_index];
+        // A statement expression binds against a scope of its own, which the
+        // declaration walk in c_parse_local_declarations opens. Binding its
+        // body here as well would resolve its locals in the enclosing scope
+        // and, worse, claim the tokens before that walk reaches them.
+        u32 statement_body_start = 0;
+        u32 statement_body_end = 0;
+        u32 statement_group_end = 0;
+        if (c_parse_statement_expression_at(preprocess, use_index, end, &statement_body_start, &statement_body_end, &statement_group_end))
+        {
+            use_index = statement_group_end;
+            continue;
+        }
         if (use.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, use), S8("__builtin_offsetof")) && use_index + 1 < end &&
             c_token_is_punctuator(&preprocess.tokens[use_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -10092,6 +10107,60 @@ BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machi
                                            });
 }
 
+BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
+                                                       CPreprocessResult preprocess, u32 declaration_index, CScopeId scope, u32 body_start,
+                                                       u32 body_token_count);
+
+// The GNU statement expression `({ ... })` opening at `index`, if one does.
+// `body_start` and `body_end` bound the block's tokens -- the braces excluded
+// -- and `group_end` is the closing parenthesis, which is what a token walk
+// resumes past.
+BUSTER_C_INTERNAL bool c_parse_statement_expression_at(CPreprocessResult preprocess, u32 index, u32 end, u32* body_start, u32* body_end,
+                                                         u32* group_end)
+{
+    bool found = false;
+    if (index + 2 < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE))
+    {
+        u32 close = c_parse_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+        if (close + 1 < end && c_token_is_punctuator(&preprocess.tokens[close + 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            *body_start = index + 2;
+            *body_end = close;
+            *group_end = close + 1;
+            found = true;
+        }
+    }
+    return found;
+}
+
+// A statement expression's body is a block of its own: `({ int t = x + 1; t; })`
+// declares `t` in a scope the trailing expression resolves against. The
+// function-body walk opens that scope itself wherever the statement expression
+// stands in a statement, but not when it stands in a declaration's initializer
+// -- that whole statement is handed to c_parse_local_declarations, so the body
+// is walked from there through here instead.
+BUSTER_C_INTERNAL void c_parse_bind_statement_expression_body(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
+                                                                CPreprocessResult preprocess, CScopeId scope, u32 declaration_index,
+                                                                u32 body_start, u32 body_end)
+{
+    BUSTER_CHECK(result->scope_count < result->scope_capacity);
+    CScopeId child = {
+        .value = result->scope_count,
+    };
+    result->scopes[result->scope_count++] = (CScope){
+        .parent = scope,
+        .first_entity = C_ENTITY_ID_INVALID,
+        .last_entity = C_ENTITY_ID_INVALID,
+        .token_start = body_start,
+        .token_end = body_end,
+    };
+    if (body_start < body_end)
+    {
+        c_parse_bind_block_statements(machine, result_arena, result, preprocess, declaration_index, child, body_start, body_end - body_start);
+    }
+}
+
 BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
                                                     CScopeId scope, u32 declaration_index, u32 start, u32 end)
 {
@@ -10104,17 +10173,40 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
     bool is_constexpr = false;
     bool is_extern = false;
     bool is_thread_local = false;
+    // Storage class and `typedef` are declaration specifiers, so only the
+    // tokens outside every delimiter belong to this declaration. A statement
+    // expression in an initializer carries a block of declarations of its own
+    // -- `int v = ({ static int s = 3; s; });` declares an automatic `v` and a
+    // static `s` -- and an array parameter's `[static 3]` is a bound qualifier
+    // rather than a storage class.
+    u32 specifier_depth = 0;
     for (u32 token_index = start; token_index < end; token_index += 1)
     {
-        is_typedef |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("typedef"));
-        is_static_storage |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("static"));
-        is_register |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("register"));
-        is_extern |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("extern"));
-        is_thread_local |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
-                          (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("_Thread_local")) ||
-                           string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("__thread")));
-        is_constexpr |= c_preprocess_dialect_is_c23(preprocess.dialect) && preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
-                        string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("constexpr"));
+        CToken specifier_token = preprocess.tokens[token_index];
+        if (c_token_is_punctuator(&specifier_token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&specifier_token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&specifier_token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            specifier_depth += 1;
+            continue;
+        }
+        if (c_token_is_punctuator(&specifier_token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&specifier_token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+            c_token_is_punctuator(&specifier_token, C_PUNCTUATOR_RIGHT_BRACE))
+        {
+            specifier_depth -= specifier_depth != 0;
+            continue;
+        }
+        if (specifier_depth || specifier_token.kind != C_TOKEN_IDENTIFIER)
+        {
+            continue;
+        }
+        is_typedef |= string_equal(c_token_spelling(preprocess.spelling_base, specifier_token), S8("typedef"));
+        is_static_storage |= string_equal(c_token_spelling(preprocess.spelling_base, specifier_token), S8("static"));
+        is_register |= string_equal(c_token_spelling(preprocess.spelling_base, specifier_token), S8("register"));
+        is_extern |= string_equal(c_token_spelling(preprocess.spelling_base, specifier_token), S8("extern"));
+        is_thread_local |= string_equal(c_token_spelling(preprocess.spelling_base, specifier_token), S8("_Thread_local")) ||
+                           string_equal(c_token_spelling(preprocess.spelling_base, specifier_token), S8("__thread"));
+        is_constexpr |= c_preprocess_dialect_is_c23(preprocess.dialect) &&
+                        string_equal(c_token_spelling(preprocess.spelling_base, specifier_token), S8("constexpr"));
     }
     if (is_auto_type)
     {
@@ -10557,6 +10649,20 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         for (u32 use_index = initializer_start; use_index < segment_end; use_index += 1)
         {
             CToken use = preprocess.tokens[use_index];
+            // A statement expression is a block, so its body binds against a
+            // scope of its own rather than against this declaration's. Nothing
+            // else opens that scope: the function-body walk hands this whole
+            // statement over and resumes past its semicolon.
+            u32 statement_body_start = 0;
+            u32 statement_body_end = 0;
+            u32 statement_group_end = 0;
+            if (c_parse_statement_expression_at(preprocess, use_index, segment_end, &statement_body_start, &statement_body_end, &statement_group_end))
+            {
+                c_parse_bind_statement_expression_body(machine, arena, result, preprocess, scope, declaration_index, statement_body_start,
+                                                       statement_body_end);
+                use_index = statement_group_end;
+                continue;
+            }
             // An aggregate definition inside an initializer declares its
             // members; it does not use them. `int b = (union{float _f; int _i;}){x}._i`
             // is a compound literal, and reading `_f` as a use of an undeclared
@@ -11170,27 +11276,30 @@ BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 st
     return UINT32_MAX;
 }
 
-BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
-                                                    CPreprocessResult preprocess, u32 declaration_index)
+// The block-statement walk of one brace-delimited range: `scope` is the scope
+// the range sits directly in, `body_start` and `body_token_count` bound its
+// tokens. It is separate from c_parse_bind_function_body because a GNU
+// statement expression's body is a block too, and one written in a
+// declaration's initializer is reached from c_parse_local_declarations rather
+// than from the function-body walk -- which hands that whole declaration
+// statement over and resumes past its semicolon.
+BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
+                                                       CPreprocessResult preprocess, u32 declaration_index, CScopeId scope, u32 body_start,
+                                                       u32 body_token_count)
 {
-    CDeclaration* declaration = &result->declarations[declaration_index];
-    if (!declaration->is_definition || !declaration->body_token_count)
-    {
-        return;
-    }
     CTokenShape const* token_shapes = c_preprocess_token_shapes(&preprocess);
     Arena* conflicts[] = {
         result_arena,
     };
     TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-    CScopeId* scope_stack = arena_allocate(temporary.arena, CScopeId, declaration->body_token_count + 1);
-    u32* scope_end_stack = arena_allocate(temporary.arena, u32, declaration->body_token_count + 1);
-    u8* statement_suffix = arena_allocate(temporary.arena, u8, declaration->body_token_count + 1);
+    CScopeId* scope_stack = arena_allocate(temporary.arena, CScopeId, body_token_count + 1);
+    u32* scope_end_stack = arena_allocate(temporary.arena, u32, body_token_count + 1);
+    u8* statement_suffix = arena_allocate(temporary.arena, u8, body_token_count + 1);
     u32 scope_count = 1;
-    scope_stack[0] = declaration->scope;
+    scope_stack[0] = scope;
     scope_end_stack[0] = UINT32_MAX;
-    u32 body_end = declaration->body_start + declaration->body_token_count;
-    u32 index = declaration->body_start;
+    u32 body_end = body_start + body_token_count;
+    u32 index = body_start;
     bool statement_start = true;
     u32 asm_goto_label_start = UINT32_MAX;
     u32 asm_goto_label_end = UINT32_MAX;
@@ -11331,7 +11440,7 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
             {
                 // The loop scope covers the whole controlled statement, compound or not, so the
                 // init declaration stays visible across every form of body.
-                u32 loop_end = c_parse_statement_end(preprocess, header_close + 1, body_end, statement_suffix, declaration->body_token_count + 1);
+                u32 loop_end = c_parse_statement_end(preprocess, header_close + 1, body_end, statement_suffix, body_token_count + 1);
                 u32 first_separator = UINT32_MAX;
                 depth = 0;
                 for (u32 scan = index + 2; scan < header_close; scan += 1)
@@ -11435,19 +11544,19 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
         bool label = false;
         if (shape == C_TOKEN_IDENTIFIER)
         {
-            label = c_ir_named_label_at(&preprocess, declaration->body_start, index, body_end);
-            bool member = index > declaration->body_start && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
-                                                              c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
-            bool tag_name = index > declaration->body_start && c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
+            label = c_ir_named_label_at(&preprocess, body_start, index, body_end);
+            bool member = index > body_start && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
+                                                 c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
+            bool tag_name = index > body_start && c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
                             (string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]), S8("struct")) ||
                              string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]), S8("union")) ||
                              string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]), S8("enum")));
-            bool goto_target = index > declaration->body_start && c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
+            bool goto_target = index > body_start && c_preprocess_token_shape_at(token_shapes, &preprocess, index - 1) == C_TOKEN_IDENTIFIER &&
                                string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]), S8("goto"));
             bool asm_goto_label = asm_goto_label_start != UINT32_MAX && index >= asm_goto_label_start && index < asm_goto_label_end;
             if (!member && !tag_name && !label && !goto_target && !asm_goto_label && !c_parse_declaration_keyword_at(result, preprocess, index) &&
-                !(index > declaration->body_start &&
-                  c_parse_label_address_prefix_with_typedef(result, &preprocess, scope_stack[scope_count - 1], declaration->body_start, index - 1)) &&
+                !(index > body_start &&
+                  c_parse_label_address_prefix_with_typedef(result, &preprocess, scope_stack[scope_count - 1], body_start, index - 1)) &&
                 !(asm_operand_range_start != UINT32_MAX &&
                   c_parse_asm_operand_name_token(preprocess, asm_operand_range_start, asm_operand_range_end, index)))
             {
@@ -11463,10 +11572,26 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
         statement_start = punctuator == C_PUNCTUATOR_SEMICOLON;
         index += 1;
     }
-    c_parse_bind_function_static_asserts(machine, temporary.arena, result_arena, result, preprocess, declaration);
-    // After the walk above, because it needs the block scopes that walk creates.
-    c_parse_bind_function_expression_aggregates(machine, result, preprocess, declaration);
     scratch_end(temporary);
+}
+
+BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
+                                                    CPreprocessResult preprocess, u32 declaration_index)
+{
+    CDeclaration* declaration = &result->declarations[declaration_index];
+    if (declaration->is_definition && declaration->body_token_count)
+    {
+        c_parse_bind_block_statements(machine, result_arena, result, preprocess, declaration_index, declaration->scope, declaration->body_start,
+                                      declaration->body_token_count);
+        Arena* conflicts[] = {
+            result_arena,
+        };
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        c_parse_bind_function_static_asserts(machine, temporary.arena, result_arena, result, preprocess, declaration);
+        // After the walk above, because it needs the block scopes that walk creates.
+        c_parse_bind_function_expression_aggregates(machine, result, preprocess, declaration);
+        scratch_end(temporary);
+    }
 }
 
 BUSTER_C_INTERNAL bool c_parse_type_only_declaration(CPreprocessResult preprocess, u32 start, u32 end)
