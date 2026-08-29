@@ -5355,6 +5355,56 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(noreturn_type_assembly_command_line)));
     BUSTER_TEST(arguments, noreturn_type_assembly.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(noreturn_type_assembly.output, S8("must_not_be_reached")) == BUSTER_STRING_NO_MATCH);
+    // The noreturn fixture also guards which declarations the marker is read
+    // from, and only the emitted code shows that: a call to a noreturn callee
+    // is followed by the terminator alone, while a call that returns reaches
+    // the store of the fall-off-the-end return value first.  The x86 backend
+    // emits both terminators as raw bytes -- 0x0f 0x0b is ud2 -- so what
+    // stands between the call and those bytes is what tells the two apart.
+    String8 noreturn_assembly_command_line[] = {
+        S8("-S"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_noreturn_call.c"),
+    };
+    CompilerDriverResult noreturn_assembly = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(noreturn_assembly_command_line)));
+    BUSTER_TEST(arguments, noreturn_assembly.error == COMPILER_DRIVER_ERROR_NONE);
+    // The marker has to reach a call through the declarator that owns it,
+    // through the specifiers every declarator of a list shares, through a
+    // later declaration of the same function, and through its definition.
+    String8 noreturn_terminated_calls[] = {
+        S8("call \"list_noreturn\"\n"),
+        S8("call \"list_specifier_first\"\n"),
+        S8("call \"list_specifier_second\"\n"),
+        S8("call \"redeclared_noreturn\"\n"),
+        S8("call \"defined_noreturn\"\n"),
+    };
+    for (u64 call_index = 0; call_index < BUSTER_ARRAY_LENGTH(noreturn_terminated_calls); call_index += 1)
+    {
+        u64 noreturn_call = string_first_sequence(noreturn_assembly.output, noreturn_terminated_calls[call_index]);
+        BUSTER_TEST(arguments, noreturn_call != BUSTER_STRING_NO_MATCH);
+        if (noreturn_call != BUSTER_STRING_NO_MATCH)
+        {
+            String8 after_call = string_slice(noreturn_assembly.output, noreturn_call + noreturn_terminated_calls[call_index].length,
+                                              noreturn_assembly.output.length);
+            BUSTER_TEST(arguments, string_starts_with_sequence(after_call, S8("\t.byte 0x0f, 0x0b")));
+        }
+    }
+    // The declarator beside list_noreturn carries no marker of its own, so its
+    // own call falls through.  Scanning the whole declarator list marked it
+    // too, and the ud2 planted after this call is what the fixture then
+    // executed at run time.
+    u64 sibling_body = string_first_sequence(noreturn_assembly.output, S8("through_list_sibling:\n"));
+    BUSTER_TEST(arguments, sibling_body != BUSTER_STRING_NO_MATCH);
+    if (sibling_body != BUSTER_STRING_NO_MATCH)
+    {
+        String8 sibling_assembly = string_slice(noreturn_assembly.output, sibling_body, noreturn_assembly.output.length);
+        u64 sibling_call = string_first_sequence(sibling_assembly, S8("call \"list_returns\"\n"));
+        BUSTER_TEST(arguments, sibling_call != BUSTER_STRING_NO_MATCH);
+        if (sibling_call != BUSTER_STRING_NO_MATCH)
+        {
+            String8 after_sibling_call = string_slice(sibling_assembly, sibling_call + S8("call \"list_returns\"\n").length, sibling_assembly.length);
+            BUSTER_TEST(arguments, string_starts_with_sequence(after_sibling_call, S8("\tmov eax, 0x0")));
+        }
+    }
     // SQLite compatibility reduced its own set of frontend, lowering and
     // linker failures to these fixtures: declarators that return function
     // pointers and the type names that cast to them, case labels inside a

@@ -1201,12 +1201,107 @@ BUSTER_C_SHARED bool c_ir_noreturn_marker_in_range(CPreprocessResult preprocess,
     return result;
 }
 
+/* The punctuators that end a declarator, and so prove that what precedes them
+   -- an identifier, then its optional parameter list and trailing attributes
+   -- was the declared name rather than one more declaration specifier: the
+   ',' or ';' that ends it, the '=' of an initializer, the '[' of an array
+   bound, and the '(' of a second parameter list, which is the shape a
+   function returning a function pointer has. Digraph spellings carry distinct
+   ids and are absent here, exactly as the delimiter sets in c_internal.h are
+   written. */
+#define C_PUNCTUATOR_SET_DECLARATOR_END                                                                                                       \
+    (C_PUNCTUATOR_BIT(C_PUNCTUATOR_COMMA) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_SEMICOLON) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_ASSIGN) |                \
+     C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_BRACKET) | C_PUNCTUATOR_BIT(C_PUNCTUATOR_LEFT_PARENTHESIS))
+
+/* Steps over one balanced `open`/`close` group starting at `index`, or leaves
+   `index` alone when no group starts there. An unbalanced group stops at
+   `end`, which the caller reads as "the scan cannot advance further": the
+   declarator parse is what diagnoses a malformed declaration. */
+BUSTER_C_INTERNAL u32 c_ir_skip_balanced_group(CPreprocessResult preprocess, u32 index, u32 end, CPunctuator open, CPunctuator close)
+{
+    if (index < end && c_token_is_punctuator(&preprocess.tokens[index], open))
+    {
+        u32 depth = 0;
+        do
+        {
+            depth += c_token_is_punctuator(&preprocess.tokens[index], open) ? 1 : 0;
+            depth -= c_token_is_punctuator(&preprocess.tokens[index], close) ? 1 : 0;
+            index += 1;
+        } while (index < end && depth);
+    }
+
+    return index;
+}
+
+/* Where the declaration specifiers of a declarator list end, which is where
+   the leading declarator begins. Every declarator of the list shares the
+   specifiers, so a marker in [start, this) marks all of them while a marker
+   past it belongs to the one declarator whose own range holds it.
+
+   The declarator starts at the first punctuator that cannot be part of the
+   specifiers -- the '*' of a pointer or the '(' of a parenthesized declarator
+   -- or at the declared name, which is the first identifier whose declarator
+   ends right after it. The tokens up to that end are its parameter list and
+   its trailing attributes, and stepping over both is what puts the attribute
+   of `void die(int) __attribute__((noreturn)), other(int);` past the boundary
+   while `void __attribute__((noreturn)) die(int), other(int);` keeps its own
+   before it. An identifier whose group is followed by anything else
+   introduces a specifier instead -- `__typeof__(x) a, b;` and
+   `_Atomic(int) a, b;` are the two that reach here -- so the scan continues
+   past it. Attribute lists are stepped over wherever they appear, and so is a
+   brace-enclosed aggregate or enum body, whose members are declarations with
+   names of their own; neither can offer up an identifier as the name.
+
+   A boundary landing earlier than the real one only drops a shared marker,
+   which costs the unreachable code after a call and never emits any. Landing
+   later is what would let one declarator's marker reach its siblings, so
+   every step above stops at the first proof it has gone far enough. */
+BUSTER_C_INTERNAL u32 c_ir_declarator_list_specifier_end(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 index = start;
+    bool declarator_reached = false;
+    while (index < end && !declarator_reached)
+    {
+        u32 after_attributes = c_parse_skip_attributes(preprocess, index, end);
+        if (after_attributes != index)
+        {
+            index = after_attributes;
+        }
+        else if (preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
+        {
+            u32 after_name = c_ir_skip_balanced_group(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            after_name = c_parse_skip_attributes(preprocess, after_name, end);
+            declarator_reached = after_name < end && c_punctuator_in_set(preprocess.tokens[after_name].punctuator, C_PUNCTUATOR_SET_DECLARATOR_END);
+            index = declarator_reached ? index : after_name;
+        }
+        else if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))
+        {
+            index = c_ir_skip_balanced_group(preprocess, index, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+        }
+        else
+        {
+            declarator_reached = true;
+        }
+    }
+
+    return index;
+}
+
 /* Whether a function declaration is marked noreturn. glibc declares exit,
    abort, _Exit and longjmp with __attribute__((__noreturn__)), so reading the
    attribute is what lets a call to any of them terminate control flow without
    the compiler carrying a list of library names. Only the declaration's
    specifiers and its declarator are scanned: a body cannot carry the marker,
-   and scanning one would find an unrelated identifier. */
+   and scanning one would find an unrelated identifier.
+
+   token_start/token_count span the whole comma-separated declarator list, not
+   just the shared specifiers, so the shared half of the scan stops where the
+   leading declarator starts. Scanning the full range instead let a trailing
+   attribute owned by one declarator mark every declarator of the list --
+   `void die(int) __attribute__((noreturn)), other(int);` terminated the block
+   after a call to `other` -- while a marker among the specifiers still
+   reaches all of them. This is the split c_parse_local_declarations already
+   makes for the block-scope declarator shapes. */
 BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration)
 {
     u32 limit = preprocess.token_count < UINT32_MAX ? (u32)preprocess.token_count : UINT32_MAX;
@@ -1217,6 +1312,10 @@ BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, 
     declarator_end = declarator_end < limit ? declarator_end : limit;
     specifier_end = body < specifier_end ? body : specifier_end;
     declarator_end = body < declarator_end ? body : declarator_end;
+    if (declaration.declarator_count)
+    {
+        specifier_end = c_ir_declarator_list_specifier_end(preprocess, declaration.token_start, specifier_end);
+    }
 
     return c_ir_noreturn_marker_in_range(preprocess, declaration.token_start, specifier_end) ||
            (declaration.declarator_count != 0 && c_ir_noreturn_marker_in_range(preprocess, declaration.declarator_start, declarator_end));
@@ -37961,6 +38060,18 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     }
     CIrWideFloatCache wide_float_cache = c_ir_wide_float_cache_initialize(arena, program);
     CIrSignature* signatures = arena_allocate(arena, CIrSignature, parse.declaration_count);
+    // The marker is a property of the function, not of the declaration that
+    // carries it: `void die(int);` followed by
+    // `__attribute__((noreturn)) void die(int);` -- a plain header
+    // declaration and the attribute on a later one, or on the definition --
+    // means the same as marking the first. A call resolves to one candidate
+    // declaration per entity, so join the marker across the entity's
+    // declarations here rather than moving that resolution, which answers a
+    // different question (the unprototyped-candidate rule in
+    // c_ir_build_function_name_index).
+    u32 entity_noreturn_count = parse.entity_count ? parse.entity_count : 1;
+    bool* entity_noreturn = arena_allocate(temporary_arena, bool, entity_noreturn_count);
+    memset(entity_noreturn, 0, sizeof(*entity_noreturn) * entity_noreturn_count);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
@@ -37969,6 +38080,18 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             signatures[declaration_index] = c_ir_function_signature(arena, program, &pointer_types, &wide_float_cache, &parse, declaration,
                                                                      c_type_ir_map, target);
             signatures[declaration_index].is_noreturn = c_ir_declaration_is_noreturn(preprocess, declaration);
+            if (declaration.entity.value < parse.entity_count)
+            {
+                entity_noreturn[declaration.entity.value] |= signatures[declaration_index].is_noreturn;
+            }
+        }
+    }
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        CDeclaration declaration = parse.declarations[declaration_index];
+        if (declaration.kind == C_DECLARATION_FUNCTION && declaration.entity.value < parse.entity_count)
+        {
+            signatures[declaration_index].is_noreturn |= entity_noreturn[declaration.entity.value];
         }
     }
     bool* function_needed = arena_allocate(arena, bool, parse.declaration_count);
