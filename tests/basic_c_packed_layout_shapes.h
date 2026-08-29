@@ -131,6 +131,24 @@ struct packed_layout_lowered_record
     char trailer;
 };
 
+// A qualifier written in front of the alias does not take the request away:
+// `const` and `volatile` of an aligned typedef are the alias's own alignment
+// in GCC and Clang alike.  A half that dropped it there lays `value` at offset
+// 4 in both records below and sizes the const one at 8, so the two halves read
+// different members of the same object (#714).
+struct packed_layout_const_record
+{
+    char tag;
+    const packed_layout_raised value;
+};
+
+struct packed_layout_volatile_record
+{
+    char tag;
+    volatile packed_layout_lowered value;
+    char trailer;
+};
+
 // The declarator-position attribute, on an object both halves address.
 extern char packed_layout_aligned_object[3] __attribute__((aligned(64)));
 
@@ -180,5 +198,12 @@ extern unsigned long long packed_layout_lowered_record_value_offset(void);
 extern struct packed_layout_raised_record packed_layout_make_raised_record(char tag, int value);
 extern int packed_layout_lowered_middle(struct packed_layout_lowered_record record);
 extern void packed_layout_fill_raised_object(int value);
+extern unsigned long long packed_layout_const_record_size(void);
+extern unsigned long long packed_layout_const_record_alignment(void);
+extern unsigned long long packed_layout_const_record_value_offset(void);
+extern unsigned long long packed_layout_volatile_record_size(void);
+extern unsigned long long packed_layout_volatile_record_value_offset(void);
+extern struct packed_layout_const_record packed_layout_make_const_record(char tag, int value);
+extern int packed_layout_volatile_middle(struct packed_layout_volatile_record record);
 
 #endif

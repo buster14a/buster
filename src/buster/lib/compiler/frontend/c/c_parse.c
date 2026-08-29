@@ -3384,6 +3384,32 @@ CTypeAlignment const* c_parse_type_alignment(CParseResult const* result, CTypeId
     return record;
 }
 
+/* Room for one more alignment record, growing the table from the arena as
+   noreturn_function_types grows.  False means the request is dropped, which
+   leaves the type with the alignment it had. */
+BUSTER_C_INTERNAL bool c_parse_reserve_type_alignment(CParseResult* result)
+{
+    bool room = result->type_alignment_count < result->type_alignment_capacity;
+    if (!room && result->arena && result->type_alignment_capacity < UINT32_MAX / 2)
+    {
+        u32 capacity = result->type_alignment_capacity ? result->type_alignment_capacity * 2 : 4;
+        u64 allocation_size = (u64)capacity * (u64)sizeof(CTypeAlignment);
+        if (c_parse_arena_can_allocate(result->arena, allocation_size, BUSTER_ALIGN_OF(CTypeAlignment)))
+        {
+            CTypeAlignment* records = (CTypeAlignment*)arena_allocate_bytes(result->arena, allocation_size, BUSTER_ALIGN_OF(CTypeAlignment));
+            if (result->type_alignments && result->type_alignment_count)
+            {
+                memcpy(records, result->type_alignments, sizeof(*records) * result->type_alignment_count);
+            }
+            result->type_alignments = records;
+            result->type_alignment_capacity = capacity;
+            room = true;
+        }
+    }
+
+    return room;
+}
+
 /* Give the name a typedef declares an alignment of its own.
 
    The type is *copied* first, always, even when the declarator built it: a
@@ -3408,24 +3434,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_add_type_alignment(CParseResult* result, CType
     {
         return type;
     }
-    bool room = result->type_alignment_count < result->type_alignment_capacity;
-    if (!room && result->arena && result->type_alignment_capacity < UINT32_MAX / 2)
-    {
-        u32 capacity = result->type_alignment_capacity ? result->type_alignment_capacity * 2 : 4;
-        u64 allocation_size = (u64)capacity * (u64)sizeof(CTypeAlignment);
-        if (c_parse_arena_can_allocate(result->arena, allocation_size, BUSTER_ALIGN_OF(CTypeAlignment)))
-        {
-            CTypeAlignment* records = (CTypeAlignment*)arena_allocate_bytes(result->arena, allocation_size, BUSTER_ALIGN_OF(CTypeAlignment));
-            if (result->type_alignments && result->type_alignment_count)
-            {
-                memcpy(records, result->type_alignments, sizeof(*records) * result->type_alignment_count);
-            }
-            result->type_alignments = records;
-            result->type_alignment_capacity = capacity;
-            room = true;
-        }
-    }
-    if (!room)
+    if (!c_parse_reserve_type_alignment(result))
     {
         return type;
     }
@@ -4532,20 +4541,55 @@ BUSTER_C_SHARED bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine
     return true;
 }
 
+/* Qualifying a type makes a copy of it, and the copy points at the *fully*
+   unqualified type rather than at the type it qualifies, so a qualified alias
+   of `typedef int cache_line __attribute__((aligned(64)))` reaches `int`
+   directly.  That is what both layout engines want to read the natural layout
+   from, and it is also why the alignment record -- keyed on the alias -- did
+   not describe the copy: `const cache_line` answered `_Alignof` 4 where Clang
+   and GCC answer 64, in every position and with no diagnostic (#714).  The
+   copy therefore inherits the record, which states an alignment the *type*
+   carries and a qualifier cannot take away.  The guard is the empty table, so
+   a translation unit without an aligned typedef -- almost every one -- pays
+   one compare per qualified type. */
 BUSTER_C_SHARED CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId base, CType qualifiers)
 {
-    if (base.value >= result->type_count)
+    CTypeId qualified_id = C_TYPE_ID_INVALID;
+    if (base.value < result->type_count)
     {
-        return C_TYPE_ID_INVALID;
+        CType qualified = result->types[base.value];
+        qualified.is_const |= qualifiers.is_const;
+        qualified.is_volatile |= qualifiers.is_volatile;
+        qualified.is_restrict |= qualifiers.is_restrict;
+        qualified.is_atomic |= qualifiers.is_atomic;
+        qualified.unqualified_type = qualified.has_unqualified_type ? qualified.unqualified_type : base;
+        qualified.has_unqualified_type = true;
+        // `_Atomic` applied *to* the alias is the exception, and it is the one
+        // place the two oracles disagree: Clang gives `_Atomic cache_line` the
+        // alignment an atomic of that width gets (4) and GCC keeps the alias's
+        // 64.  Clang is this repository's oracle, and it is also the answer
+        // this frontend already gave.  `_Atomic` written on a typedef that was
+        // *already* atomic keeps the request in both, which is why the test is
+        // on the step rather than on the result.
+        bool atomic_applied = qualifiers.is_atomic && !result->types[base.value].is_atomic;
+        CTypeAlignment const* base_alignment = result->type_alignment_count && !atomic_applied ? c_parse_type_alignment(result, base) : 0;
+        u32 alignment_start = base_alignment ? base_alignment->alignment_start : 0;
+        u32 alignment_count = base_alignment ? base_alignment->alignment_count : 0;
+        // Room is taken and the range read out before the copy is added: the
+        // growth reallocates the table the record points into.
+        bool inherit = alignment_count && c_parse_reserve_type_alignment(result);
+        qualified_id = c_parse_add_type(result, qualified);
+        if (inherit && qualified_id.value != C_ID_UNDERLYING_INVALID)
+        {
+            result->type_alignments[result->type_alignment_count++] = (CTypeAlignment){
+                .type_index = qualified_id.value,
+                .alignment_start = alignment_start,
+                .alignment_count = alignment_count,
+            };
+        }
     }
-    CType qualified = result->types[base.value];
-    qualified.is_const |= qualifiers.is_const;
-    qualified.is_volatile |= qualifiers.is_volatile;
-    qualified.is_restrict |= qualifiers.is_restrict;
-    qualified.is_atomic |= qualifiers.is_atomic;
-    qualified.unqualified_type = qualified.has_unqualified_type ? qualified.unqualified_type : base;
-    qualified.has_unqualified_type = true;
-    return c_parse_add_type(result, qualified);
+
+    return qualified_id;
 }
 
 BUSTER_C_INTERNAL CTypeId c_parse_unqualified_type(CParseResult* result, CTypeId type_id)

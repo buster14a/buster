@@ -2546,6 +2546,20 @@ on a commit you already know is incomplete tells nobody anything.
   declarator-position ones each parser appends next stay contiguous with what
   survives. A **function** keeps the position rejection whole: neither
   reference compiler raises a function's alignment through it.
+  **A qualifier cannot take the request away**, and a qualified copy points
+  *past* the alias at the type it strips to, so `c_parse_add_qualified_type`
+  gives the copy its own record rather than
+  leaving the layout engines to walk a chain that no longer names the alias --
+  `const cache_line` folded `_Alignof` 4 where Clang and GCC answer 64, in
+  every position and with no diagnostic (issue #714). `_Atomic` applied to an
+  aligned alias is the exception, and it is the one place the two references
+  disagree: Clang gives `_Atomic cache_line` the alignment an atomic of that
+  width gets and GCC keeps the alias's, so the record is inherited only when
+  the step does not add `_Atomic`. A *qualified* copy is built where the
+  qualifier is written, which is after the aggregate that embeds it, so the
+  scalar seed in `c_lower_to_ir` is cleared for every recorded type: the
+  mapping round that lays the aggregate out would otherwise read the seed's
+  natural alignment before the alias branch replaced it.
   On the System V side one more rule follows:
   "contains unaligned fields" there means unaligned for the field's *natural*
   alignment, so `struct { char tag; pair value; }` is passed in memory even

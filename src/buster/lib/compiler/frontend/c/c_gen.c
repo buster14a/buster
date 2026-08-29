@@ -38272,6 +38272,26 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                 parse.types[type_index].is_volatile);
         }
     }
+    // An aligned alias keeps the kind it copied, so the seed above just
+    // answered it with the aliased type's own scalar mapping -- the alignment
+    // the alias exists to replace.  The alias branch of the mapping rounds
+    // owns those, and an aggregate that embeds one has to wait for it rather
+    // than lay out the seed's answer.  A typedef's own copy is built where the
+    // typedef is written and so precedes every aggregate that embeds it, but a
+    // *qualified* copy of one is built where the qualifier is written, which is
+    // inside the aggregate and therefore after the aggregate's own type index:
+    // the round that lays the aggregate out reached the stale seed first and
+    // `struct { char c; const cache_line f; }` came out four-byte aligned
+    // (#714).  Walking the records rather than testing every type keeps the
+    // empty case -- almost every translation unit -- free.
+    for (u32 alias_index = 0; alias_index < parse.type_alignment_count; alias_index += 1)
+    {
+        u32 alias_type = parse.type_alignments[alias_index].type_index;
+        if (alias_type < parse.type_count)
+        {
+            c_type_ir_map[alias_type] = IR_TYPE_ID_INVALID;
+        }
+    }
     CEntityId* token_entities = arena_allocate(arena, CEntityId, preprocess.token_count);
     memset(token_entities, 0xff, sizeof(*token_entities) * preprocess.token_count);
     for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
@@ -38459,9 +38479,24 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                     {
                         continue;
                     }
-                    IrTypeId qualified = (c_type->is_atomic || c_type->is_volatile)
-                                             ? c_ir_add_qualified_type(program, unqualified, c_type->is_atomic, c_type->is_volatile)
-                                             : unqualified;
+                    // The C type this one strips to may already carry the
+                    // qualifier in the IR -- `typedef _Atomic int ai` builds
+                    // `_Atomic int` from its specifiers rather than as a
+                    // qualified copy, so an alias or a further qualification of
+                    // it maps onto an IR type that is atomic already.
+                    // c_ir_add_qualified_type refuses to stack a qualifier on a
+                    // qualified type, so the request is made against the IR
+                    // operand with the union of both sides' qualifiers; the
+                    // dedup there gives back the very type the seed built when
+                    // there is nothing to add.
+                    IrType* unqualified_value = ir_type_from_id(&program->types, unqualified);
+                    bool is_atomic = c_type->is_atomic || (unqualified_value && unqualified_value->is_atomic);
+                    bool is_volatile = c_type->is_volatile || (unqualified_value && unqualified_value->is_volatile);
+                    IrTypeId operand = unqualified_value && (unqualified_value->is_atomic || unqualified_value->is_volatile) &&
+                                               unqualified_value->unqualified_type.value != IR_ID_UNDERLYING_INVALID
+                                           ? unqualified_value->unqualified_type
+                                           : unqualified;
+                    IrTypeId qualified = (is_atomic || is_volatile) ? c_ir_add_qualified_type(program, operand, is_atomic, is_volatile) : unqualified;
                     if (qualified.value == IR_ID_UNDERLYING_INVALID)
                     {
                         continue;

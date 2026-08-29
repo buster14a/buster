@@ -656,6 +656,61 @@ static plain_scalar (*typedef_pointer_to_array)[3] = &file_rows[1];
 static struct padded_element padded_pairs[2][2];
 static struct padded_element (*tag_pointer_to_array)[2] = &padded_pairs[1];
 
+// A qualifier does not take the request away.  `const` and `volatile` of an
+// aligned alias are the alias's own alignment in GCC and Clang alike, and
+// losing it there was #696's defect reached through one more spelling: a
+// header handing out a cache-line-aligned scalar produced an underaligned
+// object the moment a program wrote `const` in front of it, in every position
+// and with no diagnostic (#714).  `_Atomic` is deliberately absent from all of
+// this: it builds a type rather than qualifying one, and the two reference
+// compilers disagree about what happens to the request there, so nothing here
+// pins it.
+struct const_typedef_member
+{
+    char byte;
+    const raised_scalar value;
+};
+
+struct volatile_typedef_member
+{
+    char byte;
+    volatile raised_scalar value;
+};
+
+// The lowering direction through a qualifier, where the member sits *earlier*
+// than its natural alignment would put it and the aggregate's own alignment
+// drops with it.
+struct const_lowered_typedef_member
+{
+    char byte;
+    const lowered_scalar value;
+    char tail;
+};
+
+union const_typedef_union
+{
+    char byte;
+    const raised_scalar value;
+};
+
+// A qualified alias is itself an alias, so a typedef of one and a second
+// qualifier both carry the request on.
+typedef const raised_scalar const_raised_alias;
+typedef volatile const_raised_alias const_volatile_raised_alias;
+
+static const raised_scalar file_const_raised_object;
+static char between_const_typedef_objects = 11;
+static volatile lowered_scalar file_volatile_lowered_object;
+
+// The array element position through a qualifier.  A qualified alias tiles
+// exactly when the alias does, which is why `const raised_scalar a[2]` is
+// absent: it is the over-aligned element #703 refuses, and it only became
+// reachable once the qualified form kept its alignment.
+typedef const lowered_scalar const_lowered_pair[2];
+typedef const exact_scalar const_exact_pair[2];
+static const_lowered_pair const_lowered_array;
+static const_exact_pair const_exact_array;
+
 int main(void)
 {
     if (sizeof(struct leading) != 5 || _Alignof(struct leading) != 1) return 1;
@@ -1166,5 +1221,48 @@ int main(void)
     if (_Alignof(typedef_specifier_shared) != 8 || _Alignof(typedef_specifier_raised) != 64) return 140;
     typedef int __attribute__((aligned(16))) block_typedef_specifier_first, block_typedef_specifier_second;
     if (_Alignof(block_typedef_specifier_first) != 16 || _Alignof(block_typedef_specifier_second) != 16) return 141;
+
+    // A qualifier written on an aligned alias, which keeps the request in both
+    // reference compilers.  The size is still the aliased type's, so it is the
+    // aggregates below that separate a request that survived the qualifier
+    // from one that was dropped.
+    if (sizeof(const raised_scalar) != 4 || _Alignof(const raised_scalar) != 32) return 156;
+    if (_Alignof(volatile raised_scalar) != 32 || _Alignof(const volatile raised_scalar) != 32) return 157;
+    if (_Alignof(const lowered_scalar) != 2 || _Alignof(volatile lowered_scalar) != 2) return 158;
+    if (_Alignof(const_raised_alias) != 32 || _Alignof(const_volatile_raised_alias) != 32) return 159;
+    // And the type the qualified alias strips to still keeps its own.
+    if (_Alignof(const int) != 4) return 160;
+
+    if (sizeof(struct const_typedef_member) != 64 || _Alignof(struct const_typedef_member) != 32) return 161;
+    if (sizeof(struct volatile_typedef_member) != 64 || _Alignof(struct volatile_typedef_member) != 32) return 162;
+    if (sizeof(struct const_lowered_typedef_member) != 8 || _Alignof(struct const_lowered_typedef_member) != 2) return 163;
+    if (sizeof(union const_typedef_union) != 32 || _Alignof(union const_typedef_union) != 32) return 164;
+
+    struct const_typedef_member const_member = {0};
+    if ((char *)&const_member.value - (char *)&const_member != 32) return 165;
+    struct volatile_typedef_member volatile_member;
+    if ((char *)&volatile_member.value - (char *)&volatile_member != 32) return 166;
+    struct const_lowered_typedef_member const_lowered_member = {0};
+    if ((char *)&const_lowered_member.value - (char *)&const_lowered_member != 2) return 167;
+    if ((char *)&const_lowered_member.tail - (char *)&const_lowered_member != 6) return 168;
+
+    if ((unsigned long long)(void *)&file_const_raised_object % 32) return 169;
+    if ((unsigned long long)(void *)&file_volatile_lowered_object % 2) return 170;
+    if (between_const_typedef_objects != 11) return 171;
+
+    typedef int block_qualified __attribute__((aligned(64)));
+    const block_qualified block_const_object = 5;
+    char between_block_qualified = 9;
+    volatile block_qualified block_volatile_object = 6;
+    if (_Alignof(const block_qualified) != 64 || _Alignof(volatile block_qualified) != 64) return 172;
+    if ((unsigned long long)(void *)&block_const_object % 64) return 173;
+    if ((unsigned long long)(void *)&block_volatile_object % 64) return 174;
+    if (block_const_object != 5 || block_volatile_object != 6 || between_block_qualified != 9) return 175;
+
+    if (sizeof(const_lowered_pair) != 8 || _Alignof(const_lowered_pair) != 2) return 176;
+    if (sizeof(const_exact_pair) != 8 || _Alignof(const_exact_pair) != 4) return 177;
+    if ((char *)&const_lowered_array[1] - (char *)&const_lowered_array[0] != 4) return 178;
+    if ((char *)&const_exact_array[1] - (char *)&const_exact_array[0] != 4) return 179;
+    if ((unsigned long long)(void *)const_lowered_array % 2) return 180;
     return 0;
 }

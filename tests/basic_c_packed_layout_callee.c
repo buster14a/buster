@@ -249,3 +249,43 @@ void packed_layout_fill_raised_object(int value)
 {
     packed_layout_raised_object = value;
 }
+
+unsigned long long packed_layout_const_record_size(void)
+{
+    return sizeof(struct packed_layout_const_record);
+}
+
+unsigned long long packed_layout_const_record_alignment(void)
+{
+    return _Alignof(struct packed_layout_const_record);
+}
+
+unsigned long long packed_layout_const_record_value_offset(void)
+{
+    struct packed_layout_const_record record = {0, 0};
+    return (unsigned long long)((char *)&record.value - (char *)&record);
+}
+
+unsigned long long packed_layout_volatile_record_size(void)
+{
+    return sizeof(struct packed_layout_volatile_record);
+}
+
+unsigned long long packed_layout_volatile_record_value_offset(void)
+{
+    struct packed_layout_volatile_record record;
+    return (unsigned long long)((char *)&record.value - (char *)&record);
+}
+
+// A const member is written by the initializer rather than by assignment, so
+// the record is built where it is declared.
+struct packed_layout_const_record packed_layout_make_const_record(char tag, int value)
+{
+    struct packed_layout_const_record record = {tag, value};
+    return record;
+}
+
+int packed_layout_volatile_middle(struct packed_layout_volatile_record record)
+{
+    return record.value;
+}

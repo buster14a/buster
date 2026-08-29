@@ -790,7 +790,9 @@ struct CAggregateAttributes
 // `packed` -- `typedef int pair __attribute__((aligned(2)))` is two-byte
 // aligned in both GCC and Clang. The record keys on the alias copy the
 // declarator made, never on the type it aliases, so `int` keeps its own
-// alignment. It lives in a side table for the reason
+// alignment -- and on every qualified copy of that alias, because a qualifier
+// cannot take an alignment away and the qualified copy points past the alias
+// at the type it strips to (#714). It lives in a side table for the reason
 // CParseResult.noreturn_function_types does: the population is a handful of
 // typedefs per translation unit against a type table of tens of thousands of
 // entries, so a field on CType would cost every one of them.

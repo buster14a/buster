@@ -157,5 +157,22 @@ int main(void)
     packed_layout_fill_raised_object(864209);
     if (packed_layout_raised_object != 864209) return 28;
     if ((unsigned long long)(void *)&packed_layout_raised_object % 16) return 29;
+
+    // And with a qualifier in front of the alias, which keeps the request: a
+    // half that dropped it there lays `value` at offset 4 in both records and
+    // sizes the const one at 8, so each half reads a different member.
+    if (sizeof(struct packed_layout_const_record) != 32) return 35;
+    if (packed_layout_const_record_size() != sizeof(struct packed_layout_const_record)) return 36;
+    if (packed_layout_const_record_alignment() != 16) return 37;
+    if (packed_layout_const_record_value_offset() != 16) return 38;
+    if (packed_layout_volatile_record_size() != 8) return 39;
+    if (packed_layout_volatile_record_value_offset() != 2) return 40;
+
+    struct packed_layout_const_record const_record = packed_layout_make_const_record('y', -24681357);
+    if (const_record.tag != 'y' || const_record.value != -24681357) return 41;
+    if ((unsigned long long)(void *)&const_record % 16) return 42;
+
+    struct packed_layout_volatile_record volatile_record = {'z', 0x5e6f7a8b, '!'};
+    if (packed_layout_volatile_middle(volatile_record) != 0x5e6f7a8b) return 43;
     return 0;
 }
