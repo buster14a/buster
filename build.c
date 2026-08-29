@@ -16109,9 +16109,11 @@ struct MuslManifest
 // `long double _Complex`, released by the System V x86-64 COMPLEX_X87 result
 // class (ST(0) real over ST(1) imaginary) reaching the canonical emitter.
 // cpowl came with them once the inline Smith division learned to take the
-// magnitude of an x87 value through its sign/exponent halfword.
-#define MUSL_EXPECTED_COMPILED_UNITS 1347
-#define MUSL_EXPECTED_FAILURE_HASH 0x6810e005bc27ac9dull
+// magnitude of an x87 value through its sign/exponent halfword. Then two more,
+// `src/stdio/vfprintf` and `src/stdio/vfwprintf`, once `va_arg` learned to
+// read a wide floating-point value out of the overflow area.
+#define MUSL_EXPECTED_COMPILED_UNITS 1349
+#define MUSL_EXPECTED_FAILURE_HASH 0x985b6ebfe3c78cebull
 
 BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, bool print)
 {
@@ -16906,12 +16908,8 @@ struct LibcTestSubsetTotals
 // sorted by unit name, so the file system's order cannot move it. Both are
 // printed on the LIBCTEST_INVENTORY line, which is what a deliberate
 // rebaseline needs.
-// 2026-08-29: one state moved, `functional/tgmath` from blocked-compile to
-// blocked-link, when the COMPLEX_X87 result class let its `long double
-// _Complex` calls through the frontend. It is now behind `vfprintf` with the
-// other 139, so the passing count is unchanged.
-#define LIBC_TEST_EXPECTED_PASSING 79
-#define LIBC_TEST_EXPECTED_STATE_HASH 0x7816cb509ce25261ull
+#define LIBC_TEST_EXPECTED_PASSING 196
+#define LIBC_TEST_EXPECTED_STATE_HASH 0xe013369831d6f8deull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it

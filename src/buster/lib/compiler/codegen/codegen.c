@@ -12417,10 +12417,73 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     else if (instruction->opcode == IR_OPCODE_VA_ARG)
                     {
                         IrType* value_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                        if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type))
+                        // An aggregate that merely carries an f80 payload
+                        // crosses the boundary as ordinary eightbytes -- musl's
+                        // `union ldshape` rides two general-purpose registers --
+                        // so it reads back through the generic path below.  A
+                        // value whose own classification is the X87/X87_UP pair
+                        // does not: System V sends that pair to memory, so the
+                        // caller left it in a sixteen-aligned overflow slot and
+                        // never in the register save area, and its read is the
+                        // overflow arm alone.
+                        bool va_arg_f80_opaque = result.abi == CODEGEN_ABI_X86_64_SYSTEM_V &&
+                                                 codegen_canonical_x64_type_is_f80_opaque_cached(f80_cache, program, instruction->canonical_type);
+                        if (!va_arg_f80_opaque && codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type))
                         {
-                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-                            return result;
+                            if (!value_type || value_type->layout.size != 16 || result.abi != CODEGEN_ABI_X86_64_SYSTEM_V ||
+                                !codegen_canonical_x64_type_is_f80_x87_shape_cached(f80_cache, program, instruction->canonical_type))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            // Realign the overflow cursor to the sixteen the
+                            // caller placed the value at, take the slot, and
+                            // advance past it.  The payload is then copied
+                            // through the x87 stack the way every other f80
+                            // copy here is, which is what leaves the six
+                            // padding bytes of the destination zeroed rather
+                            // than carrying whatever the caller's slot held.
+                            // The copy's own scratch is RAX, so the va_list
+                            // object is finished with before it runs.
+                            c_x64_load(&emitter, 0x85, instruction->operands[0]);
+                            BusterX86MetadataPhysicalOperand f80_overflow_load_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RAX, 64, 8),
+                            };
+                            BusterX86MetadataPhysicalOperand f80_align_add_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                codegen_canonical_x64_metadata_immediate(15, 8),
+                            };
+                            BusterX86MetadataPhysicalOperand f80_align_and_operands[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                                codegen_canonical_x64_metadata_immediate(-16, 8),
+                            };
+                            BusterX86MetadataPhysicalOperand f80_cursor_store_operands[2] = {
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RAX, 64, 8),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RDX, 64),
+                            };
+                            BusterX86MetadataPhysicalOperand f80_cursor_advance_operands[2] = {
+                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RAX, 64, 8),
+                                codegen_canonical_x64_metadata_immediate((s64)value_type->layout.size, 32),
+                            };
+                            if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), f80_overflow_load_operands,
+                                                                       BUSTER_ARRAY_LENGTH(f80_overflow_load_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), f80_align_add_operands,
+                                                                       BUSTER_ARRAY_LENGTH(f80_align_add_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), f80_align_and_operands,
+                                                                       BUSTER_ARRAY_LENGTH(f80_align_and_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), f80_cursor_store_operands,
+                                                                       BUSTER_ARRAY_LENGTH(f80_cursor_store_operands)) ||
+                                !codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), f80_cursor_advance_operands,
+                                                                       BUSTER_ARRAY_LENGTH(f80_cursor_advance_operands)) ||
+                                !codegen_canonical_x64_emit_f80_copy(&buffer, X64_REGISTER_RDX, 0, X64_REGISTER_RBP, result_displacement,
+                                                                       &x87_stack_depth))
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            instruction_id = instruction->next;
+                            continue;
                         }
                         u32 integer_parts = 0;
                         bool aggregate = codegen_canonical_integer_aggregate_parts(program, instruction->canonical_type, &integer_parts);

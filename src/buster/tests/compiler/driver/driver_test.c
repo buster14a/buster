@@ -5750,6 +5750,45 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(aggregate_temporary);
     }
+    // Reading an 80-bit x87 `long double` back out of a `va_list`.  System V
+    // sends its X87/X87_UP pair to memory, so the value is never in the
+    // register save area: the read realigns the overflow cursor to sixteen,
+    // takes the slot, and advances past all of it.  musl's `pop_arg` in
+    // src/stdio/vfprintf.c is the shape this covers, and the fixture also
+    // pulls one through a `va_list *` and past a `va_copy`.  Each value is
+    // compared as the `union ldshape` fields musl reads it through, against
+    // constants a 53-bit significand cannot produce, so a wrong answer fails
+    // the exit status rather than looking plausible.  Every allocator runs it
+    // for the same reason the fixtures above do: what the other three are
+    // checked for is that a function carrying an f80 falls back to the
+    // canonical emitter.  The fixture compiles to an empty program wherever
+    // `long double` is not the x87 format, so it stays registered on every
+    // host.
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators); allocator_index += 1)
+    {
+        TemporalArena va_arg_temporary = scratch_begin(&arguments->arena, 1);
+        String8 va_arg_path = buster_test_temporary_path(va_arg_temporary.arena, S8("buster-c-va-arg-long-double"), S8(""));
+        String8 va_arg_command_line[] = {
+            c_long_double_allocators[allocator_index], S8("-o"), va_arg_path, S8("tests/basic_c_va_arg_long_double.c"),
+        };
+        CompilerDriverResult va_arg = compiler_driver_execute_invocation(
+            va_arg_temporary.arena,
+            compiler_driver_parse_arguments(va_arg_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(va_arg_command_line)));
+        BUSTER_TEST(arguments, va_arg.error == COMPILER_DRIVER_ERROR_NONE);
+        if (va_arg.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 va_arg_arguments[] = {va_arg_path};
+            ProcessSpawnResult va_arg_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(va_arg_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, va_arg_spawn.handle != 0);
+            if (va_arg_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(va_arg_temporary.arena, va_arg_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(va_arg_temporary);
+    }
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
     // The single translation unit above cannot see an ABI disagreement: a
     // caller and a callee this compiler produced agree with each other

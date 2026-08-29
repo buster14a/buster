@@ -10588,7 +10588,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         S8("long double atomic_exchange(_Atomic(long double) *value) { return __c11_atomic_exchange(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
         S8("int atomic_compare(_Atomic(long double) *value, long double *expected) { return __c11_atomic_compare_exchange_strong(value, expected, 0.0L, __ATOMIC_RELAXED, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
         S8("void fixed_f80_variadic(long double value, ...) { (void)value; } int main(void) { return 0; }"),
-        S8("typedef void *va_list; int take(int count, ...) { va_list arguments; long double value = __builtin_va_arg(arguments, long double); return value != 0; } int main(void) { return 0; }"),
+        // `va_arg` reads a wide value back in the two shapes the argument side
+        // passes one in; the shapes past the two eightbytes its copy covers --
+        // a `long double _Complex`, an aggregate with a tail behind the
+        // payload -- are named here rather than at code generation.
+        S8("typedef void *va_list; int take(int count, ...) { va_list arguments; long double _Complex value = __builtin_va_arg(arguments, long double _Complex); return value != 0; } int main(void) { return 0; }"),
+        S8("typedef void *va_list; struct ldlarge { long double f; int tail; }; int take(int count, ...) { va_list arguments; struct ldlarge value = __builtin_va_arg(arguments, struct ldlarge); return value.tail; } int main(void) { return 0; }"),
         S8("long double overflow = 0x1p+16384L; int main(void) { return 0; }"),
         S8("long double underflow = 0x1p-16446L; int main(void) { return 0; }"),
         S8("long double malformed_exponent = 0x1pL; int main(void) { return 0; }"),
@@ -10628,11 +10633,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         }
         // The x87 vocabulary answers for these, so they must lower rather
         // than diagnose: negation, truth conversion, the conversions to and
-        // from a wide float, a wide float passed through a variadic call, and
-        // the static initializers the constant folder covers -- an arithmetic
-        // expression over literals, parenthesized or not, and an aggregate of
-        // them.  They are checked here, beside the shapes that still refuse,
-        // so the boundary between the two stays one list to read.
+        // from a wide float, a wide float passed through a variadic call and
+        // read back out of a `va_list` in either of the two shapes that
+        // admits, and the static initializers the constant folder covers --
+        // an arithmetic expression over literals, parenthesized or not, and
+        // an aggregate of them.  They are checked here, beside the shapes
+        // that still refuse, so the boundary between the two stays one list
+        // to read.
         String8 accepted[] = {
             S8("long double negate_variable(long double value) { return -value; } int main(void) { return 0; }"),
             S8("int truth_variable(long double value) { return value ? 1 : 0; } int main(void) { return 0; }"),
@@ -10642,6 +10649,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
             S8("long double add(long double left, long double right) { return left + right; } int main(void) { return 0; }"),
             S8("int compare(long double left, long double right) { return left < right; } int main(void) { return 0; }"),
             S8("void variadic_call(int count, ...); void call(void) { variadic_call(0, 1.0L); } int main(void) { return 0; }"),
+            S8("typedef void *va_list; int take(int count, ...) { va_list arguments; long double value = __builtin_va_arg(arguments, long double); return value != 0; } int main(void) { return 0; }"),
+            S8("typedef void *va_list; union ldshape { long double f; struct { unsigned long m; unsigned short se; } i; }; unsigned long take(int count, ...) { va_list arguments; union ldshape value = __builtin_va_arg(arguments, union ldshape); return value.i.m; } int main(void) { return 0; }"),
             S8("long double arithmetic = 1.0L + 2.0L; int main(void) { return 0; }"),
             S8("long double parenthesized_arithmetic = (1.0L + 2.0L); int main(void) { return 0; }"),
             S8("long double aggregate[1] = { 1.0L }; int main(void) { return 0; }"),

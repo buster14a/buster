@@ -953,9 +953,10 @@ because x86-64 supplies the implementation in assembly (`crt/crti`,
 `src/signal/sigsetjmp`, `src/thread/syscall_cp`, `src/thread/tls`).
 Thirty-two files are `architecture-assembly`: musl would prefer them over a
 portable C unit, and since the Buster driver takes no assembly input the
-harness compiles the portable C instead and lists each one. The remaining 2
-are the `MUSL_UNSUPPORTED` units, and they are one class:
-`vfprintf`/`vfwprintf`, both on wide floating-point `va_arg`.
+harness compiles the portable C instead and lists each one. Every other unit
+in the manifest compiles: there are no `MUSL_UNSUPPORTED` units left, and the
+last class to go was `vfprintf`/`vfwprintf`, both on wide floating-point
+`va_arg`, described with the type below.
 
 Static initializers are no longer a class, and neither are the three
 singletons that stood beside them: 1344 to 1347. `src/misc/ioctl`'s
@@ -984,11 +985,16 @@ symbol reference and takes musl's two hand-off shapes.
 `long double _Complex` and were refused at the signature boundary until the
 System V COMPLEX_X87 result class reached the canonical emitter, described
 with the type below: 1326 to 1344, and `functional/tgmath` in libc-test moved
-from `blocked-compile` to the `vfprintf` link blocker with it. Conflicting
+from `blocked-compile` to the `vfprintf` link blocker with it. Neither is
+wide floating-point `va_arg` a class any more, which is what `vfprintf` and
+`vfwprintf` stopped on until the read described with the type below was
+implemented: 1344 to 1346. Conflicting
 declarations are no longer a class: C11 6.2.7p3 makes an unprototyped
 `long f();` compatible with a non-variadic prototype for the same function,
-which is what musl's `pthread_cancel.c` and `__libc_start_main.c` write
-(measured 2026-08-29).
+which is what musl's `pthread_cancel.c` and `__libc_start_main.c` write.
+Neither is wide floating-point `va_arg`, which is what `vfprintf` and
+`vfwprintf` stopped on until the read described with the type below was
+implemented (measured 2026-08-29).
 
 `_Complex` is a two-field aggregate of its real type, real part first. That is
 the layout every psABI specifies and, with one exception, also the argument
@@ -1218,9 +1224,8 @@ unresolved symbols, or the reference's own reason for being out of reach — and
 each subset then prints one `LIBCTEST_SUBSET` line with its counts and its
 compile, link and run time. `LIBCTEST_SUPPORT` reports upstream's support
 library per side, including its archive time, and any support unit that did
-not compile is named on a `LIBCTEST_SUPPORT_UNSUPPORTED` line: `mtest.c` is
-one today, for a `long double` helper, which is why `src/math` cannot link
-even where its tests compile.
+not compile is named on a `LIBCTEST_SUPPORT_UNSUPPORTED` line. All nine
+compile on both sides today, so the line is absent.
 
 `LIBCTEST_BLOCKER` is the stage's most useful output while most of the suite
 is out of reach: the symbols the Buster-built archive could not supply, ranked
@@ -1228,35 +1233,35 @@ by how many tests wanted each. It is the work list in the order that unblocks
 the most tests, and it is why this stage grows by itself as the compiler
 improves rather than needing to be extended by hand.
 
-Today 79 of 424 units pass (measured 2026-08-29). Seventy-eight are `src/api`:
-78 of its 79 units compile against musl's headers under both compilers, and
-one — `api/unistd` — is held out because musl defines neither
+Today 196 of 424 units pass (measured 2026-08-29). Seventy-eight are
+`src/api`: 78 of its 79 units compile against musl's headers under both
+compilers, and one — `api/unistd` — is held out because musl defines neither
 `_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the reference fails on
-too. The seventy-ninth is the first runtime test to link and run green, in
-`src/regression`. The rest of the three runtime subsets still does not link:
-`src/functional` is 7 dynamic, 15 excluded-reference, 1 blocked-compile and 54
-blocked-link; `src/math` is 144 excluded-reference, 21 blocked-compile and 34
-blocked-link; `src/regression` is 2 dynamic, 12 excluded-reference and 54
-blocked-link, with nothing left that Buster cannot compile: its one
-`blocked-compile` was `flockfile-list`, whose `checkfreed` writes an unbraced
-`if` controlling a loop whose own unbraced `if` carries the compound body, and
-the statement-extent walk measured that as ending at the next semicolon rather
-than at the brace. It moved to `blocked-link` behind `vfprintf` and the
-passing count did not move with it, which is the shape of this list while one
-symbol gates a third of the suite.
+too. The other 118 are runtime tests that link and run green: `src/functional`
+is 39 passing against 2 failing, 7 dynamic, 15 excluded-reference, 2
+blocked-compile and 12 blocked-link; `src/math` is 34 passing, 144
+excluded-reference and 21 blocked-compile, with nothing blocked on a link any
+more; `src/regression` is 45 passing against 4 failing, 2 dynamic, 12
+excluded-reference, 1 blocked-compile and 5 blocked-link.
 
-The list is down to `vfprintf` (142 tests) and `vfwprintf` (1), and nothing
-else: the tail of ones went with the singletons above, and `lsearch`/`lfind`
-were the last two entries to leave it.
-`__libc_start_main` (141) and `__syscall_cp` (107) headed this list until the
-singleton fixes above let their units compile, which is what turned the stage
-from three walls into one: `src/stdio/vfprintf.c` stops on wide floating-point
-`va_arg`, and it alone gates 142 of the 424. `__procfdname` (15) stood second
-until a `[static N]` array parameter stopped making its function's definition
-internal, and `__unmapself` until the inline-assembly fix above; removing
-either moved no unit, because everything that wanted them wanted `vfprintf`
-as well. That is the shape of this list while one symbol gates a third of the
-suite — a blocker can be real, fixed, and still not move the passing count.
+The six failing units are the stage's first real wrong answers rather than
+missing components, and every one of them was blocked on a link until
+`vfprintf` compiled. `regression/fpclassify-invalid-ld80` gets `-nan` where
+the reference gets `nan`: Buster folds `0.0f/0.0f` — which is musl's `NAN` in
+the dialect Buster reads, since it does not predefine `__GNUC__` — to the
+hardware's negative default NaN where Clang folds it positive. That one is in
+the test object rather than in the archive; the reference's own object of the
+same test passes against the Buster-built archive. `regression/malloc-oom`,
+`regression/malloc-brk-fail` and `regression/setenv-oom` hang once the
+allocator is out of memory, and that one is the other way round: the
+reference's own `malloc-oom` object hangs against the Buster-built archive
+too. `functional/fcntl` and `functional/mntent` exit non-zero and have not
+been attributed further.
+
+The ranked blockers are now `__procfdname` (15 tests) and then a tail of ones.
+`__libc_start_main` (141), `__syscall_cp` (107) and `vfprintf` (140) headed
+this list in turn; the last of them is what turned the stage from three walls
+into a list of individual defects.
 
 For scale, one recorded run without libc-test left 26 MB behind: the
 Buster pass spent 57,5 seconds of child time over 1349 units — 43 ms each — for
@@ -2471,8 +2476,18 @@ on a commit you already know is incomplete tells nobody anything.
   `tests/basic_c_long_double_aggregate_{caller,callee}.c`, linked against the
   host compiler in both directions, because a caller and a callee this
   compiler produced agree with each other whatever they agree on.
-  Still refused with a source diagnostic: `va_arg` of a wide float, a fixed
-  wide-float parameter of a variadic *definition* (the SysV `va_start`
+  Reading one back out of a `va_list` admits exactly the two shapes the
+  argument side does, and for the same reason. The X87/X87_UP pair classifies
+  into memory, so a variadic `long double` is never in the register save area
+  whatever the argument counters hold: `va_arg` realigns the overflow cursor
+  to sixteen, takes the slot, advances past all of it, and copies the payload
+  through the x87 stack, which is what leaves the destination's six padding
+  bytes zeroed. An opaque aggregate reads back through the ordinary eightbyte
+  path. `tests/basic_c_va_arg_long_double.c` pins both under all four
+  allocators, including a read through a `va_list *` and one past a `va_copy`
+  — the spellings musl's `pop_arg` uses, and the ones the canonical emitter
+  alone has the x87 vocabulary for. Still refused with a source diagnostic: a
+  fixed wide-float parameter of a variadic *definition* (the SysV `va_start`
   register-save area does not account for it), an aggregate whose
   classification carries an X87 class without being the ABI-proven single-f80
   shape, and every wide float on a target whose `long double` is not this

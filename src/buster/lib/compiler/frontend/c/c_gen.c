@@ -12761,6 +12761,67 @@ BUSTER_C_INTERNAL bool c_ir_abstract_pointer_declarator(CIntegerIrBuilder* build
     return suffix == close;
 }
 
+// One dense-table classification of a call's callee token.  Interned
+// identifiers answer with a byte load; only symbol-less tokens
+// (pasted/synthesized) walk the spelling table.  Both the call preparer and
+// the type predictor ask this question and must get the same answer.
+BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* builder, CToken token)
+{
+    CSymbolBuiltin result = C_SYMBOL_BUILTIN_NONE;
+    if (token.kind == C_TOKEN_IDENTIFIER)
+    {
+        u32 symbol = token.symbol;
+        CSymbolTable* symbols = builder->preprocess.symbols;
+        if (symbol && symbols && symbol <= symbols->predefined_limit)
+        {
+            result = (CSymbolBuiltin)symbols->builtin_kinds[symbol];
+        }
+        else if (!symbol || !symbols)
+        {
+            result = c_symbol_builtin_from_spelling(c_token_spelling(builder->preprocess.spelling_base, token));
+        }
+    }
+
+    return result;
+}
+
+// The comma that separates `va_arg`'s list operand from its type name, or
+// `end` when the range holds none.  Only parentheses and brackets nest here:
+// a type name carries no brace-enclosed initializer.
+BUSTER_C_INTERNAL u32 c_ir_va_arg_type_separator(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    u32 separator = start;
+    u32 parentheses = 0;
+    u32 brackets = 0;
+    while (separator < end)
+    {
+        CToken current = builder->preprocess.tokens[separator];
+        if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            parentheses += 1;
+        }
+        else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+        {
+            parentheses -= 1;
+        }
+        else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            brackets += 1;
+        }
+        else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
+        {
+            brackets -= 1;
+        }
+        else if (!parentheses && !brackets && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
+        {
+            break;
+        }
+        separator += 1;
+    }
+
+    return separator;
+}
+
 BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u32 start, u32 end, u32** emission_order_out,
                                                      u32* emission_count_out)
 {
@@ -12877,25 +12938,9 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             }
             break;
         }
-        // One dense-table classification replaces the former ~25-probe
-        // string_equal ladder: interned identifiers answer with a byte load,
-        // and only symbol-less tokens (pasted/synthesized) walk the
-        // spelling table. Atomic and math names resolve their exact operation
-        // by spelling below, but only after the byte says they are one.
-        CSymbolBuiltin builtin_kind = C_SYMBOL_BUILTIN_NONE;
-        if (token.kind == C_TOKEN_IDENTIFIER)
-        {
-            u32 symbol = token.symbol;
-            CSymbolTable* symbols = builder->preprocess.symbols;
-            if (symbol && symbols && symbol <= symbols->predefined_limit)
-            {
-                builtin_kind = (CSymbolBuiltin)symbols->builtin_kinds[symbol];
-            }
-            else if (!symbol || !symbols)
-            {
-                builtin_kind = c_symbol_builtin_from_spelling(c_token_spelling(builder->preprocess.spelling_base, token));
-            }
-        }
+        // Atomic and math names resolve their exact operation by spelling
+        // below, but only after c_ir_token_builtin_kind says they are one.
+        CSymbolBuiltin builtin_kind = c_ir_token_builtin_kind(builder, token);
         bool builtin_identity = builtin_kind == C_SYMBOL_BUILTIN_EXPECT;
         bool builtin_constant_p = builtin_kind == C_SYMBOL_BUILTIN_CONSTANT_P;
         bool builtin_choose_expr = builtin_kind == C_SYMBOL_BUILTIN_CHOOSE_EXPR;
@@ -14523,41 +14568,30 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         if (selected->builtin_va_arg)
         {
             u32 argument_start = selected->open_index + 1;
-            u32 separator = argument_start;
-            u32 parentheses = 0;
-            u32 brackets = 0;
-            while (separator < selected->close_index)
-            {
-                CToken current = builder->preprocess.tokens[separator];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    parentheses += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-                {
-                    parentheses -= 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    brackets += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-                {
-                    brackets -= 1;
-                }
-                else if (!parentheses && !brackets && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
-                {
-                    break;
-                }
-                separator += 1;
-            }
+            u32 separator = c_ir_va_arg_type_separator(builder, argument_start, selected->close_index);
             IrValueId list = IR_VALUE_ID_INVALID;
             IrTypeId result_type = separator < selected->close_index ? c_ir_type_name(builder, separator + 1, selected->close_index) : IR_TYPE_ID_INVALID;
             if (separator == argument_start || separator >= selected->close_index || result_type.value == IR_ID_UNDERLYING_INVALID)
             {
                 return false;
             }
-            if (c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, result_type))
+            // Reading a wide value back is the mirror of passing one, and it
+            // admits the same two shapes for the same reason.  System V
+            // classifies an X87/X87_UP pair into memory, so the caller left
+            // the value in a sixteen-aligned overflow slot and never in the
+            // register save area; an aggregate whose classification carries
+            // no x87 class at all is copied by the ordinary eightbyte path.
+            // That second arm stops at the two eightbytes the emitter's
+            // va_arg copies -- `long double _Complex` is the shape past it --
+            // so a wide value it cannot read back is named here rather than
+            // reaching code generation.  Every other wide-float shape still
+            // has no lowering at all.
+            IrType* wide_result_type = ir_type_from_id(&builder->program->types, result_type);
+            bool wide_va_arg_supported =
+                c_ir_type_is_f80_x87_shape(builder->program, builder->wide_float_cache, result_type, builder->target) ||
+                (c_ir_type_is_f80_opaque_aggregate(builder->program, builder->wide_float_cache, result_type, builder->target) &&
+                 wide_result_type && wide_result_type->layout.resolved && wide_result_type->layout.size <= 16);
+            if (!wide_va_arg_supported && c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, result_type))
             {
                 builder->failure_message = S8("C IR lowering does not yet support wide floating-point va_arg");
                 builder->failure_token_index = selected->token_index;
@@ -16116,7 +16150,20 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
             else
             {
                 IrInstruction* materialization = &builder->function->instructions[builder->function->values[operand.value].definition.value];
+                IrType* address_element_type = operand_type_value && operand_type_value->kind == IR_TYPE_POINTER
+                                                   ? ir_type_from_id(&builder->program->types, operand_type_value->element_type)
+                                                   : 0;
                 if (materialization->opcode == IR_OPCODE_FUNCTION && operand_type_value && operand_type_value->kind == IR_TYPE_POINTER)
+                {
+                    result = operand;
+                }
+                // On a target where a `va_list` object decays the way an array
+                // does, the walk already produced its address rather than a
+                // load of it, and `&ap` is that same address.  musl's
+                // `vfprintf` hands its list to `printf_core` exactly this way,
+                // and without this the address-of below has no load to recover
+                // a place from and refuses the expression.
+                else if (materialization->opcode == IR_OPCODE_ADDRESS_OF && address_element_type && address_element_type->kind == IR_TYPE_VA_LIST)
                 {
                     result = operand;
                 }
@@ -16158,12 +16205,26 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
                 return false;
             }
             IrTypeId element = pointer_type->element_type;
-            IrValueId place = c_ir_emit_dereference_place(builder, operand, pointer_source);
-            if (place.value == IR_ID_UNDERLYING_INVALID)
+            IrType* element_type_value = ir_type_from_id(&builder->program->types, element);
+            // `*ap` on a `va_list *` is the array-decay case again: the object
+            // it names is the list, and every use of a list is its address.
+            // musl's `pop_arg` and `printf_core` read every argument through
+            // that spelling, and loading the object instead handed the
+            // variadic opcodes the list's first eightbyte as a pointer.
+            if (element_type_value && element_type_value->kind == IR_TYPE_VA_LIST &&
+                (builder->va_list_builtin_operand || c_ir_va_list_parameter_decays(builder->target)))
             {
-                return false;
+                result = operand;
             }
-            result = c_ir_emit_load_place(builder, place, element, pointer_source);
+            else
+            {
+                IrValueId place = c_ir_emit_dereference_place(builder, operand, pointer_source);
+                if (place.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                result = c_ir_emit_load_place(builder, place, element, pointer_source);
+            }
         }
         if (result.value == IR_ID_UNDERLYING_INVALID)
         {
@@ -23883,7 +23944,29 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         {
             CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, index);
             u32 close = UINT32_MAX;
-            if (prepared_call && builder->function && prepared_call->emitted && prepared_call->result.value < builder->function->value_count)
+            // `va_arg` is a call in spelling only: its type is the type name
+            // it names, and no signature carries that.  Without this the scan
+            // walks on into the parentheses and answers with the list
+            // operand's own type, which is how `f ? va_arg(*ap, int) : 0` --
+            // the shape musl's vfprintf reads every `*` field width through --
+            // looked like a conditional between a va_list and an int.
+            u32 va_arg_close = c_ir_token_builtin_kind(builder, token) == C_SYMBOL_BUILTIN_VA_ARG
+                                   ? c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                                     C_PUNCTUATOR_RIGHT_PARENTHESIS)
+                                   : UINT32_MAX;
+            u32 va_arg_separator = va_arg_close < end ? c_ir_va_arg_type_separator(builder, index + 2, va_arg_close) : UINT32_MAX;
+            if (va_arg_separator != UINT32_MAX && va_arg_separator < va_arg_close)
+            {
+                IrTypeId va_arg_type = IR_TYPE_ID_INVALID;
+                c_ir_query_type_name(builder, va_arg_separator + 1, va_arg_close, true, &va_arg_type);
+                if (builder->queries->has_request)
+                {
+                    return IR_TYPE_ID_INVALID;
+                }
+                candidate = va_arg_type;
+                close = va_arg_close;
+            }
+            else if (prepared_call && builder->function && prepared_call->emitted && prepared_call->result.value < builder->function->value_count)
             {
                 candidate = builder->function->values[prepared_call->result.value].canonical_type;
                 close = prepared_call->close_index;
