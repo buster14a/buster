@@ -1233,34 +1233,33 @@ by how many tests wanted each. It is the work list in the order that unblocks
 the most tests, and it is why this stage grows by itself as the compiler
 improves rather than needing to be extended by hand.
 
-Today 213 of 424 units pass (measured 2026-08-29). Seventy-eight are
+Today 216 of 424 units pass (measured 2026-08-29). Seventy-eight are
 `src/api`: 78 of its 79 units compile against musl's headers under both
 compilers, and one — `api/unistd` — is held out because musl defines neither
 `_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the reference fails on
-too. The other 135 are runtime tests that link and run green: `src/functional`
-is 49 passing against 4 failing, 7 dynamic, 15 excluded-reference, 1
-blocked-compile and 1 blocked-link; `src/math` is 34 passing, 144
-excluded-reference and 21 blocked-compile, with nothing blocked on a link any
-more; `src/regression` is 52 passing against 2 failing, 2 dynamic, 12
-excluded-reference and 1 blocked-compile, also with nothing blocked on a link.
+too. The other 138 are runtime tests that link and run green: `src/functional`
+is 50 passing against 4 failing, 7 dynamic, 15 excluded-reference and 1
+blocked-compile; `src/math` is 34 passing, 144 excluded-reference and 21
+blocked-compile; `src/regression` is 54 passing against 1 failing, 2 dynamic
+and 12 excluded-reference, with nothing it cannot compile. **Nothing anywhere
+in the suite is blocked on a link any more**, which is why `LIBCTEST_BLOCKER`
+now prints nothing at all: the work list this stage generates for itself is
+empty, and what is left is the compile gap under `src/math` and five wrong
+answers.
 
-The six failing units are the stage's wrong answers rather than missing
-components; each of them was blocked on a link until `vfprintf` compiled, so
-none is a regression against an earlier pass.
-`regression/fpclassify-invalid-ld80` gets `-nan` where the reference gets
-`nan`: Buster folds `0.0f/0.0f` — which is musl's `NAN` in the dialect
-Buster reads, since it does not predefine `__GNUC__` — to the hardware's
-negative default NaN where Clang folds it positive. That one is in the test
-object rather than in the archive; the reference's own object of the same test
-passes against the Buster-built archive. `regression/sem_close-unmap`,
-`functional/fcntl`, `functional/mntent`, `functional/strftime` and
-`functional/tgmath` exit non-zero and have not been attributed further.
+The five failing units are wrong answers rather than missing components; each
+was blocked on a link until `vfprintf` compiled, so none is a regression
+against an earlier pass. `regression/sem_close-unmap`, `functional/fcntl`,
+`functional/mntent`, `functional/strftime` and `functional/tgmath` exit
+non-zero and have not been attributed further.
 
 `regression/malloc-oom`, `regression/malloc-brk-fail`,
 `regression/setenv-oom` and `regression/pthread_create-oom` used to sit here
 too, hanging out the ten-second deadline once the allocator was out of memory,
-and none of them was about the allocator. Each fills memory with libc-test's
-`t_memfill`, which mmaps until the kernel refuses; musl's `MAP_FAILED` is
+and none of them was about the allocator. (`regression/fpclassify-invalid-ld80`
+was a sixth, and went when the folder learned to produce the positive quiet
+NaN.) Each of the four fills memory with libc-test's `t_memfill`, which mmaps
+until the kernel refuses; musl's `MAP_FAILED` is
 `((void *) -1)`, and an integer narrower than a pointer reached
 INTEGER_TO_POINTER without being widened first, so the constant arrived as
 `0x00000000ffffffff` and no caller of `mmap` could ever compare equal to it.
@@ -1275,10 +1274,13 @@ bisect that found it is worth keeping: the hang reproduced with the
 archive, and dropping Clang-built `src/malloc` objects ahead of that archive
 did not move it, which cleared the allocator and left `mmap`'s own return.
 
-The ranked blockers are now `lfind` and `lsearch`, one test each. `vfprintf`
-(140), `__libc_start_main` (141), `__syscall_cp` (107) and `__procfdname` (15)
-headed this list in turn; the walls are gone and what is left is a list of
-individual defects.
+`LIBCTEST_BLOCKER` is empty for the first time. `__libc_start_main` (141),
+`__syscall_cp` (107), `vfprintf` (142) and `__procfdname` (15) headed the list
+in turn, then `lfind` and `lsearch` with one test each; every one of them is
+now supplied. What the stage reports from here is wrong answers and the
+`src/math` compile gap, not missing components — the list will come back the
+moment a test reaches for something new, which is the point of generating it
+rather than maintaining it.
 
 For scale, one recorded run without libc-test left 26 MB behind: the
 Buster pass spent 57,5 seconds of child time over 1349 units — 43 ms each — for
@@ -2267,6 +2269,18 @@ on a commit you already know is incomplete tells nobody anything.
   instruction there, and `ir_canonical_conversion_valid` rejects a
   non-pointer-width operand outright. `tests/basic_c_integer_to_pointer.c`
   pins the answers under every allocator.
+- `builder->size_type` and `builder->ptrdiff_type` are chosen against the width
+  of the scalar type the lowering built, not against `program->data_layout`'s
+  own `unsigned long` entry. The two can disagree: the layout comes from the
+  *preprocess* result and the scalar types come from `c_lower_to_ir`'s `target`
+  argument, so a caller that preprocesses with one target and lowers with
+  another — every frontend test does, preprocessing with a default target —
+  otherwise gets a `size_t` narrower than a pointer on an LLP64 host. Nothing
+  noticed while that only reached arithmetic; the widening above notices
+  immediately, which is how a platform-independent defect first showed up as
+  one platform's CI failure.
+  `c_test_pointer_width_integer_conversion` lowers the same source for an LLP64
+  target and an LP64 one and checks both.
 - `IrFunction.opcode_summary` answers *may this function contain opcode X*
   without a scan, and it answers only for the `IR_OPCODE_SUMMARY_TRACKED`
   list: an opcode outside that list is never recorded, so

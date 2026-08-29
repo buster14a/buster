@@ -7621,6 +7621,84 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_comma_assignment(UnitTestA
     return result;
 }
 
+// `size_t` and `ptrdiff_t` must be pointer-width whatever target the lowering
+// is handed, because an integer converted to a pointer is widened to them on
+// the way.  The shape that broke this is the one every test above writes
+// without meaning to: `c_preprocess` with default options carries one target's
+// data layout, and `c_lower_to_ir` builds its scalar types from the target
+// argument.  When the two disagree about `long` -- LP64 against LLP64 -- a
+// choice made from the layout's own `unsigned long` entry picks a 32-bit
+// `ptrdiff_t` on a 64-bit-pointer target, and `(void *)0` reaches
+// INTEGER_TO_POINTER still 32 bits wide.  Both directions are lowered here so
+// the test is the same test on an LP64 host and on an LLP64 one.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_width_integer_conversion(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 triples[] = {
+        S8("x86_64-pc-windows-msvc"),
+        S8("x86_64-unknown-linux-gnu"),
+    };
+    for (u32 triple_index = 0; triple_index < BUSTER_ARRAY_LENGTH(triples); triple_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        // Default preprocess options on purpose: this is the mismatch, and it
+        // is what the frontend tests around this one all do.
+        CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                                S8("typedef struct Slot { unsigned char tag; } Slot;\n"
+                                                   "extern Slot *slot_lookup(Slot *table, unsigned long key);\n"
+                                                   "int slot_shape(Slot *table, unsigned long key)\n"
+                                                   "{ Slot *slot = (void *)0; slot = key ? slot_lookup(table, key) : (void *)0;\n"
+                                                   "  return slot != (void *)0 ? slot->tag : 0; }\n"),
+                                                (CPreprocessOptions){0});
+        TargetParseResult parsed_target = target_parse_triple(triples[triple_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("pointer-width-integer-conversion.c"), tokens, parse, parsed_target.target);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+        BUSTER_TEST(arguments, ir.program != 0);
+        if (ir.program && ir.program->module_count)
+        {
+            IrModule* module = &ir.program->modules[0];
+            BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
+            IrFunction* function = c_test_find_ir_function(module, S8("slot_shape"));
+            BUSTER_TEST(arguments, function != 0);
+            if (function)
+            {
+                // Every integer-to-pointer conversion in the function reaches
+                // it at the pointer's own width, which is the invariant
+                // ir_canonical_conversion_valid enforces and the reason the
+                // widening exists at all.
+                u32 conversion_count = 0;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    if (instruction->opcode != IR_OPCODE_CAST || instruction->conversion_operation != IR_CONVERSION_INTEGER_TO_POINTER ||
+                        !instruction->operand_count)
+                    {
+                        continue;
+                    }
+                    IrType* destination = ir_type_from_id(&ir.program->types, instruction->canonical_type);
+                    IrType* source = ir_type_from_id(&ir.program->types, function->values[instruction->operands[0].value].canonical_type);
+                    BUSTER_TEST(arguments, destination != 0 && source != 0);
+                    if (destination && source)
+                    {
+                        BUSTER_TEST(arguments, destination->layout.resolved);
+                        BUSTER_TEST(arguments, source->bit_width == destination->layout.size * 8);
+                    }
+                    conversion_count += 1;
+                }
+                BUSTER_TEST(arguments, conversion_count >= 1);
+            }
+        }
+        scratch_end(temporary);
+    }
+
+    return result;
+}
+
 // A GNU statement expression can contain control flow and calls.  Its calls
 // must be emitted in the selected arm's block, rather than hoisted into the
 // enclosing expression's entry block by call preparation.
@@ -11443,6 +11521,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_conditional_type_prediction(arguments));
     c_test_result_add(&result, c_test_conditional_void_expression(arguments));
     c_test_result_add(&result, c_test_conditional_comma_assignment(arguments));
+    c_test_result_add(&result, c_test_pointer_width_integer_conversion(arguments));
     c_test_result_add(&result, c_test_statement_expression_control_call(arguments));
     c_test_result_add(&result, c_test_statement_expression_nested_call(arguments));
     c_test_result_add(&result, c_test_statement_expression_control_value(arguments));

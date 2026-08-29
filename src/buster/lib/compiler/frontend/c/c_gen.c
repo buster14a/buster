@@ -37669,7 +37669,18 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     {
         c_ir_scalar_type(&type_context, (CTypeKind)kind);
     }
-    bool pointer_sized_long = program->data_layout.unsigned_long_integer.size == program->data_layout.pointer.size;
+    // `size_t` and `ptrdiff_t` are pointer-width by definition, so the choice
+    // is made against the width of the scalar type this lowering actually
+    // built rather than against the layout's own `unsigned long` entry. The
+    // two can disagree: `program->data_layout` comes from the preprocess
+    // result above, while the scalar types come from the `target` argument,
+    // and a caller that preprocesses with one and lowers with another -- the
+    // frontend tests do, preprocessing with a default target and lowering with
+    // the native one -- otherwise gets a `size_type` narrower than a pointer.
+    // Nothing noticed while that only reached arithmetic; an integer widened
+    // to it on its way to a pointer notices immediately.
+    IrType* unsigned_long_scalar = ir_type_from_id(&program->types, type_context.scalar_types[C_TYPE_UNSIGNED_LONG]);
+    bool pointer_sized_long = unsigned_long_scalar && unsigned_long_scalar->bit_width == program->data_layout.pointer.size * 8;
     IrTypeId size_type = type_context.scalar_types[pointer_sized_long ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG];
     IrTypeId ptrdiff_type = type_context.scalar_types[pointer_sized_long ? C_TYPE_LONG : C_TYPE_LONG_LONG];
     IrTypeId* c_type_ir_map = arena_allocate(arena, IrTypeId, parse.type_count);

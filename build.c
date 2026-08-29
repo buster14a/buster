@@ -16111,9 +16111,11 @@ struct MuslManifest
 // cpowl came with them once the inline Smith division learned to take the
 // magnitude of an x87 value through its sign/exponent halfword. Then two more,
 // `src/stdio/vfprintf` and `src/stdio/vfwprintf`, once `va_arg` learned to
-// read a wide floating-point value out of the overflow area.
+// read a wide floating-point value out of the overflow area. That was the last
+// class: every unit in the manifest compiles, so the failing set is empty and
+// its hash is the hash of nothing.
 #define MUSL_EXPECTED_COMPILED_UNITS 1349
-#define MUSL_EXPECTED_FAILURE_HASH 0x985b6ebfe3c78cebull
+#define MUSL_EXPECTED_FAILURE_HASH 0x0ull
 
 BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, bool print)
 {
@@ -16908,14 +16910,16 @@ struct LibcTestSubsetTotals
 // sorted by unit name, so the file system's order cannot move it. Both are
 // printed on the LIBCTEST_INVENTORY line, which is what a deliberate
 // rebaseline needs.
-// 2026-08-29: 209 -> 213. Four `src/regression` units -- malloc-oom,
-// malloc-brk-fail, setenv-oom and pthread_create-oom -- ran out the ten-second
-// deadline because `MAP_FAILED` is `((void *) -1)` and an integer narrower
-// than a pointer was not sign-extended on its way to one, so no caller of
-// `mmap` could ever see a failure and libc-test's `t_vmfill` mapped memory
-// forever.
-#define LIBC_TEST_EXPECTED_PASSING 213
-#define LIBC_TEST_EXPECTED_STATE_HASH 0xa5abf50e5f42f650ull
+// 2026-08-29: 79 -> 216, in two steps. Wide floating-point `va_arg` let
+// `vfprintf` compile, and it alone gated a third of the suite. Then four
+// `src/regression` units -- malloc-oom, malloc-brk-fail, setenv-oom and
+// pthread_create-oom -- stopped running out the ten-second deadline:
+// `MAP_FAILED` is `((void *) -1)`, an integer narrower than a pointer was not
+// sign-extended on its way to one, so no caller of `mmap` could ever see a
+// failure and libc-test's `t_vmfill` mapped memory forever. Nothing in the
+// suite is blocked on a link any more.
+#define LIBC_TEST_EXPECTED_PASSING 216
+#define LIBC_TEST_EXPECTED_STATE_HASH 0x871b3c0438107ac7ull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it
