@@ -16117,16 +16117,43 @@ struct MuslManifest
 #define MUSL_EXPECTED_COMPILED_UNITS 1349
 #define MUSL_EXPECTED_FAILURE_HASH 0x0ull
 
-BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, bool print)
+// The environment a dynamically linked program is given. musl's own loader
+// reads LD_PRELOAD and LD_LIBRARY_PATH out of the environment it is handed,
+// and a preload set for the host libc is not a library this musl can load: the
+// loader reports every symbol it cannot relocate and leaves at exit 127,
+// before the program's first instruction runs. Every run under this loader is
+// therefore given an environment of its own rather than the inherited one.
+// PATH comes with it so a child resolves the way it would from the driver's
+// shell; nothing this harness runs dynamically reads anything else.
+BUSTER_GLOBAL_LOCAL void musl_loader_environment(Arena* arena, SliceString8* keys_out, SliceString8* values_out)
 {
+    String8* keys = arena_allocate(arena, String8, 1);
+    String8* values = arena_allocate(arena, String8, 1);
+    keys[0] = S8("PATH");
+    values[0] = os_get_environment_variable(S8("PATH"));
+    *keys_out = (SliceString8){.pointer = keys, .length = 1};
+    *values_out = (SliceString8){.pointer = values, .length = 1};
+}
+
+BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command_environment(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture,
+                                                               bool print, bool loader_environment)
+{
+    SliceString8 keys = {0};
+    SliceString8 values = {0};
+    if (loader_environment)
+    {
+        musl_loader_environment(arena, &keys, &values);
+    }
     ProcessRun run = {
         .arguments = arguments,
         .working_directory = working_directory,
         .spawn_options =
             {
                 .capture = capture ? (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)) : 0,
-                .use_process_environment = 1,
+                .use_process_environment = !loader_environment,
             },
+        .environment_keys = keys,
+        .environment_values = values,
     };
     if (print)
     {
@@ -16145,6 +16172,11 @@ BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command(Arena* arena, SliceString8 ar
         .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
     };
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture, bool print)
+{
+    return musl_command_environment(arena, arguments, working_directory, capture, print, false);
 }
 
 BUSTER_GLOBAL_LOCAL String8 musl_trim_ascii_space(String8 text)
@@ -16168,6 +16200,30 @@ BUSTER_GLOBAL_LOCAL String8 musl_first_line(String8 text)
         end += 1;
     }
     return musl_trim_ascii_space(string_slice(text, 0, end));
+}
+
+// The first line of a linker's complaint that is the complaint. `ld` reports
+// its warnings before the error that stopped it -- a shared link that refuses
+// a relocation usually warns about the section it is in first -- so the first
+// line of the output names the symptom rather than the cause.
+BUSTER_GLOBAL_LOCAL String8 musl_first_error_line(String8 text)
+{
+    u64 position = 0;
+    while (position < text.length)
+    {
+        u64 end = position;
+        while (end < text.length && text.pointer[end] != '\n')
+        {
+            end += 1;
+        }
+        String8 line = musl_trim_ascii_space(string_slice(text, position, end));
+        if (line.length && string_first_sequence(line, S8("warning:")) == BUSTER_STRING_NO_MATCH)
+        {
+            return line;
+        }
+        position = end + 1;
+    }
+    return musl_first_line(text);
 }
 
 // Byte order over the shorter length first, then length: the manifest and the
@@ -16696,10 +16752,11 @@ BUSTER_GLOBAL_LOCAL bool musl_compile_clang(Arena* arena, String8 clang, String8
     return command.result == PROCESS_RESULT_SUCCESS;
 }
 
-// `ar` is given the object list through a response file: a musl archive is a
-// thousand members, which is past what a command line takes on Windows and
-// uncomfortably close to it elsewhere.
-BUSTER_GLOBAL_LOCAL bool musl_archive(Arena* arena, String8 ar, String8 archive, String8* objects, u64 object_count, String8 response_path)
+// The object list, one path per line, for a tool that takes @file. A musl
+// object set is a thousand members, which is past what a command line takes on
+// Windows and uncomfortably close to it elsewhere, and both the archiver and
+// the shared link are handed the whole set at once.
+BUSTER_GLOBAL_LOCAL bool musl_response_file(Arena* arena, String8 response_path, String8* objects, u64 object_count)
 {
     TemporalArena temporary = scratch_begin(&arena, 1);
     String8* lines = arena_allocate(temporary.arena, String8, object_count * 2);
@@ -16713,11 +16770,103 @@ BUSTER_GLOBAL_LOCAL bool musl_archive(Arena* arena, String8 ar, String8 archive,
     scratch_end(temporary);
     if (!written)
     {
-        string_print(S8("error: test_musl could not write the archive response file {S8}\n"), response_path);
+        string_print(S8("error: test_musl could not write the object response file {S8}\n"), response_path);
+    }
+    return written;
+}
+
+BUSTER_GLOBAL_LOCAL bool musl_archive(Arena* arena, String8 ar, String8 archive, String8* objects, u64 object_count, String8 response_path)
+{
+    if (!musl_response_file(arena, response_path, objects, object_count))
+    {
         return false;
     }
     String8 arguments[] = {ar, S8("rcs"), archive, string_format(arena, S8("@{S8}"), response_path)};
     MuslCommandResult command = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), false, true);
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// libc.so, from the same object set the archive holds. Three things separate
+// it from the archive line above, and each is musl's own:
+//
+//   -e _dlstart      musl's libc.so is its own dynamic loader, and its entry
+//                    point is the one the kernel jumps to when this file is a
+//                    program's PT_INTERP. That is what makes the shared musl
+//                    testable at all: nothing else on the machine can load it.
+//   --no-undefined   a shared object may carry unresolved names and musl's
+//                    loader will not: it reports each one and leaves at exit
+//                    127 during relocation processing, before the program
+//                    runs. Upstream's configure asks for this flag for exactly
+//                    that reason, and here it is what turns the seven
+//                    assembly-only translation units from a runtime failure
+//                    into a link error naming the symbol.
+//   -Bsymbolic       neither compiler is asked for position-independent code:
+//                    the harness drives one flag set and Buster has no -fPIC
+//                    to give. What both of them do emit is PC-relative, so the
+//                    only references `ld` cannot place in a shared object are
+//                    the ones to symbols another object could interpose.
+//                    Binding them at link time is what musl's own build does
+//                    for all but its public data, through --dynamic-list; this
+//                    takes the whole set, which costs the copy relocations
+//                    that list exists to preserve and buys a shared musl out
+//                    of the object set that is already built.
+BUSTER_GLOBAL_LOCAL bool musl_link_shared(Arena* arena, String8 linker, String8 output, String8* objects, u64 object_count, String8 response_path,
+                                          u64* elapsed_us, String8* error_out)
+{
+    if (!musl_response_file(arena, response_path, objects, object_count))
+    {
+        return false;
+    }
+    String8 arguments[] = {
+        linker, S8("-shared"), S8("-Bsymbolic"), S8("--no-undefined"), S8("-e"), S8("_dlstart"), S8("-o"), output,
+        string_format(arena, S8("@{S8}"), response_path),
+    };
+    u64 start = os_now_microseconds();
+    MuslCommandResult command = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), true, true);
+    if (elapsed_us)
+    {
+        *elapsed_us = os_now_microseconds() - start;
+    }
+    if (error_out)
+    {
+        *error_out = command.error;
+    }
+    return command.result == PROCESS_RESULT_SUCCESS;
+}
+
+// A program linked against that shared musl. The library is named twice: once
+// as the interpreter the kernel is to start, which is what musl installs as
+// /lib/ld-musl-x86_64.so.1 and what this harness points straight at the file
+// it just built, and once as the library the link resolves against.
+BUSTER_GLOBAL_LOCAL bool musl_link_dynamic(Arena* arena, String8 linker, String8 output, String8* objects, u64 object_count, String8 shared,
+                                           String8 run_path, u64* elapsed_us, String8* error_out)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, linker);
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    os_argument_builder_append(&builder, S8("--dynamic-linker"));
+    os_argument_builder_append(&builder, shared);
+    if (run_path.length)
+    {
+        os_argument_builder_append(&builder, S8("-rpath"));
+        os_argument_builder_append(&builder, run_path);
+    }
+    for (u64 index = 0; index < object_count; index += 1)
+    {
+        os_argument_builder_append(&builder, objects[index]);
+    }
+    os_argument_builder_append(&builder, shared);
+    u64 start = os_now_microseconds();
+    MuslCommandResult command = musl_command(arena, os_argument_builder_flush(&builder), S8("."), true, false);
+    if (elapsed_us)
+    {
+        *elapsed_us += os_now_microseconds() - start;
+    }
+    if (error_out)
+    {
+        *error_out = command.error;
+    }
     return command.result == PROCESS_RESULT_SUCCESS;
 }
 
@@ -16737,10 +16886,11 @@ BUSTER_GLOBAL_LOCAL bool musl_link_probe(Arena* arena, String8 linker, String8 o
     return command.result == PROCESS_RESULT_SUCCESS;
 }
 
-BUSTER_GLOBAL_LOCAL bool musl_run_probe(Arena* arena, String8 program, String8* transcript_out)
+BUSTER_GLOBAL_LOCAL bool musl_run_probe(Arena* arena, String8 program, bool loader_environment, String8* transcript_out)
 {
     String8 arguments[] = {program};
-    MuslCommandResult command = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), true, true);
+    MuslCommandResult command =
+        musl_command_environment(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), true, true, loader_environment);
     *transcript_out = command.output;
     return command.result == PROCESS_RESULT_SUCCESS;
 }
@@ -16783,9 +16933,6 @@ BUSTER_GLOBAL_LOCAL u64 musl_file_size(Arena* arena, String8 path)
 // the suite cannot be reached yet and a single total would hide which wall it
 // is behind. The classification is derived, not written down:
 //
-//   excluded-dynamic     upstream ships a sibling .mk for it, which means it
-//                        needs shared objects, -rdynamic or an explicit
-//                        do-not-run rule. Nothing here links dynamically.
 //   excluded-reference   the Clang-built musl of this same configuration
 //                        cannot compile, link or run it green. That is a
 //                        property of the configuration -- musl's x86-64
@@ -16793,18 +16940,29 @@ BUSTER_GLOBAL_LOCAL u64 musl_file_size(Arena* arena, String8 path)
 //                        and thread units are stubs -- and says nothing about
 //                        Buster, so it is held out of the comparison.
 //   blocked-compile      Buster cannot compile the test itself.
-//   blocked-link         Buster compiled it, and the Buster-built archive
-//                        cannot satisfy the link. Every undefined symbol is
-//                        recorded, which is what makes this subset grow: the
-//                        ranked symbol list is exactly the work the archive is
-//                        missing.
+//   blocked-link         Buster compiled it, and the link against the
+//                        Buster-built libc could not be made. Every undefined
+//                        symbol is recorded, which is what makes this subset
+//                        grow: the ranked symbol list is exactly the work the
+//                        libc is missing. A link that failed for another
+//                        reason -- a relocation a shared object cannot carry,
+//                        a sibling shared object this side did not build --
+//                        carries the linker's own words instead.
 //   fail                 it ran, and its transcript or exit status differs
 //                        from the Clang reference. This is the only state that
 //                        is a defect in generated code.
 //   pass                 it ran and matched. src/api is compile-only by
 //                        upstream's own design -- its units are declaration
 //                        conformance checks with no runtime -- so there a
-//                        successful compile is the pass.
+//                        successful compile is the pass, and a unit upstream
+//                        builds into a shared object rather than a program is
+//                        a pass when both sides built it.
+//
+// Nine units carry a sibling .mk, and it says how upstream builds them: as a
+// shared object rather than a program, with -rdynamic, or beside a sibling
+// shared object they open at run time. The harness reads those three facts out
+// of the fragment and builds each unit that way, against the shared musl the
+// stage above produced, rather than holding it out of the comparison.
 //
 // The gate is the passing count together with a hash of the sorted
 // "state subset/unit" lines of everything that did not pass, so a fix and a
@@ -16816,7 +16974,6 @@ typedef enum LibcTestState
     LIBC_TEST_STATE_FAIL,
     LIBC_TEST_STATE_BLOCKED_COMPILE,
     LIBC_TEST_STATE_BLOCKED_LINK,
-    LIBC_TEST_STATE_EXCLUDED_DYNAMIC,
     LIBC_TEST_STATE_EXCLUDED_REFERENCE,
     LIBC_TEST_STATE_COUNT,
 } LibcTestState;
@@ -16826,7 +16983,6 @@ BUSTER_GLOBAL_LOCAL String8 libc_test_state_names[LIBC_TEST_STATE_COUNT] = {
     [LIBC_TEST_STATE_FAIL] = S8_INITIALIZER("fail"),
     [LIBC_TEST_STATE_BLOCKED_COMPILE] = S8_INITIALIZER("blocked-compile"),
     [LIBC_TEST_STATE_BLOCKED_LINK] = S8_INITIALIZER("blocked-link"),
-    [LIBC_TEST_STATE_EXCLUDED_DYNAMIC] = S8_INITIALIZER("excluded-dynamic"),
     [LIBC_TEST_STATE_EXCLUDED_REFERENCE] = S8_INITIALIZER("excluded-reference"),
 };
 
@@ -16848,17 +17004,34 @@ BUSTER_GLOBAL_LOCAL LibcTestSubset libc_test_subsets[LIBC_TEST_SUBSET_COUNT] = {
     {.name = S8_INITIALIZER("regression")},
 };
 
+// A unit's sibling .mk names at most one shared object it needs; the bound is
+// four so that a release which adds a second cannot silently drop it.
+#define LIBC_TEST_DEPENDENCY_MAX 4
+
 typedef struct LibcTestUnit LibcTestUnit;
 struct LibcTestUnit
 {
     // "functional/strtol": the unit's identity in every report line and in the
     // gate hash.
     String8 relative;
+    // "strtol": the file name upstream builds this unit under, which is the
+    // name a dependent's .mk spells and the name a test that opens its own
+    // shared object at run time passes to dlopen.
+    String8 stem;
     String8 source;
     String8 clang_object;
     String8 buster_object;
     String8 clang_program;
     String8 buster_program;
+    // Where each side's shared object goes when this unit is one. It sits in
+    // the directory a dependent's program sits in, because that is where
+    // upstream puts it and where the tests that open one look.
+    String8 clang_shared_object;
+    String8 buster_shared_object;
+    // The sibling shared objects this unit's program needs, by stem, in the
+    // same subset. Read out of the .mk rather than written down here.
+    String8 dependencies[LIBC_TEST_DEPENDENCY_MAX];
+    u64 dependency_count;
     // Why it is not passing: a compiler diagnostic, a linker complaint, or the
     // reference's own reason for being out of reach.
     String8 detail;
@@ -16875,7 +17048,20 @@ struct LibcTestUnit
     // Whether Buster compiled the unit, recorded whether or not the state ended
     // up depending on it.
     bool compiled;
-    u8 reserved[3];
+    // What upstream's sibling .mk says this unit is. `dynamic` marks every
+    // unit that carries one: it is linked against the shared musl rather than
+    // the archive, because wanting a shared object at all is what having a .mk
+    // means here. `shared` marks the ones the .mk builds into a shared object
+    // instead of a program -- upstream never runs those; they exist for the
+    // test that loads them. `export_dynamic` is upstream's -rdynamic.
+    bool dynamic;
+    bool shared;
+    bool export_dynamic;
+    // Whether each side produced this unit's shared object, which is what
+    // decides a dependent's state when one is missing.
+    bool clang_shared_built;
+    bool buster_shared_built;
+    u8 reserved[2];
 };
 
 typedef struct LibcTestManifest LibcTestManifest;
@@ -16898,6 +17084,12 @@ struct LibcTestSubsetTotals
     // Units Buster could not compile, counted independently of the state: a
     // unit the reference holds out still says something about the frontend.
     u64 buster_compile_failed;
+    // How many of the units are linked as shared objects, and how many are
+    // programs linked against the shared musl. Both are counted independently
+    // of the state, the way the compile failures are: what a unit is does not
+    // change with whether it reached its answer.
+    u64 shared;
+    u64 dynamic;
     u64 compile_us;
     u64 link_us;
     u64 run_us;
@@ -16934,23 +17126,45 @@ struct LibcTestSubsetTotals
 // came in ahead of that change and is not attributable to it. The remaining
 // two are `functional/tgmath` and `functional/fcntl`, which are issue #728's
 // last open entries.
-#define LIBC_TEST_EXPECTED_PASSING 241
-#define LIBC_TEST_EXPECTED_STATE_HASH 0xf1b610810c578cd5ull
+// 2026-08-29: 241 -> 242. The nine units upstream ships a sibling .mk for
+// are no longer held out: they are built the way that .mk says and classified
+// by what happens, which is one pass (`functional/tls_align_dso`, the shared
+// object both sides produce), one wrong answer (`functional/tls_align`, which
+// reads its shared object's thread-local storage through the local-exec
+// offsets Buster's only TLS model produces and gets the wrong addresses), two
+// blocked-link (`functional/tls_init_dso` and
+// `regression/tls_get_new-dtv_dso`, on that same model: `ld` refuses
+// R_X86_64_TPOFF32 in a shared object), one more blocked-link
+// (`functional/dlopen_dso`, on a PC-relative reference to a symbol another
+// object could interpose, which is what -fPIC exists to avoid) and four
+// excluded-reference, all of them tests that call `dlopen`, which needs the
+// `setjmp` neither compiler can build.
+#define LIBC_TEST_EXPECTED_PASSING 242
+#define LIBC_TEST_EXPECTED_STATE_HASH 0x117c4d52052bb00aull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it
 // to exit, and this harness has to do the same or one hanging unit stops the
 // run.
-BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command_deadline(Arena* arena, SliceString8 arguments, u64 timeout_us, bool* timed_out)
+BUSTER_GLOBAL_LOCAL MuslCommandResult musl_command_deadline(Arena* arena, SliceString8 arguments, String8 working_directory, u64 timeout_us,
+                                                            bool loader_environment, bool* timed_out)
 {
+    SliceString8 keys = {0};
+    SliceString8 values = {0};
+    if (loader_environment)
+    {
+        musl_loader_environment(arena, &keys, &values);
+    }
     ProcessRun run = {
         .arguments = arguments,
-        .working_directory = S8("."),
+        .working_directory = working_directory,
         .spawn_options =
             {
                 .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                .use_process_environment = 1,
+                .use_process_environment = !loader_environment,
             },
+        .environment_keys = keys,
+        .environment_values = values,
     };
     run.spawn = process_run_spawn(arena, &run);
     if (!run.spawn.handle)
@@ -17093,12 +17307,22 @@ struct LibcTestBuild
     String8 buster_thread_pointer_object;
     String8 clang_archive;
     String8 buster_archive;
+    // The shared musl each side built, by absolute path: it is both the
+    // interpreter a dynamic test program names and the library that program
+    // resolves against.
+    String8 clang_shared;
+    String8 buster_shared;
     String8 clang_support_archive;
     String8 buster_support_archive;
+    // Where each side's dynamic programs are run from. Two of the tests that
+    // open a shared object spell its path from the working directory, so the
+    // run directory is that side's own tree rather than the driver's.
+    String8 clang_run_directory;
+    String8 buster_run_directory;
 };
 
 BUSTER_GLOBAL_LOCAL bool libc_test_compile(Arena* arena, LibcTestBuild* build, bool buster, String8 source, String8 output, String8 metrics,
-                                           bool extended, u64* elapsed_us, String8* diagnostic)
+                                           bool extended, bool shared_object, u64* elapsed_us, String8* diagnostic)
 {
     LibcTestFlags flags = libc_test_flags(arena, build->musl_root, build->musl_object_directory, build->root, build->generated_directory);
     String8 metrics_flag = metrics.length ? string_format(arena, S8("-fsource-metrics={S8}"), metrics) : (String8){0};
@@ -17114,6 +17338,15 @@ BUSTER_GLOBAL_LOCAL bool libc_test_compile(Arena* arena, LibcTestBuild* build, b
         os_argument_builder_append(&builder, build->clang);
     }
     libc_test_append_common_flags(&builder, flags, extended);
+    if (shared_object)
+    {
+        // Upstream's own .lo rule, and the one place a flag set here is not
+        // the same for both compilers by accident rather than by choice: the
+        // Buster driver takes -fPIC and does nothing with it, so what a shared
+        // object needs of the code generator is exactly what this measures.
+        os_argument_builder_append(&builder, S8("-fPIC"));
+        os_argument_builder_append(&builder, S8("-DSHARED"));
+    }
     if (buster)
     {
         os_argument_builder_append(&builder, allocator_flag);
@@ -17143,26 +17376,115 @@ BUSTER_GLOBAL_LOCAL bool libc_test_compile(Arena* arena, LibcTestBuild* build, b
     return command.result == PROCESS_RESULT_SUCCESS;
 }
 
-// One test program: musl's startup object, the thread-pointer replacement, the
-// test, upstream's support archive and the libc under test, linked static with
-// `ld` and nothing else. The archive order is upstream's: the support library
-// resolves against libc, never the other way round.
-BUSTER_GLOBAL_LOCAL bool libc_test_link(Arena* arena, LibcTestBuild* build, bool buster, String8 object, String8 output, u64* elapsed_us,
-                                        String8* error_out)
+// The directory a path names a file in, kept because a dynamic program's own
+// directory is both its run path and where the shared object it opens sits.
+BUSTER_GLOBAL_LOCAL String8 libc_test_parent_directory(String8 path)
 {
-    String8 arguments[] = {
-        build->linker,
-        S8("-static"),
-        S8("-o"),
-        output,
-        buster ? build->buster_startup_object : build->clang_startup_object,
-        buster ? build->buster_thread_pointer_object : build->clang_thread_pointer_object,
-        object,
-        buster ? build->buster_support_archive : build->clang_support_archive,
-        buster ? build->buster_archive : build->clang_archive,
-    };
+    u64 end = path.length;
+    while (end && path.pointer[end - 1] != '/' && path.pointer[end - 1] != '\\')
+    {
+        end -= 1;
+    }
+    return end ? string_slice(path, 0, end - 1) : S8(".");
+}
+
+// One test program, or one shared object. Upstream's build has three shapes
+// and the sibling .mk says which one a unit is:
+//
+//   static program   musl's startup object, the thread-pointer replacement,
+//                    the test, upstream's support archive and the libc under
+//                    test, linked with `ld -static` and nothing else. The
+//                    archive order is upstream's: the support library resolves
+//                    against libc, never the other way round.
+//   shared object    the test compiled -fPIC, linked -shared against the
+//                    shared musl. Upstream builds these for the tests that
+//                    open them and never runs one itself.
+//   dynamic program  the startup object, the test, the support archive and the
+//                    shared musl, with that musl named as the interpreter and
+//                    the program's own directory as the run path -- which is
+//                    upstream's -rpath='$ORIGIN', spelled as the directory
+//                    because this harness knows where it put the file. The
+//                    thread-pointer replacement is not on this line: the
+//                    shared musl already carries it, and a second definition
+//                    would be a duplicate symbol rather than a substitution.
+BUSTER_GLOBAL_LOCAL bool libc_test_link(Arena* arena, LibcTestBuild* build, LibcTestManifest* manifest, LibcTestUnit* unit, bool buster,
+                                        u64* elapsed_us, String8* error_out)
+{
+    String8 output = unit->shared ? (buster ? unit->buster_shared_object : unit->clang_shared_object)
+                                  : (buster ? unit->buster_program : unit->clang_program);
+    // Every string the argument builder will hold is materialized first: the
+    // builder claims a contiguous run of String8 at the arena's current
+    // position, and anything allocating on the same arena in between lands
+    // inside the argument array.
+    String8 dependencies[LIBC_TEST_DEPENDENCY_MAX] = {0};
+    u64 dependency_count = 0;
+    for (u64 index = 0; index < unit->dependency_count; index += 1)
+    {
+        LibcTestUnit* sibling = 0;
+        for (u64 candidate = 0; candidate < manifest->unit_count && !sibling; candidate += 1)
+        {
+            LibcTestUnit* other = manifest->units + candidate;
+            sibling = other->subset == unit->subset && string_equal(other->stem, unit->dependencies[index]) ? other : 0;
+        }
+        bool built = sibling && (buster ? sibling->buster_shared_built : sibling->clang_shared_built);
+        if (!built)
+        {
+            if (error_out)
+            {
+                *error_out = string_format(arena, S8("the sibling shared object {S8} was not built\n"), unit->dependencies[index]);
+            }
+            return false;
+        }
+        dependencies[dependency_count++] = buster ? sibling->buster_shared_object : sibling->clang_shared_object;
+    }
+    String8 run_path = unit->dynamic && !unit->shared ? libc_test_parent_directory(output) : (String8){0};
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, build->linker);
+    if (unit->shared)
+    {
+        os_argument_builder_append(&builder, S8("-shared"));
+    }
+    else if (unit->dynamic)
+    {
+        os_argument_builder_append(&builder, S8("--dynamic-linker"));
+        os_argument_builder_append(&builder, buster ? build->buster_shared : build->clang_shared);
+        os_argument_builder_append(&builder, S8("-rpath"));
+        os_argument_builder_append(&builder, run_path);
+        if (unit->export_dynamic)
+        {
+            os_argument_builder_append(&builder, S8("--export-dynamic"));
+        }
+    }
+    else
+    {
+        os_argument_builder_append(&builder, S8("-static"));
+    }
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    if (!unit->shared)
+    {
+        os_argument_builder_append(&builder, buster ? build->buster_startup_object : build->clang_startup_object);
+    }
+    if (!unit->shared && !unit->dynamic)
+    {
+        os_argument_builder_append(&builder, buster ? build->buster_thread_pointer_object : build->clang_thread_pointer_object);
+    }
+    os_argument_builder_append(&builder, buster ? unit->buster_object : unit->clang_object);
+    for (u64 index = 0; index < dependency_count; index += 1)
+    {
+        os_argument_builder_append(&builder, dependencies[index]);
+    }
+    os_argument_builder_append(&builder, buster ? build->buster_support_archive : build->clang_support_archive);
+    if (unit->dynamic)
+    {
+        os_argument_builder_append(&builder, buster ? build->buster_shared : build->clang_shared);
+    }
+    else
+    {
+        os_argument_builder_append(&builder, buster ? build->buster_archive : build->clang_archive);
+    }
     u64 start = os_now_microseconds();
-    MuslCommandResult command = musl_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), S8("."), true, false);
+    MuslCommandResult command = musl_command(arena, os_argument_builder_flush(&builder), S8("."), true, false);
     if (elapsed_us)
     {
         *elapsed_us += os_now_microseconds() - start;
@@ -17282,6 +17604,63 @@ BUSTER_GLOBAL_LOCAL bool libc_test_generate_options(Arena* arena, LibcTestBuild*
     return true;
 }
 
+// Upstream's sibling .mk, read for the three facts it states. It is a make
+// fragment of one to four lines and this is not a make parser: what the four
+// shapes upstream writes have in common is that each states its fact in a
+// token, so the file is scanned for tokens rather than interpreted.
+//
+//   $(N).LIBS:=$(B)/$(N).so      the unit is a shared object, not a program.
+//   $(N).LDFLAGS:=-rdynamic      its program exports its own symbols, because
+//                                the library it opens resolves against them.
+//   $(B)/$(D)/other_dso.so       its program needs that sibling beside it,
+//                                whether it is named as a prerequisite, as an
+//                                LDLIBS entry, or both.
+//
+// A `$(N).so` is the unit's own output and never a dependency; every other
+// name ending in .so is a sibling in the same subset. Anything upstream adds
+// that this does not understand shows up as a unit that does not build rather
+// than as a unit quietly held out, which is the trade this stage wants.
+BUSTER_GLOBAL_LOCAL void libc_test_read_makefile(Arena* arena, String8 path, LibcTestUnit* unit)
+{
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    ByteSlice bytes = file_read(temporary.arena, string_duplicate_arena(temporary.arena, path, true), (FileReadOptions){0});
+    String8 text = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+    unit->dynamic = true;
+    unit->shared = string_first_sequence(text, S8(".LIBS")) != BUSTER_STRING_NO_MATCH;
+    unit->export_dynamic = string_first_sequence(text, S8("-rdynamic")) != BUSTER_STRING_NO_MATCH;
+    String8 suffix = S8(".so");
+    u64 position = 0;
+    while (position + suffix.length <= text.length)
+    {
+        if (!string_equal(string_slice(text, position, position + suffix.length), suffix))
+        {
+            position += 1;
+            continue;
+        }
+        u64 start = position;
+        while (start && (text.pointer[start - 1] == '_' || text.pointer[start - 1] == '-' || text.pointer[start - 1] == '.' ||
+                         (text.pointer[start - 1] >= '0' && text.pointer[start - 1] <= '9') ||
+                         (text.pointer[start - 1] >= 'a' && text.pointer[start - 1] <= 'z') ||
+                         (text.pointer[start - 1] >= 'A' && text.pointer[start - 1] <= 'Z')))
+        {
+            start -= 1;
+        }
+        String8 name = string_slice(text, start, position);
+        bool self = string_equal(name, unit->stem) || !name.length;
+        bool seen = self;
+        for (u64 index = 0; index < unit->dependency_count; index += 1)
+        {
+            seen = seen || string_equal(unit->dependencies[index], name);
+        }
+        if (!seen && unit->dependency_count < LIBC_TEST_DEPENDENCY_MAX)
+        {
+            unit->dependencies[unit->dependency_count++] = string_duplicate_arena(arena, name, true);
+        }
+        position += suffix.length;
+    }
+    scratch_end(temporary);
+}
+
 // The manifest, enumerated from the checkout the way upstream's Makefile globs
 // it: every .c under each of the four subset directories, plus src/common
 // minus runtest.c. A release that adds or removes a test therefore shows up as
@@ -17314,16 +17693,17 @@ BUSTER_GLOBAL_LOCAL bool libc_test_collect_manifest(Arena* arena, LibcTestBuild*
             String8 relative = string_format(arena, S8("{S8}/{S8}"), libc_test_subsets[subset].name, stem);
             LibcTestUnit unit = {
                 .relative = relative,
+                .stem = stem,
                 .source = path_join(arena, directory, name),
                 .subset = subset,
             };
             // Upstream's sibling .mk is the marker: a test that carries one
-            // wants shared objects, a link flag or no run at all.
+            // wants shared objects or a link flag, and this is where the
+            // harness learns which.
             String8 makefile = string_format(arena, S8("{S8}/{S8}.mk"), directory, stem);
             if (path_exists(arena, makefile))
             {
-                unit.state = LIBC_TEST_STATE_EXCLUDED_DYNAMIC;
-                unit.detail = S8("upstream ships a sibling .mk: shared objects or an explicit do-not-run rule");
+                libc_test_read_makefile(arena, makefile, &unit);
             }
             units[unit_count++] = unit;
         }
@@ -17374,11 +17754,40 @@ BUSTER_GLOBAL_LOCAL bool libc_test_collect_manifest(Arena* arena, LibcTestBuild*
     for (u64 index = 0; index < unit_count; index += 1)
     {
         LibcTestUnit* unit = units + index;
-        String8 stem = string_format(arena, S8("{u64}"), index);
-        unit->clang_object = string_format(arena, S8("{S8}/clang/{S8}.o"), output_directory, stem);
-        unit->buster_object = string_format(arena, S8("{S8}/buster/{S8}.o"), output_directory, stem);
-        unit->clang_program = string_format(arena, S8("{S8}/clang/{S8}"), output_directory, stem);
-        unit->buster_program = string_format(arena, S8("{S8}/buster/{S8}"), output_directory, stem);
+        String8 name = string_format(arena, S8("{u64}"), index);
+        unit->clang_object = string_format(arena, S8("{S8}/clang/{S8}.o"), output_directory, name);
+        unit->buster_object = string_format(arena, S8("{S8}/buster/{S8}.o"), output_directory, name);
+        unit->clang_program = string_format(arena, S8("{S8}/clang/{S8}"), output_directory, name);
+        unit->buster_program = string_format(arena, S8("{S8}/buster/{S8}"), output_directory, name);
+        if (!unit->dynamic)
+        {
+            continue;
+        }
+        // A dynamic unit is the one kind whose path on disk is part of the
+        // test. Three of them find the shared object they open by a path
+        // rather than by a name the loader searches for: two spell it
+        // "src/functional/<stem>.so" from the working directory and one
+        // derives it from argv[0]. Laying each side's programs out under
+        // src/<subset>/<stem> and running them from that side's own directory
+        // is what makes all three resolve, and it is upstream's own layout.
+        String8 relative_directory = string_format(arena, S8("src/{S8}"), libc_test_subsets[unit->subset].name);
+        for (u64 side = 0; side < 2; side += 1)
+        {
+            String8 directory = path_join(arena, path_join(arena, output_directory, side ? S8("buster") : S8("clang")), relative_directory);
+            make_directory_recursive(arena, directory);
+            String8 program = string_format(arena, S8("{S8}/{S8}.exe"), directory, unit->stem);
+            String8 shared_object = string_format(arena, S8("{S8}/{S8}.so"), directory, unit->stem);
+            if (side)
+            {
+                unit->buster_program = program;
+                unit->buster_shared_object = shared_object;
+            }
+            else
+            {
+                unit->clang_program = program;
+                unit->clang_shared_object = shared_object;
+            }
+        }
     }
     *manifest_out = (LibcTestManifest){
         .units = units,
@@ -17404,7 +17813,7 @@ BUSTER_GLOBAL_LOCAL bool libc_test_build_support(Arena* arena, LibcTestBuild* bu
         String8 diagnostic = {0};
         TemporalArena temporary = scratch_begin(&arena, 1);
         bool compiled =
-            libc_test_compile(temporary.arena, build, buster, manifest->support[index], object, (String8){0}, false, &elapsed_us, &diagnostic);
+            libc_test_compile(temporary.arena, build, buster, manifest->support[index], object, (String8){0}, false, false, &elapsed_us, &diagnostic);
         if (compiled)
         {
             objects[object_count++] = object;
@@ -17434,12 +17843,18 @@ BUSTER_GLOBAL_LOCAL bool libc_test_build_support(Arena* arena, LibcTestBuild* bu
 // A run is green when the program exits zero and prints nothing: that is
 // upstream's own protocol, written down in its README. Anything else is the
 // transcript the two sides are compared on.
-BUSTER_GLOBAL_LOCAL bool libc_test_run(Arena* arena, String8 program, u64* elapsed_us, String8* transcript_out, String8* status_out)
+// A dynamic program runs from its own side's directory rather than from the
+// driver's: two of the tests that open a shared object spell its path from the
+// working directory, the way upstream's own runner is invoked from the build
+// root. A static program has nothing to resolve and keeps the driver's.
+BUSTER_GLOBAL_LOCAL bool libc_test_run(Arena* arena, String8 program, String8 working_directory, bool dynamic, u64* elapsed_us,
+                                       String8* transcript_out, String8* status_out)
 {
     String8 arguments[] = {program};
     bool timed_out = false;
     u64 start = os_now_microseconds();
-    MuslCommandResult command = musl_command_deadline(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), LIBC_TEST_TIMEOUT_US, &timed_out);
+    MuslCommandResult command = musl_command_deadline(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments),
+                                                      dynamic ? working_directory : S8("."), LIBC_TEST_TIMEOUT_US, dynamic, &timed_out);
     if (elapsed_us)
     {
         *elapsed_us += os_now_microseconds() - start;
@@ -17481,8 +17896,10 @@ BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, Str
     {
         return false;
     }
-    make_directory_recursive(arena, path_join(arena, output_directory, S8("clang")));
-    make_directory_recursive(arena, path_join(arena, output_directory, S8("buster")));
+    build->clang_run_directory = path_join(arena, output_directory, S8("clang"));
+    build->buster_run_directory = path_join(arena, output_directory, S8("buster"));
+    make_directory_recursive(arena, build->clang_run_directory);
+    make_directory_recursive(arena, build->buster_run_directory);
     make_directory_recursive(arena, build->generated_directory);
     String8 metrics_directory = path_join(arena, output_directory, S8("metrics"));
     make_directory_recursive(arena, metrics_directory);
@@ -17505,111 +17922,140 @@ BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, Str
     }
 
     SelfHostSourceMetrics totals = {0};
-    for (u64 index = 0; index < manifest.unit_count; index += 1)
+    // Two passes, because a unit that builds a shared object has to exist
+    // before the test that opens it links. Nothing else depends on the order:
+    // the states are assigned per unit and the gate hash is taken in manifest
+    // order afterwards.
+    for (u64 pass = 0; pass < 2; pass += 1)
     {
-        LibcTestUnit* unit = manifest.units + index;
-        if (unit->state == LIBC_TEST_STATE_EXCLUDED_DYNAMIC)
+        for (u64 index = 0; index < manifest.unit_count; index += 1)
         {
-            continue;
-        }
-        bool compile_only = libc_test_subsets[unit->subset].compile_only;
-        // Buster compiles first and unconditionally, even for a unit the
-        // reference is about to hold out. Its diagnostic is inventory -- the
-        // long double test tables under src/math are a compile gap whether or
-        // not the reference could have run them -- and a state that hid it
-        // would trade one measurement for another.
-        TemporalArena temporary = scratch_begin(&arena, 1);
-        String8 metrics_path = string_format(arena, S8("{S8}/{u64}.txt"), metrics_directory, index);
-        String8 diagnostic = {0};
-        bool compiled = libc_test_compile(temporary.arena, build, true, unit->source, unit->buster_object, metrics_path, compile_only,
-                                          &unit->compile_us, &diagnostic);
-        unit->compiled = compiled;
-        unit->detail = string_duplicate_arena(arena, diagnostic, true);
-        scratch_end(temporary);
-        if (compiled)
-        {
-            SelfHostSourceMetrics metrics = {0};
-            if (self_host_source_metrics_read(arena, metrics_path, &metrics))
+            LibcTestUnit* unit = manifest.units + index;
+            if (unit->shared != (pass == 0))
             {
-                unit->metrics = metrics;
-                totals.bytes += metrics.bytes;
-                totals.loc += metrics.loc;
-                totals.sloc += metrics.sloc;
-                totals.tokens += metrics.tokens;
-                totals.token_bytes += metrics.token_bytes;
+                continue;
             }
-        }
-
-        temporary = scratch_begin(&arena, 1);
-        // The reference decides reach. A unit the Clang-built musl of this same
-        // configuration cannot compile, link or run green is out of the
-        // harness's reach -- musl's x86-64 assembly is in neither archive, so
-        // the fenv and thread units are portable stubs -- and holding it out
-        // keeps the comparison about Buster.
-        String8 reference_diagnostic = {0};
-        if (!libc_test_compile(temporary.arena, build, false, unit->source, unit->clang_object, (String8){0}, compile_only, &unit->compile_us,
-                               &reference_diagnostic))
-        {
-            unit->state = LIBC_TEST_STATE_EXCLUDED_REFERENCE;
-            unit->detail = string_format(arena, S8("reference compile: {S8}"), reference_diagnostic);
+            bool compile_only = libc_test_subsets[unit->subset].compile_only;
+            // A shared object is compiled and linked and never run: upstream
+            // has no program to run there, and the test that opens it is the
+            // one that says whether it works.
+            bool link_only = unit->shared;
+            // Buster compiles first and unconditionally, even for a unit the
+            // reference is about to hold out. Its diagnostic is inventory -- the
+            // long double test tables under src/math are a compile gap whether or
+            // not the reference could have run them -- and a state that hid it
+            // would trade one measurement for another.
+            TemporalArena temporary = scratch_begin(&arena, 1);
+            String8 metrics_path = string_format(arena, S8("{S8}/{u64}.txt"), metrics_directory, index);
+            String8 diagnostic = {0};
+            bool compiled = libc_test_compile(temporary.arena, build, true, unit->source, unit->buster_object, metrics_path, compile_only, unit->shared,
+                                              &unit->compile_us, &diagnostic);
+            unit->compiled = compiled;
+            unit->detail = string_duplicate_arena(arena, diagnostic, true);
             scratch_end(temporary);
-            continue;
-        }
-        String8 reference_transcript = {0};
-        if (!compile_only)
-        {
+            if (compiled)
+            {
+                SelfHostSourceMetrics metrics = {0};
+                if (self_host_source_metrics_read(arena, metrics_path, &metrics))
+                {
+                    unit->metrics = metrics;
+                    totals.bytes += metrics.bytes;
+                    totals.loc += metrics.loc;
+                    totals.sloc += metrics.sloc;
+                    totals.tokens += metrics.tokens;
+                    totals.token_bytes += metrics.token_bytes;
+                }
+            }
+
+            temporary = scratch_begin(&arena, 1);
+            // The reference decides reach. A unit the Clang-built musl of this same
+            // configuration cannot compile, link or run green is out of the
+            // harness's reach -- musl's x86-64 assembly is in neither archive, so
+            // the fenv and thread units are portable stubs -- and holding it out
+            // keeps the comparison about Buster.
+            String8 reference_diagnostic = {0};
+            if (!libc_test_compile(temporary.arena, build, false, unit->source, unit->clang_object, (String8){0}, compile_only, unit->shared,
+                                   &unit->compile_us, &reference_diagnostic))
+            {
+                unit->state = LIBC_TEST_STATE_EXCLUDED_REFERENCE;
+                unit->detail = string_format(arena, S8("reference compile: {S8}"), reference_diagnostic);
+                scratch_end(temporary);
+                continue;
+            }
+            String8 reference_transcript = {0};
+            if (!compile_only)
+            {
+                String8 link_error = {0};
+                if (!libc_test_link(temporary.arena, build, &manifest, unit, false, &unit->link_us, &link_error))
+                {
+                    unit->state = LIBC_TEST_STATE_EXCLUDED_REFERENCE;
+                    unit->detail = string_format(arena, S8("reference link: {S8}"), musl_first_error_line(link_error));
+                    scratch_end(temporary);
+                    continue;
+                }
+                unit->clang_shared_built = unit->shared;
+                String8 status = {0};
+                if (!link_only &&
+                    !libc_test_run(temporary.arena, unit->clang_program, build->clang_run_directory, unit->dynamic, &unit->run_us, &reference_transcript,
+                                   &status))
+                {
+                    unit->state = LIBC_TEST_STATE_EXCLUDED_REFERENCE;
+                    unit->detail = string_format(arena, S8("reference run: {S8}"), status);
+                    scratch_end(temporary);
+                    continue;
+                }
+                reference_transcript = string_duplicate_arena(arena, reference_transcript, true);
+            }
+            scratch_end(temporary);
+
+            if (!compiled)
+            {
+                unit->state = LIBC_TEST_STATE_BLOCKED_COMPILE;
+                continue;
+            }
+            if (compile_only)
+            {
+                // src/api has no program to run: upstream builds one main.exe from
+                // the whole subset and the compile is the test.
+                unit->state = LIBC_TEST_STATE_PASS;
+                unit->detail = (String8){0};
+                continue;
+            }
+            temporary = scratch_begin(&arena, 1);
             String8 link_error = {0};
-            if (!libc_test_link(temporary.arena, build, false, unit->clang_object, unit->clang_program, &unit->link_us, &link_error))
+            bool linked = libc_test_link(temporary.arena, build, &manifest, unit, true, &unit->link_us, &link_error);
+            if (!linked)
             {
-                unit->state = LIBC_TEST_STATE_EXCLUDED_REFERENCE;
-                unit->detail = string_format(arena, S8("reference link: {S8}"), musl_first_line(link_error));
+                libc_test_collect_undefined(arena, link_error, &unit->undefined, &unit->undefined_count);
+                unit->state = LIBC_TEST_STATE_BLOCKED_LINK;
+                // An unresolved symbol is the common case and the one the blocker
+                // ranking is built from; a link that failed for another reason --
+                // a relocation a shared object cannot carry, say -- says so in the
+                // linker's own words instead of claiming zero of them.
+                unit->detail = unit->undefined_count ? string_format(arena, S8("{u64} unresolved: {S8}"), unit->undefined_count, unit->undefined[0])
+                                                     : string_duplicate_arena(arena, musl_first_error_line(link_error), true);
                 scratch_end(temporary);
                 continue;
             }
+            unit->buster_shared_built = unit->shared;
+            if (link_only)
+            {
+                // Both sides produced the shared object. There is nothing to run,
+                // and the tests that open it carry the answer from here.
+                unit->state = LIBC_TEST_STATE_PASS;
+                unit->detail = (String8){0};
+                scratch_end(temporary);
+                continue;
+            }
+            String8 transcript = {0};
             String8 status = {0};
-            if (!libc_test_run(temporary.arena, unit->clang_program, &unit->run_us, &reference_transcript, &status))
-            {
-                unit->state = LIBC_TEST_STATE_EXCLUDED_REFERENCE;
-                unit->detail = string_format(arena, S8("reference run: {S8}"), status);
-                scratch_end(temporary);
-                continue;
-            }
-            reference_transcript = string_duplicate_arena(arena, reference_transcript, true);
-        }
-        scratch_end(temporary);
-
-        if (!compiled)
-        {
-            unit->state = LIBC_TEST_STATE_BLOCKED_COMPILE;
-            continue;
-        }
-        if (compile_only)
-        {
-            // src/api has no program to run: upstream builds one main.exe from
-            // the whole subset and the compile is the test.
-            unit->state = LIBC_TEST_STATE_PASS;
-            unit->detail = (String8){0};
-            continue;
-        }
-        temporary = scratch_begin(&arena, 1);
-        String8 link_error = {0};
-        bool linked = libc_test_link(temporary.arena, build, true, unit->buster_object, unit->buster_program, &unit->link_us, &link_error);
-        if (!linked)
-        {
-            libc_test_collect_undefined(arena, link_error, &unit->undefined, &unit->undefined_count);
-            unit->state = LIBC_TEST_STATE_BLOCKED_LINK;
-            unit->detail = string_format(arena, S8("{u64} unresolved: {S8}"), unit->undefined_count,
-                                         unit->undefined_count ? unit->undefined[0] : musl_first_line(link_error));
+            bool ran = libc_test_run(temporary.arena, unit->buster_program, build->buster_run_directory, unit->dynamic, &unit->run_us, &transcript,
+                                     &status);
+            bool matched = ran && string_equal(transcript, reference_transcript);
+            unit->state = matched ? LIBC_TEST_STATE_PASS : LIBC_TEST_STATE_FAIL;
+            unit->detail = matched ? (String8){0} : string_duplicate_arena(arena, status.length ? status : musl_first_line(transcript), true);
             scratch_end(temporary);
-            continue;
         }
-        String8 transcript = {0};
-        String8 status = {0};
-        bool ran = libc_test_run(temporary.arena, unit->buster_program, &unit->run_us, &transcript, &status);
-        bool matched = ran && string_equal(transcript, reference_transcript);
-        unit->state = matched ? LIBC_TEST_STATE_PASS : LIBC_TEST_STATE_FAIL;
-        unit->detail = matched ? (String8){0} : string_duplicate_arena(arena, status.length ? status : musl_first_line(transcript), true);
-        scratch_end(temporary);
     }
 
     // The classification, per unit, for everything that is not passing. This
@@ -17627,7 +18073,9 @@ BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, Str
         LibcTestSubsetTotals* subset = subset_totals + unit->subset;
         subset->units += 1;
         subset->states[unit->state] += 1;
-        subset->buster_compile_failed += unit->state != LIBC_TEST_STATE_EXCLUDED_DYNAMIC && !unit->compiled;
+        subset->buster_compile_failed += !unit->compiled;
+        subset->shared += unit->shared;
+        subset->dynamic += unit->dynamic && !unit->shared;
         subset->compile_us += unit->compile_us;
         subset->link_us += unit->link_us;
         subset->run_us += unit->run_us;
@@ -17680,12 +18128,12 @@ BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, Str
     {
         LibcTestSubsetTotals* subset = subset_totals + index;
         string_print(S8("LIBCTEST_SUBSET name={S8} mode={S8} units={u64} pass={u64} fail={u64} blocked_compile={u64} blocked_link={u64} "
-                        "excluded_dynamic={u64} excluded_reference={u64} buster_compile_failed={u64} compile_us={u64} link_us={u64} run_us={u64}\n"),
+                        "excluded_reference={u64} shared={u64} dynamic={u64} buster_compile_failed={u64} compile_us={u64} link_us={u64} "
+                        "run_us={u64}\n"),
                      libc_test_subsets[index].name, libc_test_subsets[index].compile_only ? S8("compile") : S8("run"), subset->units,
                      subset->states[LIBC_TEST_STATE_PASS], subset->states[LIBC_TEST_STATE_FAIL], subset->states[LIBC_TEST_STATE_BLOCKED_COMPILE],
-                     subset->states[LIBC_TEST_STATE_BLOCKED_LINK], subset->states[LIBC_TEST_STATE_EXCLUDED_DYNAMIC],
-                     subset->states[LIBC_TEST_STATE_EXCLUDED_REFERENCE], subset->buster_compile_failed, subset->compile_us, subset->link_us,
-                     subset->run_us);
+                     subset->states[LIBC_TEST_STATE_BLOCKED_LINK], subset->states[LIBC_TEST_STATE_EXCLUDED_REFERENCE], subset->shared,
+                     subset->dynamic, subset->buster_compile_failed, subset->compile_us, subset->link_us, subset->run_us);
     }
     String8 hash_text = string_join_arena(hash_temporary.arena, (SliceString8){.pointer = hash_lines, .length = hash_line_count}, false);
     u64 state_hash = hash_text.length ? buster_hash_64((u8*)hash_text.pointer, hash_text.length) : 0;
@@ -17952,7 +18400,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
     u64 reference_link_us = 0;
     if (!musl_compile_clang(arena, clang, source_directory, object_directory, fixture, clang_probe_object, S8("-mstackrealign")) ||
         !musl_link_probe(arena, linker, clang_probe, clang_probe_object, clang_archive, &reference_link_us) ||
-        !musl_run_probe(arena, clang_probe, &reference_transcript) || !reference_transcript.length)
+        !musl_run_probe(arena, clang_probe, false, &reference_transcript) || !reference_transcript.length)
     {
         string_print(S8("error: the Clang reference freestanding probe did not build and run\n"));
         return PROCESS_RESULT_FAILED;
@@ -17985,7 +18433,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
                          allocators[index]);
             return PROCESS_RESULT_FAILED;
         }
-        if (!musl_run_probe(arena, probe, &transcript))
+        if (!musl_run_probe(arena, probe, false, &transcript))
         {
             string_print(S8("error: the freestanding probe did not run under allocator {S8}\n"), allocators[index]);
             return PROCESS_RESULT_FAILED;
@@ -18065,7 +18513,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
             string_print(S8("error: the cross-compiler musl link failed for {S8}; the two object sets do not agree\n"), abi_directions[index].name);
             return PROCESS_RESULT_FAILED;
         }
-        bool ran = musl_run_probe(arena, program, &transcript);
+        bool ran = musl_run_probe(arena, program, false, &transcript);
         if (!ran || !string_equal(transcript, reference_transcript))
         {
             string_print(S8("MUSL_ABI direction={S8} link_us={u64} bytes={u64} status=fail\n"), abi_directions[index].name, link_us,
@@ -18079,8 +18527,184 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
         string_print(S8("MUSL_ABI direction={S8} link_us={u64} bytes={u64} status=pass\n"), abi_directions[index].name, link_us, transcript.length);
     }
 
+    // The two project-owned objects that stand in for architecture assembly.
+    // Each is compiled by both sides with that side's own compiler, so a
+    // program built from one of them is that compiler's code throughout, and
+    // both stages below use the same pair.
+    String8 thread_pointer_fixture = S8("tests/basic_musl_thread_pointer.c");
+    String8 shared_assembly_fixture = S8("tests/basic_musl_shared_assembly.c");
+    String8 missing_fixture = !path_exists(arena, thread_pointer_fixture)  ? thread_pointer_fixture
+                              : !path_exists(arena, shared_assembly_fixture) ? shared_assembly_fixture
+                                                                             : (String8){0};
+    if (missing_fixture.length)
+    {
+        string_print(S8("error: musl compatibility fixture is missing: {S8}\n"), missing_fixture);
+        return PROCESS_RESULT_FAILED;
+    }
+    struct
+    {
+        String8 name;
+        String8 source;
+        String8 clang_object;
+        String8 buster_object;
+    } substitutions[] = {
+        {S8("thread-pointer"), thread_pointer_fixture, path_join(arena, output_directory, S8("thread-pointer-clang.o")),
+         path_join(arena, output_directory, S8("thread-pointer-buster.o"))},
+        {S8("shared-assembly"), shared_assembly_fixture, path_join(arena, output_directory, S8("shared-assembly-clang.o")),
+         path_join(arena, output_directory, S8("shared-assembly-buster.o"))},
+    };
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(substitutions); index += 1)
+    {
+        String8 diagnostic = {0};
+        if (!musl_compile_clang(arena, clang, source_directory, object_directory, substitutions[index].source, substitutions[index].clang_object,
+                                (String8){0}) ||
+            !musl_compile_buster(arena, ide, source_directory, object_directory, substitutions[index].source, substitutions[index].buster_object,
+                                 (String8){0}, S8(MUSL_COMPATIBILITY_ALLOCATOR_MODE), 0, &diagnostic))
+        {
+            string_print(S8("error: the musl {S8} replacement did not compile: {S8}\n"), substitutions[index].name, diagnostic);
+            return PROCESS_RESULT_FAILED;
+        }
+    }
+    String8 clang_thread_pointer_object = substitutions[0].clang_object;
+    String8 buster_thread_pointer_object = substitutions[0].buster_object;
+
+    // The shared musl. Everything above links -static, which is a whole
+    // program resolved before it runs; a shared object is the other half of
+    // what a libc is, and a different demand on the compiler. Every reference
+    // in it has to survive being placed at an address chosen when the library
+    // is loaded, and then musl's own loader -- which is this file -- has to
+    // relocate it and run a program against it. A compile inventory cannot see
+    // any of that, which is the same reason the freestanding probe exists.
+    //
+    // The object set is the archive's, with three differences, and all three
+    // are musl's own libc.so recipe rather than this harness's invention:
+    //
+    //   ldso/dlstart and ldso/dynlink join it. musl's AOBJS rule keeps the
+    //   loader out of libc.a and its LDSO_OBJS rule puts it into libc.so; the
+    //   entry point the shared link names is in the first of the two.
+    //
+    //   src/thread/__set_thread_area leaves it, replaced by the object the
+    //   thread-pointer fixture builds. musl's x86-64 unit is assembly, the
+    //   portable sibling this harness compiles in its place returns -ENOSYS,
+    //   and the loader's own startup crashes on that answer before any program
+    //   runs. The archive gets the same replacement by link order, which a
+    //   shared object has no equivalent of, so here it is a substitution in
+    //   the object set.
+    //
+    //   The shared-assembly fixture joins it, for the reason written at the
+    //   top of that file: --no-undefined is on the shared link line, and the
+    //   assembly-only translation units leave six names behind.
+    String8* buster_shared_objects = arena_allocate(arena, String8, manifest.unit_count + 2);
+    String8* clang_shared_objects = arena_allocate(arena, String8, manifest.unit_count + 2);
+    u64 buster_shared_count = 0;
+    u64 clang_shared_count = 0;
+    for (u64 index = 0; index < manifest.unit_count; index += 1)
+    {
+        MuslUnit* unit = manifest.units + index;
+        bool member = string_starts_with_sequence(unit->relative, S8("src/")) || string_starts_with_sequence(unit->relative, S8("ldso/"));
+        if (!member || string_equal(unit->relative, S8("src/thread/__set_thread_area")))
+        {
+            continue;
+        }
+        if (unit->compiled)
+        {
+            buster_shared_objects[buster_shared_count++] = unit->object;
+        }
+        clang_shared_objects[clang_shared_count++] = unit->clang_object;
+    }
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(substitutions); index += 1)
+    {
+        buster_shared_objects[buster_shared_count++] = substitutions[index].buster_object;
+        clang_shared_objects[clang_shared_count++] = substitutions[index].clang_object;
+    }
+    String8 buster_shared = path_join(arena, output_directory, S8("libc-buster.so"));
+    String8 clang_shared = path_join(arena, output_directory, S8("libc-clang.so"));
+    struct
+    {
+        String8 name;
+        String8 output;
+        String8* objects;
+        u64 count;
+        String8 response;
+    } shared_links[] = {
+        {S8("clang"), clang_shared, clang_shared_objects, clang_shared_count, path_join(arena, output_directory, S8("clang-shared.rsp"))},
+        {S8("buster"), buster_shared, buster_shared_objects, buster_shared_count, path_join(arena, output_directory, S8("buster-shared.rsp"))},
+    };
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(shared_links); index += 1)
+    {
+        u64 link_us = 0;
+        String8 error = {0};
+        if (!musl_link_shared(arena, linker, shared_links[index].output, shared_links[index].objects, shared_links[index].count,
+                              shared_links[index].response, &link_us, &error))
+        {
+            string_print(S8("MUSL_SHARED compiler={S8} members={u64} bytes=0 link_us={u64} status=link-failed reason={S8}\n"),
+                         shared_links[index].name, shared_links[index].count, link_us, musl_first_error_line(error));
+            string_print(S8("error: the {S8}-built musl did not link as a shared object\n"), shared_links[index].name);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("MUSL_SHARED compiler={S8} members={u64} bytes={u64} link_us={u64} status=pass\n"), shared_links[index].name,
+                     shared_links[index].count, musl_file_size(arena, shared_links[index].output), link_us);
+    }
+
+    // The dynamic probe: the same freestanding program, resolved against the
+    // shared musl instead of the archive and started by the loader inside it.
+    // The interpreter is named by absolute path because there is no installed
+    // musl to point at -- upstream's own build installs libc.so as
+    // /lib/ld-musl-x86_64.so.1 and links every program against that name. The
+    // gate is the one the static probe answers to: the transcript has to be
+    // the reference's, byte for byte, under every allocator, so a routine that
+    // computes a different answer once it is relocated rather than linked
+    // fails here rather than passing a load-and-exit check.
+    String8 clang_shared_absolute = os_path_absolute(arena, clang_shared, true);
+    String8 buster_shared_absolute = os_path_absolute(arena, buster_shared, true);
+    String8 clang_dynamic_probe = path_join(arena, output_directory, S8("probe-dynamic-clang"));
+    String8 clang_dynamic_transcript = {0};
+    u64 clang_dynamic_link_us = 0;
+    if (!musl_link_dynamic(arena, linker, clang_dynamic_probe, &clang_probe_object, 1, clang_shared_absolute, (String8){0}, &clang_dynamic_link_us,
+                           0) ||
+        !musl_run_probe(arena, clang_dynamic_probe, true, &clang_dynamic_transcript) ||
+        !string_equal(clang_dynamic_transcript, reference_transcript))
+    {
+        string_print(S8("MUSL_DYNAMIC compiler=clang allocator=- bytes={u64} link_us={u64} status=fail\n"), clang_dynamic_transcript.length,
+                     clang_dynamic_link_us);
+        string_print(S8("error: the Clang reference freestanding probe did not run against its own shared musl; the workspace or the shared link "
+                        "shape is wrong, not the compiler under test\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    string_print(S8("MUSL_DYNAMIC compiler=clang allocator=- bytes={u64} link_us={u64} status=pass\n"), clang_dynamic_transcript.length,
+                 clang_dynamic_link_us);
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(allocators); index += 1)
+    {
+        String8 probe_object = string_format(arena, S8("{S8}/probe-{S8}.o"), output_directory, allocators[index]);
+        String8 probe = string_format(arena, S8("{S8}/probe-dynamic-{S8}"), output_directory, allocators[index]);
+        String8 transcript = {0};
+        String8 error = {0};
+        u64 link_us = 0;
+        if (!musl_link_dynamic(arena, linker, probe, &probe_object, 1, buster_shared_absolute, (String8){0}, &link_us, &error))
+        {
+            string_print(S8("MUSL_DYNAMIC compiler=buster allocator={S8} bytes=0 link_us={u64} status=link-failed reason={S8}\n"),
+                         allocators[index], link_us, musl_first_error_line(error));
+            string_print(S8("error: the freestanding probe did not link against the Buster-built shared musl under allocator {S8}\n"),
+                         allocators[index]);
+            return PROCESS_RESULT_FAILED;
+        }
+        if (!musl_run_probe(arena, probe, true, &transcript) || !string_equal(transcript, reference_transcript))
+        {
+            string_print(S8("MUSL_DYNAMIC compiler=buster allocator={S8} bytes={u64} link_us={u64} status=fail\n"), allocators[index],
+                         transcript.length, link_us);
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(reference_transcript));
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(transcript));
+            string_print(S8("error: the freestanding probe did not reproduce the reference transcript against the Buster-built shared musl under "
+                            "allocator {S8}\n"),
+                         allocators[index]);
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("MUSL_DYNAMIC compiler=buster allocator={S8} bytes={u64} link_us={u64} status=pass\n"), allocators[index], transcript.length,
+                     link_us);
+    }
+
     // libc-test, when a checkout was given. Everything above is the archive
-    // this stage links against, so it runs last.
+    // and the shared object this stage links against, so it runs last.
     bool libc_test_ran = false;
     if (options.libc_test_directory.length)
     {
@@ -18089,14 +18713,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
             string_print(S8("error: test_musl needs the Clang-built crt1.o to run libc-test and did not build one\n"));
             return PROCESS_RESULT_FAILED;
         }
-        String8 thread_pointer_fixture = S8("tests/basic_musl_thread_pointer.c");
-        if (!path_exists(arena, thread_pointer_fixture))
-        {
-            string_print(S8("error: musl compatibility fixture is missing: {S8}\n"), thread_pointer_fixture);
-            return PROCESS_RESULT_FAILED;
-        }
+        // Absolute, because a dynamic test program is started from its own
+        // side's directory rather than from the driver's: every path this
+        // stage hands to a linker or to a child has to mean the same thing
+        // from both.
         String8 libc_test_directory = path_join(arena, output_directory, S8("libc-test"));
         make_directory_recursive(arena, libc_test_directory);
+        libc_test_directory = os_path_absolute(arena, libc_test_directory, true);
         LibcTestBuild build = {
             .musl_root = source_directory,
             .musl_object_directory = object_directory,
@@ -18113,22 +18736,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
             // on the LIBCTEST_MANIFEST line rather than left to be inferred.
             .buster_startup_object = buster_startup_object.length ? buster_startup_object : clang_startup_object,
             .startup_shared = !buster_startup_object.length,
-            .clang_thread_pointer_object = path_join(arena, libc_test_directory, S8("thread-pointer-clang.o")),
-            .buster_thread_pointer_object = path_join(arena, libc_test_directory, S8("thread-pointer-buster.o")),
+            .clang_thread_pointer_object = clang_thread_pointer_object,
+            .buster_thread_pointer_object = buster_thread_pointer_object,
             .clang_archive = clang_archive,
             .buster_archive = buster_archive,
+            .clang_shared = clang_shared_absolute,
+            .buster_shared = buster_shared_absolute,
             .clang_support_archive = path_join(arena, libc_test_directory, S8("libtest-clang.a")),
             .buster_support_archive = path_join(arena, libc_test_directory, S8("libtest-buster.a")),
         };
-        String8 thread_pointer_diagnostic = {0};
-        if (!musl_compile_clang(arena, clang, source_directory, object_directory, thread_pointer_fixture, build.clang_thread_pointer_object,
-                                (String8){0}) ||
-            !musl_compile_buster(arena, ide, source_directory, object_directory, thread_pointer_fixture, build.buster_thread_pointer_object,
-                                 (String8){0}, S8(MUSL_COMPATIBILITY_ALLOCATOR_MODE), 0, &thread_pointer_diagnostic))
-        {
-            string_print(S8("error: the musl thread-pointer replacement did not compile: {S8}\n"), thread_pointer_diagnostic);
-            return PROCESS_RESULT_FAILED;
-        }
         if (!libc_test_stage(arena, &build, libc_test_directory))
         {
             return PROCESS_RESULT_FAILED;

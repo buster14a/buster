@@ -758,7 +758,7 @@ The checkout must be tag `v1.2.6` at commit
 `9fa28ece75d8a2191de7c5bb53bed224c5947417` with no tracked or untracked
 changes. The optional second path is a pristine checkout of libc-test, musl's
 own test suite, at commit `68edb8bd73dab8147ee54c8bec638f4d2b3cff37`; without
-it the run stops after the freestanding probe and the ABI links. This is the
+it the run stops after the shared musl and its dynamic probe. This is the
 stretch compatibility target: musl is a whole libc, so the harness is written
 to make partial coverage legible and gated rather than to claim a pass it has
 not earned.
@@ -948,6 +948,85 @@ the one a `call` leaves, which is why the reference is compiled with
 Clang's own archive in exactly the same way. The Buster driver has no such
 flag, so that direction would measure the probe's entry rather than the two
 compilers, and the mixed archive covers what it was meant to cover.
+
+Everything above is linked `-static`, and a shared object is the other half of
+what a libc is. `libc.so` is built from the same object set on both sides, with
+the three differences musl's own `libc.so` recipe states. `ldso/dlstart` and
+`ldso/dynlink` join it, because musl's `LDSO_OBJS` rule puts the loader in the
+shared library and its `AOBJS` rule keeps it out of the archive.
+`src/thread/__set_thread_area` leaves it, replaced by the object
+`tests/basic_musl_thread_pointer.c` builds: the archive gets that substitution
+by link order, and an object set that is linked whole has no link order to
+exploit. And `tests/basic_musl_shared_assembly.c` joins it, described below.
+
+The link is `ld -shared -Bsymbolic --no-undefined -e _dlstart`, and the first
+three of those are musl's own.
+
+- `-e _dlstart`, because musl's `libc.so` *is* its dynamic loader and that is
+  the entry point the kernel jumps to when the file is a program's `PT_INTERP`.
+  It is what makes a shared musl testable here at all: nothing else on the
+  machine can load one.
+- `--no-undefined`, because a shared object may carry unresolved names and
+  musl's loader will not. It reports each one it cannot relocate and leaves at
+  exit 127, before the program's first instruction; upstream's `configure` asks
+  for the flag for exactly that reason, and here it turns the assembly-only
+  translation units from a silent runtime death into a link error naming the
+  symbol.
+- `-Bsymbolic`, because neither compiler is asked for position-independent
+  code: the harness drives one flag set and Buster has no `-fPIC` to give.
+  What both of them do emit is PC-relative, so the only references `ld` refuses
+  to place in a shared object are the ones to symbols another object could
+  interpose. Binding those at link time is what musl's own build does for
+  everything except its public data, through `--dynamic-list`; taking the whole
+  set costs the copy relocations that list exists to preserve and buys a shared
+  musl out of the object set that is already built. The probe below references
+  no libc data object, so nothing it measures turns on the difference.
+
+One object set rather than two is the other departure. musl compiles a second,
+`-fPIC` copy of every unit for `libc.so`; this harness links the one set both
+compilers already produced, which keeps the shared stage at two links instead
+of another two thousand compiles, and it is what makes the shared link a
+statement about the code generation the rest of the harness already measured.
+
+`tests/basic_musl_shared_assembly.c` is what `--no-undefined` needs. A static
+link pulls only the archive members a program reaches, so the seven
+assembly-only units cost nothing until something calls one; every object handed
+to `ld -shared` is in the result and every relocation in it is resolved when
+the library loads. Six names are left over -- `__syscall_cp_asm` with the three
+labels `__cp_begin`, `__cp_end` and `__cp_cancel` that bound its cancellation
+window, and `setjmp`/`longjmp` -- and that file defines those six and nothing
+else, compiled by each side with that side's own compiler the way the
+thread-pointer replacement is. The cancellable system call is performed without
+the window, which is what musl itself does whenever cancellation is disabled
+and it is disabled for every thread this configuration can create. `setjmp` and
+`longjmp` trap: saving the callee-saved registers and the return address needs
+the register names an inline template is not allowed to write, and neither
+compiler is given a different file. What that costs is reported rather than
+hidden -- musl's loader saves a jump buffer around `dlopen`, so every libc-test
+unit that opens a library is held out below -- and nothing at startup reaches
+either one.
+
+The dynamic probe is `tests/basic_musl_freestanding.c` again, resolved against
+the shared musl instead of the archive and started by the loader inside it. The
+interpreter is named by absolute path because there is no installed musl to
+point at: upstream installs `libc.so` as `/lib/ld-musl-x86_64.so.1` and links
+every program against that name. Its gate is the static probe's, and
+deliberately so: producing a shared object that links says nothing, and the
+transcript has to be the reference's byte for byte under all four allocators,
+so a routine that computes a different answer once it has been relocated rather
+than linked fails here. A `MUSL_SHARED` line reports each side's library and a
+`MUSL_DYNAMIC` line each program. The Buster-built library is about three times
+the size of the reference's, which is the archive's ratio and the same emitter
+spilling through the frame rather than through registers.
+
+One compiler change came out of this and it is the only one that did: a
+read-only object that carries a relocation is laid out with the writable data
+rather than in the read-only section, described with the rest of the C rules
+below. Twenty-one musl units hold one -- `__ctype_b_loc`'s `ptable`, the
+`FILE *const stdout` trio, the locale tables -- and each of them put a
+write-when-relocated word on a page the loader maps read-only, which is a
+`DT_TEXTREL` musl's loader does not undo for the file it was itself started
+from.
 
 What Buster cannot yet build is reported rather than worked around, in three
 groups. Seven translation units are `assembly-only`: their `.c` file is empty
@@ -1152,8 +1231,8 @@ divergence: Buster rejects an undeclared callee outright, so the flag is what
 makes the two compilers agree about a missing declaration -- which is most of
 what the api subset is testing.
 
-Two objects sit on every link line that neither archive supplies, and each
-side uses its own. `crt1.o` is musl's startup object, which is not an archive
+Two objects sit on every static link line that neither archive supplies, and
+each side uses its own. `crt1.o` is musl's startup object, which is not an archive
 member on either side — a program links it explicitly and `libc.a` separately —
 so a libc-test program is one compiler's code from `_start` down. If Buster
 ever stops producing it the reference's copy stands in on both sides, and the
@@ -1170,14 +1249,40 @@ archive on the link line, which is what keeps musl's portable member from
 being pulled in beside it: an archive member is only extracted for a symbol
 that is still undefined.
 
+Nine units are built differently, and upstream's sibling `.mk` is what says so.
+It is a make fragment of one to four lines, and the harness reads it for the
+three facts it states rather than interpreting it: `$(N).LIBS:=$(B)/$(N).so`
+means the unit is a shared object instead of a program, `-rdynamic` means its
+program has to export its own symbols because the library it opens resolves
+against them, and any other `name.so` in the file is a sibling its program
+needs beside it. Each of the four shapes upstream writes states its fact in a
+token, so the file is scanned for tokens; anything a later release adds that
+this does not understand shows up as a unit that fails to build rather than as
+one quietly held out, which is the trade this stage wants.
+
+What comes out of that is three link shapes rather than one. A shared-object
+unit is compiled `-fPIC -DSHARED`, which is upstream's own `.lo` rule and the
+one flag in this stage that the two compilers do different things with -- the
+Buster driver accepts `-fPIC` and does nothing with it, so what a shared object
+demands of the code generator is exactly what this measures -- and linked
+`-shared` against the shared musl; upstream never runs one, so both sides
+building it is the pass. A program with a `.mk` is linked against the shared
+musl rather than the archive, with that musl as its interpreter and its own
+directory as its run path, which is upstream's `-rpath='$ORIGIN'` spelled as a
+directory this harness knows. Every other program is linked `-static` exactly
+as before. The thread-pointer replacement is on the static link lines only: the
+shared musl already carries it, and a second definition would be a duplicate
+symbol rather than a substitution. Each side's dynamic programs are laid out
+under `src/<subset>/<stem>` in that side's own tree and run from its root,
+because three of the nine find the library they open by a path rather than by a
+name -- two spell it from the working directory and one derives it from
+`argv[0]` -- and that layout is upstream's own.
+
 Each unit is classified rather than merely passed or failed, because most of
 the suite cannot be reached yet and a single total would hide which wall it is
 behind. The classification is derived from the checkout and from what the two
 sides do, not written down:
 
-- `excluded-dynamic` — upstream ships a sibling `.mk`, which means the unit
-  wants shared objects, `-rdynamic`, or an explicit do-not-run rule. Nothing
-  here links dynamically.
 - `excluded-reference` — the Clang-built musl of this same configuration
   cannot compile, link or run it green. That is a property of the
   configuration: musl's x86-64 assembly is in neither archive, so `fenv` is a
@@ -1185,13 +1290,19 @@ sides do, not written down:
   fails on both sides, and `clone` is absent so the thread tests hang. It says
   nothing about Buster, so it is held out of the comparison.
 - `blocked-compile` — Buster cannot compile the test itself.
-- `blocked-link` — Buster compiled it and the Buster-built archive cannot
-  satisfy the link. Every undefined symbol is recorded, not just the first:
-  the link stops at the startup object every time, so a ranking built from
-  first symbols would name one symbol and hide the rest.
+- `blocked-link` — Buster compiled it and the link against the Buster-built
+  libc could not be made. Every undefined symbol is recorded, not just the
+  first: the link stops at the startup object every time, so a ranking built
+  from first symbols would name one symbol and hide the rest. A link that
+  failed for another reason — a relocation a shared object cannot carry, or a
+  sibling shared object this side did not build — carries the linker's own
+  words instead of claiming zero unresolved symbols, and `ld` reports its
+  warnings before the error that stopped it, so the line kept is the first one
+  that is not a warning.
 - `fail` — it ran, and its transcript or exit status differs from the Clang
   reference. This is the only state that is a defect in generated code.
-- `pass` — it ran and matched, or, in `src/api`, it compiled.
+- `pass` — it ran and matched; in `src/api` it compiled; in a shared-object
+  unit both sides built the library.
 
 Buster compiles every unit first and unconditionally, before the reference
 decides reach, because its diagnostic is inventory in its own right, and
@@ -1239,19 +1350,41 @@ by how many tests wanted each. It is the work list in the order that unblocks
 the most tests, and it is why this stage grows by itself as the compiler
 improves rather than needing to be extended by hand.
 
-Today 241 of 424 units pass (measured 2026-08-29). Seventy-eight are
+Today 242 of 424 units pass (measured 2026-08-29). Seventy-eight are
 `src/api`: 78 of its 79 units compile against musl's headers under both
 compilers, and one — `api/unistd` — is held out because musl defines neither
 `_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the reference fails on
-too. The other 163 are runtime tests that link and run green: `src/functional`
-is 53 passing against 2 failing, 7 dynamic and 15 excluded-reference;
+too. The other 164 are runtime tests that link and run green: `src/functional`
+is 54 passing against 3 failing, 2 blocked-link and 18 excluded-reference;
 `src/math` is 55 passing and 144 excluded-reference; `src/regression` is 55
-passing against none failing, 2 dynamic and 12 excluded-reference. **Nothing
-anywhere in the suite is blocked on a link or on a compile any more**, which
-is why `LIBCTEST_BLOCKER` now prints nothing at all: the work list this stage
-generates for itself is empty, and what is left is two wrong answers.
+passing against none failing, 1 blocked-link and 13 excluded-reference.
 `src/math` passes every one of the 55 units the reference can run, and
-`src/regression` every one of its 55.
+`src/regression` has no failing unit left.
+
+The nine units with a sibling `.mk` are what this stage's newest counts are.
+`functional/tls_align_dso` is the one that passes: both sides build that
+shared object. `functional/tls_align` links against it, runs, and gets the
+wrong answer, which is the honest result of the only thread-local model Buster
+emits — local-exec offsets, baked into a library whose thread-local block does
+not exist until it is loaded. `functional/tls_init_dso` and
+`regression/tls_get_new-dtv_dso` are blocked on that same model at the link
+instead of at the run: `ld` refuses an `R_X86_64_TPOFF32` in a shared object
+and says so. `functional/dlopen_dso` is blocked on the other half of the same
+gap, a PC-relative reference to a data symbol another object could interpose,
+which is the thing `-fPIC` exists to avoid and which `-Bsymbolic` is what hides
+for `libc.so` above. The remaining four — `functional/dlopen`,
+`tls_align_dlopen`, `tls_init_dlopen` and `regression/tls_get_new-dtv` — are
+`excluded-reference`, because every one of them calls `dlopen` and musl's
+loader saves a jump buffer around it: the reference dies on the same trapping
+`setjmp` the Buster build does.
+
+`LIBCTEST_BLOCKER` still prints nothing, and the three blocked-link units are
+why the list did not come back with them. It ranks the symbols a link could
+not resolve, and none of those three is short a symbol: each is short a
+relocation the shared object cannot carry, which the unit's own
+`LIBCTEST_UNIT` line carries in the linker's words. The work list this stage
+generates for itself is a list of missing components, and what is left now is
+a code-generation model and three wrong answers.
 
 The last 22 blocked-compile units went together, 21 in `src/math` and
 `functional/strtold`, when the x87 static-initializer folder stopped refusing
@@ -1266,14 +1399,16 @@ and its own diagnostic never reaches a state count. `buster_compile_failed` on
 the `LIBCTEST_SUBSET` line is the number to read for a compile gap, and it is
 0 in every subset but `api` and `functional` now.
 
-The two failing units are wrong answers rather than missing components; each
-was blocked on a link until `vfprintf` compiled, so neither is a regression
-against an earlier pass, and none of the 22 that came in after them joined
-this list. `functional/fcntl` and `functional/tgmath` exit non-zero and have
-not been attributed further.
+The three failing units are wrong answers rather than missing components.
+`functional/fcntl` and `functional/tgmath` exit non-zero and have not been
+attributed further; each was blocked on a link until `vfprintf` compiled, so
+neither is a regression against an earlier pass, and none of the 22 that came
+in after them joined this list. The third, `functional/tls_align`, is the
+thread-local model described above and is the one of the three with a known
+cause.
 
-Three of the original five went since. `regression/sem_close-unmap` and
-`functional/mntent` had one cause between them: neither `main` contains a
+Three of the original five went before it arrived. `regression/sem_close-unmap`
+and `functional/mntent` had one cause between them: neither `main` contains a
 return statement, and reaching the `}` that terminates `main` returns 0
 (C 5.1.2.2.3) where every other function's fall-off is undefined. The C
 frontend terminated every non-void body's fall-off with the IR's unreachable —
@@ -1318,23 +1453,25 @@ moment a test reaches for something new, which is the point of generating it
 rather than maintaining it.
 
 For scale, one recorded run without libc-test left 26 MB behind: the
-Buster pass spent 57,5 seconds of child time over 1349 units — 43 ms each — for
-116,0 MB of preprocessed source, 4.273.705 lines and 5.125.840 tokens, and
-produced 1342 archive members in 5.631.530 bytes against Clang's 1344 in
+Buster pass spent 60,6 seconds of child time over 1349 units — 45 ms each — for
+116,9 MB of preprocessed source, 4.306.806 lines and 5.167.422 tokens, and
+produced 1344 archive members in 5.744.046 bytes against Clang's 1344 in
 2.600.342. Both counts are the manifest minus its `crt/` and `ldso/` units,
 which the startup-object and archive notes above keep out. The Buster archive
-is the larger of the two despite holding fewer members, which is what an
-emitter that spills through the frame rather than through registers looks like
-at this scale. The two archives take 0,65 seconds to write and each probe link
-about 4 ms.
+is the larger of the two, which is what an emitter that spills through the
+frame rather than through registers looks like at this scale, and the two
+shared objects repeat it: 2.922.384 bytes against 929.584 over the same 1347
+members. The two archives take 0,71 seconds to write, the two shared links
+0,26, and each probe link about 3 ms.
 
-Adding libc-test takes the run to 186 seconds wall and 79 MB. The suite's 424
-units cost 30,4 seconds of compiler time across both compilers for 30,6 MB of
-preprocessed source, 939.306 lines and 2.938.231 tokens; the links cost 2,9
-seconds and the runs 62,6. The runs dominate, and almost all of that is the
-reference's own structural hangs — the thread tests wait out the ten-second
-deadline because `clone` is architecture assembly and is in neither archive —
-so that number moves with the deadline rather than with the compiler.
+Adding libc-test takes the run to about 210 seconds wall and 116 MB. The
+suite's 424 units cost 36,3 seconds of compiler time across both compilers for
+35,5 MB of preprocessed source, 1.113.780 lines and 3.480.975 tokens; the links
+cost 3,3 seconds and the runs 74,3. The runs dominate, and almost all of that
+is the reference's own structural hangs — the thread tests wait out the
+ten-second deadline because `clone` is architecture assembly and is in neither
+archive — so that number moves with the deadline rather than with the
+compiler.
 
 Generated headers, objects, archives, metrics and logs remain under
 `build/musl-v1.2.6-<pid>/` and are not cleaned up on the way out, so delete the
@@ -2365,6 +2502,21 @@ on a commit you already know is incomplete tells nobody anything.
 - Native lowering is `canonical IR -> machine IR -> scheduling/register
   allocation -> encoding`. Selection patterns and scheduling classes remain
   separate metadata domains even when they share instruction-form IDs.
+- **A read-only object that carries a relocation is laid out with the writable
+  data.** `const` is the frontend's answer and the object writer's read-only
+  section is where it usually goes, but those bytes are written when the
+  program is relocated, and in a shared object that write lands on a page the
+  loader mapped read-only — a `DT_TEXTREL` the loader has to undo before it can
+  process the relocation, and one musl's loader does not undo for the file it
+  was itself started from. Clang answers the same question with a fourth data
+  section, `.data.rel.ro`; this writer has three, so
+  `codegen_global_is_read_only` in `codegen.c` folds "has a relocation" into
+  the placement instead. Nothing in the C object model moves with it — writing
+  through a `const` lvalue is undefined either way — and a static link, whose
+  relocations are all resolved before the program runs, cannot tell the
+  difference. `static const unsigned short *const ptable = table+128;` in
+  musl's `__ctype_b_loc.c` is the shape, and `FILE *const stdout` is the one
+  every program has.
 - **`__attribute__((weak))` and `__attribute__((alias("target")))`** reach the
   object file, because musl publishes `malloc`, `free`, `errno` and most of
   its pthread surface as weak aliases of internal names. Weak is
