@@ -16926,8 +16926,16 @@ struct LibcTestSubsetTotals
 // `functional/strtold` refused at their first row; all 22 now compile, link,
 // run and pass. Nothing in the suite is blocked on a compile any more either,
 // and `src/math` passes every one of the 55 units the reference can run.
-#define LIBC_TEST_EXPECTED_PASSING 238
-#define LIBC_TEST_EXPECTED_STATE_HASH 0x0ccacdf0c3b8c365ull
+// 2026-08-29: 238 -> 241, three units and two causes. `regression/sem_close-unmap`
+// and `functional/mntent` are `main` functions with no return statement in
+// them, and reaching the closing brace of `main` returns 0 (C 5.1.2.2.3) where
+// every other function's fall-off is undefined: both had run correctly and
+// then died on the trap terminating the body, SIGILL. `functional/strftime`
+// came in ahead of that change and is not attributable to it. The remaining
+// two are `functional/tgmath` and `functional/fcntl`, which are issue #728's
+// last open entries.
+#define LIBC_TEST_EXPECTED_PASSING 241
+#define LIBC_TEST_EXPECTED_STATE_HASH 0xf1b610810c578cd5ull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it

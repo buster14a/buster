@@ -7467,6 +7467,49 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(integer_to_pointer_temporary);
         }
     }
+    // The one function in C whose fall-off is defined: reaching the `}` that
+    // terminates `main` returns 0 (C 5.1.2.2.3), where every other function's
+    // is undefined and terminates with the IR's unreachable.  The fixture's
+    // own comment carries the rule; what it is here for is that the fall-off
+    // is a code-generation terminator, so all four allocators have to agree
+    // that the zero is materialized and no trap follows it.  Exit zero is
+    // reachable only through the closing brace, so the run is the assertion.
+    {
+        String8 main_implicit_return_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(main_implicit_return_allocators); allocator_index += 1)
+        {
+            Arena* main_implicit_return_conflicts[] = {
+                arguments->arena,
+                c_asm_arena,
+            };
+            TemporalArena main_implicit_return_temporary = scratch_begin(main_implicit_return_conflicts, BUSTER_ARRAY_LENGTH(main_implicit_return_conflicts));
+            Arena* main_implicit_return_arena = main_implicit_return_temporary.arena;
+            String8 main_implicit_return_path = buster_test_temporary_path(main_implicit_return_arena, S8("buster-c-main-implicit-return"),
+                                                                          string_format(main_implicit_return_arena, S8("-{u32}"), allocator_index));
+            String8 main_implicit_return_command_line[] = {
+                string_format(main_implicit_return_arena, S8("-fregister-allocator={S8}"), main_implicit_return_allocators[allocator_index]),
+                S8("-o"),
+                main_implicit_return_path,
+                S8("tests/basic_c_main_implicit_return.c"),
+            };
+            CompilerDriverResult main_implicit_return = compiler_driver_execute_invocation(
+                main_implicit_return_arena,
+                compiler_driver_parse_arguments(main_implicit_return_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(main_implicit_return_command_line)));
+            BUSTER_TEST(arguments, main_implicit_return.error == COMPILER_DRIVER_ERROR_NONE);
+            if (main_implicit_return.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {main_implicit_return_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(main_implicit_return_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(main_implicit_return_temporary);
+        }
+    }
     String8 c_asm_aarch64_path = buster_test_temporary_path(c_asm_arena, S8("buster-c-asm-aarch64"), S8(""));
     String8 c_asm_aarch64_command_line[] = {
         S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), c_asm_aarch64_path, S8("tests/basic_c_asm.c"),

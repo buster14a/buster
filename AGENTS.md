@@ -1239,18 +1239,19 @@ by how many tests wanted each. It is the work list in the order that unblocks
 the most tests, and it is why this stage grows by itself as the compiler
 improves rather than needing to be extended by hand.
 
-Today 238 of 424 units pass (measured 2026-08-29). Seventy-eight are
+Today 241 of 424 units pass (measured 2026-08-29). Seventy-eight are
 `src/api`: 78 of its 79 units compile against musl's headers under both
 compilers, and one — `api/unistd` — is held out because musl defines neither
 `_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the reference fails on
-too. The other 160 are runtime tests that link and run green: `src/functional`
-is 51 passing against 4 failing, 7 dynamic and 15 excluded-reference;
-`src/math` is 55 passing and 144 excluded-reference; `src/regression` is 54
-passing against 1 failing, 2 dynamic and 12 excluded-reference. **Nothing
+too. The other 163 are runtime tests that link and run green: `src/functional`
+is 53 passing against 2 failing, 7 dynamic and 15 excluded-reference;
+`src/math` is 55 passing and 144 excluded-reference; `src/regression` is 55
+passing against none failing, 2 dynamic and 12 excluded-reference. **Nothing
 anywhere in the suite is blocked on a link or on a compile any more**, which
 is why `LIBCTEST_BLOCKER` now prints nothing at all: the work list this stage
-generates for itself is empty, and what is left is five wrong answers.
-`src/math` passes every one of the 55 units the reference can run.
+generates for itself is empty, and what is left is two wrong answers.
+`src/math` passes every one of the 55 units the reference can run, and
+`src/regression` every one of its 55.
 
 The last 22 blocked-compile units went together, 21 in `src/math` and
 `functional/strtold`, when the x87 static-initializer folder stopped refusing
@@ -1265,12 +1266,27 @@ and its own diagnostic never reaches a state count. `buster_compile_failed` on
 the `LIBCTEST_SUBSET` line is the number to read for a compile gap, and it is
 0 in every subset but `api` and `functional` now.
 
-The five failing units are wrong answers rather than missing components; each
-was blocked on a link until `vfprintf` compiled, so none is a regression
+The two failing units are wrong answers rather than missing components; each
+was blocked on a link until `vfprintf` compiled, so neither is a regression
 against an earlier pass, and none of the 22 that came in after them joined
-this list. `regression/sem_close-unmap`, `functional/fcntl`,
-`functional/mntent`, `functional/strftime` and `functional/tgmath` exit
-non-zero and have not been attributed further.
+this list. `functional/fcntl` and `functional/tgmath` exit non-zero and have
+not been attributed further.
+
+Three of the original five went since. `regression/sem_close-unmap` and
+`functional/mntent` had one cause between them: neither `main` contains a
+return statement, and reaching the `}` that terminates `main` returns 0
+(C 5.1.2.2.3) where every other function's fall-off is undefined. The C
+frontend terminated every non-void body's fall-off with the IR's unreachable —
+`ud2` on x86-64, BRK on AArch64 — so both programs did all of their work
+correctly and then died on the brace with SIGILL, exit status 132.
+`sem_close-unmap` is nineteen lines ending in a bare `sem_post(sem);`, so
+there was nothing else it could have been. `main` is the one function that
+gets the implicit zero, decided once with its signature rather than by
+matching a name at the terminator, and `tests/basic_c_main_implicit_return.c`
+pins it under all four allocators: exit zero is reachable in that fixture only
+by falling off the closing brace, so a trap faults and a bare `ret` exits with
+what the last call left behind. `functional/strftime` came in separately and
+is not attributable to that change.
 
 `regression/malloc-oom`, `regression/malloc-brk-fail`,
 `regression/setenv-oom` and `regression/pthread_create-oom` used to sit here
@@ -2288,6 +2304,17 @@ on a commit you already know is incomplete tells nobody anything.
   instruction there, and `ir_canonical_conversion_valid` rejects a
   non-pointer-width operand outright. `tests/basic_c_integer_to_pointer.c`
   pins the answers under every allocator.
+- `main` is the one function whose fall-off is defined: reaching the `}` that
+  terminates it returns 0 (C 5.1.2.2.3), where every other non-void function's
+  is undefined (C 6.9.1p12) and terminates with `IR_OPCODE_UNREACHABLE` — the
+  `ud2` Clang and GCC also emit. `CIrSignature.returns_zero_at_end` decides it
+  once, with the signature, from a file-scope declaration named `main` whose
+  return type is `int`; the terminator does not match a name. Getting it wrong
+  is silent until the program ends: `regression/sem_close-unmap` and
+  `functional/mntent` in libc-test have no return statement anywhere and both
+  ran correctly to their last statement before dying on the brace with SIGILL.
+  `tests/basic_c_main_implicit_return.c` pins it under every allocator, and
+  exit zero is reachable there only through the closing brace.
 - `builder->size_type` and `builder->ptrdiff_type` are chosen against the width
   of the scalar type the lowering built, not against `program->data_layout`'s
   own `unsigned long` entry. The two can disagree: the layout comes from the

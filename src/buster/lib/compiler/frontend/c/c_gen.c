@@ -839,6 +839,12 @@ struct CIrSignature
     bool valid;
     bool body_supported;
     bool returns_void;
+    // Reaching the closing brace of this function's body produces a zero
+    // rather than being undefined. C 5.1.2.2.3 says that of `main` alone, so
+    // this is set for a file-scope `main` whose return type is `int` and for
+    // nothing else; every other non-void function terminates the fall-off
+    // with unreachable, which is what Clang and GCC emit.
+    bool returns_zero_at_end;
     bool is_variadic;
     // The callee's declaration carried _Noreturn, __attribute__((noreturn)),
     // __declspec(noreturn) or [[noreturn]]. A call to it terminates control
@@ -1411,6 +1417,13 @@ BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* 
             if (result.return_type.value != IR_ID_UNDERLYING_INVALID)
             {
                 result.returns_void = return_type->kind == C_TYPE_VOID;
+                // C 5.1.2.2.3: reaching the `}` that terminates `main`
+                // returns 0. libc-test's regression/sem_close-unmap is 19
+                // lines with no return statement at all, and without this the
+                // fall-off is the same `unreachable` every other function
+                // gets -- a `ud2` the process dies on with SIGILL after the
+                // body has run correctly.
+                result.returns_zero_at_end = return_type->kind == C_TYPE_INT && string_equal(declaration.name, S8("main"));
                 result.is_variadic = function_type->is_variadic;
                 // The IR type carries the same marker, and it is the one the
                 // dialect was already applied to.
@@ -2229,6 +2242,9 @@ struct CIntegerIrBuilder
     IrFunction** cleanup_functions;
     CIrSignature* cleanup_signatures;
     bool returns_void;
+    // This body's fall-off returns zero rather than being undefined; see
+    // CIrSignature::returns_zero_at_end.
+    bool returns_zero_at_end;
     bool preparing_calls;
     bool va_list_builtin_operand;
     // Label metadata is tracked only when the body can produce label values
@@ -5403,12 +5419,15 @@ BUSTER_C_INTERNAL bool c_ir_emit_parameter(CIntegerIrBuilder* builder, CToken na
     return stored;
 }
 
-BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_typed(CIntegerIrBuilder* builder, u64 value, bool is_negative, CToken token, IrTypeId type)
+// The constant rows every integer literal becomes, taking the source range
+// directly: the fall-off of `main` has no token of its own to name, only the
+// declaration's range.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_at(CIntegerIrBuilder* builder, u64 value, bool is_negative, IrSourceRange instruction_source,
+                                                       IrTypeId type)
 {
     IrValueId result = c_ir_add_result(builder, type);
     u64* immediate = arena_allocate(builder->arena, u64, 1);
     immediate[0] = value;
-    IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_CONSTANT_INTEGER, type);
     instruction.immediates = immediate;
     instruction.immediate_count = 1;
@@ -5417,6 +5436,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_typed(CIntegerIrBuilder* bui
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[result.value].definition = id;
     return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_typed(CIntegerIrBuilder* builder, u64 value, bool is_negative, CToken token, IrTypeId type)
+{
+    return c_ir_emit_integer_value_at(builder, value, is_negative, c_ir_token_source_range(builder, token), type);
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value(CIntegerIrBuilder* builder, u64 value, bool is_negative, CToken token)
@@ -31978,6 +32002,18 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 return false;
             }
         }
+        else if (builder->returns_zero_at_end)
+        {
+            // C 5.1.2.2.3 gives `main` alone a defined fall-off: reaching the
+            // closing brace returns 0. It is one function per program, so the
+            // flag is decided once with the signature rather than by matching
+            // a name here.
+            IrValueId zero = c_ir_emit_integer_value_at(builder, 0, false, declaration_source, builder->return_type);
+            if (zero.value == IR_ID_UNDERLYING_INVALID || !c_ir_terminate(builder, IR_OPCODE_RETURN, &zero, 1, 0, 0, declaration_source))
+            {
+                return false;
+            }
+        }
         else
         {
             // Only the root body task has no continuation, so this is the end
@@ -40394,6 +40430,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                            prepared_control_expression_capacity ? (u32)prepared_control_expression_capacity : 1),
             .prepared_control_expression_capacity = prepared_control_expression_capacity ? (u32)prepared_control_expression_capacity : 1,
             .returns_void = signatures[declaration_index].returns_void,
+            .returns_zero_at_end = signatures[declaration_index].returns_zero_at_end,
         };
         for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)
         {
