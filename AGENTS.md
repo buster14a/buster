@@ -3067,18 +3067,36 @@ on a commit you already know is incomplete tells nobody anything.
   would walk the arrays, and the linker already knows every entry's target at
   layout time. `link_initializer_plan_build` reads the two sections into a
   plan and hands back the object with them removed; each writer then emits one
-  direct call per constructor before `main` and one per destructor after it,
-  patched exactly like the call to `main` beside them. ELF passes argc, argv
-  and envp to each constructor as GNU does; PE passes nothing, which is MSVC's
-  `.CRT$XCU` contract and all that is available before the argv machinery
-  runs. Two limits are worth knowing. A program that terminates by calling
-  `exit` rather than returning from `main` does not run its destructors,
-  because the stub owns that sequence rather than an `atexit` registration.
-  And the Mach-O and UEFI writers synthesize no entry point of their own --
-  LC_MAIN hands `main` straight to dyld, and a UEFI image's entry is the
-  firmware's -- so they **refuse** a program with initializers, naming the
-  first one, rather than placing an array nothing will call. The objects those
-  targets produce are correct and link through the system linker.
+  direct call per constructor before `main`, patched exactly like the call to
+  `main` beside them. ELF passes argc, argv and envp to each constructor as
+  GNU does; PE passes nothing, which is MSVC's `.CRT$XCU` contract and all
+  that is available before the argv machinery runs. The **destructors** are
+  not called where `main` came back: a program that reaches `exit` from inside
+  `main` never comes back, and GNU runs a destructor either way, so the hosted
+  stubs synthesize a **runner** past the trap that ends the stub -- one call
+  per destructor and a return -- and register it with the C runtime before the
+  constructors run. That is the position `__libc_start_main` hands `_dl_fini`
+  to `__cxa_atexit` from, and it is what leaves the runner behind every
+  handler the program registered itself (issue 781). The registration is
+  `__cxa_atexit` on ELF and `_crt_atexit` on PE, because glibc's `libc.so.6`
+  and Windows' `ucrtbase.dll` both keep plain `atexit` in a static library
+  this linker does not read; `link_elf_hosted_exit_symbol` appends the ELF
+  import beside `exit`, and both ELF dynamic writers have to agree on whether
+  it is there because the AArch64 one re-derives the x86-64 one's import
+  numbering. The freestanding ELF shape keeps its destructors inline after
+  `main`: it has no `exit` to call and no runtime to register with, and a
+  `-nostdlib` program that reaches the raw exit syscall runs no handler
+  either. Two writers synthesize no entry point of their own, and they answer
+  differently. **Mach-O** needs none: LC_MAIN hands `main` straight to dyld,
+  which runs the main executable's `__DATA,__mod_init_func` before it enters
+  `main` and its `__mod_term_func` in reverse on the way out, so that writer
+  keeps both arrays, gives each the section type dyld dispatches on, and lets
+  the loader call them (issue 779). **UEFI** has no such third party -- a
+  firmware image has no C runtime, and its entry is the firmware's call with
+  the image handle and the system table -- so it still **refuses** a program
+  with initializers, naming the first one, rather than placing an array
+  nothing will call; `link_initializer_plan_empty` is that refusal. The
+  objects it produces are correct and link through the system linker.
 - **An undefined weak symbol resolves to address zero**, which is what a
   program asks for by declaring one: musl's startup takes the address of a
   weak hidden `_DYNAMIC` and reads zero to learn it is static. Which party

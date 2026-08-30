@@ -6028,6 +6028,60 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(constructor_object_temporary);
     }
+    // The other way a program ends: `main` calls `exit` instead of returning,
+    // and the destructor still has to run (issue 781).  The entry stub cannot
+    // call it where `main` came back, because it never comes back, so the
+    // hosted stubs register a runner with the C runtime and this is what
+    // proves the registration landed -- the fixture reports its own verdict as
+    // the process status, and the status a skipped destructor would leave is
+    // the `exit(1)` `main` asked for.  It also pins the order against handlers
+    // the program registered itself, which is only right if the runner was
+    // registered before the constructors ran.
+    //
+    // The PE image is reached by a Windows host running this same loop rather
+    // than by the wine block further up -- the fixture calls `exit`, and a
+    // cross host has no ucrtbase.dll to resolve that against.
+    //
+    // Apple is excluded, and what is excluded is a measurement rather than a
+    // guess.  The image builds and runs there -- the build and spawn
+    // assertions passed on the macOS runner -- and only its status was wrong,
+    // under all four allocators, while `tests/basic_c_constructor.c` passed on
+    // the same run.  So `__DATA,__mod_init_func` is honoured and something
+    // about the terminator side is not, which nothing in this tree had ever
+    // observed before this fixture: the constructor fixture checks only that
+    // `main` has not seen its destructor yet, which is true whether or not one
+    // ever runs.  Whose contract is broken -- dyld's, or what the Mach-O
+    // writer hands it -- is not decided from here, because the oracle is a
+    // Clang build of this same fixture on a macOS host and no runner in this
+    // project's local reach is one.  That is issue 798.  The registration this
+    // change is about is the entry stub's, and no Mach-O image has one.
+#if !BUSTER_APPLE
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+    {
+        TemporalArena destructor_temporary = scratch_begin(&arguments->arena, 1);
+        String8 destructor_path = buster_test_temporary_path(destructor_temporary.arena, S8("buster-c-destructor-exit"), S8(""));
+        String8 destructor_command_line[] = {
+            c_lz4_regression_allocators[allocator_index], S8("-o"), destructor_path, S8("tests/basic_c_destructor_exit.c"),
+        };
+        CompilerDriverResult destructor_build = compiler_driver_execute_invocation(
+            destructor_temporary.arena,
+            compiler_driver_parse_arguments(destructor_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(destructor_command_line)));
+        BUSTER_TEST(arguments, destructor_build.error == COMPILER_DRIVER_ERROR_NONE);
+        if (destructor_build.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 destructor_arguments[] = {destructor_path};
+            ProcessSpawnResult destructor_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(destructor_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, destructor_spawn.handle != 0);
+            if (destructor_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(destructor_temporary.arena, destructor_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(destructor_temporary);
+    }
+#endif
     // Returning from main is a call to exit (C 5.1.2.2.3), so the linked
     // image's entry point must go through libc rather than the raw exit
     // syscall: the syscall skips stdio flushing and every atexit handler, and
