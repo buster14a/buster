@@ -5746,6 +5746,17 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     {
                         compact_unwind = string_equal(name, S8("__compact_unwind"));
                     }
+                    // S_MOD_INIT_FUNC_POINTERS and S_MOD_TERM_FUNC_POINTERS:
+                    // `__DATA,__mod_init_func` and `__mod_term_func`, the
+                    // Mach-O spelling of `.init_array`/`.fini_array`.  Their
+                    // *type* is what names them, the way SHT_INIT_ARRAY does
+                    // in ELF; without this they fall through to read-only data
+                    // and a constructor read back out of an object never runs.
+                    bool initializer_array = false;
+                    if (read_ok)
+                    {
+                        initializer_array = section_type == 0x9 || section_type == 0xa;
+                    }
                     bool eh_frame = false;
                     if (read_ok)
                     {
@@ -5771,6 +5782,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     if (read_ok)
                     {
                         output_kind = eh_frame                         ? OBJECT_SECTION_UNWIND
+                                                        : initializer_array                  ? (section_type == 0x9 ? OBJECT_SECTION_INIT_ARRAY : OBJECT_SECTION_FINI_ARRAY)
                                                         : debug_kind != OBJECT_SECTION_COUNT ? debug_kind
                                                         : is_thread_local ? (zero_fill ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
                                                         : (flags & 0x80000000) || string_equal(name, S8("__text")) ? OBJECT_SECTION_TEXT
