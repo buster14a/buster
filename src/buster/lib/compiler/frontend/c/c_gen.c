@@ -42214,6 +42214,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         }
         u32 object_alignment = type_value->layout.alignment;
         bool has_alignment = false;
+        bool has_standard_alignment = false;
         bool alignment_valid = true;
         String8 alignment_rejection = {0};
         for (u32 bucket_index = declarations_by_entity_offsets[entity_index]; bucket_index < entity_bucket_end; bucket_index += 1)
@@ -42231,10 +42232,20 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                 alignment_valid = false;
                 break;
             }
+            for (u32 specifier_index = 0; specifier_index < declaration->alignment_count; specifier_index += 1)
+            {
+                has_standard_alignment |=
+                    c_alignment_specifier_is_standard(preprocess, parse.alignments[declaration->alignment_start + specifier_index]);
+            }
             object_alignment = declaration_alignment;
             has_alignment = true;
         }
-        if (has_alignment && !definition->alignment_count)
+        // C11 6.7.5p7 makes a definition without the specifier an error only
+        // for _Alignas; the GNU attribute merges across declarations, so
+        // mimalloc's `extern mi_decl_cache_align mi_stats_t _mi_stats_main;`
+        // aligns the bare definition in another line the way GCC and Clang
+        // align it.
+        if (has_alignment && has_standard_alignment && !definition->alignment_count)
         {
             alignment_valid = false;
         }
