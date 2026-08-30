@@ -36567,6 +36567,17 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, CIrConstan
             {
                 return false;
             }
+            // A conversion rounds at the target's own precision (C 6.3.1.5),
+            // and this evaluator carries every float as an `f64`, so a `float`
+            // target has to round here or the narrowing never happens at all:
+            // `(double)(float)0.1` answered 0.1 rather than Clang's
+            // 0.10000000149011612.  The global-initializer image already
+            // rounds this way when the *destination* is a `float`; a cast in
+            // the middle of a constant expression rounds where the cast is.
+            if (target->bit_width == 32)
+            {
+                floating = (f64)(f32)floating;
+            }
             *result = (CIrConstantValue){.type = target_type, .floating = floating, .kind = C_IR_CONSTANT_FLOAT};
             return true;
         }
@@ -37566,6 +37577,72 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
                 builder->queries->value_count = value_start + value_count;
                 builder->queries->operator_count = operator_start + operator_count;
+                // `( type-name ) { ... }` is a compound literal rather than a
+                // cast of a braced operand, and it is an operand like any
+                // other: `(int){5} + 1` is a constant expression, and nothing
+                // about the construct says it has to be a whole initializer.
+                // C 6.7.9p11 converts the body to the literal's own type on
+                // the way in, which is why the shapes that convert --
+                // `(int){5}` into a `long`, `(float){0.1}` into a `double` --
+                // have to fold here, where there is a type for the conversion
+                // to happen at.  The type name is a sub-query and so is the
+                // body; both resume through the query machine the way the
+                // sizeof arm above does rather than recursing.
+                u32 literal_open = close + 1;
+                u32 literal_close = close < end && literal_open < end &&
+                                            c_token_is_punctuator(&builder->preprocess.tokens[literal_open], C_PUNCTUATOR_LEFT_BRACE)
+                                        ? c_ir_matching_delimiter_cached(builder, literal_open, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE)
+                                        : UINT32_MAX;
+                // The body this arm folds is one expression with an optional
+                // trailing comma, at a scalar type.  Every other shape the
+                // construct takes -- the C23 empty literal, a string, an
+                // 80-bit x87 value that carries more significand than this
+                // evaluator's `f64`, an aggregate -- is not a
+                // CIrConstantValue at all, and
+                // c_ir_initializer_narrow_compound_literal_value is what folds
+                // those; leaving them alone here is what keeps them reaching
+                // it.
+                u32 literal_value_end = literal_close;
+                if (literal_close < end && literal_value_end > literal_open + 1 &&
+                    c_token_is_punctuator(&builder->preprocess.tokens[literal_value_end - 1], C_PUNCTUATOR_COMMA))
+                {
+                    literal_value_end -= 1;
+                }
+                if (literal_close < end && literal_open + 1 < literal_value_end &&
+                    !c_initializer_has_top_level_comma(builder->preprocess.tokens, literal_open + 1, literal_value_end))
+                {
+                    IrTypeId literal_type = IR_TYPE_ID_INVALID;
+                    if (!c_ir_query_compound_type(builder, index + 1, close, literal_open, literal_close, &literal_type))
+                    {
+                        return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count,
+                                                              operator_count);
+                    }
+                    IrType* literal = ir_type_from_id(&builder->program->types, literal_type);
+                    bool scalar_literal = literal && literal->layout.resolved &&
+                                          (literal->kind == IR_TYPE_POINTER || (literal->kind == IR_TYPE_FLOAT && literal->bit_width <= 64) ||
+                                           c_ir_constant_type_is_integer(literal));
+                    if (scalar_literal)
+                    {
+                        CIrConstantValue body = {0};
+                        if (!c_ir_query_constant(builder, literal_open + 1, literal_value_end, &body))
+                        {
+                            return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count,
+                                                                  operator_count);
+                        }
+                        // The conversion happens once, at the literal's type.
+                        // The destination's own is the one the callers already
+                        // apply to whatever this evaluator hands back.
+                        CIrConstantValue converted_literal = {0};
+                        if (value_count >= capacity || !c_ir_constant_cast(builder, body, literal_type, &converted_literal))
+                        {
+                            return false;
+                        }
+                        values[value_count++] = converted_literal;
+                        expect_operand = false;
+                        index = literal_close;
+                        continue;
+                    }
+                }
                 IrTypeId cast_type = IR_TYPE_ID_INVALID;
                 if (close < end)
                 {
@@ -37891,7 +37968,16 @@ BUSTER_C_INTERNAL bool c_ir_global_constant_value(CIntegerIrBuilder* builder, CD
                 if (type->bit_width == 32)
                 {
                     f32 narrowed = (f32)converted.floating;
-                    if (declaration.is_constexpr && converted.kind == C_IR_CONSTANT_FLOAT && (f64)narrowed != converted.floating)
+                    // C23 6.7.1p6 wants a constexpr initializer exactly
+                    // representable in the object's type.  The conversion
+                    // above has already rounded `converted` to that type, so
+                    // comparing against it would always agree; the question is
+                    // asked of the same value at `f64`, the widest this
+                    // evaluator carries, which is what `value` held before the
+                    // destination's own conversion rounded it.
+                    CIrConstantValue unrounded = {0};
+                    if (declaration.is_constexpr && converted.kind == C_IR_CONSTANT_FLOAT &&
+                        c_ir_constant_cast(builder, value, builder->f64_type, &unrounded) && (f64)narrowed != unrounded.floating)
                     {
                         return false;
                     }

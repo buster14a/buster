@@ -2068,6 +2068,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
         S8("static int *static_compound_literal_row = &(struct StaticCompoundLiteralRows){{{1, 2}, {3, 4}}}.rows[1].y;"),
         S8("static int *static_compound_literal_past = &(int[]){1, 2}[3];"),
         S8("static int *static_compound_literal_subscript_value = (int[]){1, 2}[1];"),
+        S8("static long static_compound_literal_widened = (int){5};"),
+        S8("static unsigned static_compound_literal_unsigned = (int){-1};"),
+        S8("static double static_compound_literal_rounded = (float){0.1};"),
+        S8("static int static_compound_literal_operand = (int){5} + 1;"),
     };
     String8 static_compound_literal_source = (String8){0};
     for (u32 line_index = 0; line_index < BUSTER_ARRAY_LENGTH(static_compound_literal_lines); line_index += 1)
@@ -2087,8 +2091,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
     BUSTER_TEST(arguments, static_compound_literal_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, static_compound_literal_parse.diagnostic_count == 0);
     // Lines 3 through 6 fold, so do the subscript forms on lines 19 and 20,
-    // and so does every value form from line 11 down, so only the six
-    // refusals below are diagnosed.  A value form that stopped folding would
+    // and so does every value form from line 11 down -- including the
+    // converting ones on lines 23 through 26.  Only the six refusals below
+    // are diagnosed.  A value form that stopped folding would
     // raise this count rather than move a refusal: the shapes pinned below
     // are the address form's, and none of them is a literal used for its
     // value.
@@ -2154,6 +2159,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
                 static_compound_literal_values += 1;
                 BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && global->initializer_bits == 5);
             }
+            // The conversion at the literal's type is what these three pin.
+            // `(int){-1}` into an `unsigned` is 4294967295 rather than a
+            // negative image, and `(float){0.1}` widened to a `double` carries
+            // the `float`'s bits -- 0x3fb99999a0000000, not the `double` 0.1 the
+            // body spells -- so a fold that skipped either conversion is a
+            // different number here rather than a missing diagnostic.
+            if (string_equal(symbol->link_name, S8("static_compound_literal_widened")))
+            {
+                static_compound_literal_values += 1;
+                BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && global->initializer_bits == 5 &&
+                                           !global->initializer_is_negative);
+            }
+            if (string_equal(symbol->link_name, S8("static_compound_literal_unsigned")))
+            {
+                static_compound_literal_values += 1;
+                BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && global->initializer_bits == UINT32_MAX &&
+                                           !global->initializer_is_negative);
+            }
+            if (string_equal(symbol->link_name, S8("static_compound_literal_rounded")))
+            {
+                static_compound_literal_values += 1;
+                BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT &&
+                                           global->initializer_bits == UINT64_C(0x3fb99999a0000000));
+            }
+            if (string_equal(symbol->link_name, S8("static_compound_literal_operand")))
+            {
+                static_compound_literal_values += 1;
+                BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && global->initializer_bits == 6);
+            }
             if (string_equal(symbol->link_name, S8("static_compound_literal_value_holder")))
             {
                 static_compound_literal_values += 1;
@@ -2166,7 +2200,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
             }
         }
         BUSTER_TEST(arguments, static_compound_literal_objects == 6);
-        BUSTER_TEST(arguments, static_compound_literal_values == 2);
+        BUSTER_TEST(arguments, static_compound_literal_values == 6);
     }
     scratch_end(static_compound_literal_temporary);
     return result;

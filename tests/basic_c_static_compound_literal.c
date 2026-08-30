@@ -136,6 +136,33 @@ static int value_elements[4] = {(int){1}, 2, (int){3}, 4};
 // compatible with the pointer it is initializing.
 static const char *value_decayed = (char[]){'x', 'y', 0};
 
+// C 6.7.9p11 converts the body to the literal's own type on the way in, and
+// the destination converts it again. The answers here are the ones Clang
+// produces rather than the ones the body spells: dropping either conversion
+// reads back a different number. The literal is also an operand like any
+// other, so it folds in the middle of a constant expression.
+static long value_widened = (int){5};
+static unsigned value_unsigned = (int){-1};
+static unsigned char value_truncated = (unsigned char){300};
+static double value_rounded = (float){0.1};
+static int value_operand = (int){5} + 1;
+static int value_selected = (int){1} ? (int){2} : (int){3};
+static long long value_shifted = (long long){1} << 40;
+static void *value_converted_pointer = (int *){0};
+
+struct Converted
+{
+    long a;
+    unsigned b;
+    double c;
+};
+
+// The same conversions as an element of an aggregate, which reaches the folder
+// through the initializer walk rather than through the object's own
+// declaration.
+static struct Converted value_converted_members = {(int){5}, (int){-1}, (float){0.1}};
+static int value_converted_elements[3] = {(char){300}, (int){2} + 1, 4};
+
 // A function-local static reaches the same fold. Its address form is refused
 // -- an in-body literal has automatic storage duration -- but its value form
 // is only bytes, so it folds like any other.
@@ -274,6 +301,29 @@ int main(void)
     if (value_local() != 31)
     {
         return 21;
+    }
+
+    if (value_widened != 5 || value_unsigned != 4294967295u || value_truncated != 44)
+    {
+        return 28;
+    }
+    if (value_operand != 6 || value_selected != 2 || value_shifted != 1099511627776LL || value_converted_pointer != 0)
+    {
+        return 29;
+    }
+    // The `float` rounds at its own precision before the `double` widens it,
+    // so the value is 0.10000000149011612 rather than the 0.1 the body spells.
+    if (value_rounded == 0.1 || value_rounded != (double)(float)0.1)
+    {
+        return 30;
+    }
+    if (value_converted_members.a != 5 || value_converted_members.b != 4294967295u || value_converted_members.c != (double)(float)0.1)
+    {
+        return 31;
+    }
+    if (value_converted_elements[0] != 44 || value_converted_elements[1] != 3 || value_converted_elements[2] != 4)
+    {
+        return 32;
     }
 
     return 0;
