@@ -31071,21 +31071,18 @@ BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preproc
                            : S8("GNU initializer ranges are only available in GNU dialects");
             }
         }
+        // Computed goto and the label addresses it consumes are implemented
+        // extensions, not dialect grammar: GCC and Clang accept `goto *p` and
+        // `&&label` under -std=c11 (only -pedantic remarks), and both
+        // spellings are invalid C otherwise, so no conforming program changes
+        // meaning.  CPython's ceval.c is the load-bearing case -- upstream
+        // builds it -std=c11 with the computed-goto dispatch on.  This is the
+        // same principle that put __GNUC__ in every dialect: the dialect
+        // decides which *spellings* are keywords, not which extensions exist.
         if (token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_GOTO) && index + 1 < end &&
             c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR))
         {
-            if (!c_preprocess_dialect_is_gnu(preprocess.dialect))
-            {
-                *token_index_out = index;
-                return S8("GNU computed goto is only available in GNU dialects");
-            }
             continue;
-        }
-        if (c_parse_label_address_prefix(&preprocess, start, index) && index + 1 < end && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER &&
-            !c_preprocess_dialect_is_gnu(preprocess.dialect))
-        {
-            *token_index_out = index;
-            return S8("GNU labels-as-values are only available in GNU dialects");
         }
         if (token.kind == C_TOKEN_IDENTIFIER &&
             c_token_in_well_known_set(preprocess.spelling_base, token,

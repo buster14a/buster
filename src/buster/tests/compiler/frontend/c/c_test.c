@@ -15204,9 +15204,16 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
         scratch_end(conflicting_fixed_asm_temporary);
     }
     {
+        // Labels-as-values and computed goto are implemented extensions, not
+        // dialect grammar: GCC and Clang accept both under every -std, and
+        // the spellings are invalid C otherwise, so no conforming program
+        // changes meaning.  CPython's ceval.c is the load-bearing case --
+        // upstream builds its computed-goto dispatch with -std=c11.  This
+        // pins the standard dialect accepting the construct, where the old
+        // gate refused it.
         TemporalArena c_labels_temporary = scratch_begin(0, 0);
         CPreprocessResult c_labels_tokens = c_preprocess(c_labels_temporary.arena,
-                                                         S8("int c_labels(void) { return &&target; target: return 0; }\n"),
+                                                         S8("int c_labels(void) { void* place = &&target; goto *place; target: return 0; }\n"),
                                                          (CPreprocessOptions){
                                                              .target = target_native,
                                                              .data_layout = target_data_layout(target_native),
@@ -15214,12 +15221,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                                                          });
         CParseResult c_labels_parse = c_parse(c_labels_temporary.arena, c_labels_tokens);
         BUSTER_TEST(arguments, c_labels_tokens.diagnostic_count == 0);
-        BUSTER_TEST(arguments, c_labels_parse.diagnostic_count == 1);
-        if (c_labels_parse.diagnostic_count == 1)
-        {
-            BUSTER_STRING_TEST(arguments, c_labels_parse.diagnostics[0].message,
-                               S8("in function 'c_labels': GNU labels-as-values are only available in GNU dialects"));
-        }
+        BUSTER_TEST(arguments, c_labels_parse.diagnostic_count == 0);
         scratch_end(c_labels_temporary);
     }
     {

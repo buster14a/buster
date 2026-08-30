@@ -2631,10 +2631,17 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_memset"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin_memcmp"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin_clz"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
+    // The `l` spellings sit between the int and long long ones and lower the
+    // same way -- the operand's own width decides the operation -- so their
+    // absence only ever surfaces on an LP64 target where a caller reached
+    // for the `unsigned long` form (CPython's _Py_bit_length does).
+    { S8_INITIALIZER("__builtin_clzl"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_clzll"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
+    { S8_INITIALIZER("__builtin_ctzl"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ctzll"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_popcount"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
+    { S8_INITIALIZER("__builtin_popcountl"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountll"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     // The target-fixed 512-bit vocabulary. These names are a buster extension
     // and exist so `<buster/lib/simd.h>` can write one kernel that the host
@@ -4362,10 +4369,12 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
         "__builtin___clear_cache", "__builtin_acos",
         "__builtin_acosf",         "__builtin_ceil",
         "__builtin_ceilf",         "__builtin_clz",
-        "__builtin_clzll",         "__builtin_cos",
-        "__builtin_cosf",          "__builtin_ctz",
+        "__builtin_clzl",          "__builtin_clzll",
+        "__builtin_cos",           "__builtin_cosf",
+        "__builtin_ctz",           "__builtin_ctzl",
         "__builtin_ctzll",         "__builtin_debugtrap",
-        "__builtin_popcount",      "__builtin_popcountll",
+        "__builtin_popcount",      "__builtin_popcountl",
+        "__builtin_popcountll",
         "__builtin_assume_aligned", "__builtin_choose_expr",
         "__builtin_constant_p",    "__builtin_object_size",
         "__builtin_expect",        "__builtin_expect_with_probability",
@@ -6541,6 +6550,9 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__clang_major__", S8("18"));
     C_DEFINE_TYPE_MACRO("__clang_minor__", S8("0"));
     C_DEFINE_TYPE_MACRO("__clang_patchlevel__", S8("0"));
+    // The string form beside the three numbers: CPython's Python/getcompiler.c
+    // builds sys.version's compiler field from it.
+    C_DEFINE_TYPE_MACRO("__clang_version__", S8("\"18.0.0 (buster)\""));
     if (!layout.plain_char_is_signed)
     {
         C_DEFINE_TYPE_MACRO("__CHAR_UNSIGNED__", S8("1"));
