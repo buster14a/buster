@@ -477,6 +477,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("github.ref == 'refs/heads/main'", forgejo)
         self.assertIn("persist-credentials: false", forgejo)
         self.assertRegex(forgejo, r"checkout@[0-9a-f]{40}")
+        # The sealing dependency must stay version-pinned on the trusted side.
+        self.assertRegex(forgejo, r"pynacl==\d+\.\d+\.\d+")
 
 
 if __name__ == "__main__":

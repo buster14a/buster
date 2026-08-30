@@ -92,9 +92,11 @@ requires different hosted labels.
 
 ## Forgejo 16 configuration
 
-The dispatcher runs on a trusted Forgejo runner and needs `python3`,
-`ssh-keygen`, and one of **PyNaCl** (`pip install pynacl`) or the **gh**
-CLI to seal the per-run secret. Create these repository Actions variables:
+The dispatcher runs on a trusted Forgejo runner and needs `python3` (with
+the `venv` module) and `ssh-keygen`. The workflow provisions a private
+virtual environment with a version-pinned **PyNaCl** on first use to seal
+the per-run secret; the dispatcher also accepts a preinstalled PyNaCl or
+falls back to the **gh** CLI. Create these repository Actions variables:
 
 | Variable | Value |
 |---|---|

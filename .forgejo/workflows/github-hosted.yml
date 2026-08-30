@@ -28,7 +28,16 @@ jobs:
           FORGEJO_BRIDGE_TOKEN: ${{ secrets.GH_BRIDGE_FORGEJO_TOKEN }}
         run: |
           set -euo pipefail
-          python3 .forgejo/scripts/github_runner_bridge.py \
+          # The runner user has no root; provision a private virtual
+          # environment with a version-pinned PyNaCl once and reuse it to
+          # seal the per-run secret. The pin keeps the trusted side off
+          # unpinned installs.
+          venv="$HOME/.local/share/buster-bridge-venv"
+          if ! "$venv/bin/python" -c "import nacl" >/dev/null 2>&1; then
+            python3 -m venv --clear "$venv"
+            "$venv/bin/pip" install --quiet pynacl==1.6.2
+          fi
+          "$venv/bin/python" .forgejo/scripts/github_runner_bridge.py \
             --github-repository "$GITHUB_BRIDGE_REPOSITORY" \
             --workflow "${GITHUB_BRIDGE_WORKFLOW:-forgejo-hosted.yml}" \
             --ref "${GITHUB_BRIDGE_REF:-main}" \
