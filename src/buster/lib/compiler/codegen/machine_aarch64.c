@@ -5781,20 +5781,35 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_emit_generated_unsigned_memory(MachineA64En
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_memory(MachineA64Encoder* encoder, u32 register_number, u32 offset, u32 size, bool store)
 {
     u32 scale = size;
-    if ((size != 1 && size != 2 && size != 4 && size != 8) || offset % scale)
+    if (size != 1 && size != 2 && size != 4 && size != 8)
     {
         encoder->error = true;
-        return;
     }
-    u32 base_register = MACHINE_A64_X28;
-    if (offset / scale > A64_IMM12_MAX)
+    else
     {
-        machine_a64_emit_immediate(encoder, MACHINE_A64_X16, offset);
-        machine_a64_emit(encoder, 0x8b000000 | (MACHINE_A64_X16 << 16) | (base_register << 5) | MACHINE_A64_X16);
-        base_register = MACHINE_A64_X16;
-        offset = 0;
+        u32 base_register = MACHINE_A64_X28;
+        // The scaled unsigned form addresses a multiple of the access size, and
+        // a member of an aggregate whose alignment was lowered has no reason to
+        // sit at one: `typedef int lowered __attribute__((aligned(2)));
+        // struct { char tag; lowered value; char trailer; }` puts a four-byte
+        // member at offset two. Misalignment therefore takes the same X16
+        // materialize-and-add path an out-of-range offset does -- which is
+        // exactly what the vector sibling below already does, for the same
+        // reason. Failing closed here put the whole enclosing function back on
+        // the canonical emitter through an encode-stage fallback (#813); the
+        // access itself is legal, since AArch64 permits an unaligned normal-
+        // memory load or store and only the immediate form is scaled. X16 is
+        // reserved from the allocator, so it can never be the register the
+        // access itself names.
+        if (offset % scale || offset / scale > A64_IMM12_MAX)
+        {
+            machine_a64_emit_immediate(encoder, MACHINE_A64_X16, offset);
+            machine_a64_emit(encoder, 0x8b000000 | (MACHINE_A64_X16 << 16) | (base_register << 5) | MACHINE_A64_X16);
+            base_register = MACHINE_A64_X16;
+            offset = 0;
+        }
+        machine_a64_emit_generated_unsigned_memory(encoder, register_number, base_register, offset, size, store);
     }
-    machine_a64_emit_generated_unsigned_memory(encoder, register_number, base_register, offset, size, store);
 }
 
 BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_load(MachineA64Encoder* encoder, u32 register_number, u32 offset)

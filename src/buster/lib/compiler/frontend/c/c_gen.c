@@ -5740,6 +5740,24 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, Ir
         base = subscripted;
         index_type = base_type;
         base_type = ir_type_from_id(&builder->program->types, builder->function->values[base.value].canonical_type);
+        // The subscript is an rvalue, and the operand that arrives in the base
+        // position need not be one: the place path hands a place through for
+        // the *base*, where a place is what INDEX wants, and the swap moves
+        // that place into the index position where it is not. `z[b] = 5` then
+        // recorded the index operand as the place of `z` rather than the value
+        // in it -- a shape the canonical emitter loads through and the machine
+        // selectors both refuse, and one that emits an invalid getelementptr
+        // through the bitcode writer (#813). The read spelling never reached
+        // this because its caller has already loaded.
+        if (builder->function->values[index.value].category == IR_VALUE_PLACE)
+        {
+            index = c_ir_emit_load_place(builder, index, builder->function->values[index.value].canonical_type, source);
+            if (index.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return IR_VALUE_ID_INVALID;
+            }
+            index_type = ir_type_from_id(&builder->program->types, builder->function->values[index.value].canonical_type);
+        }
     }
     if (base_type && base_type->kind == IR_TYPE_POINTER && c_ir_value_contains_label_provenance(builder, base))
     {

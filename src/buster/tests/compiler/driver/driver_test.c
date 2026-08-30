@@ -4629,6 +4629,79 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(i128_binary_temporary);
         }
     }
+    // Two of the machine census's small-class tail (#813), which happen to be
+    // the two that were not selector gaps at all.
+    //
+    // `basic_c_reversed_subscript.c`: `z[b] = 5` with a variable index recorded
+    // the *place* of `z` as the INDEX's index operand where the normal spelling
+    // records the value loaded out of it -- the swap that puts the pointer back
+    // in the base position moved a place into a position that wants an rvalue.
+    // Both machine selectors refused it and the canonical emitter loaded
+    // through it, so the program was right and the census was not; the bitcode
+    // writer emitted an invalid getelementptr for the same shape.
+    //
+    // `basic_c_lowered_alignment_frame.c`: a member whose type's alignment was
+    // lowered sits at an offset its own size does not divide, and the AArch64
+    // encoder's scaled unsigned immediate form cannot address that. It failed
+    // closed instead of taking the scratch-register path it already takes for
+    // an out-of-range offset, so a row that had selected came back as an
+    // encode-stage fallback.
+    //
+    // Both pin the fallback count, because both produced correct answers
+    // through the canonical emitter the whole time: only the count says the
+    // machine path carries them now. Both build for both targets and run
+    // wherever there is something to run them on.
+    String8 census_tail_paths[] = {
+        S8("tests/basic_c_reversed_subscript.c"),
+        S8("tests/basic_c_lowered_alignment_frame.c"),
+    };
+    String8 census_tail_names[] = {
+        S8("buster-c-reversed-subscript"),
+        S8("buster-c-lowered-alignment-frame"),
+    };
+    for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(census_tail_paths); fixture_index += 1)
+    {
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(i128_binary_targets); target_index += 1)
+        {
+            for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(i128_binary_allocators); allocator_index += 1)
+            {
+                TemporalArena census_tail_temporary = scratch_begin(&arguments->arena, 1);
+                String8 census_tail_path = buster_test_temporary_path(
+                    census_tail_temporary.arena, census_tail_names[fixture_index],
+                    string_format(census_tail_temporary.arena, S8("-{u32}-{S8}.elf"), target_index, i128_binary_allocators[allocator_index]));
+                String8 census_tail_command_line[] = {
+                    S8("-target"),
+                    i128_binary_targets[target_index],
+                    string_format(census_tail_temporary.arena, S8("-fregister-allocator={S8}"), i128_binary_allocators[allocator_index]),
+                    S8("-o"),
+                    census_tail_path,
+                    census_tail_paths[fixture_index],
+                };
+                CompilerDriverResult census_tail = compiler_driver_execute_invocation(
+                    census_tail_temporary.arena,
+                    compiler_driver_parse_arguments(census_tail_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(census_tail_command_line)));
+                BUSTER_TEST(arguments, census_tail.error == COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_TEST(arguments, census_tail.codegen_statistics.fallback_function_count == 0u);
+                bool census_native_x64 = target_index == 0 && BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64;
+                bool census_emulated_a64 = target_index == 1 && aarch64_i128_qemu_available;
+                if (census_tail.error == COMPILER_DRIVER_ERROR_NONE && (census_native_x64 || census_emulated_a64))
+                {
+                    String8 census_native_arguments[] = {census_tail_path};
+                    String8 census_emulated_arguments[] = {S8("qemu-aarch64"), census_tail_path};
+                    SliceString8 census_run_arguments = census_native_x64 ? (SliceString8)BUSTER_ARRAY_TO_SLICE(census_native_arguments)
+                                                                         : (SliceString8)BUSTER_ARRAY_TO_SLICE(census_emulated_arguments);
+                    ProcessSpawnResult census_tail_run = os_process_spawn(census_run_arguments, (SliceString8){0}, (SliceString8){0},
+                                                                          (ProcessSpawnOptions){.use_process_environment = true});
+                    BUSTER_TEST(arguments, census_tail_run.handle != 0);
+                    if (census_tail_run.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_sync(census_tail_temporary.arena, census_tail_run).result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(census_tail_temporary);
+            }
+        }
+    }
     // The System V x86-64 side of the same stack boundary: a sixteen-aligned
     // argument's stack home is rounded up to a sixteen-aligned offset, and
     // the machine placement must count the same padding eightbytes the
