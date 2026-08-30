@@ -3534,6 +3534,24 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // A requested library the search path does not hold anywhere must fail
+    // the link the way ld does, not become a blind DT_NEEDED the loader
+    // faults on later.  This is what every autoconf `AC_SEARCH_LIBS` probe
+    // rests on: configure links against `-lsocket`, `-lnsl` and friends and
+    // reads the failed link as the library not existing; a driver that
+    // "succeeds" poisons LIBS for the rest of the configure run, and every
+    // runtime probe after it exits 127 loading libsocket.so.
+    String8 c_missing_library_path = buster_test_temporary_path(arguments->arena, S8("buster-c-missing-library"), S8(""));
+    String8 c_missing_library_command_line[] = {
+        S8("-o"),
+        c_missing_library_path,
+        S8("-lbuster-no-such-library"),
+        S8("tests/basic_c_dynamic_library.c"),
+    };
+    CompilerDriverResult c_missing_library = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_missing_library_command_line)));
+    BUSTER_TEST(arguments, c_missing_library.error == COMPILER_DRIVER_ERROR_LINK);
+    BUSTER_STRING_TEST(arguments, c_missing_library.diagnostic, S8("cannot find -lbuster-no-such-library"));
     // A hosted dynamic link must also resolve an imported function used as a
     // data initializer.  This is the relocation shape cJSON uses for its
     // global allocator hooks (R_X86_64_64 -> the generated PLT entry).

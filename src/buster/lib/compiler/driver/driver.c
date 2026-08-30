@@ -1498,6 +1498,13 @@ struct CompilerDriverDynamicLibraries
     FileMapRead* export_maps;
     u32 count;
     u32 export_map_count;
+    // The first `-l` request the export scan found no usable file for, in the
+    // caller's own spelling.  A hosted ELF link must refuse such a request the
+    // way ld does ("cannot find -lX"): recording a DT_NEEDED for a library
+    // that exists nowhere on the search path defers the failure to the
+    // loader, and a configure script reads the successful link as the
+    // library existing.  Empty when every requested library was found.
+    String8 missing_request;
 };
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_read_u16(ByteSlice bytes, u64 offset, u16* value)
@@ -2020,6 +2027,13 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
     u32 default_library_count = invocation.target.os == OPERATING_SYSTEM_WINDOWS ? BUSTER_ARRAY_LENGTH(windows_system_libraries) : 0;
     NativeDynamicLibrary* libraries =
         arena_allocate(arena, NativeDynamicLibrary, invocation.library_count + invocation.framework_count + default_library_count);
+    // The `-l` spelling that produced each entry, kept beside the mapped file
+    // name so a library the search below never finds is reported as the
+    // request the caller wrote rather than as the soname it was mapped to.
+    // Entries the caller did not request -- the Windows defaults and the
+    // Apple frameworks -- keep an empty request and are never reported.
+    String8* requests = arena_allocate(arena, String8, invocation.library_count + invocation.framework_count + default_library_count);
+    memset(requests, 0, sizeof(*requests) * (invocation.library_count + invocation.framework_count + default_library_count));
     u32 count = 0;
     for (u32 index = 0; index < default_library_count; index += 1)
     {
@@ -2091,6 +2105,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
         }
         if (!duplicate)
         {
+            requests[count] = requested;
             libraries[count++] = (NativeDynamicLibrary){
                 .name = name,
             };
@@ -2156,6 +2171,15 @@ BUSTER_GLOBAL_LOCAL CompilerDriverDynamicLibraries compiler_driver_dynamic_libra
             export_map = result.export_maps + result.export_map_count;
             compiler_driver_elf_library_exports(arena, invocation, imports_data, &libraries[index], export_map);
             result.export_map_count += export_map->bytes.pointer != 0;
+            // The scan walked every search directory the loader would, so a
+            // library it did not find is one the produced executable could
+            // never load -- and one the archive search above did not satisfy
+            // statically either, or the entry would not be here.  Record the
+            // first such request for the caller to refuse the link with.
+            if (!libraries[index].exports_known && requests[index].length && !result.missing_request.length)
+            {
+                result.missing_request = requests[index];
+            }
         }
     }
     result.pointer = libraries;
@@ -2683,6 +2707,13 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     }
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
     CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, 0, &linked.object);
+    if (dynamic_libraries.missing_request.length)
+    {
+        result->error = COMPILER_DRIVER_ERROR_LINK;
+        result->diagnostic = string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
+        compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+        return;
+    }
     result->native_link = link_native_executable(arena, &linked.object,
                                                 (NativeExecutableLinkOptions){
                                                     .output_path = output,
@@ -3789,6 +3820,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     result.has_object = true;
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
     CompilerDriverDynamicLibraries dynamic_libraries = compiler_driver_target_dynamic_libraries(arena, invocation, static_libraries, &linked.object);
+    if (dynamic_libraries.missing_request.length)
+    {
+        result.error = COMPILER_DRIVER_ERROR_LINK;
+        result.diagnostic = string_format(arena, S8("cannot find -l{S8}"), dynamic_libraries.missing_request);
+        compiler_driver_dynamic_libraries_release(&dynamic_libraries);
+        goto finish;
+    }
     result.native_link = link_native_executable(arena, &linked.object,
                                                 (NativeExecutableLinkOptions){
                                                     .output_path = output,
