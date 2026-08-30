@@ -28,9 +28,12 @@
 // entry stub calls the registered functions from it and takes the two array
 // sections off the object first (link_initializer_plan_build), because every
 // writer places every non-debug section it is given. Mach-O has no stub and
-// needs none: it keeps `__DATA,__mod_init_func` and `__mod_term_func`, gives
-// each a section command of the type dyld dispatches on, and lets the loader
-// call the entries. The UEFI writer has neither a stub nor such a loader and
+// needs none for its constructors: it keeps `__DATA,__mod_init_func`, gives
+// it a section command of the type dyld dispatches on, and lets the loader
+// call the entries. dyld runs no `__mod_term_func` in a main executable, so
+// that array comes off the object instead (link_mach_initializer_prepare)
+// and a registrar prepended to the initializer array registers a runner over
+// it with `atexit`. The UEFI writer has neither a stub nor such a loader and
 // refuses the link; link_initializer_plan_empty is that refusal.
 //
 // A second rule crosses the dynamic ELF writers: imported data reaches a
@@ -1284,9 +1287,10 @@ BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, O
 // entry, because the relocation *is* the entry: the slot holds nothing until
 // a writer fills it with the function's address.  It runs on the merged file
 // rather than in link_initializer_plan_build so that every consumer of the
-// arrays agrees -- the entry-stub writers read the plan, but the Mach-O
-// writer keeps the two sections and lets dyld walk them in the order they are
-// laid out in.  (issue 789)
+// arrays agrees -- the entry-stub writers read the plan, and the Mach-O
+// writer keeps its initializer section and lets dyld walk it in the order it
+// is laid out in, which is the consumer that has no plan to be sorted in.
+// (issue 789)
 BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile* object)
 {
     for (u32 slot = 0; slot < 2; slot += 1)
@@ -8303,6 +8307,249 @@ BUSTER_GLOBAL_LOCAL void link_mach_section_write(u8* bytes, u64 offset, char con
     link_write_u32(bytes, offset + 72, reserved2);
 }
 
+// dyld runs a main executable's `__DATA,__mod_init_func` and does not run its
+// `__mod_term_func`.  That was measured rather than assumed (issue 798): on
+// macOS 26.3.2 a pointer placed by hand in a `__mod_term_func` of an image the
+// *system* linker wrote never ran, while the `__mod_init_func` slot beside it
+// did, and Clang emits no terminator array at all -- it registers every
+// `__attribute__((destructor))` with `__cxa_atexit` from an initializer it
+// synthesizes.  A terminator array is therefore storage nothing reads, and an
+// image this writer produced dropped its destructors silently.
+//
+// So the terminator array comes off the object here, its entries are called
+// from a runner this writer synthesizes, and one initializer slot prepended
+// ahead of the program's own constructors registers that runner with
+// `atexit`.  Registering it before any constructor runs is what leaves the
+// walk behind every handler the program registers itself, which is the order
+// `.fini_array` has on ELF, the order the two entry-stub writers already
+// produce, and what tests/basic_c_destructor_exit.c pins.  Clang's own macOS
+// shape does not have that property -- it registers each destructor as its
+// initializer is reached, so a handler registered by a constructor runs after
+// them -- and this writer follows GNU rather than that.
+//
+// The object is copied rather than edited, for the reason
+// link_initializer_plan_build copies: a caller may link the same merged file
+// twice.  `plan` keeps only destructors; the constructors stay in the section
+// dyld already calls, so their slots, relocations and rebases are untouched
+// beyond the eight bytes everything past the prepended slot moves by.
+BUSTER_GLOBAL_LOCAL bool link_mach_initializer_prepare(Arena* arena, ObjectFile* object, ObjectFile* prepared, LinkInitializerPlan* plan,
+                                                       u32* atexit_symbol_index)
+{
+    bool result = true;
+    *prepared = *object;
+    *plan = (LinkInitializerPlan){0};
+    *atexit_symbol_index = UINT32_MAX;
+    u64 terminator_length = object->sections[OBJECT_SECTION_FINI_ARRAY].data.length;
+    u64 initializer_length = object->sections[OBJECT_SECTION_INIT_ARRAY].data.length;
+    if (terminator_length)
+    {
+        u64 capacity = terminator_length / OBJECT_INITIALIZER_ENTRY_SIZE;
+        if (capacity > UINT32_MAX || initializer_length > UINT64_MAX - OBJECT_INITIALIZER_ENTRY_SIZE || object->symbol_count == UINT32_MAX)
+        {
+            result = false;
+        }
+        else
+        {
+            plan->destructors = arena_allocate(arena, LinkInitializerEntry, capacity ? capacity : 1);
+            plan->destructor_count = link_initializer_entries_collect(object, OBJECT_SECTION_FINI_ARRAY, plan->destructors, true);
+            ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count);
+            memcpy(sections, object->sections, (u64)object->section_count * sizeof(*sections));
+            sections[OBJECT_SECTION_FINI_ARRAY].data = (ByteSlice){0};
+            sections[OBJECT_SECTION_FINI_ARRAY].virtual_size = 0;
+            prepared->sections = sections;
+            // The priorities are one u32 per slot of the section they
+            // describe, and neither section is that shape any more: one is
+            // gone and the other gains a slot no attribute named.  They have
+            // already done their work by here -- link_initializer_arrays_order
+            // sorted the merged arrays as `link_objects` finished -- so the
+            // copy states that it records none rather than carrying a table
+            // that no longer lines up with its section.
+            prepared->initializer_priorities[0] = 0;
+            prepared->initializer_priorities[1] = 0;
+            if (plan->destructor_count)
+            {
+                // The prepended slot holds the registrar, whose address this
+                // writer chooses at layout time; it carries no relocation and
+                // is named directly in the rebase stream instead.
+                u8* initializer_data = arena_allocate(arena, u8, initializer_length + OBJECT_INITIALIZER_ENTRY_SIZE);
+                memset(initializer_data, 0, OBJECT_INITIALIZER_ENTRY_SIZE);
+                if (initializer_length)
+                {
+                    memcpy(initializer_data + OBJECT_INITIALIZER_ENTRY_SIZE, object->sections[OBJECT_SECTION_INIT_ARRAY].data.pointer, initializer_length);
+                }
+                sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice){
+                    .pointer = initializer_data,
+                    .length = initializer_length + OBJECT_INITIALIZER_ENTRY_SIZE,
+                };
+                if (sections[OBJECT_SECTION_INIT_ARRAY].virtual_size)
+                {
+                    sections[OBJECT_SECTION_INIT_ARRAY].virtual_size += OBJECT_INITIALIZER_ENTRY_SIZE;
+                }
+                if (sections[OBJECT_SECTION_INIT_ARRAY].alignment < OBJECT_INITIALIZER_ENTRY_SIZE)
+                {
+                    sections[OBJECT_SECTION_INIT_ARRAY].alignment = OBJECT_INITIALIZER_ENTRY_SIZE;
+                }
+            }
+            ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count ? object->relocation_count : 1);
+            prepared->relocation_count = 0;
+            for (u32 index = 0; index < object->relocation_count; index += 1)
+            {
+                ObjectRelocation relocation = object->relocations[index];
+                if (relocation.section == OBJECT_SECTION_FINI_ARRAY)
+                {
+                    continue;
+                }
+                if (relocation.section == OBJECT_SECTION_INIT_ARRAY && plan->destructor_count)
+                {
+                    relocation.offset += OBJECT_INITIALIZER_ENTRY_SIZE;
+                }
+                relocations[prepared->relocation_count++] = relocation;
+            }
+            prepared->relocations = relocations;
+        }
+    }
+    // Two things happen to the symbol table at once, and both only where a
+    // slot was prepended.  A symbol *defined inside* the initializer array
+    // moved with the slot ahead of it -- crtbegin's
+    // `__frame_dummy_init_array_entry` is the one that exists in the wild --
+    // so its value follows the entry it names.  And the runner is registered
+    // with plain `atexit`, which libSystem exports and an image that never
+    // called it itself still has to reach, so the name is appended when the
+    // program does not already carry it.  A program that defines its own
+    // `atexit` keeps that definition and the registrar calls it, exactly as
+    // the ELF stub does with `exit`.
+    if (result && plan->destructor_count)
+    {
+        u32 existing = link_symbol_find(prepared, S8("atexit"));
+        u32 appended = existing == UINT32_MAX ? 1u : 0u;
+        ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, (u64)prepared->symbol_count + appended);
+        if (prepared->symbol_count)
+        {
+            memcpy(symbols, prepared->symbols, sizeof(*symbols) * prepared->symbol_count);
+        }
+        for (u32 index = 0; index < prepared->symbol_count; index += 1)
+        {
+            if (symbols[index].section == OBJECT_SECTION_INIT_ARRAY)
+            {
+                symbols[index].value += OBJECT_INITIALIZER_ENTRY_SIZE;
+            }
+        }
+        *atexit_symbol_index = existing;
+        if (appended)
+        {
+            symbols[prepared->symbol_count] = (ObjectSymbol){
+                .name = S8("atexit"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            };
+            *atexit_symbol_index = prepared->symbol_count;
+        }
+        prepared->symbols = symbols;
+        prepared->symbol_count += appended;
+    }
+
+    return result;
+}
+
+// The registrar and the runner, in one blob laid down past the import stubs.
+// The registrar is what the prepended `__mod_init_func` slot points at: it
+// hands the runner to `atexit` and returns, so dyld's own call site is where
+// the registration happens.  The runner past it calls one destructor after
+// another in the order the plan already holds them -- `__mod_term_func` runs
+// backwards, and the plan reversed the entries as it collected them -- and
+// returns to whatever the C runtime called it from.  Every call is laid down
+// as a bare rel32 whose field offset is reported, because the addresses on
+// both ends are only known once the image is laid out.
+BUSTER_GLOBAL_LOCAL u32 link_x86_mach_destructor_runner_capacity(u32 destructor_count)
+{
+    return 32 + 5 * destructor_count;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_x86_build_mach_destructor_runner(u8* bytes, u32 capacity, u32* byte_count, u32* atexit_displacement_offset,
+                                                               u32* destructor_displacement_offsets, u32 destructor_count)
+{
+    LinkX86InstructionBuilder builder = {.bytes = bytes, .capacity = capacity};
+    BusterX86MetadataPhysicalOperand operands[2] = {0};
+    // The call dyld made left the stack eight bytes short of a sixteen-byte
+    // boundary, which is what this reserve puts back before the call to
+    // `atexit`; the runner below opens the same way for the same reason.
+    operands[0] = link_x86_register(4, 64);
+    operands[1] = link_x86_immediate(8, 8);
+    if (!link_x86_emit(&builder, S8("SUB"), operands, 2)) return false;
+    operands[0] = link_x86_register(7, 64);
+    operands[1] = link_x86_memory_rip(64, 0);
+    if (!link_x86_emit(&builder, S8("LEA"), operands, 2) || builder.count < 4) return false;
+    u32 runner_displacement_field = builder.count - 4;
+    if (atexit_displacement_offset) *atexit_displacement_offset = builder.count + 1;
+    operands[0] = link_x86_relative(0, 32);
+    if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+    operands[0] = link_x86_register(4, 64);
+    operands[1] = link_x86_immediate(8, 8);
+    if (!link_x86_emit(&builder, S8("ADD"), operands, 2)) return false;
+    if (!link_x86_emit_zero(&builder, S8("RET"))) return false;
+    link_write_u32(builder.bytes, runner_displacement_field, (u32)(builder.count - (runner_displacement_field + 4)));
+    operands[0] = link_x86_register(4, 64);
+    operands[1] = link_x86_immediate(8, 8);
+    if (!link_x86_emit(&builder, S8("SUB"), operands, 2)) return false;
+    for (u32 destructor = 0; destructor < destructor_count; destructor += 1)
+    {
+        if (destructor_displacement_offsets) destructor_displacement_offsets[destructor] = builder.count + 1;
+        operands[0] = link_x86_relative(0, 32);
+        if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+    }
+    operands[0] = link_x86_register(4, 64);
+    operands[1] = link_x86_immediate(8, 8);
+    if (!link_x86_emit(&builder, S8("ADD"), operands, 2)) return false;
+    if (!link_x86_emit_zero(&builder, S8("RET"))) return false;
+    if (byte_count) *byte_count = builder.count;
+
+    return true;
+}
+
+// The AArch64 spelling of the same blob, in whole words: a frame, the ADR
+// that names the runner, the registration, a return, and then the runner's
+// own frame, one `bl` per destructor, and its return.  The ADR reaches the
+// runner from inside this same buffer, so its displacement is known before
+// the image has an address.
+BUSTER_GLOBAL_LOCAL u32 link_aarch64_mach_destructor_runner_words(u32 destructor_count)
+{
+    return 10 + destructor_count;
+}
+
+BUSTER_GLOBAL_LOCAL u32 link_aarch64_build_mach_destructor_runner(u32* words, u32 capacity, u32* atexit_word, u32* destructor_words, u32 destructor_count)
+{
+    u32 count = 0;
+    bool valid = true;
+    if (capacity >= link_aarch64_mach_destructor_runner_words(destructor_count))
+    {
+        words[count++] = 0xa9bf7bfdu;
+        words[count++] = 0x910003fdu;
+        u32 runner_adr_word = count;
+        words[count++] = 0;
+        if (atexit_word) *atexit_word = count;
+        words[count++] = 0x94000000u;
+        words[count++] = 0xa8c17bfdu;
+        words[count++] = 0xd65f03c0u;
+        words[runner_adr_word] = link_aarch64_adr(0, ((s64)count - (s64)runner_adr_word) * (s64)sizeof(u32), &valid);
+        words[count++] = 0xa9bf7bfdu;
+        words[count++] = 0x910003fdu;
+        for (u32 destructor = 0; destructor < destructor_count; destructor += 1)
+        {
+            if (destructor_words) destructor_words[destructor] = count;
+            words[count++] = 0x94000000u;
+        }
+        words[count++] = 0xa8c17bfdu;
+        words[count++] = 0xd65f03c0u;
+        if (!valid)
+        {
+            count = 0;
+        }
+    }
+
+    return count;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
@@ -8337,22 +8584,33 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         result.error = LINK_ERROR_INVALID_INPUT;
     }
     // LC_MAIN hands `main` straight to dyld, so this writer has no entry stub
-    // of its own to call initializers from -- and needs none.  dyld runs the
-    // main executable's `__DATA,__mod_init_func` before it enters `main` and
-    // its `__mod_term_func` in reverse on the way out, which is the same
-    // convention the two array sections already carry, so this writer keeps
-    // them and gives each a section command instead of taking them off the
-    // object the way the entry-stub writers do.  See
+    // of its own to call constructors from -- and needs none: dyld runs the
+    // main executable's `__DATA,__mod_init_func` before it enters `main`, so
+    // that array keeps its section command and the type dyld dispatches on
+    // instead of being taken off the object the way the entry-stub writers
+    // take it (issue 779).  Its `__mod_term_func` is the half dyld does not
+    // run, so link_mach_initializer_prepare takes *that* array off, prepends
+    // the slot whose registrar hands a synthesized runner to `atexit`, and
+    // leaves the constructors where they were (issue 798).  See
     // link_initializer_plan_empty for the writers that still refuse.
+    ObjectFile prepared_object = {0};
+    LinkInitializerPlan plan = {0};
+    u32 atexit_symbol_index = UINT32_MAX;
+    if (result.error == LINK_ERROR_NONE)
+    {
+        if (link_mach_initializer_prepare(arena, object, &prepared_object, &plan, &atexit_symbol_index))
+        {
+            object = &prepared_object;
+        }
+        else
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+        }
+    }
     bool has_initializer_array = false;
     if (result.error == LINK_ERROR_NONE)
     {
         has_initializer_array = object->sections[OBJECT_SECTION_INIT_ARRAY].data.length != 0;
-    }
-    bool has_terminator_array = false;
-    if (result.error == LINK_ERROR_NONE)
-    {
-        has_terminator_array = object->sections[OBJECT_SECTION_FINI_ARRAY].data.length != 0;
     }
     if (result.error == LINK_ERROR_NONE)
     {
@@ -8447,7 +8705,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     u32 initializer_section_count = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        initializer_section_count = (has_initializer_array ? 1u : 0u) + (has_terminator_array ? 1u : 0u);
+        initializer_section_count = has_initializer_array ? 1u : 0u;
     }
     u32 data_section_count = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -8556,12 +8814,58 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     if (result.error == LINK_ERROR_NONE)
     {
         stub_end = stub_offset + (u64)import_count * stub_size;
-        section_offsets[OBJECT_SECTION_UNWIND] = has_unwind ? align_forward(stub_end, object->sections[OBJECT_SECTION_UNWIND].alignment) : stub_end;
+    }
+    // The registrar and the runner follow the import stubs: the same
+    // executable segment, past the last thing in it, and outside any section
+    // command, which is where the stubs already sit.  Both are laid down
+    // before the image has an address and patched once it has one, so the
+    // shape is built here and only its displacements wait.
+    u8* runner_bytes = 0;
+    u32 runner_size = 0;
+    u32 runner_atexit_field = 0;
+    u32* runner_destructor_fields = 0;
+    if (result.error == LINK_ERROR_NONE && plan.destructor_count)
+    {
+        runner_destructor_fields = arena_allocate(arena, u32, plan.destructor_count);
+        if (object->target.cpu_arch == CPU_ARCH_X86_64)
+        {
+            u32 capacity = link_x86_mach_destructor_runner_capacity(plan.destructor_count);
+            runner_bytes = arena_allocate(arena, u8, capacity);
+            if (!link_x86_build_mach_destructor_runner(runner_bytes, capacity, &runner_size, &runner_atexit_field, runner_destructor_fields,
+                                                       plan.destructor_count))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+            }
+        }
+        else
+        {
+            u32 capacity = link_aarch64_mach_destructor_runner_words(plan.destructor_count);
+            u32* runner_words = arena_allocate(arena, u32, capacity);
+            u32 word_count = link_aarch64_build_mach_destructor_runner(runner_words, capacity, &runner_atexit_field, runner_destructor_fields,
+                                                                      plan.destructor_count);
+            runner_bytes = (u8*)runner_words;
+            runner_size = word_count * (u32)sizeof(u32);
+            if (!word_count)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+            }
+        }
+    }
+    u64 runner_offset = 0;
+    if (result.error == LINK_ERROR_NONE)
+    {
+        runner_offset = runner_size ? align_forward(stub_end, 16) : stub_end;
+    }
+    u64 code_end = 0;
+    if (result.error == LINK_ERROR_NONE)
+    {
+        code_end = runner_offset + runner_size;
+        section_offsets[OBJECT_SECTION_UNWIND] = has_unwind ? align_forward(code_end, object->sections[OBJECT_SECTION_UNWIND].alignment) : code_end;
     }
     u64 text_end = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        text_end = has_unwind ? section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length : stub_end;
+        text_end = has_unwind ? section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length : code_end;
     }
     u64 data_file_offset = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -8694,6 +8998,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             }
         }
         rebase_count += thread_local_count * 2;
+        // The prepended initializer slot has no relocation to be counted from.
+        rebase_count += plan.destructor_count ? 1u : 0u;
     }
     u64 rebase_capacity = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -8743,6 +9049,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                     rebase_size = link_uleb128_write(rebase_bytes, rebase_size, segment_offset);
                     rebase_bytes[rebase_size++] = 0x51;
                 }
+            }
+            if (result.error == LINK_ERROR_NONE && plan.destructor_count)
+            {
+                // A slot dyld does not rebase holds a stale address in every
+                // process that loads at a slide, and this one holds the
+                // registrar the whole destructor walk hangs off.
+                rebase_bytes[rebase_size++] = 0x22;
+                rebase_size = link_uleb128_write(rebase_bytes, rebase_size, section_offsets[OBJECT_SECTION_INIT_ARRAY] - data_file_offset);
+                rebase_bytes[rebase_size++] = 0x51;
             }
             if (result.error == LINK_ERROR_NONE)
             {
@@ -8982,6 +9297,77 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             }
         }
         if (!valid)
+        {
+            result.error = LINK_ERROR_RELOCATION;
+        }
+    }
+    // The registrar's own call reaches `atexit` the way any call to the C
+    // runtime does here: through the import stub laid down above, or straight
+    // to the program's definition where it has one.
+    u64 atexit_address = 0;
+    if (result.error == LINK_ERROR_NONE && runner_size)
+    {
+        ObjectSymbol* atexit_symbol = &object->symbols[atexit_symbol_index];
+        if (atexit_symbol->section == OBJECT_SECTION_UNDEFINED)
+        {
+            u32 atexit_import_index = import_indices[atexit_symbol_index];
+            if (atexit_import_index == UINT32_MAX)
+            {
+                result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
+                result.symbol = atexit_symbol->name;
+            }
+            else
+            {
+                atexit_address = text_vm_address + stub_offset + (u64)atexit_import_index * stub_size;
+            }
+        }
+        else if (atexit_symbol->section < OBJECT_SECTION_COUNT)
+        {
+            atexit_address = image_base + section_offsets[atexit_symbol->section] + atexit_symbol->value;
+        }
+        else
+        {
+            result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
+            result.symbol = atexit_symbol->name;
+        }
+    }
+    if (result.error == LINK_ERROR_NONE && runner_size)
+    {
+        memcpy(bytes + runner_offset, runner_bytes, runner_size);
+        bool patched = false;
+        if (object->target.cpu_arch == CPU_ARCH_X86_64)
+        {
+            u64 field = runner_offset + runner_atexit_field;
+            s64 displacement = (s64)atexit_address - (s64)(image_base + field + 4);
+            patched = displacement >= INT32_MIN && displacement <= INT32_MAX;
+            if (patched)
+            {
+                link_write_u32(bytes, field, (u32)(s32)displacement);
+            }
+            patched = patched && link_x86_patch_initializer_calls(bytes, object, &plan, section_offsets, image_base, runner_offset, runner_destructor_fields);
+        }
+        else
+        {
+            u64 offset = runner_offset + (u64)runner_atexit_field * sizeof(u32);
+            u32 instruction = 0;
+            patched = link_aarch64_branch_encode(A64_OPCODE_BL, (s64)atexit_address - (s64)(image_base + offset), &instruction);
+            if (patched)
+            {
+                link_write_u32(bytes, offset, instruction);
+            }
+            patched =
+                patched && link_aarch64_patch_initializer_calls(bytes, object, &plan, section_offsets, image_base, runner_offset, runner_destructor_fields);
+        }
+        // The slot link_mach_initializer_prepare prepended, which is the one
+        // dyld reaches first and therefore the registration that lands behind
+        // every handler the program registers itself.  It carries no
+        // relocation, so its value is written here and its address is named
+        // directly in the rebase stream.
+        if (patched)
+        {
+            link_write_u64(bytes, section_offsets[OBJECT_SECTION_INIT_ARRAY], image_base + runner_offset);
+        }
+        else
         {
             result.error = LINK_ERROR_RELOCATION;
         }
@@ -9475,24 +9861,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         link_write_u32(bytes, command + 64, data_section_count);
         link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE, "__data", "__DATA", data_vm_address, object->sections[OBJECT_SECTION_DATA].data.length,
                                 (u32)data_file_offset, 3, 0, 0, 0);
-        // S_MOD_INIT_FUNC_POINTERS and S_MOD_TERM_FUNC_POINTERS: the section
-        // type is the whole contract, because it is what makes dyld call the
-        // pointers rather than merely map them.
-        u32 initializer_section_index = 1;
+        // S_MOD_INIT_FUNC_POINTERS: the section type is the whole contract,
+        // because it is what makes dyld call the pointers rather than merely
+        // map them.  There is no S_MOD_TERM_FUNC_POINTERS section beside it --
+        // dyld does not call one in a main executable, so the destructors are
+        // reached through the registrar the first slot names instead.
         if (has_initializer_array)
         {
-            link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + (u64)initializer_section_index * MACH_SECTION_SIZE, "__mod_init_func", "__DATA",
+            link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + MACH_SECTION_SIZE, "__mod_init_func", "__DATA",
                                     image_base + section_offsets[OBJECT_SECTION_INIT_ARRAY], object->sections[OBJECT_SECTION_INIT_ARRAY].data.length,
                                     (u32)section_offsets[OBJECT_SECTION_INIT_ARRAY],
                                     link_mach_alignment_power(object->sections[OBJECT_SECTION_INIT_ARRAY].alignment), 0x9, 0, 0);
-            initializer_section_index += 1;
-        }
-        if (has_terminator_array)
-        {
-            link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + (u64)initializer_section_index * MACH_SECTION_SIZE, "__mod_term_func", "__DATA",
-                                    image_base + section_offsets[OBJECT_SECTION_FINI_ARRAY], object->sections[OBJECT_SECTION_FINI_ARRAY].data.length,
-                                    (u32)section_offsets[OBJECT_SECTION_FINI_ARRAY],
-                                    link_mach_alignment_power(object->sections[OBJECT_SECTION_FINI_ARRAY].alignment), 0xa, 0, 0);
         }
     }
     u32 read_only_alignment_power = 0;

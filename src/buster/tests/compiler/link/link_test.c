@@ -4478,13 +4478,21 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, link_read_u64(image.pointer, dwarf_file_offset) >= UINT64_C(0x100000000));
         }
     }
-    // __attribute__((constructor)) reaches a Mach-O image as the two sections
-    // dyld dispatches on rather than as a refusal (issue 779).  This writer
-    // synthesizes no entry stub and needs none: the arrays keep their own
-    // section commands, carry S_MOD_INIT_FUNC_POINTERS/S_MOD_TERM_FUNC_POINTERS,
-    // sit inside the writable __DATA segment, hold the link-time address of
-    // the function each slot named, and are named by the rebase stream so a
-    // slid image still calls the right code.
+    // __attribute__((constructor)) reaches a Mach-O image as the section dyld
+    // dispatches on rather than as a refusal (issue 779), and a destructor
+    // reaches it as the registration dyld does not offer (issue 798).  dyld
+    // runs a main executable's `__DATA,__mod_init_func` and does not run its
+    // `__mod_term_func` -- measured on macOS 26.3.2 against an image the
+    // system linker wrote -- so this image carries no terminator array at all,
+    // and the slot prepended ahead of the program's own constructors names a
+    // registrar that hands a runner over the destructors to `atexit`.  The
+    // structure that makes that work is what is checked here: one
+    // S_MOD_INIT_FUNC_POINTERS section and no S_MOD_TERM_FUNC_POINTERS one,
+    // inside the writable __DATA segment, holding the registrar and then the
+    // link-time address of the function the program's slot named, both named
+    // by the rebase stream so a slid image still calls the right code, an
+    // `atexit` import for the registrar to reach, and real code where the
+    // registrar's slot points.
     ObjectFile mach_initializer_object = aarch64_mach_object;
     ObjectSection* mach_initializer_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
     memcpy(mach_initializer_sections, mach_initializer_object.sections, OBJECT_SECTION_COUNT * sizeof(*mach_initializer_sections));
@@ -4527,12 +4535,15 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         u32 mach_initializer_command_count = link_read_u32(image.pointer, 16);
         u64 mach_initializer_command = 32;
         u32 mach_initializer_found = 0;
+        u32 mach_terminator_found = 0;
         u64 mach_initializer_slot = 0;
-        u64 mach_terminator_slot = 0;
         u64 mach_initializer_data_file_offset = 0;
+        u64 mach_initializer_data_vm_address = 0;
         u64 mach_initializer_entry_offset = 0;
         u64 mach_initializer_rebase_offset = 0;
         u64 mach_initializer_rebase_size = 0;
+        u64 mach_initializer_string_offset = 0;
+        u64 mach_initializer_string_size = 0;
         for (u32 command_index = 0; command_index < mach_initializer_command_count && mach_initializer_command + 8 <= image.length; command_index += 1)
         {
             u32 command_kind = link_read_u32(image.pointer, mach_initializer_command);
@@ -4550,6 +4561,11 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                 mach_initializer_rebase_offset = link_read_u32(image.pointer, mach_initializer_command + 8);
                 mach_initializer_rebase_size = link_read_u32(image.pointer, mach_initializer_command + 12);
             }
+            if (command_kind == 0x2)
+            {
+                mach_initializer_string_offset = link_read_u32(image.pointer, mach_initializer_command + 16);
+                mach_initializer_string_size = link_read_u32(image.pointer, mach_initializer_command + 20);
+            }
             if (command_kind == 0x19 && memcmp(image.pointer + mach_initializer_command + 8, "__DATA", 7) == 0)
             {
                 u64 segment_vm_address = link_read_u64(image.pointer, mach_initializer_command + 24);
@@ -4557,15 +4573,16 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                 u64 segment_file_size = link_read_u64(image.pointer, mach_initializer_command + 48);
                 u32 segment_section_count = link_read_u32(image.pointer, mach_initializer_command + 64);
                 mach_initializer_data_file_offset = segment_file_offset;
+                mach_initializer_data_vm_address = segment_vm_address;
                 // A pointer dyld has to write is only reachable from a
                 // writable segment.
                 BUSTER_TEST(arguments, link_read_u32(image.pointer, mach_initializer_command + 60) == 3);
                 for (u32 section_index = 0; section_index < segment_section_count; section_index += 1)
                 {
                     u64 section_command = mach_initializer_command + 72 + (u64)section_index * 80;
-                    bool is_initializer = memcmp(image.pointer + section_command, "__mod_init_func", 16) == 0;
                     bool is_terminator = memcmp(image.pointer + section_command, "__mod_term_func", 16) == 0;
-                    if (!is_initializer && !is_terminator)
+                    mach_terminator_found += is_terminator;
+                    if (memcmp(image.pointer + section_command, "__mod_init_func", 16) != 0)
                     {
                         continue;
                     }
@@ -4575,41 +4592,55 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                     mach_initializer_found += 1;
                     // The section type is the whole contract: it is what makes
                     // dyld call the pointers instead of merely mapping them.
-                    BUSTER_TEST(arguments, (link_read_u32(image.pointer, section_command + 64) & 0xff) == (is_initializer ? 0x9u : 0xau));
+                    BUSTER_TEST(arguments, (link_read_u32(image.pointer, section_command + 64) & 0xff) == 0x9u);
                     BUSTER_TEST(arguments, memcmp(image.pointer + section_command + 16, "__DATA", 7) == 0);
-                    BUSTER_TEST(arguments, section_size == OBJECT_INITIALIZER_ENTRY_SIZE);
+                    // The registrar's slot ahead of the program's own.
+                    BUSTER_TEST(arguments, section_size == 2 * OBJECT_INITIALIZER_ENTRY_SIZE);
                     BUSTER_TEST(arguments, section_address % OBJECT_INITIALIZER_ENTRY_SIZE == 0);
                     BUSTER_TEST(arguments, section_address == UINT64_C(0x100000000) + section_file_offset);
                     BUSTER_TEST(arguments, section_address >= segment_vm_address && section_file_offset >= segment_file_offset &&
                                                section_file_offset + section_size <= segment_file_offset + segment_file_size);
-                    if (is_initializer)
-                    {
-                        mach_initializer_slot = section_file_offset;
-                    }
-                    else
-                    {
-                        mach_terminator_slot = section_file_offset;
-                    }
+                    mach_initializer_slot = section_file_offset;
                 }
             }
             mach_initializer_command += command_length;
         }
-        BUSTER_TEST(arguments, mach_initializer_found == 2);
-        BUSTER_TEST(arguments, mach_initializer_slot && mach_terminator_slot && mach_initializer_entry_offset);
-        // Both slots must hold the address "main" was laid out at, which is
-        // also what LC_MAIN points the process at.
+        BUSTER_TEST(arguments, mach_initializer_found == 1);
+        // dyld never calls one, so an image that carried it would carry
+        // storage nothing reads and destructors nothing runs.
+        BUSTER_TEST(arguments, mach_terminator_found == 0);
+        BUSTER_TEST(arguments, mach_initializer_slot && mach_initializer_entry_offset && mach_initializer_string_size);
         u64 mach_initializer_target = UINT64_C(0x100000000) + mach_initializer_entry_offset;
-        if (mach_initializer_slot + 8 <= image.length && mach_terminator_slot + 8 <= image.length)
+        u64 mach_registrar_slot = mach_initializer_slot;
+        u64 mach_constructor_slot = mach_initializer_slot + OBJECT_INITIALIZER_ENTRY_SIZE;
+        if (mach_constructor_slot + 8 <= image.length)
         {
-            BUSTER_TEST(arguments, link_read_u64(image.pointer, mach_initializer_slot) == mach_initializer_target);
-            BUSTER_TEST(arguments, link_read_u64(image.pointer, mach_terminator_slot) == mach_initializer_target);
+            // The program's own slot still holds the address "main" was laid
+            // out at, which is also what LC_MAIN points the process at.
+            BUSTER_TEST(arguments, link_read_u64(image.pointer, mach_constructor_slot) == mach_initializer_target);
+            // The registrar is code this writer synthesized, in the executable
+            // segment ahead of __DATA and not in the program at all, and it
+            // opens with the frame its call to `atexit` returns through.
+            u64 registrar = link_read_u64(image.pointer, mach_registrar_slot);
+            BUSTER_TEST(arguments, registrar != mach_initializer_target && registrar > UINT64_C(0x100000000) && registrar < mach_initializer_data_vm_address);
+            BUSTER_TEST(arguments, registrar - UINT64_C(0x100000000) + 4 <= image.length &&
+                                       link_read_u32(image.pointer, registrar - UINT64_C(0x100000000)) == 0xa9bf7bfdu);
         }
+        // The registrar has nothing to register with unless the image imports
+        // `atexit`, which this program never named itself.
+        bool mach_initializer_imports_atexit = false;
+        for (u64 cursor = mach_initializer_string_offset;
+             cursor + 8 <= mach_initializer_string_offset + mach_initializer_string_size && cursor + 8 <= image.length; cursor += 1)
+        {
+            mach_initializer_imports_atexit = mach_initializer_imports_atexit || memcmp(image.pointer + cursor, "_atexit", 8) == 0;
+        }
+        BUSTER_TEST(arguments, mach_initializer_imports_atexit);
         // The image is position independent, so a slot dyld does not rebase
         // holds a stale address in every process that loads at a slide.  Both
         // must appear in the rebase stream against __DATA, which is segment
         // two behind __PAGEZERO and __TEXT.
-        bool mach_initializer_rebased = false;
-        bool mach_terminator_rebased = false;
+        bool mach_registrar_rebased = false;
+        bool mach_constructor_rebased = false;
         u64 rebase_cursor = mach_initializer_rebase_offset;
         u64 rebase_end = mach_initializer_rebase_offset + mach_initializer_rebase_size;
         u8 rebase_segment = 0;
@@ -4638,13 +4669,13 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                 for (u32 repeat = 0; repeat < (u32)(opcode & 0x0f); repeat += 1)
                 {
                     u64 rebased = mach_initializer_data_file_offset + rebase_segment_offset;
-                    mach_initializer_rebased = mach_initializer_rebased || (rebase_segment == 2 && rebased == mach_initializer_slot);
-                    mach_terminator_rebased = mach_terminator_rebased || (rebase_segment == 2 && rebased == mach_terminator_slot);
+                    mach_registrar_rebased = mach_registrar_rebased || (rebase_segment == 2 && rebased == mach_registrar_slot);
+                    mach_constructor_rebased = mach_constructor_rebased || (rebase_segment == 2 && rebased == mach_constructor_slot);
                     rebase_segment_offset += sizeof(u64);
                 }
             }
         }
-        BUSTER_TEST(arguments, mach_initializer_rebased && mach_terminator_rebased);
+        BUSTER_TEST(arguments, mach_registrar_rebased && mach_constructor_rebased);
     }
     ObjectFile ios_mach_object = aarch64_mach_object;
     ios_mach_object.target.os = OPERATING_SYSTEM_IOS;

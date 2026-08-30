@@ -6006,7 +6006,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Apple is included: the Mach-O writer synthesizes no entry stub, but it
     // does not need one -- it keeps `__DATA,__mod_init_func` and gives it the
     // section type dyld dispatches on, so the loader calls the entries before
-    // it enters `main` (issue 779).
+    // it enters `main` (issue 779).  It is only the constructor half that
+    // this proves, on any target: the destructor here is one `main` must not
+    // yet have seen, which holds whether or not it ever runs.  The fixture
+    // that observes a destructor running is basic_c_destructor_exit.c below.
     for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
     {
         TemporalArena constructor_temporary = scratch_begin(&arguments->arena, 1);
@@ -6090,20 +6093,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // than by the wine block further up -- the fixture calls `exit`, and a
     // cross host has no ucrtbase.dll to resolve that against.
     //
-    // Apple is excluded, and what is excluded is a measurement rather than a
-    // guess.  The image builds and runs there -- the build and spawn
-    // assertions passed on the macOS runner -- and only its status was wrong,
-    // under all four allocators, while `tests/basic_c_constructor.c` passed on
-    // the same run.  So `__DATA,__mod_init_func` is honoured and something
-    // about the terminator side is not, which nothing in this tree had ever
-    // observed before this fixture: the constructor fixture checks only that
-    // `main` has not seen its destructor yet, which is true whether or not one
-    // ever runs.  Whose contract is broken -- dyld's, or what the Mach-O
-    // writer hands it -- is not decided from here, because the oracle is a
-    // Clang build of this same fixture on a macOS host and no runner in this
-    // project's local reach is one.  That is issue 798.  The registration this
-    // change is about is the entry stub's, and no Mach-O image has one.
-#if !BUSTER_APPLE
+    // Apple is included, and was excluded until issue 798 measured why it
+    // failed: dyld does not run a main executable's `__mod_term_func`, so the
+    // Mach-O writer registers the walk with `atexit` from an initializer slot
+    // it prepends ahead of the program's constructors.  That gives Apple the
+    // same order the entry-stub writers produce, which is what the expected
+    // sequence below is written against -- Clang's own macOS shape registers
+    // each destructor as its initializer is reached and would not produce it.
     for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
     {
         TemporalArena destructor_temporary = scratch_begin(&arguments->arena, 1);
@@ -6129,7 +6125,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(destructor_temporary);
     }
-#endif
     // The order across two translation units, which is the half one file
     // cannot show (issue 789).  GNU runs every prioritized constructor before
     // every unprioritized one over the whole program, and the two fixtures

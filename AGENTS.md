@@ -3072,9 +3072,9 @@ on a commit you already know is incomplete tells nobody anything.
   for Clang's objects as much as for this compiler's, which was issue #789.
   That sort moves each entry's relocation and any symbol defined at its slot
   with the entry, and it runs on the merged object rather than in
-  `link_initializer_plan_build` so the Mach-O writer -- which keeps the arrays
-  for dyld to walk instead of reading a plan -- gets the same order the
-  entry-stub writers do. An input that states no priorities (the COFF and
+  `link_initializer_plan_build` so the Mach-O writer -- which keeps the
+  initializer array for dyld to walk instead of reading a plan for it -- gets
+  the same order the entry-stub writers do. An input that states no priorities (the COFF and
   Mach-O readers, the assembler's objects) has every entry unprioritized,
   which leaves it in link order.
 - **A relocatable object keeps its arrays in all three formats, but only ELF
@@ -3118,13 +3118,35 @@ on a commit you already know is incomplete tells nobody anything.
   `main`: it has no `exit` to call and no runtime to register with, and a
   `-nostdlib` program that reaches the raw exit syscall runs no handler
   either. Two writers synthesize no entry point of their own, and they answer
-  differently. **Mach-O** needs none: LC_MAIN hands `main` straight to dyld,
-  which runs the main executable's `__DATA,__mod_init_func` before it enters
-  `main` and its `__mod_term_func` in reverse on the way out, so that writer
-  keeps both arrays, gives each the section type dyld dispatches on, and lets
-  the loader call them (issue 779) -- which is why the merged array has to be
-  in GNU's order before any writer sees it (issue 789), rather than only in
-  the plan the other writers read. **UEFI** has no such third party -- a
+  differently. **Mach-O** needs none for its constructors: LC_MAIN hands
+  `main` straight to dyld, which runs the main executable's
+  `__DATA,__mod_init_func` before it enters `main`, so that writer keeps that
+  array, gives it the section type dyld dispatches on, and lets the loader
+  call it (issue 779) -- which is why the merged array has to be in GNU's
+  order before any writer sees it (issue 789), rather than only in the plan
+  the other writers read. **dyld does not run a main executable's
+  `__mod_term_func`**, which was measured rather than assumed (issue 798): on
+  macOS 26.3.2 a pointer placed by hand in a `__mod_term_func` of an image
+  *ld64* wrote never ran while the `__mod_init_func` slot beside it did, and
+  Clang emits no terminator array on Darwin at all -- it registers every
+  `__attribute__((destructor))` with `__cxa_atexit` from a
+  `__GLOBAL_init_65535` initializer it synthesizes. So the Mach-O writer emits
+  no `__mod_term_func` either. `link_mach_initializer_prepare` takes that
+  array off the object -- the one half of this writer that does read a plan,
+  built from the same merged array issue 789 ordered -- the writer synthesizes
+  a **runner** over its entries past the import stubs, and a **registrar**
+  prepended as the *first* `__mod_init_func` slot hands the runner to `atexit`
+  before any constructor of the program runs. Registering first is what leaves
+  the walk behind every handler the program registered itself, so Apple gets
+  the same order the two entry stubs produce and
+  `tests/basic_c_destructor_exit.c` runs there; Clang's own Darwin shape does
+  not have that property, because it registers each destructor as its
+  initializer is reached and a handler registered by a constructor therefore
+  runs *after* the destructors. The prepended slot carries no relocation --
+  its value is an address this writer chooses -- so it is written directly and
+  named directly in the rebase stream, and the registrar reaches `atexit`
+  through the import stub, appending that import when the program never named
+  it. **UEFI** has no such third party -- a
   firmware image has no C runtime, and its entry is the firmware's call with
   the image handle and the system table -- so it still **refuses** a program
   with initializers, naming the first one, rather than placing an array
