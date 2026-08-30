@@ -1321,16 +1321,16 @@ sides do, not written down:
 - `pass` — it ran and matched; in `src/api` it compiled; in a shared-object
   unit both sides built the library.
 
-Six units are what building the assembly newly put in front of Buster, and
-each is filed rather than absorbed. `functional/setjmp` and
-`functional/pthread_cancel-points` do not compile (issues 735 and 736 -- an
-aggregate assigned to a `volatile`-qualified object, and a file-scope
-designated initializer). `functional/pthread_robust` and
-`regression/pthread-robust-detach` run and answer differently from the
-reference (issue 737). And `functional/tls_align_dlopen` and
-`functional/tls_init_dlopen` join the local-exec TLS group that was already
-there, which is the model rather than anything new. 242 to 375 passing, and
-nothing that passed before stopped passing.
+Five units were what building the assembly newly put in front of Buster, and
+each was filed rather than absorbed. Three are closed: `functional/setjmp`
+compiles once an aggregate can be assigned across a `volatile` qualifier
+(issue 735), and `functional/pthread_robust` and
+`regression/pthread-robust-detach` pass once a walked-through aggregate member
+is not loaded (issue 737). The other two, `functional/tls_align_dlopen` and
+`functional/tls_init_dlopen`, joined the local-exec TLS group that was already
+there, which is the model rather than anything new -- and that group is now
+the whole of what the suite does not pass. 243 to 381, and nothing that passed
+before stopped passing.
 
 One difference from a native musl build is left, and it is not assembly:
 musl's `ARCH_SRCS` also covers the architecture subdirectories' `.c` files --

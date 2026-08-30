@@ -17197,20 +17197,21 @@ struct LibcTestSubsetTotals
 // its parent held as not held. Both prepasses share one deferral scan now;
 // `tests/basic_c_lazy_operand_argument.c` pins the class under all four
 // allocators.
-// 2026-08-29: 243 -> PLACEHOLDER_PASSING, and it is mostly the reference's
-// reach that moved rather than Buster's. Both archives and both shared objects
-// hold musl's own x86-64 assembly now, so `fenv` is the real one, `clone` is
-// present and `setjmp` is not a trap: `src/math`'s exception-flag units stop
-// being `excluded-reference` (144 -> 31, 55 -> 168 passing), the thread tests
-// stop hanging out their ten-second deadline and the `dlopen` tests become
-// reachable. A few units newly reach Buster and stop there, which is what
-// raising the ceiling was for: `functional/pthread_cancel-points` and
-// `functional/setjmp` do not compile (issues 736 and 735),
-// `functional/pthread_robust` and `regression/pthread-robust-detach` answer
-// differently (issue 737), and `functional/tls_align_dlopen` and
-// `functional/tls_init_dlopen` join the local-exec TLS group that was already
-// there. Nothing that passed before stopped passing.
-// 2026-08-29: PLACEHOLDER_PREVIOUS -> PLACEHOLDER_PASSING, `functional/tgmath`.
+// 2026-08-29: 243 -> 377, and it is mostly the reference's reach that moved
+// rather than Buster's. Both archives and both shared objects hold musl's own
+// x86-64 assembly now, so `fenv` is the real one, `clone` is present and
+// `setjmp` is not a trap: `src/math`'s exception-flag units stop being
+// `excluded-reference` (144 -> 31, 55 -> 168 passing), the thread tests stop
+// hanging out their ten-second deadline (`regression` 33 -> 65, and the
+// suite's run time falls from 53,6 seconds to 3,9) and the `dlopen` tests
+// become reachable. Five units newly reach Buster and stop there, which is
+// what raising the ceiling was for: `functional/setjmp` does not compile
+// (issue 735), `functional/pthread_robust` and
+// `regression/pthread-robust-detach` answer differently (issue 737), and
+// `functional/tls_align_dlopen` and `functional/tls_init_dlopen` join the
+// local-exec TLS group that was already there. Nothing that passed before
+// stopped passing.
+// 2026-08-29: 377 -> PLACEHOLDER_PASSING, `functional/tgmath`.
 // `ide cc` predefines `__GNUC__` in every dialect now, the way clang and gcc
 // both do, so under the suite's `-std=c99` the two compilers finally read the
 // same source out of musl's headers: <tgmath.h> keeps its `__typeof__` return
@@ -17221,9 +17222,15 @@ struct LibcTestSubsetTotals
 // constant-valued math intrinsics in an x87 `long double` initializer, which
 // is the spelling musl's <math.h> chooses once the builtins are advertised;
 // the last of those held 21 `src/math` units and `functional/strtold`
-// blocked-compile the moment the predefine changed.
-#define LIBC_TEST_EXPECTED_PASSING 243
-#define LIBC_TEST_EXPECTED_STATE_HASH 0x788ca45669f24411ull
+// blocked-compile the moment the predefine changed. Three more units came in
+// with it and are not that change: `functional/setjmp` compiles now that an
+// aggregate can be assigned across a `volatile` qualifier (2c9b7cc1, issue
+// 735), and `functional/pthread_robust` and `regression/pthread-robust-detach`
+// pass now that a walked-through aggregate member is not loaded (84cdadc8,
+// issue 737). Everything the assembly work newly exposed is closed with them;
+// the seven units left in the suite are the local-exec TLS group.
+#define LIBC_TEST_EXPECTED_PASSING 381
+#define LIBC_TEST_EXPECTED_STATE_HASH 0x0e973f6c67fa1195ull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it
