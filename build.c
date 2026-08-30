@@ -16181,8 +16181,14 @@ struct MuslManifest
 // MUSL_SUBSTITUTED line. The four refused classes are pinned as fixtures --
 // tests/basic_c_asm_{sse_output,sse_input,x87_output,x87_clobber}.c -- so
 // implementing one moves this count and that test together.
-#define MUSL_EXPECTED_COMPILED_UNITS 1340
-#define MUSL_EXPECTED_FAILURE_HASH 0xe18f8e99d8c1ac40ull
+// 2026-08-30: 1340 -> 1348. The SSE half is implemented: `x` is an operand
+// class of its own, allocated out of the vector registers and carried in and
+// out of its frame slot by a scalar move, so the eight units musl writes in it
+// -- sqrt, sqrtf, fabs, fabsf as outputs and llrint, llrintf, lrint, lrintf as
+// inputs -- hold musl's own x86-64 implementation rather than a substituted
+// portable one. The eight left are the x87 register stack, issue 766.
+#define MUSL_EXPECTED_COMPILED_UNITS 1348
+#define MUSL_EXPECTED_FAILURE_HASH 0x30f0106d42042a1aull
 
 // The environment a dynamically linked program is given. musl's own loader
 // reads LD_PRELOAD and LD_LIBRARY_PATH out of the environment it is handed,

@@ -212,6 +212,13 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // a loader jumping to the program it relocated, and a thread jumping onto
     // a stack that is not the one it is unmapping.
     S8_INITIALIZER("jmp"),
+    // The scalar SSE instructions musl's own x86-64 math is written in, which
+    // are the only reason the 'x' operand class exists here. Each writes only
+    // its named vector operands, so they need none of the memory or immediate
+    // machinery this list keeps out; the shift-by-immediate pair carries a '$'
+    // literal, which the operand scan below already admits.
+    S8_INITIALIZER("sqrtsd"), S8_INITIALIZER("sqrtss"), S8_INITIALIZER("cvtsd2si"), S8_INITIALIZER("cvtss2si"),
+    S8_INITIALIZER("pcmpeqd"), S8_INITIALIZER("psrlq"), S8_INITIALIZER("psrld"), S8_INITIALIZER("andps"),
 };
 
 // The registers a template may name literally. The rule the ban exists for is
@@ -244,6 +251,22 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_registers[] = {
     S8_INITIALIZER("r9"), S8_INITIALIZER("r9d"), S8_INITIALIZER("r9w"), S8_INITIALIZER("r9b"), S8_INITIALIZER("r10"), S8_INITIALIZER("r10d"), S8_INITIALIZER("r10w"), S8_INITIALIZER("r10b"), S8_INITIALIZER("r11"), S8_INITIALIZER("r11d"), S8_INITIALIZER("r11w"),
     S8_INITIALIZER("r11b"), S8_INITIALIZER("r12"), S8_INITIALIZER("r12d"), S8_INITIALIZER("r12w"), S8_INITIALIZER("r12b"), S8_INITIALIZER("r13"), S8_INITIALIZER("r13d"), S8_INITIALIZER("r13w"), S8_INITIALIZER("r13b"), S8_INITIALIZER("r14"), S8_INITIALIZER("r14d"),
     S8_INITIALIZER("r14w"), S8_INITIALIZER("r14b"), S8_INITIALIZER("r15"), S8_INITIALIZER("r15d"), S8_INITIALIZER("r15w"), S8_INITIALIZER("r15b"),
+    // The SSE file is here for the same reason the general one is: an operand
+    // in the 'x' class is allocated a vector register, and a template that
+    // also writes one by name could overwrite it. Refusing the literal spelling
+    // is what keeps the allocation the only way into the file.
+    S8_INITIALIZER("xmm0"), S8_INITIALIZER("xmm1"), S8_INITIALIZER("xmm2"), S8_INITIALIZER("xmm3"), S8_INITIALIZER("xmm4"), S8_INITIALIZER("xmm5"),
+    S8_INITIALIZER("xmm6"), S8_INITIALIZER("xmm7"), S8_INITIALIZER("xmm8"), S8_INITIALIZER("xmm9"), S8_INITIALIZER("xmm10"), S8_INITIALIZER("xmm11"),
+    S8_INITIALIZER("xmm12"), S8_INITIALIZER("xmm13"), S8_INITIALIZER("xmm14"), S8_INITIALIZER("xmm15"),
+};
+
+// The vector registers an 'x' operand may be allocated. The canonical emitter
+// keeps every value in its frame slot between instructions, so none of these is
+// live across the template; the pool is capped at eight because the metadata
+// bridge's vector operand is encoded from a register index in that range.
+BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_vector_names[] = {
+    S8_INITIALIZER("xmm0"), S8_INITIALIZER("xmm1"), S8_INITIALIZER("xmm2"), S8_INITIALIZER("xmm3"),
+    S8_INITIALIZER("xmm4"), S8_INITIALIZER("xmm5"), S8_INITIALIZER("xmm6"), S8_INITIALIZER("xmm7"),
 };
 BUSTER_GLOBAL_LOCAL X64Register const codegen_x64_asm_system_v_registers[] = {
     X64_REGISTER_RAX, X64_REGISTER_RCX, X64_REGISTER_RDX, X64_REGISTER_RSI, X64_REGISTER_RDI,
@@ -405,6 +428,21 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_name(String8 token)
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(codegen_x64_asm_registers) && !result; index += 1)
     {
         result = string_equal(token, codegen_x64_asm_registers[index]);
+    }
+
+    return result;
+}
+
+// The name an operand in the SSE class is spelled with, or an empty string for
+// an operand in any other class. Keeping the two files behind one lookup is
+// what lets the template walk stay a single pass over the references.
+BUSTER_GLOBAL_LOCAL String8 codegen_inline_assembly_vector_register_name(u64 constraint, u32 const* vector_registers, u32 operand_index)
+{
+    String8 result = {0};
+    if (vector_registers && IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) &&
+        vector_registers[operand_index] < BUSTER_ARRAY_LENGTH(codegen_x64_asm_vector_names))
+    {
+        result = codegen_x64_asm_vector_names[vector_registers[operand_index]];
     }
 
     return result;
@@ -720,8 +758,8 @@ BUSTER_GLOBAL_LOCAL void codegen_inline_assembly_normalize_statements(String8* s
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
-                                                                   IrInstructionExtra extra, X64Register* registers, AssemblySyntax syntax,
-                                                                   String8* source_out)
+                                                                   IrInstructionExtra extra, X64Register* registers, u32* vector_registers,
+                                                                   AssemblySyntax syntax, String8* source_out)
 {
     String8 template_source = extra.literal;
     if (!codegen_inline_assembly_template_literal_valid(template_source, codegen_inline_assembly_transfers_control(template_source)))
@@ -765,10 +803,17 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, 
         // other operand is spelled at the width of its own type.
         bool memory_operand =
             IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(instruction->immediates[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
-        String8 register_name = codegen_x64_asm_register_name(registers[operand_index],
-                                                              memory_operand                                              ? 8
-                                                              : type_class == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID ? 0
-                                                                                                                        : (u32)type->layout.size);
+        // A vector operand is spelled by the register alone: the SSE file has
+        // one name per register rather than a name per access width, and the
+        // instruction the template wrote is what says how much of it is read.
+        String8 register_name = codegen_inline_assembly_vector_register_name(instruction->immediates[operand_index], vector_registers, operand_index);
+        if (!register_name.length)
+        {
+            register_name = codegen_x64_asm_register_name(registers[operand_index],
+                                                          memory_operand                                              ? 8
+                                                          : type_class == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID ? 0
+                                                                                                                    : (u32)type->layout.size);
+        }
         if (!register_name.length || (syntax != ASSEMBLY_SYNTAX_ATT && syntax != ASSEMBLY_SYNTAX_INTEL))
         {
             return false;
@@ -811,7 +856,11 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, 
         IrType* type = ir_type_from_id(&program->types, function->values[value.value].canonical_type);
         bool memory_operand =
             IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(instruction->immediates[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
-        String8 register_name = codegen_x64_asm_register_name(registers[operand_index], memory_operand ? 8 : (u32)type->layout.size);
+        String8 register_name = codegen_inline_assembly_vector_register_name(instruction->immediates[operand_index], vector_registers, operand_index);
+        if (!register_name.length)
+        {
+            register_name = codegen_x64_asm_register_name(registers[operand_index], memory_operand ? 8 : (u32)type->layout.size);
+        }
         if (memory_operand)
         {
             output[output_index++] = syntax == ASSEMBLY_SYNTAX_ATT ? '(' : '[';
@@ -962,6 +1011,14 @@ BUSTER_GLOBAL_LOCAL u32 codegen_inline_assembly_type_class(IrType* type)
     }
 
     return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+}
+
+// What GNU's 'x' may carry, and the mirror of c_ir_inline_assembly_vector_operand
+// in the frontend: a float of the width the scalar SSE instructions operate on.
+// The x87 `long double` is a different register file and is not one of these.
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_vector_operand(IrType* type)
+{
+    return type && type->layout.resolved && type->kind == IR_TYPE_FLOAT && (type->layout.size == 4 || type->layout.size == 8);
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_types_compatible(IrType* output, IrType* input)
@@ -1971,6 +2028,23 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_asm_store(CodegenBuffer* buffer, 
         codegen_canonical_x64_metadata_gpr(source, memory_width),
     };
     (void)codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), operands, BUSTER_ARRAY_LENGTH(operands));
+}
+
+// One scalar SSE move between a vector register and memory, for an operand in
+// the 'x' class. codegen_canonical_x64_float_memory does the same job for the
+// ABI paths but only against the frame pointer; an asm operand reached through
+// a pointer loads from the register that pointer was loaded into, so the base
+// is a parameter here.
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_asm_vector_memory(CodegenBuffer* buffer, u32 vector_register, X64Register base, u32 displacement,
+                                                                 u32 width, bool store)
+{
+    String8 mnemonic = width == 4 ? S8("MOVSS") : S8("MOVSD");
+    String8 feature_names[] = {width == 4 ? S8("sse") : S8("sse2")};
+    BusterX86MetadataPhysicalOperand memory = codegen_canonical_x64_metadata_memory(base, (u16)(width * 8), (s64)(s32)displacement);
+    BusterX86MetadataPhysicalOperand vector = codegen_canonical_x64_metadata_vector(vector_register, 128);
+    BusterX86MetadataPhysicalOperand operands[2] = {store ? memory : vector, store ? vector : memory};
+    (void)codegen_canonical_x64_metadata_emit_features(buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
+                                                       (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)});
 }
 
 // The address of a frame slot, for a memory operand whose storage is the slot
@@ -15638,8 +15712,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         bool indirect_operands = false;
                         bool used_registers[12] = {0};
                         bool clobbered_registers[12] = {0};
+                        // The SSE file is allocated out of its own pool: an 'x'
+                        // operand takes a vector register and no general one,
+                        // so the two allocations never collide and the parallel
+                        // array is what says which file an operand landed in.
+                        bool used_vector_registers[BUSTER_ARRAY_LENGTH(codegen_x64_asm_vector_names)] = {0};
                         bool* indirect = arena_allocate(arena, bool, instruction->operand_count ? instruction->operand_count : 1);
                         X64Register* asm_registers = arena_allocate(arena, X64Register, instruction->operand_count ? instruction->operand_count : 1);
+                        u32* asm_vector_registers = arena_allocate(arena, u32, instruction->operand_count ? instruction->operand_count : 1);
+                        bool asm_vector_operands = false;
                         for (u32 clobber_index = 0; clobber_index < asm_extra.clobber_count; clobber_index += 1)
                         {
                             X64Register clobber_register = X64_REGISTER_RAX;
@@ -15731,12 +15812,25 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                        definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE;
                             indirect_operands |= indirect[operand_index];
                             IrType* operand_type = ir_type_from_id(&program->types, function->values[operand.value].canonical_type);
-                            if (ordinary && (codegen_inline_assembly_type_class(operand_type) == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID ||
-                                             !codegen_canonical_x64_asm_memory_width((u32)operand_type->layout.size)))
+                            bool vector_operand = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint_index);
+                            // A vector operand is checked whatever the template
+                            // is, because the move that carries it in and out is
+                            // emitted for the empty template too; the general
+                            // file's check is the ordinary-template one it has
+                            // always been.
+                            if (vector_operand && !codegen_inline_assembly_vector_operand(operand_type))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
+                            if (!vector_operand && ordinary &&
+                                (codegen_inline_assembly_type_class(operand_type) == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID ||
+                                 !codegen_canonical_x64_asm_memory_width((u32)operand_type->layout.size)))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            asm_vector_operands |= vector_operand;
                             if ((constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0)
                             {
                                 if (codegen_inline_assembly_type_class(operand_type) == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID)
@@ -15768,6 +15862,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     }
                                 }
                                 asm_registers[operand_index] = asm_registers[match_index];
+                                asm_vector_registers[operand_index] = asm_vector_registers[match_index];
+                                continue;
+                            }
+                            if (vector_operand)
+                            {
+                                bool found_vector = false;
+                                for (u32 candidate = 0; candidate < BUSTER_ARRAY_LENGTH(used_vector_registers) && !found_vector; candidate += 1)
+                                {
+                                    if (!used_vector_registers[candidate])
+                                    {
+                                        used_vector_registers[candidate] = true;
+                                        asm_vector_registers[operand_index] = candidate;
+                                        found_vector = true;
+                                    }
+                                }
+                                if (!found_vector)
+                                {
+                                    result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                                // RSP is never handed to an asm operand, so
+                                // parking the general-file entry there keeps
+                                // the aliasing scan above from ever matching a
+                                // register this operand does not occupy.
+                                asm_registers[operand_index] = X64_REGISTER_RSP;
                                 continue;
                             }
                             X64Register register_index = X64_REGISTER_RAX;
@@ -15871,12 +15990,27 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 continue;
                             }
+                            bool vector_input = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
                             if (indirect[operand_index])
                             {
                                 codegen_canonical_x64_asm_load(&buffer, X64_REGISTER_R11, X64_REGISTER_RBP,
                                                               (u32)c_x64_frame_displacement(&emitter, value_offsets[input.value]), 8);
-                                codegen_canonical_x64_asm_load(&buffer, asm_registers[operand_index], X64_REGISTER_R11, 0,
-                                                              (u32)input_type->layout.size);
+                                if (vector_input)
+                                {
+                                    codegen_canonical_x64_asm_vector_memory(&buffer, asm_vector_registers[operand_index], X64_REGISTER_R11, 0,
+                                                                            (u32)input_type->layout.size, false);
+                                }
+                                else
+                                {
+                                    codegen_canonical_x64_asm_load(&buffer, asm_registers[operand_index], X64_REGISTER_R11, 0,
+                                                                  (u32)input_type->layout.size);
+                                }
+                            }
+                            else if (vector_input)
+                            {
+                                codegen_canonical_x64_asm_vector_memory(&buffer, asm_vector_registers[operand_index], X64_REGISTER_RBP,
+                                                                        (u32)c_x64_frame_displacement(&emitter, value_offsets[input.value]),
+                                                                        (u32)input_type->layout.size, false);
                             }
                             else
                             {
@@ -15946,7 +16080,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             String8 source = {0};
                             if (!codegen_inline_assembly_resolve_template(arena, program, function, instruction, asm_extra, asm_registers,
-                                                                           codegen_inline_assembly_syntax(options), &source))
+                                                                           asm_vector_registers, codegen_inline_assembly_syntax(options), &source))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
@@ -15992,12 +16126,27 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             bool output_indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                                    definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE;
+                            bool vector_output = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
                             if (output_indirect)
                             {
                                 codegen_canonical_x64_asm_load(&buffer, X64_REGISTER_R11, X64_REGISTER_RBP,
                                                               (u32)c_x64_frame_displacement(&emitter, value_offsets[place_id.value]), 8);
-                                codegen_canonical_x64_asm_store(&buffer, X64_REGISTER_R11, asm_registers[operand_index], 0,
-                                                               (u32)output_type->layout.size);
+                                if (vector_output)
+                                {
+                                    codegen_canonical_x64_asm_vector_memory(&buffer, asm_vector_registers[operand_index], X64_REGISTER_R11, 0,
+                                                                            (u32)output_type->layout.size, true);
+                                }
+                                else
+                                {
+                                    codegen_canonical_x64_asm_store(&buffer, X64_REGISTER_R11, asm_registers[operand_index], 0,
+                                                                   (u32)output_type->layout.size);
+                                }
+                            }
+                            else if (vector_output)
+                            {
+                                codegen_canonical_x64_asm_vector_memory(&buffer, asm_vector_registers[operand_index], X64_REGISTER_RBP,
+                                                                        (u32)c_x64_frame_displacement(&emitter, value_offsets[place_id.value]),
+                                                                        (u32)output_type->layout.size, true);
                             }
                             else
                             {
@@ -16005,6 +16154,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                (u32)c_x64_frame_displacement(&emitter, value_offsets[place_id.value]),
                                                                (u32)output_type->layout.size);
                             }
+                        }
+                        // A template that ran with operands in the SSE file
+                        // wrote vector registers the wide-vector cache still
+                        // believes hold a value, so the cache is dropped here
+                        // the same way an explicit SIMD operation drops it.
+                        if (asm_vector_operands)
+                        {
+                            x64_last_wide_vector_result = IR_VALUE_ID_INVALID;
+                            x64_last_wide_vector_size = 0;
                         }
                         // Inline assembly may use RBX for a fixed b operand or
                         // declare it clobbered.  Restore the ABI-owned value

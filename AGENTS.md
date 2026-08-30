@@ -806,9 +806,29 @@ a thread-pointer read is spelled. GNU's semicolon separates statements while
 this assembler reads one as a comment, so the inline-assembly path rewrites
 the separators, folding `lock ; insn` into the single statement the assembler
 wants and splitting the rest onto their own lines. The operand classes are the
-fixed general registers, `r` and `m`, and nothing else: the SSE and x87 classes
-musl's own x86-64 math is written in are the whole of what the manifest below
-reports as unsupported.
+fixed general registers, `r`, `m` and `x`: the x87 class musl's own x86-64
+math is written in is the whole of what the manifest below reports as
+unsupported.
+
+`x` is GNU's SSE register class, and it is a second register file rather than
+another name for a general register. An operand in it is allocated a vector
+register out of its own pool -- so a general and a vector operand in one
+template can never collide -- carried in and out of its frame slot by a scalar
+`MOVSS`/`MOVSD`, and spelled in the template by the register name alone,
+because the SSE file has one name per register rather than a name per access
+width and the instruction the template wrote is what says how much of it is
+read. It carries a `float` or a `double` and nothing else: an x87 `long double`
+is the other file, and an integer would need a move between files that no
+operand here performs; both halves -- the value's type and the target having
+the file at all -- are refused by the frontend with a source diagnostic rather
+than left to the emitter. The vector register names joined the general ones in
+the literal-register refusal for the same reason the general ones are there:
+an operand is allocated one, and a template that also wrote one by hand could
+overwrite it. `tests/basic_c_asm_sse_output.c` and
+`tests/basic_c_asm_sse_input.c` are musl's own `sqrt`, `fabs` and `lrint`
+reduced to their operands and run under every allocator, with their answers
+checked -- an operand carried into the wrong register still assembles and still
+hands back a number.
 
 Two more things a template may do, and they are what a libc's startup and its
 dynamic loader are written in rather than its atomics. It may **name a
@@ -1066,25 +1086,25 @@ than an exclusion. One unit's `.c` is empty with no architecture file to
 replace it -- `src/thread/tls`, which x86-64 does not need -- and it is the
 empty translation unit musl itself compiles rather than a reported gap.
 
-1340 of the 1356 build. The 16 that do not are the architecture C under
-`src/math/x86_64`, and the whole of the refusal is four inline-assembly operand
-classes the frontend does not have: the SSE register class as an output
-(`"=x"`, `"+x"`: `sqrt`, `sqrtf`, `fabs`, `fabsf`), the SSE class as an input
-(`"x"`: `llrint`, `llrintf`, `lrint`, `lrintf`), the x87 stack as an operand
-(`"+t"`, `"u"`: `fabsl`, `fmodl`, `remainderl`, `remquol`, `rintl`, `sqrtl`)
-and `st` as a clobber (`llrintl`, `lrintl`). Those are two register files
-rather than four gaps -- issue 765 is the SSE half, issue 766 the x87 half.
-The other two architecture C units, `fma` and `fmaf`, build: neither `__FMA__`
-nor `__FMA4__` is defined under this flag set, so both fall through to
+1348 of the 1356 build. The 8 that do not are architecture C under
+`src/math/x86_64`, and the whole of the refusal is the x87 register stack as an
+inline-assembly operand class the frontend does not have: the stack as an
+operand (`"+t"`, `"u"`: `fabsl`, `fmodl`, `remainderl`, `remquol`, `rintl`,
+`sqrtl`) and `st` as a clobber (`llrintl`, `lrintl`). Those are one register
+file rather than two gaps, and they are issue 766. The SSE half was issue 765
+and is closed: `x` is an operand class of its own now, so `sqrt`, `sqrtf`,
+`fabs` and `fabsf` (`"=x"`, `"+x"`) and `llrint`, `llrintf`, `lrint` and
+`lrintf` (`"x"`) hold musl's own x86-64 implementation. The other two
+architecture C units, `fma` and `fmaf`, build: neither `__FMA__` nor `__FMA4__`
+is defined under this flag set, so both fall through to
 `#include "../fma.c"` and are the portable code reached by an architecture
 path. Clang compiles all eighteen, so the reference archive holds musl's own
-implementations and the comparison is a real one. The four refused classes are
-pinned as fixtures -- `tests/basic_c_asm_sse_output.c`,
-`tests/basic_c_asm_sse_input.c`, `tests/basic_c_asm_x87_output.c` and
-`tests/basic_c_asm_x87_clobber.c` -- each a reduction of a named musl unit to
-one construct, each asserting its exact
-diagnostic, so implementing one class moves the musl count and one fixture
-together.
+implementations and the comparison is a real one. Each class has its fixture --
+`tests/basic_c_asm_sse_output.c` and `tests/basic_c_asm_sse_input.c` are the
+two the SSE class turned into programs that check their answers, and
+`tests/basic_c_asm_x87_output.c` and `tests/basic_c_asm_x87_clobber.c` are
+still reductions asserting their exact diagnostic -- so implementing a class
+moves the musl count and one fixture together.
 
 A refused architecture unit does not leave a hole in the archive. `hypot`
 calls `sqrt`, so a `libc.a` without one is a `libc.a` nothing links against,

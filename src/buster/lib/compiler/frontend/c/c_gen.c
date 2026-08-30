@@ -28374,6 +28374,16 @@ BUSTER_C_INTERNAL u32 c_ir_inline_assembly_type_class(IrType* type)
     return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
 }
 
+// What GNU's 'x' may carry. The SSE register class holds a floating-point
+// value of the width the scalar instructions operate on, which is what musl's
+// x86-64 math puts there; the x87 `long double` is a different register file
+// and is not one of these, and an integer would need a move between files that
+// no operand here performs.
+BUSTER_C_INTERNAL bool c_ir_inline_assembly_vector_operand(IrType* type)
+{
+    return type && type->layout.resolved && type->kind == IR_TYPE_FLOAT && (type->layout.size == 4 || type->layout.size == 8);
+}
+
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_operand_types_compatible(CIntegerIrBuilder* builder, IrValueId output, IrValueId input)
 {
     if (!builder || !builder->function || output.value >= builder->function->value_count || input.value >= builder->function->value_count)
@@ -28606,6 +28616,9 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
         case 'm':
             constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_M;
             break;
+        case 'x':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_X;
+            break;
         default:
             builder->failure_message = S8("unsupported asm output constraint");
             return false;
@@ -28638,6 +28651,9 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
             break;
         case 'm':
             constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_M;
+            break;
+        case 'x':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_X;
             break;
         default:
         {
@@ -28697,6 +28713,23 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     }
     IrValueId operand = state->operands[state->operand_count];
     IrType* operand_type = ir_type_from_id(&builder->program->types, builder->function->values[operand.value].canonical_type);
+    // The SSE class is a second register file, so both halves of what makes an
+    // operand belong in it are checked here rather than left to the emitter:
+    // the target has to have that file at all, and the value has to be one the
+    // scalar SSE instructions operate on.
+    if (!matching && IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
+    {
+        if (builder->target.cpu_arch != CPU_ARCH_X86_64)
+        {
+            builder->failure_message = S8("unsupported asm constraint for target");
+            return false;
+        }
+        if (!c_ir_inline_assembly_vector_operand(operand_type))
+        {
+            builder->failure_message = S8("an asm operand in the SSE register class must be a float or a double");
+            return false;
+        }
+    }
     if (matching)
     {
         if (c_ir_inline_assembly_type_class(operand_type) == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID)
@@ -28900,6 +28933,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_matches_constraint(String8 c
         return string_equal(clobber, S8("r11"));
     case IR_INLINE_ASSEMBLY_CONSTRAINT_R:
     case IR_INLINE_ASSEMBLY_CONSTRAINT_M:
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_X:
     case IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT:
         break;
     }

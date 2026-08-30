@@ -154,11 +154,19 @@ typedef enum IrInlineAssemblyConstraint
     // above R because it is not a register class at all -- nothing may be
     // pinned to it, and no clobber can name it.
     IR_INLINE_ASSEMBLY_CONSTRAINT_M,
+    // GNU's 'x': the SSE register class, which is a second register file
+    // rather than another name for one of the general registers above. It is
+    // allocated the way R is -- the emitter picks the register -- but out of
+    // its own pool, and the value it carries is a float rather than an
+    // integer, so nothing that reasons about the general registers reaches it.
+    // musl's own x86-64 sqrt, fabs and lrint are written in it.
+    IR_INLINE_ASSEMBLY_CONSTRAINT_X,
     IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT,
 } IrInlineAssemblyConstraint;
 
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_IS_FIXED(class) ((class) < (u64)IR_INLINE_ASSEMBLY_CONSTRAINT_R)
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(class) ((class) == (u64)IR_INLINE_ASSEMBLY_CONSTRAINT_M)
+#define IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(class) ((class) == (u64)IR_INLINE_ASSEMBLY_CONSTRAINT_X)
 
 #define IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER 0
 #define IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER 1
