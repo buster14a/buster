@@ -3332,6 +3332,43 @@ BUSTER_GLOBAL_LOCAL void a64_emit_atomic_exclusive_store(CodegenBuffer* buffer, 
     a64_emit_instruction_word(buffer, (release ? UINT32_C(0x0800fc00) : UINT32_C(0x08007c00)) | size_bits | (status << 16) | (address << 5) | value);
 }
 
+// LDXP/LDAXP and STXP/STLXP, the exclusive pair forms behind every 16-byte
+// atomic: below LSE2 no plain 16-byte access is single-copy atomic, so a
+// sixteen-byte atomic load, store, RMW, and CAS are all bounded loops over
+// these words, exactly the shape clang emits for baseline AArch64.
+BUSTER_GLOBAL_LOCAL void a64_emit_atomic_exclusive_load_pair(CodegenBuffer* buffer, u32 low, u32 high, u32 address, bool acquire)
+{
+    if (low > 31 || high > 31 || address > 31)
+    {
+        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return;
+    }
+    a64_emit_instruction_word(buffer, (acquire ? UINT32_C(0xc87f8000) : UINT32_C(0xc87f0000)) | (high << 10) | (address << 5) | low);
+}
+
+BUSTER_GLOBAL_LOCAL void a64_emit_atomic_exclusive_store_pair(CodegenBuffer* buffer, u32 status, u32 low, u32 high, u32 address, bool release)
+{
+    if (status > 31 || low > 31 || high > 31 || address > 31)
+    {
+        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+        return;
+    }
+    a64_emit_instruction_word(buffer, (release ? UINT32_C(0xc8208000) : UINT32_C(0xc8200000)) | (status << 16) | (high << 10) | (address << 5) | low);
+}
+
+// The bounded backward branch every exclusive loop ends with: CBNZ on the
+// W13 status register to the loop's exclusive load.
+BUSTER_GLOBAL_LOCAL void a64_emit_exclusive_retry(CodegenBuffer* buffer, u32 retry_offset)
+{
+    s64 displacement = (s64)retry_offset - (s64)buffer->count;
+    if (displacement % 4 || displacement / 4 < -INT64_C(0x40000) || displacement / 4 > INT64_C(0x3ffff))
+    {
+        buffer->error = CODEGEN_ERROR_CAPACITY;
+        return;
+    }
+    a64_emit_instruction_word(buffer, UINT32_C(0x35000000) | (((u32)(displacement / 4) & UINT32_C(0x7ffff)) << 5) | 13);
+}
+
 void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_number, u32 base_register, u32 byte_offset);
 
 void a64_emit_load_pointer_offset(CodegenBuffer* buffer, u32 target, u32 address, u32 offset, u32 size)
@@ -17187,6 +17224,34 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             IrType* atomic_place_type = ir_type_from_id(&program->types, place->canonical_type);
                             u64 atomic_width = atomic_place_type && atomic_place_type->layout.resolved ? atomic_place_type->layout.size : 0;
                             bool aggregate_kind = loaded_type && (loaded_type->kind == IR_TYPE_STRUCT || loaded_type->kind == IR_TYPE_UNION);
+                            bool pair_kind =
+                                loaded_type && (aggregate_kind || (loaded_type->kind == IR_TYPE_INTEGER && loaded_type->bit_width == 128));
+                            if (atomic_width == 16 && pair_kind)
+                            {
+                                // A sixteen-byte atomic load is the exclusive pair
+                                // loop — the load alone is not single-copy atomic,
+                                // so the pair writes itself back and retries until
+                                // the store-exclusive proves the read was whole.
+                                // Both halves land in the slot, so a narrower
+                                // value's promoted padding reads back exactly what
+                                // the store side wrote.
+                                if (indirect)
+                                {
+                                    c_a64_load(&emitter, 10, instruction->operands[0]);
+                                }
+                                else
+                                {
+                                    codegen_canonical_a64_base_address(&buffer, 10, 28, value_offsets[instruction->operands[0].value]);
+                                }
+                                u32 pair_retry_offset = (u32)buffer.count;
+                                a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, instruction->memory_order != IR_MEMORY_ORDER_RELAXED);
+                                a64_emit_atomic_exclusive_store_pair(&buffer, 13, 9, 14, 10, false);
+                                a64_emit_exclusive_retry(&buffer, pair_retry_offset);
+                                c_a64_store(&emitter, 9, result_offset);
+                                c_a64_store_high(&emitter, 14, result_offset);
+                                instruction_id = instruction->next;
+                                continue;
+                            }
                             if (!aggregate_kind || (atomic_width != 1 && atomic_width != 2 && atomic_width != 4 && atomic_width != 8))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
@@ -17601,6 +17666,37 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             u64 atomic_width = atomic_place_type && atomic_place_type->layout.resolved ? atomic_place_type->layout.size : 0;
                             u64 atomic_stored_size = stored_type && stored_type->layout.resolved ? stored_type->layout.size : 0;
                             bool aggregate_kind = stored_type && (stored_type->kind == IR_TYPE_STRUCT || stored_type->kind == IR_TYPE_UNION);
+                            bool pair_kind =
+                                stored_type && (aggregate_kind || (stored_type->kind == IR_TYPE_INTEGER && stored_type->bit_width == 128));
+                            if (atomic_width == 16 && pair_kind && atomic_stored_size > 8)
+                            {
+                                // The sixteen-byte store loop: the value pair
+                                // stages before the loop with its promoted
+                                // padding cleared, the discarded exclusive load
+                                // arms the monitor (acquire-formed only when
+                                // sequential, clang's answer), and the pair
+                                // store retries until it lands whole.
+                                c_a64_load(&emitter, 11, instruction->operands[1]);
+                                c_a64_load_high(&emitter, 12, instruction->operands[1]);
+                                a64_emit_keep_low_bytes(&buffer, 12, 13, atomic_stored_size - 8);
+                                if (indirect)
+                                {
+                                    c_a64_load(&emitter, 10, instruction->operands[0]);
+                                }
+                                else
+                                {
+                                    codegen_canonical_a64_base_address(&buffer, 10, 28, value_offsets[instruction->operands[0].value]);
+                                }
+                                bool pair_release = instruction->memory_order == IR_MEMORY_ORDER_RELEASE ||
+                                                    instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE_RELEASE ||
+                                                    instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+                                u32 pair_retry_offset = (u32)buffer.count;
+                                a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL);
+                                a64_emit_atomic_exclusive_store_pair(&buffer, 13, 11, 12, 10, pair_release);
+                                a64_emit_exclusive_retry(&buffer, pair_retry_offset);
+                                instruction_id = instruction->next;
+                                continue;
+                            }
                             if (!aggregate_kind || (atomic_width != 1 && atomic_width != 2 && atomic_width != 4 && atomic_width != 8))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
@@ -17711,6 +17807,69 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
                         bool pointer_arithmetic = value_type && value_type->kind == IR_TYPE_POINTER &&
                                                   (instruction->atomic_operation == IR_ATOMIC_ADD || instruction->atomic_operation == IR_ATOMIC_SUBTRACT);
+                        if (value_type && value_type->kind == IR_TYPE_INTEGER && value_type->layout.resolved && value_type->bit_width == 128 &&
+                            value_type->layout.size == 16 && instruction->atomic_operation < IR_ATOMIC_OPERATION_COUNT)
+                        {
+                            // The sixteen-byte read-modify-write: an exclusive
+                            // pair loop whose operand pair reloads from its
+                            // frame slot each retry, because the arithmetic
+                            // writes the operand registers and a store inside
+                            // the window could clear the monitor while a load
+                            // cannot. The carry rides ADDS/ADC and SUBS/SBC;
+                            // the old value survives in x9:x14 for the result.
+                            if (indirect)
+                            {
+                                c_a64_load(&emitter, 10, instruction->operands[0]);
+                            }
+                            else
+                            {
+                                codegen_canonical_a64_base_address(&buffer, 10, 28, value_offsets[instruction->operands[0].value]);
+                            }
+                            bool pair_acquire = instruction->memory_order == IR_MEMORY_ORDER_CONSUME ||
+                                                instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE ||
+                                                instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE_RELEASE ||
+                                                instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+                            bool pair_release = instruction->memory_order == IR_MEMORY_ORDER_RELEASE ||
+                                                instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE_RELEASE ||
+                                                instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+                            u32 pair_retry_offset = (u32)buffer.count;
+                            a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, pair_acquire);
+                            c_a64_load(&emitter, 11, instruction->operands[1]);
+                            c_a64_load_high(&emitter, 12, instruction->operands[1]);
+                            switch (instruction->atomic_operation)
+                            {
+                            case IR_ATOMIC_ADD:
+                                codegen_emit_u32(&buffer, UINT32_C(0xab0b012b));
+                                codegen_emit_u32(&buffer, UINT32_C(0x9a0c01cc));
+                                break;
+                            case IR_ATOMIC_SUBTRACT:
+                                codegen_emit_u32(&buffer, UINT32_C(0xeb0b012b));
+                                codegen_emit_u32(&buffer, UINT32_C(0xda0c01cc));
+                                break;
+                            case IR_ATOMIC_BITWISE_AND:
+                                codegen_emit_u32(&buffer, UINT32_C(0x8a0b012b));
+                                codegen_emit_u32(&buffer, UINT32_C(0x8a0c01cc));
+                                break;
+                            case IR_ATOMIC_BITWISE_OR:
+                                codegen_emit_u32(&buffer, UINT32_C(0xaa0b012b));
+                                codegen_emit_u32(&buffer, UINT32_C(0xaa0c01cc));
+                                break;
+                            case IR_ATOMIC_BITWISE_XOR:
+                                codegen_emit_u32(&buffer, UINT32_C(0xca0b012b));
+                                codegen_emit_u32(&buffer, UINT32_C(0xca0c01cc));
+                                break;
+                            case IR_ATOMIC_EXCHANGE:
+                                break;
+                            case IR_ATOMIC_OPERATION_COUNT:
+                                break;
+                            }
+                            a64_emit_atomic_exclusive_store_pair(&buffer, 13, 11, 12, 10, pair_release);
+                            a64_emit_exclusive_retry(&buffer, pair_retry_offset);
+                            c_a64_store(&emitter, 9, result_offset);
+                            c_a64_store_high(&emitter, 14, result_offset);
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         if (!value_type ||
                             (!pointer_arithmetic && value_type->kind != IR_TYPE_INTEGER &&
                              (instruction->atomic_operation != IR_ATOMIC_EXCHANGE ||
@@ -17781,6 +17940,56 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                         definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE ||
                                         (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
+                        if (value_type && value_type->kind == IR_TYPE_INTEGER && value_type->layout.resolved && value_type->bit_width == 128 &&
+                            value_type->layout.size == 16)
+                        {
+                            // The sixteen-byte compare-exchange: the expected
+                            // pair reloads inside the loop (the register pair
+                            // doubles as the desired pair on the match path),
+                            // both halves compare through CCMP, a mismatch
+                            // leaves through CLREX like the scalar form, and
+                            // the loop returns the old value pair like every
+                            // other atomic — the frontend owns the success
+                            // comparison and the expected write-back.
+                            if (indirect)
+                            {
+                                c_a64_load(&emitter, 10, instruction->operands[0]);
+                            }
+                            else
+                            {
+                                codegen_canonical_a64_base_address(&buffer, 10, 28, value_offsets[instruction->operands[0].value]);
+                            }
+                            bool pair_acquire =
+                                instruction->memory_order == IR_MEMORY_ORDER_CONSUME || instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE ||
+                                instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE_RELEASE || instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL ||
+                                instruction->failure_memory_order == IR_MEMORY_ORDER_CONSUME ||
+                                instruction->failure_memory_order == IR_MEMORY_ORDER_ACQUIRE ||
+                                instruction->failure_memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+                            bool pair_release = instruction->memory_order == IR_MEMORY_ORDER_RELEASE ||
+                                                instruction->memory_order == IR_MEMORY_ORDER_ACQUIRE_RELEASE ||
+                                                instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+                            u32 pair_retry_offset = (u32)buffer.count;
+                            a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, pair_acquire);
+                            c_a64_load(&emitter, 11, instruction->operands[1]);
+                            c_a64_load_high(&emitter, 12, instruction->operands[1]);
+                            // CMP X9, X11; CCMP X14, X12, #0, EQ — NE when either
+                            // half differs; the B.NE displacement patches once the
+                            // desired reloads below fix the loop's length.
+                            codegen_emit_u32(&buffer, UINT32_C(0xeb0b013f));
+                            codegen_emit_u32(&buffer, UINT32_C(0xfa4c01c0));
+                            u32 pair_mismatch_offset = (u32)buffer.count;
+                            codegen_emit_u32(&buffer, UINT32_C(0x54000001));
+                            c_a64_load(&emitter, 11, instruction->operands[2]);
+                            c_a64_load_high(&emitter, 12, instruction->operands[2]);
+                            a64_emit_atomic_exclusive_store_pair(&buffer, 13, 11, 12, 10, pair_release);
+                            a64_emit_exclusive_retry(&buffer, pair_retry_offset);
+                            codegen_canonical_a64_patch_local_branch(&buffer, pair_mismatch_offset, (u32)buffer.count, true);
+                            codegen_emit_u32(&buffer, UINT32_C(0xd5033f5f));
+                            c_a64_store(&emitter, 9, result_offset);
+                            c_a64_store_high(&emitter, 14, result_offset);
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         if (!value_type || (value_type->kind != IR_TYPE_INTEGER && value_type->kind != IR_TYPE_POINTER) || !value_type->layout.resolved ||
                             (value_type->layout.size != 1 && value_type->layout.size != 2 && value_type->layout.size != 4 && value_type->layout.size != 8))
                         {

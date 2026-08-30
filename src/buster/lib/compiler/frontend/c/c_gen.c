@@ -4259,7 +4259,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_temporary(CIntegerIrBuilder* builder, IrTy
    (#731): a three-byte record is four bytes aligned four so that one four-byte
    access covers it.  The widths the backends implement that access at are one,
    two, four and eight bytes everywhere, plus sixteen on x86-64 when `cx16`
-   gives them CMPXCHG16B -- see the IR_OPCODE_ATOMIC_LOAD and
+   gives them CMPXCHG16B and on AArch64 always, through the LDXP/STXP
+   exclusive-pair loops -- see the IR_OPCODE_ATOMIC_LOAD and
    IR_OPCODE_ATOMIC_STORE branches in codegen.c, which are where the aggregate
    forms are emitted; the machine selectors refuse the aggregate shapes and fall
    back to those.  Anything wider would need a `libatomic` lock, and there is
@@ -4278,7 +4279,9 @@ BUSTER_C_INTERNAL bool c_ir_atomic_aggregate_access_supported(CIntegerIrBuilder*
     if (unqualified && (unqualified->kind == IR_TYPE_STRUCT || unqualified->kind == IR_TYPE_UNION) && qualified->layout.resolved)
     {
         u64 width = qualified->layout.size;
-        bool wide_pair = width == 16 && builder->target.cpu_arch == CPU_ARCH_X86_64 && target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_CX16);
+        bool wide_pair = width == 16 && ((builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+                                          target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_CX16)) ||
+                                         builder->target.cpu_arch == CPU_ARCH_AARCH64);
         result = width == 1 || width == 2 || width == 4 || width == 8 || wide_pair;
     }
 

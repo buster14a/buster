@@ -7106,6 +7106,44 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(atomic_a64_aggregate_temporary);
     }
+    // The 128-bit integer fixture, cross-compiled to AArch64: its
+    // test_atomic_wide walks the whole sixteen-byte atomic vocabulary —
+    // store, load, every fetch-op, exchange, and both compare-exchange
+    // strengths — which the canonical AArch64 emitter lowers as LDXP/STXP
+    // exclusive-pair loops. qemu executes the loops, so a pair whose halves
+    // tore, a carry that missed the high half, or a compare that read one
+    // half would exit nonzero here rather than only compiling.
+    for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(aarch64_i128_allocators); allocator_index += 1)
+    {
+        TemporalArena int128_a64_temporary = scratch_begin(&arguments->arena, 1);
+        String8 int128_a64_path =
+            buster_test_temporary_path(int128_a64_temporary.arena, S8("buster-c-int128-a64"),
+                                       string_format(int128_a64_temporary.arena, S8("-{S8}.elf"), aarch64_i128_allocators[allocator_index]));
+        String8 int128_a64_command_line[] = {
+            S8("-target"),
+            S8("aarch64-unknown-linux-gnu"),
+            string_format(int128_a64_temporary.arena, S8("-fregister-allocator={S8}"), aarch64_i128_allocators[allocator_index]),
+            S8("-o"),
+            int128_a64_path,
+            S8("tests/basic_c_int128.c"),
+        };
+        CompilerDriverResult int128_a64 = compiler_driver_execute_invocation(
+            int128_a64_temporary.arena,
+            compiler_driver_parse_arguments(int128_a64_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(int128_a64_command_line)));
+        BUSTER_TEST(arguments, int128_a64.error == COMPILER_DRIVER_ERROR_NONE);
+        if (int128_a64.error == COMPILER_DRIVER_ERROR_NONE && aarch64_i128_qemu_available)
+        {
+            String8 int128_a64_run[] = {S8("qemu-aarch64"), int128_a64_path};
+            ProcessSpawnResult int128_a64_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(int128_a64_run), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, int128_a64_spawn.handle != 0);
+            if (int128_a64_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(int128_a64_temporary.arena, int128_a64_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(int128_a64_temporary);
+    }
     // `__attribute__((packed))` and `__attribute__((aligned(N)))` decide
     // object representation, so a compiler that parses and ignores them lays
     // out a different object than every other compiler on the target while

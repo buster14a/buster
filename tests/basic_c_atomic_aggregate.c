@@ -304,7 +304,10 @@ static int argument_round_trip(void)
            takes_operator(gives_operator(value_tagged)) && takes_union(gives_union(value_union)) && takes_six(gives_six(value_six));
 }
 
-#if defined(__x86_64__)
+/* x86-64 lowers these through the CMPXCHG16B pair, AArch64 through
+   LDXP/STXP exclusive-pair loops; both make the sixteen-byte shapes and
+   the promoted padding of `nine` observable. */
+#if defined(__x86_64__) || defined(__aarch64__)
 typedef struct
 {
     long long a, b;
