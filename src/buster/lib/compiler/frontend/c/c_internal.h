@@ -440,6 +440,8 @@ typedef enum CParseExpressionTypeOperation
     C_PARSE_EXPRESSION_TYPE_CONDITIONAL,
     C_PARSE_EXPRESSION_TYPE_UNARY,
     C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT,
+    C_PARSE_EXPRESSION_TYPE_INDIRECTION,
+    C_PARSE_EXPRESSION_TYPE_ADDRESS_OF,
 } CParseExpressionTypeOperation;
 
 typedef enum CTypeParseFrameKind
@@ -549,7 +551,6 @@ struct CTypeParseFrame
     bool has_function_suffix;
     bool original_type_valid;
     bool is_bit_field;
-    bool auto_conditional;
     bool scanning_inner_parameters;
     bool has_inner_parameters;
     bool inner_variadic;

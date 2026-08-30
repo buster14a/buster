@@ -7953,6 +7953,102 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestAr
     return result;
 }
 
+// `__typeof__` over a dereferenced conditional -- the shape musl's
+// <tgmath.h> selects a type with.  Every name below is a typedef rather than
+// an object because half of the answers are `void`, which is a legal typedef
+// and an illegal variable, and the point of the test is the type the walk
+// resolves rather than what a declaration then does with it.
+//
+// The walk had no unary `*` or `&` at all, so `*(double *)0` alone already
+// resolved to nothing, and its conditional merge compared type ids, so two
+// pointer arms of different types resolved to nothing as well.  A `typeof`
+// specifier that resolves to nothing declares no name at all, which is why
+// the reported error named the declared identifier and never the `typeof`.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("static double object;\n"
+                                               "typedef __typeof__(*(double *)0) from_cast;\n"
+                                               "typedef __typeof__(*(0 ? (double *)0 : (double *)0)) same_arms;\n"
+                                               "typedef __typeof__(*(0 ? (double *)0 : (void *)!(1))) selected_true;\n"
+                                               "typedef __typeof__(*(0 ? (double *)0 : (void *)!(0))) selected_false;\n"
+                                               "typedef __typeof__(*(0 ? (double *)0 : (char *)0)) mismatched;\n"
+                                               "typedef __typeof__(0 ? (double *)0 : (char *)0) mismatched_pointer;\n"
+                                               "typedef __typeof__(*(0 ? (const double *)0 : (double *)0)) qualified;\n"
+                                               "typedef __typeof__(&object) address;\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    struct
+    {
+        String8 name;
+        CTypeKind kind;
+        CTypeKind element_kind;
+    } expected[] = {
+        // A prefix `*` over a cast, with no conditional anywhere in it.
+        {S8("from_cast"), C_TYPE_DOUBLE, C_TYPE_VOID},
+        {S8("same_arms"), C_TYPE_DOUBLE, C_TYPE_VOID},
+        // C11 6.3.2.3p3: `(void *)!(1)` is an integer constant expression
+        // with the value 0 cast to `void *`, so it is a null pointer constant
+        // and the *other* arm names the type.  `(void *)!(0)` is `(void *)1`,
+        // which is not one, so the `void *` arm pulls the result to `void *`
+        // and the dereference is `void` -- the two halves of musl's
+        // `__type1(c,t)`.
+        {S8("selected_true"), C_TYPE_DOUBLE, C_TYPE_VOID},
+        {S8("selected_false"), C_TYPE_VOID, C_TYPE_VOID},
+        // Two object pointers whose elements are incompatible: clang reports
+        // -Wpointer-type-mismatch and still types the conditional as
+        // `void *`, so the dereference is `void`.
+        {S8("mismatched"), C_TYPE_VOID, C_TYPE_VOID},
+        {S8("mismatched_pointer"), C_TYPE_POINTER, C_TYPE_VOID},
+        // A qualifier on one arm's element does not change which element is
+        // selected.
+        {S8("qualified"), C_TYPE_DOUBLE, C_TYPE_VOID},
+        {S8("address"), C_TYPE_POINTER, C_TYPE_DOUBLE},
+    };
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
+    {
+        CEntityId name = C_ENTITY_ID_INVALID;
+        for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+        {
+            if (parse.entities[entity_index].kind == C_ENTITY_TYPEDEF && string_equal(parse.entities[entity_index].name, expected[expected_index].name))
+            {
+                name = (CEntityId){.value = entity_index};
+            }
+        }
+        BUSTER_TEST(arguments, name.value != C_ID_UNDERLYING_INVALID);
+        if (name.value < parse.entity_count)
+        {
+            CType* type = c_type_from_id(&parse, parse.entities[name.value].type);
+            BUSTER_TEST(arguments, type && type->kind == expected[expected_index].kind);
+            if (type && type->kind == C_TYPE_POINTER)
+            {
+                CType* element = c_type_from_id(&parse, type->element_type);
+                BUSTER_TEST(arguments, element && element->kind == expected[expected_index].element_kind);
+            }
+        }
+    }
+
+    // The same walk under `sizeof`, where the answer is a size rather than a
+    // declared name: a prefix `*` binds tighter than any binary operator, so
+    // the address is taken of the subscript alone and the `+ 1` steps it.
+    CPreprocessResult sizes = c_preprocess(temporary.arena,
+                                           S8("static int numbers[4];\n"
+                                              "_Static_assert(sizeof(*(0 ? (double *)0 : (void *)0)) == sizeof(double), \"selected\");\n"
+                                              "_Static_assert(sizeof(*(&numbers[1] + 1)) == sizeof(int), \"prefix binds tighter\");\n"
+                                              "_Static_assert(sizeof(0 ? (double *)0 : 0) == sizeof(double *), \"integer arm\");\n"),
+                                           (CPreprocessOptions){0});
+    CParseResult size_parse = c_parse(temporary.arena, sizes);
+    BUSTER_TEST(arguments, sizes.diagnostic_count == 0);
+    BUSTER_TEST(arguments, size_parse.diagnostic_count == 0);
+    scratch_end(temporary);
+    return result;
+}
+
 // A conditional with void branches is common in Lua's GC-barrier macros:
 // `iscollectable(v) ? luaC_objbarrier(...) : ((void)(0))`.  It has side
 // effects but no result place; lowering must not cast/store a synthetic value
@@ -12277,6 +12373,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_for_declaration_scopes(arguments));
     c_test_result_add(&result, c_test_then_nested_conditionals(arguments));
     c_test_result_add(&result, c_test_conditional_type_prediction(arguments));
+    c_test_result_add(&result, c_test_typeof_conditional_type(arguments));
     c_test_result_add(&result, c_test_conditional_void_expression(arguments));
     c_test_result_add(&result, c_test_conditional_comma_assignment(arguments));
     c_test_result_add(&result, c_test_pointer_width_integer_conversion(arguments));

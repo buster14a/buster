@@ -3303,6 +3303,39 @@ on a commit you already know is incomplete tells nobody anything.
   `c_parse_entity_kind_redeclares` in `c_parse.c` is what keeps this spelling
   and an ordinary prototype one entity, which in musl every published name
   has.
+- **A `typeof` operand is typed twice, by two engines, and both have to
+  answer.** `c_ir_sizeof_operand_type_attempt` in `c_gen.c` types the operand
+  of a `typeof` written in an *expression* -- a cast, a compound literal --
+  and `c_type_parse_sizeof_step` in `c_parse.c` types the one written as a
+  *declaration's specifier*, because the parse is what decides a declaration
+  exists at all. A specifier that resolves to nothing declares no name, so the
+  reported error is "use of undeclared identifier" at the first *use*, naming
+  neither the `typeof` nor its operand; a `typeof` bug reads as a missing
+  declaration (issue #760). The parse-side walk carried two gaps that the
+  gen-side one did not: no unary `*` or `&` at all -- so `__typeof__(*(double
+  *)0)` resolved to nothing, prefixes over a plain identifier chain being the
+  only ones `c_parse_direct_expression_type` handles -- and a conditional
+  merge that compared type ids, so two pointer arms of different types
+  resolved to nothing either. `c_parse_conditional_pointer_type` now applies
+  C11 6.5.15p6 in its own order, and both engines agree: a *null pointer
+  constant* on either side yields the other operand's type, and only if
+  neither is one does a `void *` operand pull an object pointer to `void *`.
+  Two object pointers with incompatible elements are what clang reports as
+  `-Wpointer-type-mismatch` and still types as `void *`, so
+  `*(0 ? (double *)0 : (char *)0)` is `void` and the declaration on it is
+  refused for an incomplete type -- clang's own diagnostic -- rather than
+  never being seen. `c_parse_range_is_null_pointer_constant` answers the
+  spelling half: it gates on the arm's type (integer, or pointer to `void` --
+  the constant walk strips casts, so without the gate `(double *)0` would
+  answer yes), strips leading pointer casts by shape, since a parenthesized
+  group whose last token is `*` is never a parenthesized expression, and folds
+  the rest through `c_parse_integer_constant_range` *machineless*, the caller
+  already being inside a type-parse frame. That composition is exactly musl's
+  `__type1(c,t)`/`__type2(c,t1,t2)`, whose outer cast is
+  `(__typeof__(...) *)` and whose machineless base-type reader cannot resolve
+  it -- hence the by-shape strip. `tests/basic_c_typeof_conditional.c` runs
+  both macros under all four allocators and
+  `c_test_typeof_conditional_type` pins the resolved types themselves.
 - **A failed call blames the call, not the declaration.** A direct call's
   callee token is not an identifier *use*: it resolves through the
   call-target index, so the parser records no binding for it and

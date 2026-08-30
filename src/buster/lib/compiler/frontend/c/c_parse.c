@@ -30,7 +30,10 @@
 //                                                 and bit-field layout
 //   c_parse_direct_expression_type ..             expression typing without
 //   c_parse_conditional_expression_type           lowering (usual arithmetic
-//                                                 conversions, precedence)
+//                                                 conversions, precedence,
+//                                                 and the null-pointer-
+//                                                 constant rule a conditional
+//                                                 picks a pointer type with)
 //   c_parse_static_assert_evaluate                _Static_assert, including
 //                                                 deferral past unresolved
 //                                                 array bounds
@@ -2481,8 +2484,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
 }
 
 BUSTER_C_INTERNAL CTypeId c_parse_auto_decay_type(CParseResult* result, CTypeId type);
-BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId left,
-                                                                CTypeId right);
+BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                                CTypeId left, CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end);
 
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
@@ -2680,6 +2683,31 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 };
                 continue;
             }
+            // Unary `*` and `&` are split here rather than beside the `+`/`-`
+            // prefixes above because both spellings are also binary operators:
+            // the scan that just finished is what proves this one is the
+            // outermost operator, so `&x + 1` still splits at the `+` and only
+            // then takes the address.  The leaf below resolves a prefix over a
+            // plain identifier chain by itself, but nothing else -- so
+            // `__typeof__(*(double *)0)` and every `__typeof__` over a
+            // dereferenced conditional resolved to no type at all, and a
+            // declaration written on one declared nothing.
+            if (c_token_is_punctuator(&first, C_PUNCTUATOR_STAR) || c_token_is_punctuator(&first, C_PUNCTUATOR_AMPERSAND))
+            {
+                task->operation = c_token_is_punctuator(&first, C_PUNCTUATOR_STAR) ? C_PARSE_EXPRESSION_TYPE_INDIRECTION
+                                                                                   : C_PARSE_EXPRESSION_TYPE_ADDRESS_OF;
+                task->state = 1;
+                if (task_count >= capacity)
+                {
+                    last = C_TYPE_ID_INVALID;
+                    break;
+                }
+                tasks[task_count++] = (CParseExpressionTypeTask){
+                    .start = task->start + 1,
+                    .end = task->end,
+                };
+                continue;
+            }
             frame->task_count = task_count;
             frame->type = last;
             frame->stage = C_TYPE_PARSE_STAGE_CHILD;
@@ -2714,6 +2742,29 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 last = (c_parse_expression_integer_kind(kind) || kind == C_TYPE_FLOAT || kind == C_TYPE_DOUBLE || kind == C_TYPE_LONG_DOUBLE)
                            ? c_parse_expression_scalar_type(result, kind)
                            : C_TYPE_ID_INVALID;
+            }
+            task_count -= 1;
+            continue;
+        }
+        if (task->operation == C_PARSE_EXPRESSION_TYPE_INDIRECTION || task->operation == C_PARSE_EXPRESSION_TYPE_ADDRESS_OF)
+        {
+            if (last.value >= result->type_count)
+            {
+                last = C_TYPE_ID_INVALID;
+            }
+            else if (task->operation == C_PARSE_EXPRESSION_TYPE_ADDRESS_OF)
+            {
+                last = c_parse_add_type(result, (CType){
+                                                    .element_type = last,
+                                                    .return_type = C_TYPE_ID_INVALID,
+                                                    .array_bound = C_ARRAY_BOUND_INVALID,
+                                                    .kind = C_TYPE_POINTER,
+                                                });
+            }
+            else
+            {
+                CType* pointer = result->types + last.value;
+                last = pointer->kind == C_TYPE_POINTER || pointer->kind == C_TYPE_ARRAY ? pointer->element_type : C_TYPE_ID_INVALID;
             }
             task_count -= 1;
             continue;
@@ -2792,31 +2843,19 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         break;
         case C_PARSE_EXPRESSION_TYPE_CONDITIONAL:
         {
-            if (frame->auto_conditional)
-            {
-                last = c_parse_conditional_expression_type(arena, preprocess, result, left, right);
-            }
-            else if (left.value == right.value || (left_type->kind == right_type->kind && left_type->kind != C_TYPE_POINTER))
-            {
-                last = left;
-            }
-            else if (left_type->kind == C_TYPE_POINTER && right_type->kind == C_TYPE_NULLPTR)
-            {
-                last = left;
-            }
-            else if (right_type->kind == C_TYPE_POINTER && left_type->kind == C_TYPE_NULLPTR)
-            {
-                last = right;
-            }
-            else
-            {
-                last = c_parse_expression_arithmetic_type(result, preprocess.target, left, right);
-            }
+            // The arms' token ranges travel with the type ids because C
+            // resolves two mismatched pointer operands by *spelling*: an
+            // operand that is a null pointer constant yields the other one's
+            // type, and only the ranges can say whether one is.
+            last = c_parse_conditional_expression_type(arena, preprocess, result, scope, left, right, task->split + 1, task->colon, task->colon + 1,
+                                                       task->end);
         }
         break;
         case C_PARSE_EXPRESSION_TYPE_NONE:
         case C_PARSE_EXPRESSION_TYPE_UNARY:
         case C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT:
+        case C_PARSE_EXPRESSION_TYPE_INDIRECTION:
+        case C_PARSE_EXPRESSION_TYPE_ADDRESS_OF:
         {
             last = C_TYPE_ID_INVALID;
         }
@@ -2833,7 +2872,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
 }
 
 BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                       CScopeId scope, u32 start, u32 end, bool auto_conditional, CTypeId* type_out)
+                                                       CScopeId scope, u32 start, u32 end, CTypeId* type_out)
 {
     u32 frame_start = machine->frame_count;
     CParseResult checkpoint = *result;
@@ -2848,7 +2887,6 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
                                               .start = start,
                                               .end = end,
                                               .kind = C_TYPE_PARSE_FRAME_SIZEOF,
-                                              .auto_conditional = auto_conditional,
                                           });
     if (pushed)
     {
@@ -2867,7 +2905,7 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_expression_type(CTypeParseMachine* machine
                                                         CScopeId scope, u32 start, u32 end,
                                                         CTypeId* type_out)
 {
-    return c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, false, type_out);
+    return c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, type_out);
 }
 
 
@@ -3157,6 +3195,61 @@ BUSTER_C_INTERNAL bool c_parse_integer_constant_range(CTypeParseMachine* machine
                                               .token_count = expression_count + 4,
                                           },
                                           scope, value_out, &ignored_message);
+}
+
+// C11 6.3.2.3p3 gives a null pointer constant two spellings: an integer
+// constant expression with the value 0, or such an expression cast to
+// `void *`.  The second is the only one that survives as a conditional
+// operand, and it is what musl's <tgmath.h> selects a type with --
+// `0 ? (t *)0 : (void *)!(c)` names `t` exactly when the `void *` arm is one.
+//
+// The type gate is not a shortcut, it is the whole correctness of the answer:
+// the constant walk below strips every cast before evaluating, so
+// `(double *)0` folds to zero just as `(void *)0` does, and without the gate
+// any zero-valued pointer cast would claim to be a null pointer constant.
+// The walk is entered machineless -- the caller is already inside a type-parse
+// frame -- so an operand whose value needs the machine (a `sizeof` over a type
+// only a frame can resolve) simply answers no, which is the conservative half.
+BUSTER_C_INTERNAL bool c_parse_range_is_null_pointer_constant(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                                CTypeId type_id, u32 start, u32 end)
+{
+    type_id = c_parse_unqualified_type(result, type_id);
+    bool constant = false;
+    if (type_id.value < result->type_count && start < end)
+    {
+        // By value: c_parse_unqualified_type may append a type and move the
+        // table out from under a borrowed row.
+        CType type = result->types[type_id.value];
+        bool void_pointer = false;
+        if (type.kind == C_TYPE_POINTER)
+        {
+            CTypeId element = c_parse_unqualified_type(result, type.element_type);
+            void_pointer = element.value < result->type_count && result->types[element.value].kind == C_TYPE_VOID;
+        }
+        if (void_pointer || c_parse_expression_integer_kind(type.kind))
+        {
+            // Strip the pointer casts in front of the constant by shape, not
+            // by resolving them: a parenthesized group whose last token is
+            // `*` is never a parenthesized expression, so it can only be a
+            // pointer cast.  The walk below resolves a cast type of its own,
+            // but only through the machineless base-type reader, which cannot
+            // read the `(__typeof__(...) *)` musl's `__type2` writes around
+            // its inner `__type1` -- and one unstripped cast is the whole
+            // answer, because the operand it hides is the literal `0`.
+            while (start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 close = c_parse_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                if (close + 1 >= end || close < start + 2 || !c_token_is_punctuator(&preprocess.tokens[close - 1], C_PUNCTUATOR_STAR))
+                {
+                    break;
+                }
+                start = close + 1;
+            }
+            u64 value = 0;
+            constant = c_parse_integer_constant_range(0, arena, preprocess, result, scope, start, end, &value) && !value;
+        }
+    }
+    return constant;
 }
 
 BUSTER_C_INTERNAL bool c_parse_static_assert_has_unresolved_array(CPreprocessResult preprocess, CParseResult* result, CDeclaration declaration, CScopeId scope)
@@ -4167,7 +4260,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_value_is_aggregate_expression(CTypePa
                                                                            CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
     CTypeId expression_type = C_TYPE_ID_INVALID;
-    if (!c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, false, &expression_type) ||
+    if (!c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, &expression_type) ||
         expression_type.value >= result->type_count)
     {
         return false;
@@ -10212,8 +10305,83 @@ BUSTER_C_SHARED void c_parse_validate_unattached_cleanup_attributes(CParseResult
     }
 }
 
-BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId left,
-                                                                CTypeId right)
+// C11 6.5.15p6 resolves a conditional whose arms are not both arithmetic in
+// one order, and the order is what the GNU `typeof` idiom selects a type
+// with: a *null pointer constant* on either side yields the other operand's
+// type, and only if neither is one does a `void *` operand pull an object
+// pointer to `void *`.  That is the whole of musl's <tgmath.h> --
+// `0 ? (t *)0 : (void *)!(c)` names `t` when `c` holds and `void` when it does
+// not -- so the arms arrive as token ranges, not just as type ids.
+//
+// Elements that are compatible compose, carrying the union of both arms'
+// qualifiers.  Elements that are not are the case clang reports as
+// -Wpointer-type-mismatch and still types as `void *`; answering `void *`
+// rather than nothing is what makes `*(0 ? (double *)0 : (char *)0)` resolve
+// to `void`, so a declaration written on it is rejected for an incomplete
+// type -- clang's own diagnostic -- instead of never being seen as a
+// declaration at all.
+BUSTER_C_INTERNAL CTypeId c_parse_conditional_pointer_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, CTypeId left,
+                                                             CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end)
+{
+    CType left_value = result->types[left.value];
+    CType right_value = result->types[right.value];
+    bool left_pointer = left_value.kind == C_TYPE_POINTER;
+    bool right_pointer = right_value.kind == C_TYPE_POINTER;
+    bool left_null = c_parse_range_is_null_pointer_constant(arena, preprocess, result, scope, left, left_start, left_end);
+    bool right_null = c_parse_range_is_null_pointer_constant(arena, preprocess, result, scope, right, right_start, right_end);
+    CTypeId type = C_TYPE_ID_INVALID;
+    if (left_pointer && right_null)
+    {
+        type = left;
+    }
+    else if (right_pointer && left_null)
+    {
+        type = right;
+    }
+    else if (left_pointer && right_pointer)
+    {
+        CTypeId left_element = c_parse_unqualified_type(result, left_value.element_type);
+        CTypeId right_element = c_parse_unqualified_type(result, right_value.element_type);
+        if (left_element.value >= result->type_count || right_element.value >= result->type_count)
+        {
+            type = C_TYPE_ID_INVALID;
+        }
+        else
+        {
+            CType left_element_value = result->types[left_element.value];
+            CType right_element_value = result->types[right_element.value];
+            bool void_compatible = (left_element_value.kind == C_TYPE_VOID && right_element_value.kind != C_TYPE_FUNCTION) ||
+                                   (right_element_value.kind == C_TYPE_VOID && left_element_value.kind != C_TYPE_FUNCTION);
+            bool element_compatible = void_compatible || c_parse_types_compatible(arena, result, preprocess, left_element, right_element);
+            CTypeId element = left_element_value.kind == C_TYPE_VOID ? left_element : right_element_value.kind == C_TYPE_VOID ? right_element : left_element;
+            CType element_qualifiers = {
+                .is_const = result->types[left_value.element_type.value].is_const || result->types[right_value.element_type.value].is_const,
+                .is_volatile = result->types[left_value.element_type.value].is_volatile || result->types[right_value.element_type.value].is_volatile,
+                .is_restrict = result->types[left_value.element_type.value].is_restrict || result->types[right_value.element_type.value].is_restrict,
+                .is_atomic = result->types[left_value.element_type.value].is_atomic || result->types[right_value.element_type.value].is_atomic,
+            };
+            if (!element_compatible)
+            {
+                element = c_parse_expression_scalar_type(result, C_TYPE_VOID);
+                element_qualifiers = (CType){0};
+            }
+            if (element_qualifiers.is_const || element_qualifiers.is_volatile || element_qualifiers.is_restrict || element_qualifiers.is_atomic)
+            {
+                element = c_parse_add_qualified_type(result, element, element_qualifiers);
+            }
+            type = c_parse_add_type(result, (CType){
+                                                .element_type = element,
+                                                .return_type = C_TYPE_ID_INVALID,
+                                                .array_bound = C_ARRAY_BOUND_INVALID,
+                                                .kind = C_TYPE_POINTER,
+                                            });
+        }
+    }
+    return type;
+}
+
+BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+                                                                CTypeId left, CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end)
 {
     left = c_parse_auto_decay_type(result, left);
     right = c_parse_auto_decay_type(result, right);
@@ -10231,40 +10399,12 @@ BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPre
     {
         return left;
     }
-    if (left_value.kind == C_TYPE_POINTER && right_value.kind == C_TYPE_POINTER)
+    // The pointer rules need the arms' spellings and the arithmetic ones do
+    // not, so the constant walk they rest on runs only when an arm is a
+    // pointer -- `condition ? 1 : 2` never pays for it.
+    if (left_value.kind == C_TYPE_POINTER || right_value.kind == C_TYPE_POINTER)
     {
-        CTypeId left_element = c_parse_unqualified_type(result, left_value.element_type);
-        CTypeId right_element = c_parse_unqualified_type(result, right_value.element_type);
-        if (left_element.value >= result->type_count || right_element.value >= result->type_count)
-        {
-            return C_TYPE_ID_INVALID;
-        }
-        CType left_element_value = result->types[left_element.value];
-        CType right_element_value = result->types[right_element.value];
-        bool void_compatible = (left_element_value.kind == C_TYPE_VOID && right_element_value.kind != C_TYPE_FUNCTION) ||
-                               (right_element_value.kind == C_TYPE_VOID && left_element_value.kind != C_TYPE_FUNCTION);
-        bool element_compatible = void_compatible || c_parse_types_compatible(arena, result, preprocess, left_element, right_element);
-        if (!element_compatible)
-        {
-            return C_TYPE_ID_INVALID;
-        }
-        CTypeId element = left_element_value.kind == C_TYPE_VOID ? left_element : right_element_value.kind == C_TYPE_VOID ? right_element : left_element;
-        CType element_qualifiers = {
-            .is_const = result->types[left_value.element_type.value].is_const || result->types[right_value.element_type.value].is_const,
-            .is_volatile = result->types[left_value.element_type.value].is_volatile || result->types[right_value.element_type.value].is_volatile,
-            .is_restrict = result->types[left_value.element_type.value].is_restrict || result->types[right_value.element_type.value].is_restrict,
-            .is_atomic = result->types[left_value.element_type.value].is_atomic || result->types[right_value.element_type.value].is_atomic,
-        };
-        if (element_qualifiers.is_const || element_qualifiers.is_volatile || element_qualifiers.is_restrict || element_qualifiers.is_atomic)
-        {
-            element = c_parse_add_qualified_type(result, element, element_qualifiers);
-        }
-        return c_parse_add_type(result, (CType){
-                                                .element_type = element,
-                                                .return_type = C_TYPE_ID_INVALID,
-                                                .array_bound = C_ARRAY_BOUND_INVALID,
-                                                .kind = C_TYPE_POINTER,
-                                            });
+        return c_parse_conditional_pointer_type(arena, preprocess, result, scope, left, right, left_start, left_end, right_start, right_end);
     }
     if (left_value.kind == right_value.kind &&
         (left_value.kind == C_TYPE_STRUCT || left_value.kind == C_TYPE_UNION || left_value.kind == C_TYPE_ENUM))
@@ -11116,7 +11256,7 @@ BUSTER_C_INTERNAL bool c_parse_auto_initializer_type(CTypeParseMachine* machine,
                                                        CScopeId scope, u32 start, u32 end, CTypeId* type_out)
 {
     CTypeId type = C_TYPE_ID_INVALID;
-    if (start >= end || !c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, true, &type))
+    if (start >= end || !c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, &type))
     {
         return false;
     }

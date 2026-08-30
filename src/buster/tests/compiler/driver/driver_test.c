@@ -6761,6 +6761,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_null_pointer_offsetof.c"),
         S8("tests/basic_c_created_nan_sign.c"),
         S8("tests/basic_c_static_compound_literal.c"),
+        S8("tests/basic_c_typeof_conditional.c"),
     };
     String8 c_musl_shape_fixture_names[] = {
         S8("buster-c-reversed-subscript"),
@@ -6775,6 +6776,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-null-pointer-offsetof"),
         S8("buster-c-created-nan-sign"),
         S8("buster-c-static-compound-literal"),
+        S8("buster-c-typeof-conditional"),
     };
     String8 c_musl_shape_allocator_flags[] = {
         S8("-fregister-allocator=none"),
