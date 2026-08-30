@@ -160,6 +160,13 @@ Three layers: `./build.sh` bootstraps `build/build` from `build.c` using
 **tcc**, which then drives CMake + ninja (multi-config, outputs in
 `build/<Config>/`).
 
+The narrow, supplementary GitHub-hosted privacy broker is the only bootstrap
+exception: its fresh hosted images compile `build.c` with the preinstalled
+Clang so the broker neither downloads an unpinned compiler before receiving
+source nor depends on TCC where modern macOS cannot run it. It never produces a
+trusted or reusable compiler artifact; canonical local and Forgejo workflows
+continue to bootstrap with TCC.
+
 Keep build orchestration and policy in `build.c`, with the least practical
 process-launch and scripting overhead. Shell and PowerShell scripts exist only
 to bootstrap `build/build`; do not grow them into build systems. Use CMake only
@@ -2089,9 +2096,14 @@ compilation is explicitly enabled.
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
-- CI is defined under `.forgejo/`, not GitHub. Preserve Debug/Release,
+- CI is defined under `.forgejo/`; Forgejo remains the source of truth. The
+  opt-in GitHub-hosted desktop capacity uses the source-free broker template in
+  `.forgejo/github-bridge/`, not a repository mirror. Preserve Debug/Release,
   unity/non-unity, sanitizer/fuzz, self-host, and supported-platform coverage
-  when changing build orchestration or the compiler pipeline.
+  when changing build orchestration or the compiler pipeline. Do not add source
+  mirroring, Actions artifacts/caches, durable GitHub-side credentials, verbose
+  broker logs, or untrusted-PR triggers to the broker; see
+  `docs/ci-github-hosted-runners.md`.
 
 ## Benchmarking and diagnostics
 
@@ -2432,8 +2444,11 @@ cross-reference each other by them — and stay as written.
 
 ## Forge, issues, and pull requests
 
-The forge is Forgejo at `https://code.buster14a.com/buster/buster`, not GitHub;
-CI lives under `.forgejo/`. Talk to it with **`fj`**, the Forgejo CLI. It reads
+The forge and source of truth are Forgejo at
+`https://code.buster14a.com/buster/buster`, not GitHub; CI lives under
+`.forgejo/`. A private workflow-only GitHub broker may supply opt-in hosted
+desktop runners as documented in `docs/ci-github-hosted-runners.md`, but it is
+never a source mirror. Talk to Forgejo with **`fj`**, the Forgejo CLI. It reads
 the repository from the git remote, so run it from inside a checkout (or pass
 `-C <path>` / `-r buster/buster`).
 
@@ -3913,7 +3928,7 @@ Top level:
 | `src/buster/tests/` | In-process unit/module tests. |
 | `tests/` | C frontend, driver, object/archive, fuzz, and CI-script fixtures. |
 | `tools/` | Python generators, scanners, and measurement scripts run by hand; outside the build graph. |
-| `.forgejo/` | Forgejo CI workflows and scripts. |
+| `.forgejo/` | Forgejo CI workflows/scripts and the source-free GitHub broker workflow template. |
 | `PERFORMANCE_AUDITS.md` | Index of the append-only measurement history; one line per audit. |
 | `docs/performance-audits/` | One file per audit, named for its id; older entries may describe components that no longer exist. |
 | `WASM64.md` | Direct core Wasm64 target contract and usage. |

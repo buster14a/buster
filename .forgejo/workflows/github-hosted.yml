@@ -1,0 +1,38 @@
+name: GitHub hosted desktop matrix
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  bridge:
+    name: Privacy bridge
+    if: ${{ vars.GH_HOSTED_RUNNERS_ENABLED == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: x86_64-linux
+    timeout-minutes: 150
+    steps:
+      - name: Checkout trusted dispatcher
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Dispatch and wait for GitHub-hosted runners
+        shell: bash
+        env:
+          FORGEJO_SHA: ${{ github.sha }}
+          GITHUB_BRIDGE_REPOSITORY: ${{ vars.GH_BRIDGE_REPOSITORY }}
+          GITHUB_BRIDGE_WORKFLOW: ${{ vars.GH_BRIDGE_WORKFLOW }}
+          GITHUB_BRIDGE_REF: ${{ vars.GH_BRIDGE_REF }}
+          GITHUB_BRIDGE_TOKEN: ${{ secrets.GH_BRIDGE_TOKEN }}
+          FORGEJO_BRIDGE_REPOSITORY: ${{ vars.GH_BRIDGE_FORGEJO_REPOSITORY }}
+          FORGEJO_BRIDGE_API_URL: ${{ vars.GH_BRIDGE_FORGEJO_API_URL }}
+          FORGEJO_BRIDGE_TOKEN: ${{ secrets.GH_BRIDGE_FORGEJO_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 .forgejo/scripts/github_runner_bridge.py \
+            --github-repository "$GITHUB_BRIDGE_REPOSITORY" \
+            --workflow "${GITHUB_BRIDGE_WORKFLOW:-forgejo-hosted.yml}" \
+            --ref "${GITHUB_BRIDGE_REF:-main}" \
+            --sha "$FORGEJO_SHA" \
+            --forgejo-repository "${FORGEJO_BRIDGE_REPOSITORY:-buster/buster}" \
+            --forgejo-api-url "${FORGEJO_BRIDGE_API_URL:-https://code.buster14a.com/api/v1}" \
+            --timeout-seconds 7500
