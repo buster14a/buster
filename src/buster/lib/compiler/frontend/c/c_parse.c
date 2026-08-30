@@ -3283,12 +3283,24 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
                 literal_close = initializer_close < expression_end ? initializer_close : UINT32_MAX;
             }
             u32 type_index = type_start;
+            // A lone identifier the assertion's scope binds to an object is
+            // that object, whatever typedef shares the spelling further out:
+            // ctypes declares `typedef PyObject *string;` at file scope and
+            // then asserts over a local `char string[256]`, and the type
+            // interpretation must lose to the shadow before it runs.
+            bool shadowed_object = false;
+            if (type_start + 1 == type_end && preprocess.tokens[type_start].kind == C_TOKEN_IDENTIFIER)
+            {
+                CEntityId shadow_entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[type_start]);
+                shadowed_object = shadow_entity.value < result->entity_count && result->entities[shadow_entity.value].kind != C_ENTITY_TYPEDEF;
+            }
             // The machineless half already resolves in the assertion's scope;
             // the machine half has to as well, or a block-local typedef
             // shadowing an outer name of the same spelling sizes the outer
             // type.
-            CTypeId type = machine ? c_parse_scalar_type_in_scope(machine, result, preprocess, scope, type_start, type_end, &type_index)
-                                   : c_parse_machineless_base_type(result, preprocess, scope, type_start, type_end, &type_index);
+            CTypeId type = shadowed_object ? C_TYPE_ID_INVALID
+                           : machine       ? c_parse_scalar_type_in_scope(machine, result, preprocess, scope, type_start, type_end, &type_index)
+                                           : c_parse_machineless_base_type(result, preprocess, scope, type_start, type_end, &type_index);
             if (type.value != C_ID_UNDERLYING_INVALID)
             {
                 type = c_parse_pointer_chain(result, preprocess, type, &type_index, type_end);
