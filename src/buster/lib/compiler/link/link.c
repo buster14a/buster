@@ -24,6 +24,15 @@
 // synthesizes no stub at all — LC_MAIN hands the entry point to dyld, which
 // already calls `exit` with what it returns.
 //
+// `__attribute__((constructor))` follows the same split. A writer with an
+// entry stub calls the registered functions from it and takes the two array
+// sections off the object first (link_initializer_plan_build), because every
+// writer places every non-debug section it is given. Mach-O has no stub and
+// needs none: it keeps `__DATA,__mod_init_func` and `__mod_term_func`, gives
+// each a section command of the type dyld dispatches on, and lets the loader
+// call the entries. The UEFI writer has neither a stub nor such a loader and
+// refuses the link; link_initializer_plan_empty is that refusal.
+//
 // A second rule crosses the dynamic ELF writers: imported data reaches a
 // non-PIE executable through a copy relocation, and the slot that relocation
 // fills stands for the shared library's object, not for the name the program
@@ -2730,14 +2739,16 @@ BUSTER_GLOBAL_LOCAL bool link_elf_symbol_needs_dynamic_import(NativeExecutableLi
     return symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(options, symbol, true);
 }
 
-// The writers that place an image but do not synthesize an entry point of
-// their own -- Mach-O, whose LC_MAIN hands `main` straight to dyld, and the
-// UEFI writer, whose entry is the firmware's -- have nowhere to put the
-// initializer sequence.  They still have to take the arrays off the object,
-// because every writer places every non-debug section it is given and a
-// section with no offset of its own would be written over the image header;
-// what they must not do is drop them silently, which is the state issue 771
-// found the whole attribute in.  A refusal names the gap instead.
+// The UEFI writer places an image but synthesizes no entry point of its own
+// -- the entry is the firmware's call to the application, with the image
+// handle and the system table in the argument registers -- so it has nowhere
+// to put the initializer sequence, and no loader that would walk the arrays
+// on its behalf the way dyld walks the Mach-O writer's.  It still has to take
+// the arrays off the object, because every writer places every non-debug
+// section it is given and a section with no offset of its own would be
+// written over the image header; what it must not do is drop them silently,
+// which is the state issue 771 found the whole attribute in.  A refusal names
+// the gap instead (issue 779).
 BUSTER_GLOBAL_LOCAL bool link_initializer_plan_empty(LinkInitializerPlan const* plan)
 {
     return !plan->constructor_count && !plan->destructor_count;
@@ -6594,7 +6605,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
     }
     // A UEFI application's entry point is the firmware's call to the image,
     // and this writer synthesizes no stub of its own to run initializers
-    // before it.  See link_initializer_plan_empty.
+    // before it.  Unlike the Mach-O writer -- which hands the arrays to dyld,
+    // a loader that already knows to call them -- there is no third party
+    // here: a firmware image has no C runtime, and its entry takes the image
+    // handle and the system table, so a stub would have to forward both into
+    // `UefiMain` after calling the constructors.  That stub is deliberately
+    // not built (issue 779): EDK2 firmware drives its own constructor
+    // protocol rather than the GNU attribute, so a refusal that names the
+    // function is a better answer here than a startup sequence no firmware
+    // program asked for.  See link_initializer_plan_empty.
     if (!link_initializer_plan_empty(&plan))
     {
         result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
@@ -7700,6 +7719,19 @@ BUSTER_GLOBAL_LOCAL u64 link_uleb128_write(u8* bytes, u64 offset, u64 value)
     return offset;
 }
 
+// The `align` field of a section command is the power of two, not the
+// alignment itself.
+BUSTER_GLOBAL_LOCAL u32 link_mach_alignment_power(u32 alignment)
+{
+    u32 result = 0;
+    for (u32 remaining = alignment; remaining > 1; remaining >>= 1)
+    {
+        result += 1;
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void link_mach_section_write(u8* bytes, u64 offset, char const* section_name, char const* segment_name, u64 address, u64 size,
                                                  u32 file_offset, u32 alignment, u32 flags, u32 reserved1, u32 reserved2)
 {
@@ -7747,27 +7779,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     {
         result.error = LINK_ERROR_INVALID_INPUT;
     }
-    ObjectFile stripped_object = {0};
-    LinkInitializerPlan plan = {0};
+    // LC_MAIN hands `main` straight to dyld, so this writer has no entry stub
+    // of its own to call initializers from -- and needs none.  dyld runs the
+    // main executable's `__DATA,__mod_init_func` before it enters `main` and
+    // its `__mod_term_func` in reverse on the way out, which is the same
+    // convention the two array sections already carry, so this writer keeps
+    // them and gives each a section command instead of taking them off the
+    // object the way the entry-stub writers do.  See
+    // link_initializer_plan_empty for the writers that still refuse.
+    bool has_initializer_array = false;
     if (result.error == LINK_ERROR_NONE)
     {
-        if (!link_initializer_plan_build(arena, object, &stripped_object, &plan))
-        {
-            result.error = LINK_ERROR_INVALID_INPUT;
-        }
-        // LC_MAIN hands `main` straight to dyld, so this writer has no entry
-        // stub of its own to run the initializers from, and it does not yet
-        // build the `__DATA,__mod_init_func` section dyld would run them out
-        // of instead.  See link_initializer_plan_empty.
-        else if (!link_initializer_plan_empty(&plan))
-        {
-            result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
-            result.symbol = link_initializer_plan_first_name(object, &plan);
-        }
-        else
-        {
-            object = &stripped_object;
-        }
+        has_initializer_array = object->sections[OBJECT_SECTION_INIT_ARRAY].data.length != 0;
+    }
+    bool has_terminator_array = false;
+    if (result.error == LINK_ERROR_NONE)
+    {
+        has_terminator_array = object->sections[OBJECT_SECTION_FINI_ARRAY].data.length != 0;
     }
     if (result.error == LINK_ERROR_NONE)
     {
@@ -7859,10 +7887,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
             result.symbol = entry_name;
         }
     }
+    u32 initializer_section_count = 0;
+    if (result.error == LINK_ERROR_NONE)
+    {
+        initializer_section_count = (has_initializer_array ? 1u : 0u) + (has_terminator_array ? 1u : 0u);
+    }
     u32 data_section_count = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        data_section_count = 4 + (thread_local_count ? 3 : 0);
+        data_section_count = 4u + (thread_local_count ? 3u : 0u) + initializer_section_count;
     }
     u64 data_command_size = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -7978,8 +8011,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     {
         data_file_offset = align_forward(text_end, MACH_PAGE_SIZE);
         section_offsets[OBJECT_SECTION_DATA] = data_file_offset;
-        section_offsets[OBJECT_SECTION_READ_ONLY_DATA] =
+        // The two initializer arrays sit beside __data in __DATA: dyld walks
+        // them out of a writable segment and rebases every entry there, and a
+        // section this writer laid out nowhere would be copied over the image
+        // header at offset zero.
+        section_offsets[OBJECT_SECTION_INIT_ARRAY] =
             align_forward(section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length,
+                          object->sections[OBJECT_SECTION_INIT_ARRAY].alignment);
+        section_offsets[OBJECT_SECTION_FINI_ARRAY] =
+            align_forward(section_offsets[OBJECT_SECTION_INIT_ARRAY] + object->sections[OBJECT_SECTION_INIT_ARRAY].data.length,
+                          object->sections[OBJECT_SECTION_FINI_ARRAY].alignment);
+        section_offsets[OBJECT_SECTION_READ_ONLY_DATA] =
+            align_forward(section_offsets[OBJECT_SECTION_FINI_ARRAY] + object->sections[OBJECT_SECTION_FINI_ARRAY].data.length,
                           object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
     }
     u64 got_offset = 0;
@@ -8129,6 +8172,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 {
                     segment_index = relocation->section == OBJECT_SECTION_DATA || relocation->section == OBJECT_SECTION_ZERO ||
                                                relocation->section == OBJECT_SECTION_READ_ONLY_DATA ||
+                                               relocation->section == OBJECT_SECTION_INIT_ARRAY || relocation->section == OBJECT_SECTION_FINI_ARRAY ||
                                                relocation->section == OBJECT_SECTION_THREAD_LOCAL_DATA || relocation->section == OBJECT_SECTION_THREAD_LOCAL_ZERO
                                            ? 2
                                            : 1;
@@ -8874,6 +8918,25 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         link_write_u32(bytes, command + 64, data_section_count);
         link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE, "__data", "__DATA", data_vm_address, object->sections[OBJECT_SECTION_DATA].data.length,
                                 (u32)data_file_offset, 3, 0, 0, 0);
+        // S_MOD_INIT_FUNC_POINTERS and S_MOD_TERM_FUNC_POINTERS: the section
+        // type is the whole contract, because it is what makes dyld call the
+        // pointers rather than merely map them.
+        u32 initializer_section_index = 1;
+        if (has_initializer_array)
+        {
+            link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + (u64)initializer_section_index * MACH_SECTION_SIZE, "__mod_init_func", "__DATA",
+                                    image_base + section_offsets[OBJECT_SECTION_INIT_ARRAY], object->sections[OBJECT_SECTION_INIT_ARRAY].data.length,
+                                    (u32)section_offsets[OBJECT_SECTION_INIT_ARRAY],
+                                    link_mach_alignment_power(object->sections[OBJECT_SECTION_INIT_ARRAY].alignment), 0x9, 0, 0);
+            initializer_section_index += 1;
+        }
+        if (has_terminator_array)
+        {
+            link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + (u64)initializer_section_index * MACH_SECTION_SIZE, "__mod_term_func", "__DATA",
+                                    image_base + section_offsets[OBJECT_SECTION_FINI_ARRAY], object->sections[OBJECT_SECTION_FINI_ARRAY].data.length,
+                                    (u32)section_offsets[OBJECT_SECTION_FINI_ARRAY],
+                                    link_mach_alignment_power(object->sections[OBJECT_SECTION_FINI_ARRAY].alignment), 0xa, 0, 0);
+        }
     }
     u32 read_only_alignment_power = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -8883,20 +8946,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         {
             read_only_alignment_power += 1;
         }
-        link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + MACH_SECTION_SIZE, "__const", "__DATA",
+        // Every section after __data is displaced by however many initializer
+        // arrays this image carries; the section commands must stay in the
+        // order the file lays the sections out in.
+        link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + (1 + (u64)initializer_section_count) * MACH_SECTION_SIZE, "__const", "__DATA",
                                 image_base + section_offsets[OBJECT_SECTION_READ_ONLY_DATA], object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length,
                                 (u32)section_offsets[OBJECT_SECTION_READ_ONLY_DATA],
                                 read_only_alignment_power, 0, 0, 0);
-        link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + 2 * MACH_SECTION_SIZE, "__got", "__DATA", image_base + got_offset, got_count * sizeof(u64),
-                                (u32)got_offset, 3, 0, 0, 0);
+        link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + (2 + (u64)initializer_section_count) * MACH_SECTION_SIZE, "__got", "__DATA",
+                                image_base + got_offset, got_count * sizeof(u64), (u32)got_offset, 3, 0, 0, 0);
         if (thread_local_count)
         {
-            link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + 3 * MACH_SECTION_SIZE, "__thread_vars", "__DATA",
+            link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + (3 + (u64)initializer_section_count) * MACH_SECTION_SIZE, "__thread_vars", "__DATA",
                                     image_base + thread_local_variables_offset, thread_local_variables_size, (u32)thread_local_variables_offset, 3, 0x13, 0, 0);
-            link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + 4 * MACH_SECTION_SIZE, "__thread_data", "__DATA",
+            link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + (4 + (u64)initializer_section_count) * MACH_SECTION_SIZE, "__thread_data", "__DATA",
                                     image_base + section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA], object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length,
                                     (u32)section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA], 4, 0x11, 0, 0);
-            link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + 5 * MACH_SECTION_SIZE, "__thread_bss", "__DATA",
+            link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + (5 + (u64)initializer_section_count) * MACH_SECTION_SIZE, "__thread_bss", "__DATA",
                                     image_base + section_offsets[OBJECT_SECTION_THREAD_LOCAL_ZERO], object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size,
                                     0, 4, 0x12, 0, 0);
         }
@@ -8913,7 +8979,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     u32 zero_section_index = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        zero_section_index = 3 + (thread_local_count ? 3 : 0);
+        zero_section_index = 3u + initializer_section_count + (thread_local_count ? 3u : 0u);
         link_mach_section_write(bytes, command + MACH_SEGMENT_COMMAND_SIZE + (u64)zero_section_index * MACH_SECTION_SIZE, "__bss", "__DATA",
                                 image_base + section_offsets[OBJECT_SECTION_ZERO], object->sections[OBJECT_SECTION_ZERO].virtual_size, 0, zero_alignment_power, 1, 0, 0);
         command += data_command_size;

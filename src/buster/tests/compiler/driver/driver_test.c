@@ -5884,12 +5884,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // filled by the object writer and called by the linker, and a definition
     // the allocator path rejected would drop out of both.
     //
-    // Apple is excluded, and the exclusion is the gap rather than the fixture
-    // being unsuitable: LC_MAIN hands `main` straight to dyld, so the Mach-O
-    // writer synthesizes no entry stub to run initializers from and refuses
-    // the link instead of dropping them.  The object it produces carries
-    // `__DATA,__mod_init_func` and links correctly through the system linker.
-#if !BUSTER_APPLE
+    // Apple is included: the Mach-O writer synthesizes no entry stub, but it
+    // does not need one -- it keeps `__DATA,__mod_init_func` and gives it the
+    // section type dyld dispatches on, so the loader calls the entries before
+    // it enters `main` (issue 779).
     for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
     {
         TemporalArena constructor_temporary = scratch_begin(&arguments->arena, 1);
@@ -5915,7 +5913,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(constructor_temporary);
     }
-#endif
     // Returning from main is a call to exit (C 5.1.2.2.3), so the linked
     // image's entry point must go through libc rather than the raw exit
     // syscall: the syscall skips stdio flushing and every atexit handler, and
