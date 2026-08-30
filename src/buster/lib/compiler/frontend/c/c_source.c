@@ -3151,6 +3151,14 @@ struct CMacroReplacementToken
 {
     CPpToken token;
     bool placemarker;
+    // This item is the `##` of GNU's `, ## __VA_ARGS__` comma-deletion
+    // idiom: a paste written between a literal comma and the variadic
+    // parameter.  With empty varargs the placemarker path deletes the comma;
+    // with tokens present GNU performs no paste at all -- the comma stays
+    // and the arguments follow -- where a real paste of `,` against the
+    // first argument token cannot form one preprocessing token and would
+    // refuse every non-empty call.
+    bool comma_paste;
 };
 
 BUSTER_C_INTERNAL bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling)
@@ -3681,8 +3689,21 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
             replacement.kind == C_TOKEN_IDENTIFIER && macro->definition.function_like ? c_macro_parameter_index(macro, c_token_spelling(base, replacement)) : -1;
         if (parameter_index < 0)
         {
+            // GNU's comma-deletion idiom, recognized on the definition's own
+            // spelling: a `##` written between a literal comma and the
+            // variadic parameter.  The paste loop below reads the mark.
+            bool comma_paste = false;
+            if (macro->definition.variadic && c_macro_is_paste(replacement) && replacement_index &&
+                replacement_index + 1 < macro->definition.replacement_count &&
+                c_token_is_punctuator(&macro->definition.replacement[replacement_index - 1], C_PUNCTUATOR_COMMA))
+            {
+                CToken next = macro->definition.replacement[replacement_index + 1];
+                s32 next_parameter = next.kind == C_TOKEN_IDENTIFIER ? c_macro_parameter_index(macro, c_token_spelling(base, next)) : -1;
+                comma_paste = next_parameter >= 0 && (u32)next_parameter + 1 == macro->definition.parameter_count;
+            }
             materialized[materialized_count++] = (CMacroReplacementToken){
                 .token = {.token = replacement, .location = location, .foreign = true, .preceded_by_space = replacement_space},
+                .comma_paste = comma_paste,
             };
             continue;
         }
@@ -3742,6 +3763,15 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
             {
                 output_count -= 1;
             }
+            continue;
+        }
+        if (item.comma_paste)
+        {
+            // Varargs present: GNU performs no paste here at all.  The comma
+            // already stands in the output; the argument's first token
+            // follows it as itself, and the rest of the argument flows
+            // through the loop as ordinary tokens.
+            output[output_count++] = right.token;
             continue;
         }
         CPpToken left = output[--output_count];

@@ -3599,6 +3599,41 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    // GNU's `, ## __VA_ARGS__` comma-deletion idiom, both ways and through a
+    // forwarding macro layer: empty varargs delete the comma, present ones
+    // are placed with no paste at all.  A real paste of `,` against the
+    // first argument token refused every non-empty call, which is how
+    // CPython's Parser/pegen.c stopped compiling.
+    String8 c_comma_paste_path = buster_test_temporary_path(arguments->arena, S8("buster-c-variadic-comma-paste"),
+#if BUSTER_WINDOWS
+                                                            S8(".exe"));
+#else
+                                                            S8(""));
+#endif
+    String8 c_comma_paste_command_line[] = {
+        S8("-o"),
+        c_comma_paste_path,
+        S8("tests/basic_c_variadic_comma_paste.c"),
+    };
+    CompilerDriverResult c_comma_paste = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_comma_paste_command_line)));
+    BUSTER_TEST(arguments, c_comma_paste.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_comma_paste.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_comma_paste_arguments[] = {
+            c_comma_paste_path,
+        };
+        ProcessSpawnResult c_comma_paste_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_comma_paste_arguments), (SliceString8){0},
+                                                                  (SliceString8){0},
+                                                                  (ProcessSpawnOptions){
+                                                                      .use_process_environment = true,
+                                                                  });
+        BUSTER_TEST(arguments, c_comma_paste_spawn.handle != 0);
+        if (c_comma_paste_spawn.handle)
+        {
+            BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, c_comma_paste_spawn).result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     String8 c_atomic_path = buster_test_temporary_path(arguments->arena, S8("buster-c-atomic"),
 #if BUSTER_WINDOWS
                                                        S8(".exe"));
