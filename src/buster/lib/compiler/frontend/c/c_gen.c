@@ -8731,12 +8731,46 @@ BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 del
     return true;
 }
 
+// A string initializer may sit in redundant parentheses -- CPython's
+// _PyRuntimeState_INIT writes ("<dictcomp>") into its static identifier
+// table -- and the reference compilers accept the parenthesized spelling
+// everywhere the bare one initializes an array.  Both the predicate and the
+// decoder trim balanced pairs that wrap the whole range, so every caller
+// that asks one and then reads through the other sees the same tokens.
+BUSTER_C_INTERNAL void c_ir_string_literal_range_trim(CPreprocessResult preprocess, u32* start, u32* end)
+{
+    while (*end > *start + 2 && c_token_is_punctuator(&preprocess.tokens[*start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_token_is_punctuator(&preprocess.tokens[*end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        // The opening parenthesis must match the closing one, or
+        // `("a"),("b")` would trim into two unrelated ranges.
+        u32 depth = 0;
+        bool wraps = true;
+        for (u32 index = *start; index < *end && wraps; index += 1)
+        {
+            depth += c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS);
+            if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                depth -= 1;
+                wraps = depth != 0 || index == *end - 1;
+            }
+        }
+        if (!wraps)
+        {
+            break;
+        }
+        *start += 1;
+        *end -= 1;
+    }
+}
+
 BUSTER_C_SHARED bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end)
 {
     if (start >= end || end > preprocess.token_count)
     {
         return false;
     }
+    c_ir_string_literal_range_trim(preprocess, &start, &end);
     for (u32 index = start; index < end; index += 1)
     {
         if (preprocess.tokens[index].kind != C_TOKEN_STRING_LITERAL)
@@ -9024,6 +9058,7 @@ BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u
 BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target, u32 start, u32 end,
                                                                      CIrDecodedString* decoded_out)
 {
+    c_ir_string_literal_range_trim(preprocess, &start, &end);
     if (!c_ir_tokens_are_string_literals(preprocess, start, end))
     {
         return false;
