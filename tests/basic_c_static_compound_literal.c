@@ -74,6 +74,47 @@ static int *member_pointer = &(struct Inner){.x = 5, .y = 6}.y;
 // A literal that itself holds a literal, a string and a designator.
 static struct Outer *nested = &(struct Outer){.in = {.y = 3}, .p = &(int){44}, .s = "deep"};
 
+// The other half of the same construct: a compound literal used for its value
+// rather than its address. `&(T){...}` needs an object to point at, so it
+// synthesizes one and holds its symbol; `(T){...}` needs only the bytes, which
+// belong to the object being initialized -- no second object, no relocation to
+// one. A scalar destination never looked for a literal at all and refused
+// every one of these.
+static int value_scalar = (int){5};
+static void *value_null = (void *){0};
+static const char *value_string = (const char *){"lit"};
+static double value_double = (double){1.5};
+static int value_parenthesized = ((int){23});
+
+struct Holder
+{
+    void *a;
+    void *b;
+};
+
+int value_target = 41;
+
+// The same literal as an element of an aggregate, which reaches the scalar
+// folder through the initializer walk rather than through the object's own
+// declaration. The neighbours pin that the bytes land at the element's offset.
+static struct Holder value_holder = {(void *){0}, (void *){&value_target}};
+static int value_elements[4] = {(int){1}, 2, (int){3}, 4};
+
+// A literal of array type without an `&` is still an address: it decays to a
+// pointer to its first element, and `decayed` above is the same shape. This
+// one pins that the value fold does not claim it -- an array type is never
+// compatible with the pointer it is initializing.
+static const char *value_decayed = (char[]){'x', 'y', 0};
+
+// A function-local static reaches the same fold. Its address form is refused
+// -- an in-body literal has automatic storage duration -- but its value form
+// is only bytes, so it folds like any other.
+static int value_local(void)
+{
+    static int local = (int){31};
+    return local;
+}
+
 int main(void)
 {
     if (current_scenario != scenarios)
@@ -138,6 +179,41 @@ int main(void)
     if (nested->s[0] != 'd' || nested->s[3] != 'p' || nested->s[4] != 0)
     {
         return 13;
+    }
+
+    if (value_scalar != 5 || value_parenthesized != 23)
+    {
+        return 14;
+    }
+    if (value_null != 0)
+    {
+        return 15;
+    }
+    if (value_string == 0 || value_string[0] != 'l' || value_string[2] != 't' || value_string[3] != 0)
+    {
+        return 16;
+    }
+    if (value_double != 1.5)
+    {
+        return 17;
+    }
+    // The relocation belongs to the object being initialized, so `b` holds the
+    // address of `value_target` itself rather than of a copy of it.
+    if (value_holder.a != 0 || value_holder.b != &value_target || *(int *)value_holder.b != 41)
+    {
+        return 18;
+    }
+    if (value_elements[0] != 1 || value_elements[1] != 2 || value_elements[2] != 3 || value_elements[3] != 4)
+    {
+        return 19;
+    }
+    if (value_decayed[0] != 'x' || value_decayed[1] != 'y' || value_decayed[2] != 0)
+    {
+        return 20;
+    }
+    if (value_local() != 31)
+    {
+        return 21;
     }
 
     return 0;

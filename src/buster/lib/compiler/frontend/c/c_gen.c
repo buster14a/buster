@@ -32675,6 +32675,44 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy(CIntegerIrBuilder*
                                                                 u64 relocation_base, IrGlobalRelocation* relocations, u32* relocation_count,
                                                                 u32 relocation_capacity);
 
+BUSTER_C_INTERNAL bool c_ir_initializer_compound_literal_info(CIntegerIrBuilder* builder, u32 start, u32 limit, u32* open_out, u32* close_out,
+                                                                u32* type_start_out, u32* type_end_out);
+
+// A compound literal used for its *value* rather than its address: `(T){...}`
+// initializing an object, where `&(T){...}` names one.  There is no literal
+// object here and no relocation to one -- the bytes belong to the object being
+// initialized -- so the whole rewrite is to drop the `( type-name )` and hand
+// the brace body to the folder that was going to run on the initializer
+// anyway.  That is what an aggregate destination already does in
+// c_ir_constant_initializer_context_begin; this is the same rewrite for the
+// scalar destinations, which never looked for a literal at all.
+// The literal's type must be compatible with the destination for the rewrite
+// to be the whole story.  An incompatible one would still be a valid program
+// -- `static long v = (int){5};` converts on the way in (C 6.7.9p11) -- but
+// the conversion has to happen at the literal's type, and once the
+// `( type-name )` is gone the folder can no longer see it, so the range is
+// left alone instead.  Leaving it alone is also what keeps the shapes that
+// are addresses rather than values reaching their own handlers: an array
+// literal decaying to a pointer, `(int[]){1, 2}` initializing an `int *`, is
+// never compatible with its destination and still reaches
+// c_ir_static_compound_literal_address below.
+BUSTER_C_INTERNAL void c_ir_initializer_narrow_compound_literal_value(CIntegerIrBuilder* builder, IrTypeId destination, u32* start, u32* end)
+{
+    u32 open = 0;
+    u32 close = 0;
+    u32 type_start = 0;
+    u32 type_end = 0;
+    if (c_ir_initializer_compound_literal_info(builder, *start, *end, &open, &close, &type_start, &type_end))
+    {
+        IrTypeId literal = c_ir_compound_literal_type(builder, type_start, type_end, open, close);
+        if (literal.value != IR_ID_UNDERLYING_INVALID && c_ir_types_compatible(builder, literal, destination))
+        {
+            *start = open;
+            *end = close + 1;
+        }
+    }
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBuilder* builder, Arena* task_arena, u32 start, u32 end,
                                                                      IrTypeId root_type, u8* bytes, u64 byte_count, u64 relocation_base,
                                                                      IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity)
@@ -32744,6 +32782,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
         }
         if (!aggregate)
         {
+            // The scalar leaf of an aggregate initializer: `{ (void *){0} }`
+            // reaches here with the element's own range, and the brace strip
+            // below is the folder the narrowed range is handed to.
+            c_ir_initializer_narrow_compound_literal_value(builder, task.type, &task.start, &task.end);
             if (task.end > task.start + 1 && c_token_is_punctuator(&preprocess.tokens[task.start], C_PUNCTUATOR_LEFT_BRACE) &&
                 c_token_is_punctuator(&preprocess.tokens[task.end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
                 c_ir_matching_delimiter(preprocess, task.start, task.end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == task.end - 1)
@@ -37874,6 +37916,16 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
         }
     }
     bool aggregate_type = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
+    if (!aggregate_type)
+    {
+        // `static int v = (int){5};`.  An aggregate destination finds its own
+        // literal in the compound_aggregate_initializer branch below; every
+        // scalar path from here down -- the x87 folder, the pointer shapes,
+        // the constant evaluator, the bare number at the tail -- reads the
+        // range, so narrowing it once here is what lets all of them see the
+        // literal's value where they would otherwise see a `(`.
+        c_ir_initializer_narrow_compound_literal_value(builder, global->type, &start, &end);
+    }
     if (!aggregate_type && end > start + 1 && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
         c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
         c_ir_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == end - 1)

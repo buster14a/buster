@@ -2055,6 +2055,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
         S8("static int static_compound_literal_element_call[2] = { 0, static_compound_literal_call() };"),
         S8("static int *static_compound_literal_bad_member = &(struct StaticCompoundLiteral){1, 2}.z;"),
         S8("void static_compound_literal_local(void) { static int *local = &(int){7}; (void)local; }"),
+        S8("struct StaticCompoundLiteralHolder { void *a; void *b; };"),
+        S8("extern int static_compound_literal_target;"),
+        S8("static int static_compound_literal_value = (int){5};"),
+        S8("static void *static_compound_literal_value_null = (void *){0};"),
+        S8("static const char *static_compound_literal_value_string = (const char *){\"lit\"};"),
+        S8("static struct StaticCompoundLiteralHolder static_compound_literal_value_holder ="
+           " { (void *){0}, (void *){&static_compound_literal_target} };"),
+        S8("void static_compound_literal_value_local(void) { static int local = (int){9}; (void)local; }"),
     };
     String8 static_compound_literal_source = (String8){0};
     for (u32 line_index = 0; line_index < BUSTER_ARRAY_LENGTH(static_compound_literal_lines); line_index += 1)
@@ -2073,7 +2081,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
                       static_compound_literal_parse, target_native);
     BUSTER_TEST(arguments, static_compound_literal_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, static_compound_literal_parse.diagnostic_count == 0);
-    // Lines 3 through 6 fold, so only the four refusals below are diagnosed.
+    // Lines 3 through 6 fold, and so does every value form from line 11 down,
+    // so only the four refusals below are diagnosed.  A value form that
+    // stopped folding would raise this count rather than move a refusal: the
+    // shapes pinned below are the address form's, and none of them is a
+    // literal used for its value.
     BUSTER_TEST(arguments, static_compound_literal_ir.diagnostic_count == 4);
     // The line the refusal belongs to, the token inside it the refusal must
     // point at, and the words that must name the construct.
@@ -2105,6 +2117,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
         }
         BUSTER_TEST(arguments, refused_offset < refused_source.length);
         BUSTER_TEST(arguments, found);
+    }
+    // The address form synthesizes an object and holds its symbol; the value
+    // form folds the literal's bytes into the object being initialized and
+    // must synthesize nothing.  Four literals are addressed above -- the
+    // scalar, the aggregate, the member designator and the array that decays
+    // -- so a fifth symbol would mean a value form took the address path.
+    if (static_compound_literal_ir.program)
+    {
+        IrModule* module = &static_compound_literal_ir.program->modules[0];
+        u32 static_compound_literal_objects = 0;
+        u32 static_compound_literal_values = 0;
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            IrSymbol* symbol = ir_symbol_from_id(&static_compound_literal_ir.program->symbols, global->symbol);
+            if (!symbol)
+            {
+                continue;
+            }
+            static_compound_literal_objects += string_starts_with_sequence(symbol->link_name, S8(".L.compoundliteral."));
+            if (string_equal(symbol->link_name, S8("static_compound_literal_value")))
+            {
+                static_compound_literal_values += 1;
+                BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && global->initializer_bits == 5);
+            }
+            if (string_equal(symbol->link_name, S8("static_compound_literal_value_holder")))
+            {
+                static_compound_literal_values += 1;
+                // One relocation, and it names the target rather than a
+                // literal object standing in for it.
+                IrSymbol* referenced =
+                    global->relocation_count == 1 ? ir_symbol_from_id(&static_compound_literal_ir.program->symbols, global->relocations[0].symbol) : 0;
+                BUSTER_TEST(arguments, global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->relocation_count == 1 && referenced &&
+                                           string_equal(referenced->link_name, S8("static_compound_literal_target")));
+            }
+        }
+        BUSTER_TEST(arguments, static_compound_literal_objects == 4);
+        BUSTER_TEST(arguments, static_compound_literal_values == 2);
     }
     scratch_end(static_compound_literal_temporary);
     return result;
