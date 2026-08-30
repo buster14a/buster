@@ -3385,9 +3385,8 @@ on a commit you already know is incomplete tells nobody anything.
   nothing, for a tag and for `int` equally (#784), and an atomic aggregate is
   still not accepted as a **parameter** in any spelling (#786). On the argument side the promotion moves nothing: a promoted
   four-byte record is one INTEGER eightbyte where the three-byte one already
-  was. Clang classifying every record that *contains* an atomic member as
-  MEMORY is a divergence of its own, and one where GCC and this compiler agree
-  against it (#763). The **LLVM bitcode writer** maps an atomic type onto its
+  was, and the rule that says so is the next bullet.
+  The **LLVM bitcode writer** maps an atomic type onto its
   operand's LLVM type, which is exact for every atomic scalar -- `_Atomic int`
   and `int` are one type -- and short by the padding for an aggregate, so an
   atomic type whose `layout.size` exceeds its operand's gets a record of its
@@ -3403,6 +3402,55 @@ on a commit you already know is incomplete tells nobody anything.
   next to the one-byte aggregate that agrees without them, once for each
   engine, and they stay out of the cross-linked
   `basic_c_packed_layout_shapes.h` for the same reason the shapes above do.
+- **A qualifier decides nothing about how a value is passed.** `_Atomic T` and
+  `volatile T` take T's argument class on every convention: the qualified copy
+  carries T's kind and T's fields, `_Atomic` changes only the size and the
+  alignment, and neither qualifier introduces a class of its own. So a record
+  holding an `_Atomic int` is the INTEGER eightbyte its `int` spelling is, a
+  record holding an `_Atomic float` beside a plain one is still two floats --
+  SSE on System V, a homogeneous float aggregate on AAPCS64 -- and an atomic
+  record passed by value is classified from the record it is built from, which
+  no fixture can pin yet: an atomic aggregate parameter fails code generation
+  in every spelling (#786), and the one spelling that compiles does so only
+  because it is not reaching the type at all (#761), so a fixture written that
+  way would pass while testing nothing. The wrapped shape --
+  `struct { char c; _Atomic(struct pair) v; }` -- reaches the same walk and is
+  in the pair. `ir_abi_unqualified_type` in `ir.c` is the one step that says
+  so, and the AAPCS64 homogeneity walk is its only caller: System V already
+  reads the leaf kind, which a qualified copy keeps.
+  **This is the one place the oracle is not followed, and it is a decision
+  rather than an oversight** (#763). Measured 2026-08-30 against Clang 22.1.8
+  and GCC 16.2.1: GCC classifies every one of these shapes exactly as the
+  unqualified spelling on x86-64 (its AArch64 answer was not measurable on the
+  machine that measured this -- no cross-GCC). Clang sends any record
+  *containing* an atomic member, and any atomic record, to MEMORY -- but only
+  on System V x86-64; the same Clang passes them in registers on Win64, on
+  AAPCS64 and on Darwin AArch64. Its AArch64 homogeneity test declines
+  separately, so `struct { _Atomic float a, b; }` rides X0 there where
+  `struct { float a, b; }` rides S0/S1. Both refusals are the same accident:
+  `X86_64ABIInfo::classify` asks `Ty->getAs<RecordType>()` and
+  `isHomogeneousAggregate` asks for a builtin type, an `AtomicType` is sugar
+  over nothing, and each walk falls through to its "everything else" tail. The
+  psABI and AAPCS state no such rule, `volatile` reaches neither refusal, and
+  Clang contradicts itself across three of its own conventions, so following
+  it would mean writing a rule neither document states and disagreeing with
+  GCC everywhere and with Clang on every convention but one. The cost is real
+  and is recorded rather than hidden: a `struct { char c; _Atomic int v; }`
+  argument sits in a register on this side of a System V x86-64
+  translation-unit boundary and in memory on Clang's.
+  The same reading fixed a divergence from *both* references: identity in the
+  homogeneity walk was a type id, so `struct { float a; volatile float b; }`
+  was an integer pair where Clang and GCC both keep the two-register
+  aggregate. `tests/basic_c_atomic_abi_shapes.h` and the callee/caller pair
+  around it pin all of it -- both halves through this compiler under every
+  allocator, mixed with a real GCC on System V x86-64 (the host compiler
+  cannot stand in: on that convention Clang is the half that disagrees), and
+  mixed with Clang on AArch64 under qemu, where the one shape Clang answers
+  differently leaves through `ATOMIC_ABI_REFERENCE_DECLINES_ATOMIC_HFA` and its
+  `volatile` twin stays behind to pin the same mechanism. Both directions were
+  verified to fail when the rule is taken away: the Clang-paired System V link
+  fails at the first record, and restoring the type-id identity fails the
+  Clang-paired AArch64 link at the `volatile` shape.
 - **An atomic aggregate is loaded and stored as one integer access of its
   promoted width**, which is what the promotion above exists for: a three-byte
   record is read and written through four bytes, and the padding the promotion

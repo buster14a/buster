@@ -6,8 +6,9 @@
 // and canonical source recovery for diagnostics, label-provenance
 // propagation for computed goto (ir_label_provenance_*), the per-target
 // ABI classification the frontend and codegen both consume
-// (ir_system_v_abi_classes, ir_homogeneous_float_abi,
-// ir_classify_abi_value, ir_prepare_program_abi), and the module validator
+// (ir_abi_unqualified_type, ir_system_v_abi_classes,
+// ir_homogeneous_float_abi, ir_classify_abi_value, ir_prepare_program_abi),
+// and the module validator
 // (ir_validate_canonical_module) that every producer runs before machine
 // selection or Wasm emission so a diagnosed frontend failure cannot leak a
 // half-built function into codegen.
@@ -2664,6 +2665,67 @@ struct IrAbiClassificationTask
     u64 offset;
 };
 
+// **A qualifier decides nothing about how a value is passed.**  `_Atomic T`
+// and `volatile T` are classified as the T they are built from, on every
+// convention: the qualified copy carries T's kind and T's fields, `_Atomic`
+// changes only the size and alignment (c_ir_add_qualified_type promotes them),
+// and neither qualifier introduces a class of its own.  So a record holding an
+// `_Atomic int` is the INTEGER eightbyte its `int` spelling is, a record
+// holding an `_Atomic float` beside a plain one is still two floats -- SSE on
+// System V, a homogeneous float aggregate on AAPCS64 -- and an atomic record
+// passed by value is classified from the record.  The AAPCS64 homogeneity walk
+// below is this step's only caller: System V already reads the leaf kind,
+// which a qualified copy keeps.
+//
+// This is where the two references disagree and the oracle is not followed
+// (#763).  Measured 2026-08-30 against Clang 22.1.8 and GCC 16.2.1:
+//
+//   - GCC classifies every one of these shapes exactly as the unqualified
+//     spelling, on x86-64.  Its AArch64 answer was not measurable here (no
+//     cross-GCC on the machine that measured this).
+//   - Clang sends *any* record containing an atomic member, and any atomic
+//     record, to MEMORY -- but only on System V x86-64.  The same Clang passes
+//     them in registers on Win64, on AAPCS64 and on Darwin AArch64.
+//   - Clang's AArch64 homogeneous-aggregate test declines separately: a member
+//     of atomic float type stops the aggregate from being an HFA, so
+//     `struct { _Atomic float a, b; }` rides X0 there where
+//     `struct { float a, b; }` rides S0/S1.  A `volatile` member does not,
+//     which is the tell that neither refusal is a rule about atomics.
+//
+// Both refusals are the same accident on Clang's side: `X86_64ABIInfo::classify`
+// asks `Ty->getAs<RecordType>()` and `isHomogeneousAggregate` asks for a
+// builtin type, an `AtomicType` is sugar over nothing, and each walk falls
+// through to its "everything else" tail.  The psABI text states no such rule --
+// an `_Atomic` object has the size and alignment of the type it is built from,
+// and no class of its own -- and Clang contradicts itself across three of its
+// own conventions, so it is read here as a fall-through rather than as an ABI
+// position.  Following it would mean writing a rule neither document states,
+// disagreeing with GCC everywhere and with Clang on every convention but one.
+//
+// The same reading fixed a divergence from *both* references: identity in the
+// homogeneity walk was a type id, so `struct { float a; volatile float b; }`
+// came out an integer pair where Clang and GCC both keep the two-register
+// aggregate.
+//
+// The cost of the choice is recorded rather than hidden: a
+// `struct { char c; _Atomic int v; }` argument sits in a register on this
+// side of a System V x86-64 translation-unit boundary and in memory on
+// Clang's.  `tests/basic_c_atomic_abi_shapes.h` and the callee/caller pair
+// around it pin it, mixed with a real GCC there and with Clang on AArch64.
+// One shape is missing from them and is decided by the rule alone: a *bare*
+// atomic record passed by value, which fails code generation in every
+// spelling today (#786) except the one that compiles only because it does not
+// reach the type (#761).  The pair carries the wrapped shape instead --
+// `struct { char c; _Atomic(struct pair) v; }` reaches the same walk.
+BUSTER_GLOBAL_LOCAL IrTypeId ir_abi_unqualified_type(IrTypeTable* table, IrTypeId id)
+{
+    IrType* type = ir_type_from_id(table, id);
+    // One step is the whole walk: c_ir_add_qualified_type refuses a qualified
+    // base, so `volatile _Atomic T` is a single copy carrying both flags and
+    // pointing straight at T.
+    return type && (type->is_atomic || type->is_volatile) ? type->unqualified_type : id;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_class_is_x87(IrAbiClass abi_class)
 {
     return abi_class == IR_ABI_CLASS_X87 || abi_class == IR_ABI_CLASS_X87_UP;
@@ -2965,8 +3027,16 @@ BUSTER_GLOBAL_LOCAL bool ir_homogeneous_float_abi(IrProgram* program, IrTypeId r
                 }
                 else
                 {
+                    // Homogeneity is a question about the fundamental data
+                    // type, and a qualifier is not part of it: the members of
+                    // `struct { float a; volatile float b; }` are one type, so
+                    // it is the two-register HFA its unqualified spelling is
+                    // and not the integer pair distinct type ids made of it.
+                    // `_Atomic` rides the same step by the same rule, which is
+                    // the one place this parts company with Clang -- see
+                    // ir_abi_unqualified_type for both references (#763).
                     shapes[shape_count++] = (IrHomogeneousFloatShape){
-                        .element = task.type,
+                        .element = ir_abi_unqualified_type(&program->types, task.type),
                         .count = 1,
                     };
                 }

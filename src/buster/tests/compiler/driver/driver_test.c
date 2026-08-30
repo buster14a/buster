@@ -6418,6 +6418,254 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(atomic_aggregate_temporary);
     }
+    // How a record holding an atomic member -- and an atomic record -- is
+    // *passed*, which is a question of its own and one where the two
+    // references disagree (#763).  A qualifier decides nothing about the class
+    // here: `_Atomic T` and `volatile T` ride exactly the registers T rides,
+    // which is GCC's answer everywhere and Clang's answer on every convention
+    // but System V x86-64, where it sends any such record to memory, and on
+    // AArch64, where it declines to call an aggregate with an atomic floating
+    // member homogeneous.  ir_abi_unqualified_type holds the reasoning and the
+    // measurements.  Build both halves with this compiler through every
+    // allocator first: that catches a caller and a callee that disagree with
+    // each other, which the mixed links below cannot separate from a
+    // disagreement with the reference.
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators); allocator_index += 1)
+    {
+        TemporalArena atomic_abi_temporary = scratch_begin(&arguments->arena, 1);
+        String8 atomic_abi_path = buster_test_temporary_path(atomic_abi_temporary.arena, S8("buster-c-atomic-abi"), S8(""));
+        String8 atomic_abi_command_line[] = {
+            c_long_double_allocators[allocator_index], S8("-o"), atomic_abi_path, S8("tests/basic_c_atomic_abi_callee.c"),
+            S8("tests/basic_c_atomic_abi_caller.c"),
+        };
+        CompilerDriverResult atomic_abi = compiler_driver_execute_invocation(
+            atomic_abi_temporary.arena,
+            compiler_driver_parse_arguments(atomic_abi_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_abi_command_line)));
+        BUSTER_TEST(arguments, atomic_abi.error == COMPILER_DRIVER_ERROR_NONE);
+        if (atomic_abi.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 atomic_abi_arguments[] = {atomic_abi_path};
+            ProcessSpawnResult atomic_abi_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_abi_arguments), (SliceString8){0},
+                                                                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, atomic_abi_spawn.handle != 0);
+            if (atomic_abi_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(atomic_abi_temporary.arena, atomic_abi_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(atomic_abi_temporary);
+    }
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+    // The System V half of the decision, against the reference that shares it.
+    // The host compiler cannot stand in here the way it does for the packed
+    // pair below: on this convention Clang is the half that disagrees, so a
+    // Clang-built object fails this fixture at its first record by design.
+    // Look for a real GCC instead, and skip the lane when there is none --
+    // `gcc` on macOS is a Clang shim, which its own `--version` says.
+    String8 atomic_abi_gcc = executable_resolve_in_path(arguments->arena, S8("gcc"));
+    bool atomic_abi_gcc_available = false;
+    if (atomic_abi_gcc.length)
+    {
+        String8 atomic_abi_gcc_probe_arguments[] = {atomic_abi_gcc, S8("--version")};
+        ProcessSpawnResult atomic_abi_gcc_probe =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_abi_gcc_probe_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){
+                                 .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                 .use_process_environment = true,
+                             });
+        if (atomic_abi_gcc_probe.handle)
+        {
+            ProcessWaitResult atomic_abi_gcc_wait = os_process_wait_sync(arguments->arena, atomic_abi_gcc_probe);
+            String8 atomic_abi_gcc_version = (String8){
+                .pointer = (char8*)atomic_abi_gcc_wait.streams[STANDARD_STREAM_OUTPUT].pointer,
+                .length = atomic_abi_gcc_wait.streams[STANDARD_STREAM_OUTPUT].length,
+            };
+            atomic_abi_gcc_available = atomic_abi_gcc_wait.result == PROCESS_RESULT_SUCCESS &&
+                                       string_first_sequence(atomic_abi_gcc_version, S8("clang")) == BUSTER_STRING_NO_MATCH;
+        }
+    }
+    if (atomic_abi_gcc_available)
+    {
+        TemporalArena atomic_abi_pair_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* atomic_abi_pair_arena = atomic_abi_pair_temporary.arena;
+        String8 gcc_atomic_callee_path = buster_test_temporary_path(atomic_abi_pair_arena, S8("buster-c-atomic-abi-gcc-callee"), S8(".o"));
+        String8 gcc_atomic_caller_path = buster_test_temporary_path(atomic_abi_pair_arena, S8("buster-c-atomic-abi-gcc-caller"), S8(".o"));
+        // -fno-pic and -g0 for the same reasons the packed pair below uses
+        // them: this linker has no GOT model, and the reference's newer debug
+        // sections sit outside the object reader's model.
+        String8 gcc_atomic_callee_command[] = {
+            atomic_abi_gcc, S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), gcc_atomic_callee_path, S8("tests/basic_c_atomic_abi_callee.c"),
+        };
+        String8 gcc_atomic_caller_command[] = {
+            atomic_abi_gcc, S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), gcc_atomic_caller_path, S8("tests/basic_c_atomic_abi_caller.c"),
+        };
+        ProcessSpawnOptions gcc_atomic_options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = true,
+        };
+        ProcessSpawnResult gcc_atomic_callee_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(gcc_atomic_callee_command), (SliceString8){0}, (SliceString8){0}, gcc_atomic_options);
+        ProcessSpawnResult gcc_atomic_caller_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(gcc_atomic_caller_command), (SliceString8){0}, (SliceString8){0}, gcc_atomic_options);
+        bool gcc_atomic_callee_compiled =
+            gcc_atomic_callee_spawn.handle && os_process_wait_sync(atomic_abi_pair_arena, gcc_atomic_callee_spawn).result == PROCESS_RESULT_SUCCESS;
+        bool gcc_atomic_caller_compiled =
+            gcc_atomic_caller_spawn.handle && os_process_wait_sync(atomic_abi_pair_arena, gcc_atomic_caller_spawn).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, gcc_atomic_callee_compiled && gcc_atomic_caller_compiled);
+        for (u64 allocator_index = 0;
+             gcc_atomic_callee_compiled && gcc_atomic_caller_compiled && allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators);
+             allocator_index += 1)
+        {
+            String8 buster_atomic_callee_path = buster_test_temporary_path(atomic_abi_pair_arena, S8("buster-c-atomic-abi-callee"), S8(".o"));
+            String8 buster_atomic_caller_path = buster_test_temporary_path(atomic_abi_pair_arena, S8("buster-c-atomic-abi-caller"), S8(".o"));
+            String8 buster_atomic_callee_command[] = {
+                c_long_double_allocators[allocator_index], S8("-c"), S8("-o"), buster_atomic_callee_path, S8("tests/basic_c_atomic_abi_callee.c"),
+            };
+            String8 buster_atomic_caller_command[] = {
+                c_long_double_allocators[allocator_index], S8("-c"), S8("-o"), buster_atomic_caller_path, S8("tests/basic_c_atomic_abi_caller.c"),
+            };
+            CompilerDriverResult buster_atomic_callee = compiler_driver_execute_invocation(
+                atomic_abi_pair_arena,
+                compiler_driver_parse_arguments(atomic_abi_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_atomic_callee_command)));
+            CompilerDriverResult buster_atomic_caller = compiler_driver_execute_invocation(
+                atomic_abi_pair_arena,
+                compiler_driver_parse_arguments(atomic_abi_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_atomic_caller_command)));
+            BUSTER_TEST(arguments, buster_atomic_callee.error == COMPILER_DRIVER_ERROR_NONE && buster_atomic_caller.error == COMPILER_DRIVER_ERROR_NONE);
+            if (buster_atomic_callee.error != COMPILER_DRIVER_ERROR_NONE || buster_atomic_caller.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                continue;
+            }
+            String8 atomic_object_pairs[2][2] = {
+                {buster_atomic_caller_path, gcc_atomic_callee_path},
+                {gcc_atomic_caller_path, buster_atomic_callee_path},
+            };
+            for (u64 direction = 0; direction < BUSTER_ARRAY_LENGTH(atomic_object_pairs); direction += 1)
+            {
+                String8 atomic_mixed_path = buster_test_temporary_path(atomic_abi_pair_arena, S8("buster-c-atomic-abi-pair"), S8(""));
+                String8 atomic_mixed_link_command[] = {
+                    S8("-o"), atomic_mixed_path, atomic_object_pairs[direction][0], atomic_object_pairs[direction][1],
+                };
+                CompilerDriverResult atomic_mixed_link = compiler_driver_execute_invocation(
+                    atomic_abi_pair_arena,
+                    compiler_driver_parse_arguments(atomic_abi_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_mixed_link_command)));
+                BUSTER_TEST(arguments, atomic_mixed_link.error == COMPILER_DRIVER_ERROR_NONE);
+                if (atomic_mixed_link.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    continue;
+                }
+                String8 atomic_mixed_arguments[] = {atomic_mixed_path};
+                ProcessSpawnResult atomic_mixed_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_mixed_arguments), (SliceString8){0},
+                                                                          (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, atomic_mixed_spawn.handle != 0);
+                if (atomic_mixed_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(atomic_abi_pair_arena, atomic_mixed_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+        scratch_end(atomic_abi_pair_temporary);
+    }
+#endif
+#if !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+    // The AArch64 half, against Clang, which agrees with us there that such a
+    // record rides registers -- its memory rule is System V's alone.  What it
+    // does not agree with is the homogeneous float aggregate an atomic member
+    // sits in, so that one shape leaves the pair through
+    // ATOMIC_ABI_REFERENCE_DECLINES_ATOMIC_HFA and its `volatile` twin, which
+    // Clang does keep homogeneous, stays and pins the same mechanism.  The
+    // tiny AArch64 `_start` object the __int128 pair above uses keeps this a
+    // static, libc-free image qemu can execute.
+    if (aarch64_i128_clang_available && aarch64_i128_qemu_available)
+    {
+        TemporalArena atomic_a64_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* atomic_a64_arena = atomic_a64_temporary.arena;
+        String8 atomic_a64_reference[] = {S8("-DATOMIC_ABI_REFERENCE_DECLINES_ATOMIC_HFA=1")};
+        String8 clang_atomic_callee_path = buster_test_temporary_path(atomic_a64_arena, S8("buster-c-atomic-abi-a64-clang-callee"), S8(".o"));
+        String8 clang_atomic_caller_path = buster_test_temporary_path(atomic_a64_arena, S8("buster-c-atomic-abi-a64-clang-caller"), S8(".o"));
+        String8 clang_atomic_start_path = buster_test_temporary_path(atomic_a64_arena, S8("buster-c-atomic-abi-a64-clang-start"), S8(".o"));
+        String8 clang_atomic_callee_command[] = {
+            S8("clang"), S8("-target"), S8("aarch64-unknown-linux-gnu"), atomic_a64_reference[0], S8("-ffreestanding"), S8("-fno-builtin"),
+            S8("-fno-stack-protector"), S8("-g0"), S8("-c"), S8("-o"), clang_atomic_callee_path, S8("tests/basic_c_atomic_abi_callee.c"),
+        };
+        String8 clang_atomic_caller_command[] = {
+            S8("clang"), S8("-target"), S8("aarch64-unknown-linux-gnu"), atomic_a64_reference[0], S8("-ffreestanding"), S8("-fno-builtin"),
+            S8("-fno-stack-protector"), S8("-g0"), S8("-c"), S8("-o"), clang_atomic_caller_path, S8("tests/basic_c_atomic_abi_caller.c"),
+        };
+        String8 clang_atomic_start_command[] = {
+            S8("clang"), S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-g0"), S8("-c"), S8("-o"), clang_atomic_start_path,
+            S8("tests/basic_c_aarch64_i128_start.S"),
+        };
+        ProcessSpawnOptions clang_atomic_options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = true,
+        };
+        ProcessSpawnResult clang_atomic_callee_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_atomic_callee_command), (SliceString8){0}, (SliceString8){0}, clang_atomic_options);
+        ProcessSpawnResult clang_atomic_caller_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_atomic_caller_command), (SliceString8){0}, (SliceString8){0}, clang_atomic_options);
+        ProcessSpawnResult clang_atomic_start_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_atomic_start_command), (SliceString8){0}, (SliceString8){0}, clang_atomic_options);
+        bool clang_atomic_callee_compiled =
+            clang_atomic_callee_spawn.handle && os_process_wait_sync(atomic_a64_arena, clang_atomic_callee_spawn).result == PROCESS_RESULT_SUCCESS;
+        bool clang_atomic_caller_compiled =
+            clang_atomic_caller_spawn.handle && os_process_wait_sync(atomic_a64_arena, clang_atomic_caller_spawn).result == PROCESS_RESULT_SUCCESS;
+        bool clang_atomic_start_compiled =
+            clang_atomic_start_spawn.handle && os_process_wait_sync(atomic_a64_arena, clang_atomic_start_spawn).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, clang_atomic_callee_compiled && clang_atomic_caller_compiled && clang_atomic_start_compiled);
+        if (clang_atomic_callee_compiled && clang_atomic_caller_compiled && clang_atomic_start_compiled)
+        {
+            String8 buster_atomic_a64_callee_path = buster_test_temporary_path(atomic_a64_arena, S8("buster-c-atomic-abi-a64-callee"), S8(".o"));
+            String8 buster_atomic_a64_caller_path = buster_test_temporary_path(atomic_a64_arena, S8("buster-c-atomic-abi-a64-caller"), S8(".o"));
+            String8 buster_atomic_a64_callee_command[] = {
+                S8("-c"), S8("-target"), S8("aarch64-unknown-linux-gnu"), atomic_a64_reference[0], S8("-fregister-allocator=none"), S8("-o"),
+                buster_atomic_a64_callee_path, S8("tests/basic_c_atomic_abi_callee.c"),
+            };
+            String8 buster_atomic_a64_caller_command[] = {
+                S8("-c"), S8("-target"), S8("aarch64-unknown-linux-gnu"), atomic_a64_reference[0], S8("-fregister-allocator=none"), S8("-o"),
+                buster_atomic_a64_caller_path, S8("tests/basic_c_atomic_abi_caller.c"),
+            };
+            CompilerDriverResult buster_atomic_a64_callee = compiler_driver_execute_invocation(
+                atomic_a64_arena,
+                compiler_driver_parse_arguments(atomic_a64_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_atomic_a64_callee_command)));
+            CompilerDriverResult buster_atomic_a64_caller = compiler_driver_execute_invocation(
+                atomic_a64_arena,
+                compiler_driver_parse_arguments(atomic_a64_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_atomic_a64_caller_command)));
+            BUSTER_TEST(arguments,
+                        buster_atomic_a64_callee.error == COMPILER_DRIVER_ERROR_NONE && buster_atomic_a64_caller.error == COMPILER_DRIVER_ERROR_NONE);
+            if (buster_atomic_a64_callee.error == COMPILER_DRIVER_ERROR_NONE && buster_atomic_a64_caller.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 atomic_a64_pairs[2][2] = {
+                    {buster_atomic_a64_caller_path, clang_atomic_callee_path},
+                    {clang_atomic_caller_path, buster_atomic_a64_callee_path},
+                };
+                for (u64 direction = 0; direction < BUSTER_ARRAY_LENGTH(atomic_a64_pairs); direction += 1)
+                {
+                    String8 atomic_a64_image_path = buster_test_temporary_path(atomic_a64_arena, S8("buster-c-atomic-abi-a64-pair"), S8(".elf"));
+                    String8 atomic_a64_link_command[] = {
+                        S8("-target"), S8("aarch64-unknown-linux-gnu"), S8("-o"), atomic_a64_image_path, atomic_a64_pairs[direction][0],
+                        atomic_a64_pairs[direction][1], clang_atomic_start_path,
+                    };
+                    CompilerDriverResult atomic_a64_link = compiler_driver_execute_invocation(
+                        atomic_a64_arena, compiler_driver_parse_arguments(atomic_a64_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_a64_link_command)));
+                    BUSTER_TEST(arguments, atomic_a64_link.error == COMPILER_DRIVER_ERROR_NONE);
+                    if (atomic_a64_link.error != COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        continue;
+                    }
+                    String8 atomic_a64_run_arguments[] = {S8("qemu-aarch64"), atomic_a64_image_path};
+                    ProcessSpawnResult atomic_a64_run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_a64_run_arguments), (SliceString8){0},
+                                                                          (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    BUSTER_TEST(arguments, atomic_a64_run.handle != 0);
+                    if (atomic_a64_run.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_sync(atomic_a64_arena, atomic_a64_run).result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+            }
+        }
+        scratch_end(atomic_a64_temporary);
+    }
+#endif
     // `__attribute__((packed))` and `__attribute__((aligned(N)))` decide
     // object representation, so a compiler that parses and ignores them lays
     // out a different object than every other compiler on the target while
