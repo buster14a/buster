@@ -770,7 +770,8 @@ way musl's makefile globs it — every `.c` under each immediate subdirectory of
 `src/`, plus `src/malloc/mallocng`, `crt/` and `ldso/` — rather than carrying a
 written-down source list, so a release that adds or removes a translation unit
 shows up as a manifest change instead of a silent omission. On x86-64 that is
-1349 C units.
+1356 units: 1324 C and the 32 the architecture answers in assembly, which the
+`MUSL_MANIFEST` line reports separately.
 
 One flag set drives both compilers, and it is musl's own `CFLAGS_ALL` minus the
 flags musl's `configure` only offers a compiler that accepts them: `-std=c99
@@ -1387,6 +1388,43 @@ by how many tests wanted each. It is the work list in the order that unblocks
 the most tests, and it is why this stage grows by itself as the compiler
 improves rather than needing to be extended by hand.
 
+The suite is built twice, and the second time is the only coverage the NONE
+register allocator has against a whole libc. Both compile inventories — musl's
+1356 units and libc-test's 424 — are compiled under FAST, and building either
+of them four times over would produce four object sets and one answer. All
+four allocators do run on the freestanding probe, each required to reproduce
+the reference transcript byte for byte, but that is one program of about two
+kilobytes against FAST's 424. So one subset is built and run a second time
+under `-fregister-allocator=none`: `src/functional`, 77 units of ordinary C
+whose programs run in a couple of seconds. Compiling the musl manifest a
+second time under NONE and gating the unit count would have been cheaper and
+could only ever have caught a refusal — the half of the compiler the register
+allocator is not in — where this compiles, links, runs and compares generated
+code.
+
+Only the test's own object is rebuilt. It links against the same Buster-built
+libc, startup object and support archive as the pass above, so a unit that
+answers differently here answers differently because of the allocator and not
+because of anything underneath it. Each unit is classified from scratch,
+against the same reference transcript the first pass recorded, rather than by
+comparing the two Buster passes: a unit FAST cannot compile says nothing about
+NONE, and the reference's reach is the one thing the two passes do share. The
+gate is its own count and its own hash — `LIBC_TEST_ALLOCATOR_EXPECTED_PASSING`
+and `LIBC_TEST_ALLOCATOR_EXPECTED_STATE_HASH`, printed on
+`LIBCTEST_ALLOCATOR_INVENTORY` beside a `LIBCTEST_ALLOCATOR` line of counts and
+cost, with one `LIBCTEST_ALLOCATOR_UNIT` line for each unit that is not
+passing — because folding it into `LIBC_TEST_EXPECTED_PASSING` would make a
+difference between two allocators and a regression under both the same moved
+number. The pass runs whether or not the first inventory moved, so one run
+reports both.
+
+`src/functional` classifies identically under both allocators today: 69
+passing, the same two wrong answers — `functional/tls_align` and
+`functional/tls_align_dlopen`, both of them the local-exec TLS model rather
+than anything an allocator decides — the same three blocked-link and the same
+three excluded-reference. That agreement across 69 running programs is what
+the pass exists to be able to state.
+
 Today 381 of 424 units pass (measured 2026-08-29, twice on one machine).
 Seventy-eight are `src/api`: 78 of its 79 units compile against musl's headers
 under both compilers, and one — `api/unistd` — is held out because musl
@@ -1605,14 +1643,19 @@ shared objects repeat it: 2.922.384 bytes against 929.584 over the same 1347
 members. The two archives take 0,71 seconds to write, the two shared links
 0,26, and each probe link about 3 ms.
 
-Adding libc-test takes the run to about 210 seconds wall and 116 MB. The
-suite's 424 units cost 36,3 seconds of compiler time across both compilers for
-35,5 MB of preprocessed source, 1.113.780 lines and 3.480.975 tokens; the links
-cost 3,3 seconds and the runs 74,3. The runs dominate, and almost all of that
-is the reference's own structural hangs — the thread tests wait out the
-ten-second deadline because `clone` is architecture assembly and is in neither
-archive — so that number moves with the deadline rather than with the
-compiler.
+Adding libc-test takes the run to about 131 seconds wall and 160 MB (measured
+2026-08-30, twice on one machine). The suite's 424 units cost 32,0 seconds of
+compiler time across both compilers for 35,7 MB of preprocessed source,
+1.122.642 lines and 3.523.458 tokens; the links cost 4,0 seconds and the runs
+3,3. The runs used to dominate at 74,3 seconds, almost all of it the
+reference's own structural hangs waiting out the ten-second deadline because
+`clone` was architecture assembly and in neither archive; building musl's
+x86-64 assembly into both ended that, and what is left is the compile.
+`src/functional` under the second register allocator adds 5,0 seconds of that
+compiler and child time — 3,3 compiling its 77 units, 0,5 linking them and 1,3
+running them — and 17 MB of objects and programs. That is about four per cent
+of the run and inside its run-to-run spread: 130,5 and 135,3 seconds wall with
+the pass against 132,1 and 128,2 without it, on the same machine.
 
 Generated headers, objects, archives, metrics and logs remain under
 `build/musl-v1.2.6-<pid>/` and are not cleaned up on the way out, so delete the

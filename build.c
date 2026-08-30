@@ -704,10 +704,12 @@ struct TestMuslOptions
 // musl's MALLOC_DIR. The pinned release builds mallocng; src/malloc/oldmalloc
 // is present in the tree and is not part of the manifest.
 #define MUSL_COMPATIBILITY_ALLOCATOR "mallocng"
-// The register allocator the whole manifest is compiled under. The four
-// allocators are compared on the freestanding probe rather than on a thousand
-// units each, which is where a difference between them would show as a wrong
-// answer instead of as four identical object sets.
+// The register allocator the whole manifest is compiled under. Compiling a
+// thousand units four times over would produce four object sets and one
+// answer, so the other three allocators are exercised where a difference
+// between them shows as a wrong answer instead: on the freestanding probe,
+// which runs all four, and on one libc-test subset, which runs the second of
+// them over 77 test programs (LIBC_TEST_ALLOCATOR_MODE).
 #define MUSL_COMPATIBILITY_ALLOCATOR_MODE "fast"
 
 // libc-test is musl's own test suite. It carries no tags and no version file,
@@ -725,6 +727,18 @@ struct TestMuslOptions
 // loaded runner cannot turn a slow test into a classified failure, and a test
 // that exceeds it is classified rather than left to hang.
 #define LIBC_TEST_TIMEOUT_US (10ull * 1000ull * 1000ull)
+// The second register allocator the suite is built under, and the one subset
+// it covers. NONE is the allocator that is not an allocator -- every value
+// lives in the frame and every operand is loaded and stored around its use --
+// so it is the mode a defect in the rest of the emitter shows up under, and
+// until this pass its only coverage against a libc was the freestanding
+// probe: one program of about two kilobytes, against FAST's 424.
+// `src/functional` is the subset to give it: 77 units of ordinary C that run
+// in a couple of seconds, so a second allocator costs about a tenth of the
+// run and buys generated code that is compiled, linked and run rather than
+// merely accepted.
+#define LIBC_TEST_ALLOCATOR_MODE "none"
+#define LIBC_TEST_ALLOCATOR_SUBSET "functional"
 
 // QuickJS publishes its releases as dated tarballs rather than tags, so the
 // pin is the commit whose tree is the release and the VERSION file that
@@ -17028,6 +17042,26 @@ BUSTER_GLOBAL_LOCAL String8 libc_test_state_names[LIBC_TEST_STATE_COUNT] = {
     [LIBC_TEST_STATE_EXCLUDED_REFERENCE] = S8_INITIALIZER("excluded-reference"),
 };
 
+// The three ways a unit is built. The first two are the comparison this stage
+// is -- the reference compiler, and Buster under the manifest's own register
+// allocator -- and the third is Buster again under the second allocator, over
+// one subset. Only the test's own translation unit changes with it: a side is
+// a compiler and a set of output paths, not a libc.
+typedef enum LibcTestSide
+{
+    LIBC_TEST_SIDE_CLANG,
+    LIBC_TEST_SIDE_BUSTER,
+    LIBC_TEST_SIDE_ALLOCATOR,
+    LIBC_TEST_SIDE_COUNT,
+} LibcTestSide;
+
+// Also the directory each side's objects, programs and shared objects go in.
+BUSTER_GLOBAL_LOCAL String8 libc_test_side_names[LIBC_TEST_SIDE_COUNT] = {
+    [LIBC_TEST_SIDE_CLANG] = S8_INITIALIZER("clang"),
+    [LIBC_TEST_SIDE_BUSTER] = S8_INITIALIZER("buster"),
+    [LIBC_TEST_SIDE_ALLOCATOR] = S8_INITIALIZER("allocator"),
+};
+
 typedef struct LibcTestSubset LibcTestSubset;
 struct LibcTestSubset
 {
@@ -17061,15 +17095,14 @@ struct LibcTestUnit
     // shared object at run time passes to dlopen.
     String8 stem;
     String8 source;
-    String8 clang_object;
-    String8 buster_object;
-    String8 clang_program;
-    String8 buster_program;
-    // Where each side's shared object goes when this unit is one. It sits in
-    // the directory a dependent's program sits in, because that is where
-    // upstream puts it and where the tests that open one look.
-    String8 clang_shared_object;
-    String8 buster_shared_object;
+    // One object and one program per side, and -- when upstream builds this
+    // unit as a library rather than a program -- one shared object per side
+    // instead. A shared object sits in the directory a dependent's program
+    // sits in, because that is where upstream puts it and where the tests that
+    // open one look.
+    String8 object[LIBC_TEST_SIDE_COUNT];
+    String8 program[LIBC_TEST_SIDE_COUNT];
+    String8 shared_object[LIBC_TEST_SIDE_COUNT];
     // The sibling shared objects this unit's program needs, by stem, in the
     // same subset. Read out of the .mk rather than written down here.
     String8 dependencies[LIBC_TEST_DEPENDENCY_MAX];
@@ -17081,12 +17114,25 @@ struct LibcTestUnit
     // within the unit. Empty unless the state is blocked-link.
     String8* undefined;
     u64 undefined_count;
+    // What the reference printed, kept because the second allocator's pass
+    // needs the same answer to compare against and rerunning the reference
+    // program for it would measure the reference twice.
+    String8 reference_transcript;
+    // The second allocator's own answer, over the subset it covers and
+    // nothing else. It is kept apart from the fields above rather than
+    // replacing them: the two inventories are gated separately, so a mode
+    // difference and a regression cannot arrive as one moved number.
+    String8 allocator_detail;
+    u64 allocator_compile_us;
+    u64 allocator_link_us;
+    u64 allocator_run_us;
     u64 subset;
     u64 compile_us;
     u64 link_us;
     u64 run_us;
     SelfHostSourceMetrics metrics;
     LibcTestState state;
+    LibcTestState allocator_state;
     // Whether Buster compiled the unit, recorded whether or not the state ended
     // up depending on it.
     bool compiled;
@@ -17101,9 +17147,8 @@ struct LibcTestUnit
     bool export_dynamic;
     // Whether each side produced this unit's shared object, which is what
     // decides a dependent's state when one is missing.
-    bool clang_shared_built;
-    bool buster_shared_built;
-    u8 reserved[2];
+    bool shared_built[LIBC_TEST_SIDE_COUNT];
+    u8 reserved[1];
 };
 
 typedef struct LibcTestManifest LibcTestManifest;
@@ -17236,6 +17281,24 @@ struct LibcTestSubsetTotals
 // are the local-exec TLS group.
 #define LIBC_TEST_EXPECTED_PASSING 381
 #define LIBC_TEST_EXPECTED_STATE_HASH 0x0e973f6c67fa1195ull
+
+// The same gate for the second allocator, over LIBC_TEST_ALLOCATOR_SUBSET
+// alone, and deliberately not folded into the two above: a unit that answers
+// differently under NONE than under FAST is a code-generation defect in one
+// allocator, while a unit that stops passing under both is a defect anywhere
+// in the compiler, and one pinned number could not tell them apart. The
+// classification is taken from scratch against the same reference
+// transcripts rather than by comparing the two Buster passes, so a unit FAST
+// cannot reach does not decide what NONE is credited with.
+// 2026-08-30: the first measurement, and it is the one worth having:
+// `src/functional` classifies identically under both allocators. 69 passing,
+// the same two wrong answers (`functional/tls_align` and
+// `functional/tls_align_dlopen`, both of them the local-exec TLS model rather
+// than anything an allocator decides), the same three blocked-link and the
+// same three excluded-reference. NONE and FAST agreeing across 69 running
+// programs is what this pass exists to be able to state rather than assume.
+#define LIBC_TEST_ALLOCATOR_EXPECTED_PASSING 69
+#define LIBC_TEST_ALLOCATOR_EXPECTED_STATE_HASH 0xd8d4dc347e1bddc9ull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it
@@ -17410,16 +17473,21 @@ struct LibcTestBuild
     // Where each side's dynamic programs are run from. Two of the tests that
     // open a shared object spell its path from the working directory, so the
     // run directory is that side's own tree rather than the driver's.
-    String8 clang_run_directory;
-    String8 buster_run_directory;
+    String8 run_directory[LIBC_TEST_SIDE_COUNT];
 };
 
-BUSTER_GLOBAL_LOCAL bool libc_test_compile(Arena* arena, LibcTestBuild* build, bool buster, String8 source, String8 output, String8 metrics,
+BUSTER_GLOBAL_LOCAL bool libc_test_compile(Arena* arena, LibcTestBuild* build, LibcTestSide side, String8 source, String8 output, String8 metrics,
                                            bool extended, bool shared_object, u64* elapsed_us, String8* diagnostic)
 {
+    // Two of the three sides are Buster, and the register allocator is the
+    // whole of what separates them: the flag set below is otherwise the same
+    // string for both, which is what makes a difference between them
+    // attributable.
+    bool buster = side != LIBC_TEST_SIDE_CLANG;
+    String8 mode = side == LIBC_TEST_SIDE_ALLOCATOR ? S8(LIBC_TEST_ALLOCATOR_MODE) : S8(MUSL_COMPATIBILITY_ALLOCATOR_MODE);
     LibcTestFlags flags = libc_test_flags(arena, build->musl_root, build->musl_object_directory, build->root, build->generated_directory);
     String8 metrics_flag = metrics.length ? string_format(arena, S8("-fsource-metrics={S8}"), metrics) : (String8){0};
-    String8 allocator_flag = string_format(arena, S8("-fregister-allocator={S8}"), S8(MUSL_COMPATIBILITY_ALLOCATOR_MODE));
+    String8 allocator_flag = string_format(arena, S8("-fregister-allocator={S8}"), mode);
     OsArgumentBuilder builder = os_argument_builder_start(arena);
     if (buster)
     {
@@ -17497,11 +17565,16 @@ BUSTER_GLOBAL_LOCAL String8 libc_test_parent_directory(String8 path)
 //                    the program's own directory as the run path -- which is
 //                    upstream's -rpath='$ORIGIN', spelled as the directory
 //                    because this harness knows where it put the file.
-BUSTER_GLOBAL_LOCAL bool libc_test_link(Arena* arena, LibcTestBuild* build, LibcTestManifest* manifest, LibcTestUnit* unit, bool buster,
+BUSTER_GLOBAL_LOCAL bool libc_test_link(Arena* arena, LibcTestBuild* build, LibcTestManifest* manifest, LibcTestUnit* unit, LibcTestSide side,
                                         u64* elapsed_us, String8* error_out)
 {
-    String8 output = unit->shared ? (buster ? unit->buster_shared_object : unit->clang_shared_object)
-                                  : (buster ? unit->buster_program : unit->clang_program);
+    // What the side owns is its own object, its own program and its own
+    // sibling shared objects. Everything else on the line -- the startup
+    // object, the support archive, the libc, static or shared -- is the
+    // compiler's rather than the allocator's, so both Buster sides link
+    // against the one set the pass above built.
+    bool buster = side != LIBC_TEST_SIDE_CLANG;
+    String8 output = unit->shared ? unit->shared_object[side] : unit->program[side];
     // Every string the argument builder will hold is materialized first: the
     // builder claims a contiguous run of String8 at the arena's current
     // position, and anything allocating on the same arena in between lands
@@ -17516,7 +17589,7 @@ BUSTER_GLOBAL_LOCAL bool libc_test_link(Arena* arena, LibcTestBuild* build, Libc
             LibcTestUnit* other = manifest->units + candidate;
             sibling = other->subset == unit->subset && string_equal(other->stem, unit->dependencies[index]) ? other : 0;
         }
-        bool built = sibling && (buster ? sibling->buster_shared_built : sibling->clang_shared_built);
+        bool built = sibling && sibling->shared_built[side];
         if (!built)
         {
             if (error_out)
@@ -17525,7 +17598,7 @@ BUSTER_GLOBAL_LOCAL bool libc_test_link(Arena* arena, LibcTestBuild* build, Libc
             }
             return false;
         }
-        dependencies[dependency_count++] = buster ? sibling->buster_shared_object : sibling->clang_shared_object;
+        dependencies[dependency_count++] = sibling->shared_object[side];
     }
     String8 run_path = unit->dynamic && !unit->shared ? libc_test_parent_directory(output) : (String8){0};
     OsArgumentBuilder builder = os_argument_builder_start(arena);
@@ -17555,7 +17628,7 @@ BUSTER_GLOBAL_LOCAL bool libc_test_link(Arena* arena, LibcTestBuild* build, Libc
     {
         os_argument_builder_append(&builder, buster ? build->buster_startup_object : build->clang_startup_object);
     }
-    os_argument_builder_append(&builder, buster ? unit->buster_object : unit->clang_object);
+    os_argument_builder_append(&builder, unit->object[side]);
     for (u64 index = 0; index < dependency_count; index += 1)
     {
         os_argument_builder_append(&builder, dependencies[index]);
@@ -17841,10 +17914,11 @@ BUSTER_GLOBAL_LOCAL bool libc_test_collect_manifest(Arena* arena, LibcTestBuild*
     {
         LibcTestUnit* unit = units + index;
         String8 name = string_format(arena, S8("{u64}"), index);
-        unit->clang_object = string_format(arena, S8("{S8}/clang/{S8}.o"), output_directory, name);
-        unit->buster_object = string_format(arena, S8("{S8}/buster/{S8}.o"), output_directory, name);
-        unit->clang_program = string_format(arena, S8("{S8}/clang/{S8}"), output_directory, name);
-        unit->buster_program = string_format(arena, S8("{S8}/buster/{S8}"), output_directory, name);
+        for (u64 side = 0; side < LIBC_TEST_SIDE_COUNT; side += 1)
+        {
+            unit->object[side] = string_format(arena, S8("{S8}/{S8}/{S8}.o"), output_directory, libc_test_side_names[side], name);
+            unit->program[side] = string_format(arena, S8("{S8}/{S8}/{S8}"), output_directory, libc_test_side_names[side], name);
+        }
         if (!unit->dynamic)
         {
             continue;
@@ -17857,22 +17931,12 @@ BUSTER_GLOBAL_LOCAL bool libc_test_collect_manifest(Arena* arena, LibcTestBuild*
         // src/<subset>/<stem> and running them from that side's own directory
         // is what makes all three resolve, and it is upstream's own layout.
         String8 relative_directory = string_format(arena, S8("src/{S8}"), libc_test_subsets[unit->subset].name);
-        for (u64 side = 0; side < 2; side += 1)
+        for (u64 side = 0; side < LIBC_TEST_SIDE_COUNT; side += 1)
         {
-            String8 directory = path_join(arena, path_join(arena, output_directory, side ? S8("buster") : S8("clang")), relative_directory);
+            String8 directory = path_join(arena, path_join(arena, output_directory, libc_test_side_names[side]), relative_directory);
             make_directory_recursive(arena, directory);
-            String8 program = string_format(arena, S8("{S8}/{S8}.exe"), directory, unit->stem);
-            String8 shared_object = string_format(arena, S8("{S8}/{S8}.so"), directory, unit->stem);
-            if (side)
-            {
-                unit->buster_program = program;
-                unit->buster_shared_object = shared_object;
-            }
-            else
-            {
-                unit->clang_program = program;
-                unit->clang_shared_object = shared_object;
-            }
+            unit->program[side] = string_format(arena, S8("{S8}/{S8}.exe"), directory, unit->stem);
+            unit->shared_object[side] = string_format(arena, S8("{S8}/{S8}.so"), directory, unit->stem);
         }
     }
     *manifest_out = (LibcTestManifest){
@@ -17898,8 +17962,8 @@ BUSTER_GLOBAL_LOCAL bool libc_test_build_support(Arena* arena, LibcTestBuild* bu
         String8 object = string_format(arena, S8("{S8}/{S8}/support-{u64}.o"), output_directory, buster ? S8("buster") : S8("clang"), index);
         String8 diagnostic = {0};
         TemporalArena temporary = scratch_begin(&arena, 1);
-        bool compiled =
-            libc_test_compile(temporary.arena, build, buster, manifest->support[index], object, (String8){0}, false, false, &elapsed_us, &diagnostic);
+        bool compiled = libc_test_compile(temporary.arena, build, buster ? LIBC_TEST_SIDE_BUSTER : LIBC_TEST_SIDE_CLANG, manifest->support[index],
+                                          object, (String8){0}, false, false, &elapsed_us, &diagnostic);
         if (compiled)
         {
             objects[object_count++] = object;
@@ -17976,16 +18040,172 @@ struct LibcTestBlocker
     u64 units;
 };
 
+// One subset, built and run a second time under LIBC_TEST_ALLOCATOR_MODE.
+//
+// The whole suite under all four allocators is not what this is: the compile
+// alone is 33 of the run's 210 seconds and four of them would dominate the
+// stage. One subset under one more allocator is about a tenth of the run and
+// is real coverage -- 77 programs compiled, linked, run and compared against
+// the reference's own transcripts -- where compiling the musl manifest a
+// second time and counting the units that survive would have been cheaper and
+// could only ever have caught a refusal, which is the half of the compiler the
+// register allocator is not in.
+//
+// Only the test's own object is rebuilt. It links against the same
+// Buster-built libc, startup object and support archive as the pass above, so
+// a unit that answers differently here answers differently because of the
+// allocator and not because of anything underneath it.
+//
+// Each unit is classified from scratch, exactly as above and against the same
+// reference transcript, rather than by comparing the two Buster passes. A unit
+// the reference cannot reach carries that state here too -- there is no answer
+// to compare against under any allocator -- and everything else is asked the
+// question again from the compile.
+BUSTER_GLOBAL_LOCAL bool libc_test_allocator_stage(Arena* arena, LibcTestBuild* build, LibcTestManifest* manifest)
+{
+    u64 subset = LIBC_TEST_SUBSET_COUNT;
+    for (u64 index = 0; index < LIBC_TEST_SUBSET_COUNT; index += 1)
+    {
+        subset = string_equal(libc_test_subsets[index].name, S8(LIBC_TEST_ALLOCATOR_SUBSET)) ? index : subset;
+    }
+    if (subset == LIBC_TEST_SUBSET_COUNT)
+    {
+        string_print(S8("error: test_musl names {S8} as the second allocator's subset and libc-test has no such subset\n"),
+                     S8(LIBC_TEST_ALLOCATOR_SUBSET));
+        return false;
+    }
+    bool compile_only = libc_test_subsets[subset].compile_only;
+    // Shared objects first, for the same reason as above: a test that opens
+    // one has to find this side's own copy of it at link time.
+    for (u64 pass = 0; pass < 2; pass += 1)
+    {
+        for (u64 index = 0; index < manifest->unit_count; index += 1)
+        {
+            LibcTestUnit* unit = manifest->units + index;
+            if (unit->subset != subset || unit->shared != (pass == 0))
+            {
+                continue;
+            }
+            if (unit->state == LIBC_TEST_STATE_EXCLUDED_REFERENCE)
+            {
+                unit->allocator_state = LIBC_TEST_STATE_EXCLUDED_REFERENCE;
+                unit->allocator_detail = unit->detail;
+                continue;
+            }
+            TemporalArena temporary = scratch_begin(&arena, 1);
+            String8 diagnostic = {0};
+            bool compiled = libc_test_compile(temporary.arena, build, LIBC_TEST_SIDE_ALLOCATOR, unit->source, unit->object[LIBC_TEST_SIDE_ALLOCATOR],
+                                              (String8){0}, compile_only, unit->shared, &unit->allocator_compile_us, &diagnostic);
+            unit->allocator_detail = string_duplicate_arena(arena, diagnostic, true);
+            scratch_end(temporary);
+            if (!compiled)
+            {
+                unit->allocator_state = LIBC_TEST_STATE_BLOCKED_COMPILE;
+                continue;
+            }
+            if (compile_only)
+            {
+                unit->allocator_state = LIBC_TEST_STATE_PASS;
+                unit->allocator_detail = (String8){0};
+                continue;
+            }
+            temporary = scratch_begin(&arena, 1);
+            String8 link_error = {0};
+            if (!libc_test_link(temporary.arena, build, manifest, unit, LIBC_TEST_SIDE_ALLOCATOR, &unit->allocator_link_us, &link_error))
+            {
+                // The blocker ranking is the pass above's: an unresolved
+                // symbol is a property of the archive, which this side shares
+                // with it, so what is worth keeping here is the linker's own
+                // first words rather than a second copy of the same list.
+                unit->allocator_state = LIBC_TEST_STATE_BLOCKED_LINK;
+                unit->allocator_detail = string_duplicate_arena(arena, musl_first_error_line(link_error), true);
+                scratch_end(temporary);
+                continue;
+            }
+            unit->shared_built[LIBC_TEST_SIDE_ALLOCATOR] = unit->shared;
+            if (unit->shared)
+            {
+                unit->allocator_state = LIBC_TEST_STATE_PASS;
+                unit->allocator_detail = (String8){0};
+                scratch_end(temporary);
+                continue;
+            }
+            String8 transcript = {0};
+            String8 status = {0};
+            bool ran = libc_test_run(temporary.arena, unit->program[LIBC_TEST_SIDE_ALLOCATOR], build->run_directory[LIBC_TEST_SIDE_ALLOCATOR],
+                                     unit->dynamic, &unit->allocator_run_us, &transcript, &status);
+            bool matched = ran && string_equal(transcript, unit->reference_transcript);
+            unit->allocator_state = matched ? LIBC_TEST_STATE_PASS : LIBC_TEST_STATE_FAIL;
+            unit->allocator_detail = matched ? (String8){0} : string_duplicate_arena(arena, status.length ? status : musl_first_line(transcript), true);
+            scratch_end(temporary);
+        }
+    }
+
+    TemporalArena hash_temporary = scratch_begin(&arena, 1);
+    String8* hash_lines = arena_allocate(hash_temporary.arena, String8, manifest->unit_count * 4);
+    u64 hash_line_count = 0;
+    LibcTestSubsetTotals totals = {0};
+    u64 passing = 0;
+    for (u64 index = 0; index < manifest->unit_count; index += 1)
+    {
+        LibcTestUnit* unit = manifest->units + index;
+        if (unit->subset != subset)
+        {
+            continue;
+        }
+        totals.units += 1;
+        totals.states[unit->allocator_state] += 1;
+        totals.shared += unit->shared;
+        totals.dynamic += unit->dynamic && !unit->shared;
+        totals.compile_us += unit->allocator_compile_us;
+        totals.link_us += unit->allocator_link_us;
+        totals.run_us += unit->allocator_run_us;
+        if (unit->allocator_state == LIBC_TEST_STATE_PASS)
+        {
+            passing += 1;
+            continue;
+        }
+        string_print(S8("LIBCTEST_ALLOCATOR_UNIT mode={S8} unit={S8} state={S8} detail={S8}\n"), S8(LIBC_TEST_ALLOCATOR_MODE), unit->relative,
+                     libc_test_state_names[unit->allocator_state], unit->allocator_detail);
+        hash_lines[hash_line_count++] = libc_test_state_names[unit->allocator_state];
+        hash_lines[hash_line_count++] = S8(" ");
+        hash_lines[hash_line_count++] = unit->relative;
+        hash_lines[hash_line_count++] = S8("\n");
+    }
+    String8 hash_text = string_join_arena(hash_temporary.arena, (SliceString8){.pointer = hash_lines, .length = hash_line_count}, false);
+    u64 state_hash = hash_text.length ? buster_hash_64((u8*)hash_text.pointer, hash_text.length) : 0;
+    scratch_end(hash_temporary);
+    string_print(S8("LIBCTEST_ALLOCATOR mode={S8} subset={S8} units={u64} pass={u64} fail={u64} blocked_compile={u64} blocked_link={u64} "
+                    "excluded_reference={u64} shared={u64} dynamic={u64} compile_us={u64} link_us={u64} run_us={u64}\n"),
+                 S8(LIBC_TEST_ALLOCATOR_MODE), libc_test_subsets[subset].name, totals.units, totals.states[LIBC_TEST_STATE_PASS],
+                 totals.states[LIBC_TEST_STATE_FAIL], totals.states[LIBC_TEST_STATE_BLOCKED_COMPILE], totals.states[LIBC_TEST_STATE_BLOCKED_LINK],
+                 totals.states[LIBC_TEST_STATE_EXCLUDED_REFERENCE], totals.shared, totals.dynamic, totals.compile_us, totals.link_us, totals.run_us);
+    string_print(S8("LIBCTEST_ALLOCATOR_INVENTORY mode={S8} subset={S8} passing={u64} expected_passing={u64} state_hash={u64:x} "
+                    "expected_state_hash={u64:x}\n"),
+                 S8(LIBC_TEST_ALLOCATOR_MODE), libc_test_subsets[subset].name, passing, (u64)LIBC_TEST_ALLOCATOR_EXPECTED_PASSING, state_hash,
+                 (u64)LIBC_TEST_ALLOCATOR_EXPECTED_STATE_HASH);
+    if (passing != LIBC_TEST_ALLOCATOR_EXPECTED_PASSING || state_hash != LIBC_TEST_ALLOCATOR_EXPECTED_STATE_HASH)
+    {
+        string_print(S8("error: the {S8} allocator's libc-test classification moved; update LIBC_TEST_ALLOCATOR_EXPECTED_PASSING and "
+                        "LIBC_TEST_ALLOCATOR_EXPECTED_STATE_HASH in build.c to the values on the LIBCTEST_ALLOCATOR_INVENTORY line above, and record "
+                        "what changed\n"),
+                     S8(LIBC_TEST_ALLOCATOR_MODE));
+        return false;
+    }
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, String8 output_directory)
 {
     if (!libc_test_git_verify(arena, build->root))
     {
         return false;
     }
-    build->clang_run_directory = path_join(arena, output_directory, S8("clang"));
-    build->buster_run_directory = path_join(arena, output_directory, S8("buster"));
-    make_directory_recursive(arena, build->clang_run_directory);
-    make_directory_recursive(arena, build->buster_run_directory);
+    for (u64 side = 0; side < LIBC_TEST_SIDE_COUNT; side += 1)
+    {
+        build->run_directory[side] = path_join(arena, output_directory, libc_test_side_names[side]);
+        make_directory_recursive(arena, build->run_directory[side]);
+    }
     make_directory_recursive(arena, build->generated_directory);
     String8 metrics_directory = path_join(arena, output_directory, S8("metrics"));
     make_directory_recursive(arena, metrics_directory);
@@ -18034,8 +18254,8 @@ BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, Str
             TemporalArena temporary = scratch_begin(&arena, 1);
             String8 metrics_path = string_format(arena, S8("{S8}/{u64}.txt"), metrics_directory, index);
             String8 diagnostic = {0};
-            bool compiled = libc_test_compile(temporary.arena, build, true, unit->source, unit->buster_object, metrics_path, compile_only, unit->shared,
-                                              &unit->compile_us, &diagnostic);
+            bool compiled = libc_test_compile(temporary.arena, build, LIBC_TEST_SIDE_BUSTER, unit->source, unit->object[LIBC_TEST_SIDE_BUSTER],
+                                              metrics_path, compile_only, unit->shared, &unit->compile_us, &diagnostic);
             unit->compiled = compiled;
             unit->detail = string_duplicate_arena(arena, diagnostic, true);
             scratch_end(temporary);
@@ -18060,8 +18280,8 @@ BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, Str
             // the fenv and thread units are portable stubs -- and holding it out
             // keeps the comparison about Buster.
             String8 reference_diagnostic = {0};
-            if (!libc_test_compile(temporary.arena, build, false, unit->source, unit->clang_object, (String8){0}, compile_only, unit->shared,
-                                   &unit->compile_us, &reference_diagnostic))
+            if (!libc_test_compile(temporary.arena, build, LIBC_TEST_SIDE_CLANG, unit->source, unit->object[LIBC_TEST_SIDE_CLANG], (String8){0},
+                                   compile_only, unit->shared, &unit->compile_us, &reference_diagnostic))
             {
                 unit->state = LIBC_TEST_STATE_EXCLUDED_REFERENCE;
                 unit->detail = string_format(arena, S8("reference compile: {S8}"), reference_diagnostic);
@@ -18072,18 +18292,17 @@ BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, Str
             if (!compile_only)
             {
                 String8 link_error = {0};
-                if (!libc_test_link(temporary.arena, build, &manifest, unit, false, &unit->link_us, &link_error))
+                if (!libc_test_link(temporary.arena, build, &manifest, unit, LIBC_TEST_SIDE_CLANG, &unit->link_us, &link_error))
                 {
                     unit->state = LIBC_TEST_STATE_EXCLUDED_REFERENCE;
                     unit->detail = string_format(arena, S8("reference link: {S8}"), musl_first_error_line(link_error));
                     scratch_end(temporary);
                     continue;
                 }
-                unit->clang_shared_built = unit->shared;
+                unit->shared_built[LIBC_TEST_SIDE_CLANG] = unit->shared;
                 String8 status = {0};
-                if (!link_only &&
-                    !libc_test_run(temporary.arena, unit->clang_program, build->clang_run_directory, unit->dynamic, &unit->run_us, &reference_transcript,
-                                   &status))
+                if (!link_only && !libc_test_run(temporary.arena, unit->program[LIBC_TEST_SIDE_CLANG], build->run_directory[LIBC_TEST_SIDE_CLANG],
+                                                 unit->dynamic, &unit->run_us, &reference_transcript, &status))
                 {
                     unit->state = LIBC_TEST_STATE_EXCLUDED_REFERENCE;
                     unit->detail = string_format(arena, S8("reference run: {S8}"), status);
@@ -18091,6 +18310,7 @@ BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, Str
                     continue;
                 }
                 reference_transcript = string_duplicate_arena(arena, reference_transcript, true);
+                unit->reference_transcript = reference_transcript;
             }
             scratch_end(temporary);
 
@@ -18109,7 +18329,7 @@ BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, Str
             }
             temporary = scratch_begin(&arena, 1);
             String8 link_error = {0};
-            bool linked = libc_test_link(temporary.arena, build, &manifest, unit, true, &unit->link_us, &link_error);
+            bool linked = libc_test_link(temporary.arena, build, &manifest, unit, LIBC_TEST_SIDE_BUSTER, &unit->link_us, &link_error);
             if (!linked)
             {
                 libc_test_collect_undefined(arena, link_error, &unit->undefined, &unit->undefined_count);
@@ -18123,7 +18343,7 @@ BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, Str
                 scratch_end(temporary);
                 continue;
             }
-            unit->buster_shared_built = unit->shared;
+            unit->shared_built[LIBC_TEST_SIDE_BUSTER] = unit->shared;
             if (link_only)
             {
                 // Both sides produced the shared object. There is nothing to run,
@@ -18135,8 +18355,8 @@ BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, Str
             }
             String8 transcript = {0};
             String8 status = {0};
-            bool ran = libc_test_run(temporary.arena, unit->buster_program, build->buster_run_directory, unit->dynamic, &unit->run_us, &transcript,
-                                     &status);
+            bool ran = libc_test_run(temporary.arena, unit->program[LIBC_TEST_SIDE_BUSTER], build->run_directory[LIBC_TEST_SIDE_BUSTER],
+                                     unit->dynamic, &unit->run_us, &transcript, &status);
             bool matched = ran && string_equal(transcript, reference_transcript);
             unit->state = matched ? LIBC_TEST_STATE_PASS : LIBC_TEST_STATE_FAIL;
             unit->detail = matched ? (String8){0} : string_duplicate_arena(arena, status.length ? status : musl_first_line(transcript), true);
@@ -18228,10 +18448,18 @@ BUSTER_GLOBAL_LOCAL bool libc_test_stage(Arena* arena, LibcTestBuild* build, Str
                  totals.bytes, totals.loc, totals.sloc, totals.tokens);
     string_print(S8("LIBCTEST_INVENTORY passing={u64} expected_passing={u64} state_hash={u64:x} expected_state_hash={u64:x}\n"), passing,
                  (u64)LIBC_TEST_EXPECTED_PASSING, state_hash, (u64)LIBC_TEST_EXPECTED_STATE_HASH);
-    if (passing != LIBC_TEST_EXPECTED_PASSING || state_hash != LIBC_TEST_EXPECTED_STATE_HASH)
+    bool inventory_moved = passing != LIBC_TEST_EXPECTED_PASSING || state_hash != LIBC_TEST_EXPECTED_STATE_HASH;
+    if (inventory_moved)
     {
         string_print(S8("error: the libc-test classification moved; update LIBC_TEST_EXPECTED_PASSING and LIBC_TEST_EXPECTED_STATE_HASH in build.c "
                         "to the values on the LIBCTEST_INVENTORY line above, and record what changed\n"));
+    }
+    // The second allocator runs whether or not the inventory above moved, so
+    // that one run reports both numbers: a rebaseline of one of them almost
+    // always wants the other's line in the same log.
+    bool allocator_moved = !libc_test_allocator_stage(arena, build, &manifest);
+    if (inventory_moved || allocator_moved)
+    {
         return false;
     }
     string_print(S8("LIBCTEST_SUMMARY commit={S8} units={u64} passing={u64} subsets={u64} blockers={u64}\n"), S8(LIBC_TEST_COMMIT), manifest.unit_count,
