@@ -3400,6 +3400,20 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             }
             link_write_u32(bytes, output_offset, (u32)value);
         }
+        // R_X86_64_32 zero-extends: -fno-pic small-model foreign objects
+        // (clang emits it for every address literal there) are valid in an
+        // image whose base keeps the whole file below 4GB.
+        else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE32)
+        {
+            u64 value = 0;
+            if (!link_address_addend(symbol_address, relocation->addend, &value) || value > UINT32_MAX)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, (u32)value);
+        }
         else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
         {
             u64 value = 0;
@@ -4457,6 +4471,20 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             if (!link_absolute32s_value(symbol_address, relocation->addend, &value))
             {
                 result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, (u32)value);
+        }
+        // R_X86_64_32 zero-extends: -fno-pic small-model foreign objects
+        // (clang emits it for every address literal there) are valid in an
+        // image whose base keeps the whole file below 4GB.
+        else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE32)
+        {
+            u64 value = 0;
+            if (!link_address_addend(symbol_address, relocation->addend, &value) || value > UINT32_MAX)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
                 return result;
             }
             link_write_u32(bytes, output_offset, (u32)value);

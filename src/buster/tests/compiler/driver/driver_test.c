@@ -10171,6 +10171,31 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
 #endif
+        // A `.long symbol` in an assembled unit is R_X86_64_32, the
+        // zero-extended absolute form -fno-pic small-model foreign objects
+        // use for every address literal.  The linked program reads a
+        // function's address back out of the slot and calls it.
+        String8 abs32_path = buster_test_temporary_path(asm_unit_arena, S8("buster-asm-abs32"), S8(""));
+        String8 abs32_command_line[] = {
+            S8("-o"), abs32_path, S8("tests/basic_c_abs32_caller.c"), S8("tests/basic_asm_abs32_anchor.s"),
+        };
+        CompilerDriverResult abs32 = compiler_driver_execute_invocation(
+            asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(abs32_command_line)));
+        BUSTER_TEST(arguments, abs32.error == COMPILER_DRIVER_ERROR_NONE);
+        if (abs32.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 abs32_arguments[] = {abs32_path};
+            ProcessSpawnResult abs32_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(abs32_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){
+                                     .use_process_environment = true,
+                                 });
+            BUSTER_TEST(arguments, abs32_spawn.handle != 0);
+            if (abs32_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(asm_unit_arena, abs32_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
         // A directive the vocabulary does not cover is refused by name and by
         // line, rather than dropped from an object that then quietly lacks
         // whatever it was there to do.
