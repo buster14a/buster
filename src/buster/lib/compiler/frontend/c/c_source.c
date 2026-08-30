@@ -3168,7 +3168,7 @@ struct CMacroReplacementToken
     bool comma_paste;
 };
 
-BUSTER_C_INTERNAL bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling)
+BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling)
 {
     return string_equal(c_token_spelling(spelling_base, token), spelling);
 }

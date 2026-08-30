@@ -1980,6 +1980,22 @@ BUSTER_C_INTERNAL bool c_parse_direct_expression_type(Arena* arena, CPreprocessR
             start += 1;
             normalize = true;
         }
+        // An increment or decrement is type-transparent: Py_CLEAR walks
+        // `*p++`, and the update's result type is its operand's.  A trailing
+        // `++` is necessarily a top-level postfix operator -- every nested
+        // position ends in its group's closer instead.
+        if (start + 1 < end && (c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_PLUS_PLUS) ||
+                                c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_MINUS_MINUS)))
+        {
+            start += 1;
+            normalize = true;
+        }
+        if (start + 1 < end && (c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_PLUS_PLUS) ||
+                                c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_MINUS_MINUS)))
+        {
+            end -= 1;
+            normalize = true;
+        }
     }
     u32 base_start = start;
     u32 base_end = end;
@@ -2766,7 +2782,14 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE) || c_token_is_punctuator(&first, C_PUNCTUATOR_EXCLAMATION) ||
                 c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS))
             {
-                task->operation = c_token_is_punctuator(&first, C_PUNCTUATOR_EXCLAMATION) ? C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT : C_PARSE_EXPRESSION_TYPE_UNARY;
+                // An increment keeps its operand's type -- no promotion,
+                // pointers allowed -- where `+`/`-`/`~` promote and demand
+                // an arithmetic operand: `__typeof__(++p)` over a pointer is
+                // that pointer, and Py_CLEAR's `*p++` depends on it.
+                task->operation = c_token_is_punctuator(&first, C_PUNCTUATOR_EXCLAMATION) ? C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT
+                                  : (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS))
+                                      ? C_PARSE_EXPRESSION_TYPE_UPDATE
+                                      : C_PARSE_EXPRESSION_TYPE_UNARY;
                 task->state = 1;
                 if (task_count >= capacity)
                 {
@@ -2934,7 +2957,8 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             }
             return;
         }
-        if (task->operation == C_PARSE_EXPRESSION_TYPE_UNARY || task->operation == C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT)
+        if (task->operation == C_PARSE_EXPRESSION_TYPE_UNARY || task->operation == C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT ||
+            task->operation == C_PARSE_EXPRESSION_TYPE_UPDATE)
         {
             if (last.value >= result->type_count)
             {
@@ -2943,6 +2967,11 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             else if (task->operation == C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT)
             {
                 last = c_parse_expression_scalar_type(result, C_TYPE_INT);
+            }
+            else if (task->operation == C_PARSE_EXPRESSION_TYPE_UPDATE)
+            {
+                // `last` already holds the operand's type, which is the
+                // increment's whole answer.
             }
             else
             {
@@ -3062,6 +3091,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         break;
         case C_PARSE_EXPRESSION_TYPE_NONE:
         case C_PARSE_EXPRESSION_TYPE_UNARY:
+        case C_PARSE_EXPRESSION_TYPE_UPDATE:
         case C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT:
         case C_PARSE_EXPRESSION_TYPE_INDIRECTION:
         case C_PARSE_EXPRESSION_TYPE_ADDRESS_OF:

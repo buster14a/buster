@@ -152,6 +152,7 @@ BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_token(CParseResult* result, char
                                                        CScopeId scope, CToken const* token);
 BUSTER_C_EXTERN CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index);
 BUSTER_C_EXTERN u32 c_parse_scope_distance(CParseResult* result, CScopeId candidate, CScopeId scope);
+BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
 BUSTER_C_EXTERN bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out);
@@ -449,6 +450,7 @@ typedef enum CParseExpressionTypeOperation
     C_PARSE_EXPRESSION_TYPE_COMPARE,
     C_PARSE_EXPRESSION_TYPE_CONDITIONAL,
     C_PARSE_EXPRESSION_TYPE_UNARY,
+    C_PARSE_EXPRESSION_TYPE_UPDATE,
     C_PARSE_EXPRESSION_TYPE_LOGICAL_NOT,
     C_PARSE_EXPRESSION_TYPE_INDIRECTION,
     C_PARSE_EXPRESSION_TYPE_ADDRESS_OF,
