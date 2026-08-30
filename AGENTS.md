@@ -766,12 +766,16 @@ not earned.
 The harness first runs musl's own three header recipes with `sed`
 (`bits/alltypes.h` through `tools/mkalltypes.sed`, `bits/syscall.h`, and
 `src/internal/version.h`), then enumerates the manifest from the checkout the
-way musl's makefile globs it — every `.c` under each immediate subdirectory of
-`src/`, plus `src/malloc/mallocng`, `crt/` and `ldso/` — rather than carrying a
-written-down source list, so a release that adds or removes a translation unit
-shows up as a manifest change instead of a silent omission. On x86-64 that is
-1356 units: 1324 C and the 32 the architecture answers in assembly, which the
-`MUSL_MANIFEST` line reports separately.
+way musl's makefile globs it — musl's `BASE_SRCS`, every `.c` under each
+immediate subdirectory of `src/`, plus `src/malloc/mallocng`, `crt/` and
+`ldso/`, and musl's `ARCH_SRCS`, every `.c`, `.s` and `.S` under those
+directories' `x86_64` subdirectory — rather than carrying a written-down source
+list, so a release that adds or removes a translation unit shows up as a
+manifest change instead of a silent omission. On x86-64 that is 1356 portable
+`.c` files and 50 architecture files, and because every architecture file
+replaces a portable one of the same name the manifest is 1356 units: 1306
+portable C, 18 architecture C and 32 assembly. The replacement rule and what
+Buster does with it are described with the archive below.
 
 One flag set drives both compilers, and it is musl's own `CFLAGS_ALL` minus the
 flags musl's `configure` only offers a compiler that accepts them: `-std=c99
@@ -801,7 +805,10 @@ cannot alias anything -- the stack pointer as a memory base, which is the
 a thread-pointer read is spelled. GNU's semicolon separates statements while
 this assembler reads one as a comment, so the inline-assembly path rewrites
 the separators, folding `lock ; insn` into the single statement the assembler
-wants and splitting the rest onto their own lines.
+wants and splitting the rest onto their own lines. The operand classes are the
+fixed general registers, `r` and `m`, and nothing else: the SSE and x87 classes
+musl's own x86-64 math is written in are the whole of what the manifest below
+reports as unsupported.
 
 Two more things a template may do, and they are what a libc's startup and its
 dynamic loader are written in rather than its atomics. It may **name a
@@ -1039,18 +1046,50 @@ write-when-relocated word on a page the loader maps read-only, which is a
 `DT_TEXTREL` musl's loader does not undo for the file it was itself started
 from.
 
-The manifest is musl's own x86-64 configuration, replacement rule included.
-Every `.c` in a source directory and every `.s` in its architecture
-subdirectory is collected, and where the two name the same unit the
-architecture file wins and the portable one is not built at all -- musl's
-`REPLACED_OBJS`. That is 1356 units, 32 of them assembly, and all 1356 build:
-there are no `MUSL_UNSUPPORTED` units and no excluded components. Each
-assembly unit is still named, on a `MUSL_ASSEMBLY` line, because which units
-the archive holds musl's own x86-64 implementation for is inventory worth
-having; it is no longer an exclusion. One unit's `.c` is empty with no
-assembly to replace it -- `src/thread/tls`, which x86-64 does not need -- and
-it is the empty translation unit musl itself compiles rather than a reported
-gap.
+The manifest is musl's own x86-64 configuration, replacement rule included and
+whole. Every `.c` in a source directory is collected, and so is every `.c`,
+`.s` and `.S` in its architecture subdirectory: musl's `ARCH_SRCS` is
+`src/*/$(ARCH)/*.[csS]`, not its assembly half. Where a portable file and an
+architecture file name the same unit the architecture file wins and the
+portable one is not built -- musl's `REPLACED_OBJS`. That is 1356 units, 32 of
+them assembly and 18 of them architecture C. Each replacement is named, on a
+`MUSL_ASSEMBLY` or a `MUSL_ARCHITECTURE` line, because which units the archive
+holds musl's own x86-64 implementation for is inventory worth having rather
+than an exclusion. One unit's `.c` is empty with no architecture file to
+replace it -- `src/thread/tls`, which x86-64 does not need -- and it is the
+empty translation unit musl itself compiles rather than a reported gap.
+
+1340 of the 1356 build. The 16 that do not are the architecture C under
+`src/math/x86_64`, and the whole of the refusal is four inline-assembly operand
+classes the frontend does not have: the SSE register class as an output
+(`"=x"`, `"+x"`: `sqrt`, `sqrtf`, `fabs`, `fabsf`), the SSE class as an input
+(`"x"`: `llrint`, `llrintf`, `lrint`, `lrintf`), the x87 stack as an operand
+(`"+t"`, `"u"`: `fabsl`, `fmodl`, `remainderl`, `remquol`, `rintl`, `sqrtl`)
+and `st` as a clobber (`llrintl`, `lrintl`). Those are two register files
+rather than four gaps -- issue 765 is the SSE half, issue 766 the x87 half.
+The other two architecture C units, `fma` and `fmaf`, build: neither `__FMA__`
+nor `__FMA4__` is defined under this flag set, so both fall through to
+`#include "../fma.c"` and are the portable code reached by an architecture
+path. Clang compiles all eighteen, so the reference archive holds musl's own
+implementations and the comparison is a real one. The four refused classes are
+pinned as fixtures -- `tests/basic_c_asm_sse_output.c`,
+`tests/basic_c_asm_sse_input.c`, `tests/basic_c_asm_x87_output.c` and
+`tests/basic_c_asm_x87_clobber.c` -- each a reduction of a named musl unit to
+one construct, each asserting its exact
+diagnostic, so implementing one class moves the musl count and one fixture
+together.
+
+A refused architecture unit does not leave a hole in the archive. `hypot`
+calls `sqrt`, so a `libc.a` without one is a `libc.a` nothing links against,
+and every stage after the archive -- the freestanding probe, both ABI links,
+the shared object, the whole libc-test suite -- would stop measuring anything
+at all. The archive therefore falls back to the portable file the architecture
+source displaced, and says so: each fallback is a `MUSL_SUBSTITUTED` line
+naming the file refused and the file taken, beside the `MUSL_UNSUPPORTED` line
+carrying the diagnostic. The unit still does not count as compiled, so the
+substitution is a reported gap rather than a repaired one; the two lines
+together are exactly how this archive differs from a native musl one. Both
+archives are 1349 members.
 
 Before the driver took assembly input this was three groups of reported
 exclusions: seven `assembly-only` units whose `.c` is empty because the
@@ -1337,12 +1376,13 @@ there rather than being anything new -- and that group is the whole of what
 the suite does not pass. 243 to 381, and nothing that passed before stopped
 passing.
 
-One difference from a native musl build is left, and it is not assembly:
-musl's `ARCH_SRCS` also covers the architecture subdirectories' `.c` files --
-eighteen of them under `src/math/x86_64` -- and this manifest still takes the
-portable sibling for those. They were never a reported exclusion, because the
-harness never looked for them; closing that is its own change with its own
-rebaseline.
+Applying `ARCH_SRCS` whole moved the reference and not the suite. The Clang
+archive holds musl's own x86-64 `sqrt`, `fabs`, the `lrint` family and the x87
+`long double` remainders now instead of the portable files, and Buster's holds
+the portable files for the sixteen it cannot compile. `src/math` is the subset
+that would show it -- these are its implementations -- and all 168 of its
+passing units answer the same as before, which is what a correctly rounded
+portable implementation standing in for a hardware one should do.
 
 Buster compiles every unit first and unconditionally, before the reference
 decides reach, because its diagnostic is inventory in its own right, and

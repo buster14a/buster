@@ -3984,6 +3984,44 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                                            S8("C code generation failed with error 2, function 0 ('conditional_asm_goto'")));
     }
     {
+        // The four inline-assembly operand classes musl's own x86-64 math asks
+        // for and this frontend does not have.  musl's ARCH_SRCS replaces
+        // eighteen portable src/math units with the files under
+        // src/math/x86_64, and sixteen of them are refused here: test_musl
+        // reports each on a MUSL_UNSUPPORTED line and falls its archive back to
+        // the portable file, and these fixtures are the reduction of that
+        // report to one construct apiece.  The exact diagnostic is pinned
+        // rather than merely the refusal, because implementing one of the four
+        // must move exactly one of these and not quietly reclassify another.
+        struct
+        {
+            String8 fixture;
+            String8 diagnostic;
+        } refused_asm_operands[] = {
+            {S8("tests/basic_c_asm_sse_output.c"),
+             S8("tests/basic_c_asm_sse_output.c:9:36: in function 'asm_sse_output': unsupported asm output constraint")},
+            {S8("tests/basic_c_asm_sse_input.c"),
+             S8("tests/basic_c_asm_sse_input.c:8:47: in function 'asm_sse_input': malformed asm matching constraint")},
+            {S8("tests/basic_c_asm_x87_output.c"),
+             S8("tests/basic_c_asm_x87_output.c:7:28: in function 'asm_x87_output': unsupported asm output constraint")},
+            {S8("tests/basic_c_asm_x87_clobber.c"),
+             S8("tests/basic_c_asm_x87_clobber.c:8:5: in function 'asm_x87_clobber': unsupported GNU inline assembly clobber")},
+        };
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(refused_asm_operands); index += 1)
+        {
+            String8 refused_object_path = buster_test_temporary_path(arguments->arena, S8("buster-refused-asm-operand"), S8(".o"));
+            String8 refused_command_line[] = {
+                S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), refused_object_path, refused_asm_operands[index].fixture,
+            };
+            CompilerDriverResult refused = compiler_driver_execute_invocation(
+                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(refused_command_line)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ANALYSIS);
+            BUSTER_TEST(arguments, refused.tokenizer_error_count == 0 && refused.parser_diagnostic_count == 0 &&
+                                   refused.analysis_diagnostic_count == 1 && !refused.has_object);
+            BUSTER_STRING_TEST(arguments, refused.diagnostic, refused_asm_operands[index].diagnostic);
+        }
+    }
+    {
         // Ordinary templates are deliberately a closed, scalar register-only
         // subset.  Keep each rejection explicit so a future assembler-table
         // expansion cannot accidentally widen compiler-side effects.
