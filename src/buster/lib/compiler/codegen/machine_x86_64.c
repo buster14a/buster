@@ -5678,7 +5678,14 @@ enum
     MACHINE_X64_VSPLATB_EXACT_FORM_ID = 5841u,
     MACHINE_X64_VSPLATD_EXACT_FORM_ID = 7534u,
     MACHINE_X64_XCHG_EXACT_FORM_ID = 9837u,
+    // `xchg r/m8, r8` is opcode 0x86, a different metadata form from the
+    // 0x87 row above rather than an operand-size variant of it, so a width-1
+    // atomic store had no encoding at all and fell back to the canonical
+    // emitter after selecting (#806). Both rows are the nolock spelling: an
+    // XCHG with a memory operand locks the bus whether or not LOCK is written.
+    MACHINE_X64_XCHG8_EXACT_FORM_ID = 9834u,
     MACHINE_X64_CMPXCHG_EXACT_FORM_ID = 10280u,
+    MACHINE_X64_CMPXCHG8_EXACT_FORM_ID = 10278u,
     MACHINE_X64_SUB_RSP_EXACT_FORM_ID = 9285u,
     MACHINE_X64_VPADDB_EXACT_FORM_ID = 5739u,
     MACHINE_X64_VPADDW_EXACT_FORM_ID = 5777u,
@@ -5782,6 +5789,9 @@ typedef enum MachineX64ExactVariantSelector
     MACHINE_X64_EXACT_VARIANT_MOV_IMMEDIATE,
     MACHINE_X64_EXACT_VARIANT_SIGNED_IMMEDIATE,
     MACHINE_X64_EXACT_VARIANT_VBINARY,
+    // The payload carries the access width in bytes, and one is a different
+    // metadata form rather than a narrower operand of the same one.
+    MACHINE_X64_EXACT_VARIANT_PAYLOAD_BYTE_WIDTH,
     MACHINE_X64_EXACT_VARIANT_SELECTOR_COUNT,
 } MachineX64ExactVariantSelector;
 
@@ -5851,6 +5861,7 @@ typedef enum MachineX64ExactPlanId
     MACHINE_X64_EXACT_PLAN_VSPLATD,
     MACHINE_X64_EXACT_PLAN_VPTERNLOGD,
     MACHINE_X64_EXACT_PLAN_XCHG,
+    MACHINE_X64_EXACT_PLAN_XCHG8,
     MACHINE_X64_EXACT_PLAN_CMPXCHG,
     MACHINE_X64_EXACT_PLAN_SUB_RSP,
     MACHINE_X64_EXACT_PLAN_COUNT,
@@ -5951,6 +5962,15 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipeVariant machine_x64_exact_recipe_varian
 // MachineEmitRecipeId assigned by machine.c; the operand slots are the
 // post-placement machine row slots, in metadata form order (RM/B before
 // REG/R for the two-address ALU forms).
+// XCHG's byte row. Variant zero is the 0x87 form the recipe itself names,
+// which covers widths two, four and eight; a width-1 payload selects this one.
+// The operand projections are the same -- they resolve their width from the
+// payload -- so only the durable form key differs.
+BUSTER_GLOBAL_LOCAL MachineX64ExactRecipeVariant const machine_x64_xchg_variants[] = {
+    {.key = {MACHINE_X64_XCHG8_EXACT_FORM_ID, UINT64_C(0x148a08bd76c221bc)}, .operand_count = 2, .operand_slots = {0, 1},
+     .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD_SIZE, MACHINE_X64_EXACT_OPERAND_GPR_PAYLOAD_SIZE}},
+};
+
 BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_exact_recipe_table[MACHINE_X86_64_EMIT_REGISTRY_DIRECT_COUNT] = {
     [0] = {
         .recipe = MACHINE_EMIT_RECIPE_DIRECT_BASE + 0,
@@ -6522,6 +6542,8 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactRecipe const machine_x64_family_exact_recipe_
         .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 34, .key = {MACHINE_X64_XCHG_EXACT_FORM_ID, UINT64_C(0x100612d3d9f27042)},
         .operand_count = 2, .operand_slots = {0, 1},
         .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD_SIZE, MACHINE_X64_EXACT_OPERAND_GPR_PAYLOAD_SIZE},
+        .variant_count = BUSTER_ARRAY_LENGTH(machine_x64_xchg_variants),
+        .variant_selector = MACHINE_X64_EXACT_VARIANT_PAYLOAD_BYTE_WIDTH, .variants = machine_x64_xchg_variants,
     },
     [35] = {
         .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 35, .key = {MACHINE_X64_CMPXCHG_EXACT_FORM_ID, UINT64_C(0x46a888e2c049f87a)},
@@ -6551,8 +6573,29 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_cmpxchg_sequen
         .operand_widths = {0, 0},
     },
 };
+// CMPXCHG's byte row, for the same reason XCHG needs one: `cmpxchg r/m8, r8`
+// is 0x0F 0xB0, a different metadata form from the 0x0F 0xB1 row above rather
+// than an operand-size variant of it, so a width-1 compare-exchange selected
+// and then failed to encode. The staging MOV is unchanged -- it loads the
+// expected value into RAX, and the byte compare reads AL out of it.
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_cmpxchg8_sequence_steps[] = {
+    {
+        .key = {MACHINE_X64_MOV_RR_EXACT_FORM_ID, UINT64_C(0x3ab69ab9d0d06329)},
+        .operand_count = 2, .operand_slots = {0, 2},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX, MACHINE_X64_EXACT_OPERAND_GPR},
+        .operand_widths = {64, 64},
+    },
+    {
+        .key = {MACHINE_X64_CMPXCHG8_EXACT_FORM_ID, UINT64_C(0xd8600a40453775c4)},
+        .operand_count = 2, .flags = MACHINE_X64_EXACT_RECIPE_FLAG_FORCE_LOCK,
+        .operand_slots = {1, 3},
+        .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_PAYLOAD_SIZE, MACHINE_X64_EXACT_OPERAND_GPR_PAYLOAD_SIZE},
+        .operand_widths = {0, 0},
+    },
+};
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_cmpxchg_sequence_variants[] = {
     {.step_count = 2, .steps = machine_x64_cmpxchg_sequence_steps},
+    {.step_count = 2, .steps = machine_x64_cmpxchg8_sequence_steps},
 };
 
 // Scalar floating-point rows retain the canonical two-address scratch
@@ -6954,7 +6997,8 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequence const machine_x64_exact_sequence_tab
     [43] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 43, .variant_count = 4, .variants = machine_x64_vpmovzxbd_sequence_variants},
     [35] = {
         .recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 35,
-        .variant_count = 1, .variants = machine_x64_cmpxchg_sequence_variants,
+        .variant_count = BUSTER_ARRAY_LENGTH(machine_x64_cmpxchg_sequence_variants),
+        .variant_selector = MACHINE_X64_EXACT_VARIANT_PAYLOAD_BYTE_WIDTH, .variants = machine_x64_cmpxchg_sequence_variants,
     },
     [44] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 44, .variant_count = 8, .variants = machine_x64_farith_sequence_variants},
     [45] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 45, .variant_count = 12, .variants = machine_x64_fcmp_set_sequence_variants},
@@ -7067,6 +7111,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_plan_id_for_recipe_variant(MachineEmitR
             if (recipe_index == 2 && variant_index == 1) return MACHINE_X64_EXACT_PLAN_ADD_RSP;
             if (recipe_index == 3 && variant_index == 1) return MACHINE_X64_EXACT_PLAN_IMUL_IMMEDIATE32;
             if (recipe_index == 25 && variant_index <= 10) return (u8)(MACHINE_X64_EXACT_PLAN_VPADDB + variant_index);
+            if (recipe_index == 34 && variant_index == 1) return MACHINE_X64_EXACT_PLAN_XCHG8;
             return machine_x64_family_exact_plan_id_by_recipe[recipe_index];
         }
     }
@@ -9132,6 +9177,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             s64 signed_immediate = (s64)immediate_value;
             variant_index = signed_immediate >= INT8_MIN && signed_immediate <= INT8_MAX ? 0 : 1;
         }
+        else if (descriptor->variant_selector == MACHINE_X64_EXACT_VARIANT_PAYLOAD_BYTE_WIDTH)
+        {
+            variant_index = (payload & 0xffu) == 1u ? 1u : 0u;
+        }
         else if (descriptor->variant_selector == MACHINE_X64_EXACT_VARIANT_VBINARY)
         {
             switch (payload)
@@ -9469,6 +9518,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
         sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 42)
     {
         variant_index = payload < sequence->variant_count ? payload : UINT32_MAX;
+    }
+    else if (sequence->variant_selector == MACHINE_X64_EXACT_VARIANT_PAYLOAD_BYTE_WIDTH)
+    {
+        variant_index = (payload & 0xffu) == 1u ? 1u : 0u;
     }
     else if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 44)
     {

@@ -7447,6 +7447,71 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_marked\"\n\t.byte 0x0f, 0x0b")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_scoped\"\n\t.byte 0x0f, 0x0b")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_plain\"\n\tmov eax, 0x0")) != BUSTER_STRING_NO_MATCH);
+    // The x86-64 byte rows of XCHG and CMPXCHG (#806). `xchg r/m8, r8` is
+    // opcode 0x86 and `cmpxchg r/m8, r8` is 0x0F 0xB0 -- a different metadata
+    // form from the 0x87 / 0x0F 0xB1 sibling each shares a recipe with, not an
+    // operand-size variant of it -- so a width-1 atomic store or
+    // compare-exchange selected on the machine path and then failed to encode.
+    // The fallback count is the assertion that says the byte rows are reached:
+    // running alone would pass on the canonical emitter too. It is pinned at
+    // zero under every allocator, NONE included, because nothing in this
+    // fixture has any other reason to refuse.
+    String8 c_atomic_byte_allocators[] = {
+        S8("none"),
+        S8("mir-stack"),
+        S8("fast"),
+        S8("quality"),
+    };
+    for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_atomic_byte_allocators); allocator_index += 1)
+    {
+        TemporalArena atomic_byte_temporary = scratch_begin(&arguments->arena, 1);
+        String8 atomic_byte_path = buster_test_temporary_path(atomic_byte_temporary.arena, S8("buster-c-atomic-byte-exchange"),
+                                                              string_format(atomic_byte_temporary.arena, S8("-{S8}"), c_atomic_byte_allocators[allocator_index]));
+        String8 atomic_byte_command_line[] = {
+            S8("-target"),
+            S8("x86_64-unknown-linux-gnu"),
+            string_format(atomic_byte_temporary.arena, S8("-fregister-allocator={S8}"), c_atomic_byte_allocators[allocator_index]),
+            S8("-o"),
+            atomic_byte_path,
+            S8("tests/basic_c_atomic_byte_exchange.c"),
+        };
+        CompilerDriverResult atomic_byte = compiler_driver_execute_invocation(
+            atomic_byte_temporary.arena,
+            compiler_driver_parse_arguments(atomic_byte_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_byte_command_line)));
+        BUSTER_TEST(arguments, atomic_byte.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, atomic_byte.codegen_statistics.fallback_function_count == 0u);
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+        if (atomic_byte.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 atomic_byte_arguments[] = {atomic_byte_path};
+            ProcessSpawnResult atomic_byte_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_byte_arguments), (SliceString8){0},
+                                                                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, atomic_byte_spawn.handle != 0);
+            if (atomic_byte_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(atomic_byte_temporary.arena, atomic_byte_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+#endif
+        scratch_end(atomic_byte_temporary);
+    }
+    // A byte source in SIL, DIL, SPL or BPL needs a bare REX prefix that the
+    // low four registers do not, and an allocator is free to pick one. The
+    // assembly is where both halves are visible: `f0 40 0f b0` is the locked
+    // byte compare-exchange carrying that REX byte, and `86` the byte
+    // exchange, against the `87` its sibling row would have written.
+    String8 c_atomic_byte_assembly_command_line[] = {
+        S8("-S"),
+        S8("-target"),
+        S8("x86_64-unknown-linux-gnu"),
+        S8("-fregister-allocator=fast"),
+        S8("tests/basic_c_atomic_byte_exchange.c"),
+    };
+    CompilerDriverResult c_atomic_byte_assembly = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_atomic_byte_assembly_command_line)));
+    BUSTER_TEST(arguments, c_atomic_byte_assembly.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, string_first_sequence(c_atomic_byte_assembly.output, S8("0x86, 0x02")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(c_atomic_byte_assembly.output, S8("0xf0, 0x40, 0x0f, 0xb0")) != BUSTER_STRING_NO_MATCH);
     // Six frontend defects the 2026-08-30 differential harness run found, each
     // with its own fixture so a regression names the contract it broke: a
     // positional initializer storing into an anonymous bit-field instead of
