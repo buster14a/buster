@@ -47,6 +47,14 @@ static struct outer_table* get_outer(void)
     return &the_outer;
 }
 
+typedef int (*fn_t)(int);
+
+static fn_t pick(int unused)
+{
+    (void)unused;
+    return double_it;
+}
+
 int main(void)
 {
     if (get_table(0)->method(21) != 42)
@@ -56,6 +64,15 @@ int main(void)
     if (get_outer()->get(0)->method(10) != 20)
     {
         return 2;
+    }
+    // The adjacent spelling: a call returning a function pointer, called
+    // directly.  Discovery classifies the outer call at the `)` of `(0)`
+    // while the base is still on the active stack; the base is its
+    // continuation, not its argument, so the parent walk skips it and the
+    // base's result is emitted first.
+    if (pick(0)(5) != 10)
+    {
+        return 3;
     }
     printf("call member call ok\n");
     return 0;

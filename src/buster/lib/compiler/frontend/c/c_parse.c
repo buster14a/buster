@@ -2011,7 +2011,10 @@ BUSTER_C_INTERNAL bool c_parse_direct_expression_type(Arena* arena, CPreprocessR
         base_end -= 1;
     }
     CTypeId type = C_TYPE_ID_INVALID;
-    if (base_end == base_start + 1 && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER)
+    bool call_base = base_end > base_start + 2 && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER &&
+                     c_token_is_punctuator(&preprocess.tokens[base_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                     c_token_is_punctuator(&preprocess.tokens[base_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    if ((base_end == base_start + 1 || call_base) && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER)
     {
         CEntityId entity_id = C_ENTITY_ID_INVALID;
         u32 base_use_index = c_parse_identifier_use_index(result, base_start);
@@ -2034,6 +2037,19 @@ BUSTER_C_INTERNAL bool c_parse_direct_expression_type(Arena* arena, CPreprocessR
                        result->entities[entity_id.value].kind != C_ENTITY_ENUMERATOR
                    ? result->entities[entity_id.value].type
                    : C_TYPE_ID_INVALID;
+        // A call base -- `_PyBaseExceptionObject_cast(self)->context` is what
+        // CPython's Py_XSETREF callers hand _Py_TYPEOF -- contributes its
+        // return type, through a function pointer's pointee when the name
+        // binds to one.
+        if (call_base && type.value < result->type_count)
+        {
+            CType* base_type = &result->types[type.value];
+            if (base_type->kind == C_TYPE_POINTER && base_type->element_type.value < result->type_count)
+            {
+                base_type = &result->types[base_type->element_type.value];
+            }
+            type = base_type->kind == C_TYPE_FUNCTION ? base_type->return_type : C_TYPE_ID_INVALID;
+        }
     }
     else if (base_start < base_end && c_token_is_punctuator(&preprocess.tokens[base_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {

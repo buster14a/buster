@@ -13501,6 +13501,36 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token
     return call && call->emitted ? call->result : IR_VALUE_ID_INVALID;
 }
 
+// The outermost chained call rooted at `call` that still closes inside
+// `end`.  A chain call keys on its base call's argument list -- two calls
+// cannot share one first token in the token->call index -- so
+// `Py_TYPE(self)->tp_free(self)` and `pick(0)(5)` record their outer call
+// with token_index == the inner call's open_index, and a walk that found the
+// inner call by its first token follows that link outward before consuming.
+// A call still being emitted is its own callee's context and stays excluded,
+// which is what keeps the callee lowering consuming the inner value.
+BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_chained(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end)
+{
+    for (;;)
+    {
+        CIrPreparedCall* chained = 0;
+        for (u32 index = 0; index < builder->prepared_call_count; index += 1)
+        {
+            CIrPreparedCall* candidate = builder->prepared_calls + index;
+            if (candidate != call && candidate->token_index == call->open_index && candidate->close_index < end && !candidate->emitting)
+            {
+                chained = candidate;
+                break;
+            }
+        }
+        if (!chained)
+        {
+            return call;
+        }
+        call = chained;
+    }
+}
+
 BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
 
 BUSTER_C_INTERNAL bool c_ir_call_arguments(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32* starts, u32* ends, u32 capacity, u32* count_out)
@@ -14327,7 +14357,22 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             return false;
         }
         u32 prepared_call_index = builder->prepared_call_count++;
-        u32 parent_index = active_call_count ? active_calls[active_call_count - 1] : UINT32_MAX;
+        // The parent is the innermost active call that actually contains
+        // this one.  A chain call discovered at its base call's closing
+        // parenthesis -- `pick(0)(5)` classifies at the `)` of `(0)` --
+        // still finds the base on the active stack, but it is the base's
+        // continuation, not its argument: a child emits before its parent,
+        // and this call's callee needs the base's result already emitted.
+        u32 parent_index = UINT32_MAX;
+        for (u32 active_index = active_call_count; active_index != 0; active_index -= 1)
+        {
+            u32 candidate = active_calls[active_index - 1];
+            if (builder->prepared_calls[candidate].close_index > close)
+            {
+                parent_index = candidate;
+                break;
+            }
+        }
         u32 previous_sibling_index = parent_index != UINT32_MAX ? builder->prepared_calls[parent_index].last_child_index : last_root;
         builder->prepared_calls[prepared_call_index] = (CIrPreparedCall){
             .result = IR_VALUE_ID_INVALID,
@@ -16196,6 +16241,39 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     u32 callee_end = selected->parenthesized_callee ? selected->open_index - 1 : selected->open_index;
                     if (selected->parenthesized_callee)
                     {
+                        // The "callee group" may be an inner call's argument
+                        // list rather than a parenthesized designator:
+                        // `pick(0)(5)` classifies with its group at `(0)`,
+                        // whose contents lower to an int, not a callable.
+                        // The same discovery link as the member-chain case
+                        // identifies it -- a prepared call's open_index at
+                        // this call's first token -- so hop to the chain
+                        // root and lower the whole inner call as the callee
+                        // value.
+                        u32 chained_root = selected->token_index;
+                        while (c_token_is_punctuator(&builder->preprocess.tokens[chained_root], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                        {
+                            u32 widened = chained_root;
+                            for (u32 inner_index = 0; inner_index < builder->prepared_call_count; inner_index += 1)
+                            {
+                                if (builder->prepared_calls[inner_index].open_index == chained_root)
+                                {
+                                    widened = builder->prepared_calls[inner_index].token_index;
+                                    break;
+                                }
+                            }
+                            if (widened == chained_root)
+                            {
+                                break;
+                            }
+                            chained_root = widened;
+                        }
+                        if (chained_root != selected->token_index)
+                        {
+                            selected->emitting = true;
+                            return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, chained_root,
+                                                                         selected->open_index, false);
+                        }
                         // A function designator written as `(*fp)(args)` is
                         // the same callable value as `fp` after the C
                         // function-to-pointer conversion.  Lower the value
@@ -22840,31 +22918,12 @@ c_ir_expression_core_loop:
         {
             prepared_call = 0;
         }
-        // A chain call keys on its base call's argument list, because two
-        // calls cannot share one first token in the token->call index:
-        // `Py_TYPE(self)->tp_free(self)` records the outer call at `(self)`.
-        // Consuming only the inner call would strand the walk at the outer
-        // argument list, so hop to the outermost chained call this range
-        // still contains and consume its result instead; each hop follows
-        // token_index == open_index, which is the one link discovery writes.
-        while (prepared_call)
+        // Consuming only the inner call of a chain would strand the walk at
+        // the outer argument list, so hop to the outermost chained call this
+        // range still contains and consume its result instead.
+        if (prepared_call)
         {
-            CIrPreparedCall* chained = 0;
-            for (u32 chain_index = 0; chain_index < builder->prepared_call_count; chain_index += 1)
-            {
-                CIrPreparedCall* candidate = builder->prepared_calls + chain_index;
-                if (candidate != prepared_call && candidate->token_index == prepared_call->open_index && candidate->close_index < end &&
-                    !candidate->emitting)
-                {
-                    chained = candidate;
-                    break;
-                }
-            }
-            if (!chained)
-            {
-                break;
-            }
-            prepared_call = chained;
+            prepared_call = c_ir_prepared_call_chained(builder, prepared_call, end);
         }
         if (prepared_call)
         {
@@ -22977,8 +23036,13 @@ c_ir_expression_core_loop:
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                value = c_ir_emit_call(builder, index);
-                index = close - 1;
+                CIrPreparedCall* chained_call = c_ir_prepared_call_find(builder, index);
+                if (chained_call && chained_call->close_index < end)
+                {
+                    chained_call = c_ir_prepared_call_chained(builder, chained_call, end);
+                }
+                value = chained_call && chained_call->emitted ? chained_call->result : IR_VALUE_ID_INVALID;
+                index = chained_call && chained_call->emitted ? chained_call->close_index : close - 1;
             }
             else
             {
