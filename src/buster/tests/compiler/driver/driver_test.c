@@ -3599,6 +3599,40 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    // A call whose callee is a member read off another call's result --
+    // `Py_TYPE(self)->tp_free(self)`, how CPython frees every object -- with
+    // the answers checked so a callee read off the wrong base returns the
+    // wrong number rather than compiling quietly.
+    String8 c_call_member_call_path = buster_test_temporary_path(arguments->arena, S8("buster-c-call-member-call"),
+#if BUSTER_WINDOWS
+                                                                 S8(".exe"));
+#else
+                                                                 S8(""));
+#endif
+    String8 c_call_member_call_command_line[] = {
+        S8("-o"),
+        c_call_member_call_path,
+        S8("tests/basic_c_call_member_call.c"),
+    };
+    CompilerDriverResult c_call_member_call = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_call_member_call_command_line)));
+    BUSTER_TEST(arguments, c_call_member_call.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_call_member_call.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_call_member_call_arguments[] = {
+            c_call_member_call_path,
+        };
+        ProcessSpawnResult c_call_member_call_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_call_member_call_arguments), (SliceString8){0},
+                                                                       (SliceString8){0},
+                                                                       (ProcessSpawnOptions){
+                                                                           .use_process_environment = true,
+                                                                       });
+        BUSTER_TEST(arguments, c_call_member_call_spawn.handle != 0);
+        if (c_call_member_call_spawn.handle)
+        {
+            BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, c_call_member_call_spawn).result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // C11 6.7.6.3p8: a parameter declared with function type adjusts to a
     // pointer to that function, in both spellings.  CPython's pegen passes
     // its grammar rules as `RES_TYPE (func)(Parser *)`.

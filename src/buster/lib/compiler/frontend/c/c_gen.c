@@ -16234,8 +16234,39 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     // rather than arriving at one to consume.
                     if (callee_start < callee_end && c_token_is_punctuator(&builder->preprocess.tokens[callee_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
                     {
+                        // The parenthesis may not be a grouped expression: a
+                        // chain rooted in a call keeps its callee record at
+                        // the inner call's argument list, because two calls
+                        // cannot share one first token in the token->call
+                        // index.  `Py_TYPE(self)->tp_free(self)` is the
+                        // shape, and it is how CPython frees every object.
+                        // Widen the expression to the inner call's own chain
+                        // root so the member is read off the call's result
+                        // rather than off `(self)` alone; the inner call is
+                        // not marked emitting, so the expression machine
+                        // consumes it as a value the way it consumes any
+                        // other prepared call.
+                        u32 expression_start = callee_start;
+                        while (expression_start < callee_end &&
+                               c_token_is_punctuator(&builder->preprocess.tokens[expression_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                        {
+                            u32 widened = expression_start;
+                            for (u32 inner_index = 0; inner_index < builder->prepared_call_count; inner_index += 1)
+                            {
+                                if (builder->prepared_calls[inner_index].open_index == expression_start)
+                                {
+                                    widened = builder->prepared_calls[inner_index].token_index;
+                                    break;
+                                }
+                            }
+                            if (widened == expression_start)
+                            {
+                                break;
+                            }
+                            expression_start = widened;
+                        }
                         selected->emitting = true;
-                        return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, callee_start,
+                        return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, expression_start,
                                                                      callee_end, false);
                     }
                     return c_ir_prepared_call_request_place(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_INDIRECT_CALLEE, callee_start, callee_end);
@@ -22808,6 +22839,32 @@ c_ir_expression_core_loop:
         if (prepared_call && prepared_call->close_index >= end)
         {
             prepared_call = 0;
+        }
+        // A chain call keys on its base call's argument list, because two
+        // calls cannot share one first token in the token->call index:
+        // `Py_TYPE(self)->tp_free(self)` records the outer call at `(self)`.
+        // Consuming only the inner call would strand the walk at the outer
+        // argument list, so hop to the outermost chained call this range
+        // still contains and consume its result instead; each hop follows
+        // token_index == open_index, which is the one link discovery writes.
+        while (prepared_call)
+        {
+            CIrPreparedCall* chained = 0;
+            for (u32 chain_index = 0; chain_index < builder->prepared_call_count; chain_index += 1)
+            {
+                CIrPreparedCall* candidate = builder->prepared_calls + chain_index;
+                if (candidate != prepared_call && candidate->token_index == prepared_call->open_index && candidate->close_index < end &&
+                    !candidate->emitting)
+                {
+                    chained = candidate;
+                    break;
+                }
+            }
+            if (!chained)
+            {
+                break;
+            }
+            prepared_call = chained;
         }
         if (prepared_call)
         {
