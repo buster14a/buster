@@ -3360,11 +3360,16 @@ BUSTER_GLOBAL_LOCAL void self_host_compare_and_bench_add(Arena* arena, String8 s
 
 #if !BUSTER_WINDOWS
 // One stage built through the machine register allocators must also execute:
-// the byte-identity stages above only prove that the canonical path
-// reproduces itself, so machine-encoded functions otherwise reach users
-// without ever having run (the aggregate zero-fill miscompile lived exactly
-// there). Windows is excluded because its x86-64 ABI keeps every function on
-// the canonical fallback, which the stages above already cover.
+// the fixed-point pair above runs the default FAST allocator, so MIR_STACK
+// encodings would otherwise reach users without ever having run at this
+// scale (the aggregate zero-fill miscompile lived exactly there). Windows is
+// excluded for CI cost, no longer for ABI reach: now that the machine subset
+// covers Win64, the FAST pair on the Windows runner already executes
+// machine-encoded functions, and the driver tests gate every machine mode
+// against Win64 at fixture scale; what this stage and the canonical gate
+// below would still add there -- MIR_STACK and NONE at self-host scale under
+// Win64 -- costs two more full unity compiles on the one runner that gates
+// CI wall time.
 BUSTER_GLOBAL_LOCAL void self_host_machine_bench_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot,
                                                      String8 output_directory)
 {
