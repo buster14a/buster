@@ -3621,6 +3621,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_typeof_update_operand.c"),
         S8("tests/basic_c_spin_pause_builtin.c"),
         S8("tests/basic_c_asm_memory_operand_no_load.c"),
+        S8("tests/basic_c_static_pointer_subtraction.c"),
     };
     for (u32 shape_index = 0; shape_index < BUSTER_ARRAY_LENGTH(c_cpython_shape_fixtures); shape_index += 1)
     {

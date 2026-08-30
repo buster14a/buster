@@ -34509,8 +34509,24 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                 }
                 if (literal_index >= task.end)
                 {
+                    // This fallback answers with the symbol alone, so it must
+                    // not claim a shape that carries structure it would drop:
+                    // arithmetic, a subscript, or a member walk all contribute
+                    // an addend the evaluator above is the one to fold, and
+                    // when it could not, a silent symbol-only relocation
+                    // points every such element at offset zero.
+                    bool bare_reference = true;
+                    for (u32 shape_index = task.start; shape_index < task.end && bare_reference; shape_index += 1)
+                    {
+                        CToken shape_token = preprocess.tokens[shape_index];
+                        bare_reference = !c_token_is_punctuator(&shape_token, C_PUNCTUATOR_PLUS) &&
+                                         !c_token_is_punctuator(&shape_token, C_PUNCTUATOR_MINUS) &&
+                                         !c_token_is_punctuator(&shape_token, C_PUNCTUATOR_LEFT_BRACKET) &&
+                                         !c_token_is_punctuator(&shape_token, C_PUNCTUATOR_DOT) &&
+                                         !c_token_is_punctuator(&shape_token, C_PUNCTUATOR_ARROW);
+                    }
                     IrSymbolId referenced = IR_SYMBOL_ID_INVALID;
-                    for (u32 token_index = task.start; token_index < task.end; token_index += 1)
+                    for (u32 token_index = task.start; bare_reference && token_index < task.end; token_index += 1)
                     {
                         if (preprocess.tokens[token_index].kind != C_TOKEN_IDENTIFIER)
                         {
@@ -38217,11 +38233,21 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
                 count = -count;
             }
             s64 scale = (s64)element->layout.size;
-            if ((count > 0 && count > (INT64_MAX - pointer.addend) / scale) || (count < 0 && count < (INT64_MIN - pointer.addend) / scale))
+            // The bound must be overflow-free itself: `INT64_MIN - addend`
+            // wraps for any positive addend, and the wrapped bound rejected
+            // every negative count -- CPython's obmalloc pool headers are
+            // `&pools.used[2*i] - 2` shapes, and each fell through to the
+            // symbol-only fallback with its addend gone.
+            if (count > INT64_MAX / scale || count < INT64_MIN / scale)
             {
                 return false;
             }
-            pointer.addend += count * scale;
+            s64 scaled = count * scale;
+            if ((scaled > 0 && pointer.addend > INT64_MAX - scaled) || (scaled < 0 && pointer.addend < INT64_MIN - scaled))
+            {
+                return false;
+            }
+            pointer.addend += scaled;
             *result = pointer;
             return true;
         }
