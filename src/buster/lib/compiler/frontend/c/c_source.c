@@ -2543,6 +2543,12 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_assume_aligned"), C_SYMBOL_BUILTIN_ASSUME_ALIGNED },
     { S8_INITIALIZER("__builtin_debugtrap"), C_SYMBOL_BUILTIN_DEBUGTRAP },
     { S8_INITIALIZER("__builtin_trap"), C_SYMBOL_BUILTIN_DEBUGTRAP },
+    // Clang's emmintrin.h carries only `void _mm_pause(void);` -- the
+    // definition lives in the compiler -- so a dialect that consumes clang
+    // headers must know the name or every SSE2 spin loop leaves an
+    // unresolved symbol behind.
+    { S8_INITIALIZER("_mm_pause"), C_SYMBOL_BUILTIN_SPIN_PAUSE },
+    { S8_INITIALIZER("__builtin_ia32_pause"), C_SYMBOL_BUILTIN_SPIN_PAUSE },
     { S8_INITIALIZER("__builtin_unreachable"), C_SYMBOL_BUILTIN_UNREACHABLE },
     { S8_INITIALIZER("__builtin_frame_address"), C_SYMBOL_BUILTIN_FRAME_ADDRESS },
     { S8_INITIALIZER("__builtin_alloca"), C_SYMBOL_BUILTIN_ALLOCA },
@@ -4446,6 +4452,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
         "__builtin_memset",        "__builtin_memcmp",
         "__builtin_sqrt",          "__builtin_sqrtf",
         "__builtin_strlen",        "__builtin_trap",
+        "__builtin_ia32_pause",
         "__builtin_types_compatible_p",
         "__builtin_unreachable",   "__builtin_frame_address",
         "__builtin_alloca",

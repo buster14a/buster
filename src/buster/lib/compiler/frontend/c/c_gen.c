@@ -1847,6 +1847,7 @@ struct CIrPreparedCall
     bool builtin_object_size;
     bool builtin_assume_aligned;
     bool builtin_debugtrap;
+    bool builtin_spin_pause;
     bool builtin_unreachable;
     bool builtin_frame_address;
     bool builtin_alloca;
@@ -14212,6 +14213,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         bool builtin_object_size = builtin_kind == C_SYMBOL_BUILTIN_OBJECT_SIZE;
         bool builtin_assume_aligned = builtin_kind == C_SYMBOL_BUILTIN_ASSUME_ALIGNED;
         bool builtin_debugtrap = builtin_kind == C_SYMBOL_BUILTIN_DEBUGTRAP;
+        bool builtin_spin_pause = builtin_kind == C_SYMBOL_BUILTIN_SPIN_PAUSE;
         bool builtin_unreachable = builtin_kind == C_SYMBOL_BUILTIN_UNREACHABLE;
         bool builtin_frame_address = builtin_kind == C_SYMBOL_BUILTIN_FRAME_ADDRESS;
         bool builtin_alloca = builtin_kind == C_SYMBOL_BUILTIN_ALLOCA;
@@ -14425,7 +14427,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         if ((!indexed_callee && !parenthesized_callee && token.kind != C_TOKEN_IDENTIFIER) ||
             !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
             (!builtin_identity && !builtin_constant_p && !builtin_choose_expr && !builtin_types_compatible_p && !builtin_object_size &&
-             !builtin_assume_aligned && !builtin_debugtrap && !builtin_unreachable && !builtin_frame_address && !builtin_alloca && !builtin_complex && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
+             !builtin_assume_aligned && !builtin_debugtrap && !builtin_spin_pause && !builtin_unreachable && !builtin_frame_address && !builtin_alloca && !builtin_complex && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
              !builtin_va_start && !builtin_va_copy && !builtin_va_end && !builtin_va_arg && !builtin_generic && builtin_atomic == C_IR_ATOMIC_BUILTIN_COUNT &&
              !builtin_math_link_name.length && builtin_memory == C_IR_MEMORY_BUILTIN_COUNT && builtin_unary == IR_UNARY_COUNT &&
              builtin_simd == C_IR_SIMD_BUILTIN_NONE && !indirect &&
@@ -14480,6 +14482,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_object_size = builtin_object_size,
             .builtin_assume_aligned = builtin_assume_aligned,
             .builtin_debugtrap = builtin_debugtrap,
+            .builtin_spin_pause = builtin_spin_pause,
             .builtin_unreachable = builtin_unreachable,
             .builtin_frame_address = builtin_frame_address,
             .builtin_alloca = builtin_alloca,
@@ -15798,6 +15801,31 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             IrInstruction trap_instruction = c_ir_instruction_initialize(IR_OPCODE_DEBUG_TRAP, builder->void_type);
             IrSourceRange trap_instruction_source = source;
             c_ir_append_instruction(builder, trap_instruction, trap_instruction_source);
+            selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+            selected->emitted = true;
+            remaining -= 1;
+            continue;
+        }
+        if (selected->builtin_spin_pause)
+        {
+            if (selected->close_index != selected->open_index + 1)
+            {
+                return false;
+            }
+            // Clang's headers declare _mm_pause and never define it: the
+            // pause is the compiler's to emit.  The canonical emitters
+            // already carry the exact spin-hint mnemonics as no-operand
+            // inline assembly, so the builtin borrows that spelling.
+            IrSourceRange source = c_ir_token_source_range(builder, token);
+            IrInstruction pause_instruction = c_ir_instruction_initialize(IR_OPCODE_INLINE_ASSEMBLY, builder->void_type);
+            pause_instruction.volatile_access = true;
+            IrInstructionId pause_id = c_ir_append_instruction(builder, pause_instruction, source);
+            if (pause_id.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
+            }
+            IrInstructionExtra* pause_extra = ir_instruction_extra_ensure(builder->arena, builder->function, pause_id);
+            pause_extra->literal = builder->target.cpu_arch == CPU_ARCH_AARCH64 ? S8("yield") : S8("pause");
             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
             selected->emitted = true;
             remaining -= 1;
