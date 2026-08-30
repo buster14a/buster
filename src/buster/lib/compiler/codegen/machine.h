@@ -343,6 +343,17 @@ typedef enum MachineOpcode
     // lea whose displacement carries the TPOFF relocation, exactly the
     // canonical emitter's sequence. def; payload indexes call_targets.
     MACHINE_X64_LEA_TLS,
+    // ELF initial-exec form: the same fs-base load, then an add of the GOT
+    // word the loader filled with the offset instead of a folded constant.
+    // Same shape, same one definition, one relocation. def; payload indexes
+    // call_targets.
+    MACHINE_X64_LEA_TLS_INITIAL_EXEC,
+    // ELF general-dynamic form: a call to __tls_get_addr with the address of
+    // a loader-filled module/offset pair in RDI. It is a call and is marked
+    // as one, so the caller-saved file is foreclosed across it and the
+    // address arrives in RAX for a following move, exactly like a direct
+    // call's result. No operands; payload indexes call_targets.
+    MACHINE_X64_TLS_GENERAL_DYNAMIC,
     // Terminator compare chain: use condition, block ref default; payload
     // is the first row in the switch-case side table and flags holds the
     // case count.
@@ -662,17 +673,17 @@ typedef enum MachineOpcode
 // projection of MACHINE_X64_MOV_RI..MACHINE_X64_VBINARY; the authority and
 // neutral-patch records below keep every remaining producer explicit while
 // migration work moves instruction construction behind metadata.
-#define MACHINE_X86_64_EMIT_REGISTRY_COUNT 123u
+#define MACHINE_X86_64_EMIT_REGISTRY_COUNT 125u
 #define MACHINE_X86_64_EMIT_REGISTRY_DIRECT_COUNT 47u
 #define MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT 50u
-#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT 26u
+#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT 28u
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT 78u
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT 19u
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT (MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT + MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT)
-#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 26u
+#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 28u
 #define MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT 0u
 #define MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT 5u
-#define MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT 14u
+#define MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT 15u
 
 typedef enum MachineX64EmitProducerStatus
 {
@@ -705,6 +716,13 @@ typedef enum MachineX64NeutralPatchClass
     MACHINE_X64_NEUTRAL_PATCH_DISPLACEMENT,
     MACHINE_X64_NEUTRAL_PATCH_DATA,
     MACHINE_X64_NEUTRAL_PATCH_TARGET_PAYLOAD,
+    // A byte sequence whose identity is the contract rather than its
+    // encoding: a linker matches on exactly these bytes and replaces all of
+    // them, so the shortest encoding of the same instructions -- which is
+    // what the metadata encoder produces, and the only thing it can produce
+    // -- would be the wrong answer.  The x86-64 ELF general-dynamic
+    // thread-local pair is the one such site.
+    MACHINE_X64_NEUTRAL_PATCH_FIXED_SEQUENCE,
     MACHINE_X64_NEUTRAL_PATCH_CLASS_COUNT,
 } MachineX64NeutralPatchClass;
 
@@ -1343,6 +1361,18 @@ struct MachineStackPlacement
     u8 reserved[3];
 };
 
+// Which field of an x86-64 thread-local sequence a call site names. The
+// general-dynamic sequence has two -- the lea that addresses the loader-filled
+// pair and the call to __tls_get_addr beside it -- so one selected row can
+// produce two sites.
+typedef enum MachineThreadLocalSite
+{
+    MACHINE_THREAD_LOCAL_SITE_LOCAL_EXEC,
+    MACHINE_THREAD_LOCAL_SITE_INITIAL_EXEC,
+    MACHINE_THREAD_LOCAL_SITE_GENERAL_DYNAMIC,
+    MACHINE_THREAD_LOCAL_SITE_TLS_GET_ADDR,
+} MachineThreadLocalSite;
+
 // A relocation site: the function-relative offset of the field to patch
 // and the call-target index it must resolve to. x86-64 sites are rel32
 // fields; AArch64 sites are branch words, or eight-byte inline literals
@@ -1359,6 +1389,11 @@ struct MachineCallSite
     u32 is_thread_local;
     // AArch64 TPREL pairs: distinguishes the LO12 add from the HI12 one.
     u32 thread_local_low;
+    // x86-64 only: which thread-local sequence this site belongs to, as a
+    // MachineThreadLocalSite. The encoder knows the byte layout, so it says
+    // which relocation each field wants rather than leaving the module layer
+    // to re-derive it from the instruction bytes.
+    u32 thread_local_site;
 };
 
 typedef struct MachineEncodeResult MachineEncodeResult;
@@ -1530,8 +1565,10 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena
 // Codegen calls this only after the canonical validator or a private producer
 // certificate has established ownership and value integrity. The target pass
 // can then accumulate its compact value facts inside an existing row walk.
-BUSTER_F_DECL MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target);
+BUSTER_F_DECL MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
+                                                                             bool position_independent);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
+                                                                          bool position_independent,
                                                                            bool assume_validated);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                             bool assume_validated);

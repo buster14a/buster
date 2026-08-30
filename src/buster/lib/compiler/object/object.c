@@ -975,12 +975,23 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_string(buffer, S8("\n"));
             return true;
         case OBJECT_RELOCATION_X86_64_PC32:
+        case OBJECT_RELOCATION_X86_64_PLT32:
         case OBJECT_RELOCATION_AARCH64_PREL32:
         case OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32:
             object_assembly_append_string(buffer, S8("\t.long "));
             object_assembly_append_relocation_value(buffer, object, target, relocation, section_data);
             object_assembly_append_string(buffer, S8(" - ."));
             object_assembly_append_string(buffer, S8("\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_GOTTPOFF:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@GOTTPOFF"));
+            object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
+        case OBJECT_RELOCATION_X86_64_TLSGD:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TLSGD"));
+            object_assembly_append_string(buffer, S8(" - .\n"));
             return true;
         case OBJECT_RELOCATION_X86_64_MACH_TLV_PC32:
             object_assembly_append_string(buffer, S8("\t.long "));
@@ -1538,6 +1549,14 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_x86_relocation_expression(Object
     if (relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32)
     {
         object_assembly_append_string(buffer, S8("@TPOFF"));
+    }
+    else if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF)
+    {
+        object_assembly_append_string(buffer, S8("@GOTTPOFF"));
+    }
+    else if (relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD)
+    {
+        object_assembly_append_string(buffer, S8("@TLSGD"));
     }
     else if (relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32)
     {
@@ -3557,6 +3576,10 @@ BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
         return S8("R_X86_64_32");
     case 11:
         return S8("R_X86_64_32S");
+    case 19:
+        return S8("R_X86_64_TLSGD");
+    case 22:
+        return S8("R_X86_64_GOTTPOFF");
     case 23:
         return S8("R_X86_64_TPOFF32");
     case 41:
@@ -4171,10 +4194,17 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     {
                         if (target.cpu_arch == CPU_ARCH_X86_64)
                         {
+                            // R_X86_64_PLT32 reads back as a plain rel32: a
+                            // call through a PLT entry and a direct call
+                            // resolve identically here, and only the writer
+                            // has to keep the distinction (a shared link
+                            // refuses PC32 against an undefined function).
                             kind = relocation_type == 1                           ? OBJECT_RELOCATION_ABSOLUTE64
                                    : relocation_type == 2 || relocation_type == 4 ? OBJECT_RELOCATION_X86_64_PC32
                                    : relocation_type == 10                        ? OBJECT_RELOCATION_ABSOLUTE32
                                    : relocation_type == 11                        ? OBJECT_RELOCATION_X86_64_ABSOLUTE32S
+                                   : relocation_type == 19                        ? OBJECT_RELOCATION_X86_64_TLSGD
+                                   : relocation_type == 22                        ? OBJECT_RELOCATION_X86_64_GOTTPOFF
                                    : relocation_type == 23                        ? OBJECT_RELOCATION_X86_64_TPOFF32
                                                                                   : OBJECT_RELOCATION_COUNT;
                             if (relocation_type == 4)
@@ -4286,6 +4316,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                 addend = (s64)(s32)stored;
                             }
                             else if (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
+                                     kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
                                      kind == OBJECT_RELOCATION_AARCH64_PREL32)
                             {
                                 u32 stored = 0;
@@ -8687,6 +8718,9 @@ BUSTER_GLOBAL_LOCAL bool object_relocation_kind_from_codegen(CodegenModuleReloca
             case CODEGEN_MODULE_RELOCATION_ABSOLUTE32: *destination = OBJECT_RELOCATION_ABSOLUTE32; return true;
             case CODEGEN_MODULE_RELOCATION_ABSOLUTE64: *destination = OBJECT_RELOCATION_ABSOLUTE64; return true;
             case CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32: *destination = OBJECT_RELOCATION_X86_64_TPOFF32; return true;
+            case CODEGEN_MODULE_RELOCATION_X86_64_GOTTPOFF: *destination = OBJECT_RELOCATION_X86_64_GOTTPOFF; return true;
+            case CODEGEN_MODULE_RELOCATION_X86_64_TLSGD: *destination = OBJECT_RELOCATION_X86_64_TLSGD; return true;
+            case CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32: *destination = OBJECT_RELOCATION_X86_64_PLT32; return true;
             case CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32: *destination = OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32; return true;
             case CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32: *destination = OBJECT_RELOCATION_PE_TLS_OFFSET32; return true;
             case CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP: *destination = OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP; return true;
@@ -9116,8 +9150,15 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             result.error = OBJECT_ERROR_INVALID_INPUT;
             break;
         }
-        u32 symbol_index = source.symbol.value < entry_symbol_capacity ? entry_by_symbol[source.symbol.value] : UINT32_MAX;
-        String8 name = target_symbol->link_name.length ? target_symbol->link_name : target_symbol->name;
+        // The general-dynamic call names the thread-local symbol so the two
+        // sites of one sequence stay one relocation record each, but what it
+        // actually calls is the runtime helper. Substituting the name here
+        // keeps the byte offsets with the emitter that produced them.
+        bool tls_get_addr = source.kind == CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32;
+        u32 symbol_index = !tls_get_addr && source.symbol.value < entry_symbol_capacity ? entry_by_symbol[source.symbol.value] : UINT32_MAX;
+        String8 name = tls_get_addr                        ? S8("__tls_get_addr")
+                       : target_symbol->link_name.length   ? target_symbol->link_name
+                                                           : target_symbol->name;
         if (symbol_index == UINT32_MAX)
         {
             ObjectSymbolNameSlot* slot = object_symbol_name_slot(name_index, name);
@@ -9132,16 +9173,18 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             result.symbols[symbol_index] = (ObjectSymbol){
                 .name = name,
                 .section = OBJECT_SECTION_UNDEFINED,
-                .kind = target_symbol->kind == IR_SYMBOL_DATA ? OBJECT_SYMBOL_DATA : OBJECT_SYMBOL_FUNCTION,
+                .kind = !tls_get_addr && target_symbol->kind == IR_SYMBOL_DATA ? OBJECT_SYMBOL_DATA : OBJECT_SYMBOL_FUNCTION,
                 .global = true,
-                .weak = target_symbol->is_weak,
-                .hidden = target_symbol->is_hidden,
+                .weak = !tls_get_addr && target_symbol->is_weak,
+                .hidden = !tls_get_addr && target_symbol->is_hidden,
             };
             object_symbol_name_index_add(name_index, &result.symbols[symbol_index], symbol_index);
         }
         result.relocations[result.relocation_count++] = (ObjectRelocation){
-            .addend = source.addend + (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
-                                               kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32
+            .addend = source.addend + (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
+                                               kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
+                                               kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 ||
+                                               kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD
                                            ? -4
                                            : 0),
             .offset = source.offset,
@@ -9179,6 +9222,9 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
     if (arch == CPU_ARCH_X86_64)
     {
         return kind == OBJECT_RELOCATION_X86_64_PC32          ? 2
+               : kind == OBJECT_RELOCATION_X86_64_PLT32       ? 4
+               : kind == OBJECT_RELOCATION_X86_64_TLSGD       ? 19
+               : kind == OBJECT_RELOCATION_X86_64_GOTTPOFF    ? 22
                : kind == OBJECT_RELOCATION_X86_64_TPOFF32     ? 23
                : kind == OBJECT_RELOCATION_ABSOLUTE64         ? 1
                : kind == OBJECT_RELOCATION_ABSOLUTE32         ? 10
@@ -10281,6 +10327,8 @@ ObjectExecutable object_link_executable(ObjectFile* object)
                  relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ||
                  relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
                  relocation->kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 ||
                  relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32)

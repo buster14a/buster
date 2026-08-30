@@ -6,6 +6,7 @@
 // else is an explicit unsupported result, never a silent misselection.
 
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
@@ -103,6 +104,9 @@ struct MachineX64Selector
     // as data, and every access dispatches down the same pointer paths a
     // GLOBAL's address takes.
     u32* value_indirect_slots;
+    // -fPIC: decided by the driver, read only where a thread-local symbol
+    // reference picks its model.
+    bool position_independent;
     // Result value per argument index, captured at entry before any scratch
     // register can clobber the incoming fixed registers; IR_ID_UNDERLYING_INVALID
     // when the function has no such argument.
@@ -2233,8 +2237,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_global_address(MachineX64Selector* s
 
     bool selected = false;
     IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
-    // Thread-local addresses select only where the canonical emitter's
-    // local-exec fs-base sequence applies; other OSes keep the fallback.
+    // Thread-local addresses select only where the ELF sequences apply;
+    // other OSes keep the canonical fallback.
     bool thread_local_supported =
         symbol && (!symbol->is_thread_local || selector->target.os == OPERATING_SYSTEM_LINUX || selector->target.os == OPERATING_SYSTEM_ANDROID);
     if (result_register != UINT32_MAX && thread_local_supported)
@@ -2242,12 +2246,38 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_global_address(MachineX64Selector* s
         u32 target_index = selector->call_targets.total_count;
         IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
         *target_row = instruction->symbol;
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
-                                                       .payload = target_index,
-                                                       .opcode = (u16)(symbol->is_thread_local ? MACHINE_X64_LEA_TLS : MACHINE_X64_LEA_SYMBOL),
-                                                   });
-        machine_x64_define(selector, result_register, row);
+        CodegenThreadLocalModel model = symbol->is_thread_local
+                                            ? codegen_thread_local_model(selector->position_independent, symbol->is_definition)
+                                            : CODEGEN_THREAD_LOCAL_LOCAL_EXEC;
+        if (model == CODEGEN_THREAD_LOCAL_GENERAL_DYNAMIC)
+        {
+            // The address comes back from __tls_get_addr in RAX, so this
+            // reads exactly like a direct call: the call row itself defines
+            // nothing the allocator names, and a move off the physical
+            // result register is what the value is defined by.
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .payload = target_index,
+                                                 .opcode = MACHINE_X64_TLS_GENERAL_DYNAMIC,
+                                             });
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                        machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX)},
+                                                           .opcode = MACHINE_X64_MOV_RR,
+                                                       });
+            machine_x64_define(selector, result_register, row);
+        }
+        else
+        {
+            u32 row = machine_x64_select_row(selector,
+                                             (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                 .payload = target_index,
+                                                 .opcode = (u16)(!symbol->is_thread_local              ? MACHINE_X64_LEA_SYMBOL
+                                                                 : model == CODEGEN_THREAD_LOCAL_INITIAL_EXEC ? MACHINE_X64_LEA_TLS_INITIAL_EXEC
+                                                                                                              : MACHINE_X64_LEA_TLS),
+                                             });
+            machine_x64_define(selector, result_register, row);
+        }
         selected = true;
     }
     return selected;
@@ -4153,7 +4183,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_return(MachineX64Selector* selector,
      IR_OPCODE_BIT(IR_OPCODE_BRANCH_IF))
 
 MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                              bool assume_validated)
+                                                              bool position_independent, bool assume_validated)
 {
     MachineSelectResult result = {
         .failed_opcode = IR_OPCODE_COUNT,
@@ -4216,6 +4246,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .value_stack_slots = arena_allocate(arena, u32, function->value_count),
         .value_indirect_slots = arena_allocate(arena, u32, function->value_count),
         .target = target,
+        .position_independent = position_independent,
         .supported = true,
         .failed_opcode = IR_OPCODE_COUNT,
     };
@@ -8884,6 +8915,22 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     return true;
 }
 
+// A fixed instruction sequence copied in verbatim. The only caller is the
+// general-dynamic thread-local pair, whose prefixes are part of the sequence a
+// linker matches on rather than an encoding the metadata tables would choose;
+// everything else goes through the encoder so its form stays the audited one.
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_literal_bytes(MachineX64Encoder* encoder, u8 const* literal, u32 byte_count)
+{
+    if (encoder->count > encoder->capacity || byte_count > encoder->capacity - encoder->count)
+    {
+        encoder->overflow = true;
+        return false;
+    }
+    memcpy(encoder->bytes + encoder->count, literal, byte_count);
+    encoder->count += byte_count;
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_pointer_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 base, u32 offset, u32 chunk,
                                                                   MachineX64ExactEmitCounters* counters)
 {
@@ -9948,6 +9995,72 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                             .code_offset = encoder.count - 4,
                             .target = instruction->payload,
                             .is_thread_local = 1,
+                            .thread_local_site = MACHINE_THREAD_LOCAL_SITE_LOCAL_EXEC,
+                        };
+                    }
+                    break; case MACHINE_X64_LEA_TLS_INITIAL_EXEC:
+                    {
+                        // mov dest, fs:[0] — the thread pointer — then
+                        // add dest, [rip + sym@GOTTPOFF], the word the loader
+                        // wrote with this symbol's offset from it.
+                        u32 destination = operand_registers[0];
+                        BusterX86MetadataPhysicalOperand fs_operands[2] = {
+                            machine_x64_exact_gpr_operand(destination, 64),
+                            {
+                                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+                                .width = 64,
+                                .memory = {
+                                    .displacement = 0,
+                                    .address_size = 64,
+                                    .scale = 1,
+                                    .segment = BUSTER_X86_METADATA_SEGMENT_FS,
+                                    .has_displacement = true,
+                                    .has_segment = true,
+                                },
+                            },
+                        };
+                        (void)machine_x64_emit_metadata_instruction(&encoder, S8("MOV"), fs_operands, 2,
+                                (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
+                        BusterX86MetadataPhysicalOperand add_operands[2] = {
+                            machine_x64_exact_gpr_operand(destination, 64),
+                            machine_x64_exact_rip_memory_operand(),
+                        };
+                        (void)machine_x64_emit_metadata_instruction(&encoder, S8("ADD"), add_operands, 2,
+                                (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
+                        MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                        *site = (MachineCallSite){
+                            .code_offset = encoder.count - 4,
+                            .target = instruction->payload,
+                            .is_thread_local = 1,
+                            .thread_local_site = MACHINE_THREAD_LOCAL_SITE_INITIAL_EXEC,
+                        };
+                    }
+                    break; case MACHINE_X64_TLS_GENERAL_DYNAMIC:
+                    {
+                        // Sixteen bytes whose prefixes are the sequence rather
+                        // than an encoding choice: a linker relaxing
+                        // general-dynamic to a cheaper model matches on
+                        // exactly these bytes and overwrites all sixteen, so
+                        // they are written directly instead of through the
+                        // encoder, which would pick each instruction's
+                        // shortest form.
+                        //   66 48 8d 3d <r32>  data16 lea rdi, [rip + sym@TLSGD]
+                        //   66 66 48 e8 <r32>  data16 data16 rex.W call __tls_get_addr
+                        static u8 const general_dynamic_bytes[] = {0x66, 0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0x66, 0x66, 0x48, 0xe8, 0, 0, 0, 0};
+                        u32 sequence_offset = encoder.count;
+                        (void)machine_x64_emit_literal_bytes(&encoder, general_dynamic_bytes, (u32)BUSTER_ARRAY_LENGTH(general_dynamic_bytes));
+                        MachineCallSite* address_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                        *address_site = (MachineCallSite){
+                            .code_offset = sequence_offset + 4,
+                            .target = instruction->payload,
+                            .is_thread_local = 1,
+                            .thread_local_site = MACHINE_THREAD_LOCAL_SITE_GENERAL_DYNAMIC,
+                        };
+                        MachineCallSite* helper_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                        *helper_site = (MachineCallSite){
+                            .code_offset = sequence_offset + 12,
+                            .target = instruction->payload,
+                            .thread_local_site = MACHINE_THREAD_LOCAL_SITE_TLS_GET_ADDR,
                         };
                     }
                     break; case MACHINE_X64_COPY_FRAME_FROM_FRAME:

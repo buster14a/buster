@@ -17279,6 +17279,26 @@ struct LibcTestSubsetTotals
 // defect, but it is not what moved these two units. Everything the assembly
 // work newly exposed is closed between them; the seven units left in the suite
 // are the local-exec TLS group.
+// 2026-08-30: 381 -> 381, and the flat number is the finding. Buster emits
+// initial-exec and general-dynamic thread-local models now (issue 751), so
+// none of the seven remaining units is behind a thread-local relocation any
+// more: `ld` no longer refuses anything a shared object cannot carry from the
+// TLS side, and `functional/tls_init_dso` and `regression/tls_get_new-dtv_dso`
+// moved from `R_X86_64_TPOFF32 ... local-exec is incompatible with -shared`
+// to `R_X86_64_PC32 against symbol 'gettls'` -- their `.eh_frame` FDE names
+// the function it describes where clang names `.text` plus an offset, and a
+// PC-relative reference to an interposable symbol is what -shared refuses.
+// That is issue 752's, the same relocation `functional/dlopen_dso` is blocked
+// on, and it is now what holds all four of those units and their two
+// dependents. `functional/tls_align` and `functional/tls_align_dlopen` are
+// behind something else again: their shared object is a single
+// `__attribute__((constructor))` that fills the table the test reads, nothing
+// in this tree emits `.init_array`, and the attribute is accepted and
+// dropped -- `tls_align_dso.o` has an empty `.text`. The models themselves
+// are pinned by `tests/basic_c_thread_local_models.c`, which is compiled both
+// ways under all four allocators: the objects have to carry the right
+// relocations, because an executable link relaxes all three back to
+// local-exec and a run alone cannot tell them apart.
 #define LIBC_TEST_EXPECTED_PASSING 381
 #define LIBC_TEST_EXPECTED_STATE_HASH 0x0e973f6c67fa1195ull
 

@@ -79,6 +79,15 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_COFF_SECTION16,
     OBJECT_RELOCATION_COFF_ADDR32NB,
     OBJECT_RELOCATION_X86_64_TPOFF32,
+    // R_X86_64_GOTTPOFF: initial-exec, a GOT word the loader fills with the
+    // symbol's offset from the thread pointer.
+    OBJECT_RELOCATION_X86_64_GOTTPOFF,
+    // R_X86_64_TLSGD: general-dynamic, the address of the module/offset pair
+    // the loader builds, and R_X86_64_PLT32 against __tls_get_addr for the
+    // call that reads it. The two always appear together, eight bytes apart,
+    // in that order.
+    OBJECT_RELOCATION_X86_64_TLSGD,
+    OBJECT_RELOCATION_X86_64_PLT32,
     OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32,
     OBJECT_RELOCATION_PE_TLS_OFFSET32,
     OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP,

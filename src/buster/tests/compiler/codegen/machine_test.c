@@ -30,7 +30,7 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlockParameter) == 40);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrIncoming) == 16);
-BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 4);
+BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 5);
 
 // Compiles one C source through the C frontend into a canonical IrProgram
 // for machine-selection tests. Diagnostics fail the caller's assertions.
@@ -477,6 +477,7 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
     {
         String8 source_file;
         String8 owner_symbol;
+        bool fixed_sequence;
     };
     // Consumers are kept as migration anchors for the source audit, but are
     // not counted as authorities: their bodies must route instruction
@@ -498,7 +499,8 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
         {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_native_executable_mach_o64")},
     };
     static MachineX64NeutralSite const neutral_sites[] = {
-        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_emit_global_assembly")},
+        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_emit_global_assembly"), false},
+        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_canonical_x64_thread_local_general_dynamic"), true},
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_generate_canonical_module_attempt")},
         {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), S8_INITIALIZER("assembly_x86_metadata_local_relocation")},
         {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_address_difference")},
@@ -652,6 +654,20 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
                 u64 end = offset + prefix.length;
                 while (end < source.end && machine_test_source_identifier_continue(source.bytes[end])) end += 1;
                 String8 owner = {.pointer = (char8*)(source.bytes + offset), .length = end - offset};
+                // A registered fixed-sequence site is the one kind of x86
+                // byte writer the metadata encoder cannot stand in for: its
+                // bytes are matched and replaced whole by a linker, so the
+                // shortest encoding of the same instructions is the wrong
+                // answer.  Naming the owner in the neutral registry is what
+                // keeps it reviewed; the registry membership is checked
+                // above, so here it only stops the discovery scan from
+                // counting the same site as a handwritten constructor.
+                bool fixed_sequence = false;
+                for (u32 neutral_index = 0; neutral_index < BUSTER_ARRAY_LENGTH(neutral_sites); neutral_index += 1)
+                {
+                    MachineX64NeutralSite site = neutral_sites[neutral_index];
+                    fixed_sequence |= site.fixed_sequence && string_equal(site.source_file, file.path) && string_equal(site.owner_symbol, owner);
+                }
                 MachineX64SourceSpan body = {0};
                 // The name starts at `offset`, so ask whether a definition
                 // begins *here* rather than searching forward for one.  The
@@ -676,7 +692,7 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
                                                           : BUSTER_ARRAY_LENGTH(codegen_writers),
                                                       &has_x86, &has_aarch64, &has_unknown);
                 }
-                if (has_x86 || has_unknown)
+                if (!fixed_sequence && (has_x86 || has_unknown))
                 {
                     audit.forbidden_count += 1;
                     audit.forbidden_constructor_count += 1;
@@ -1109,7 +1125,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 77);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 79);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
@@ -1119,7 +1135,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 47);
     BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 50);
-    BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 26);
+    BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 28);
 
     // The x86-64 producer registry is the Phase-0 census used to keep the
     // encoder switch and recipe projection from drifting independently.  It
@@ -1390,6 +1406,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_DISPLACEMENT] != 0);
     BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_DATA] != 0);
     BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_TARGET_PAYLOAD] != 0);
+    // One site, and it should stay one: a fixed sequence is an exception to
+    // the metadata authority, so a second one is a decision, not a detail.
+    BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_FIXED_SEQUENCE] == 1);
     MachineX64SourceAudit source_audit = machine_test_x86_source_authority_audit(arguments->arena);
     // Packaged runtimes (notably Android) do not carry the repository source
     // tree, so the scanner cannot discover its five audit files there.  Keep

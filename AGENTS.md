@@ -988,7 +988,8 @@ three of those are musl's own.
   for the flag for exactly that reason, and here it turns a name the object set
   is missing from a silent runtime death into a link error naming the symbol.
 - `-Bsymbolic`, because neither compiler is asked for position-independent
-  code: the harness drives one flag set and Buster has no `-fPIC` to give.
+  code: the harness drives one flag set and Buster's `-fPIC` reaches only the
+  thread-local model, not the rest of the code model (issue 752).
   What both of them do emit is PC-relative, so the only references `ld` refuses
   to place in a shared object are the ones to symbols another object could
   interpose. Binding those at link time is what musl's own build does for
@@ -1280,8 +1281,9 @@ one quietly held out, which is the trade this stage wants.
 What comes out of that is three link shapes rather than one. A shared-object
 unit is compiled `-fPIC -DSHARED`, which is upstream's own `.lo` rule and the
 one flag in this stage that the two compilers do different things with -- the
-Buster driver accepts `-fPIC` and does nothing with it, so what a shared object
-demands of the code generator is exactly what this measures -- and linked
+Buster driver reads `-fPIC` for the thread-local model and absorbs the rest of
+it, so what a shared object demands of the code generator is exactly what this
+measures -- and linked
 `-shared` against the shared musl; upstream never runs one, so both sides
 building it is the pass. A program with a `.mk` is linked against the shared
 musl rather than the archive, with that musl as its interpreter and its own
@@ -1330,10 +1332,10 @@ compiles once an aggregate can be assigned across a `volatile` qualifier
 (issue 735), and `functional/pthread_robust` and
 `regression/pthread-robust-detach` pass once a walked-through aggregate member
 is not loaded (issue 737). The other two, `functional/tls_align_dlopen` and
-`functional/tls_init_dlopen`, joined the local-exec TLS group that was already
-there, which is the model rather than anything new -- and that group is now
-the whole of what the suite does not pass. 243 to 381, and nothing that passed
-before stopped passing.
+`functional/tls_init_dlopen`, joined the shared-object group that was already
+there rather than being anything new -- and that group is the whole of what
+the suite does not pass. 243 to 381, and nothing that passed before stopped
+passing.
 
 One difference from a native musl build is left, and it is not assembly:
 musl's `ARCH_SRCS` also covers the architecture subdirectories' `.c` files --
@@ -1446,20 +1448,25 @@ note in `build.c`, which is where each step is written down.
 
 The nine units with a sibling `.mk` are what this stage's newest counts are.
 `functional/tls_align_dso` is the one that passes: both sides build that
-shared object. `functional/tls_align` links against it, runs, and gets the
-wrong answer, which is the honest result of the only thread-local model Buster
-emits — local-exec offsets, baked into a library whose thread-local block does
-not exist until it is loaded. `functional/tls_init_dso` and
-`regression/tls_get_new-dtv_dso` are blocked on that same model at the link
-instead of at the run: `ld` refuses an `R_X86_64_TPOFF32` in a shared object
-and says so. `functional/dlopen_dso` is blocked on the other half of the same
-gap, a PC-relative reference to a data symbol another object could interpose,
-which is the thing `-fPIC` exists to avoid and which `-Bsymbolic` is what hides
-for `libc.so` above. The remaining four — `functional/dlopen`,
-`tls_align_dlopen`, `tls_init_dlopen` and `regression/tls_get_new-dtv` — are
-`excluded-reference`, because every one of them calls `dlopen` and musl's
-loader saves a jump buffer around it: the reference dies on the same trapping
-`setjmp` the Buster build does.
+shared object. What holds the other three is no longer the thread-local model.
+Buster picks between all three ELF models now — local-exec for a definition
+in an executable, initial-exec for a declaration it does not define,
+general-dynamic under `-fPIC` — so nothing in this group is behind a
+thread-local relocation `ld` refuses. `functional/tls_init_dso` and
+`regression/tls_get_new-dtv_dso` are blocked one relocation further on: their
+`.eh_frame` FDE names the function it describes, where clang names `.text`
+plus an offset, and a PC-relative reference to a symbol another object could
+interpose is what `-shared` refuses. That is the same relocation
+`functional/dlopen_dso` is blocked on — there for a reference to a data
+object — and it is the `-fPIC` code model, which `-Bsymbolic` is what hides
+for `libc.so` above. `functional/tls_align` links against its shared object,
+runs, and still gets the wrong answer, and its cause is neither of those:
+`tls_align_dso.c` is one `__attribute__((constructor))` filling the table the
+test reads, nothing in this tree emits `.init_array`, and the attribute is
+accepted and dropped, so that object's `.text` comes out empty. The remaining
+four — `functional/dlopen`, `tls_align_dlopen`, `tls_init_dlopen` and
+`regression/tls_get_new-dtv` — are `excluded-reference` or blocked on a
+sibling this side did not build; every one of them calls `dlopen`.
 
 `LIBCTEST_BLOCKER` still prints nothing, and the three blocked-link units are
 why the list did not come back with them. It ranks the symbols a link could
@@ -1467,7 +1474,7 @@ not resolve, and none of those three is short a symbol: each is short a
 relocation the shared object cannot carry, which the unit's own
 `LIBCTEST_UNIT` line carries in the linker's words. The work list this stage
 generates for itself is a list of missing components, and what is left now is
-a code-generation model and two wrong answers.
+a code model, an unwind-table reference and one unimplemented attribute.
 
 The last 22 blocked-compile units went together, 21 in `src/math` and
 `functional/strtold`, when the x87 static-initializer folder stopped refusing
@@ -1484,8 +1491,9 @@ the `LIBCTEST_SUBSET` line is the number to read for a compile gap, and it is
 
 Two failing units are left, and both are the same wrong answer rather than a
 missing component: `functional/tls_align` and `functional/tls_align_dlopen`,
-the thread-local model described above. Their cause is known, and every one of
-the five this stage started with is attributed.
+whose shared object is a constructor this compiler drops, as described above.
+Their cause is known, and every one of the five this stage started with is
+attributed.
 
 `functional/fcntl` was the fourth of the original five to go, and it was a
 lazy operand inside a call argument. Its child process exits on

@@ -7598,6 +7598,123 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(lazy_operand_temporary);
         }
     }
+    // The three ELF thread-local models under every allocator, twice: a
+    // plain build, where a definition in the module is local-exec and a
+    // declaration it does not define is initial-exec, and a -fPIC build,
+    // where every reference is general-dynamic.  Two things are pinned.  The
+    // objects have to carry the right relocations, because the linker relaxes
+    // all three back to local-exec in an executable and a run alone cannot
+    // tell a general-dynamic build from a local-exec one.  And the programs
+    // have to run: general-dynamic is a call that writes RDI and answers in
+    // RAX, so every allocator has to keep the values live across it, and the
+    // fixture holds four of them at once.  It exits non-zero with its own
+    // number on the first wrong answer.
+    {
+        String8 thread_local_model_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(thread_local_model_allocators); allocator_index += 1)
+        {
+            for (u32 pic_index = 0; pic_index < 2; pic_index += 1)
+            {
+                Arena* thread_local_model_conflicts[] = {
+                    arguments->arena,
+                    c_asm_arena,
+                };
+                TemporalArena thread_local_model_temporary =
+                    scratch_begin(thread_local_model_conflicts, BUSTER_ARRAY_LENGTH(thread_local_model_conflicts));
+                Arena* thread_local_model_arena = thread_local_model_temporary.arena;
+                String8 allocator_flag =
+                    string_format(thread_local_model_arena, S8("-fregister-allocator={S8}"), thread_local_model_allocators[allocator_index]);
+                String8 position_independent_flag = pic_index ? S8("-fPIC") : S8("-fno-pic");
+                String8 thread_local_model_object_command_line[] = {
+                    allocator_flag, position_independent_flag, S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"),
+                    S8("tests/basic_c_thread_local_models.c"),
+                };
+                CompilerDriverResult thread_local_model_object = compiler_driver_execute_invocation(
+                    thread_local_model_arena, compiler_driver_parse_arguments(thread_local_model_arena,
+                                                                             (SliceString8)BUSTER_ARRAY_TO_SLICE(thread_local_model_object_command_line)));
+                BUSTER_TEST(arguments, thread_local_model_object.error == COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_TEST(arguments, thread_local_model_object.has_object);
+                if (thread_local_model_object.has_object)
+                {
+                    u32 local_exec_count = 0;
+                    u32 initial_exec_count = 0;
+                    u32 general_dynamic_count = 0;
+                    u32 tls_get_addr_count = 0;
+                    for (u32 relocation_index = 0; relocation_index < thread_local_model_object.object.relocation_count; relocation_index += 1)
+                    {
+                        ObjectRelocation* relocation = thread_local_model_object.object.relocations + relocation_index;
+                        local_exec_count += relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32;
+                        initial_exec_count += relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF;
+                        general_dynamic_count += relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD;
+                        tls_get_addr_count += relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 &&
+                                              relocation->symbol < thread_local_model_object.object.symbol_count &&
+                                              string_equal(thread_local_model_object.object.symbols[relocation->symbol].name, S8("__tls_get_addr"));
+                    }
+                    if (pic_index)
+                    {
+                        // -fPIC takes every reference, defined or not, and
+                        // each general-dynamic site is a pair.
+                        BUSTER_TEST(arguments, general_dynamic_count != 0);
+                        BUSTER_TEST(arguments, tls_get_addr_count == general_dynamic_count);
+                        BUSTER_TEST(arguments, local_exec_count == 0);
+                        BUSTER_TEST(arguments, initial_exec_count == 0);
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, local_exec_count != 0);
+                        BUSTER_TEST(arguments, initial_exec_count != 0);
+                        BUSTER_TEST(arguments, general_dynamic_count == 0);
+                        BUSTER_TEST(arguments, tls_get_addr_count == 0);
+                    }
+                }
+                scratch_end(thread_local_model_temporary);
+            }
+        }
+    }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    {
+        String8 thread_local_run_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(thread_local_run_allocators); allocator_index += 1)
+        {
+            for (u32 pic_index = 0; pic_index < 2; pic_index += 1)
+            {
+                Arena* thread_local_run_conflicts[] = {
+                    arguments->arena,
+                    c_asm_arena,
+                };
+                TemporalArena thread_local_run_temporary = scratch_begin(thread_local_run_conflicts, BUSTER_ARRAY_LENGTH(thread_local_run_conflicts));
+                Arena* thread_local_run_arena = thread_local_run_temporary.arena;
+                String8 thread_local_run_path =
+                    buster_test_temporary_path(thread_local_run_arena, S8("buster-c-thread-local-models"),
+                                               string_format(thread_local_run_arena, S8("-{u32}-{u32}"), allocator_index, pic_index));
+                String8 thread_local_run_command_line[] = {
+                    string_format(thread_local_run_arena, S8("-fregister-allocator={S8}"), thread_local_run_allocators[allocator_index]),
+                    pic_index ? S8("-fPIC") : S8("-fno-pic"),
+                    S8("-o"),
+                    thread_local_run_path,
+                    S8("tests/basic_c_thread_local_models.c"),
+                    S8("tests/basic_c_thread_local_models_extern.c"),
+                };
+                CompilerDriverResult thread_local_run = compiler_driver_execute_invocation(
+                    thread_local_run_arena,
+                    compiler_driver_parse_arguments(thread_local_run_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(thread_local_run_command_line)));
+                BUSTER_TEST(arguments, thread_local_run.error == COMPILER_DRIVER_ERROR_NONE);
+                if (thread_local_run.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run_arguments[] = {thread_local_run_path};
+                    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                (ProcessSpawnOptions){.use_process_environment = true});
+                    BUSTER_TEST(arguments, spawn.handle != 0);
+                    if (spawn.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_sync(thread_local_run_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(thread_local_run_temporary);
+            }
+        }
+    }
+#endif
     // musl's <tgmath.h> machinery under every allocator.  The fixture's own
     // comment carries the three rules; what it is here for is that all three
     // are type-only questions the frontend answers before any code is

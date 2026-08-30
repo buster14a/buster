@@ -1274,10 +1274,27 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         bool debug_option = argument.length >= 2 && argument.pointer[0] == '-' && argument.pointer[1] == 'g';
         bool warning_option =
             argument.length >= 2 && argument.pointer[0] == '-' && argument.pointer[1] == 'W' && !string_starts_with_sequence(argument, S8("-Wl,"));
+        // -fPIC/-fpic is the one entry in this list that is not purely
+        // accepted: it decides the thread-local model, because an object that
+        // may end up in a shared library cannot fold an offset from the
+        // thread pointer.  The rest of the position-independent code model is
+        // still absorbed here; that is #752.  -fPIE/-fpie stay absorbed --
+        // a position-independent executable's own thread-local block is still
+        // the initial one, which is what clang emits for them too.
+        if (string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fpic")))
+        {
+            invocation.position_independent = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-fno-pic")))
+        {
+            invocation.position_independent = false;
+            continue;
+        }
         bool compatible_codegen_option =
-            string_equal(argument, S8("-pipe")) || string_equal(argument, S8("-pthread")) || string_equal(argument, S8("-fPIC")) ||
-            string_equal(argument, S8("-fpic")) || string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie")) ||
-            string_equal(argument, S8("-fno-pic")) || string_equal(argument, S8("-fno-pie")) || string_equal(argument, S8("-fno-builtin")) ||
+            string_equal(argument, S8("-pipe")) || string_equal(argument, S8("-pthread")) ||
+            string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie")) ||
+            string_equal(argument, S8("-fno-pie")) || string_equal(argument, S8("-fno-builtin")) ||
             string_equal(argument, S8("-fwrapv")) || string_equal(argument, S8("-fno-strict-aliasing")) || string_equal(argument, S8("-funsigned-char")) ||
             string_equal(argument, S8("-fsigned-char")) || string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common")) ||
             // Buster emits no stack-protector prologue, so the disabling
@@ -3003,6 +3020,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                            (CodegenModuleOptions){
                                                                .debug_info = invocation.debug_info,
                                                                .assume_validated = true,
+                                                               .position_independent = invocation.position_independent,
                                                                .register_allocator = invocation.register_allocator,
                                                                .assembly_syntax = (u8)invocation.assembly_syntax,
                                                            });

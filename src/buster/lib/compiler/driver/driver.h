@@ -129,6 +129,9 @@ struct CompilerDriverInvocation
     // -fregister-allocator= selects another mode and
     // -fno-register-allocator selects NONE.
     u8 register_allocator;
+    // -fPIC/-fpic. Only the thread-local model reads it today; see #752 for
+    // the rest of the code model.
+    bool position_independent;
     u8 optimization_level;
     bool has_gpu_target;
     bool save_gpu_temporaries;

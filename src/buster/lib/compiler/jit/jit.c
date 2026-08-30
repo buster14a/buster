@@ -250,6 +250,8 @@ BUSTER_GLOBAL_LOCAL bool jit_relocation_is_tls(ObjectRelocationKind kind)
     switch (kind)
     {
         case OBJECT_RELOCATION_X86_64_TPOFF32:
+        case OBJECT_RELOCATION_X86_64_GOTTPOFF:
+        case OBJECT_RELOCATION_X86_64_TLSGD:
         case OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32:
         case OBJECT_RELOCATION_PE_TLS_OFFSET32:
         case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
@@ -272,7 +274,8 @@ BUSTER_GLOBAL_LOCAL bool jit_relocation_is_tls(ObjectRelocationKind kind)
 
 BUSTER_GLOBAL_LOCAL bool jit_relocation_uses_function_thunk(ObjectRelocationKind kind)
 {
-    return kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26;
+    return kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 || kind == OBJECT_RELOCATION_AARCH64_CALL26 ||
+           kind == OBJECT_RELOCATION_AARCH64_JUMP26;
 }
 
 BUSTER_GLOBAL_LOCAL bool jit_relocation_is_supported(ObjectRelocationKind kind, CpuArch arch)

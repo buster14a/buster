@@ -350,6 +350,19 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
     },
+    [MACHINE_X64_LEA_TLS_INITIAL_EXEC] = {
+        .name = S8_INITIALIZER("x64_lea_tls_initial_exec"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
+    },
+    // A call in everything but name: it writes RDI, lands its answer in RAX
+    // and runs __tls_get_addr in between, so it takes the caller-saved
+    // foreclosure the CALL attribute carries and is not rematerializable.
+    [MACHINE_X64_TLS_GENERAL_DYNAMIC] = {
+        .name = S8_INITIALIZER("x64_tls_general_dynamic"),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
     [MACHINE_X64_SWITCH] = {
         .name = S8_INITIALIZER("x64_switch"),
         .operand_count = 2,
@@ -979,7 +992,7 @@ BUSTER_GLOBAL_LOCAL MachineX64EmitRegistryEntry const machine_x86_64_emit_regist
 };
 
 BUSTER_CT_CHECK(MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT == 5u);
-BUSTER_CT_CHECK(MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT == 14u);
+BUSTER_CT_CHECK(MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT == 15u);
 
 // Canonical x86 authority records.  These rows name only the metadata module
 // entry points that own instruction bytes.  Codegen, assembly, JIT, and link
@@ -1022,6 +1035,11 @@ BUSTER_GLOBAL_LOCAL MachineX64NeutralPatchSite const machine_x86_64_neutral_patc
         .patch_class = MACHINE_X64_NEUTRAL_PATCH_DATA,
         .source_file = S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"),
         .owner_symbol = S8_INITIALIZER("codegen_emit_global_assembly"),
+    },
+    {
+        .patch_class = MACHINE_X64_NEUTRAL_PATCH_FIXED_SEQUENCE,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"),
+        .owner_symbol = S8_INITIALIZER("codegen_canonical_x64_thread_local_general_dynamic"),
     },
     {
         .patch_class = MACHINE_X64_NEUTRAL_PATCH_DISPLACEMENT,
@@ -2247,13 +2265,13 @@ bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* 
 #include <buster/lib/compiler/codegen/register_allocator_quality.c>
 
 BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_internal(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                                    bool assume_validated)
+                                                                                    bool assume_validated, bool position_independent)
 {
     MachineSelectResult result;
 
     switch (target.cpu_arch)
     {
-        break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, assume_validated);
+        break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, position_independent, assume_validated);
         break; case CPU_ARCH_AARCH64: result = machine_select_canonical_function_aarch64(arena, program, function, target, assume_validated);
         break; default: BUSTER_TODO();
     }
@@ -2263,12 +2281,13 @@ BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_intern
 
 MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
 {
-    return machine_select_canonical_function_internal(arena, program, function, target, false);
+    return machine_select_canonical_function_internal(arena, program, function, target, false, false);
 }
 
-MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
+MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
+                                                                bool position_independent)
 {
-    return machine_select_canonical_function_internal(arena, program, function, target, true);
+    return machine_select_canonical_function_internal(arena, program, function, target, true, position_independent);
 }
 
 #if BUSTER_INCLUDE_TESTS

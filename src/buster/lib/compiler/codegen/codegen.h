@@ -207,6 +207,18 @@ typedef enum CodegenModuleRelocationKind
     CODEGEN_MODULE_RELOCATION_ABSOLUTE32,
     CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
     CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32,
+    // ELF initial-exec: the loader stores the thread-pointer offset in a GOT
+    // slot and the code adds that slot to the thread pointer, so the offset
+    // does not have to be known when the referencing object is built.
+    CODEGEN_MODULE_RELOCATION_X86_64_GOTTPOFF,
+    // ELF general-dynamic: the lea that hands __tls_get_addr the address of
+    // the module/offset pair the loader fills in, and the call to it.  The
+    // pair is a linker-built GOT entry (R_X86_64_DTPMOD64 plus
+    // R_X86_64_DTPOFF64); the object carries only these two sites.  The call
+    // resolves to __tls_get_addr rather than to the relocation's own symbol,
+    // which is why it is a kind of its own rather than a plain PC32.
+    CODEGEN_MODULE_RELOCATION_X86_64_TLSGD,
+    CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32,
     CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32,
     CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32,
     CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP,
@@ -424,11 +436,31 @@ typedef enum CodegenRegisterAllocatorMode
     CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT,
 } CodegenRegisterAllocatorMode;
 
+// Which thread-local addressing sequence a symbol reference is lowered to.
+// The three are not interchangeable: local-exec folds a constant offset from
+// the thread pointer and is only correct for the main executable's own block,
+// initial-exec reads the offset out of a GOT slot the loader fills and is
+// correct for anything present at program start, and general-dynamic asks
+// __tls_get_addr at run time and is the only one correct for a module that
+// may be dlopened.  Each is strictly more general and strictly slower than
+// the one before it, so the choice is the narrowest form that can be right.
+typedef enum CodegenThreadLocalModel
+{
+    CODEGEN_THREAD_LOCAL_LOCAL_EXEC,
+    CODEGEN_THREAD_LOCAL_INITIAL_EXEC,
+    CODEGEN_THREAD_LOCAL_GENERAL_DYNAMIC,
+} CodegenThreadLocalModel;
+
 typedef struct CodegenModuleOptions CodegenModuleOptions;
 struct CodegenModuleOptions
 {
     bool debug_info;
     bool assume_validated;
+    // -fPIC/-fpic: this object may end up in a shared library, so no
+    // thread-local definition it names can be assumed to sit in the initial
+    // thread-local block.  Only the thread-local model reads it today; the
+    // rest of the position-independent code model is #752.
+    bool position_independent;
     // A CodegenRegisterAllocatorMode value; u8 storage keeps the options
     // record at its existing size.
     u8 register_allocator;
@@ -451,6 +483,9 @@ BUSTER_F_DECL bool codegen_module_relocation_valid(CodegenModuleRelocation* relo
 // canonical emitter's simulation through this exact walk.
 BUSTER_F_DECL bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type_id, u32* part_count);
 BUSTER_F_DECL String8 codegen_register_allocator_mode_string(CodegenRegisterAllocatorMode mode);
+// The ELF thread-local model for one symbol reference.  Windows and Mach-O
+// have their own sequences and never ask.
+BUSTER_F_DECL CodegenThreadLocalModel codegen_thread_local_model(bool position_independent, bool symbol_is_definition);
 BUSTER_F_DECL CodegenAbi codegen_abi_for_target(Target target);
 BUSTER_F_DECL CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options);
 BUSTER_F_DECL CodegenExecutable codegen_make_executable(CodegenFunction function);

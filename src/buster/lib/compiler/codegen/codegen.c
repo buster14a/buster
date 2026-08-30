@@ -76,6 +76,16 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
         case CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32:
             is_thread_local = true;
             break;
+        case CODEGEN_MODULE_RELOCATION_X86_64_GOTTPOFF:
+        case CODEGEN_MODULE_RELOCATION_X86_64_TLSGD:
+            is_thread_local = true;
+            break;
+        // The call in the general-dynamic pair patches a plain rel32 against
+        // __tls_get_addr, so it resolves like any other call and carries none
+        // of the thread-local bits even though it only ever appears beside a
+        // TLSGD site.
+        case CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32:
+            break;
         case CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32:
             is_thread_local = true;
             thread_local_index = true;
@@ -1196,6 +1206,38 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metad
     return result;
 }
 
+// The ELF general-dynamic thread-local pair, sixteen fixed bytes:
+//
+//   66 48 8d 3d <r32>  data16 lea rdi, [rip + sym@TLSGD]
+//   66 66 48 e8 <r32>  data16 data16 rex.W call __tls_get_addr
+//
+// The prefixes are the sequence rather than an encoding of it.  Nothing
+// executes them -- a data16 on a 64-bit lea and two on a rex.W call change
+// nothing -- and they are there so the sixteen bytes have a shape a linker
+// can recognize: relaxing general-dynamic to initial-exec or local-exec
+// replaces all sixteen, and both `ld` and this tree's own linker match on
+// exactly these bytes to do it.  That makes them data whose identity is the
+// contract, which no metadata form can express, since the encoder's job is to
+// choose the shortest encoding of an instruction and the shortest one here is
+// the wrong answer.  The site is registered as a neutral fixed sequence in
+// `machine_x86_64_neutral_patch_sites` so it stays reviewable rather than
+// becoming an unaudited byte writer.
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_thread_local_general_dynamic(CodegenBuffer* buffer, u32* address_offset, u32* helper_offset)
+{
+    codegen_emit_u8(buffer, 0x66);
+    codegen_emit_u8(buffer, 0x48);
+    codegen_emit_u8(buffer, 0x8d);
+    codegen_emit_u8(buffer, 0x3d);
+    *address_offset = (u32)buffer->count;
+    codegen_emit_u32(buffer, 0);
+    codegen_emit_u8(buffer, 0x66);
+    codegen_emit_u8(buffer, 0x66);
+    codegen_emit_u8(buffer, 0x48);
+    codegen_emit_u8(buffer, 0xe8);
+    *helper_offset = (u32)buffer->count;
+    codegen_emit_u32(buffer, 0);
+}
+
 BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metadata_segment_memory(
     BusterX86MetadataPhysicalSegment segment, u16 width, s64 displacement)
 {
@@ -2005,6 +2047,23 @@ String8 codegen_register_allocator_mode_string(CodegenRegisterAllocatorMode mode
         break;
     }
     return S8("invalid");
+}
+
+// The narrowest thread-local model that can be right for one reference, which
+// is what clang picks and for the same two reasons.  Position-independent
+// code may be linked into a shared object, and a shared object may be
+// dlopened after the initial thread-local block is laid out, so nothing it
+// defines has a link-time offset from the thread pointer: general-dynamic.
+// Otherwise the object is an executable, its own definitions are in the
+// initial block at a link-time constant offset -- local-exec, which is the
+// common case and the one every non-shared program takes -- while a
+// declaration it does not define may live in a library, whose offset only
+// the loader knows: initial-exec, through a GOT slot.
+CodegenThreadLocalModel codegen_thread_local_model(bool position_independent, bool symbol_is_definition)
+{
+    return position_independent  ? CODEGEN_THREAD_LOCAL_GENERAL_DYNAMIC
+           : symbol_is_definition ? CODEGEN_THREAD_LOCAL_LOCAL_EXEC
+                                  : CODEGEN_THREAD_LOCAL_INITIAL_EXEC;
 }
 
 CodegenAbi codegen_abi_for_target(Target target)
@@ -8908,7 +8967,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         {
             TemporalArena machine_scratch = scratch_begin(&arena, 1);
             MachineSelectResult selected = {0};
-            selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target);
+            selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target, options.position_independent);
             machine_simd_operation_count = selected.simd_operation_count;
             if (!selected.supported)
             {
@@ -9227,17 +9286,29 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
                             {
+                                // The encoder says which field of which
+                                // sequence each site is; only the ELF
+                                // thread-local models have more than one
+                                // spelling, and the call beside a
+                                // general-dynamic lea is not thread-local at
+                                // all -- it resolves to __tls_get_addr.
+                                MachineThreadLocalSite thread_local_site =
+                                    (MachineThreadLocalSite)encoded.call_sites[site_index].thread_local_site;
+                                bool site_is_thread_local = encoded.call_sites[site_index].is_thread_local != 0;
+                                CodegenModuleRelocationKind site_kind =
+                                    thread_local_site == MACHINE_THREAD_LOCAL_SITE_TLS_GET_ADDR ? CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32
+                                    : !site_is_thread_local                                     ? CODEGEN_MODULE_RELOCATION_X86_64_PC32
+                                    : target.os == OPERATING_SYSTEM_WINDOWS                     ? CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32
+                                    : (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+                                        ? CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32
+                                    : thread_local_site == MACHINE_THREAD_LOCAL_SITE_INITIAL_EXEC    ? CODEGEN_MODULE_RELOCATION_X86_64_GOTTPOFF
+                                    : thread_local_site == MACHINE_THREAD_LOCAL_SITE_GENERAL_DYNAMIC ? CODEGEN_MODULE_RELOCATION_X86_64_TLSGD
+                                                                                                     : CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32;
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = selected.function.call_targets[encoded.call_sites[site_index].target],
                                     .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
-                                    .kind = (u8)(encoded.call_sites[site_index].is_thread_local
-                                                     ? target.os == OPERATING_SYSTEM_WINDOWS
-                                                           ? CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32
-                                                           : (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
-                                                                 ? CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32
-                                                                 : CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32
-                                                     : CODEGEN_MODULE_RELOCATION_X86_64_PC32),
-                                    .is_thread_local = encoded.call_sites[site_index].is_thread_local != 0,
+                                    .kind = (u8)site_kind,
+                                    .is_thread_local = site_is_thread_local,
                                 };
                             }
                             buffer.count += encoded.byte_count;
@@ -10460,8 +10531,35 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                 return result;
                             }
+                            else if (codegen_thread_local_model(options.position_independent, symbol->is_definition) ==
+                                     CODEGEN_THREAD_LOCAL_GENERAL_DYNAMIC)
+                            {
+                                //   66 48 8d 3d <r32>  data16 lea rdi, [rip + sym@TLSGD]
+                                //   66 66 48 e8 <r32>  data16 data16 rex.W call __tls_get_addr
+                                u32 general_dynamic_offset = 0;
+                                u32 tls_get_addr_offset = 0;
+                                codegen_canonical_x64_thread_local_general_dynamic(&buffer, &general_dynamic_offset, &tls_get_addr_offset);
+                                if (buffer.error != CODEGEN_ERROR_NONE)
+                                {
+                                    result.error = buffer.error;
+                                    return result;
+                                }
+                                result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
+                                    .symbol = instruction->symbol,
+                                    .offset = general_dynamic_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_X86_64_TLSGD,
+                                    .is_thread_local = true,
+                                };
+                                result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
+                                    .symbol = instruction->symbol,
+                                    .offset = tls_get_addr_offset,
+                                    .kind = CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32,
+                                };
+                            }
                             else
                             {
+                                bool initial_exec = codegen_thread_local_model(options.position_independent, symbol->is_definition) ==
+                                                    CODEGEN_THREAD_LOCAL_INITIAL_EXEC;
                                 BusterX86MetadataPhysicalOperand thread_pointer_load_operands[2] = {
                                     codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
                                     codegen_canonical_x64_metadata_segment_memory(BUSTER_X86_METADATA_SEGMENT_FS, 64, 0),
@@ -10472,12 +10570,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = buffer.error;
                                     return result;
                                 }
+                                // Local-exec folds the offset into the lea's
+                                // displacement; initial-exec adds the GOT word
+                                // the loader wrote to the thread pointer
+                                // instead.  Both are one instruction over the
+                                // same register.
                                 BusterX86MetadataPhysicalOperand tls_value_address_operands[2] = {
                                     codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
-                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RAX, 64, 0),
+                                    initial_exec ? codegen_canonical_x64_metadata_rip_relative(64, 0)
+                                                 : codegen_canonical_x64_metadata_memory(X64_REGISTER_RAX, 64, 0),
                                 };
                                 u32 tls_relocation_offset = 0;
-                                if (!codegen_canonical_x64_metadata_emit_relocation(&buffer, S8("LEA"), tls_value_address_operands,
+                                if (!codegen_canonical_x64_metadata_emit_relocation(&buffer, initial_exec ? S8("ADD") : S8("LEA"),
+                                                                                     tls_value_address_operands,
                                                                                      BUSTER_ARRAY_LENGTH(tls_value_address_operands),
                                                                                      &tls_relocation_offset))
                                 {
@@ -10487,7 +10592,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = instruction->symbol,
                                     .offset = tls_relocation_offset,
-                                    .kind = CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32,
+                                    .kind = (u8)(initial_exec ? CODEGEN_MODULE_RELOCATION_X86_64_GOTTPOFF
+                                                              : CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32),
                                     .is_thread_local = true,
                                 };
                             }

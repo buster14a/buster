@@ -1092,6 +1092,91 @@ BUSTER_GLOBAL_LOCAL void link_write_u32(u8* bytes, u64 offset, u32 value)
     memcpy(bytes + offset, &value, sizeof(value));
 }
 
+// An image this linker writes has one thread-local block, laid out here, so
+// every reference in it can be answered with a constant offset from the
+// thread pointer no matter which model the compiler chose. Initial-exec and
+// general-dynamic are rewritten into that constant in place, which is the
+// same relaxation `ld` performs when a position-independent object ends up in
+// an executable rather than in a shared library.
+//
+//   initial-exec, seven bytes ending at the patched field:
+//     REX.W 03 modrm(00 reg 101) disp32   add reg, [rip + sym@GOTTPOFF]
+//   becomes
+//     REX.W 81 modrm(11 000 reg) imm32    add reg, tpoff
+//   The GOT operand's register is the modrm reg field and the immediate
+//   form's is the rm field, so REX.R moves to REX.B with it.
+//
+//   general-dynamic, sixteen bytes starting four before the patched field:
+//     66 48 8d 3d <r32>  66 66 48 e8 <r32>
+//   becomes
+//     64 48 8b 04 25 00000000    mov rax, fs:0
+//     48 8d 80 <tpoff>           lea rax, [rax + tpoff]
+//   which is the local-exec sequence, and is why the general-dynamic bytes
+//   are emitted as a fixed sixteen rather than in their shortest forms.
+BUSTER_GLOBAL_LOCAL bool link_elf_relax_thread_local(u8* bytes, u64 field_offset, u64 section_start, u64 section_end, bool general_dynamic,
+                                                     s32 thread_pointer_offset)
+{
+    // Both rewrites reach outside the four bytes the relocation names, so the
+    // whole sequence has to be inside the section the relocation is in before
+    // any of it is read or written.
+    if (general_dynamic)
+    {
+        if (field_offset < section_start + 4 || field_offset + 12 > section_end)
+        {
+            return false;
+        }
+        static u8 const local_exec_bytes[] = {0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x80};
+        u64 sequence = field_offset - 4;
+        if (bytes[sequence] != 0x66 || bytes[sequence + 1] != 0x48 || bytes[sequence + 2] != 0x8d || bytes[sequence + 3] != 0x3d ||
+            bytes[sequence + 8] != 0x66 || bytes[sequence + 9] != 0x66 || bytes[sequence + 10] != 0x48 || bytes[sequence + 11] != 0xe8)
+        {
+            return false;
+        }
+        memcpy(bytes + sequence, local_exec_bytes, sizeof(local_exec_bytes));
+        link_write_u32(bytes, sequence + sizeof(local_exec_bytes), (u32)thread_pointer_offset);
+        return true;
+    }
+    if (field_offset < section_start + 3 || field_offset + 4 > section_end)
+    {
+        return false;
+    }
+    u8 rex = bytes[field_offset - 3];
+    u8 opcode = bytes[field_offset - 2];
+    u8 modrm = bytes[field_offset - 1];
+    if ((rex & 0xf8) != 0x48 || opcode != 0x03 || (modrm & 0xc7) != 0x05)
+    {
+        return false;
+    }
+    bytes[field_offset - 3] = (u8)((rex & (u8)~0x04u) | ((rex & 0x04u) ? 0x01u : 0x00u));
+    bytes[field_offset - 2] = 0x81;
+    bytes[field_offset - 1] = (u8)(0xc0u | ((modrm >> 3) & 0x07u));
+    link_write_u32(bytes, field_offset, (u32)thread_pointer_offset);
+    return true;
+}
+
+// Whether this relocation is the call half of a general-dynamic pair the
+// relaxation above rewrote. Both halves come out of one selected row eight
+// bytes apart, in that order, so the TLSGD site is the whole test; the name
+// check only keeps the scan off every other rel32 in the object.
+BUSTER_GLOBAL_LOCAL bool link_elf_relocation_is_relaxed_tls_get_addr(ObjectFile* object, ObjectRelocation* relocation, ObjectSymbol* symbol)
+{
+    if ((relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PLT32) || relocation->offset < 8 ||
+        !string_equal(symbol->name, S8("__tls_get_addr")))
+    {
+        return false;
+    }
+    for (u32 index = 0; index < object->relocation_count; index += 1)
+    {
+        ObjectRelocation* candidate = object->relocations + index;
+        if (candidate->kind == OBJECT_RELOCATION_X86_64_TLSGD && candidate->section == relocation->section &&
+            candidate->offset == relocation->offset - 8)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 BUSTER_GLOBAL_LOCAL bool link_aarch64_branch_encode(A64Opcode opcode, s64 displacement, u32* word)
 {
     bool result;
@@ -3229,6 +3314,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
+        // The call in a general-dynamic pair is gone once the pair is relaxed
+        // into local-exec, and __tls_get_addr with it: the sequence eight
+        // bytes back is what makes this call that call rather than a written
+        // one, and an image this linker produces has no dynamic thread-local
+        // storage for a real call to reach.
+        if (link_elf_relocation_is_relaxed_tls_get_addr(object, relocation, symbol))
+        {
+            continue;
+        }
         u64 symbol_address = 0;
         if (symbol->section == OBJECT_SECTION_UNDEFINED && import_indices[relocation->symbol] == UINT32_MAX)
         {
@@ -3324,7 +3418,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             }
             link_write_u64(bytes, output_offset, value);
         }
-        else if (relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32)
+        else if (relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 || relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ||
+                 relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD)
         {
             if (symbol->section != OBJECT_SECTION_THREAD_LOCAL_DATA && symbol->section != OBJECT_SECTION_THREAD_LOCAL_ZERO)
             {
@@ -3337,13 +3432,29 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             u64 thread_local_size = align_forward(initialized_size + object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size,
                                                   object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment);
             u64 symbol_offset = symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO ? initialized_size + symbol->value : symbol->value;
+            // Local-exec patches a field the addend belongs to. The other two
+            // name a rip-relative operand whose -4 is about the instruction,
+            // not about the offset from the thread pointer, and relaxing them
+            // replaces that operand outright.
+            s64 thread_local_addend = relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32 ? relocation->addend : 0;
             s64 value = 0;
-            if (!link_address_difference(symbol_offset, thread_local_size, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
+            if (!link_address_difference(symbol_offset, thread_local_size, thread_local_addend, &value) || value < INT32_MIN || value > INT32_MAX)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 return result;
             }
-            link_write_u32(bytes, output_offset, (u32)(s32)value);
+            if (relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32)
+            {
+                link_write_u32(bytes, output_offset, (u32)(s32)value);
+            }
+            else if (!link_elf_relax_thread_local(bytes, output_offset, section_offsets[relocation->section],
+                                                  section_offsets[relocation->section] + section->data.length,
+                                                  relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD, (s32)value))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
         }
         else
         {
@@ -5745,7 +5856,8 @@ BUSTER_GLOBAL_LOCAL void link_u32_shell_sort(u32* values, u32 count)
 
 BUSTER_GLOBAL_LOCAL bool link_uefi_relocation_is_tls(ObjectRelocationKind kind)
 {
-    return kind == OBJECT_RELOCATION_X86_64_TPOFF32 || kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
+    return kind == OBJECT_RELOCATION_X86_64_TPOFF32 || kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
+           kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
            kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
            kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
            kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12;
