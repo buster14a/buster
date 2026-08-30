@@ -21550,8 +21550,43 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_is_unmapped_array_object(CIntegerIrBu
     return result;
 }
 
+// Whether a sizeof/_Alignof operand is a type name wrapped in its own
+// parentheses.  The word's own parentheses are already outside start..end, so
+// any strippable pair here was a second pair in the source -- and
+// `sizeof ((T))` is not C: the operand grammar is a unary expression or
+// `( type-name )` with exactly one pair, and `(T)` as an expression names a
+// type where a value is required.  Every resolver above correctly fails on
+// it, which left the int prediction to answer 4 -- and autoconf's
+// AC_CHECK_TYPE compiles exactly this shape and requires it to fail, so a
+// compiler that accepts it reports every type as absent: CPython's configure
+// lost clock_t, socklen_t, ssize_t, mode_t, off_t, pid_t and size_t at once,
+// and `#define size_t unsigned int` followed.
+BUSTER_C_INTERNAL bool c_ir_sizeof_operand_is_parenthesized_type_name(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    u32 stripped = 0;
+    while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+    {
+        start += 1;
+        end -= 1;
+        stripped += 1;
+    }
+    if (!stripped || start >= end || builder->preprocess.tokens[start].kind != C_TOKEN_IDENTIFIER)
+    {
+        return false;
+    }
+    return c_ir_type_name(builder, start, end).value != IR_ID_UNDERLYING_INVALID;
+}
+
 BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* size_out, u32* alignment_out)
 {
+    // The paren normalization below would strip `((T))` down to the type name
+    // and answer its size; refuse the shape before it can, so it reaches the
+    // lowering's refusal instead of resolving.
+    if (c_ir_sizeof_operand_is_parenthesized_type_name(builder, start, end))
+    {
+        return false;
+    }
     u32 expression_start = start;
     u32 expression_end = end;
     u32 dereference_count = 0;
@@ -22676,6 +22711,13 @@ c_ir_expression_core_loop:
                 if (builder->sizeof_operand_missing_member.length)
                 {
                     builder->failure_message = builder->sizeof_operand_missing_member;
+                    builder->failure_token_index = operand_start;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
+                if (c_ir_sizeof_operand_is_parenthesized_type_name(builder, operand_start, operand_end))
+                {
+                    builder->failure_message = S8("a parenthesized type name is not an expression; the type form takes exactly one pair of parentheses");
                     builder->failure_token_index = operand_start;
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
