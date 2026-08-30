@@ -2205,9 +2205,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             }
             // The boolean shortcut is valid only for the frontend's
             // observed == expected comparison.  Mutate that RHS to the
-            // unrelated desired i128 value and require the generic selector
-            // to reject the unsupported i128 equality instead of reusing the
-            // atomic success flag.
+            // unrelated desired i128 value and require the generic selector to
+            // lower a real i128 equality instead of reusing the atomic success
+            // flag.  It used to prove that by refusing; since the x86-64
+            // selector picked up the i128 binary subset (#811) the generic
+            // path answers it, so the proof is now in the rows: that path
+            // differences the halves with a pair of XOR64s, which the shortcut
+            // -- a single move out of the success register -- never emits.
             IrInstruction* atomic_ir = 0;
             IrInstruction* atomic_observed_compare = 0;
             for (u32 instruction_index = 0; instruction_index < atomic_cmpxchg16_function->instruction_count; instruction_index += 1)
@@ -2236,10 +2240,22 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             if (atomic_ir && atomic_observed_compare && atomic_ir->operands[1].value != atomic_ir->operands[2].value)
             {
                 IrValueId expected_operand = atomic_observed_compare->operands[1];
+                u32 shortcut_difference_rows = 0;
+                for (u32 row_index = 0; atomic_cmpxchg16_selected.supported && row_index < atomic_cmpxchg16_selected.function.instruction_count;
+                     row_index += 1)
+                {
+                    shortcut_difference_rows += atomic_cmpxchg16_selected.function.instructions[row_index].opcode == MACHINE_X64_XOR64;
+                }
                 atomic_observed_compare->operands[1] = atomic_ir->operands[2];
                 MachineSelectResult unrelated_i128_selected =
                     machine_select_canonical_function(arguments->arena, machine_program, atomic_cmpxchg16_function, machine_target);
-                BUSTER_TEST(arguments, !unrelated_i128_selected.supported);
+                BUSTER_TEST(arguments, unrelated_i128_selected.supported);
+                u32 unrelated_difference_rows = 0;
+                for (u32 row_index = 0; unrelated_i128_selected.supported && row_index < unrelated_i128_selected.function.instruction_count; row_index += 1)
+                {
+                    unrelated_difference_rows += unrelated_i128_selected.function.instructions[row_index].opcode == MACHINE_X64_XOR64;
+                }
+                BUSTER_TEST(arguments, unrelated_difference_rows > shortcut_difference_rows);
                 atomic_observed_compare->operands[1] = expected_operand;
             }
             Target no_cx16_target = machine_target;

@@ -1033,6 +1033,172 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_constant_shift_amount(MachineX64Selector* s
     return false;
 }
 
+// The two shift directions beside the unsigned right one, over the same
+// slot-backed pair and by the same bounded constant amount. Each is the two
+// halves shifted in place plus one cross term: a left shift carries the low
+// half's top bits into the high one, and both right shifts carry the high
+// half's low bits down. The registers the frame loads produce are freshly
+// synthesized, which is what licenses the in-place shift rows below -- the same
+// shape machine_x64_select_i128_unsigned_shift_right already uses.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_i128_shift_left(MachineX64Selector* selector, IrInstruction* instruction, u32 amount)
+{
+    IrFunction* function = selector->function;
+
+    bool selected = instruction->operand_count >= 2 && instruction->result.value < function->value_count &&
+                    instruction->operands[0].value < function->value_count && amount <= 127;
+    u32 source_slot = selected ? selector->value_stack_slots[instruction->operands[0].value] : UINT32_MAX;
+    u32 result_slot = selected ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+    selected = selected && source_slot != UINT32_MAX && result_slot != UINT32_MAX;
+    if (selected && amount == 0)
+    {
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                          machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+                                             .payload = 16,
+                                             .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
+                                         });
+    }
+    else if (selected && amount < 64)
+    {
+        u32 low = machine_x64_select_frame_load64(selector, source_slot, 0);
+        u32 high = machine_x64_select_frame_load64(selector, source_slot, 8);
+        u32 cross = machine_x64_synthesize_register(selector);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low)},
+                                             .opcode = MACHINE_X64_MOV_RR,
+                                         });
+        u32 count = machine_x64_select_immediate_register(selector, amount);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count)},
+                                             .opcode = MACHINE_X64_SHL64,
+                                         });
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count)},
+                                             .opcode = MACHINE_X64_SHL64,
+                                         });
+        u32 cross_count = machine_x64_select_immediate_register(selector, 64 - amount);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross_count)},
+                                             .opcode = MACHINE_X64_SHR64,
+                                         });
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross)},
+                                             .opcode = MACHINE_X64_OR64,
+                                         });
+        machine_x64_select_frame_store64(selector, result_slot, 0, low);
+        machine_x64_select_frame_store64(selector, result_slot, 8, high);
+    }
+    else if (selected)
+    {
+        u32 high = machine_x64_select_frame_load64(selector, source_slot, 0);
+        if (amount > 64)
+        {
+            u32 count = machine_x64_select_immediate_register(selector, amount - 64);
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count)},
+                                                 .opcode = MACHINE_X64_SHL64,
+                                             });
+        }
+        machine_x64_select_frame_store64(selector, result_slot, 8, high);
+        machine_x64_select_frame_store64(selector, result_slot, 0, machine_x64_select_immediate_register(selector, 0));
+    }
+
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_i128_signed_shift_right(MachineX64Selector* selector, IrInstruction* instruction, u32 amount)
+{
+    IrFunction* function = selector->function;
+
+    bool selected = instruction->operand_count >= 2 && instruction->result.value < function->value_count &&
+                    instruction->operands[0].value < function->value_count && amount <= 127;
+    u32 source_slot = selected ? selector->value_stack_slots[instruction->operands[0].value] : UINT32_MAX;
+    u32 result_slot = selected ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+    selected = selected && source_slot != UINT32_MAX && result_slot != UINT32_MAX;
+    if (selected && amount == 0)
+    {
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                          machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+                                             .payload = 16,
+                                             .opcode = MACHINE_X64_COPY_FRAME_FROM_FRAME,
+                                         });
+    }
+    else if (selected && amount < 64)
+    {
+        u32 low = machine_x64_select_frame_load64(selector, source_slot, 0);
+        u32 high = machine_x64_select_frame_load64(selector, source_slot, 8);
+        u32 cross = machine_x64_synthesize_register(selector);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high)},
+                                             .opcode = MACHINE_X64_MOV_RR,
+                                         });
+        u32 count = machine_x64_select_immediate_register(selector, amount);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count)},
+                                             .opcode = MACHINE_X64_SHR64,
+                                         });
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count)},
+                                             .opcode = MACHINE_X64_SAR64,
+                                         });
+        u32 cross_count = machine_x64_select_immediate_register(selector, 64 - amount);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross_count)},
+                                             .opcode = MACHINE_X64_SHL64,
+                                         });
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross)},
+                                             .opcode = MACHINE_X64_OR64,
+                                         });
+        machine_x64_select_frame_store64(selector, result_slot, 0, low);
+        machine_x64_select_frame_store64(selector, result_slot, 8, high);
+    }
+    else if (selected)
+    {
+        // Past the halfway point the high half becomes the low one and the
+        // sign fills what is left, which is that half shifted right by 63.
+        u32 low = machine_x64_select_frame_load64(selector, source_slot, 8);
+        u32 sign = machine_x64_synthesize_register(selector);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, sign),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low)},
+                                             .opcode = MACHINE_X64_MOV_RR,
+                                         });
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, sign),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, machine_x64_select_immediate_register(selector, 63))},
+                                             .opcode = MACHINE_X64_SAR64,
+                                         });
+        if (amount > 64)
+        {
+            u32 count = machine_x64_select_immediate_register(selector, amount - 64);
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count)},
+                                                 .opcode = MACHINE_X64_SAR64,
+                                             });
+        }
+        machine_x64_select_frame_store64(selector, result_slot, 0, low);
+        machine_x64_select_frame_store64(selector, result_slot, 8, sign);
+    }
+
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_i128_unsigned_shift_right(MachineX64Selector* selector, IrInstruction* instruction, u32 amount)
 {
     IrFunction* function = selector->function;
@@ -1462,6 +1628,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_argument(MachineX64Selector* selecto
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_constant(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
+    IrProgram* program = selector->program;
+    IrFunction* function = selector->function;
+
     bool selected = false;
     if (result_register != UINT32_MAX)
     {
@@ -1482,6 +1651,30 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_constant(MachineX64Selector* selecto
                                                    });
         machine_x64_define(selector, result_register, row);
         selected = true;
+    }
+    else if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+             instruction->result.value < function->value_count && selector->value_stack_slots[instruction->result.value] != UINT32_MAX)
+    {
+        // A 128-bit integer constant is slot-backed like every i128 value, so
+        // it has no result register and is written half by half. The second
+        // eightbyte is the canonical emitters' selection: an explicit second
+        // immediate when the frontend recorded one, otherwise the negated low
+        // half's sign fill. This mirrors machine_a64_select_constant.
+        IrType* constant_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (constant_type && constant_type->kind == IR_TYPE_INTEGER && constant_type->bit_width == 128 && instruction->immediate_count &&
+            instruction->immediates)
+        {
+            u32 result_slot = selector->value_stack_slots[instruction->result.value];
+            u64 low = instruction->immediate_is_negative ? 0 - instruction->immediates[0] : instruction->immediates[0];
+            u64 high = instruction->immediate_count > 1 ? instruction->immediates[1] : instruction->immediate_is_negative ? UINT64_MAX : 0;
+            u64 halves[2] = {low, high};
+            for (u32 half_index = 0; half_index < 2; half_index += 1)
+            {
+                machine_x64_select_frame_store64(selector, result_slot, half_index * 8,
+                                                 machine_x64_select_immediate_register(selector, halves[half_index]));
+            }
+            selected = true;
+        }
     }
     return selected;
 }
@@ -2187,7 +2380,9 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_atomic_success_source(MachineX64Selector* se
     return success_register;
 }
 
-// A 128-bit unsigned right shift, the one i128 binary the subset lowers.
+// A 128-bit shift in any of the three directions: the result is 128 bits wide
+// too, which is what separates it from the comparisons below, whose operands
+// are i128 and whose result is a boolean.
 BUSTER_GLOBAL_LOCAL bool machine_x64_binary_is_i128_shift(MachineX64Selector* selector, IrInstruction* instruction)
 {
     IrProgram* program = selector->program;
@@ -2199,9 +2394,209 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_binary_is_i128_shift(MachineX64Selector* se
         IrType* left_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
         IrType* result_type = ir_type_from_id(&program->types, function->values[instruction->result.value].canonical_type);
         matched = left_type && result_type && left_type->kind == IR_TYPE_INTEGER && result_type->kind == IR_TYPE_INTEGER &&
-                  left_type->bit_width == 128 && result_type->bit_width == 128 && instruction->binary_operation == IR_BINARY_UNSIGNED_SHIFT_RIGHT;
+                  left_type->bit_width == 128 && result_type->bit_width == 128 &&
+                  (instruction->binary_operation == IR_BINARY_SHIFT_LEFT || instruction->binary_operation == IR_BINARY_SIGNED_SHIFT_RIGHT ||
+                   instruction->binary_operation == IR_BINARY_UNSIGNED_SHIFT_RIGHT);
     }
     return matched;
+}
+
+// A binary whose *operands* are 128-bit integers, which is the whole class this
+// selector dispatches: the shifts and the arithmetic answer 128 bits, the
+// comparisons answer a boolean.
+BUSTER_GLOBAL_LOCAL bool machine_x64_binary_is_i128(MachineX64Selector* selector, IrInstruction* instruction)
+{
+    IrProgram* program = selector->program;
+    IrFunction* function = selector->function;
+
+    bool matched = false;
+    if (instruction->operand_count >= 2 && instruction->operands[0].value < function->value_count &&
+        instruction->operands[1].value < function->value_count)
+    {
+        IrType* left_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+        matched = left_type && left_type->kind == IR_TYPE_INTEGER && left_type->bit_width == 128;
+    }
+    return matched;
+}
+
+// Both 128-bit operands as slot-backed pairs: true only when the two value
+// slots exist, filling the four half registers.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_i128_halves(MachineX64Selector* selector, IrInstruction* instruction, u32* left_low, u32* left_high,
+                                                        u32* right_low, u32* right_high)
+{
+    IrFunction* function = selector->function;
+
+    bool selected = false;
+    u32 left_slot = instruction->operands[0].value < function->value_count ? selector->value_stack_slots[instruction->operands[0].value] : UINT32_MAX;
+    u32 right_slot = instruction->operands[1].value < function->value_count ? selector->value_stack_slots[instruction->operands[1].value] : UINT32_MAX;
+    if (left_slot != UINT32_MAX && right_slot != UINT32_MAX)
+    {
+        *left_low = machine_x64_select_frame_load64(selector, left_slot, 0);
+        *left_high = machine_x64_select_frame_load64(selector, left_slot, 8);
+        *right_low = machine_x64_select_frame_load64(selector, right_slot, 0);
+        *right_high = machine_x64_select_frame_load64(selector, right_slot, 8);
+        selected = true;
+    }
+    return selected;
+}
+
+// One three-operand SSA row into a fresh synthesized register. Only the
+// two-address SSA arithmetic opcodes may be spelled this way; the shifts and
+// the divides keep their constrained two-row shape.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_select_arithmetic_row(MachineX64Selector* selector, u16 opcode, u32 left_register, u32 right_register)
+{
+    u32 result = machine_x64_synthesize_register(selector);
+    machine_x64_select_row(selector, (MachineInstruction){
+                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result),
+                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                         .opcode = opcode,
+                                     });
+    return result;
+}
+
+// One CMP64 + SETcc pair into a fresh synthesized register. The compare is
+// re-issued per SETcc so every flags read sits directly behind its producer,
+// which is the shape the scheduler's flag chain already models. SETcc's row is
+// a two-step sequence ending in MOVZX, so the boolean it leaves is zero
+// extended to sixty-four bits and can be blended with AND64/OR64 below.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_select_compare_set(MachineX64Selector* selector, u32 left_register, u32 right_register, u32 condition)
+{
+    machine_x64_select_row(selector, (MachineInstruction){
+                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                         .opcode = MACHINE_X64_CMP64,
+                                     });
+    u32 result = machine_x64_synthesize_register(selector);
+    machine_x64_select_row(selector, (MachineInstruction){
+                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result)},
+                                         .payload = condition,
+                                         .opcode = MACHINE_X64_SETCC,
+                                     });
+    return result;
+}
+
+// The 128-bit binary subset over slot-backed pairs, the same one the AArch64
+// selector carries and spelled the same way: the three constant-amount shifts,
+// the bitwise trio per half, add and subtract per half with the carry and the
+// borrow as SETcc booleans off the low halves, equality through per-half XOR,
+// and the eight ordered comparisons as the strict high-half relation blended
+// with the unsigned low-half one behind high-half equality.
+//
+// x86 has ADC and SBB, which would carry the flags between the halves in one
+// instruction each; the boolean spelling is used instead because it needs no
+// flags-pairing row, and a row that produces flags for a *later* row to consume
+// is not something MachineInstruction models yet. Multiplies, divides,
+// remainders and variable-amount shifts keep the canonical pair lowerings --
+// the multiply needs a high-multiply row that neither target has.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_i128_binary(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
+{
+    IrFunction* function = selector->function;
+
+    bool selected = false;
+    IrBinaryOperation operation = instruction->binary_operation;
+    u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+    u32 left_low = UINT32_MAX;
+    u32 left_high = UINT32_MAX;
+    u32 right_low = UINT32_MAX;
+    u32 right_high = UINT32_MAX;
+    if (machine_x64_binary_is_i128_shift(selector, instruction))
+    {
+        u32 amount;
+        selected = machine_x64_constant_shift_amount(selector, instruction->operands[1], &amount);
+        if (selected)
+        {
+            selected = operation == IR_BINARY_SHIFT_LEFT           ? machine_x64_select_i128_shift_left(selector, instruction, amount)
+                       : operation == IR_BINARY_SIGNED_SHIFT_RIGHT ? machine_x64_select_i128_signed_shift_right(selector, instruction, amount)
+                                                                   : machine_x64_select_i128_unsigned_shift_right(selector, instruction, amount);
+        }
+    }
+    else if ((operation == IR_BINARY_INTEGER_BITWISE_AND || operation == IR_BINARY_INTEGER_BITWISE_OR || operation == IR_BINARY_INTEGER_BITWISE_XOR) &&
+             result_slot != UINT32_MAX && machine_x64_select_i128_halves(selector, instruction, &left_low, &left_high, &right_low, &right_high))
+    {
+        u16 opcode = operation == IR_BINARY_INTEGER_BITWISE_AND  ? MACHINE_X64_AND64
+                     : operation == IR_BINARY_INTEGER_BITWISE_OR ? MACHINE_X64_OR64
+                                                                 : MACHINE_X64_XOR64;
+        machine_x64_select_frame_store64(selector, result_slot, 0, machine_x64_select_arithmetic_row(selector, opcode, left_low, right_low));
+        machine_x64_select_frame_store64(selector, result_slot, 8, machine_x64_select_arithmetic_row(selector, opcode, left_high, right_high));
+        selected = true;
+    }
+    else if ((operation == IR_BINARY_INTEGER_ADD || operation == IR_BINARY_INTEGER_SUBTRACT) && result_slot != UINT32_MAX &&
+             machine_x64_select_i128_halves(selector, instruction, &left_low, &left_high, &right_low, &right_high))
+    {
+        if (operation == IR_BINARY_INTEGER_ADD)
+        {
+            // low' = low_a + low_b; the carry is low' <u low_a.
+            u32 sum_low = machine_x64_select_arithmetic_row(selector, MACHINE_X64_ADD64, left_low, right_low);
+            u32 carry = machine_x64_select_compare_set(selector, sum_low, left_low, MACHINE_X64_CONDITION_BELOW);
+            u32 sum_high = machine_x64_select_arithmetic_row(selector, MACHINE_X64_ADD64, left_high, right_high);
+            machine_x64_select_frame_store64(selector, result_slot, 0, sum_low);
+            machine_x64_select_frame_store64(selector, result_slot, 8, machine_x64_select_arithmetic_row(selector, MACHINE_X64_ADD64, sum_high, carry));
+        }
+        else
+        {
+            // The borrow is low_a <u low_b, read before the halves move.
+            u32 borrow = machine_x64_select_compare_set(selector, left_low, right_low, MACHINE_X64_CONDITION_BELOW);
+            u32 difference_low = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, left_low, right_low);
+            u32 difference_high = machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, left_high, right_high);
+            machine_x64_select_frame_store64(selector, result_slot, 0, difference_low);
+            machine_x64_select_frame_store64(selector, result_slot, 8,
+                                             machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, difference_high, borrow));
+        }
+        selected = true;
+    }
+    else if ((operation == IR_BINARY_INTEGER_EQUAL || operation == IR_BINARY_INTEGER_NOT_EQUAL) && result_register != UINT32_MAX &&
+             machine_x64_select_i128_halves(selector, instruction, &left_low, &left_high, &right_low, &right_high))
+    {
+        u32 low_difference = machine_x64_select_arithmetic_row(selector, MACHINE_X64_XOR64, left_low, right_low);
+        u32 high_difference = machine_x64_select_arithmetic_row(selector, MACHINE_X64_XOR64, left_high, right_high);
+        u32 any_difference = machine_x64_select_arithmetic_row(selector, MACHINE_X64_OR64, low_difference, high_difference);
+        machine_x64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, any_difference),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, machine_x64_select_immediate_register(selector, 0))},
+                                             .opcode = MACHINE_X64_CMP64,
+                                         });
+        u32 row = machine_x64_select_row(
+            selector, (MachineInstruction){
+                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                          .payload = operation == IR_BINARY_INTEGER_EQUAL ? MACHINE_X64_CONDITION_EQUAL : MACHINE_X64_CONDITION_NOT_EQUAL,
+                          .opcode = MACHINE_X64_SETCC,
+                      });
+        machine_x64_define(selector, result_register, row);
+        selected = true;
+    }
+    else if ((operation == IR_BINARY_SIGNED_LESS || operation == IR_BINARY_SIGNED_LESS_EQUAL || operation == IR_BINARY_SIGNED_GREATER ||
+              operation == IR_BINARY_SIGNED_GREATER_EQUAL || operation == IR_BINARY_UNSIGNED_LESS || operation == IR_BINARY_UNSIGNED_LESS_EQUAL ||
+              operation == IR_BINARY_UNSIGNED_GREATER || operation == IR_BINARY_UNSIGNED_GREATER_EQUAL) &&
+             result_register != UINT32_MAX && machine_x64_select_i128_halves(selector, instruction, &left_low, &left_high, &right_low, &right_high))
+    {
+        // The high halves decide with the signed or unsigned strict relation;
+        // only exactly equal high halves defer to the low halves, which always
+        // compare unsigned.
+        bool less_directed = operation == IR_BINARY_SIGNED_LESS || operation == IR_BINARY_SIGNED_LESS_EQUAL || operation == IR_BINARY_UNSIGNED_LESS ||
+                             operation == IR_BINARY_UNSIGNED_LESS_EQUAL;
+        bool signed_compare = operation == IR_BINARY_SIGNED_LESS || operation == IR_BINARY_SIGNED_LESS_EQUAL || operation == IR_BINARY_SIGNED_GREATER ||
+                              operation == IR_BINARY_SIGNED_GREATER_EQUAL;
+        bool or_equal = operation == IR_BINARY_SIGNED_LESS_EQUAL || operation == IR_BINARY_UNSIGNED_LESS_EQUAL ||
+                        operation == IR_BINARY_SIGNED_GREATER_EQUAL || operation == IR_BINARY_UNSIGNED_GREATER_EQUAL;
+        u32 high_condition = signed_compare ? (less_directed ? MACHINE_X64_CONDITION_LESS : MACHINE_X64_CONDITION_GREATER)
+                                            : (less_directed ? MACHINE_X64_CONDITION_BELOW : MACHINE_X64_CONDITION_ABOVE);
+        u32 low_condition = less_directed ? (or_equal ? MACHINE_X64_CONDITION_BELOW_EQUAL : MACHINE_X64_CONDITION_BELOW)
+                                          : (or_equal ? MACHINE_X64_CONDITION_ABOVE_EQUAL : MACHINE_X64_CONDITION_ABOVE);
+        u32 high_decides = machine_x64_select_compare_set(selector, left_high, right_high, high_condition);
+        u32 high_equal = machine_x64_select_compare_set(selector, left_high, right_high, MACHINE_X64_CONDITION_EQUAL);
+        u32 low_decides = machine_x64_select_compare_set(selector, left_low, right_low, low_condition);
+        u32 deferred = machine_x64_select_arithmetic_row(selector, MACHINE_X64_AND64, high_equal, low_decides);
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_decides),
+                                                                    machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, deferred)},
+                                                       .opcode = MACHINE_X64_OR64,
+                                                   });
+        machine_x64_define(selector, result_register, row);
+        selected = true;
+    }
+    return selected;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_binary(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
@@ -2223,11 +2618,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_binary(MachineX64Selector* selector,
         machine_x64_define(selector, result_register, row);
         selected = true;
     }
-    else if (machine_x64_binary_is_i128_shift(selector, instruction))
+    else if (machine_x64_binary_is_i128(selector, instruction))
     {
-        u32 amount;
-        selected = machine_x64_constant_shift_amount(selector, instruction->operands[1], &amount) &&
-                   machine_x64_select_i128_unsigned_shift_right(selector, instruction, amount);
+        // i128 operands are slot-backed with no operand register, so the
+        // register path below cannot see them at all: anything this subset
+        // refuses refuses here and rides the canonical emitter.
+        selected = machine_x64_select_i128_binary(selector, instruction, result_register);
     }
     else if (result_register != UINT32_MAX && machine_x64_operand_register(selector, instruction->operands[0], &left_register) &&
              machine_x64_operand_register(selector, instruction->operands[1], &right_register))
@@ -4822,7 +5218,12 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                       instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL ||
                       instruction->opcode == IR_OPCODE_VA_ARG ||
                       instruction->opcode == IR_OPCODE_CAST || instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
-                      instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE || instruction->opcode == IR_OPCODE_BINARY) &&
+                      instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE || instruction->opcode == IR_OPCODE_BINARY ||
+                      // An i128 constant is slot-backed like every other i128
+                      // value; nothing else this opcode produces reaches the
+                      // aggregate kinds below, so the widened list costs one
+                      // compare on a row that already fails them all.
+                      instruction->opcode == IR_OPCODE_CONSTANT_INTEGER) &&
                      value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
                      (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
                       (value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128) ||

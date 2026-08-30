@@ -4567,6 +4567,68 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
     }
+    // The 128-bit binary subset both machine selectors carry (#811). The x86-64
+    // one refused every operation in it -- add, subtract, the bitwise trio, two
+    // of the three shift directions, the i128-typed constants and the ordered
+    // comparisons -- while the AArch64 one selected them all, so the fixture is
+    // built for both targets and run on both: natively here, and under
+    // qemu-aarch64 where that is installed.
+    //
+    // The fallback count is pinned at zero because running alone proves
+    // nothing: the canonical emitter answers identically, and a selector that
+    // stopped firing would silently retire the coverage. Only the multiply is
+    // left refusing on either target, and this fixture deliberately has none --
+    // it needs a high-multiply row neither target has.
+    String8 i128_binary_allocators[] = {
+        S8("none"),
+        S8("mir-stack"),
+        S8("fast"),
+        S8("quality"),
+    };
+    String8 i128_binary_targets[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("aarch64-unknown-linux-gnu"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(i128_binary_targets); target_index += 1)
+    {
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(i128_binary_allocators); allocator_index += 1)
+        {
+            TemporalArena i128_binary_temporary = scratch_begin(&arguments->arena, 1);
+            String8 i128_binary_path = buster_test_temporary_path(
+                i128_binary_temporary.arena, S8("buster-c-i128-binary"),
+                string_format(i128_binary_temporary.arena, S8("-{u32}-{S8}.elf"), target_index, i128_binary_allocators[allocator_index]));
+            String8 i128_binary_command_line[] = {
+                S8("-target"),
+                i128_binary_targets[target_index],
+                string_format(i128_binary_temporary.arena, S8("-fregister-allocator={S8}"), i128_binary_allocators[allocator_index]),
+                S8("-o"),
+                i128_binary_path,
+                S8("tests/basic_c_x86_64_i128_binary.c"),
+            };
+            CompilerDriverResult i128_binary = compiler_driver_execute_invocation(
+                i128_binary_temporary.arena,
+                compiler_driver_parse_arguments(i128_binary_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(i128_binary_command_line)));
+            BUSTER_TEST(arguments, i128_binary.error == COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, i128_binary.codegen_statistics.fallback_function_count == 0u);
+            bool native_x64 = target_index == 0 && BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64;
+            bool emulated_a64 = target_index == 1 && aarch64_i128_qemu_available;
+            if (i128_binary.error == COMPILER_DRIVER_ERROR_NONE && (native_x64 || emulated_a64))
+            {
+                String8 native_arguments[] = {i128_binary_path};
+                String8 emulated_arguments[] = {S8("qemu-aarch64"), i128_binary_path};
+                SliceString8 run_arguments = native_x64 ? (SliceString8)BUSTER_ARRAY_TO_SLICE(native_arguments)
+                                                        : (SliceString8)BUSTER_ARRAY_TO_SLICE(emulated_arguments);
+                ProcessSpawnResult i128_binary_run =
+                    os_process_spawn(run_arguments, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, i128_binary_run.handle != 0);
+                if (i128_binary_run.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(i128_binary_temporary.arena, i128_binary_run).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(i128_binary_temporary);
+        }
+    }
     // The System V x86-64 side of the same stack boundary: a sixteen-aligned
     // argument's stack home is rounded up to a sixteen-aligned offset, and
     // the machine placement must count the same padding eightbytes the
@@ -4600,9 +4662,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             x64_i128_stack_arena, compiler_driver_parse_arguments(x64_i128_stack_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(x64_i128_stack_command_line)));
         BUSTER_TEST(arguments, x64_i128_stack.error == COMPILER_DRIVER_ERROR_NONE);
         // NONE reports no fallbacks by definition; under the machine modes
-        // exactly the checker and main carry the __int128 shifts, so the
-        // four boundary callees remain machine-selected.
-        BUSTER_TEST(arguments, x64_i128_stack.codegen_statistics.fallback_function_count == (allocator_index == 0 ? 0u : 2u));
+        // exactly one function is left, and the four boundary callees remain
+        // machine-selected. The count was two until the x86-64 selector picked
+        // up the rest of the i128 binary subset (#811) and the checker's shifts
+        // and comparisons started selecting; the one left refuses at a CALL,
+        // not at an i128 operation.
+        BUSTER_TEST(arguments, x64_i128_stack.codegen_statistics.fallback_function_count == (allocator_index == 0 ? 0u : 1u));
         CompilerDriverError x64_i128_stack_error = x64_i128_stack.error;
         BUSTER_TEST(arguments, arena_destroy(x64_i128_stack_arena, 1));
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
