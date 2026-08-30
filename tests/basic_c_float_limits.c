@@ -45,5 +45,11 @@ int main(void)
     {
         return 7;
     }
+    // FLT_ROUNDS folds to 1 in the prelude: round to nearest, the startup
+    // mode of every hosted process and GCC's own historical answer.
+    if (FLT_ROUNDS != 1)
+    {
+        return 8;
+    }
     return 0;
 }

@@ -6465,6 +6465,21 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__DBL_HAS_INFINITY__", S8("1"));
     C_DEFINE_TYPE_MACRO("__DBL_HAS_QUIET_NAN__", S8("1"));
     C_DEFINE_TYPE_MACRO("__DECIMAL_DIG__", S8("__LDBL_DECIMAL_DIG__"));
+    {
+        // <float.h> spells FLT_ROUNDS as `(__builtin_flt_rounds())`, a call
+        // that reads the dynamic rounding mode.  The prelude answers 1 --
+        // round to nearest, every hosted process's startup mode, and GCC's
+        // own historical answer -- as a zero-parameter function-like macro,
+        // so the spelling folds before lowering ever meets a builtin call.
+        // The documented cost: a program that calls fesetround and then
+        // reads FLT_ROUNDS sees a stale 1, exactly as it did under GCC
+        // before the builtin existed.
+        CLexResult flt_rounds_lex = c_lex_space(arena, space, S8("1"));
+        c_symbols_intern_tokens(symbol_table, flt_rounds_lex.spelling_base, flt_rounds_lex.tokens, flt_rounds_lex.token_count);
+        CMacro* flt_rounds_macro =
+            c_macro_define(arena, symbol_table, &first_macro, &last_macro, S8("__builtin_flt_rounds"), flt_rounds_lex.tokens, 1, 0, 0, true, false);
+        flt_rounds_macro->definition.replacement_space = c_macro_replacement_spaces(arena, flt_rounds_lex.spelling_base, flt_rounds_lex.tokens, 1);
+    }
     C_DEFINE_TYPE_MACRO("__LDBL_HAS_DENORM__", S8("1"));
     C_DEFINE_TYPE_MACRO("__LDBL_HAS_INFINITY__", S8("1"));
     C_DEFINE_TYPE_MACRO("__LDBL_HAS_QUIET_NAN__", S8("1"));
