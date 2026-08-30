@@ -96,6 +96,34 @@ static int equal_signed(S128 left, S128 right)
     return left == right;
 }
 
+/* The machine selector's direct i128 subset: pair signatures over slot-backed
+   halves, carry/borrow add and subtract, per-half bitwise, constant-amount
+   shifts, and the whole comparison ladder.  Each function is small enough to
+   select whole, so the register-allocator lanes run the machine rows here
+   while the divide and multiply helpers above keep the canonical fallback. */
+static U128 add_pair(U128 left, U128 right) { return left + right; }
+static U128 subtract_pair(U128 left, U128 right) { return left - right; }
+static U128 and_pair(U128 left, U128 right) { return left & right; }
+static U128 or_pair(U128 left, U128 right) { return left | right; }
+static U128 xor_pair(U128 left, U128 right) { return left ^ right; }
+static U128 shift_left_1(U128 value) { return value << 1; }
+static U128 shift_left_64(U128 value) { return value << 64; }
+static U128 shift_left_65(U128 value) { return value << 65; }
+static U128 shift_right_1(U128 value) { return value >> 1; }
+static U128 shift_right_64(U128 value) { return value >> 64; }
+static U128 shift_right_127(U128 value) { return value >> 127; }
+static S128 arithmetic_shift_right_1(S128 value) { return value >> 1; }
+static S128 arithmetic_shift_right_65(S128 value) { return value >> 65; }
+static S128 arithmetic_shift_right_127(S128 value) { return value >> 127; }
+static int less_unsigned(U128 left, U128 right) { return left < right; }
+static int less_equal_unsigned(U128 left, U128 right) { return left <= right; }
+static int greater_unsigned(U128 left, U128 right) { return left > right; }
+static int greater_equal_unsigned(U128 left, U128 right) { return left >= right; }
+static int less_signed(S128 left, S128 right) { return left < right; }
+static int less_equal_signed(S128 left, S128 right) { return left <= right; }
+static int greater_signed(S128 left, S128 right) { return left > right; }
+static int greater_equal_signed(S128 left, S128 right) { return left >= right; }
+
 int main(void)
 {
     U128 quotient = 0;
@@ -241,5 +269,80 @@ int main(void)
     float_to_unsigned(0x1p127f, &unsigned_value);
     if (!equal_unsigned(unsigned_value, (U128)1 << 127))
         return 36;
+
+    /* The machine subset: a carry that crosses the half boundary and its
+       inverse borrow, then a doubling checked against the shift row. */
+    U128 all_low = ((U128)0x0123456789abcdefULL << 64) | 0xffffffffffffffffULL;
+    if (!equal_unsigned(add_pair(all_low, 1), (U128)0x0123456789abcdf0ULL << 64))
+        return 37;
+    if (!equal_unsigned(subtract_pair((U128)0x0123456789abcdf0ULL << 64, 1), all_low))
+        return 38;
+    if (!equal_unsigned(add_pair(small, small), shift_left_1(small)))
+        return 39;
+    /* Per-half bitwise over byte-alternating patterns. */
+    U128 pattern_a = ((U128)0xf0f0f0f0f0f0f0f0ULL << 64) | 0x00ff00ff00ff00ffULL;
+    U128 pattern_b = ((U128)0x0ff00ff00ff00ff0ULL << 64) | 0x0f0f0f0f0f0f0f0fULL;
+    if (!equal_unsigned(and_pair(pattern_a, pattern_b), ((U128)0x00f000f000f000f0ULL << 64) | 0x000f000f000f000fULL))
+        return 40;
+    if (!equal_unsigned(or_pair(pattern_a, pattern_b), ((U128)0xfff0fff0fff0fff0ULL << 64) | 0x0fff0fff0fff0fffULL))
+        return 41;
+    if (!equal_unsigned(xor_pair(pattern_a, pattern_b), ((U128)0xff00ff00ff00ff00ULL << 64) | 0x0ff00ff00ff00ff0ULL))
+        return 42;
+    /* Constant shifts across the amount boundaries: cross bits below 64,
+       the identity move at exactly 64, and the sign fill above it. */
+    U128 wide_bits = ((U128)0x8000000000000001ULL << 64) | 0x8000000000000001ULL;
+    if (!equal_unsigned(shift_left_1(wide_bits), ((U128)0x0000000000000003ULL << 64) | 0x0000000000000002ULL))
+        return 43;
+    if (!equal_unsigned(shift_left_64(wide_bits), (U128)0x8000000000000001ULL << 64))
+        return 44;
+    if (!equal_unsigned(shift_left_65(wide_bits), (U128)0x0000000000000002ULL << 64))
+        return 45;
+    if (!equal_unsigned(shift_right_1(wide_bits), ((U128)0x4000000000000000ULL << 64) | 0xC000000000000000ULL))
+        return 46;
+    if (!equal_unsigned(shift_right_64(wide_bits), (U128)0x8000000000000001ULL))
+        return 47;
+    if (!equal_unsigned(shift_right_127(wide_bits), (U128)1))
+        return 48;
+    if (!equal_signed(arithmetic_shift_right_1((S128)wide_bits), (S128)(((U128)0xC000000000000000ULL << 64) | 0xC000000000000000ULL)))
+        return 49;
+    if (!equal_signed(arithmetic_shift_right_65((S128)wide_bits), (S128)(((U128)0xffffffffffffffffULL << 64) | 0xC000000000000000ULL)))
+        return 50;
+    if (!equal_signed(arithmetic_shift_right_127((S128)wide_bits), (S128)-1))
+        return 51;
+    /* Every ordering, on both sides of the high-half tie. */
+    U128 same_high_small = ((U128)5 << 64) | 10;
+    U128 same_high_large = ((U128)5 << 64) | 20;
+    U128 higher = ((U128)6 << 64) | 1;
+    if (!less_unsigned(same_high_small, same_high_large) || less_unsigned(same_high_large, same_high_small) ||
+        !less_unsigned(same_high_large, higher) || less_unsigned(higher, same_high_large) || less_unsigned(higher, higher))
+        return 52;
+    if (!less_equal_unsigned(same_high_small, same_high_small) || !less_equal_unsigned(same_high_small, same_high_large) ||
+        less_equal_unsigned(higher, same_high_large))
+        return 53;
+    if (!greater_unsigned(higher, same_high_large) || greater_unsigned(same_high_small, same_high_large) || greater_unsigned(higher, higher))
+        return 54;
+    if (!greater_equal_unsigned(higher, higher) || !greater_equal_unsigned(same_high_large, same_high_small) ||
+        greater_equal_unsigned(same_high_small, same_high_large))
+        return 55;
+    S128 negative_deep = -(S128)(((U128)1 << 64) | 5);
+    S128 negative_tiny = -(S128)5;
+    S128 positive_tiny = (S128)5;
+    if (!less_signed(negative_deep, negative_tiny) || !less_signed(negative_tiny, positive_tiny) ||
+        less_signed(positive_tiny, negative_tiny) || less_signed(positive_tiny, positive_tiny))
+        return 56;
+    if (!less_equal_signed(positive_tiny, positive_tiny) || !less_equal_signed(negative_deep, negative_tiny) ||
+        less_equal_signed(positive_tiny, negative_tiny))
+        return 57;
+    if (!greater_signed(positive_tiny, negative_tiny) || !greater_signed(negative_tiny, negative_deep) ||
+        greater_signed(negative_deep, negative_tiny))
+        return 58;
+    if (!greater_equal_signed(negative_tiny, negative_tiny) || !greater_equal_signed(positive_tiny, negative_deep) ||
+        greater_equal_signed(negative_deep, positive_tiny))
+        return 59;
+    /* Two negatives sharing a high half defer to the unsigned low halves. */
+    S128 deep_negative_a = -(S128)(((U128)1 << 64) | 5);
+    S128 deep_negative_b = -(S128)(((U128)1 << 64) | 4);
+    if (!less_signed(deep_negative_a, deep_negative_b) || less_signed(deep_negative_b, deep_negative_a))
+        return 60;
     return 0;
 }

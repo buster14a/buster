@@ -2015,7 +2015,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "typedef unsigned char MachineV8 __attribute__((vector_size(8)));\n"
                                   "MachineV8 v8_pass(MachineV8 value) { return value; }\n"
                                   "typedef unsigned char MachineV2 __attribute__((vector_size(2)));\n"
-                                  "MachineV2 v2_make(int a) { return (MachineV2){ (unsigned char)a, (unsigned char)(a + 3) }; }\n");
+                                  "MachineV2 v2_make(int a) { return (MachineV2){ (unsigned char)a, (unsigned char)(a + 3) }; }\n"
+                                  // A 128-bit multiply stays outside the AArch64 machine subset
+                                  // (no UMULH row), so this is the corpus's deliberate fallback
+                                  // witness: the module-wiring assertion below needs at least one
+                                  // counted function now that the pair signatures, memory,
+                                  // constant shifts, carry arithmetic, and comparisons select.
+                                  "unsigned __int128 a64_i128_multiply(unsigned __int128 a, unsigned __int128 b) { return a * b; }\n");
     String8 machine_c_source_base =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail, machine_c_source_extra);
     String8 machine_c_source_stage11 =
