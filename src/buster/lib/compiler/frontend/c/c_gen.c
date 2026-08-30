@@ -22504,6 +22504,46 @@ c_ir_expression_core_loop:
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
+            // `++*s++`: the place machine cannot carry the inner postfix's
+            // side effect, so the one shape that nests one -- dtoa's
+            // digit-strip bumps a digit and steps past it in a single
+            // expression -- is emitted inline.  The pointer's own increment
+            // runs first; its postfix result is the old pointer, which is
+            // the object the prefix update then works on.
+            if (operand_end == index + 4 && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_STAR) &&
+                builder->preprocess.tokens[index + 2].kind == C_TOKEN_IDENTIFIER &&
+                (c_token_is_punctuator(&builder->preprocess.tokens[index + 3], C_PUNCTUATOR_PLUS_PLUS) ||
+                 c_token_is_punctuator(&builder->preprocess.tokens[index + 3], C_PUNCTUATOR_MINUS_MINUS)))
+            {
+                CEntityId pointer_entity = c_ir_identifier_entity(builder, index + 2);
+                CIntegerIrLocal* pointer_local = c_ir_find_local_by_entity(builder, pointer_entity);
+                IrValueId pointer_place = pointer_local ? pointer_local->place : c_ir_emit_global_place(builder, pointer_entity, source);
+                if (pointer_place.value < builder->function->value_count)
+                {
+                    IrTypeId pointer_type = builder->function->values[pointer_place.value].canonical_type;
+                    IrValueId pointer = c_ir_emit_load_place(builder, pointer_place, pointer_type, source);
+                    pointer = c_ir_emit_increment(builder, pointer_place, pointer_type, pointer, builder->preprocess.tokens[index + 3], false);
+                    IrValueId object_place = pointer.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, pointer, source)
+                                                                                       : IR_VALUE_ID_INVALID;
+                    if (object_place.value >= builder->function->value_count)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    IrTypeId object_type = builder->function->values[object_place.value].canonical_type;
+                    IrValueId previous = c_ir_emit_load_place(builder, object_place, object_type, source);
+                    IrValueId updated = c_ir_emit_increment(builder, object_place, object_type, previous, token, true);
+                    if (updated.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    values[value_count++] = updated;
+                    expect_operand = false;
+                    index = index + 3;
+                    continue;
+                }
+            }
             c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count, operation_count,
                                       operand_end, expect_operand);
             state->pending_start = index;
@@ -39318,6 +39358,148 @@ BUSTER_C_INTERNAL bool c_ir_global_canonicalize_zero_bytes(IrGlobal* global, u8*
     return true;
 }
 
+// A static object may initialize its struct's flexible array member --
+// GCC and Clang size the object past the struct by the elements written, and
+// CPython's empty PyDictKeysObject is the shape: eight DKIX_EMPTY entries in
+// a `char dk_indices[]` tail.  The walkers and every downstream consumer size
+// by the type's layout, so the extension is a synthesized type: the same
+// struct with the tail materialized as an array of the counted elements, and
+// the layout grown to hold them.  The count comes from a shallow scan of the
+// outer initializer: it must cover every slot positionally, and the last
+// entry must be its own brace group (or, for a character tail, a string
+// literal), or the type is returned unchanged and the ordinary bounds
+// refusal answers.
+BUSTER_C_INTERNAL IrTypeId c_ir_flexible_initializer_type(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_id)
+{
+    IrProgram* program = builder->program;
+    IrType* root = ir_type_from_id(&program->types, root_id);
+    if (!root || root->kind != IR_TYPE_STRUCT || !root->field_count || !root->layout.resolved)
+    {
+        return root_id;
+    }
+    IrField* last_field = root->fields + root->field_count - 1;
+    IrTypeId tail_type_id = last_field->type;
+    u64 tail_offset = last_field->offset;
+    IrType* tail = ir_type_from_id(&program->types, tail_type_id);
+    if (!tail || tail->kind != IR_TYPE_ARRAY || tail->element_count != 0)
+    {
+        return root_id;
+    }
+    IrTypeId element_id = tail->element_type;
+    IrType* element = ir_type_from_id(&program->types, element_id);
+    if (!element || !element->layout.resolved || !element->layout.size)
+    {
+        return root_id;
+    }
+    u64 element_size = element->layout.size;
+    u32 element_alignment = element->layout.alignment;
+    if (start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) ||
+        !c_token_is_punctuator(&builder->preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE))
+    {
+        return root_id;
+    }
+    u64 entries = 0;
+    u32 last_start = 0;
+    u32 last_end = 0;
+    u32 depth = 0;
+    u32 segment = start + 1;
+    for (u32 index = start + 1; index < end; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                 (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && index != end - 1))
+        {
+            depth -= depth != 0;
+        }
+        else if ((!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA)) || index == end - 1)
+        {
+            if (index > segment)
+            {
+                entries += 1;
+                last_start = segment;
+                last_end = index;
+            }
+            segment = index + 1;
+        }
+    }
+    if (!entries || entries != c_ir_constant_initializer_slot_count(root) || last_start >= last_end)
+    {
+        return root_id;
+    }
+    u64 tail_count = 0;
+    if (c_token_is_punctuator(&builder->preprocess.tokens[last_start], C_PUNCTUATOR_LEFT_BRACE) &&
+        c_token_is_punctuator(&builder->preprocess.tokens[last_end - 1], C_PUNCTUATOR_RIGHT_BRACE))
+    {
+        u32 inner_depth = 0;
+        u32 inner_segment = last_start + 1;
+        for (u32 index = last_start + 1; index < last_end; index += 1)
+        {
+            CToken token = builder->preprocess.tokens[index];
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+                c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+            {
+                inner_depth += 1;
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                     (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) && index != last_end - 1))
+            {
+                inner_depth -= inner_depth != 0;
+            }
+            else if ((!inner_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA)) || index == last_end - 1)
+            {
+                tail_count += index > inner_segment;
+                inner_segment = index + 1;
+            }
+        }
+    }
+    else if (element_size == 1 && c_ir_tokens_are_string_literals(builder->preprocess, last_start, last_end))
+    {
+        CIrDecodedString decoded = {0};
+        if (!c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, last_start, last_end, &decoded))
+        {
+            return root_id;
+        }
+        tail_count = decoded.element_count + 1;
+    }
+    if (!tail_count || element_size > UINT64_MAX / tail_count || tail_offset > UINT64_MAX - element_size * tail_count)
+    {
+        return root_id;
+    }
+    u64 extended_size = tail_offset + element_size * tail_count;
+    if (extended_size < root->layout.size)
+    {
+        extended_size = root->layout.size;
+    }
+    // Every add may grow the type table, so the root is cloned by value
+    // first and never re-read.
+    IrType clone = *root;
+    IrTypeId tail_array = ir_program_add_type(program, (IrType){
+                                                           .name = S8("array"),
+                                                           .element_type = element_id,
+                                                           .return_type = IR_TYPE_ID_INVALID,
+                                                           .layout =
+                                                               {
+                                                                   .size = element_size * tail_count,
+                                                                   .alignment = element_alignment,
+                                                                   .resolved = true,
+                                                               },
+                                                           .kind = IR_TYPE_ARRAY,
+                                                           .element_count = tail_count,
+                                                       });
+    IrField* fields = arena_allocate(builder->arena, IrField, clone.field_count);
+    memcpy(fields, clone.fields, sizeof(*fields) * clone.field_count);
+    fields[clone.field_count - 1].type = tail_array;
+    clone.fields = fields;
+    clone.layout.size = extended_size;
+    clone.abi = 0;
+    return ir_program_add_type(program, clone);
+}
+
 BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global)
 {
     Arena* arena = builder->arena;
@@ -39643,6 +39825,14 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
                             c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_RIGHT_BRACE)) ||
                            compound_aggregate_initializer))
     {
+        // A flexible tail with elements swaps in the synthesized extended
+        // type before anything is sized off the layout.
+        IrTypeId flexible_type = c_ir_flexible_initializer_type(builder, start, end, global->type);
+        if (flexible_type.value != global->type.value)
+        {
+            global->type = flexible_type;
+            type = ir_type_from_id(&program->types, flexible_type);
+        }
         u8* bytes = arena_allocate(arena, u8, type->layout.size);
         u32 relocation_capacity = 0;
         if (!c_ir_constant_initializer_relocation_capacity(builder, type->layout.size, (u64)end - start, &relocation_capacity))

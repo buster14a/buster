@@ -3599,6 +3599,49 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    // Three CPython-found lowering shapes, each compiled and run with its
+    // answers checked: a flexible array member initialized at static
+    // storage (dictobject's empty keys), `++*s++` (dtoa's digit strip), and
+    // `__typeof__` over an address-of member base (crossinterp's Py_CLEAR).
+    String8 c_cpython_shape_fixtures[] = {
+        S8("tests/basic_c_flexible_array_static_initializer.c"),
+        S8("tests/basic_c_prefix_update_stepping_pointer.c"),
+        S8("tests/basic_c_typeof_address_member.c"),
+    };
+    for (u32 shape_index = 0; shape_index < BUSTER_ARRAY_LENGTH(c_cpython_shape_fixtures); shape_index += 1)
+    {
+        String8 c_shape_path = buster_test_temporary_path(arguments->arena, S8("buster-c-cpython-shape"),
+                                                          string_format(arguments->arena,
+#if BUSTER_WINDOWS
+                                                                        S8("-{u32}.exe"),
+#else
+                                                                        S8("-{u32}"),
+#endif
+                                                                        shape_index));
+        String8 c_shape_command_line[] = {
+            S8("-o"),
+            c_shape_path,
+            c_cpython_shape_fixtures[shape_index],
+        };
+        CompilerDriverResult c_shape = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_shape_command_line)));
+        BUSTER_TEST(arguments, c_shape.error == COMPILER_DRIVER_ERROR_NONE);
+        if (c_shape.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 c_shape_arguments[] = {
+                c_shape_path,
+            };
+            ProcessSpawnResult c_shape_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_shape_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                (ProcessSpawnOptions){
+                                                                    .use_process_environment = true,
+                                                                });
+            BUSTER_TEST(arguments, c_shape_spawn.handle != 0);
+            if (c_shape_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, c_shape_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
     // The <float.h> predefine vocabulary, pinned as static initializers and
     // compared against literal spellings so a predefine folding to the wrong
     // bits fails at run time rather than compiling quietly.

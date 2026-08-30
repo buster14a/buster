@@ -2051,6 +2051,20 @@ BUSTER_C_INTERNAL bool c_parse_direct_expression_type(Arena* arena, CPreprocessR
             type = base_type->kind == C_TYPE_FUNCTION ? base_type->return_type : C_TYPE_ID_INVALID;
         }
     }
+    else if (base_start < base_end && (c_token_is_punctuator(&preprocess.tokens[base_start], C_PUNCTUATOR_AMPERSAND) ||
+                                       c_token_is_punctuator(&preprocess.tokens[base_start], C_PUNCTUATOR_STAR)))
+    {
+        // An address-of or dereference base -- Py_CLEAR over
+        // `(&(interp)->xi)->PyExc_NotShareableError` is the shape, the outer
+        // parens already stripped -- is this walk again one level down: the
+        // recursion's own prefix handling wraps or unwraps the pointer, and
+        // the member chain here continues off what it returns.
+        CTypeId recursive_base = C_TYPE_ID_INVALID;
+        if (c_parse_direct_expression_type(arena, preprocess, result, scope, base_start, base_end, &recursive_base))
+        {
+            type = recursive_base;
+        }
+    }
     else if (base_start < base_end && c_token_is_punctuator(&preprocess.tokens[base_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
         // A cast base: `((propertyobject *) new)->prop_name` is what
