@@ -4925,6 +4925,74 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_to_pointer(CIntegerIrBuilder* buil
     return c_ir_emit_cast_instruction(builder, value, target_type, IR_CONVERSION_INTEGER_TO_POINTER, source);
 }
 
+/* The atomic type of an atomic-aggregate/operand pair, or an invalid id when
+   these two types are not one.
+
+   `_Atomic three` and `three` are two aggregates of two sizes -- the promotion
+   pads the atomic one up to a lock-free width (#731) -- so neither ladder in
+   c_ir_emit_cast has a conversion between them, and every position that builds
+   the type reaches one: a parameter, a return, a call argument and a call
+   result all carry the type the argument classification is made from, while
+   every load and store between them carries the unqualified one (#786). */
+BUSTER_C_INTERNAL IrTypeId c_ir_atomic_aggregate_pair(CIntegerIrBuilder* builder, IrTypeId left, IrTypeId right)
+{
+    IrType* left_value = ir_type_from_id(&builder->program->types, left);
+    IrType* right_value = ir_type_from_id(&builder->program->types, right);
+    bool left_aggregate = left_value && (left_value->kind == IR_TYPE_STRUCT || left_value->kind == IR_TYPE_UNION);
+    bool right_aggregate = right_value && (right_value->kind == IR_TYPE_STRUCT || right_value->kind == IR_TYPE_UNION);
+    bool left_atomic = left_value && left_value->is_atomic && right_aggregate && left_value->unqualified_type.value == right.value;
+    bool right_atomic = right_value && right_value->is_atomic && left_aggregate && right_value->unqualified_type.value == left.value;
+    return left_atomic ? left : right_atomic ? right : IR_TYPE_ID_INVALID;
+}
+
+/* One of that pair converted into the other, through an object of the atomic
+   type: the two are the same bytes seen twice, and there is no instruction
+   that retypes an aggregate value, so the conversion is a slot written through
+   one view and read back through the other.
+
+   Widening is the atomic store the assignment to such an object already is
+   (#762) -- one integer access of the promoted width, which is what zeroes the
+   padding Clang zeroes -- followed by a plain read of the whole slot, private
+   storage nothing else can observe.  Narrowing is that pair the other way
+   round: the whole value written plainly, then the settled atomic load, which
+   yields the record and drops the padding.  Both accesses are the settled ones,
+   so a promoted width past the target's lock-free ceiling is refused by the
+   walk over the finished body rather than failing inside code generation. */
+BUSTER_C_INTERNAL IrValueId c_ir_emit_atomic_aggregate_conversion(CIntegerIrBuilder* builder, IrValueId value, IrTypeId atomic_type, bool to_atomic,
+                                                                   IrSourceRange source)
+{
+    IrValueId slot = c_ir_emit_temporary(builder, atomic_type, source);
+    if (slot.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return IR_VALUE_ID_INVALID;
+    }
+    if (to_atomic)
+    {
+        if (!c_ir_emit_store_place(builder, slot, atomic_type, value, source))
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        IrValueId result = c_ir_add_result(builder, atomic_type);
+        IrValueId* load_operands = arena_allocate(builder->arena, IrValueId, 1);
+        load_operands[0] = slot;
+        IrInstruction load = c_ir_instruction_initialize(IR_OPCODE_LOAD, atomic_type);
+        load.operands = load_operands;
+        load.operand_count = 1;
+        load.result = result;
+        IrInstructionId load_id = c_ir_append_instruction(builder, load, source);
+        builder->function->values[result.value].definition = load_id;
+        return result;
+    }
+    IrValueId* store_operands = arena_allocate(builder->arena, IrValueId, 2);
+    store_operands[0] = slot;
+    store_operands[1] = value;
+    IrInstruction store = c_ir_instruction_initialize(IR_OPCODE_STORE, builder->void_type);
+    store.operands = store_operands;
+    store.operand_count = 2;
+    c_ir_append_instruction(builder, store, source);
+    return c_ir_emit_load_place_raw(builder, slot, atomic_type, source);
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source)
 {
     if (value.value >= builder->function->value_count)
@@ -4971,6 +5039,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     if (ir_types_differ_only_in_volatile(&builder->program->types, source_type, target_type))
     {
         return value;
+    }
+    // An atomic aggregate meets the record it is built from at every position
+    // that passes or returns one, and neither is convertible into the other by
+    // any of the ladders below: they are two aggregates of two sizes.
+    IrTypeId atomic_aggregate_type = c_ir_atomic_aggregate_pair(builder, source_type, target_type);
+    if (atomic_aggregate_type.value != IR_ID_UNDERLYING_INVALID)
+    {
+        return c_ir_emit_atomic_aggregate_conversion(builder, value, atomic_aggregate_type, atomic_aggregate_type.value == target_type.value, source);
     }
     // A complex type on either end converts half by half, and the halves are
     // what the ladders below can reason about: the wide-float arm sees only a

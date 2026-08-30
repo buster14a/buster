@@ -190,6 +190,120 @@ static int sizes_are_promoted(void)
            sizeof(global_six) == 8 && _Alignof(atomic_six) == 8 && sizeof(global_eight) == 8 && sizeof(global_union) == 4 && sizeof(three) == 3;
 }
 
+/* Passing and returning one (#786).  The type an argument is classified from
+   is the promoted one, so what travels is four bytes where the record is three
+   and the padding byte travels with it: the value reaches the call through an
+   object of the atomic type, which is where its zero comes from and is where
+   Clang's comes from too.  Nothing reads a member out of the atomic object
+   itself -- an atomic aggregate is copied whole and read through the copy,
+   which is also what Clang's -Watomic-access asks for.
+
+   All four spellings that build the type appear here, in both positions,
+   because what failed was the position rather than any one spelling: the
+   typedef, `_Atomic` in front of the tag keyword, after it, and the
+   `_Atomic ( T )` operator. */
+static int takes_alias(atomic_three parameter)
+{
+    unsigned char expected[4] = {16, 17, 18, 0};
+    three value = parameter;
+    return bytes_are(&parameter, expected, sizeof(expected)) && value.a == 16 && value.b == 17 && value.c == 18 && sizeof(parameter) == 4;
+}
+
+static atomic_three gives_alias(three value)
+{
+    atomic_three result = value;
+    return result;
+}
+
+static int takes_leading(_Atomic struct tagged_three parameter)
+{
+    struct tagged_three value = parameter;
+    return ((const unsigned char*)&parameter)[3] == 0 && value.a == 19 && value.b == 20 && value.c == 21;
+}
+
+static _Atomic struct tagged_three gives_leading(struct tagged_three value)
+{
+    _Atomic struct tagged_three result = value;
+    return result;
+}
+
+static int takes_trailing(struct tagged_three _Atomic parameter)
+{
+    struct tagged_three value = parameter;
+    return ((const unsigned char*)&parameter)[3] == 0 && value.a == 19 && value.b == 20 && value.c == 21;
+}
+
+static struct tagged_three _Atomic gives_trailing(struct tagged_three value)
+{
+    struct tagged_three _Atomic result = value;
+    return result;
+}
+
+static int takes_operator(_Atomic(struct tagged_three) parameter)
+{
+    struct tagged_three value = parameter;
+    return ((const unsigned char*)&parameter)[3] == 0 && value.a == 19 && value.b == 20 && value.c == 21;
+}
+
+static _Atomic(struct tagged_three) gives_operator(struct tagged_three value)
+{
+    _Atomic(struct tagged_three) result = value;
+    return result;
+}
+
+static int takes_union(_Atomic narrow_union parameter)
+{
+    unsigned char expected[4] = {0x11, 0x22, 0x33, 0};
+    narrow_union value = parameter;
+    return bytes_are(&parameter, expected, sizeof(expected)) && value.bytes[0] == 0x11 && value.bytes[1] == 0x22 && value.bytes[2] == 0x33;
+}
+
+static _Atomic narrow_union gives_union(narrow_union value)
+{
+    _Atomic narrow_union result = value;
+    return result;
+}
+
+/* The promotion adds nothing to this one -- `six` is already eight bytes -- so
+   the round trip runs over a pair of types that are the same size and still
+   not the same type. */
+static int takes_six(atomic_six parameter)
+{
+    six value = parameter;
+    return value.a == 0x11223344 && value.b == 0x5566 && sizeof(parameter) == 8;
+}
+
+static atomic_six gives_six(six value)
+{
+    atomic_six result = value;
+    return result;
+}
+
+static int argument_round_trip(void)
+{
+    unsigned char returned_bytes[4] = {16, 17, 18, 0};
+    three value_three = {16, 17, 18};
+    struct tagged_three value_tagged = {19, 20, 21};
+    narrow_union value_union;
+    six value_six = {0x11223344, 0x5566};
+
+    /* The destination's padding byte is dirtied first, so a returned value
+       that left it alone fails here rather than passing on a zero that was
+       already in the object. */
+    atomic_three returned;
+    ((unsigned char*)&returned)[3] = 0x5a;
+    returned = gives_alias(value_three);
+
+    value_union.word = 0;
+    value_union.bytes[0] = 0x11;
+    value_union.bytes[1] = 0x22;
+    value_union.bytes[2] = 0x33;
+
+    return takes_alias(gives_alias(value_three)) && bytes_are(&returned, returned_bytes, sizeof(returned_bytes)) && takes_alias(returned) &&
+           takes_leading(gives_leading(value_tagged)) && takes_trailing(gives_trailing(value_tagged)) &&
+           takes_operator(gives_operator(value_tagged)) && takes_union(gives_union(value_union)) && takes_six(gives_six(value_six));
+}
+
 #if defined(__x86_64__)
 typedef struct
 {
@@ -222,8 +336,34 @@ static int wide_round_trip(void)
            bytes_are(&global_nine, nine_bytes, sizeof(nine_bytes)) && read_nine.a == 0x1122334455667788LL && read_nine.b == 0x5a &&
            sizeof(global_nine) == 16 && _Alignof(atomic_nine) == 16;
 }
+
+/* Sixteen bytes ride two eightbytes rather than one, and the seven bytes the
+   promotion added to `nine` are part of what is passed. */
+static int takes_nine(atomic_nine parameter)
+{
+    unsigned char expected[16] = {0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x5a, 0, 0, 0, 0, 0, 0, 0};
+    nine value = parameter;
+    return bytes_are(&parameter, expected, sizeof(expected)) && value.a == 0x1122334455667788LL && value.b == 0x5a && sizeof(parameter) == 16;
+}
+
+static atomic_nine gives_nine(nine value)
+{
+    atomic_nine result = value;
+    return result;
+}
+
+static int wide_argument_round_trip(void)
+{
+    nine value_nine = {0x1122334455667788LL, 0x5a};
+    return takes_nine(gives_nine(value_nine));
+}
 #else
 static int wide_round_trip(void)
+{
+    return 1;
+}
+
+static int wide_argument_round_trip(void)
 {
     return 1;
 }
@@ -232,5 +372,5 @@ static int wide_round_trip(void)
 int main(void)
 {
     return !(sizes_are_promoted() && global_round_trip() && local_round_trip() && pointer_round_trip() && member_round_trip() && union_round_trip() &&
-             leading_round_trip() && wide_round_trip());
+             leading_round_trip() && argument_round_trip() && wide_round_trip() && wide_argument_round_trip());
 }

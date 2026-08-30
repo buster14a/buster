@@ -3437,11 +3437,14 @@ on a commit you already know is incomplete tells nobody anything.
   follows the source and the levels go on an explicit stack
   (`C_PARSE_MACHINELESS_ATOMIC_LEVELS`, eight) rather than on the C call stack;
   past it the operand does not fold, which is where every depth of it stood
-  before, and the machine-bearing path folds it at any depth either way. An
-  atomic aggregate is
-  still not accepted as a **parameter** in any spelling (#786). On the argument side the promotion moves nothing: a promoted
+  before, and the machine-bearing path folds it at any depth either way. On
+  the argument side the promotion moves nothing *on System V*: a promoted
   four-byte record is one INTEGER eightbyte where the three-byte one already
-  was, and the rule that says so is the next bullet.
+  was. It does move something on Win64, where the class is a function of the
+  size alone -- four bytes ride a register and three are passed indirectly --
+  so the classification is made from the promoted type rather than from the
+  record on every convention, and that is what makes an argument position
+  carry the atomic type; see the parameter bullet below.
   The **LLVM bitcode writer** maps an atomic type onto its
   operand's LLVM type, which is exact for every atomic scalar -- `_Atomic int`
   and `int` are one type -- and short by the padding for an aggregate, so an
@@ -3480,12 +3483,16 @@ on a commit you already know is incomplete tells nobody anything.
   unqualified spelling on x86-64 (its AArch64 answer was not measurable on the
   machine that measured this -- no cross-GCC). Clang sends any record
   *containing* an atomic member, and any atomic record, to MEMORY -- but only
-  on System V x86-64; the same Clang passes them in registers on Win64, on
-  AAPCS64 and on Darwin AArch64. Its AArch64 homogeneity test declines
-  separately, so `struct { _Atomic float a, b; }` rides X0 there where
-  `struct { float a, b; }` rides S0/S1. Both refusals are the same accident:
-  `X86_64ABIInfo::classify` asks `Ty->getAs<RecordType>()` and
-  `isHomogeneousAggregate` asks for a builtin type, an `AtomicType` is sugar
+  on System V x86-64; the same Clang passes a record *containing* an atomic
+  member in registers on Win64, on AAPCS64 and on Darwin AArch64. An atomic
+  *record* passed by value shows the fallthrough in a third shape on Win64
+  (measured 2026-08-30): Clang expands it into one argument per member, the
+  padding byte among them, and returns it through `sret`, where the four-byte
+  record it is built from would ride one register both ways. Its AArch64
+  homogeneity test declines separately, so `struct { _Atomic float a, b; }`
+  rides X0 there where `struct { float a, b; }` rides S0/S1. Both refusals are
+  the same accident: `X86_64ABIInfo::classify` asks `Ty->getAs<RecordType>()`
+  and `isHomogeneousAggregate` asks for a builtin type, an `AtomicType` is sugar
   over nothing, and each walk falls through to its "everything else" tail. The
   psABI and AAPCS state no such rule, `volatile` reaches neither refusal, and
   Clang contradicts itself across three of its own conventions, so following
@@ -3533,6 +3540,31 @@ on a commit you already know is incomplete tells nobody anything.
   therefore target-dependent where the layout rule above is not.
   `tests/basic_c_atomic_aggregate.c` runs the bytes under every allocator with
   Clang's answers baked in, including the padding.
+- **A parameter and a return value of an atomic aggregate carry the atomic type
+  itself, and what converts between it and the record is an object rather than
+  an instruction.** Every access in between carries the unqualified type -- a
+  load of an atomic place yields the record and a store takes one, which the IR
+  validates rather than merely allows -- but an ABI position cannot: the
+  `IR_OPCODE_ARGUMENT` type is validated against the signature's parameter type,
+  and code generation classifies an argument from the type the instruction
+  carries, so a record-typed value there would be classified from three bytes
+  where the object is four. The two are therefore two aggregates of two sizes
+  meeting in one expression, which no ladder in `c_ir_emit_cast` spans, and
+  every spelling of the type failed code generation with an internal message
+  rather than a diagnostic (#786). `c_ir_atomic_aggregate_pair` in `c_gen.c`
+  recognizes the pair and `c_ir_emit_atomic_aggregate_conversion` converts
+  through a slot of the atomic type, written through one view and read back
+  through the other: widening is the settled atomic store -- one integer access
+  of the promoted width, which is what zeroes the padding -- followed by a
+  plain read of the whole slot, private storage nothing else can observe, and
+  narrowing is that pair reversed. Both accesses are the settled ones above, so
+  a promoted width past the target's lock-free ceiling is refused by the same
+  walk over the finished body rather than failing inside code generation, and
+  nothing in the IR, in validation or in code generation had to change. The
+  parameter and return round trips are in `tests/basic_c_atomic_aggregate.c`
+  in all four spellings and in both positions, with Clang's bytes -- the
+  padding the promotion added among them -- baked in the way the rest of that
+  fixture bakes them.
 - **A top-level `(` right after an identifier** is the parameter list of a
   function that identifier names in `T f(int)`, and a parenthesized declarator
   in `T (*p)[2]`, whose `T` is the last word of the declaration specifiers.

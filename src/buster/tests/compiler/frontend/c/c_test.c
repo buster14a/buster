@@ -9852,6 +9852,99 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         scratch_end(temporary);
     }
     {
+        // The same refusal in an argument position: what the conversion below
+        // is built from are the settled accesses, so a promoted width past the
+        // ceiling is named by the walk over the finished body rather than
+        // failing inside code generation (#762, #786).
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult wide_parameter_tokens = c_preprocess(temporary.arena,
+                                                               S8("typedef struct { long long a, b, c; } twentyfour;"
+                                                                  " int atomic_aggregate_wide_parameter(_Atomic twentyfour parameter) {"
+                                                                  " twentyfour value = parameter;"
+                                                                  " return (int)value.a;"
+                                                                  " }\n"),
+                                                               (CPreprocessOptions){0});
+        CParseResult wide_parameter_parse = c_parse(temporary.arena, wide_parameter_tokens);
+        CIRLowerResult wide_parameter_ir =
+            c_lower_to_ir(temporary.arena, S8("atomic-aggregate-wide-parameter.c"), wide_parameter_tokens, wide_parameter_parse, target_native);
+        BUSTER_TEST(arguments, wide_parameter_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, wide_parameter_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, wide_parameter_ir.diagnostic_count == 1);
+        if (wide_parameter_ir.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, wide_parameter_ir.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            BUSTER_STRING_TEST(arguments, wide_parameter_ir.diagnostics[0].message,
+                               S8("in function 'atomic_aggregate_wide_parameter': C IR lowering does not support an atomic load of a 24-byte aggregate: this target has no lock-free access that wide"));
+        }
+        scratch_end(temporary);
+    }
+    {
+        // Passed and returned by value (#786).  An ABI position carries the
+        // atomic type itself -- the classification is made from the promoted
+        // width, which is four bytes where the record is three -- so the
+        // ARGUMENT type is that type and not the record every load and store
+        // between them carries.  What converts the two is an object rather
+        // than an instruction, so the module still validates.
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult atomic_argument_tokens = c_preprocess(temporary.arena,
+                                                                S8("typedef struct { char a, b, c; } three;"
+                                                                   " typedef _Atomic three atomic_three;"
+                                                                   " atomic_three atomic_aggregate_gives(three value) {"
+                                                                   " atomic_three result = value;"
+                                                                   " return result;"
+                                                                   " }"
+                                                                   " int atomic_aggregate_takes(atomic_three parameter) {"
+                                                                   " three value = parameter;"
+                                                                   " return value.a;"
+                                                                   " }\n"),
+                                                                (CPreprocessOptions){0});
+        CParseResult atomic_argument_parse = c_parse(temporary.arena, atomic_argument_tokens);
+        CIRLowerResult atomic_argument_ir =
+            c_lower_to_ir(temporary.arena, S8("atomic-aggregate-argument.c"), atomic_argument_tokens, atomic_argument_parse, target_native);
+        BUSTER_TEST(arguments, atomic_argument_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, atomic_argument_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, atomic_argument_ir.diagnostic_count == 0);
+        bool argument_carries_atomic = false;
+        bool return_carries_atomic = false;
+        if (atomic_argument_ir.program)
+        {
+            IrModule* module = atomic_argument_ir.program->modules;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(atomic_argument_ir.program, module).error == IR_VALIDATION_NONE);
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                IrType* signature = ir_type_from_id(&atomic_argument_ir.program->types, function->canonical_type);
+                if (!signature || signature->kind != IR_TYPE_FUNCTION)
+                {
+                    continue;
+                }
+                IrType* return_type = ir_type_from_id(&atomic_argument_ir.program->types, signature->return_type);
+                IrType* return_operand = return_type && return_type->is_atomic
+                                             ? ir_type_from_id(&atomic_argument_ir.program->types, return_type->unqualified_type)
+                                             : 0;
+                return_carries_atomic |= return_operand && return_type->layout.resolved && return_type->layout.size == 4 &&
+                                         return_operand->layout.resolved && return_operand->layout.size == 3;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    if (instruction->opcode != IR_OPCODE_ARGUMENT || instruction->immediate_count != 1 ||
+                        instruction->immediates[0] >= signature->parameter_count)
+                    {
+                        continue;
+                    }
+                    IrTypeId parameter_type_id = signature->parameter_types[instruction->immediates[0]];
+                    IrType* parameter_type = ir_type_from_id(&atomic_argument_ir.program->types, parameter_type_id);
+                    argument_carries_atomic |= parameter_type && parameter_type->is_atomic && parameter_type->layout.resolved &&
+                                               parameter_type->layout.size == 4 &&
+                                               instruction->canonical_type.value == parameter_type_id.value;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, argument_carries_atomic);
+        BUSTER_TEST(arguments, return_carries_atomic);
+        scratch_end(temporary);
+    }
+    {
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult atomic_builtin_tokens = c_preprocess(temporary.arena,
                                                                S8("int atomic_builtin_ir(void) {"
