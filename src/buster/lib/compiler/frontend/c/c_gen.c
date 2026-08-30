@@ -21117,10 +21117,29 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
+        u32 group_open = index;
         CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
         if (scan == C_IR_GROUP_SCAN_SKIPPED)
         {
             previous_is_operand = true;
+            // A parenthesized group is an operand -- unless it is a cast, in
+            // which case the `*`, `&`, `+` or `-` after it is a prefix
+            // operator over the cast's operand, not a binary one.  ctypes'
+            // SET macro writes `(signed char)*(signed char*)ptr & 3`, where
+            // reading the star as multiplication combined the mask against
+            // the pointer and predicted the whole conditional arm as one.
+            // The type-name test runs only when the next token is
+            // sign-ambiguous, so ordinary grouped operands pay one compare.
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index + 1 < end)
+            {
+                u32 following = builder->preprocess.tokens[index + 1].punctuator;
+                if ((following == C_PUNCTUATOR_STAR || following == C_PUNCTUATOR_AMPERSAND || following == C_PUNCTUATOR_PLUS ||
+                     following == C_PUNCTUATOR_MINUS) &&
+                    group_open + 1 < index && c_ir_type_name(builder, group_open + 1, index).value != IR_ID_UNDERLYING_INVALID)
+                {
+                    previous_is_operand = false;
+                }
+            }
             continue;
         }
         if (scan == C_IR_GROUP_SCAN_UNCLOSED)

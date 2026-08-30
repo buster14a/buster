@@ -3615,6 +3615,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_conditional_signed_arithmetic.c"),
         S8("tests/basic_c_transparent_union.c"),
         S8("tests/basic_c_static_assert_shadowed_typedef.c"),
+        S8("tests/basic_c_cast_deref_conditional.c"),
     };
     for (u32 shape_index = 0; shape_index < BUSTER_ARRAY_LENGTH(c_cpython_shape_fixtures); shape_index += 1)
     {
