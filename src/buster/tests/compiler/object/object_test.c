@@ -654,6 +654,86 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, elf_roundtrip.sections[OBJECT_SECTION_ZERO].data.length == 0);
         BUSTER_TEST(arguments, elf_roundtrip.sections[OBJECT_SECTION_ZERO].virtual_size == BUSTER_MB(1));
     }
+    // A `constructor(N)` priority survives a write and a read (issue 789).
+    // The writer spells it in the section name -- one `.init_array.NNNNN` per
+    // group -- and this model has one section per kind, so the reader has to
+    // put the name back into the per-entry priorities: they are what the
+    // linker orders a whole program's constructors by, and it is also the one
+    // place an external producer's spelling reaches this compiler.  The
+    // entries come back merged in `ld`'s order, so the priorities do too.
+    {
+        ObjectSection* initializer_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
+        for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+        {
+            initializer_sections[kind] = (ObjectSection){
+                .name = object_section_name_for_kind((ObjectSectionKind)kind),
+                .kind = (ObjectSectionKind)kind,
+                .alignment = object_section_default_alignment((ObjectSectionKind)kind),
+            };
+        }
+        initializer_sections[OBJECT_SECTION_TEXT].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_text);
+        u8 initializer_entries[3 * OBJECT_INITIALIZER_ENTRY_SIZE] = {0};
+        initializer_sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(initializer_entries);
+        // Written in the order the converter sorts them into, which is the
+        // shape the writer's split expects: ascending, the run that named no
+        // priority last.
+        u32 written_priorities[] = {101, 150, IR_INITIALIZER_PRIORITY_NONE};
+        ObjectSymbol initializer_symbols[] = {
+            {.name = S8("initializer_earliest"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("initializer_latest"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("initializer_plain"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        };
+        ObjectRelocation initializer_relocations[] = {
+            {.section = OBJECT_SECTION_INIT_ARRAY, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 2 * OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        };
+        ObjectFile initializer_object = {
+            .sections = initializer_sections,
+            .symbols = initializer_symbols,
+            .relocations = initializer_relocations,
+            .target = object.target,
+            .section_count = OBJECT_SECTION_COUNT,
+            .symbol_count = BUSTER_ARRAY_LENGTH(initializer_symbols),
+            .relocation_count = BUSTER_ARRAY_LENGTH(initializer_relocations),
+            .initializer_priorities = {written_priorities, 0},
+        };
+        ObjectArtifact initializer_elf = object_write(arguments->arena, &initializer_object, OBJECT_FORMAT_ELF64);
+        BUSTER_TEST(arguments, initializer_elf.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, object_bytes_contain(initializer_elf.bytes, S8(".init_array.00101")));
+        ObjectFile initializer_roundtrip = object_read(arguments->arena, initializer_elf.bytes, initializer_object.target);
+        BUSTER_TEST(arguments, initializer_roundtrip.error == OBJECT_ERROR_NONE);
+        bool initializer_read_valid = initializer_roundtrip.error == OBJECT_ERROR_NONE && initializer_roundtrip.initializer_priorities[0] &&
+                                      initializer_roundtrip.sections[OBJECT_SECTION_INIT_ARRAY].data.length == sizeof(initializer_entries);
+        BUSTER_TEST(arguments, initializer_read_valid);
+        // The section that named no priority carries none back, which is
+        // where `ld` puts it: after every suffixed one.
+        BUSTER_TEST(arguments, !initializer_roundtrip.initializer_priorities[1]);
+        if (initializer_read_valid)
+        {
+            for (u64 entry = 0; entry < BUSTER_ARRAY_LENGTH(written_priorities); entry += 1)
+            {
+                BUSTER_TEST(arguments, initializer_roundtrip.initializer_priorities[0][entry] == written_priorities[entry]);
+            }
+            String8 expected_initializer_names[] = {
+                S8("initializer_earliest"), S8("initializer_latest"), S8("initializer_plain"),
+            };
+            u32 initializer_entries_found = 0;
+            for (u32 relocation_index = 0; relocation_index < initializer_roundtrip.relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation read_relocation = initializer_roundtrip.relocations[relocation_index];
+                u64 entry = read_relocation.offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+                if (read_relocation.section != OBJECT_SECTION_INIT_ARRAY || entry >= BUSTER_ARRAY_LENGTH(expected_initializer_names) ||
+                    read_relocation.symbol >= initializer_roundtrip.symbol_count)
+                {
+                    continue;
+                }
+                BUSTER_TEST(arguments, string_equal(initializer_roundtrip.symbols[read_relocation.symbol].name, expected_initializer_names[entry]));
+                initializer_entries_found += 1;
+            }
+            BUSTER_TEST(arguments, initializer_entries_found == BUSTER_ARRAY_LENGTH(expected_initializer_names));
+        }
+    }
     bool elf_relocation_valid = elf_roundtrip.relocations && elf_roundtrip.relocation_count && elf_roundtrip.symbols &&
                                 elf_roundtrip.relocations[0].symbol < elf_roundtrip.symbol_count;
     BUSTER_TEST(arguments, elf_relocation_valid);

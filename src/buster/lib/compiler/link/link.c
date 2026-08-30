@@ -1271,6 +1271,97 @@ BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, O
     return true;
 }
 
+// GNU runs every prioritized initializer before every unprioritized one,
+// ascending, across the *whole program* rather than within one translation
+// unit, and `ld` gets that off the section name: every `.init_array.NNNNN`
+// ahead of the unsuffixed `.init_array`.  A merge that concatenates each
+// input's array in link order is that order only while no input names a
+// priority, so this puts the merged arrays back in it -- a stable sort of the
+// 8-byte entries by ObjectFile.initializer_priorities, which is where the
+// name went (see object_read_elf64 and object_from_canonical_codegen_module).
+//
+// The sort moves an entry's relocation and any symbol that names it with the
+// entry, because the relocation *is* the entry: the slot holds nothing until
+// a writer fills it with the function's address.  It runs on the merged file
+// rather than in link_initializer_plan_build so that every consumer of the
+// arrays agrees -- the entry-stub writers read the plan, but the Mach-O
+// writer keeps the two sections and lets dyld walk them in the order they are
+// laid out in.  (issue 789)
+BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile* object)
+{
+    for (u32 slot = 0; slot < 2; slot += 1)
+    {
+        ObjectSectionKind kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+        u32* priorities = object->initializer_priorities[slot];
+        ObjectSection* section = object->sections + kind;
+        u64 entries = priorities ? section->data.length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
+        bool ordered = true;
+        for (u64 entry = 1; entry < entries; entry += 1)
+        {
+            ordered = ordered && priorities[entry - 1] <= priorities[entry];
+        }
+        // A program whose initializers all named no priority, and one whose
+        // inputs happen to have arrived in GNU's order already, are the
+        // common shapes and cost nothing beyond the scan above.
+        if (ordered)
+        {
+            continue;
+        }
+        TemporalArena temporary = scratch_begin(&arena, 1);
+        u32* order = arena_allocate(temporary.arena, u32, entries);
+        u8* bytes = arena_allocate(temporary.arena, u8, section->data.length);
+        // Insertion sort, which is stable and which this population is the
+        // shape for: a program registers a handful of initializers, they
+        // arrive as one already-ascending run per input object, and equal
+        // priorities have to keep the order the inputs were given in.
+        for (u64 entry = 0; entry < entries; entry += 1)
+        {
+            u64 position = entry;
+            while (position && priorities[order[position - 1]] > priorities[entry])
+            {
+                order[position] = order[position - 1];
+                position -= 1;
+            }
+            order[position] = (u32)entry;
+        }
+        // The inverse permutation, which is what the relocations and the
+        // symbols are rewritten through.
+        u32* destination = arena_allocate(temporary.arena, u32, entries);
+        for (u64 entry = 0; entry < entries; entry += 1)
+        {
+            memcpy(bytes + entry * OBJECT_INITIALIZER_ENTRY_SIZE, section->data.pointer + (u64)order[entry] * OBJECT_INITIALIZER_ENTRY_SIZE,
+                   OBJECT_INITIALIZER_ENTRY_SIZE);
+            destination[order[entry]] = (u32)entry;
+        }
+        memcpy(section->data.pointer, bytes, entries * OBJECT_INITIALIZER_ENTRY_SIZE);
+        u32* sorted = arena_allocate(temporary.arena, u32, entries);
+        for (u64 entry = 0; entry < entries; entry += 1)
+        {
+            sorted[entry] = priorities[order[entry]];
+        }
+        memcpy(priorities, sorted, entries * sizeof(*priorities));
+        for (u32 index = 0; index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation* relocation = object->relocations + index;
+            u64 entry = relocation->offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+            if (relocation->section == (u32)kind && entry < entries)
+            {
+                relocation->offset = (u64)destination[entry] * OBJECT_INITIALIZER_ENTRY_SIZE + relocation->offset % OBJECT_INITIALIZER_ENTRY_SIZE;
+            }
+        }
+        for (u32 index = 0; index < object->symbol_count; index += 1)
+        {
+            ObjectSymbol* symbol = object->symbols + index;
+            u64 entry = symbol->value / OBJECT_INITIALIZER_ENTRY_SIZE;
+            if (symbol->section == (u32)kind && entry < entries)
+            {
+                symbol->value = (u64)destination[entry] * OBJECT_INITIALIZER_ENTRY_SIZE + symbol->value % OBJECT_INITIALIZER_ENTRY_SIZE;
+            }
+        }
+        scratch_end(temporary);
+    }
+}
+
 LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_count, LinkOptions options)
 {
     LinkObjectResult result = {0};
@@ -1362,6 +1453,23 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
             .alignment = section_alignments[kind],
         };
     }
+    // One priority per merged initializer entry, filled beside the data below
+    // and read by link_initializer_arrays_order once the merge is complete:
+    // an input that states none, and every entry no input covered, is
+    // unprioritized, which is where `ld` puts it -- last.
+    for (u32 slot = 0; slot < 2; slot += 1)
+    {
+        ObjectSectionKind kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+        u64 entries = section_sizes[kind] / OBJECT_INITIALIZER_ENTRY_SIZE;
+        if (entries)
+        {
+            result.object.initializer_priorities[slot] = arena_allocate(arena, u32, entries);
+            for (u64 entry = 0; entry < entries; entry += 1)
+            {
+                result.object.initializer_priorities[slot][entry] = IR_INITIALIZER_PRIORITY_NONE;
+            }
+        }
+    }
     for (u32 object_index = 0; object_index < object_count; object_index += 1)
     {
         ObjectFile* object = objects + object_index;
@@ -1387,6 +1495,23 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
             if (source->data.length)
             {
                 memcpy(result.object.sections[source->kind].data.pointer + offsets[section_index], source->data.pointer, source->data.length);
+            }
+            // The priorities of an initializer array travel with its entries.
+            // An offset that is not a whole number of entries cannot name one,
+            // and only an input section aligned under
+            // OBJECT_INITIALIZER_ENTRY_SIZE could produce one.
+            u32 slot = source->kind == OBJECT_SECTION_FINI_ARRAY;
+            u32* merged = source->kind == OBJECT_SECTION_INIT_ARRAY || source->kind == OBJECT_SECTION_FINI_ARRAY
+                              ? result.object.initializer_priorities[slot]
+                              : 0;
+            u32* priorities = merged ? object->initializer_priorities[slot] : 0;
+            if (priorities && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
+            {
+                u64 first = offsets[section_index] / OBJECT_INITIALIZER_ENTRY_SIZE;
+                for (u64 entry = 0; entry < source->data.length / OBJECT_INITIALIZER_ENTRY_SIZE; entry += 1)
+                {
+                    merged[first + entry] = priorities[entry];
+                }
             }
         }
     }
@@ -1513,6 +1638,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
             result.object.relocations[result.object.relocation_count++] = source;
         }
     }
+    link_initializer_arrays_order(arena, &result.object);
     if (!options.allow_undefined_symbols)
     {
         for (u32 symbol_index = 0; symbol_index < result.object.symbol_count; symbol_index += 1)

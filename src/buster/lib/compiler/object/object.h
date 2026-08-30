@@ -207,10 +207,16 @@ struct ObjectFile
     // (index 1): one u32 per OBJECT_INITIALIZER_ENTRY_SIZE bytes of that
     // section, in slot order, ascending because the entries were sorted into
     // it, with IR_INITIALIZER_PRIORITY_NONE for an attribute that named none.
-    // Only object_from_canonical_codegen_module fills these; the readers leave
-    // them null, because this model has one section per kind and the section
-    // name a priority is spelled in does not survive a read.  The ELF writer
-    // is the only consumer -- see object_elf_split_initializer_priorities.
+    // This is what carries the priority past a model that has one section per
+    // kind, in both directions: object_from_canonical_codegen_module records
+    // what the attribute named and the ELF writer splits the array back into
+    // the `.init_array.NNNNN` sections `ld` orders by
+    // (object_elf_split_initializer_priorities), while object_read_elf64
+    // recovers it from those same names so the linker can order one program's
+    // whole array (link_initializer_arrays_order).  A producer that has no
+    // priorities to state -- the COFF and Mach-O readers, a hand-built file --
+    // leaves these null, which reads as every entry unprioritized and keeps
+    // the arrays in the order they arrived.
     u32* initializer_priorities[2];
 };
 

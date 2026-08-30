@@ -3754,6 +3754,23 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
     {
         section_bases = arena_allocate(arena, u64, section_count);
     }
+    if (read_ok)
+    {
+        if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+        {
+            read_ok = false;
+        }
+    }
+    // The GNU priority the name of each initializer array section spells, kept
+    // per input section by the placement loop below so the per-entry
+    // ObjectFile.initializer_priorities can be filled beside the data copy
+    // without reading the name a third time.  It is only written for the two
+    // initializer kinds.
+    u32* section_priorities = 0;
+    if (read_ok)
+    {
+        section_priorities = arena_allocate(arena, u32, section_count);
+    }
     u64 section_sizes[OBJECT_SECTION_COUNT] = {0};
     u32 section_alignments[OBJECT_SECTION_COUNT];
     // How many input sections merge into OBJECT_SECTION_INIT_ARRAY and
@@ -3939,6 +3956,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 }
                 placed_priority = next_priority;
                 placed_index = next_index;
+                section_priorities[next_index] = next_priority;
             }
         }
         if (read_ok)
@@ -3985,6 +4003,32 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     .alignment = section_alignments[kind],
                 };
             }
+        }
+    }
+    // One priority per merged entry, which is what carries the order past this
+    // model's one-section-per-kind merge: the section name it was spelled in
+    // is gone by the time the linker sees the array, and concatenating two
+    // inputs in link order is `ld`'s order only while neither names a
+    // priority.  The entries a section did not cover -- alignment padding
+    // between two of them -- keep IR_INITIALIZER_PRIORITY_NONE, which is
+    // where a slot no relocation fills would sort anyway.
+    for (u32 slot = 0; slot < 2 && read_ok; slot += 1)
+    {
+        ObjectSectionKind kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+        u64 entries = section_sizes[kind] / OBJECT_INITIALIZER_ENTRY_SIZE;
+        if (!entries)
+        {
+            continue;
+        }
+        if (!object_reader_arena_can_allocate_count(arena, entries, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+        {
+            read_ok = false;
+            continue;
+        }
+        result.initializer_priorities[slot] = arena_allocate(arena, u32, entries);
+        for (u64 entry = 0; entry < entries; entry += 1)
+        {
+            result.initializer_priorities[slot][entry] = IR_INITIALIZER_PRIORITY_NONE;
         }
     }
     u32 symbol_section = 0;
@@ -4037,6 +4081,22 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     if (section_type != 8 && size)
                     {
                         memcpy(result.sections[kind].data.pointer + section_bases[section_index], bytes.pointer + offset, size);
+                    }
+                    // The priority this section's name spelled, spread over
+                    // the entries it merged into.  A base that is not a whole
+                    // number of entries cannot name one, and only a section
+                    // aligned under OBJECT_INITIALIZER_ENTRY_SIZE could
+                    // produce it.
+                    u32* priorities = kind == OBJECT_SECTION_INIT_ARRAY   ? result.initializer_priorities[0]
+                                      : kind == OBJECT_SECTION_FINI_ARRAY ? result.initializer_priorities[1]
+                                                                          : 0;
+                    if (priorities && !(section_bases[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
+                    {
+                        u64 first = section_bases[section_index] / OBJECT_INITIALIZER_ENTRY_SIZE;
+                        for (u64 entry = 0; entry < size / OBJECT_INITIALIZER_ENTRY_SIZE; entry += 1)
+                        {
+                            priorities[first + entry] = section_priorities[section_index];
+                        }
                     }
                 }
                 if (section_type == 2)

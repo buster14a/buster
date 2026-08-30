@@ -2043,6 +2043,106 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         ObjectFile no_symbols_object = link_test_object_make(arguments->arena, target, (ByteSlice){0}, 0, 0, 0, 0);
         LinkObjectResult no_symbols = link_objects(arguments->arena, &no_symbols_object, 1, (LinkOptions){0});
         BUSTER_TEST(arguments, no_symbols.error == LINK_ERROR_NONE && no_symbols.object.symbol_count == 0);
+
+        // Initializer arrays merge in GNU's whole-program order rather than by
+        // concatenation (issue 789): every priority ahead of every entry that
+        // named none, ascending, and equal priorities -- including the run
+        // that named none -- in link order.  Two objects are the smallest
+        // shape that shows it, because each one's own array is already sorted.
+        // The entries carry a distinct byte each so the data permutation is
+        // observable beside the relocations, and the second object defines a
+        // symbol *inside* its array (crtbegin's
+        // `__frame_dummy_init_array_entry` is the real one) so the merge is
+        // pinned to move those with the entry too.
+        u8 first_initializer_entries[2 * OBJECT_INITIALIZER_ENTRY_SIZE] = {0x20, 0, 0, 0, 0, 0, 0, 0, 0x40};
+        u8 second_initializer_entries[3 * OBJECT_INITIALIZER_ENTRY_SIZE] = {0x10, 0, 0, 0, 0, 0, 0, 0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0x50};
+        u32 first_initializer_priorities[] = {120, IR_INITIALIZER_PRIORITY_NONE};
+        u32 second_initializer_priorities[] = {101, 150, IR_INITIALIZER_PRIORITY_NONE};
+        ObjectSymbol first_initializer_symbols[] = {
+            {.name = S8("first_middle"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+            {.name = S8("first_plain"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+        };
+        ObjectSymbol second_initializer_symbols[] = {
+            {.name = S8("second_earliest"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+            {.name = S8("second_latest"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+            {.name = S8("second_plain"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+            {
+                .name = S8("second_array_entry"),
+                .value = 2 * OBJECT_INITIALIZER_ENTRY_SIZE,
+                .size = OBJECT_INITIALIZER_ENTRY_SIZE,
+                .section = OBJECT_SECTION_INIT_ARRAY,
+                .kind = OBJECT_SYMBOL_DATA,
+            },
+        };
+        ObjectRelocation first_initializer_relocations[] = {
+            {.section = OBJECT_SECTION_INIT_ARRAY, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        };
+        ObjectRelocation second_initializer_relocations[] = {
+            {.section = OBJECT_SECTION_INIT_ARRAY, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 2 * OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        };
+        u8 initializer_text[] = {0, 0, 0, 0, 0, 0, 0, 0};
+        ObjectFile initializer_objects[] = {
+            link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(initializer_text), first_initializer_symbols,
+                                  BUSTER_ARRAY_LENGTH(first_initializer_symbols), first_initializer_relocations,
+                                  BUSTER_ARRAY_LENGTH(first_initializer_relocations)),
+            link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(initializer_text), second_initializer_symbols,
+                                  BUSTER_ARRAY_LENGTH(second_initializer_symbols), second_initializer_relocations,
+                                  BUSTER_ARRAY_LENGTH(second_initializer_relocations)),
+        };
+        initializer_objects[0].sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(first_initializer_entries);
+        initializer_objects[0].initializer_priorities[0] = first_initializer_priorities;
+        initializer_objects[1].sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(second_initializer_entries);
+        initializer_objects[1].initializer_priorities[0] = second_initializer_priorities;
+        LinkObjectResult initializer_merge =
+            link_objects(arguments->arena, initializer_objects, BUSTER_ARRAY_LENGTH(initializer_objects), (LinkOptions){0});
+        BUSTER_TEST(arguments, initializer_merge.error == LINK_ERROR_NONE);
+        if (initializer_merge.error == LINK_ERROR_NONE)
+        {
+            String8 expected_initializer_names[] = {
+                S8("second_earliest"), S8("first_middle"), S8("second_latest"), S8("first_plain"), S8("second_plain"),
+            };
+            u32 expected_initializer_priorities[] = {101, 120, 150, IR_INITIALIZER_PRIORITY_NONE, IR_INITIALIZER_PRIORITY_NONE};
+            u8 expected_initializer_entries[] = {0x10, 0x20, 0x30, 0x40, 0x50};
+            ObjectSection merged = initializer_merge.object.sections[OBJECT_SECTION_INIT_ARRAY];
+            BUSTER_TEST(arguments, merged.data.length == BUSTER_ARRAY_LENGTH(expected_initializer_names) * OBJECT_INITIALIZER_ENTRY_SIZE);
+            u32 initializer_entries_found = 0;
+            for (u32 relocation_index = 0; relocation_index < initializer_merge.object.relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation relocation = initializer_merge.object.relocations[relocation_index];
+                u64 entry = relocation.offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+                if (relocation.section != OBJECT_SECTION_INIT_ARRAY || entry >= BUSTER_ARRAY_LENGTH(expected_initializer_names))
+                {
+                    continue;
+                }
+                BUSTER_TEST(arguments, string_equal(initializer_merge.object.symbols[relocation.symbol].name, expected_initializer_names[entry]));
+                initializer_entries_found += 1;
+            }
+            BUSTER_TEST(arguments, initializer_entries_found == BUSTER_ARRAY_LENGTH(expected_initializer_names));
+            for (u64 entry = 0; entry < BUSTER_ARRAY_LENGTH(expected_initializer_names); entry += 1)
+            {
+                BUSTER_TEST(arguments, initializer_merge.object.initializer_priorities[0][entry] == expected_initializer_priorities[entry]);
+                BUSTER_TEST(arguments, merged.data.pointer[entry * OBJECT_INITIALIZER_ENTRY_SIZE] == expected_initializer_entries[entry]);
+            }
+            // `second_plain` is the last entry of the merged array, and the
+            // symbol that named its slot has to have followed it there from
+            // the third slot of its own object.
+            u32 array_entry_index = UINT32_MAX;
+            for (u32 symbol_index = 0; symbol_index < initializer_merge.object.symbol_count; symbol_index += 1)
+            {
+                if (string_equal(initializer_merge.object.symbols[symbol_index].name, S8("second_array_entry")))
+                {
+                    array_entry_index = symbol_index;
+                }
+            }
+            BUSTER_TEST(arguments, array_entry_index != UINT32_MAX);
+            if (array_entry_index != UINT32_MAX)
+            {
+                BUSTER_TEST(arguments, initializer_merge.object.symbols[array_entry_index].value == 4 * OBJECT_INITIALIZER_ENTRY_SIZE);
+            }
+        }
     }
 #if BUSTER_CPU_ARCH_X86_64
     u8 answer_text[] = {

@@ -3050,17 +3050,33 @@ on a commit you already know is incomplete tells nobody anything.
   the function. ELF writes them `SHT_INIT_ARRAY`/`SHT_FINI_ARRAY`, Mach-O
   `__DATA,__mod_init_func`/`__mod_term_func` with the `S_MOD_*_FUNC_POINTERS`
   types, and COFF keeps this model's neutral names the way `.rodata` and
-  `.tdata` already do. **Priority orders within the translation unit, not
-  across one.** `ld` gets the GNU order by sorting `.init_array.NNNNN` ahead
-  of the unsuffixed `.init_array`, and this model has one section per kind, so
-  the object writer sorts the entries instead: ascending priority, with an
-  attribute that named none last, and equal priorities left in declaration
-  order. That reproduces GNU's order exactly inside one object; between
-  objects the order is link order, for `ld` and for this linker alike, so an
-  unprioritized constructor in the first object still runs before a
-  `constructor(150)` in the second where GCC and Clang would run the
-  prioritized one first. That is issue #782, and it is the one part of the
-  attribute's contract this does not reproduce.
+  `.tdata` already do. **Priority orders the whole program**, and the priority
+  travels beside the array rather than in it. `ld` gets GNU's order off the
+  section name -- every `.init_array.NNNNN` ahead of the unsuffixed
+  `.init_array`, ascending -- and this model has one section per kind, so a
+  translation unit's whole array is one section, its entries sorted into that
+  order by `object_from_canonical_codegen_module` (ascending priority, an
+  attribute that named none last, equal priorities in declaration order) and
+  each entry's priority recorded beside it in
+  `ObjectFile.initializer_priorities`, one `u32` per slot. Three places carry
+  that array, and they are the same fact from different sides.
+  `object_write_elf64` splits it back into one `.init_array.NNNNN` section per
+  priority group, so an external linker orders two Buster objects exactly as
+  it orders Clang's (issue #782). `object_read_elf64` recovers it from those
+  section names -- the padded `.init_array.00101` written here and the
+  unpadded `.init_array.101` Clang writes are both read -- and merges the
+  sections of a kind in `ld`'s order rather than in section header order. And
+  `link_initializer_arrays_order` sorts the *merged* array, stably, after
+  `link_objects` has concatenated its inputs: without it a `constructor(101)`
+  in the second object ran after an unprioritized constructor in the first,
+  for Clang's objects as much as for this compiler's, which was issue #789.
+  That sort moves each entry's relocation and any symbol defined at its slot
+  with the entry, and it runs on the merged object rather than in
+  `link_initializer_plan_build` so the Mach-O writer -- which keeps the arrays
+  for dyld to walk instead of reading a plan -- gets the same order the
+  entry-stub writers do. An input that states no priorities (the COFF and
+  Mach-O readers, the assembler's objects) has every entry unprioritized,
+  which leaves it in link order.
 - **An image this linker produces calls its initializers from the entry
   stub.** There is no libc startup object in it -- the stub *is* the startup,
   which is why `link_x86_build_elf_entry_stub` exists at all -- so nothing
@@ -3091,7 +3107,9 @@ on a commit you already know is incomplete tells nobody anything.
   which runs the main executable's `__DATA,__mod_init_func` before it enters
   `main` and its `__mod_term_func` in reverse on the way out, so that writer
   keeps both arrays, gives each the section type dyld dispatches on, and lets
-  the loader call them (issue 779). **UEFI** has no such third party -- a
+  the loader call them (issue 779) -- which is why the merged array has to be
+  in GNU's order before any writer sees it (issue 789), rather than only in
+  the plan the other writers read. **UEFI** has no such third party -- a
   firmware image has no C runtime, and its entry is the firmware's call with
   the image handle and the system table -- so it still **refuses** a program
   with initializers, naming the first one, rather than placing an array

@@ -6130,6 +6130,124 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         scratch_end(destructor_temporary);
     }
 #endif
+    // The order across two translation units, which is the half one file
+    // cannot show (issue 789).  GNU runs every prioritized constructor before
+    // every unprioritized one over the whole program, and the two fixtures
+    // interleave: 101 and 150 come from the second unit, 120 from the first,
+    // and the two that named no priority run last in link order.  Both
+    // routes into the linker are checked, because they fill the per-entry
+    // priorities from different places -- the compiled-in-memory objects from
+    // the converter, the `-c` objects from the `.init_array.NNNNN` section
+    // names the ELF writer spelled them in -- and the fixture returns the
+    // position that ran out of order, so a concatenation of the two arrays
+    // exits 2 rather than failing to link.
+    {
+        TemporalArena order_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* order_arena = order_temporary.arena;
+        String8 order_first_object = buster_test_temporary_path(order_arena, S8("buster-c-constructor-order-first"), S8(".o"));
+        String8 order_second_object = buster_test_temporary_path(order_arena, S8("buster-c-constructor-order-second"), S8(".o"));
+        String8 order_first_command[] = {
+            S8("-c"), S8("-o"), order_first_object, S8("tests/basic_c_constructor_order.c"),
+        };
+        String8 order_second_command[] = {
+            S8("-c"), S8("-o"), order_second_object, S8("tests/basic_c_constructor_order_second.c"),
+        };
+        CompilerDriverResult order_first = compiler_driver_execute_invocation(
+            order_arena, compiler_driver_parse_arguments(order_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(order_first_command)));
+        CompilerDriverResult order_second = compiler_driver_execute_invocation(
+            order_arena, compiler_driver_parse_arguments(order_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(order_second_command)));
+        BUSTER_TEST(arguments, order_first.error == COMPILER_DRIVER_ERROR_NONE && order_second.error == COMPILER_DRIVER_ERROR_NONE);
+        // The first unit holds `main` and one of the unprioritized
+        // constructors, and it is given to the linker first: the two
+        // unprioritized ones run in link order, so the argument order is part
+        // of what the fixture asserts.
+        String8 order_image_path = buster_test_temporary_path(order_arena, S8("buster-c-constructor-order"), S8(""));
+        String8 order_link_command[] = {
+            S8("-o"), order_image_path, order_first_object, order_second_object,
+        };
+        String8 order_source_image_path = buster_test_temporary_path(order_arena, S8("buster-c-constructor-order-source"), S8(""));
+        String8 order_source_command[] = {
+            S8("-o"), order_source_image_path, S8("tests/basic_c_constructor_order.c"), S8("tests/basic_c_constructor_order_second.c"),
+        };
+        SliceString8 order_link_command_lines[2] = {
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(order_link_command),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(order_source_command),
+        };
+        String8 order_image_paths[2] = {order_image_path, order_source_image_path};
+        for (u64 route = 0; route < BUSTER_ARRAY_LENGTH(order_image_paths); route += 1)
+        {
+            if (order_first.error != COMPILER_DRIVER_ERROR_NONE || order_second.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                break;
+            }
+            CompilerDriverResult order_link =
+                compiler_driver_execute_invocation(order_arena, compiler_driver_parse_arguments(order_arena, order_link_command_lines[route]));
+            BUSTER_TEST(arguments, order_link.error == COMPILER_DRIVER_ERROR_NONE);
+            if (order_link.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                continue;
+            }
+            String8 order_image_arguments[] = {order_image_paths[route]};
+            ProcessSpawnResult order_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(order_image_arguments), (SliceString8){0},
+                                                              (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, order_spawn.handle != 0);
+            if (order_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(order_arena, order_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+        // The same two units built by the host compiler, which is the cheapest
+        // oracle for this: it depends on nothing this object writer does, and
+        // it spells a priority group `.init_array.101` where the writer here
+        // spells it `.init_array.00101`, so it is also what pins the reader to
+        // both forms.  -fno-pic and -g0 for the reasons the clang object
+        // fixture above gives.
+        String8 host_first_object = buster_test_temporary_path(order_arena, S8("buster-c-constructor-order-host-first"), S8(".o"));
+        String8 host_second_object = buster_test_temporary_path(order_arena, S8("buster-c-constructor-order-host-second"), S8(".o"));
+        String8 host_first_command[] = {
+            S8(BUSTER_HOST_C_COMPILER), S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_first_object,
+            S8("tests/basic_c_constructor_order.c"),
+        };
+        String8 host_second_command[] = {
+            S8(BUSTER_HOST_C_COMPILER), S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_second_object,
+            S8("tests/basic_c_constructor_order_second.c"),
+        };
+        ProcessSpawnOptions host_order_options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = true,
+        };
+        ProcessSpawnResult host_first_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_first_command), (SliceString8){0}, (SliceString8){0}, host_order_options);
+        ProcessSpawnResult host_second_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_second_command), (SliceString8){0}, (SliceString8){0}, host_order_options);
+        bool host_first_compiled = host_first_spawn.handle && os_process_wait_sync(order_arena, host_first_spawn).result == PROCESS_RESULT_SUCCESS;
+        bool host_second_compiled = host_second_spawn.handle && os_process_wait_sync(order_arena, host_second_spawn).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, host_first_compiled && host_second_compiled);
+        if (host_first_compiled && host_second_compiled)
+        {
+            String8 host_image_path = buster_test_temporary_path(order_arena, S8("buster-c-constructor-order-host"), S8(""));
+            String8 host_link_command[] = {
+                S8("-o"), host_image_path, host_first_object, host_second_object,
+            };
+            CompilerDriverResult host_link = compiler_driver_execute_invocation(
+                order_arena, compiler_driver_parse_arguments(order_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link_command)));
+            BUSTER_TEST(arguments, host_link.error == COMPILER_DRIVER_ERROR_NONE);
+            if (host_link.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 host_image_arguments[] = {host_image_path};
+                ProcessSpawnResult host_image_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_image_arguments), (SliceString8){0},
+                                                                       (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, host_image_spawn.handle != 0);
+                if (host_image_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(order_arena, host_image_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+#endif
+        scratch_end(order_temporary);
+    }
     // Returning from main is a call to exit (C 5.1.2.2.3), so the linked
     // image's entry point must go through libc rather than the raw exit
     // syscall: the syscall skips stdio flushing and every atexit handler, and

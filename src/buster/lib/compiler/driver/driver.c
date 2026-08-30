@@ -3662,6 +3662,23 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 object.debug_modules[module_index] = unit.object.debug_modules[module_index];
                 object.debug_modules[module_index].name = string_duplicate_arena(arena, unit.object.debug_modules[module_index].name, false);
             }
+            // The initializer priorities are as much a part of the array
+            // sections as their bytes are: the linker orders the whole
+            // program's constructors by them, and a copy that dropped them
+            // would leave a `constructor(101)` in this unit running after an
+            // unprioritized one in another.
+            for (u32 slot = 0; slot < 2; slot += 1)
+            {
+                u32 kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+                u64 entries = unit.object.initializer_priorities[slot] && kind < unit.object.section_count
+                                  ? unit.object.sections[kind].data.length / OBJECT_INITIALIZER_ENTRY_SIZE
+                                  : 0;
+                if (entries)
+                {
+                    object.initializer_priorities[slot] = arena_allocate(arena, u32, entries);
+                    memcpy(object.initializer_priorities[slot], unit.object.initializer_priorities[slot], entries * sizeof(u32));
+                }
+            }
             objects[object_count++] = object;
         }
         if (unit.output.length)
