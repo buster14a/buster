@@ -799,11 +799,10 @@ _Static_assert(_Alignof(_Atomic atomic_raised_atomic) == 32, "an already atomic 
 // above they stay out of basic_c_packed_layout_shapes.h, whose other half is
 // whichever host compiler the platform has.
 //
-// `_Atomic` written directly on a tag -- `_Atomic struct three` -- is not
-// among the spellings below: that prefix never reaches the type at all here,
-// so the type is not atomic and this rule cannot apply to it (issue #761).
-// The three spellings that do build the type are pinned instead, and they have
-// to answer alike.
+// All four spellings of the type are pinned, and they have to answer alike.
+// The three below are written on a typedef of an anonymous aggregate; the
+// fourth, `_Atomic` written directly in front of the tag keyword, needs a tag
+// and is grouped with the tagged shapes further down (#761).
 typedef struct
 {
     char a, b, c;
@@ -892,6 +891,58 @@ static atomic_three_alias file_atomic_three_object;
 static char between_atomic_promoted_objects = 17;
 static atomic_three_pair file_atomic_three_array;
 
+// The fourth spelling: `_Atomic` written in front of the tag keyword.  It
+// builds the same type the other three do, and it is checked against them on
+// the same tag rather than only against a number, because what went wrong was
+// that the qualifier reached neither -- the prefix scan stepped over it and
+// the aggregate branch handed back the tag's own type, so `sizeof` answered 3
+// and an assignment was an ordinary aggregate copy where the program asked
+// for an atomic store (#761).  `const` and `volatile` ride the same prefix
+// run and are pinned beside it: neither promotes anything, so a run that
+// reached the type carrying the wrong qualifier would show up here as a
+// changed size.
+struct atomic_tag_three
+{
+    char a, b, c;
+};
+
+union atomic_tag_union
+{
+    char a[3];
+};
+
+enum atomic_tag_enum
+{
+    ATOMIC_TAG_ENUM_VALUE = 1
+};
+
+typedef _Atomic struct atomic_tag_three atomic_tag_leading_alias;
+
+struct atomic_leading_member
+{
+    char byte;
+    _Atomic struct atomic_tag_three value;
+    char tail;
+};
+
+static _Atomic struct atomic_tag_three file_atomic_leading_object;
+static char between_atomic_leading_objects = 19;
+
+// The enum-constant evaluator folds sizeof on a third road into the parse
+// engine -- an operand walk that never enters the type-parse machine, because
+// the machine is already running the enum body it is folding for.  That walk
+// dropped the leading run too, and dropped it for `const` and `volatile` hard
+// enough that the whole enumerator failed to fold.
+enum
+{
+    atomic_leading_folded_size = sizeof(_Atomic struct atomic_tag_three),
+    atomic_leading_folded_alignment = _Alignof(_Atomic struct atomic_tag_three),
+    atomic_trailing_folded_size = sizeof(struct atomic_tag_three _Atomic),
+    atomic_plain_folded_size = sizeof(struct atomic_tag_three),
+    atomic_const_folded_size = sizeof(const struct atomic_tag_three),
+    atomic_volatile_folded_size = sizeof(volatile struct atomic_tag_three)
+};
+
 // A complex type is the one scalar whose size is a power of two while its
 // alignment is not equal to it, so the promotion moves the alignment alone:
 // Clang and GCC agree on both of these.
@@ -924,6 +975,24 @@ _Static_assert(sizeof(atomic_three_lowered) == 4 && _Alignof(atomic_three_lowere
 _Static_assert(sizeof(atomic_three_pair) == 8 && _Alignof(atomic_three_pair) == 4, "the element tiles at four");
 _Static_assert(sizeof(struct atomic_promoted_member) == 12, "the member sits at four");
 _Static_assert(sizeof(struct atomic_unpromoted_member) == 19, "and at one past the ceiling");
+_Static_assert(sizeof(_Atomic struct atomic_tag_three) == 4 && _Alignof(_Atomic struct atomic_tag_three) == 4, "written before the tag");
+_Static_assert(sizeof(_Atomic struct atomic_tag_three) == sizeof(struct atomic_tag_three _Atomic) &&
+                   _Alignof(_Atomic struct atomic_tag_three) == _Alignof(struct atomic_tag_three _Atomic),
+               "the leading and trailing spellings are one type");
+_Static_assert(sizeof(_Atomic struct atomic_tag_three) == sizeof(_Atomic(struct atomic_tag_three)) &&
+                   _Alignof(_Atomic struct atomic_tag_three) == _Alignof(_Atomic(struct atomic_tag_three)),
+               "and so is the operator spelling");
+_Static_assert(sizeof(atomic_tag_leading_alias) == 4 && _Alignof(atomic_tag_leading_alias) == 4, "a typedef of it carries the promotion");
+_Static_assert(sizeof(_Atomic union atomic_tag_union) == 4 && _Alignof(_Atomic union atomic_tag_union) == 4, "a union before the tag");
+_Static_assert(sizeof(_Atomic enum atomic_tag_enum) == 4 && _Alignof(_Atomic enum atomic_tag_enum) == 4, "an enum before the tag");
+_Static_assert(sizeof(const struct atomic_tag_three) == 3 && _Alignof(const struct atomic_tag_three) == 1, "const before the tag promotes nothing");
+_Static_assert(sizeof(volatile struct atomic_tag_three) == 3, "and neither does volatile");
+_Static_assert(sizeof(_Atomic const struct atomic_tag_three) == 4 && sizeof(const _Atomic struct atomic_tag_three) == 4,
+               "either order of the two words is the atomic type");
+_Static_assert(sizeof(struct atomic_leading_member) == 12, "the member sits at four here too");
+_Static_assert(atomic_leading_folded_size == 4 && atomic_leading_folded_alignment == 4, "the enum-constant fold answers alike");
+_Static_assert(atomic_trailing_folded_size == 4 && atomic_plain_folded_size == 3, "and tells the two spellings apart");
+_Static_assert(atomic_const_folded_size == 3 && atomic_volatile_folded_size == 3, "a const or volatile operand folds at all");
 
 int main(void)
 {
@@ -1578,5 +1647,30 @@ int main(void)
     if (sizeof(_Atomic block_three) != 4 || _Alignof(_Atomic block_three) != 4) return 242;
     if ((unsigned long long)(void *)&block_atomic_three_object % 4) return 243;
     if (between_block_atomic_three != 18) return 244;
+
+    // `_Atomic` in front of the tag keyword, folded by the lowering engine.
+    // Every number here is stated for the parse engine above, and the object
+    // checks are what say the promotion reached the object and not only the
+    // fold.
+    if (sizeof(_Atomic struct atomic_tag_three) != 4 || _Alignof(_Atomic struct atomic_tag_three) != 4) return 246;
+    if (sizeof(_Atomic struct atomic_tag_three) != sizeof(struct atomic_tag_three _Atomic)) return 247;
+    if (sizeof(_Atomic struct atomic_tag_three) != sizeof(_Atomic(struct atomic_tag_three))) return 248;
+    if (sizeof(atomic_tag_leading_alias) != 4 || _Alignof(atomic_tag_leading_alias) != 4) return 249;
+    if (sizeof(_Atomic union atomic_tag_union) != 4 || _Alignof(_Atomic union atomic_tag_union) != 4) return 250;
+    if (sizeof(_Atomic enum atomic_tag_enum) != 4 || _Alignof(_Atomic enum atomic_tag_enum) != 4) return 251;
+    if (sizeof(const struct atomic_tag_three) != 3 || sizeof(volatile struct atomic_tag_three) != 3) return 252;
+    if (sizeof(struct atomic_leading_member) != 12 || _Alignof(struct atomic_leading_member) != 4) return 253;
+    struct atomic_leading_member leading_member = {0};
+    if ((char *)&leading_member.value - (char *)&leading_member != 4) return 254;
+    if ((char *)&leading_member.tail - (char *)&leading_member != 8) return 255;
+    if ((unsigned long long)(void *)&file_atomic_leading_object % 4) return 256;
+    if (between_atomic_leading_objects != 19) return 257;
+
+    // The block-scope parser reads the leading run through the same machine.
+    _Atomic struct atomic_tag_three block_leading_object;
+    char between_block_leading = 20;
+    if (sizeof(block_leading_object) != 4 || _Alignof(block_leading_object) != 4) return 258;
+    if ((unsigned long long)(void *)&block_leading_object % 4) return 259;
+    if (between_block_leading != 20) return 260;
     return 0;
 }

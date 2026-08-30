@@ -6386,6 +6386,21 @@ BUSTER_C_INTERNAL bool c_parse_type_qualifier_word_token(CPreprocessResult prepr
     return c_parse_qualifier_bits_apply(c_parse_word_bits_token(preprocess, token), type);
 }
 
+// `_Atomic` spells two different things with one keyword, and a `(` right
+// after it is the only thing that tells them apart: `_Atomic ( T )` is a type
+// specifier that constructs the atomic type from T, and `_Atomic` anywhere
+// else is a qualifier that applies to whatever type the specifier run builds.
+// The declaration-specifier scans have to ask before they decide whether the
+// run continues, because stopping at every `_Atomic` leaves the qualifier
+// spelling uncollected; c_ir_atomic_type_specifier_at in c_gen.c is the same
+// question asked of a type name in an expression.
+BUSTER_C_INTERNAL bool c_parse_atomic_type_specifier_at(CPreprocessResult preprocess, u32 index, u32 end)
+{
+    return index + 1 < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+           (c_parse_word_bits_token(preprocess, preprocess.tokens[index]) & C_WORD_QUALIFIER_ATOMIC) != 0 &&
+           c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+}
+
 BUSTER_C_INTERNAL bool c_parse_atomic_declaration_prefix_token(CPreprocessResult preprocess, CToken token, CType* qualifiers)
 {
     u16 bits = c_parse_word_bits_token(preprocess, token);
@@ -7011,8 +7026,17 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
             .return_type = C_TYPE_ID_INVALID,
             .array_bound = C_ARRAY_BOUND_INVALID,
         };
+        // The run stops at the `_Atomic ( T )` specifier, which the branch
+        // below parses whole, and steps over every other `_Atomic` as the
+        // qualifier it is.  Stopping at both left `_Atomic struct three`
+        // building the plain aggregate -- the qualifier reached neither the
+        // type nor the object, so `sizeof` answered 3 where the three other
+        // spellings answered 4 and an assignment to it was an ordinary
+        // aggregate copy where the program asked for an atomic store (#761).
+        // `const struct S` and `volatile struct S` ride this same run and
+        // always have.
         while (specifier_index < frame->end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
-               !string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[specifier_index]), S8("_Atomic")))
+               !c_parse_atomic_type_specifier_at(preprocess, specifier_index, frame->end))
         {
             if (!c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[specifier_index], &frame->qualifiers))
             {
@@ -7029,9 +7053,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
               string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[specifier_index]), S8("typeof"))) ||
              (c_preprocess_dialect_is_c23(preprocess.dialect) && string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[specifier_index]), S8("typeof_unqual")))) &&
             c_token_is_punctuator(&preprocess.tokens[specifier_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
-        bool is_atomic = specifier_index + 1 < frame->end && preprocess.tokens[specifier_index].kind == C_TOKEN_IDENTIFIER &&
-                         string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[specifier_index]), S8("_Atomic")) &&
-                         c_token_is_punctuator(&preprocess.tokens[specifier_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        bool is_atomic = c_parse_atomic_type_specifier_at(preprocess, specifier_index, frame->end);
         if (!is_typeof && !is_atomic)
         {
             frame->stage = C_TYPE_PARSE_STAGE_FINISH;
@@ -8011,7 +8033,25 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CP
     CTypeId type = c_parse_qualified_typedef_type(result, preprocess, scope, start, end, &index);
     if (type.value == C_ID_UNDERLYING_INVALID)
     {
+        // The qualifier run ahead of the tag keyword.
+        // c_parse_qualified_typedef_type above collects the same run and then
+        // discards it whenever the name it reaches is not a typedef, which is
+        // every tag: `_Atomic struct three` is four bytes where `struct three`
+        // is three, so an operand walk that drops the run folds a size the
+        // type-parse machine does not (#761).  `const struct S` and
+        // `volatile struct S` ride the same run and were dropped with it --
+        // the whole operand went unresolved, which fails the enum constant
+        // that spells it rather than merely mis-sizing it.
+        CType tag_qualifiers = {0};
+        bool has_tag_qualifier = false;
         u32 tag_index = c_parse_skip_attributes(preprocess, start, end);
+        while (tag_index < end && preprocess.tokens[tag_index].kind == C_TOKEN_IDENTIFIER &&
+               !c_parse_atomic_type_specifier_at(preprocess, tag_index, end) &&
+               c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[tag_index], &tag_qualifiers))
+        {
+            has_tag_qualifier = true;
+            tag_index = c_parse_skip_attributes(preprocess, tag_index + 1, end);
+        }
         String8 tag_word = tag_index < end && preprocess.tokens[tag_index].kind == C_TOKEN_IDENTIFIER
                                ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[tag_index])
                                : (String8){0};
@@ -8026,6 +8066,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CP
             {
                 type = c_parse_aggregate_lookup(result, tag_kind, c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_index]));
                 index = c_parse_skip_attributes(preprocess, name_index + 1, end);
+                type = has_tag_qualifier ? c_parse_add_qualified_type(result, type, tag_qualifiers) : type;
             }
         }
     }
@@ -8397,11 +8438,19 @@ BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, C
         u32 pointer_start = index;
         type = c_parse_pointer_chain(&operand_parse, preprocess, type, &index, end);
         CType qualifiers = {0};
+        bool has_qualifier = false;
         while (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
                c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[index], &qualifiers))
         {
+            has_qualifier = true;
             index += 1;
         }
+        // The run qualifies what the walk has built so far -- the base type
+        // when no `*` preceded it, the pointer otherwise.  `_Atomic` is the
+        // one qualifier that changes the layout the walk then asks for, so
+        // dropping the run folded `sizeof(struct three _Atomic)` to 3 where
+        // the same operand through the type-parse machine folds 4.
+        type = has_qualifier ? c_parse_add_qualified_type(&operand_parse, type, qualifiers) : type;
         if (index == pointer_start)
         {
             break;

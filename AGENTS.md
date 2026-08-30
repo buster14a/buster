@@ -3363,9 +3363,27 @@ on a commit you already know is incomplete tells nobody anything.
   three spellings that reach one: `c_ir_type_name_prefix` qualified only an
   aligned alias before, which was invisible while `_Atomic T` was laid out like
   T and became `sizeof` 3 written inline against 4 through a typedef the moment
-  it was not. The fourth spelling is not among them -- `_Atomic` written before
-  a `struct`, `union` or `enum` keyword never reaches the type at all, so it is
-  not atomic and this rule does not apply to it (#761). On the argument side the promotion moves nothing: a promoted
+  it was not. The fourth spelling is `_Atomic` written in
+  front of a `struct`, `union` or `enum` keyword, and it reaches the type
+  through the declaration-specifier run rather than through a resolver of its
+  own: `c_parse_atomic_type_specifier_at` is what tells the qualifier apart
+  from the `_Atomic ( T )` specifier, a `(` right after the keyword being the
+  only difference, and the prefix scans stop only at the specifier. Stopping
+  at both left the qualifier uncollected, so the aggregate branch handed back
+  the tag's own type and `_Atomic struct three` was `sizeof` 3 against the
+  other three spellings' 4 -- and, worse than a number, an assignment to such
+  an object was an ordinary aggregate copy where the program asked for an
+  atomic store (#761). `const struct S` and `volatile struct S` ride that same
+  run and always reached the type through it. Two scans ask the question: the
+  declaration-specifier run in `c_type_parse_scalar_step`, whose existing
+  completion applies whatever the run collected, and
+  `c_parse_machineless_base_type`, the operand walk the enum-constant
+  evaluator uses because the type-parse machine is already running the body it
+  is folding for -- that walk dropped the leading run before the tag and the
+  trailing run after it alike, which failed a `const struct S` operand outright
+  rather than mis-sizing it. Its `_Atomic ( T )` spelling still resolves
+  nothing, for a tag and for `int` equally (#784), and an atomic aggregate is
+  still not accepted as a **parameter** in any spelling (#786). On the argument side the promotion moves nothing: a promoted
   four-byte record is one INTEGER eightbyte where the three-byte one already
   was. Clang classifying every record that *contains* an atomic member as
   MEMORY is a divergence of its own, and one where GCC and this compiler agree

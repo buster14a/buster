@@ -62,6 +62,20 @@ typedef struct
 
 static holder global_holder;
 
+/* The fourth spelling of the type, `_Atomic` written in front of the tag
+   keyword (#761).  It needs a tag -- every shape above is a typedef of an
+   anonymous aggregate, which no leading spelling can name -- and it belongs
+   with the accesses rather than only with the sizes, because the access is
+   what the dropped qualifier cost: a type that never became atomic is stored
+   with an ordinary three-byte aggregate copy, which leaves the fourth byte
+   holding whatever was there instead of the zero the atomic store writes. */
+struct tagged_three
+{
+    signed char a, b, c;
+};
+
+static _Atomic struct tagged_three global_leading;
+
 static int bytes_are(const void* object, const unsigned char* expected, unsigned count)
 {
     const unsigned char* actual = (const unsigned char*)object;
@@ -156,6 +170,20 @@ static int union_round_trip(void)
     return bytes_are(&global_union, expected, sizeof(expected)) && read.bytes[0] == 0x11 && read.bytes[1] == 0x22 && read.bytes[2] == 0x33;
 }
 
+static int leading_round_trip(void)
+{
+    unsigned char expected[4] = {13, 14, 15, 0};
+    struct tagged_three value = {13, 14, 15};
+    /* The padding byte is dirtied first, so a store that writes only the three
+       value bytes fails here rather than passing on a zero that was already
+       there. */
+    ((unsigned char*)&global_leading)[3] = 0x5a;
+    global_leading = value;
+    struct tagged_three read = global_leading;
+    return bytes_are(&global_leading, expected, sizeof(expected)) && read.a == 13 && read.b == 14 && read.c == 15 && sizeof(global_leading) == 4 &&
+           _Alignof(_Atomic struct tagged_three) == 4 && sizeof(struct tagged_three) == 3;
+}
+
 static int sizes_are_promoted(void)
 {
     return sizeof(atomic_three) == 4 && _Alignof(atomic_three) == 4 && sizeof(global_one) == 1 && sizeof(global_two) == 2 &&
@@ -204,5 +232,5 @@ static int wide_round_trip(void)
 int main(void)
 {
     return !(sizes_are_promoted() && global_round_trip() && local_round_trip() && pointer_round_trip() && member_round_trip() && union_round_trip() &&
-             wide_round_trip());
+             leading_round_trip() && wide_round_trip());
 }
