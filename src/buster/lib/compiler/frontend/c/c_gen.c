@@ -35867,23 +35867,25 @@ BUSTER_C_INTERNAL CIrStaticCompoundLiteral c_ir_static_compound_literal_address(
         }
         else
         {
-            // `&(T){...}.member` reaches a subobject of the same static object,
-            // so it is the same symbol with the member's offset as the addend.
-            // A subscript step reaches one too and is not folded; the refusal
-            // names what is supported instead of claiming the program is wrong.
+            // `&(T){...}.member` and `&(T[]){...}[i]` both reach a subobject
+            // of the same static object, so each is that symbol with the
+            // subobject's offset as the addend.  The two steps compose in any
+            // order, and a subscript is as many tokens as its index
+            // expression, so the walk carries a cursor each arm advances
+            // itself rather than the fixed pair stride a member designator
+            // alone needed.
             s64 addend = 0;
             IrType* current = literal;
             bool walked = true;
-            for (u32 index = close + 1; walked && index < end; index += 2)
+            u32 index = close + 1;
+            while (walked && index < end)
             {
-                if (index + 1 >= end || !c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_DOT) ||
-                    preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER || (current->kind != IR_TYPE_STRUCT && current->kind != IR_TYPE_UNION))
-                {
-                    c_ir_constant_initializer_fail(builder, S8("only a member designator after a compound literal is folded in a static initializer"),
-                                                   index);
-                    walked = false;
-                }
-                else
+                bool member_step = index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_DOT) &&
+                                   preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER &&
+                                   (current->kind == IR_TYPE_STRUCT || current->kind == IR_TYPE_UNION);
+                bool subscript_step = !member_step && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET) &&
+                                      current->kind == IR_TYPE_ARRAY;
+                if (member_step)
                 {
                     String8 member = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]);
                     IrField* field = 0;
@@ -35908,8 +35910,58 @@ BUSTER_C_INTERNAL CIrStaticCompoundLiteral c_ir_static_compound_literal_address(
                     {
                         addend += (s64)field->offset;
                         current = member_type;
+                        index += 2;
                     }
                 }
+                else if (subscript_step)
+                {
+                    u32 subscript_close = c_ir_matching_delimiter(preprocess, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+                    IrType* element = ir_type_from_id(&program->types, current->element_type);
+                    u64 subscript = 0;
+                    bool folded = subscript_close < end && index + 1 < subscript_close && element && element->layout.resolved &&
+                                  c_ir_integer_constant_evaluate(builder->arena, builder, index + 1, subscript_close, &subscript);
+                    u64 stride = folded ? element->layout.size : 0;
+                    // The index arrives as a `u64` whatever the source spelled,
+                    // so a negative one is a value above every bound and the
+                    // single comparison refuses it along with an index past the
+                    // end.  One *past* the end is in range: C 6.5.6p8 gives
+                    // `&a[n]` an address.  Refusing is the answer rather than
+                    // letting the multiply below wrap into some other object.
+                    if (!folded || subscript > current->element_count)
+                    {
+                        c_ir_constant_initializer_fail(
+                            builder, S8("a subscript after a compound literal in a static initializer must be a constant index within the literal"), index);
+                        walked = false;
+                    }
+                    else if ((stride && subscript > (u64)INT64_MAX / stride) || addend > INT64_MAX - (s64)(subscript * stride))
+                    {
+                        c_ir_constant_initializer_fail(builder, S8("a compound literal subscript exceeds the range of a static relocation addend"), index);
+                        walked = false;
+                    }
+                    else
+                    {
+                        addend += (s64)(subscript * stride);
+                        current = element;
+                        index = subscript_close + 1;
+                    }
+                }
+                else
+                {
+                    c_ir_constant_initializer_fail(
+                        builder, S8("only a member designator or a constant subscript after a compound literal is folded in a static initializer"), index);
+                    walked = false;
+                }
+            }
+            // Without an `&` the address is an array decaying to its first
+            // element, which is the same rule the carve-out above asks of the
+            // literal -- asked again of what the walk ended at, because a
+            // subscript can leave it somewhere else.  `(int[]){1, 2}[1]` is an
+            // `int`, not an address, and folding it would put a relocation
+            // where a value belongs.
+            if (walked && !address_of && current->kind != IR_TYPE_ARRAY)
+            {
+                c_ir_constant_initializer_fail(builder, S8("a subscripted compound literal without an '&' is a value rather than an address"), close + 1);
+                walked = false;
             }
             u32 relocation_capacity = 0;
             if (walked && !c_ir_constant_initializer_relocation_capacity(builder, literal->layout.size, (u64)close + 1 - open, &relocation_capacity))

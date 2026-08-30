@@ -28,6 +28,16 @@ struct Outer
     const char *s;
 };
 
+struct Cells
+{
+    int cell[2];
+};
+
+struct Rows
+{
+    struct Cells rows[2];
+};
+
 struct Scenario
 {
     int want_cancel;
@@ -70,6 +80,26 @@ static char (*whole_array)[4] = &(char[4]){'a', 'b', 'c', 0};
 // A member designator after the literal reaches a subobject of the same
 // object, which is that symbol with the member's offset as the addend.
 static int *member_pointer = &(struct Inner){.x = 5, .y = 6}.y;
+
+// A subscript reaches one too, at the element's stride, and the two steps
+// compose in either order and to any depth. Every addend here was checked
+// against Clang's with `llvm-readelf -r`: the symbol is the literal object and
+// the addend is the offset of the subobject inside it.
+static int *element_pointer = &(int[]){21, 22, 23}[2];
+static int *member_element = &(struct Rows){{{31, 32}, {33, 34}}}.rows[1].cell[0];
+static struct Inner *element_member = &(struct Inner[]){{41, 42}, {43, 44}}[1];
+
+// A subscript whose index is a constant expression rather than a literal
+// number, and one that names the element just past the end -- an address C
+// 6.5.6p8 allows a program to form.
+static int *computed_element = &(int[]){51, 52, 53, 54}[1 + 2 * 1];
+static int *past_the_end = &(int[]){61, 62}[2];
+
+// Without an `&` the subscripted literal is still an address when what the
+// subscript lands on is itself an array: it decays to its first element the
+// way the whole literal does. `(int[]){...}[1]` beside it is an `int` instead,
+// and is refused rather than folded to an address.
+static int *decayed_row = (int[2][3]){{71, 72, 73}, {74, 75, 76}}[1];
 
 // A literal that itself holds a literal, a string and a designator.
 static struct Outer *nested = &(struct Outer){.in = {.y = 3}, .p = &(int){44}, .s = "deep"};
@@ -166,6 +196,36 @@ int main(void)
     if (*member_pointer != 6)
     {
         return 10;
+    }
+
+    // The subscript steps, read back through the pointer: a wrong stride, a
+    // wrong member offset or the two composed in the wrong order all still
+    // produce a program, and each of these lands on a distinct value.
+    if (*element_pointer != 23)
+    {
+        return 22;
+    }
+    if (*member_element != 33)
+    {
+        return 23;
+    }
+    if (element_member->x != 43 || element_member->y != 44)
+    {
+        return 24;
+    }
+    if (*computed_element != 54)
+    {
+        return 25;
+    }
+    // One past the end is an address rather than an object, so only the
+    // arithmetic is checked: stepping back from it names the last element.
+    if (past_the_end[-1] != 62)
+    {
+        return 26;
+    }
+    if (decayed_row[0] != 74 || decayed_row[2] != 76)
+    {
+        return 27;
     }
 
     if (nested->in.x != 0 || nested->in.y != 3)

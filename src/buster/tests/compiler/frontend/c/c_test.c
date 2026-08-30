@@ -2063,6 +2063,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
         S8("static struct StaticCompoundLiteralHolder static_compound_literal_value_holder ="
            " { (void *){0}, (void *){&static_compound_literal_target} };"),
         S8("void static_compound_literal_value_local(void) { static int local = (int){9}; (void)local; }"),
+        S8("struct StaticCompoundLiteralRows { struct StaticCompoundLiteral rows[2]; };"),
+        S8("static int *static_compound_literal_element = &(int[]){1, 2}[1];"),
+        S8("static int *static_compound_literal_row = &(struct StaticCompoundLiteralRows){{{1, 2}, {3, 4}}}.rows[1].y;"),
+        S8("static int *static_compound_literal_past = &(int[]){1, 2}[3];"),
+        S8("static int *static_compound_literal_subscript_value = (int[]){1, 2}[1];"),
     };
     String8 static_compound_literal_source = (String8){0};
     for (u32 line_index = 0; line_index < BUSTER_ARRAY_LENGTH(static_compound_literal_lines); line_index += 1)
@@ -2081,20 +2086,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
                       static_compound_literal_parse, target_native);
     BUSTER_TEST(arguments, static_compound_literal_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, static_compound_literal_parse.diagnostic_count == 0);
-    // Lines 3 through 6 fold, and so does every value form from line 11 down,
-    // so only the four refusals below are diagnosed.  A value form that
-    // stopped folding would raise this count rather than move a refusal: the
-    // shapes pinned below are the address form's, and none of them is a
-    // literal used for its value.
-    BUSTER_TEST(arguments, static_compound_literal_ir.diagnostic_count == 4);
+    // Lines 3 through 6 fold, so do the subscript forms on lines 19 and 20,
+    // and so does every value form from line 11 down, so only the six
+    // refusals below are diagnosed.  A value form that stopped folding would
+    // raise this count rather than move a refusal: the shapes pinned below
+    // are the address form's, and none of them is a literal used for its
+    // value.
+    BUSTER_TEST(arguments, static_compound_literal_ir.diagnostic_count == 6);
     // The line the refusal belongs to, the token inside it the refusal must
     // point at, and the words that must name the construct.
-    u32 static_compound_literal_refused_lines[] = {7, 8, 9, 10};
+    u32 static_compound_literal_refused_lines[] = {7, 8, 9, 10, 21, 22};
     String8 static_compound_literal_refused_tokens[] = {
         S8("static_compound_literal_call("),
         S8("static_compound_literal_call("),
         S8("z;"),
         S8("&(int){7}"),
+        S8("[3]"),
+        S8("[1];"),
     };
     String8 static_compound_literal_refused_messages[] = {
         S8("C IR lowering: cannot fold the call to 'static_compound_literal_call' in a static initializer"),
@@ -2102,6 +2110,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
         S8("C IR lowering: a compound literal of type"),
         S8("in function 'static_compound_literal_local': could not lower static initializer for local 'local': a compound literal inside a function "
            "body has automatic storage duration, so its address is not a constant expression"),
+        S8("C IR lowering: a subscript after a compound literal in a static initializer must be a constant index within the literal"),
+        S8("C IR lowering: a subscripted compound literal without an '&' is a value rather than an address"),
     };
     for (u32 refusal_index = 0; refusal_index < BUSTER_ARRAY_LENGTH(static_compound_literal_refused_lines); refusal_index += 1)
     {
@@ -2120,9 +2130,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
     }
     // The address form synthesizes an object and holds its symbol; the value
     // form folds the literal's bytes into the object being initialized and
-    // must synthesize nothing.  Four literals are addressed above -- the
-    // scalar, the aggregate, the member designator and the array that decays
-    // -- so a fifth symbol would mean a value form took the address path.
+    // must synthesize nothing.  Six literals are addressed above -- the
+    // scalar, the aggregate, the member designator, the array that decays,
+    // the subscript and the member-and-subscript chain -- so a seventh symbol
+    // would mean a value form took the address path, and a refused subscript
+    // that synthesized its object anyway would show up the same way.
     if (static_compound_literal_ir.program)
     {
         IrModule* module = &static_compound_literal_ir.program->modules[0];
@@ -2153,7 +2165,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_compound_literal(UnitTestArgume
                                            string_equal(referenced->link_name, S8("static_compound_literal_target")));
             }
         }
-        BUSTER_TEST(arguments, static_compound_literal_objects == 4);
+        BUSTER_TEST(arguments, static_compound_literal_objects == 6);
         BUSTER_TEST(arguments, static_compound_literal_values == 2);
     }
     scratch_end(static_compound_literal_temporary);
