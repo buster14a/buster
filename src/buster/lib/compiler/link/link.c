@@ -9120,7 +9120,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     u64 bind_offset = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        bind_offset = linkedit_file_offset + rebase_size;
+        // Every __LINKEDIT blob has to start on an eight-byte boundary: dyld's
+        // layout check refuses the whole image with "mis-aligned LINKEDIT
+        // content" otherwise, and the rebase stream ahead of this one is
+        // however many uleb128 bytes it happened to need.  The gap bytes are
+        // already zero, and each blob carries its own size, so the padding is
+        // read by nothing.
+        bind_offset = align_forward(linkedit_file_offset + rebase_size, 8);
     }
     u64 symbol_table_offset = 0;
     if (result.error == LINK_ERROR_NONE)

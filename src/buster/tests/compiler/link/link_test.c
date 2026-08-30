@@ -430,6 +430,98 @@ BUSTER_GLOBAL_LOCAL bool link_test_mach_section_find(ByteSlice image, String8 se
     return false;
 }
 
+// dyld will not read the fixups of an image whose __LINKEDIT blobs are
+// mis-aligned or out of order: `dyld_info` answers "mis-aligned LINKEDIT
+// content 'bind opcodes'" instead of the table, and a signing pass reads the
+// same layout.  Every blob but the string table starts on an eight-byte
+// boundary, each one lies inside the segment, and none overlaps its
+// neighbour.  Blobs carry their own sizes, so the gaps that alignment leaves
+// are read by nothing.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_mach_linkedit_layout(UnitTestArguments* arguments, ByteSlice image, bool expect_fixups, bool* bind_padded)
+{
+    UnitTestResult result = {0};
+    u64 linkedit_offset = 0;
+    u64 linkedit_size = 0;
+    u64 rebase_offset = 0;
+    u64 rebase_size = 0;
+    u64 bind_offset = 0;
+    u64 bind_size = 0;
+    u64 symbol_table_offset = 0;
+    u64 symbol_table_size = 0;
+    u64 string_table_offset = 0;
+    u64 string_table_size = 0;
+    u64 signature_offset = 0;
+    u64 signature_size = 0;
+    bool mach_header_valid = image.length >= 32 && link_read_u32(image.pointer, 0) == 0xfeedfacf;
+    BUSTER_TEST(arguments, mach_header_valid);
+    u32 command_count = mach_header_valid ? link_read_u32(image.pointer, 16) : 0;
+    u64 command = 32;
+    for (u32 command_index = 0; command_index < command_count && command + 8 <= image.length; command_index += 1)
+    {
+        u32 kind = link_read_u32(image.pointer, command);
+        u32 size = link_read_u32(image.pointer, command + 4);
+        if (size < 8 || size > image.length - command)
+        {
+            break;
+        }
+        if (kind == 0x19 && size >= 72 && memcmp(image.pointer + command + 8, "__LINKEDIT", 11) == 0)
+        {
+            linkedit_offset = link_read_u64(image.pointer, command + 40);
+            linkedit_size = link_read_u64(image.pointer, command + 48);
+        }
+        if (kind == 0x80000022 && size >= 24)
+        {
+            rebase_offset = link_read_u32(image.pointer, command + 8);
+            rebase_size = link_read_u32(image.pointer, command + 12);
+            bind_offset = link_read_u32(image.pointer, command + 16);
+            bind_size = link_read_u32(image.pointer, command + 20);
+        }
+        if (kind == 0x2 && size >= 24)
+        {
+            symbol_table_offset = link_read_u32(image.pointer, command + 8);
+            symbol_table_size = (u64)link_read_u32(image.pointer, command + 12) * 16;
+            string_table_offset = link_read_u32(image.pointer, command + 16);
+            string_table_size = link_read_u32(image.pointer, command + 20);
+        }
+        if (kind == 0x1d && size >= 16)
+        {
+            signature_offset = link_read_u32(image.pointer, command + 8);
+            signature_size = link_read_u32(image.pointer, command + 12);
+        }
+        command += size;
+    }
+    BUSTER_TEST(arguments, linkedit_offset && linkedit_size && signature_size);
+    // The blob whose start the rebase stream's length used to decide.
+    BUSTER_TEST(arguments, !expect_fixups || (rebase_size && bind_size));
+    BUSTER_TEST(arguments, rebase_offset % 8 == 0);
+    BUSTER_TEST(arguments, bind_offset % 8 == 0);
+    BUSTER_TEST(arguments, symbol_table_offset % 8 == 0);
+    BUSTER_TEST(arguments, signature_offset % 8 == 0);
+    u64 blob_offsets[] = {rebase_offset, bind_offset, symbol_table_offset, string_table_offset, signature_offset};
+    u64 blob_sizes[] = {rebase_size, bind_size, symbol_table_size, string_table_size, signature_size};
+    u64 linkedit_end = linkedit_offset + linkedit_size;
+    u64 blob_cursor = linkedit_offset;
+    bool blobs_contained = linkedit_offset && linkedit_size && linkedit_end <= image.length;
+    for (u32 blob_index = 0; blob_index < BUSTER_ARRAY_LENGTH(blob_offsets); blob_index += 1)
+    {
+        if (!blob_sizes[blob_index])
+        {
+            continue;
+        }
+        blobs_contained = blobs_contained && blob_offsets[blob_index] >= blob_cursor && blob_offsets[blob_index] <= linkedit_end &&
+                          blob_sizes[blob_index] <= linkedit_end - blob_offsets[blob_index];
+        blob_cursor = blob_offsets[blob_index] + blob_sizes[blob_index];
+    }
+    BUSTER_TEST(arguments, blobs_contained);
+    if (bind_padded)
+    {
+        // The shape the refusal came from: a rebase stream that does not end
+        // on a boundary, with bind opcodes behind it.
+        *bind_padded = rebase_size && bind_size && (rebase_offset + rebase_size) % 8 != 0;
+    }
+    return result;
+}
+
 #if BUSTER_LINUX || BUSTER_WINDOWS || BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL bool link_test_pe_section_find(ByteSlice image, String8 name, u32* virtual_address, u32* raw_offset)
 {
@@ -4677,6 +4769,86 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, mach_registrar_rebased && mach_constructor_rebased);
     }
+    // A single rebased pointer is five opcode bytes, so an image that also
+    // imports something puts its bind opcodes behind a rebase stream that
+    // ends mid-word.  That is the layout dyld refuses to read.
+    u32 mach_linkedit_instructions[] = {
+        UINT32_C(0x90000009), UINT32_C(0x91000129), UINT32_C(0xd65f03c0),
+    };
+    u64 mach_linkedit_pointer = 0;
+    ObjectSymbol mach_linkedit_symbols[] = {
+        {
+            .name = S8("main"),
+            .size = sizeof(mach_linkedit_instructions),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+        {
+            .name = S8("linkedit_import"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+    };
+    ObjectRelocation mach_linkedit_relocations[] = {
+        {
+            .offset = 0,
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGE21,
+        },
+        {
+            .offset = sizeof(u32),
+            .section = OBJECT_SECTION_TEXT,
+            .symbol = 1,
+            .kind = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
+        },
+        {
+            .offset = 0,
+            .section = OBJECT_SECTION_DATA,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_ABSOLUTE64,
+        },
+    };
+    ObjectFile mach_linkedit_object = link_test_object_make(
+        arguments->arena, aarch64_mach_object.target,
+        (ByteSlice){.pointer = (u8*)mach_linkedit_instructions, .length = sizeof(mach_linkedit_instructions)}, mach_linkedit_symbols,
+        BUSTER_ARRAY_LENGTH(mach_linkedit_symbols), mach_linkedit_relocations, BUSTER_ARRAY_LENGTH(mach_linkedit_relocations));
+    mach_linkedit_object.sections[OBJECT_SECTION_DATA].data = (ByteSlice){
+        .pointer = (u8*)&mach_linkedit_pointer,
+        .length = sizeof(mach_linkedit_pointer),
+    };
+    String8 mach_linkedit_output_path = link_test_temporary_executable_path(arguments->arena, S8("buster-native-aarch64-macho-linkedit-test"), S8(""));
+    NativeExecutableLinkResult mach_linkedit_executable = link_native_executable(arguments->arena, &mach_linkedit_object,
+                                                                                 (NativeExecutableLinkOptions){
+                                                                                     .output_path = mach_linkedit_output_path,
+                                                                                     .entry_symbol = S8("main"),
+                                                                                 });
+    BUSTER_TEST(arguments, mach_linkedit_executable.error == LINK_ERROR_NONE);
+    ByteSlice mach_linkedit_images[] = {
+        aarch64_mach_executable.executable,
+        aarch64_mach_data_executable.executable,
+        aarch64_mach_libc_executable.executable,
+        mach_initializer_executable.executable,
+        mach_linkedit_executable.executable,
+    };
+    bool mach_linkedit_fixups[] = {
+        false, false, false, true, true,
+    };
+    bool mach_linkedit_bind_padded = false;
+    for (u32 image_index = 0; image_index < BUSTER_ARRAY_LENGTH(mach_linkedit_images); image_index += 1)
+    {
+        bool image_bind_padded = false;
+        UnitTestResult mach_linkedit =
+            link_test_mach_linkedit_layout(arguments, mach_linkedit_images[image_index], mach_linkedit_fixups[image_index], &image_bind_padded);
+        mach_linkedit_bind_padded = mach_linkedit_bind_padded || image_bind_padded;
+        result.succeeded_test_count += mach_linkedit.succeeded_test_count;
+        result.test_count += mach_linkedit.test_count;
+    }
+    // Without an image whose rebase stream ends mid-word the alignment above
+    // would hold by accident, so the fixtures must keep producing one.
+    BUSTER_TEST(arguments, mach_linkedit_bind_padded);
     ObjectFile ios_mach_object = aarch64_mach_object;
     ios_mach_object.target.os = OPERATING_SYSTEM_IOS;
     String8 ios_mach_output_path = link_test_temporary_executable_path(arguments->arena, S8("buster-native-ios-macho-test"), S8(""));
@@ -4730,6 +4902,16 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                      .entry_symbol = S8("main"),
                                                                                  });
     BUSTER_TEST(arguments, x86_mach_libc_executable.error == LINK_ERROR_NONE);
+    ByteSlice x86_mach_linkedit_images[] = {
+        x86_mach_executable.executable,
+        x86_mach_libc_executable.executable,
+    };
+    for (u32 image_index = 0; image_index < BUSTER_ARRAY_LENGTH(x86_mach_linkedit_images); image_index += 1)
+    {
+        UnitTestResult x86_mach_linkedit = link_test_mach_linkedit_layout(arguments, x86_mach_linkedit_images[image_index], false, 0);
+        result.succeeded_test_count += x86_mach_linkedit.succeeded_test_count;
+        result.test_count += x86_mach_linkedit.test_count;
+    }
 #endif
 #if BUSTER_MACOS
     String8* native_mach_paths = 0;
@@ -4750,6 +4932,41 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     native_mach_paths = aarch64_native_mach_paths;
     native_mach_path_count = BUSTER_ARRAY_LENGTH(aarch64_native_mach_paths);
 #endif
+    // dyld_info runs dyld's own __LINKEDIT layout check before it prints
+    // anything, so it is the tool that refuses an image this writer laid out
+    // wrong -- "mis-aligned LINKEDIT content 'bind opcodes'" in place of the
+    // fixup table.  The image linked above is the one whose bind opcodes sit
+    // behind an odd-length rebase stream.  The tool comes with the command
+    // line tools any macOS host that can build this compiler already has, and
+    // a skipped check would look exactly like a passing one, so its absence
+    // is a failure rather than a skip.
+    String8 dyld_info_arguments[] = {
+        S8("dyld_info"),
+        S8("-fixups"),
+        mach_linkedit_output_path,
+    };
+    ProcessSpawnResult dyld_info = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(dyld_info_arguments), (SliceString8){0}, (SliceString8){0},
+                                                    (ProcessSpawnOptions){
+                                                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                        .use_process_environment = true,
+                                                    });
+    BUSTER_TEST(arguments, dyld_info.handle != 0);
+    if (dyld_info.handle)
+    {
+        ProcessWaitResult dyld_info_wait = os_process_wait_sync(arguments->arena, dyld_info);
+        String8 dyld_info_output = {
+            .pointer = (char8*)dyld_info_wait.streams[STANDARD_STREAM_OUTPUT].pointer,
+            .length = dyld_info_wait.streams[STANDARD_STREAM_OUTPUT].length,
+        };
+        String8 dyld_info_error = {
+            .pointer = (char8*)dyld_info_wait.streams[STANDARD_STREAM_ERROR].pointer,
+            .length = dyld_info_wait.streams[STANDARD_STREAM_ERROR].length,
+        };
+        BUSTER_TEST(arguments, string_first_sequence(dyld_info_output, S8("mis-aligned")) == BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(dyld_info_error, S8("mis-aligned")) == BUSTER_STRING_NO_MATCH);
+        // The table itself, which is what the refusal used to replace.
+        BUSTER_TEST(arguments, string_first_sequence(dyld_info_output, S8("__DATA")) != BUSTER_STRING_NO_MATCH);
+    }
     for (u32 path_index = 0; path_index < native_mach_path_count; path_index += 1)
     {
         String8 run_arguments[] = {

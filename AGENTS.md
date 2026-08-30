@@ -3168,6 +3168,23 @@ on a commit you already know is incomplete tells nobody anything.
   with initializers, naming the first one, rather than placing an array
   nothing will call; `link_initializer_plan_empty` is that refusal. The
   objects it produces are correct and link through the system linker.
+- **Every blob in a Mach-O image's `__LINKEDIT` starts on an eight-byte
+  boundary.** dyld runs a layout check over the whole segment before it reads
+  any of it, and a blob that starts mid-word makes it refuse the image with
+  `mis-aligned LINKEDIT content '<name>'` -- which `dyld_info` prints in place
+  of the fixup table while dyld itself still loads and runs the image, so
+  nothing but a tool, a signing pass or a notarisation pass ever notices
+  (issue 800). The rebase stream opens the segment at a page boundary, but its
+  length is one uleb128 run per rebased address, so `bind_offset`,
+  `symbol_table_offset` and the code signature are each aligned rather than
+  laid straight after the blob before them. Anything added to that chain --
+  export info, function starts, data in code -- has to be aligned the same
+  way; the gap bytes are already zero because the image buffer is memset
+  before anything is written, and every blob carries its own size, so the
+  padding is read by nothing. `link_test.c` walks LC_DYLD_INFO_ONLY, LC_SYMTAB
+  and LC_CODE_SIGNATURE of five images and requires one fixture to keep ending
+  its rebase stream mid-word, without which the alignment would hold by
+  accident; on macOS the same image goes through `dyld_info -fixups`.
 - **An undefined weak symbol resolves to address zero**, which is what a
   program asks for by declaring one: musl's startup takes the address of a
   weak hidden `_DYNAMIC` and reads zero to learn it is static. Which party
