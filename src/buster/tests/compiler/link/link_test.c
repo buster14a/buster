@@ -4599,6 +4599,28 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         .pointer = mach_terminator_entry,
         .length = sizeof(mach_terminator_entry),
     };
+    // A symbol defined *inside* the initializer array -- crtbegin's
+    // `__frame_dummy_init_array_entry` is the one that exists in the wild --
+    // and a pointer to it, which is how its address becomes observable at all:
+    // this writer's symbol table carries imports and nothing else.  The
+    // prepended slot has to move the symbol with the entry it names, so the
+    // pointer must come out holding the *second* slot.
+    u8 mach_initializer_pointer[8] = {0};
+    mach_initializer_sections[OBJECT_SECTION_DATA].data = (ByteSlice){
+        .pointer = mach_initializer_pointer,
+        .length = sizeof(mach_initializer_pointer),
+    };
+    ObjectSymbol* mach_initializer_symbols = arena_allocate(arguments->arena, ObjectSymbol, mach_initializer_object.symbol_count + 1);
+    memcpy(mach_initializer_symbols, mach_initializer_object.symbols, mach_initializer_object.symbol_count * sizeof(*mach_initializer_symbols));
+    mach_initializer_symbols[mach_initializer_object.symbol_count] = (ObjectSymbol){
+        .name = S8("array_entry"),
+        .size = OBJECT_INITIALIZER_ENTRY_SIZE,
+        .section = OBJECT_SECTION_INIT_ARRAY,
+        .kind = OBJECT_SYMBOL_DATA,
+    };
+    u32 mach_initializer_entry_symbol = mach_initializer_object.symbol_count;
+    mach_initializer_object.symbols = mach_initializer_symbols;
+    mach_initializer_object.symbol_count += 1;
     ObjectRelocation mach_initializer_relocations[] = {
         {
             .offset = 0,
@@ -4610,6 +4632,12 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
             .offset = 0,
             .section = OBJECT_SECTION_FINI_ARRAY,
             .symbol = 0,
+            .kind = OBJECT_RELOCATION_ABSOLUTE64,
+        },
+        {
+            .offset = 0,
+            .section = OBJECT_SECTION_DATA,
+            .symbol = mach_initializer_entry_symbol,
             .kind = OBJECT_RELOCATION_ABSOLUTE64,
         },
     };
@@ -4717,6 +4745,14 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, registrar != mach_initializer_target && registrar > UINT64_C(0x100000000) && registrar < mach_initializer_data_vm_address);
             BUSTER_TEST(arguments, registrar - UINT64_C(0x100000000) + 4 <= image.length &&
                                        link_read_u32(image.pointer, registrar - UINT64_C(0x100000000)) == 0xa9bf7bfdu);
+        }
+        // The pointer at the top of __data names the array entry, which the
+        // prepended slot moved eight bytes along with everything else in the
+        // section.  __data is the first section of the segment, so the
+        // segment's own file offset is where it starts.
+        if (mach_initializer_data_file_offset + 8 <= image.length)
+        {
+            BUSTER_TEST(arguments, link_read_u64(image.pointer, mach_initializer_data_file_offset) == UINT64_C(0x100000000) + mach_constructor_slot);
         }
         // The registrar has nothing to register with unless the image imports
         // `atexit`, which this program never named itself.
