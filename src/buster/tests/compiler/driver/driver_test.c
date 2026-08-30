@@ -235,11 +235,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_aarch64_tied_in
     {
         ByteSlice text = object->sections[OBJECT_SECTION_TEXT].data;
         // Object-reader/disassembly sequence for int numeric_tied_output with an empty asm body:
-        // ldr w9, [x28, #0x20]; str w9, [x28, #0x10].  The adjacent load/store
+        // ldr w9, [x28, #0x18]; str w9, [x28, #0x10].  The adjacent load/store
         // proves that the tied input reaches the reused output register and is
-        // then published through the output place.
+        // then published through the output place.  (The frame shrank when
+        // operand lowering stopped pre-loading the place it recovers, which
+        // is what moved the slot from #0x20.)
         static u8 const tied_sequence[] = {
-            0x89, 0x23, 0x40, 0xb9,
+            0x89, 0x1b, 0x40, 0xb9,
             0x89, 0x13, 0x00, 0xb9,
         };
         for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
@@ -3618,6 +3620,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_cast_deref_conditional.c"),
         S8("tests/basic_c_typeof_update_operand.c"),
         S8("tests/basic_c_spin_pause_builtin.c"),
+        S8("tests/basic_c_asm_memory_operand_no_load.c"),
     };
     for (u32 shape_index = 0; shape_index < BUSTER_ARRAY_LENGTH(c_cpython_shape_fixtures); shape_index += 1)
     {

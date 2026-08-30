@@ -31069,20 +31069,35 @@ BUSTER_C_INTERNAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* builde
             {
                 state->operands[state->operand_count] = value;
             }
-            else if (output_value->definition.value < builder->function->instruction_count)
+            else
             {
-                IrInstruction* definition = builder->function->instructions + output_value->definition.value;
-                if (definition->opcode != IR_OPCODE_LOAD || definition->operand_count != 1)
+                // The child lowered the operand as a value, emitting a load
+                // the template never asked for: an "m" operand names the
+                // place, and mimalloc's thread-slot read hands it
+                // `*((void**)0)` under a %fs override, so the pre-load
+                // faults on address zero before the assembly runs.  Un-emit
+                // a trailing load outright; a value defined earlier keeps
+                // its load, which another consumer already owns.
+                IrValueId place = c_ir_recover_place_from_value(builder, value);
+                if (place.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    state->operands[state->operand_count] = place;
+                }
+                else if (output_value->definition.value < builder->function->instruction_count)
+                {
+                    IrInstruction* definition = builder->function->instructions + output_value->definition.value;
+                    if (definition->opcode != IR_OPCODE_LOAD || definition->operand_count != 1)
+                    {
+                        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                        return;
+                    }
+                    state->operands[state->operand_count] = definition->operands[0];
+                }
+                else
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                state->operands[state->operand_count] = definition->operands[0];
-            }
-            else
-            {
-                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                return;
             }
             if (c_ir_bit_field_from_place(builder, state->operands[state->operand_count]))
             {
