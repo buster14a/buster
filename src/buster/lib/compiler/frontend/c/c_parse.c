@@ -1926,6 +1926,9 @@ BUSTER_C_SHARED CEntityId c_parse_lookup_entity_token(CParseResult* result, char
 BUSTER_C_SHARED CTypeId c_parse_add_type(CParseResult* result, CType type);
 
 BUSTER_C_INTERNAL CTypeId c_parse_unqualified_type(CParseResult* result, CTypeId type_id);
+BUSTER_C_INTERNAL CTypeId c_parse_adjust_parameter_type(CParseResult* result, CTypeId type);
+BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                          CTypeId return_type, u32 open, u32 end, u32* index_out);
 
 BUSTER_C_INTERNAL CTypeId c_parse_string_literal_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, u32 start, u32 end);
 
@@ -7661,6 +7664,7 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
         c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
         return;
     }
+    frame->type = c_parse_adjust_parameter_type(result, frame->type);
     result->parameters[result->parameter_count++] = (CParameter){
         .name = c_token_spelling(preprocess.spelling_base, frame->name),
         .location = c_preprocess_token_location(&preprocess, frame->name),
@@ -9546,6 +9550,13 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
     {
         name = preprocess.tokens[declarator_start];
         declarator_start += 1;
+        // The unparenthesized function-type spelling, `int func(int)`: the
+        // suffix derives the function type here, and the adjustment at the
+        // record below turns it into the pointer C11 6.7.6.3p8 asks for.
+        if (declarator_start < end && c_token_is_punctuator(&preprocess.tokens[declarator_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            type = c_parse_local_function_suffix(machine, result, preprocess, type, declarator_start, end, &declarator_start);
+        }
     }
     declarator_start = c_parse_skip_attributes(preprocess, declarator_start, end);
     type = c_parse_array_suffixes(result, preprocess, type, &declarator_start, end);
@@ -9562,6 +9573,7 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
     {
         c_parse_add_noreturn_function_type(result, noreturn_function);
     }
+    type = c_parse_adjust_parameter_type(result, type);
     BUSTER_CHECK(result->parameter_count < result->parameter_capacity);
     result->parameters[result->parameter_count++] = (CParameter){
         .name = c_token_spelling(preprocess.spelling_base, name),
@@ -11688,6 +11700,27 @@ BUSTER_C_INTERNAL void c_parse_bind_auto_initializer_identifiers(Arena* arena, C
             c_parse_bind_identifier(arena, result, preprocess, scope, use_index);
         }
     }
+}
+
+
+// C11 6.7.6.3p8: a parameter declared with function type -- either spelling,
+// `int func(int)` or `int (func)(int)` -- adjusts to a pointer to that
+// function.  CPython's Parser/pegen.c passes its grammar rules this way:
+// `RES_TYPE (func)(Parser *)` in the LOOKAHEAD helpers.  Without the
+// adjustment the parameter entity carried the bare function type and every
+// call through it was refused.
+BUSTER_C_INTERNAL CTypeId c_parse_adjust_parameter_type(CParseResult* result, CTypeId type)
+{
+    if (type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION)
+    {
+        type = c_parse_add_type(result, (CType){
+                                            .element_type = type,
+                                            .return_type = C_TYPE_ID_INVALID,
+                                            .array_bound = C_ARRAY_BOUND_INVALID,
+                                            .kind = C_TYPE_POINTER,
+                                        });
+    }
+    return type;
 }
 
 BUSTER_C_INTERNAL CTypeId c_parse_local_function_suffix(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
