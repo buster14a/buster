@@ -209,12 +209,14 @@ struct ObjectFile
     // it, with IR_INITIALIZER_PRIORITY_NONE for an attribute that named none.
     // This is what carries the priority past a model that has one section per
     // kind, in both directions: object_from_canonical_codegen_module records
-    // what the attribute named and the ELF writer splits the array back into
-    // the `.init_array.NNNNN` sections `ld` orders by
-    // (object_elf_split_initializer_priorities), while object_read_elf64
-    // recovers it from those same names so the linker can order one program's
-    // whole array (link_initializer_arrays_order).  A producer that has no
-    // priorities to state -- the COFF and Mach-O readers, a hand-built file --
+    // what the attribute named and the ELF and COFF writers split the array
+    // back into the sections their linkers order by --
+    // `.init_array.NNNNN` and `.CRT$XCA00101`, see
+    // object_split_initializer_priorities -- while object_read_elf64 and
+    // object_read_coff recover it from those same names so the linker can
+    // order one program's whole array (link_initializer_arrays_order).  A
+    // producer that has no priorities to state -- the Mach-O reader, whose
+    // format has no such convention (issue 795), or a hand-built file --
     // leaves these null, which reads as every entry unprioritized and keeps
     // the arrays in the order they arrived.
     u32* initializer_priorities[2];

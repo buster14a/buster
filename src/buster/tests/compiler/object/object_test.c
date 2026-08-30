@@ -654,13 +654,14 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, elf_roundtrip.sections[OBJECT_SECTION_ZERO].data.length == 0);
         BUSTER_TEST(arguments, elf_roundtrip.sections[OBJECT_SECTION_ZERO].virtual_size == BUSTER_MB(1));
     }
-    // A `constructor(N)` priority survives a write and a read (issue 789).
-    // The writer spells it in the section name -- one `.init_array.NNNNN` per
-    // group -- and this model has one section per kind, so the reader has to
-    // put the name back into the per-entry priorities: they are what the
-    // linker orders a whole program's constructors by, and it is also the one
-    // place an external producer's spelling reaches this compiler.  The
-    // entries come back merged in `ld`'s order, so the priorities do too.
+    // A `constructor(N)` priority survives a write and a read (issues 789 and
+    // 795).  The writer spells it in the section name -- one section per
+    // group, in the convention that format's linker orders by -- and this
+    // model has one section per kind, so the reader has to put the name back
+    // into the per-entry priorities: they are what the linker orders a whole
+    // program's constructors by, and it is also the one place an external
+    // producer's spelling reaches this compiler.  The entries come back merged
+    // in that order, so the priorities do too.
     {
         ObjectSection* initializer_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
         for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
@@ -673,11 +674,17 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         }
         initializer_sections[OBJECT_SECTION_TEXT].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_text);
         u8 initializer_entries[3 * OBJECT_INITIALIZER_ENTRY_SIZE] = {0};
+        u8 terminator_entries[2 * OBJECT_INITIALIZER_ENTRY_SIZE] = {0};
         initializer_sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(initializer_entries);
+        // The terminator array carries a priority the same way, in the group
+        // one letter along -- `.fini_array.NNNNN` and `.CRT$XTA00101` -- so it
+        // is here to keep that half of every spelling covered.
+        initializer_sections[OBJECT_SECTION_FINI_ARRAY].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(terminator_entries);
         // Written in the order the converter sorts them into, which is the
         // shape the writer's split expects: ascending, the run that named no
         // priority last.
         u32 written_priorities[] = {101, 150, IR_INITIALIZER_PRIORITY_NONE};
+        u32 written_terminator_priorities[] = {101, IR_INITIALIZER_PRIORITY_NONE};
         ObjectSymbol initializer_symbols[] = {
             {.name = S8("initializer_earliest"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
             {.name = S8("initializer_latest"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
@@ -687,6 +694,8 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             {.section = OBJECT_SECTION_INIT_ARRAY, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
             {.offset = OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
             {.offset = 2 * OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.section = OBJECT_SECTION_FINI_ARRAY, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_FINI_ARRAY, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
         };
         ObjectFile initializer_object = {
             .sections = initializer_sections,
@@ -696,24 +705,30 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             .section_count = OBJECT_SECTION_COUNT,
             .symbol_count = BUSTER_ARRAY_LENGTH(initializer_symbols),
             .relocation_count = BUSTER_ARRAY_LENGTH(initializer_relocations),
-            .initializer_priorities = {written_priorities, 0},
+            .initializer_priorities = {written_priorities, written_terminator_priorities},
         };
         ObjectArtifact initializer_elf = object_write(arguments->arena, &initializer_object, OBJECT_FORMAT_ELF64);
         BUSTER_TEST(arguments, initializer_elf.error == OBJECT_ERROR_NONE);
         BUSTER_TEST(arguments, object_bytes_contain(initializer_elf.bytes, S8(".init_array.00101")));
+        BUSTER_TEST(arguments, object_bytes_contain(initializer_elf.bytes, S8(".fini_array.00101")));
         ObjectFile initializer_roundtrip = object_read(arguments->arena, initializer_elf.bytes, initializer_object.target);
         BUSTER_TEST(arguments, initializer_roundtrip.error == OBJECT_ERROR_NONE);
         bool initializer_read_valid = initializer_roundtrip.error == OBJECT_ERROR_NONE && initializer_roundtrip.initializer_priorities[0] &&
-                                      initializer_roundtrip.sections[OBJECT_SECTION_INIT_ARRAY].data.length == sizeof(initializer_entries);
+                                      initializer_roundtrip.initializer_priorities[1] &&
+                                      initializer_roundtrip.sections[OBJECT_SECTION_INIT_ARRAY].data.length == sizeof(initializer_entries) &&
+                                      initializer_roundtrip.sections[OBJECT_SECTION_FINI_ARRAY].data.length == sizeof(terminator_entries);
         BUSTER_TEST(arguments, initializer_read_valid);
-        // The section that named no priority carries none back, which is
-        // where `ld` puts it: after every suffixed one.
-        BUSTER_TEST(arguments, !initializer_roundtrip.initializer_priorities[1]);
         if (initializer_read_valid)
         {
             for (u64 entry = 0; entry < BUSTER_ARRAY_LENGTH(written_priorities); entry += 1)
             {
                 BUSTER_TEST(arguments, initializer_roundtrip.initializer_priorities[0][entry] == written_priorities[entry]);
+            }
+            // The entry that named no priority keeps the unsuffixed section
+            // and comes back last, which is where `ld` puts it.
+            for (u64 entry = 0; entry < BUSTER_ARRAY_LENGTH(written_terminator_priorities); entry += 1)
+            {
+                BUSTER_TEST(arguments, initializer_roundtrip.initializer_priorities[1][entry] == written_terminator_priorities[entry]);
             }
             String8 expected_initializer_names[] = {
                 S8("initializer_earliest"), S8("initializer_latest"), S8("initializer_plain"),
@@ -733,18 +748,30 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             }
             BUSTER_TEST(arguments, initializer_entries_found == BUSTER_ARRAY_LENGTH(expected_initializer_names));
         }
-        // The other two formats have nowhere to put a priority -- COFF has no
-        // convention of its own for these arrays and a Mach-O section name has
-        // no room past `__mod_init_func` -- but they must still come back as
-        // the arrays they were written as.  Read as data, the entries reach no
-        // initializer plan at all and a program linked from an object runs no
-        // constructor, which is what this pins.
+        // The other two formats must come back as the arrays they were
+        // written as: read as data, the entries reach no initializer plan at
+        // all and a program linked from an object runs no constructor.  COFF
+        // states the priority as well, in the `.CRT$XC*` group MSVC's linker
+        // orders lexicographically and Clang emits into; a Mach-O section name
+        // has no room past `__mod_init_func` and the platform has no other
+        // carrier, so that format states none and its priorities come back
+        // null -- every entry unprioritized, which leaves the arrays in link
+        // order (issue 795).
         ObjectFormat initializer_formats[] = {OBJECT_FORMAT_COFF, OBJECT_FORMAT_MACH_O64};
         OperatingSystem initializer_systems[] = {OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
         for (u64 format_index = 0; format_index < BUSTER_ARRAY_LENGTH(initializer_formats); format_index += 1)
         {
+            bool states_priorities = initializer_formats[format_index] == OBJECT_FORMAT_COFF;
             ObjectArtifact initializer_artifact = object_write(arguments->arena, &initializer_object, initializer_formats[format_index]);
             BUSTER_TEST(arguments, initializer_artifact.error == OBJECT_ERROR_NONE);
+            // The group names, which are the whole carrier: `A` sorts before
+            // `U`, so `link.exe` and `lld-link` put the two prioritized groups
+            // ahead of what named none exactly as `ld` does.
+            BUSTER_TEST(arguments, object_bytes_contain(initializer_artifact.bytes, S8(".CRT$XCA00101")) == states_priorities);
+            BUSTER_TEST(arguments, object_bytes_contain(initializer_artifact.bytes, S8(".CRT$XCA00150")) == states_priorities);
+            BUSTER_TEST(arguments, object_bytes_contain(initializer_artifact.bytes, S8(".CRT$XCU")) == states_priorities);
+            BUSTER_TEST(arguments, object_bytes_contain(initializer_artifact.bytes, S8(".CRT$XTA00101")) == states_priorities);
+            BUSTER_TEST(arguments, object_bytes_contain(initializer_artifact.bytes, S8(".CRT$XTX")) == states_priorities);
             ObjectFile initializer_read = object_read(arguments->arena, initializer_artifact.bytes,
                                                       (Target){
                                                           .cpu_arch = CPU_ARCH_X86_64,
@@ -757,12 +784,26 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             }
             BUSTER_TEST(arguments, initializer_read.sections[OBJECT_SECTION_INIT_ARRAY].data.length == sizeof(initializer_entries));
             BUSTER_TEST(arguments, initializer_read.sections[OBJECT_SECTION_INIT_ARRAY].kind == OBJECT_SECTION_INIT_ARRAY);
+            BUSTER_TEST(arguments, initializer_read.sections[OBJECT_SECTION_FINI_ARRAY].data.length == sizeof(terminator_entries));
             u32 initializer_read_found = 0;
+            u32 terminator_read_found = 0;
             for (u32 relocation_index = 0; relocation_index < initializer_read.relocation_count; relocation_index += 1)
             {
                 initializer_read_found += initializer_read.relocations[relocation_index].section == OBJECT_SECTION_INIT_ARRAY ? 1 : 0;
+                terminator_read_found += initializer_read.relocations[relocation_index].section == OBJECT_SECTION_FINI_ARRAY ? 1 : 0;
             }
-            BUSTER_TEST(arguments, initializer_read_found == BUSTER_ARRAY_LENGTH(initializer_relocations));
+            BUSTER_TEST(arguments, initializer_read_found == BUSTER_ARRAY_LENGTH(written_priorities));
+            BUSTER_TEST(arguments, terminator_read_found == BUSTER_ARRAY_LENGTH(written_terminator_priorities));
+            BUSTER_TEST(arguments, (initializer_read.initializer_priorities[0] != 0) == states_priorities);
+            BUSTER_TEST(arguments, (initializer_read.initializer_priorities[1] != 0) == states_priorities);
+            for (u64 entry = 0; states_priorities && entry < BUSTER_ARRAY_LENGTH(written_priorities); entry += 1)
+            {
+                BUSTER_TEST(arguments, initializer_read.initializer_priorities[0][entry] == written_priorities[entry]);
+            }
+            for (u64 entry = 0; states_priorities && entry < BUSTER_ARRAY_LENGTH(written_terminator_priorities); entry += 1)
+            {
+                BUSTER_TEST(arguments, initializer_read.initializer_priorities[1][entry] == written_terminator_priorities[entry]);
+            }
         }
     }
     bool elf_relocation_valid = elf_roundtrip.relocations && elf_roundtrip.relocation_count && elf_roundtrip.symbols &&

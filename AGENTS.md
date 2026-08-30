@@ -3049,23 +3049,26 @@ on a commit you already know is incomplete tells nobody anything.
   pointer-wide slot per initializer with an `ABSOLUTE64` relocation against
   the function. ELF writes them `SHT_INIT_ARRAY`/`SHT_FINI_ARRAY`, Mach-O
   `__DATA,__mod_init_func`/`__mod_term_func` with the `S_MOD_*_FUNC_POINTERS`
-  types, and COFF keeps this model's neutral names the way `.rodata` and
-  `.tdata` already do. **Priority orders the whole program**, and the priority
-  travels beside the array rather than in it. `ld` gets GNU's order off the
-  section name -- every `.init_array.NNNNN` ahead of the unsuffixed
-  `.init_array`, ascending -- and this model has one section per kind, so a
-  translation unit's whole array is one section, its entries sorted into that
-  order by `object_from_canonical_codegen_module` (ascending priority, an
-  attribute that named none last, equal priorities in declaration order) and
-  each entry's priority recorded beside it in
+  types, and COFF the `.CRT$XC*`/`.CRT$XT*` group MSVC's C runtime walks.
+  **Priority orders the whole program**, and the priority travels beside the
+  array rather than in it. A linker gets that order off the *section name* --
+  `ld` places every `.init_array.NNNNN` ahead of the unsuffixed
+  `.init_array`, ascending, and a PE linker concatenates a `$` group in
+  lexicographic order of the whole name -- and this model has one section per
+  kind, so a translation unit's whole array is one section, its entries sorted
+  into that order by `object_from_canonical_codegen_module` (ascending
+  priority, an attribute that named none last, equal priorities in declaration
+  order) and each entry's priority recorded beside it in
   `ObjectFile.initializer_priorities`, one `u32` per slot. Three places carry
   that array, and they are the same fact from different sides.
-  `object_write_elf64` splits it back into one `.init_array.NNNNN` section per
-  priority group, so an external linker orders two Buster objects exactly as
-  it orders Clang's (issue #782). `object_read_elf64` recovers it from those
-  section names -- the padded `.init_array.00101` written here and the
-  unpadded `.init_array.101` Clang writes are both read -- and merges the
-  sections of a kind in `ld`'s order rather than in section header order. And
+  `object_split_initializer_priorities` splits it back into one section per
+  priority group for the ELF and COFF writers, so an external linker orders
+  two Buster objects exactly as it orders Clang's (issue #782).
+  `object_read_elf64` and `object_read_coff` recover it from those section
+  names -- the padded `.init_array.00101` written here and the unpadded
+  `.init_array.101` Clang writes are both read -- and
+  `object_reader_merge_initializer_arrays` merges the sections of a kind in
+  that order rather than in section header order. And
   `link_initializer_arrays_order` sorts the *merged* array, stably, after
   `link_objects` has concatenated its inputs: without it a `constructor(101)`
   in the second object ran after an unprioritized constructor in the first,
@@ -3074,24 +3077,37 @@ on a commit you already know is incomplete tells nobody anything.
   with the entry, and it runs on the merged object rather than in
   `link_initializer_plan_build` so the Mach-O writer -- which keeps the
   initializer array for dyld to walk instead of reading a plan for it -- gets
-  the same order the entry-stub writers do. An input that states no priorities (the COFF and
-  Mach-O readers, the assembler's objects) has every entry unprioritized,
+  the same order the entry-stub writers do. An input that states no priorities
+  (the Mach-O reader, the assembler's objects) has every entry unprioritized,
   which leaves it in link order.
-- **A relocatable object keeps its arrays in all three formats, but only ELF
-  can state a priority.** The COFF reader classifies them by this model's
-  neutral name (`.init_array`; COFF has no section type for them, and MSVC's
-  own `.CRT$XC*` convention is written and read by nothing here) and the
-  Mach-O reader by the `S_MOD_INIT_FUNC_POINTERS`/`S_MOD_TERM_FUNC_POINTERS`
-  types dyld dispatches on. Without those two the arrays came back as `.data`
-  and read-only data, and a program linked from an object ran **no
-  constructor at all** on Windows and macOS -- the entries reached no
-  initializer plan, and nothing diagnosed it. Priority is the part that does
-  not survive: COFF's section name would have to take ELF's suffix as a
-  private convention, and a Mach-O section name has no room past
-  `__mod_init_func`, so on those two formats `ide cc a.o b.o` concatenates in
-  link order. That is issue #795, and it is why `driver_test`'s
-  cross-translation-unit object route is ELF-only while its source route --
-  where the priorities never touch a format -- runs on every host.
+- **A relocatable object keeps its arrays in all three formats; ELF and COFF
+  can also state a priority, Mach-O cannot.** The COFF spelling is
+  `.CRT$XCA00101` for a group, `.CRT$XCU` for what named none, and
+  `.CRT$XTA00101`/`.CRT$XTX` for the terminators, which is what Clang emits
+  and what `link.exe` and `lld-link` order lexicographically -- `A` sorts
+  before `U`, so it says exactly what `ld`'s suffix says. Taking the
+  platform's convention rather than a private `.init_array.NNNNN` suffix is
+  what makes an object written here order correctly under a PE linker as well,
+  and what lets `object_read_coff` recover the priorities out of an object
+  Clang wrote; `object_coff_initializer_section_kind` reads the group back,
+  and only that `A`-plus-five-digits spelling is a priority (`.CRT$XCU` and
+  the runtime's marker sections are unprioritized, and a marker's null slot is
+  dropped because no relocation fills it). The Mach-O reader classifies by the
+  `S_MOD_INIT_FUNC_POINTERS`/`S_MOD_TERM_FUNC_POINTERS` section types, the way
+  `SHT_INIT_ARRAY` names `.init_array` in ELF. Without those the arrays came
+  back as `.data` and read-only data, and a program linked from an object ran
+  **no constructor at all** on Windows and macOS -- the entries reached no
+  initializer plan, and nothing diagnosed it. **Mach-O states no priority and
+  is not going to**: `__mod_init_func` is 15 of a section name's 16 bytes, and
+  the platform has no carrier elsewhere -- Clang emits one unsuffixed
+  `__mod_init_func` per translation unit with the priorities sorted only
+  inside it, so ld64 orders two objects by link order. A private carrier there
+  would make `ide cc a.o b.o` disagree with `clang a.o b.o` on the same
+  objects, so `ide cc a.o b.o` concatenates in link order on macOS, as the
+  platform toolchain does (issue #795). That is why `driver_test`'s
+  cross-translation-unit object route is gated off Apple hosts alone, while
+  its source route -- where the priorities never touch a format -- runs on
+  every host.
 - **An image this linker produces calls its initializers from the entry
   stub.** There is no libc startup object in it -- the stub *is* the startup,
   which is why `link_x86_build_elf_entry_stub` exists at all -- so nothing

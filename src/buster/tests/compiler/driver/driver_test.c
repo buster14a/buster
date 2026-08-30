@@ -6156,15 +6156,16 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, os_process_wait_sync(order_arena, order_source_spawn).result == PROCESS_RESULT_SUCCESS);
             }
         }
-#if !BUSTER_WINDOWS && !BUSTER_APPLE && !BUSTER_IOS
+#if !BUSTER_APPLE && !BUSTER_IOS
         // The same two units through `-c` and a second invocation, where the
-        // priorities have to survive a relocatable object.  ELF is the only
-        // format that can state them -- `ld`'s own convention, one
-        // `.init_array.NNNNN` section per group -- so this half is ELF hosts
-        // only: COFF has no such convention, and a Mach-O section name has no
-        // room for a suffix past `__mod_init_func`.  Both formats keep the
-        // arrays across a round trip, so what those hosts lose is the
-        // cross-object *priority*, not the constructors.
+        // priorities have to survive a relocatable object.  Two of the three
+        // formats can state one, each in its own linker's convention -- ELF as
+        // `.init_array.NNNNN`, COFF in the lexicographically ordered
+        // `.CRT$XC*` group -- so this half runs everywhere but Mach-O, whose
+        // section name has no room past `__mod_init_func` and whose platform
+        // has no other carrier (issue 795).  That format still keeps the
+        // arrays across a round trip, so what it loses is the cross-object
+        // *priority*, not the constructors.
         String8 order_first_object = buster_test_temporary_path(order_arena, S8("buster-c-constructor-order-first"), S8(".o"));
         String8 order_second_object = buster_test_temporary_path(order_arena, S8("buster-c-constructor-order-second"), S8(".o"));
         String8 order_first_command[] = {
