@@ -9642,6 +9642,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             S8("tests/basic_c_asm_sse_input.c"),
             S8("tests/basic_c_asm_x87_output.c"),
             S8("tests/basic_c_asm_x87_clobber.c"),
+            S8("tests/basic_c_asm_x87_control_word.c"),
         };
         String8 sse_operand_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
         for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(sse_operand_fixtures); fixture_index += 1)

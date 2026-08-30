@@ -226,6 +226,14 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // that register literally because the same asm pins it with an `a` output.
     S8_INITIALIZER("fsqrt"), S8_INITIALIZER("frndint"), S8_INITIALIZER("fabs"), S8_INITIALIZER("fprem"),
     S8_INITIALIZER("fprem1"), S8_INITIALIZER("fnstsw"), S8_INITIALIZER("fistpll"), S8_INITIALIZER("fistpq"),
+    // The x87 control-word pair, which touches only the control word and its
+    // one memory operand -- no stack position, no general register -- so it
+    // needs nothing beyond the `m` machinery FNSTSW already exercises.  It is
+    // how a program changes x87 precision or rounding: CPython's configure
+    // probes exactly `fnstcw %0` / `fldcw %0` for HAVE_GCC_ASM_FOR_X87, and
+    // the FSTCW spelling is the wait form the assembler already folds onto
+    // FNSTCW.
+    S8_INITIALIZER("fnstcw"), S8_INITIALIZER("fstcw"), S8_INITIALIZER("fldcw"),
 };
 
 // The registers a template may name literally. The rule the ban exists for is
