@@ -3623,6 +3623,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_asm_memory_operand_no_load.c"),
         S8("tests/basic_c_static_pointer_subtraction.c"),
         S8("tests/basic_c_static_local_member_address.c"),
+        S8("tests/basic_c_tied_operand_reused_source.c"),
     };
     for (u32 shape_index = 0; shape_index < BUSTER_ARRAY_LENGTH(c_cpython_shape_fixtures); shape_index += 1)
     {

@@ -1782,6 +1782,22 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     {
                         u32 source_virtual = machine_ref_payload(source_ref);
                         tied_source_dies = machine_fast_source_dies_here(&state, source_virtual);
+                        // Dying at this row is not dead for the transfer when
+                        // another use slot of the same row reads the same
+                        // vreg: releasing the register would send that read
+                        // to a home slot nothing ever stored.  CPython's
+                        // insert_to_usedpool indexes `usedpools[size + size]`
+                        // -- both add operands are one promoted local -- and
+                        // the reload of the discarded value walked the
+                        // allocator into unmapped memory.
+                        for (u32 other_slot = 0; tied_source_dies && other_slot < info->operand_count; other_slot += 1)
+                        {
+                            if (other_slot != tied_source && (virtual_slots & (1u << other_slot)) && (use_slots & (1u << other_slot)) &&
+                                machine_ref_payload(instruction->operands[other_slot]) == source_virtual)
+                            {
+                                tied_source_dies = false;
+                            }
+                        }
                         u32 source_location = state.virtual_register_locations[source_virtual];
                         if (tied_target == UINT32_MAX && source_location != UINT32_MAX && tied_source_dies)
                         {
