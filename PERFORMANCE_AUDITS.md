@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-08-30T182357Z`](docs/performance-audits/2026-08-30T182357Z.md) — the translation phase takes the chunk kernel and the window emitter's line metrics become one subtraction; the cursor residue and checkpoint-row stores are measured negative and closed
 - [`2026-08-24T174159Z`](docs/performance-audits/2026-08-24T174159Z.md) — #539 position-index tile classification A/B and fixed-point audit
 - [`2026-08-24T171245Z`](docs/performance-audits/2026-08-24T171245Z.md) — #538 token-shape sidecar A/B and fixed-point audit
 - [`2026-08-24T131758Z`](docs/performance-audits/2026-08-24T131758Z.md) — same-arena single-chunk machine streams alias their live payload instead of flattening
