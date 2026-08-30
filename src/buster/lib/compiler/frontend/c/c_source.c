@@ -6008,9 +6008,54 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
         }
     }
     u64 replacement_start = *token_index;
-    while (*token_index < lex.token_count && lex.tokens[*token_index].kind != C_TOKEN_NEWLINE && lex.tokens[*token_index].kind != C_TOKEN_END_OF_FILE)
+    // A block comment is one space, so a newline inside one does not end the
+    // definition: CPython's FutureObj_HEAD writes a comment spanning lines
+    // between its spliced ones, and the bit-fields after it vanished from
+    // the struct.  The comment leaves no token, so the gap bytes between
+    // tokens carry the state -- an unclosed /* before a newline token marks
+    // it interior, and the interior newlines are dropped from the recorded
+    // replacement so expansion and spacing read past them.
     {
-        *token_index += 1;
+        bool comment_open = false;
+        u64 gap_start = replacement_start ? (u64)lex.tokens[replacement_start - 1].offset +
+                                                c_token_length(lex.spelling_base, lex.tokens[replacement_start - 1])
+                                          : 0;
+        while (*token_index < lex.token_count && lex.tokens[*token_index].kind != C_TOKEN_END_OF_FILE)
+        {
+            CToken current = lex.tokens[*token_index];
+            bool line_comment = false;
+            for (u64 byte_index = gap_start; byte_index < current.offset; byte_index += 1)
+            {
+                char8 byte = lex.spelling_base[byte_index];
+                if (comment_open)
+                {
+                    if (byte == '*' && byte_index + 1 < current.offset && lex.spelling_base[byte_index + 1] == '/')
+                    {
+                        comment_open = false;
+                        byte_index += 1;
+                    }
+                }
+                else if (!line_comment && byte == '/' && byte_index + 1 < current.offset)
+                {
+                    if (lex.spelling_base[byte_index + 1] == '*')
+                    {
+                        comment_open = true;
+                        byte_index += 1;
+                    }
+                    else if (lex.spelling_base[byte_index + 1] == '/')
+                    {
+                        line_comment = true;
+                        byte_index += 1;
+                    }
+                }
+            }
+            if (current.kind == C_TOKEN_NEWLINE && !comment_open)
+            {
+                break;
+            }
+            gap_start = (u64)current.offset + c_token_length(lex.spelling_base, current);
+            *token_index += 1;
+        }
     }
     if (!valid)
     {
@@ -6018,11 +6063,16 @@ BUSTER_C_INTERNAL void c_preprocess_define_directive(Arena* arena, CSymbolTable*
                                      S8("invalid function-like macro parameter list"));
         return;
     }
-    u64 replacement_count = *token_index - replacement_start;
-    CToken* replacement = arena_allocate(arena, CToken, replacement_count);
-    for (u64 index = 0; index < replacement_count; index += 1)
+    u64 replacement_capacity = *token_index - replacement_start;
+    CToken* replacement = arena_allocate(arena, CToken, replacement_capacity);
+    u64 replacement_count = 0;
+    for (u64 index = 0; index < replacement_capacity; index += 1)
     {
-        replacement[index] = lex.tokens[replacement_start + index];
+        CToken candidate = lex.tokens[replacement_start + index];
+        if (candidate.kind != C_TOKEN_NEWLINE)
+        {
+            replacement[replacement_count++] = candidate;
+        }
     }
     CMacro* macro = c_macro_define(arena, symbols, first_macro, last_macro, c_token_spelling(lex.spelling_base, name), replacement, (u32)replacement_count,
                                    parameters, parameter_count, function_like, variadic);

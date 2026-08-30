@@ -2004,13 +2004,71 @@ BUSTER_C_INTERNAL bool c_parse_direct_expression_type(Arena* arena, CPreprocessR
             break;
         }
     }
+    // Strip only a pair that wraps the whole base: `(cast)(operand)` opens
+    // and closes with parentheses too, and peeling those leaves corrupt
+    // token soup where the cast branch below would have answered.
     while (base_start < base_end && c_token_is_punctuator(&preprocess.tokens[base_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
            c_token_is_punctuator(&preprocess.tokens[base_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
     {
+        u32 strip_depth = 0;
+        bool wraps = true;
+        for (u32 strip_index = base_start; strip_index < base_end && wraps; strip_index += 1)
+        {
+            strip_depth += c_token_is_punctuator(&preprocess.tokens[strip_index], C_PUNCTUATOR_LEFT_PARENTHESIS);
+            if (c_token_is_punctuator(&preprocess.tokens[strip_index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                strip_depth -= 1;
+                wraps = strip_depth != 0 || strip_index == base_end - 1;
+            }
+        }
+        if (!wraps)
+        {
+            break;
+        }
         base_start += 1;
         base_end -= 1;
     }
     CTypeId type = C_TYPE_ID_INVALID;
+    // A comma expression contributes its last operand's type -- Py_XSETREF
+    // over _PyTuple_ITEMS writes `((void)0, (cast)->ob_item)[0]`, and the
+    // paren strip above has already unwrapped the group -- so the base
+    // recurses on the segment past the last top-level comma before any other
+    // shape is considered.
+    u32 last_comma = UINT32_MAX;
+    {
+        u32 comma_depth = 0;
+        for (u32 comma_index = base_start; comma_index < base_end; comma_index += 1)
+        {
+            CToken comma_token = preprocess.tokens[comma_index];
+            if (c_token_is_punctuator(&comma_token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&comma_token, C_PUNCTUATOR_LEFT_BRACKET) ||
+                c_token_is_punctuator(&comma_token, C_PUNCTUATOR_LEFT_BRACE))
+            {
+                comma_depth += 1;
+            }
+            else if (c_token_is_punctuator(&comma_token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&comma_token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                     c_token_is_punctuator(&comma_token, C_PUNCTUATOR_RIGHT_BRACE))
+            {
+                comma_depth -= comma_depth != 0;
+            }
+            else if (!comma_depth && c_token_is_punctuator(&comma_token, C_PUNCTUATOR_COMMA))
+            {
+                last_comma = comma_index;
+            }
+        }
+    }
+    if (last_comma != UINT32_MAX)
+    {
+        CTypeId comma_type = C_TYPE_ID_INVALID;
+        if (last_comma + 1 < base_end && c_parse_direct_expression_type(arena, preprocess, result, scope, last_comma + 1, base_end, &comma_type))
+        {
+            type = comma_type;
+        }
+        if (type.value == C_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        goto base_resolved;
+    }
     bool call_base = base_end > base_start + 2 && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER &&
                      c_token_is_punctuator(&preprocess.tokens[base_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                      c_token_is_punctuator(&preprocess.tokens[base_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
@@ -2109,6 +2167,7 @@ BUSTER_C_INTERNAL bool c_parse_direct_expression_type(Arena* arena, CPreprocessR
     {
         return false;
     }
+base_resolved:;
     u32 index = postfix;
     while (index < end)
     {

@@ -3610,6 +3610,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_parenthesized_string_initializer.c"),
         S8("tests/basic_c_cast_away_const_store.c"),
         S8("tests/basic_c_extern_aligned_definition.c"),
+        S8("tests/basic_c_macro_comment_bitfields.c"),
+        S8("tests/basic_c_typeof_comma_base.c"),
     };
     for (u32 shape_index = 0; shape_index < BUSTER_ARRAY_LENGTH(c_cpython_shape_fixtures); shape_index += 1)
     {
