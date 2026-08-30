@@ -5856,6 +5856,54 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
+    // #792: on a PE target that fixture used to be unlinkable.  `atexit` and
+    // `at_quick_exit` are not ucrtbase.dll exports -- UCRT keeps them in its
+    // import library as one call apiece to `_crt_atexit` and
+    // `_crt_at_quick_exit` -- and this driver imports from the DLL alone, so
+    // the names resolved nowhere.  link_windows_libc_runtime_object supplies
+    // them, and two contracts hold on every host.  The link never fails on
+    // `atexit` again: a machine with a readable ucrtbase.dll (a Windows host,
+    // or a Linux one with `-L` on a directory holding it) links the program
+    // outright, and a machine without one fails on the `_crt_` import the
+    // stub introduced instead, which is the same wall every other libc call
+    // hits there.  And an image that registers no handler carries no `_crt_`
+    // import at all, which is what the archive-member selection buys over
+    // adding the stubs to every executable the way `_fltused` is added.
+    String8 c_windows_exit_targets[] = {
+        S8("x86_64-pc-windows-msvc"),
+        S8("aarch64-pc-windows-msvc"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(c_windows_exit_targets); target_index += 1)
+    {
+        TemporalArena exit_temporary = scratch_begin(&arguments->arena, 1);
+        String8 windows_exit_path =
+            buster_test_temporary_path(exit_temporary.arena, S8("buster-c-windows-atexit"), string_format(exit_temporary.arena, S8("-{u32}.exe"), target_index));
+        String8 windows_exit_command_line[] = {
+            S8("-target"), c_windows_exit_targets[target_index], S8("-o"), windows_exit_path, S8("tests/basic_c_atexit_handler.c"),
+        };
+        CompilerDriverResult windows_exit = compiler_driver_execute_invocation(
+            exit_temporary.arena, compiler_driver_parse_arguments(exit_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(windows_exit_command_line)));
+        BUSTER_TEST(arguments, windows_exit.error == COMPILER_DRIVER_ERROR_NONE ||
+                                   string_starts_with_sequence(windows_exit.native_link.symbol, S8("_crt_")));
+        if (windows_exit.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            BUSTER_TEST(arguments, compiler_driver_bytes_contain(windows_exit.native_link.executable, S8("_crt_atexit")));
+        }
+        String8 windows_handlerless_path = buster_test_temporary_path(exit_temporary.arena, S8("buster-c-windows-no-atexit"),
+                                                                     string_format(exit_temporary.arena, S8("-{u32}.exe"), target_index));
+        String8 windows_handlerless_command_line[] = {
+            S8("-target"), c_windows_exit_targets[target_index], S8("-o"), windows_handlerless_path, S8("tests/basic_c_vector.c"),
+        };
+        CompilerDriverResult windows_handlerless = compiler_driver_execute_invocation(
+            exit_temporary.arena, compiler_driver_parse_arguments(exit_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(windows_handlerless_command_line)));
+        BUSTER_TEST(arguments, windows_handlerless.error == COMPILER_DRIVER_ERROR_NONE);
+        if (windows_handlerless.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            BUSTER_TEST(arguments, !compiler_driver_bytes_contain(windows_handlerless.native_link.executable, S8("_crt_atexit")));
+            BUSTER_TEST(arguments, !compiler_driver_bytes_contain(windows_handlerless.native_link.executable, S8("_crt_at_quick_exit")));
+        }
+        scratch_end(exit_temporary);
+    }
     // The object side of the same fixture, checked for a fixed cross target so
     // every host runs it: the array is what an external linker consumes.  This
     // model has one section per kind, so the converter sorts a translation

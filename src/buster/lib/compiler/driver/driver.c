@@ -45,6 +45,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_runtime_object_target(Target target
     return target.os == OPERATING_SYSTEM_LINUX && (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64);
 }
 
+// How many synthetic runtime objects a hosted link for this target can add:
+// Windows takes the unconditional `_fltused` marker plus the UCRT exit-handler
+// stubs, ELF only the glibc ones.  Both stub objects are selected the way an
+// archive member is, so this is the capacity to reserve, not the count that
+// will be used.
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_runtime_object_capacity(Target target)
+{
+    return compiler_driver_windows_runtime_object_target(target) ? 2 : compiler_driver_elf_runtime_object_target(target) ? 1 : 0;
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_option_value(String8 argument, String8 prefix)
 {
     if (!string_starts_with_sequence(argument, prefix))
@@ -2646,6 +2656,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     if (compiler_driver_windows_runtime_object_target(invocation.target))
     {
         link_inputs[link_input_count++] = link_windows_runtime_object(arena, invocation.target);
+        ObjectFile runtime = link_windows_libc_runtime_object(arena, invocation.target);
+        if (runtime.error == OBJECT_ERROR_NONE && compiler_driver_archive_member_needed(&runtime, link_inputs, link_input_count))
+        {
+            link_inputs[link_input_count++] = runtime;
+        }
     }
     if (compiler_driver_elf_runtime_object_target(invocation.target))
     {
@@ -3428,16 +3443,17 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         object_capacity += archive.object_count;
     }
-    if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK &&
-        (compiler_driver_windows_runtime_object_target(invocation.target) || compiler_driver_elf_runtime_object_target(invocation.target)))
+    u32 runtime_object_capacity =
+        !invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK ? compiler_driver_runtime_object_capacity(invocation.target) : 0;
+    if (runtime_object_capacity)
     {
-        if (object_capacity == UINT32_MAX)
+        if (object_capacity > UINT32_MAX - runtime_object_capacity)
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
             result.diagnostic = S8("too many link inputs");
             goto finish;
         }
-        object_capacity += 1;
+        object_capacity += runtime_object_capacity;
     }
     ObjectFile* objects = arena_allocate(arena, ObjectFile, object_capacity);
     String8* preprocessed = arena_allocate(arena, String8, invocation.input_count);
@@ -3682,6 +3698,15 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK && compiler_driver_windows_runtime_object_target(invocation.target))
     {
         objects[object_count++] = link_windows_runtime_object(arena, invocation.target);
+        // The UCRT exit-handler stubs are selected the way an archive member
+        // is, unlike the `_fltused` marker above them: their undefined `_crt_`
+        // reference would otherwise import into every image, and fail the link
+        // where no ucrtbase.dll can be read.
+        ObjectFile runtime = link_windows_libc_runtime_object(arena, invocation.target);
+        if (runtime.error == OBJECT_ERROR_NONE && compiler_driver_archive_member_needed(&runtime, objects, object_count))
+        {
+            objects[object_count++] = runtime;
+        }
     }
     if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK && compiler_driver_elf_runtime_object_target(invocation.target))
     {

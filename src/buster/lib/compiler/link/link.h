@@ -150,6 +150,12 @@ BUSTER_F_DECL ObjectFile link_windows_runtime_object(Arena* arena, Target target
 // from.  Selected the way an archive member is, so a program that references
 // none of them never sees it.
 BUSTER_F_DECL ObjectFile link_elf_libc_runtime_object(Arena* arena, Target target);
+// The UCRT counterpart for hosted Windows executable links: `atexit` and
+// `at_quick_exit` live in the import library rather than in ucrtbase.dll, so
+// this supplies them as weak stubs over the `_crt_` forms it does export.
+// Selected the same way, which is what keeps the `_crt_` import out of an
+// image that never registers a handler.
+BUSTER_F_DECL ObjectFile link_windows_libc_runtime_object(Arena* arena, Target target);
 BUSTER_F_DECL NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options);
 BUSTER_F_DECL ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
                                                        u32 const* object_output_sections, u64 const* object_section_offsets,

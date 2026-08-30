@@ -1582,33 +1582,54 @@ ObjectFile link_windows_runtime_object(Arena* arena, Target target)
     return result;
 }
 
-// glibc splits its C library in two: libc.so.6 carries the shared symbols and
-// libc_nonshared.a a handful of stubs that every program links statically.
-// `atexit` and `at_quick_exit` are two of them -- the shared object exports
-// only their `__cxa_` forms -- and the ELF writers here resolve undefined
-// symbols against libc.so.6 alone, so a program that registers an exit handler
-// (SQLite's shell does, on its first line of main) links and then dies in the
-// loader.  Supply the stubs the way glibc does, as weak definitions that
-// forward with a null argument and a null DSO handle, which is exactly what
-// the executable's own stubs pass.  The driver adds this object only when
-// something references one of them and nothing defines it, and a program with
-// its own definition keeps it.
-ObjectFile link_elf_libc_runtime_object(Arena* arena, Target target)
+// Every C library this linker resolves against keeps a few exit-handler
+// registration functions out of its shared object and inside the static half
+// a program is expected to link: glibc puts `atexit` and `at_quick_exit` in
+// libc_nonshared.a, where each is a call to its `__cxa_` form, and UCRT puts
+// the same two names in its import library, where each is a call to its
+// `_crt_` form.  The writers here import from the shared object alone, so
+// those names resolve nowhere and a program that registers an exit handler
+// (SQLite's shell does, on its first line of main) fails to link.
+//
+// This builds the missing half: one weak stub per name whose whole body is a
+// tail branch to the exported function, so a program with its own definition
+// still wins and the C ABI hands the arguments straight through.
+// `zero_trailing_arguments` covers a target that takes more arguments than
+// the stub does -- `__cxa_atexit` takes the handler, a null argument and a
+// null DSO handle where `atexit` takes only the handler -- which is exactly
+// what an executable's own glibc stub passes.  The branch is the last
+// instruction of the body, so the relocated field sits a fixed distance from
+// its start; the caller has already checked the target.
+BUSTER_GLOBAL_LOCAL ObjectFile link_forwarding_runtime_object(Arena* arena, Target target, String8 const* stub_names, String8 const* target_names,
+                                                              u64 stub_count, bool zero_trailing_arguments)
 {
     ObjectFile result = {
         .target = target,
     };
-    if (!arena)
-    {
-        result.error = OBJECT_ERROR_INVALID_INPUT;
-        return result;
-    }
+    static u8 const x86_64_zero_arguments[] = {
+        0x31, 0xf6, // xor esi, esi
+        0x31, 0xd2, // xor edx, edx
+    };
+    static u8 const x86_64_branch[] = {
+        0xe9, 0x00, 0x00, 0x00, 0x00, // jmp rel32
+    };
+    static u8 const aarch64_zero_arguments[] = {
+        0x01, 0x00, 0x80, 0xd2, // mov x1, #0
+        0x02, 0x00, 0x80, 0xd2, // mov x2, #0
+    };
+    static u8 const aarch64_branch[] = {
+        0x00, 0x00, 0x00, 0x14, // b
+    };
     bool x86_64 = target.cpu_arch == CPU_ARCH_X86_64;
-    if (object_format_for_target(target) != OBJECT_FORMAT_ELF64 || (!x86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
-    {
-        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-        return result;
-    }
+    u8 const* zero_arguments = x86_64 ? x86_64_zero_arguments : aarch64_zero_arguments;
+    u64 zero_arguments_size = !zero_trailing_arguments ? 0 : x86_64 ? sizeof(x86_64_zero_arguments) : sizeof(aarch64_zero_arguments);
+    u8 const* branch = x86_64 ? x86_64_branch : aarch64_branch;
+    u64 branch_size = x86_64 ? sizeof(x86_64_branch) : sizeof(aarch64_branch);
+    // The displacement field starts one opcode byte into the x86-64 branch and
+    // is the whole AArch64 instruction word; the x86-64 field is measured from
+    // its own end, which is where the -4 addend comes from.
+    u64 branch_field = x86_64 ? 1 : 0;
+    u64 thunk_size = zero_arguments_size + branch_size;
     result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
     result.section_count = OBJECT_SECTION_COUNT;
     for (u32 section_index = 0; section_index < OBJECT_SECTION_COUNT; section_index += 1)
@@ -1620,32 +1641,17 @@ ObjectFile link_elf_libc_runtime_object(Arena* arena, Target target)
             .alignment = object_section_default_alignment(kind),
         };
     }
-    // x86-64: zero the second and third arguments and tail-call the import.
-    // AArch64: the same two arguments in x1/x2 and a tail branch.
-    static u8 const x86_64_thunk[] = {
-        0x31, 0xf6,                   // xor esi, esi
-        0x31, 0xd2,                   // xor edx, edx
-        0xe9, 0x00, 0x00, 0x00, 0x00, // jmp rel32 __cxa_atexit
-    };
-    static u8 const aarch64_thunk[] = {
-        0x01, 0x00, 0x80, 0xd2, // mov x1, #0
-        0x02, 0x00, 0x80, 0xd2, // mov x2, #0
-        0x00, 0x00, 0x00, 0x14, // b __cxa_atexit
-    };
     // One thunk per stub, laid out back to back in the same section.
-    static char8 const* const stub_names[] = {"atexit", "at_quick_exit"};
-    static char8 const* const target_names[] = {"__cxa_atexit", "__cxa_at_quick_exit"};
-    u64 thunk_size = x86_64 ? sizeof(x86_64_thunk) : sizeof(aarch64_thunk);
-    u64 stub_count = BUSTER_ARRAY_LENGTH(stub_names);
     u8* thunks = arena_allocate(arena, u8, thunk_size * stub_count);
     result.symbols = arena_allocate(arena, ObjectSymbol, stub_count * 2);
     result.relocations = arena_allocate(arena, ObjectRelocation, stub_count);
     for (u64 index = 0; index < stub_count; index += 1)
     {
         u64 offset = thunk_size * index;
-        memcpy(thunks + offset, x86_64 ? x86_64_thunk : aarch64_thunk, thunk_size);
+        memcpy(thunks + offset, zero_arguments, zero_arguments_size);
+        memcpy(thunks + offset + zero_arguments_size, branch, branch_size);
         result.symbols[index * 2] = (ObjectSymbol){
-            .name = string_from_pointer((char8*)stub_names[index]),
+            .name = stub_names[index],
             .value = offset,
             .size = thunk_size,
             .section = OBJECT_SECTION_TEXT,
@@ -1654,14 +1660,14 @@ ObjectFile link_elf_libc_runtime_object(Arena* arena, Target target)
             .weak = true,
         };
         result.symbols[index * 2 + 1] = (ObjectSymbol){
-            .name = string_from_pointer((char8*)target_names[index]),
+            .name = target_names[index],
             .section = OBJECT_SECTION_UNDEFINED,
             .kind = OBJECT_SYMBOL_FUNCTION,
             .global = true,
         };
         result.relocations[index] = (ObjectRelocation){
             .addend = x86_64 ? -4 : 0,
-            .offset = offset + (x86_64 ? 5 : 8),
+            .offset = offset + zero_arguments_size + branch_field,
             .section = OBJECT_SECTION_TEXT,
             .symbol = (u32)(index * 2 + 1),
             .kind = x86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_JUMP26,
@@ -1671,6 +1677,73 @@ ObjectFile link_elf_libc_runtime_object(Arena* arena, Target target)
     result.relocation_count = (u32)stub_count;
     result.sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = thunks, .length = thunk_size * stub_count};
     result.sections[OBJECT_SECTION_TEXT].virtual_size = thunk_size * stub_count;
+
+    return result;
+}
+
+// The glibc half of that split: libc.so.6 exports only the `__cxa_` forms, so
+// the stubs pass the null argument and the null DSO handle the executable's
+// own libc_nonshared.a stubs pass.  The driver adds this object only when
+// something references one of them and nothing defines it, and a program with
+// its own definition keeps it.
+ObjectFile link_elf_libc_runtime_object(Arena* arena, Target target)
+{
+    ObjectFile result = {
+        .target = target,
+    };
+    static String8 const stub_names[] = {S8_INITIALIZER("atexit"), S8_INITIALIZER("at_quick_exit")};
+    static String8 const target_names[] = {S8_INITIALIZER("__cxa_atexit"), S8_INITIALIZER("__cxa_at_quick_exit")};
+    if (!arena)
+    {
+        result.error = OBJECT_ERROR_INVALID_INPUT;
+    }
+    else if (object_format_for_target(target) != OBJECT_FORMAT_ELF64 || (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
+    {
+        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+    }
+    else
+    {
+        result = link_forwarding_runtime_object(arena, target, stub_names, target_names, BUSTER_ARRAY_LENGTH(stub_names), true);
+    }
+
+    return result;
+}
+
+// The UCRT half.  `winedump -j export ucrtbase.dll` lists `_crt_atexit` and
+// `_crt_at_quick_exit` and neither `atexit` nor `at_quick_exit`: those two
+// live in the import library, where each is one call to its `_crt_` form and
+// nothing else, so the stubs here pass their single argument straight on.
+// `_onexit` is deliberately not among them.  It is the same registration with
+// a different result -- the handler on success, a null pointer on failure,
+// where `_crt_atexit` answers with a status -- so it cannot be a tail branch,
+// and a stub that called and then chose would need Windows unwind data of its
+// own.  Nothing in this project names it.
+//
+// This is a second object rather than more of link_windows_runtime_object
+// because the two are selected differently: `_fltused` is data no image can
+// be harmed by, while these stubs carry an undefined `_crt_` reference that
+// would become an import in every executable ever linked -- and would fail
+// the link outright on a host with no readable ucrtbase.dll.
+ObjectFile link_windows_libc_runtime_object(Arena* arena, Target target)
+{
+    ObjectFile result = {
+        .target = target,
+    };
+    static String8 const stub_names[] = {S8_INITIALIZER("atexit"), S8_INITIALIZER("at_quick_exit")};
+    static String8 const target_names[] = {S8_INITIALIZER("_crt_atexit"), S8_INITIALIZER("_crt_at_quick_exit")};
+    if (!arena)
+    {
+        result.error = OBJECT_ERROR_INVALID_INPUT;
+    }
+    else if (target.os != OPERATING_SYSTEM_WINDOWS || (target.cpu_arch != CPU_ARCH_X86_64 && target.cpu_arch != CPU_ARCH_AARCH64))
+    {
+        result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+    }
+    else
+    {
+        result = link_forwarding_runtime_object(arena, target, stub_names, target_names, BUSTER_ARRAY_LENGTH(stub_names), false);
+    }
+
     return result;
 }
 

@@ -3125,6 +3125,27 @@ on a commit you already know is incomplete tells nobody anything.
   driver could not open exports whatever it happens to export; a link missing
   one of them keeps the import it made before, which is also why a target
   whose libraries are never read, Android today, is unchanged.
+- **A C library keeps some of its own names out of its shared object**, and
+  this linker imports from the shared object alone, so it has to supply the
+  rest itself. glibc puts `atexit` and `at_quick_exit` in libc_nonshared.a as
+  one call apiece to `__cxa_atexit` and `__cxa_at_quick_exit`; UCRT puts the
+  same two names in its import library as one call apiece to `_crt_atexit` and
+  `_crt_at_quick_exit`. `link_elf_libc_runtime_object` and
+  `link_windows_libc_runtime_object` build those stubs — weak, so a program's
+  own definition wins, and a bare tail branch, so the C ABI hands the
+  arguments through — over the shared `link_forwarding_runtime_object`. The
+  driver adds either one **the way it selects an archive member**
+  (`compiler_driver_archive_member_needed`): only when something references a
+  stub and nothing defines it. That selection is the contract, not a
+  refinement of it. The stub carries an undefined `__cxa_`/`_crt_` reference,
+  so adding it unconditionally would put that import in every executable, and
+  on a host with no readable `ucrtbase.dll` it would fail every Windows link
+  outright. `link_windows_runtime_object` is the counterexample that has to
+  stay separate: `_fltused` is a four-byte marker with no reference of its
+  own, so it is added to every hosted Windows link unconditionally.
+  `_onexit` is deliberately absent — it answers with the handler rather than
+  with a status, so it cannot be a tail branch, and a stub that called and
+  then chose would need Windows unwind data of its own.
 - **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
   representation, so ignoring them is an ABI divergence rather than a missing
   optimization: a Buster-only program agrees with itself whatever it agrees on,

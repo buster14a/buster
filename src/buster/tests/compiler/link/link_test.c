@@ -2403,6 +2403,128 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         link_objects(arguments->arena, windows_runtime_missing_inputs, BUSTER_ARRAY_LENGTH(windows_runtime_missing_inputs), (LinkOptions){0});
     BUSTER_TEST(arguments, windows_runtime_missing_link.error == LINK_ERROR_UNRESOLVED_SYMBOL);
     BUSTER_STRING_TEST(arguments, windows_runtime_missing_link.symbol, S8("missing_runtime_symbol"));
+
+    // #792: `atexit` and `at_quick_exit` are not ucrtbase.dll exports either
+    // -- UCRT keeps them in its import library as one call to `_crt_atexit`
+    // and `_crt_at_quick_exit` -- so a PE link resolved them nowhere.  The
+    // second Windows runtime object supplies exactly those two names as weak
+    // tail branches.  This is the shape both architectures produce; the driver
+    // test links and runs it.
+    u8 windows_libc_x86_64_text[] = {
+        0xe9, 0x00, 0x00, 0x00, 0x00, // jmp rel32 _crt_atexit
+        0xe9, 0x00, 0x00, 0x00, 0x00, // jmp rel32 _crt_at_quick_exit
+    };
+    u8 windows_libc_aarch64_text[] = {
+        0x00, 0x00, 0x00, 0x14, // b _crt_atexit
+        0x00, 0x00, 0x00, 0x14, // b _crt_at_quick_exit
+    };
+    String8 windows_libc_stub_names[] = {S8_INITIALIZER("atexit"), S8_INITIALIZER("at_quick_exit")};
+    String8 windows_libc_target_names[] = {S8_INITIALIZER("_crt_atexit"), S8_INITIALIZER("_crt_at_quick_exit")};
+    Target windows_libc_targets[] = {windows_runtime_target, windows_runtime_target};
+    windows_libc_targets[1].cpu_arch = CPU_ARCH_AARCH64;
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(windows_libc_targets); architecture += 1)
+    {
+        bool architecture_x86_64 = windows_libc_targets[architecture].cpu_arch == CPU_ARCH_X86_64;
+        ByteSlice expected_text = architecture_x86_64 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_libc_x86_64_text)
+                                                      : (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_libc_aarch64_text);
+        u64 thunk_size = expected_text.length / BUSTER_ARRAY_LENGTH(windows_libc_stub_names);
+        ObjectFile windows_libc = link_windows_libc_runtime_object(arguments->arena, windows_libc_targets[architecture]);
+        BUSTER_TEST(arguments, windows_libc.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, windows_libc.symbol_count == 2 * BUSTER_ARRAY_LENGTH(windows_libc_stub_names) &&
+                                   windows_libc.relocation_count == BUSTER_ARRAY_LENGTH(windows_libc_stub_names));
+        BUSTER_TEST(arguments, windows_libc.sections[OBJECT_SECTION_TEXT].data.length == expected_text.length &&
+                                   memcmp(windows_libc.sections[OBJECT_SECTION_TEXT].data.pointer, expected_text.pointer, expected_text.length) == 0);
+        for (u32 stub_index = 0; stub_index < BUSTER_ARRAY_LENGTH(windows_libc_stub_names); stub_index += 1)
+        {
+            ObjectSymbol stub = windows_libc.symbols[stub_index * 2];
+            ObjectSymbol imported = windows_libc.symbols[stub_index * 2 + 1];
+            ObjectRelocation relocation = windows_libc.relocations[stub_index];
+            BUSTER_TEST(arguments, string_equal(stub.name, windows_libc_stub_names[stub_index]) && stub.weak && stub.global &&
+                                       stub.section == OBJECT_SECTION_TEXT && stub.kind == OBJECT_SYMBOL_FUNCTION && stub.value == stub_index * thunk_size &&
+                                       stub.size == thunk_size);
+            BUSTER_TEST(arguments, string_equal(imported.name, windows_libc_target_names[stub_index]) && imported.global && !imported.weak &&
+                                       imported.section == OBJECT_SECTION_UNDEFINED && imported.kind == OBJECT_SYMBOL_FUNCTION);
+            // The branch is the last instruction of the body: one opcode byte
+            // into it on x86-64, the whole word on AArch64.  A PC32 field is
+            // measured from its own end, which the -4 addend restores.
+            BUSTER_TEST(arguments, relocation.section == OBJECT_SECTION_TEXT && relocation.symbol == stub_index * 2 + 1 &&
+                                       relocation.offset == stub_index * thunk_size + (architecture_x86_64 ? 1 : 0) &&
+                                       relocation.addend == (architecture_x86_64 ? -4 : 0) &&
+                                       relocation.kind == (architecture_x86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_JUMP26));
+        }
+    }
+    Target windows_libc_linux_target = windows_runtime_target;
+    windows_libc_linux_target.os = OPERATING_SYSTEM_LINUX;
+    BUSTER_TEST(arguments, link_windows_libc_runtime_object(arguments->arena, windows_libc_linux_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    Target windows_libc_uefi_target = windows_runtime_target;
+    windows_libc_uefi_target.os = OPERATING_SYSTEM_UEFI;
+    BUSTER_TEST(arguments, link_windows_libc_runtime_object(arguments->arena, windows_libc_uefi_target).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    // The ELF object shares the builder and keeps its own shape: two more
+    // instructions ahead of the branch, because `__cxa_atexit` takes the null
+    // argument and null DSO handle that `atexit` does not.
+    Target elf_libc_target = windows_runtime_target;
+    elf_libc_target.os = OPERATING_SYSTEM_LINUX;
+    ObjectFile elf_libc = link_elf_libc_runtime_object(arguments->arena, elf_libc_target);
+    u8 elf_libc_x86_64_text[] = {
+        0x31, 0xf6, 0x31, 0xd2, 0xe9, 0x00, 0x00, 0x00, 0x00, // xor esi, esi; xor edx, edx; jmp rel32 __cxa_atexit
+        0x31, 0xf6, 0x31, 0xd2, 0xe9, 0x00, 0x00, 0x00, 0x00, // the same for __cxa_at_quick_exit
+    };
+    BUSTER_TEST(arguments, elf_libc.error == OBJECT_ERROR_NONE);
+    BUSTER_TEST(arguments, elf_libc.sections[OBJECT_SECTION_TEXT].data.length == sizeof(elf_libc_x86_64_text) &&
+                               memcmp(elf_libc.sections[OBJECT_SECTION_TEXT].data.pointer, elf_libc_x86_64_text, sizeof(elf_libc_x86_64_text)) == 0);
+    BUSTER_TEST(arguments, string_equal(elf_libc.symbols[0].name, S8("atexit")) && elf_libc.symbols[0].weak &&
+                               string_equal(elf_libc.symbols[1].name, S8("__cxa_atexit")) && elf_libc.relocations[0].offset == 5 &&
+                               elf_libc.relocations[1].offset == 14);
+    // A reference resolves to the weak stub, and a program's own definition
+    // replaces it -- the two properties the driver's archive-member selection
+    // rests on.
+    ObjectFile windows_libc_object = link_windows_libc_runtime_object(arguments->arena, windows_runtime_target);
+    ObjectSymbol windows_libc_reference_symbols[] = {
+        windows_runtime_undefined_symbols[0],
+        {
+            .name = S8("atexit"),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+    };
+    ObjectFile windows_libc_reference =
+        link_test_object_make(arguments->arena, windows_runtime_target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_runtime_text_bytes),
+                              windows_libc_reference_symbols, BUSTER_ARRAY_LENGTH(windows_libc_reference_symbols), 0, 0);
+    ObjectFile windows_libc_reference_inputs[] = {windows_libc_reference, windows_libc_object};
+    LinkObjectResult windows_libc_reference_link = link_objects(arguments->arena, windows_libc_reference_inputs,
+                                                               BUSTER_ARRAY_LENGTH(windows_libc_reference_inputs),
+                                                               (LinkOptions){
+                                                                   .allow_undefined_symbols = true,
+                                                               });
+    BUSTER_TEST(arguments, windows_libc_reference_link.error == LINK_ERROR_NONE);
+    u32 windows_libc_reference_index = link_test_symbol_find(&windows_libc_reference_link.object, S8("atexit"));
+    BUSTER_TEST(arguments, windows_libc_reference_index != UINT32_MAX &&
+                               windows_libc_reference_link.object.symbols[windows_libc_reference_index].section == OBJECT_SECTION_TEXT &&
+                               windows_libc_reference_link.object.symbols[windows_libc_reference_index].weak);
+    ObjectSymbol windows_libc_own_symbols[] = {
+        windows_runtime_undefined_symbols[0],
+        {
+            .name = S8("atexit"),
+            .value = 0,
+            .size = sizeof(windows_runtime_text_bytes),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        },
+    };
+    ObjectFile windows_libc_own = windows_libc_reference;
+    windows_libc_own.symbols = windows_libc_own_symbols;
+    ObjectFile windows_libc_own_inputs[] = {windows_libc_own, windows_libc_object};
+    LinkObjectResult windows_libc_own_link = link_objects(arguments->arena, windows_libc_own_inputs, BUSTER_ARRAY_LENGTH(windows_libc_own_inputs),
+                                                         (LinkOptions){
+                                                             .allow_undefined_symbols = true,
+                                                         });
+    BUSTER_TEST(arguments, windows_libc_own_link.error == LINK_ERROR_NONE);
+    u32 windows_libc_own_index = link_test_symbol_find(&windows_libc_own_link.object, S8("atexit"));
+    BUSTER_TEST(arguments, windows_libc_own_index != UINT32_MAX && windows_libc_own_link.object.symbols[windows_libc_own_index].section == OBJECT_SECTION_TEXT &&
+                               !windows_libc_own_link.object.symbols[windows_libc_own_index].weak &&
+                               windows_libc_own_link.object.symbols[windows_libc_own_index].value == 0);
     ObjectFile windows_object = linked.object;
     windows_object.target.os = OPERATING_SYSTEM_WINDOWS;
     windows_object.sections = arena_allocate(arguments->arena, ObjectSection, linked.object.section_count);
