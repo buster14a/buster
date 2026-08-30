@@ -7512,9 +7512,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_atomic_byte_assembly.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(c_atomic_byte_assembly.output, S8("0x86, 0x02")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(c_atomic_byte_assembly.output, S8("0xf0, 0x40, 0x0f, 0xb0")) != BUSTER_STRING_NO_MATCH);
-    // Eight frontend gaps, each with its own fixture so a regression names the
-    // contract it broke. Six came from the 2026-08-30 differential harness run
-    // and two from the CPython configure differential: a
+    // Nine frontend gaps, each with its own fixture so a regression names the
+    // contract it broke. Seven came from the 2026-08-30 differential harness
+    // run and two from the CPython configure differential: a
     // positional initializer storing into an anonymous bit-field instead of
     // skipping it (#818), a typedef taking an attributed struct definition's
     // attribute operand as the alias's own alignment (#819), a statement
@@ -7524,10 +7524,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // definition it forward-declares (#825), and the GNU `__atomic_*` builtin
     // family, which the frontend had only the `__c11_atomic_*` spelling of
     // (#829), and the function-pointer conversions that must stay legal beside
-    // the incompatible ones now refused (#830). All eight run under every
-    // register allocator: four are layout or lowering defects rather than
-    // parsing ones, and the layout pair has to agree between the sizeof
-    // folding in the parse and the IR layout, which only a running object
+    // the incompatible ones now refused (#830), and a read-modify-write on an
+    // atomic floating-point object, which lowers to a compare-exchange loop
+    // (#821). All nine run under every register allocator: five are layout or
+    // lowering defects rather than parsing ones, the layout pair has to agree
+    // between the sizeof folding in the parse and the IR layout, and the
+    // atomic-float loop has to terminate -- none of which a compile alone
     // proves.
     String8 c_differential_regression_paths[] = {
         S8("tests/basic_c_anonymous_bit_field_initializer.c"),
@@ -7538,6 +7540,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_unspecified_array_parameter.c"),
         S8("tests/basic_c_gnu_atomic_builtins.c"),
         S8("tests/basic_c_function_pointer_compatibility.c"),
+        S8("tests/basic_c_atomic_float_update.c"),
     };
     String8 c_differential_regression_names[] = {
         S8("buster-c-anonymous-bit-field-initializer"),
@@ -7548,6 +7551,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-unspecified-array-parameter"),
         S8("buster-c-gnu-atomic-builtins"),
         S8("buster-c-function-pointer-compatibility"),
+        S8("buster-c-atomic-float-update"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_differential_regression_paths); fixture_index += 1)
     {

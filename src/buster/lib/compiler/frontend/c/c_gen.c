@@ -18075,6 +18075,130 @@ BUSTER_C_INTERNAL bool c_ir_atomic_operation(CConditionalOperator operation, IrA
     }
 }
 
+// `E op= x` and `++E` on an `_Atomic` floating-point object (#821). C11
+// 6.5.16.2p3 makes a compound assignment on an atomic type a read-modify-write,
+// and the hardware has no floating-point atomic arithmetic, so the operation is
+// a compare-exchange loop over the object's bit pattern -- which is what clang
+// emits for the same source.
+//
+// The comparison the loop retries on has to be a *bitwise* one: comparing two
+// floats with `==` never terminates once the object holds a NaN, and would
+// terminate wrongly on a negative zero. The IR has no bitcast, so the integer
+// view is taken through memory instead: the object's address is cast to a
+// pointer of the same-width unsigned type, and a float-shaped scratch slot with
+// an integer view of its own is what a value crosses the two formats through.
+// Both views alias one object each, which is what makes the reinterpretation
+// legal rather than a copy.
+//
+// `previous_out` receives the value the object held before the last successful
+// exchange and `result_out` the one it holds after, which are what `E op= x`
+// and the two spellings of `++E` answer.
+BUSTER_C_INTERNAL bool c_ir_emit_atomic_float_update(CIntegerIrBuilder* builder, IrValueId place, IrTypeId object_type, IrTypeId value_type,
+                                                      CConditionalOperator operation, IrValueId right, IrSourceRange source, IrValueId* previous_out,
+                                                      IrValueId* result_out)
+{
+    IrType* value = ir_type_from_id(&builder->program->types, value_type);
+    u64 width = value && value->layout.resolved ? value->layout.size : 0;
+    IrTypeId bits_type = c_ir_unsigned_type_of_size(builder, width);
+    IrTypeId bits_pointer_type = bits_type.value != IR_ID_UNDERLYING_INVALID
+                                     ? c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type)
+                                     : IR_TYPE_ID_INVALID;
+    bool result = width && (width == 4 || width == 8) && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID;
+    if (!result)
+    {
+        // An x87 long double is eighty bits in an object no integer is the
+        // width of, so it has no bit pattern this loop can carry.
+        builder->failure_message = S8("C IR lowering does not yet support a read-modify-write of this atomic floating-point width");
+    }
+    IrValueId object_address = result ? c_ir_emit_address_of_place(builder, place, object_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId object_bits_address = result ? c_ir_emit_cast(builder, object_address, bits_pointer_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId object_bits = result ? c_ir_emit_dereference_place(builder, object_bits_address, source) : IR_VALUE_ID_INVALID;
+    IrValueId scratch = result ? c_ir_emit_temporary(builder, value_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId scratch_address = result ? c_ir_emit_address_of_place(builder, scratch, value_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId scratch_bits_address = result ? c_ir_emit_cast(builder, scratch_address, bits_pointer_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId scratch_bits = result ? c_ir_emit_dereference_place(builder, scratch_bits_address, source) : IR_VALUE_ID_INVALID;
+    // The three slots the loop carries across its back edge.
+    IrValueId expected_slot = result ? c_ir_emit_temporary(builder, bits_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId previous_slot = result ? c_ir_emit_temporary(builder, value_type, source) : IR_VALUE_ID_INVALID;
+    IrValueId updated_slot = result ? c_ir_emit_temporary(builder, value_type, source) : IR_VALUE_ID_INVALID;
+    IrBlockId retry_block = result ? c_ir_block_create(builder) : (IrBlockId){IR_ID_UNDERLYING_INVALID};
+    IrBlockId done_block = result ? c_ir_block_create(builder) : (IrBlockId){IR_ID_UNDERLYING_INVALID};
+    result = result && object_bits.value != IR_ID_UNDERLYING_INVALID && scratch_bits.value != IR_ID_UNDERLYING_INVALID &&
+             expected_slot.value != IR_ID_UNDERLYING_INVALID && previous_slot.value != IR_ID_UNDERLYING_INVALID &&
+             updated_slot.value != IR_ID_UNDERLYING_INVALID && retry_block.value != IR_ID_UNDERLYING_INVALID &&
+             done_block.value != IR_ID_UNDERLYING_INVALID;
+    if (result)
+    {
+        // The seed read is relaxed: the loop's own exchange carries the
+        // ordering, and a value that is already stale only costs an iteration.
+        IrValueId seed = c_ir_add_result(builder, bits_type);
+        IrInstruction load = c_ir_instruction_initialize(IR_OPCODE_ATOMIC_LOAD, bits_type);
+        load.operands = arena_allocate(builder->arena, IrValueId, 1);
+        load.operands[0] = object_bits;
+        load.operand_count = 1;
+        load.memory_order = (u8)IR_MEMORY_ORDER_RELAXED;
+        load.result = seed;
+        builder->function->values[seed.value].definition = c_ir_append_instruction(builder, load, source);
+        result = c_ir_emit_store_place(builder, expected_slot, bits_type, seed, source) &&
+                 c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &retry_block, 1, source) && c_ir_switch_block(builder, retry_block);
+    }
+    IrValueId expected = result ? c_ir_emit_load_place(builder, expected_slot, bits_type, source) : IR_VALUE_ID_INVALID;
+    result = result && expected.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, scratch_bits, bits_type, expected, source);
+    IrValueId previous = result ? c_ir_emit_load_place(builder, scratch, value_type, source) : IR_VALUE_ID_INVALID;
+    result = result && previous.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, previous_slot, value_type, previous, source);
+    if (result)
+    {
+        IrValueId operands[2] = {previous, right};
+        u32 operand_count = 2;
+        result = c_ir_apply_operation(builder, operation, operands, &operand_count, source, value_type) && operand_count == 1;
+        IrValueId updated = result ? c_ir_emit_cast(builder, operands[0], value_type, source) : IR_VALUE_ID_INVALID;
+        result = result && updated.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, updated_slot, value_type, updated, source) &&
+                 c_ir_emit_store_place(builder, scratch, value_type, updated, source);
+    }
+    IrValueId desired = result ? c_ir_emit_load_place(builder, scratch_bits, bits_type, source) : IR_VALUE_ID_INVALID;
+    if (result && desired.value != IR_ID_UNDERLYING_INVALID)
+    {
+        IrValueId observed = c_ir_add_result(builder, bits_type);
+        IrInstruction exchange = c_ir_instruction_initialize(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE, bits_type);
+        exchange.operands = arena_allocate(builder->arena, IrValueId, 3);
+        exchange.operands[0] = object_bits;
+        exchange.operands[1] = expected;
+        exchange.operands[2] = desired;
+        exchange.operand_count = 3;
+        exchange.memory_order = (u8)IR_MEMORY_ORDER_SEQUENTIAL;
+        exchange.failure_memory_order = (u8)IR_MEMORY_ORDER_SEQUENTIAL;
+        exchange.result = observed;
+        builder->function->values[observed.value].definition = c_ir_append_instruction(builder, exchange, source);
+        IrValueId settled = c_ir_emit_binary_value(builder, observed, expected, builder->bool_type, IR_BINARY_INTEGER_EQUAL, source);
+        IrBlockId targets[2] = {done_block, retry_block};
+        result = settled.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, expected_slot, bits_type, observed, source) &&
+                 c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &settled, 1, targets, 2, source) && c_ir_switch_block(builder, done_block);
+    }
+    else
+    {
+        result = false;
+    }
+    if (result)
+    {
+        IrValueId answered_previous = c_ir_emit_load_place(builder, previous_slot, value_type, source);
+        IrValueId answered_updated = c_ir_emit_load_place(builder, updated_slot, value_type, source);
+        result = answered_previous.value != IR_ID_UNDERLYING_INVALID && answered_updated.value != IR_ID_UNDERLYING_INVALID;
+        if (result)
+        {
+            if (previous_out)
+            {
+                *previous_out = answered_previous;
+            }
+            if (result_out)
+            {
+                *result_out = answered_updated;
+            }
+        }
+    }
+
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, CConditionalOperator operation,
                                                        IrValueId right, IrSourceRange source, IrValueId* previous_out, IrValueId* result_out)
 {
@@ -18104,6 +18228,13 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
     if (right.value == IR_ID_UNDERLYING_INVALID)
     {
         return false;
+    }
+    if (atomic && unqualified && unqualified->kind == IR_TYPE_FLOAT)
+    {
+        // No hardware has a floating-point atomic read-modify-write, so this
+        // one is a compare-exchange loop over the object's bit pattern rather
+        // than a single instruction.
+        return c_ir_emit_atomic_float_update(builder, place, type, value_type, operation, operation_right, source, previous_out, result_out);
     }
     if (atomic)
     {
