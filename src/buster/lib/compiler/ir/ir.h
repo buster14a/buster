@@ -644,7 +644,7 @@ struct IrModuleAssembly
 #define IR_INITIALIZER_PRIORITY_NONE 0x10000u
 
 // One function that runs before `main` (`__attribute__((constructor))`) or
-// after it (`__attribute__((destructor))`). Like IrModuleAlias this is a
+// after it (`__attribute__((destructor))`). Like IrSymbolAlias this is a
 // relation rather than a symbol property -- the object writer turns the list
 // into the `.init_array`/`.fini_array` entries and their relocations -- and a
 // translation unit that registers none carries an empty list, which is nearly

@@ -21999,22 +21999,34 @@ c_ir_expression_core_loop:
             {
                 value = is_sizeof ? c_ir_sizeof_operand_size(operand) : c_ir_sizeof_operand_alignment(operand);
             }
-            else if (!is_sizeof && literal_end != UINT32_MAX &&
-                     c_ir_sizeof_expression(builder, operand_start, operand_end, &value, &literal_alignment))
+            else if (!is_sizeof && c_ir_sizeof_expression(builder, operand_start, operand_end, &value, &literal_alignment))
             {
-                // The alignof words take a type name, so the only expression
-                // operand reaching here is the compound literal the extent
-                // scan above claimed; its alignment is the literal type's.
+                // `_Alignof` takes a type name, but GNU's `__alignof__` also
+                // takes an expression -- libc-test's tls_align_dso.c fills its
+                // table with `__alignof__(x)` over four objects -- and so does
+                // the compound literal the extent scan above claimed for both
+                // words. The alignment of the operand's own type is the
+                // answer in each case, so the sizeof resolver settles it and
+                // only its second answer is read.
                 value = literal_alignment;
             }
             else if (is_sizeof && c_ir_sizeof_expression(builder, operand_start, operand_end, &value, 0))
             {
             }
-            else if (is_sizeof)
+            else
             {
+                // Both words take an expression operand: `sizeof v` writes one
+                // without parentheses, and GNU's `__alignof__ (v)` is a second
+                // spelling of `_Alignof` that accepts one where the standard
+                // word takes only a type name -- libc-test's tls_align_dso.c
+                // fills its table with `__alignof__(x)` over four objects, and
+                // the alignment of an object's *type* is what GCC answers for
+                // one whose declaration asked for no more.
+                //
                 // The prediction guesses int for an operand it cannot type; an
                 // inline aggregate definition is such an operand, and a guess
-                // for one silently misfolds the size, so it fails here instead.
+                // for one silently misfolds the answer, so it fails here
+                // instead.
                 IrTypeId expression_type = c_ir_tokens_start_aggregate_definition(builder, operand_start, operand_end) ||
                                                    c_ir_sizeof_operand_is_unmapped_array_object(builder, operand_start, operand_end)
                                                ? IR_TYPE_ID_INVALID
@@ -22025,12 +22037,7 @@ c_ir_expression_core_loop:
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                     return;
                 }
-                value = expression->layout.size;
-            }
-            else
-            {
-                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-                return;
+                value = is_sizeof ? expression->layout.size : c_ir_sizeof_operand_alignment(expression);
             }
             values[value_count++] = c_ir_emit_integer_value_typed(builder, value, false, token, builder->size_type);
             expect_operand = false;

@@ -1533,17 +1533,17 @@ anything an allocator decides — and the same three excluded-reference. That
 agreement across 72 running programs is what the pass exists to be able to
 state.
 
-Today 386 of 424 units pass (measured 2026-08-30, on one machine).
+Today 388 of 424 units pass (measured 2026-08-30, on one machine).
 Seventy-eight are `src/api`: 78 of its 79 units compile against musl's headers
 under both compilers, and one — `api/unistd` — is held out because musl
 defines neither `_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the
-reference fails on too. The other 308 are runtime tests that link and run
-green: `src/functional` is 72 passing against 2 failing and 3
+reference fails on too. The other 310 are runtime tests that link and run
+green: `src/functional` is 74 passing against none failing and 3
 excluded-reference; `src/math` is 168 passing and 31 excluded-reference;
 `src/regression` is 68 passing against none failing and 1 excluded-reference.
-`src/math` passes every one of the 168 units the reference can run,
-`src/regression` has no failing unit left, and nothing in the suite is blocked
-on a compile or on a link.
+Every subset passes every unit the reference can run, and **no unit of the
+suite is in any state but `pass` or `excluded-reference`**: nothing is blocked
+on a compile, nothing on a link, and nothing answers differently.
 
 Most of that total is the reference's reach rather than Buster's, and it
 arrived with the assembly stage: both archives hold musl's own x86-64 assembly
@@ -1570,18 +1570,17 @@ where clang names `.text` plus an offset, and that is a PC-relative reference
 to an interposable symbol like any other. `functional/dlopen` is
 `excluded-reference`, because musl's loader saves a jump buffer around
 `dlopen` and the reference dies on the same trapping `setjmp` the Buster
-build does. The two that are left, `functional/tls_align` and
-`tls_align_dlopen`, link and run and get the wrong answer, and their cause is
+build does. The last two, `functional/tls_align` and `tls_align_dlopen`, were
 neither code model: `tls_align_dso.c` is one `__attribute__((constructor))`
-filling the table the test reads, nothing in this tree emits `.init_array`,
-and the attribute is accepted and dropped, so that object's `.text` comes out
-empty.
+filling the table the test reads, nothing in this tree emitted `.init_array`,
+and the attribute was accepted and dropped, so that object's `.text` came out
+empty. Both pass since the attribute started reaching the object file and the
+image (issue 771).
 
 `LIBCTEST_BLOCKER` still prints nothing, and now neither does any
-blocked-link state: every unit in the suite compiles and links under both
-compilers. The work list this stage generates for itself is a list of missing
-components, and what is left is one unimplemented attribute and the two wrong
-answers it causes.
+blocked-link or failing state: every unit in the suite compiles, links and
+answers as the reference does under both compilers. The work list this stage
+generates for itself is a list of missing components, and it is empty.
 
 The last 22 blocked-compile units went together, 21 in `src/math` and
 `functional/strtold`, when the x87 static-initializer folder stopped refusing
@@ -1596,12 +1595,18 @@ and its own diagnostic never reaches a state count. `buster_compile_failed` on
 the `LIBCTEST_SUBSET` line is the number to read for a compile gap, and it is
 0 in every subset but `api` now.
 
-Two failing units are left, and both are the same wrong answer rather than a
-missing component: `functional/tls_align` and `functional/tls_align_dlopen`,
-whose shared object is a constructor this compiler drops, as described above.
-Their cause is known, and every one of the five this stage started with is
-attributed. They are also the only units in the suite in any state but
-`pass` or `excluded-reference`.
+The last two failing units, `functional/tls_align` and
+`functional/tls_align_dlopen`, went with `__attribute__((constructor))`, and
+they are worth keeping as the shape of a dropped feature: the attribute was
+parsed and accepted, so nothing diagnosed it, and because the function that
+carried it was static and nothing called it, the unused-static elimination
+took the only function in the translation unit with it. The evidence was an
+object with an empty `.text` rather than any diagnostic. Keeping the function
+then exposed the gap behind it, which had never been reached: `__alignof__`
+took an expression operand only for a compound literal, and that constructor
+fills its table with `__alignof__(x)` over four thread-local objects. Every
+one of the five units this stage started with is attributed, and no unit in
+the suite is in any state but `pass` or `excluded-reference`.
 
 `functional/fcntl` was the fourth of the original five to go, and it was a
 lazy operand inside a call argument. Its child process exits on
@@ -2806,6 +2811,19 @@ on a commit you already know is incomplete tells nobody anything.
   sentinels.
 - Validate IR before machine selection or Wasm emission. A diagnosed frontend
   failure must not publish an apparently valid partial function to codegen.
+- **GNU's `__alignof__` takes an expression; `_Alignof` takes only a type
+  name.** Both spellings reach the same fold in `c_gen.c`, and it resolved an
+  expression operand only for a compound literal until libc-test's
+  `tls_align_dso.c` reached it: the file fills a table with `__alignof__(x)`
+  over four `__thread` objects, and every other shape refused with "could not
+  lower logical expression core". The operand now goes through the resolver
+  `sizeof v` already used, which answers the alignment of the operand's **own
+  type** -- `__alignof__(arr)` over a `char[7]` is 1, not the 8 the expression
+  type prediction would give the pointer it decays to in any other context.
+  The prediction is still the last resort for both words, under the same
+  guards: an inline aggregate definition and an object whose array type never
+  mapped are refused rather than guessed at. `tests/basic_c_alignof_expression.c`
+  is the fixture, and every value in it was compared against clang.
 - **`void` is one byte, and an object of it is still refused.** GNU gives
   `void` a size and an alignment of one so that arithmetic on a `void *` steps
   by bytes, and clang and gcc both fold `sizeof(void)`, `sizeof(const void)`

@@ -6864,14 +6864,15 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // Every fixture here folds a sizeof or _Alignof whose wrong lowering still
     // produces a plausible constant -- an unevaluated operand, an enum constant
     // over an object sizeof, a compound literal, a call-typed array bound, a
-    // function designator -- so reading the diagnostic is no evidence and the
-    // fixtures run.
+    // function designator, an expression operand under GNU's `__alignof__` --
+    // so reading the diagnostic is no evidence and the fixtures run.
     String8 c_runtime_fixture_paths[] = {
         S8("tests/basic_c_sizeof_unevaluated.c"),
         S8("tests/basic_c_enum_sizeof_object.c"),
         S8("tests/basic_c_sizeof_compound_literal.c"),
         S8("tests/basic_c_sizeof_call_array_bound.c"),
         S8("tests/basic_c_sizeof_function_designator.c"),
+        S8("tests/basic_c_alignof_expression.c"),
         // The two sbase fixtures belong here for the same reason: a wrong
         // lowering of a self-referential initializer or of `onestr + 1` still
         // produces a program, and only running it reads the pointer.
@@ -6884,6 +6885,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-sizeof-compound-literal"),
         S8("buster-c-sizeof-call-array-bound"),
         S8("buster-c-sizeof-function-designator"),
+        S8("buster-c-alignof-expression"),
         S8("buster-c-sbase-declarations"),
         S8("buster-c-sbase-expressions"),
     };

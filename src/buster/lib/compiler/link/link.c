@@ -384,8 +384,6 @@ struct LinkInitializerPlan
     LinkInitializerEntry* destructors;
     u32 constructor_count;
     u32 destructor_count;
-    bool valid;
-    u8 reserved[3];
 };
 
 // The entries of one array section, ordered by slot.  A slot with no
@@ -430,7 +428,7 @@ BUSTER_GLOBAL_LOCAL bool link_initializer_plan_build(Arena* arena, ObjectFile* o
 {
     bool result = true;
     *stripped = *object;
-    *plan = (LinkInitializerPlan){.valid = true};
+    *plan = (LinkInitializerPlan){0};
     u64 total = object->sections[OBJECT_SECTION_INIT_ARRAY].data.length + object->sections[OBJECT_SECTION_FINI_ARRAY].data.length;
     if (total)
     {
@@ -479,16 +477,14 @@ BUSTER_GLOBAL_LOCAL bool link_initializer_plan_build(Arena* arena, ObjectFile* o
 // terminate with main's status.  `exit_displacement_offset` receives the
 // hosted shape's second rel32 field for the caller to patch, exactly like the
 // call to main; it is untouched in the freestanding shape.
-// The stack an image's initializers are called on is the one the kernel
-// handed `_start`, which System V says is 16-byte aligned, so a `call` from
-// here leaves the callee with the misalignment by eight that every function
-// entry expects. That is why the ctor calls precede the `and rsp, -16` the
-// call to `main` needs: the mask is there for a start-up that did not honour
-// the guarantee, and applying it before reading argc off the stack would lose
-// the pointer. GNU hands argc, argv and envp to every initializer, so they are
-// read once into callee-saved registers and copied back into the argument
-// registers before each call, and `main`'s status is parked in ebx across the
-// destructors, which take no arguments.
+// The initializer calls sit between the `and rsp, -16` and the call to
+// `main`, so they run on the same aligned stack `main` does; the mask has to
+// follow the three reads because it is the stack pointer those index off.
+// GNU hands argc, argv and envp to every initializer, so they are read once
+// into callee-saved registers and copied back into the argument registers
+// before each call -- a called constructor owns rdi, rsi and rdx -- and
+// `main`'s status is parked in ebx across the destructors, which take no
+// arguments.
 //
 // A program with no initializers gets exactly the byte sequence this emitted
 // before there was a plan, at the two sizes named above.
@@ -519,6 +515,9 @@ BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8* bytes, u32 capacity, 
     operands[0] = link_x86_register(envp_register, 64);
     operands[1] = link_x86_memory_base_index(argv_register, argc_register, 8, 64, 8);
     if (!link_x86_emit(&builder, S8("LEA"), operands, 2)) return false;
+    operands[0] = link_x86_register(4, 64);
+    operands[1] = link_x86_immediate(-16, 8);
+    if (!link_x86_emit(&builder, S8("AND"), operands, 2)) return false;
     for (u32 constructor = 0; constructor < constructor_count; constructor += 1)
     {
         operands[0] = link_x86_register(7, 64);
@@ -547,9 +546,6 @@ BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8* bytes, u32 capacity, 
         operands[1] = link_x86_register(envp_register, 64);
         if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
     }
-    operands[0] = link_x86_register(4, 64);
-    operands[1] = link_x86_immediate(-16, 8);
-    if (!link_x86_emit(&builder, S8("AND"), operands, 2)) return false;
     if (call_displacement_offset) *call_displacement_offset = builder.count + 1;
     operands[0] = link_x86_relative(0, 32);
     if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;

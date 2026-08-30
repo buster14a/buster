@@ -17412,8 +17412,25 @@ struct LibcTestSubsetTotals
 // The shared musl above is still linked -Bsymbolic, because it is built from
 // the one non-PIC object set the rest of the harness measures rather than
 // because the flag is missing.
-#define LIBC_TEST_EXPECTED_PASSING 386
-#define LIBC_TEST_EXPECTED_STATE_HASH 0x7f7d113b6cd1805aull
+// 2026-08-30: 386 -> 388, and the suite has no failing unit left in any
+// subset. `__attribute__((constructor))` reaches the object file and the
+// image now (issue 771): it was parsed, accepted and dropped, nothing emitted
+// `.init_array`, and because `functional/tls_align_dso.c` is one static
+// constructor and nothing calls it the unused-static elimination dropped the
+// only function in the file. That object's `.text` is 2.112 bytes now, its
+// `.init_array` holds one relocated slot, and `functional/tls_align` and
+// `functional/tls_align_dlopen` read the table it fills.
+// Keeping the function is what exposed the gap behind it, which had never
+// been reached: `__alignof__` accepted an expression operand only for a
+// compound literal, and `tls_align_dso.c` fills its table with
+// `__alignof__(x)` over four thread-local objects. GNU's spelling takes an
+// expression where `_Alignof` takes only a type name, so the operand now
+// resolves through the same path `sizeof v` does -- the alignment of its own
+// type, not of the pointer an array would decay to. Both fixes are pinned by
+// `tests/basic_c_constructor.c` and `tests/basic_c_alignof_expression.c`
+// under all four allocators.
+#define LIBC_TEST_EXPECTED_PASSING 388
+#define LIBC_TEST_EXPECTED_STATE_HASH 0x6de8bc444366d4eull
 
 // The same gate for the second allocator, over LIBC_TEST_ALLOCATOR_SUBSET
 // alone, and deliberately not folded into the two above: a unit that answers
@@ -17436,8 +17453,12 @@ struct LibcTestSubsetTotals
 // making -fPIC a code model moves them here too. The two allocators still
 // classify `src/functional` identically, which is the fact this pass exists
 // to state.
-#define LIBC_TEST_ALLOCATOR_EXPECTED_PASSING 72
-#define LIBC_TEST_ALLOCATOR_EXPECTED_STATE_HASH 0xa8900b760d0d4598ull
+// 2026-08-30: 72 -> 74, the two units the inventory above gained, for the
+// same reason: `functional/tls_align` and `functional/tls_align_dlopen` read
+// a table an `__attribute__((constructor))` fills. The two allocators still
+// classify `src/functional` identically, and neither has a failing unit.
+#define LIBC_TEST_ALLOCATOR_EXPECTED_PASSING 74
+#define LIBC_TEST_ALLOCATOR_EXPECTED_STATE_HASH 0x39ee9bd6fa1ee8b1ull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it
