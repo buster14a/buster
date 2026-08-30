@@ -3921,6 +3921,30 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                            c_invalid_labels.analysis_diagnostic_count == 1 && !c_invalid_labels.has_object);
     BUSTER_TEST(arguments, string_starts_with_sequence(c_invalid_labels.diagnostic,
                                                        S8("tests/basic_c_invalid_labels.c:17:11: in function 'invalid_unsafe_branch': computed goto requires a function-local void pointer label value")));
+    // A sizeof operand is unevaluated but still an expression: a member chain
+    // that reaches a resolved aggregate with no member of that name must be
+    // refused, not handed to the type prediction as an int-sized guess.  The
+    // guess is what autoconf's AC_CHECK_MEMBER fallback probe reads --
+    // `if (sizeof ac_aggr.st_birthtime)` -- so it defined
+    // HAVE_STRUCT_STAT_ST_BIRTHTIME, ST_FLAGS and ST_GEN on Linux for
+    // CPython.  The fixture keeps the valid dot and arrow spellings beside
+    // the missing one, so a diagnostic that reached past the missing name
+    // changes the count here rather than passing.
+    String8 c_sizeof_missing_member_path = buster_test_temporary_path(arguments->arena, S8("buster-c-sizeof-missing-member"), S8(".o"));
+    String8 c_sizeof_missing_member_command_line[] = {
+        S8("-c"),
+        S8("-g0"),
+        S8("-o"),
+        c_sizeof_missing_member_path,
+        S8("tests/basic_c_sizeof_missing_member.c"),
+    };
+    CompilerDriverResult c_sizeof_missing_member = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_sizeof_missing_member_command_line)));
+    BUSTER_TEST(arguments, c_sizeof_missing_member.error == COMPILER_DRIVER_ERROR_ANALYSIS);
+    BUSTER_TEST(arguments, c_sizeof_missing_member.tokenizer_error_count == 0 && c_sizeof_missing_member.parser_diagnostic_count == 0 &&
+                           c_sizeof_missing_member.analysis_diagnostic_count == 1 && !c_sizeof_missing_member.has_object);
+    BUSTER_TEST(arguments, string_ends_with_sequence(c_sizeof_missing_member.diagnostic,
+                                                     S8("type 'stat_like' has no member named 'st_birthtime' (2 fields available)")));
     // A named bit-field of zero width is not a declaration C has: the zero
     // width belongs to the unnamed spelling, which declares no member and only
     // moves the next one to its type's boundary.  Accepted, it laid out a

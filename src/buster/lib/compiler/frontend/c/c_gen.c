@@ -2348,6 +2348,15 @@ struct CIntegerIrBuilder
     // its own rather than a construct this frontend has not implemented.
     u32 failure_kind_plus_one;
     u32 failure_token_index;
+    // Set by the sizeof-operand walkers when a member chain reached a
+    // resolved aggregate that has no member of the requested name.  An
+    // attempt returning false usually means "could not determine, try the
+    // next shape", but this one is a constraint violation: the fallback that
+    // would otherwise predict int for the operand reads it and refuses, so
+    // `sizeof v.missing` is an error rather than a silent 4 -- which is what
+    // every autoconf AC_CHECK_MEMBER fallback probe rests on.  Cleared by the
+    // sizeof/_Alignof lowering before it resolves an operand.
+    String8 sizeof_operand_missing_member;
     u32 declaration_index;
     CIntegerIrLocal* locals;
     // The entity of `locals[i]`, kept beside the table rather than read out of
@@ -20681,6 +20690,15 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_postfix_chain_attempt(CIntegerIrBuild
         IrTypeId member_type = IR_TYPE_ID_INVALID;
         if (!c_ir_promoted_member_type(builder, *type, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]), &member_type))
         {
+            // A resolved aggregate that lacks the name is a constraint
+            // violation, not a shape this resolver cannot read; record it so
+            // the prediction fallback refuses instead of guessing int.
+            if (value->layout.resolved && !builder->sizeof_operand_missing_member.length)
+            {
+                builder->sizeof_operand_missing_member =
+                    string_format(builder->arena, S8("type '{S8}' has no member named '{S8}' ({u32} fields available)"), value->name,
+                                  c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]), value->field_count);
+            }
             return false;
         }
         *type = member_type;
@@ -21800,6 +21818,15 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder
             IrTypeId member_type = IR_TYPE_ID_INVALID;
             if (!c_ir_promoted_member_type(builder, type, member_name, &member_type))
             {
+                // Same constraint violation as the chain walker above: a
+                // resolved aggregate without the name must not fall through
+                // to the int prediction.
+                if (value->layout.resolved && !builder->sizeof_operand_missing_member.length)
+                {
+                    builder->sizeof_operand_missing_member =
+                        string_format(builder->arena, S8("type '{S8}' has no member named '{S8}' ({u32} fields available)"), value->name, member_name,
+                                      value->field_count);
+                }
                 return false;
             }
             type = member_type;
@@ -22604,6 +22631,7 @@ c_ir_expression_core_loop:
                     }
                 }
             }
+            builder->sizeof_operand_missing_member = (String8){0};
             IrTypeId operand_type =
                 builder->preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER ? c_ir_type_name(builder, operand_start, operand_end) : IR_TYPE_ID_INVALID;
             IrType* operand = ir_type_from_id(&builder->program->types, operand_type);
@@ -22640,7 +22668,18 @@ c_ir_expression_core_loop:
                 // The prediction guesses int for an operand it cannot type; an
                 // inline aggregate definition is such an operand, and a guess
                 // for one silently misfolds the answer, so it fails here
-                // instead.
+                // instead.  A member chain the resolver proved wrong -- a
+                // resolved aggregate with no member of that name -- is not a
+                // shape to guess either: it is the diagnostic the walkers
+                // recorded, and predicting int for it is what made every
+                // autoconf AC_CHECK_MEMBER fallback probe answer yes.
+                if (builder->sizeof_operand_missing_member.length)
+                {
+                    builder->failure_message = builder->sizeof_operand_missing_member;
+                    builder->failure_token_index = operand_start;
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                    return;
+                }
                 IrTypeId expression_type = c_ir_tokens_start_aggregate_definition(builder, operand_start, operand_end) ||
                                                    c_ir_sizeof_operand_is_unmapped_array_object(builder, operand_start, operand_end)
                                                ? IR_TYPE_ID_INVALID
