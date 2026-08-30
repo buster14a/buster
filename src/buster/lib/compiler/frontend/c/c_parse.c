@@ -6030,7 +6030,7 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_parse_attribute_unsigned(String8 spelling, u32* value_out)
+BUSTER_C_SHARED bool c_parse_attribute_unsigned(String8 spelling, u32* value_out)
 {
     u32 base = 10;
     u64 index = 0;

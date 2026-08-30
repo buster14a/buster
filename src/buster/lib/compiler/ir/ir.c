@@ -3735,6 +3735,30 @@ IrSymbolAlias* ir_module_add_alias(Arena* arena, IrModule* module, IrSymbolAlias
     return result;
 }
 
+IrModuleInitializer* ir_module_add_initializer(Arena* arena, IrModule* module, IrModuleInitializer initializer)
+{
+    IrModuleInitializer* result = 0;
+    if (arena && module)
+    {
+        if (module->initializer_count >= module->initializer_capacity)
+        {
+            u32 old_capacity = module->initializer_capacity;
+            u32 capacity = old_capacity ? old_capacity * 2 : 4;
+            IrModuleInitializer* initializers = arena_allocate(arena, IrModuleInitializer, capacity);
+            if (module->initializer_count)
+            {
+                memcpy(initializers, module->initializers, (u64)module->initializer_count * sizeof(*initializers));
+            }
+            module->initializers = initializers;
+            module->initializer_capacity = capacity;
+        }
+        result = module->initializers + module->initializer_count++;
+        *result = initializer;
+    }
+
+    return result;
+}
+
 IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block)
 {
     IrBlock* result;
@@ -5031,6 +5055,29 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_alias(IrProgram* program, IrMo
     return result;
 }
 
+// A `constructor`/`destructor` entry is a relocation against a function this
+// module emits, so the same rule an alias obeys applies for the same reason:
+// a target that is only declared here would have the object writer relocate a
+// pointer against a name nothing in the image defines.
+BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_initializer(IrProgram* program, IrModule* module, IrModuleInitializer initializer)
+{
+    IrValidationError result = IR_VALIDATION_INITIALIZER_TARGET;
+    IrSymbol* symbol = ir_symbol_from_id(&program->symbols, initializer.symbol);
+    if (symbol && symbol->kind == IR_SYMBOL_FUNCTION && symbol->is_definition &&
+        (initializer.priority <= UINT16_MAX || initializer.priority == IR_INITIALIZER_PRIORITY_NONE))
+    {
+        bool defined_here = false;
+        for (u32 function_index = 0; function_index < module->function_count && !defined_here; function_index += 1)
+        {
+            defined_here = module->functions[function_index].symbol.value == initializer.symbol.value &&
+                           module->functions[function_index].state == IR_FUNCTION_LOWERED;
+        }
+        result = defined_here ? IR_VALIDATION_NONE : IR_VALIDATION_INITIALIZER_TARGET;
+    }
+
+    return result;
+}
+
 IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
 {
     IrValidationResult result = ir_validation_ok();
@@ -5048,6 +5095,10 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
         for (u32 alias_index = 0; alias_index < module->alias_count && result.error == IR_VALIDATION_NONE; alias_index += 1)
         {
             result.error = ir_validate_alias(program, module, module->aliases[alias_index]);
+        }
+        for (u32 initializer_index = 0; initializer_index < module->initializer_count && result.error == IR_VALIDATION_NONE; initializer_index += 1)
+        {
+            result.error = ir_validate_initializer(program, module, module->initializers[initializer_index]);
         }
         for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
         {

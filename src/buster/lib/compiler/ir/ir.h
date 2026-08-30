@@ -636,6 +636,32 @@ struct IrModuleAssembly
     IrSourceRange source_range;
 };
 
+// The priority a `constructor`/`destructor` attribute written without one
+// carries. GNU runs every prioritized initializer before every unprioritized
+// one and `ld` gets that by sorting `.init_array.NNNNN` ahead of the
+// unsuffixed `.init_array`, so one number past the 16-bit priority range
+// reproduces the same order with an ordinary ascending sort.
+#define IR_INITIALIZER_PRIORITY_NONE 0x10000u
+
+// One function that runs before `main` (`__attribute__((constructor))`) or
+// after it (`__attribute__((destructor))`). Like IrModuleAlias this is a
+// relation rather than a symbol property -- the object writer turns the list
+// into the `.init_array`/`.fini_array` entries and their relocations -- and a
+// translation unit that registers none carries an empty list, which is nearly
+// all of them.
+typedef struct IrModuleInitializer IrModuleInitializer;
+struct IrModuleInitializer
+{
+    IrSymbolId symbol;
+    // 0..65535 as written, or IR_INITIALIZER_PRIORITY_NONE when the attribute
+    // named no priority. Ascending, so the sort is one comparison.
+    u32 priority;
+    // Runs after `main` rather than before it: `.fini_array`, not
+    // `.init_array`.
+    bool is_destructor;
+    u8 reserved[3];
+};
+
 typedef struct IrModule IrModule;
 struct IrModule
 {
@@ -648,6 +674,11 @@ struct IrModule
     // for something -- so they are a short list the object writer walks once,
     // not a mostly-unset field on every symbol.
     IrSymbolAlias* aliases;
+    // The `constructor`/`destructor` functions this module registers, in the
+    // order their definitions were written. The object writer sorts a copy by
+    // priority; this list keeps source order so two initializers that share a
+    // priority keep the order the translation unit gave them.
+    IrModuleInitializer* initializers;
     u32 function_count;
     u32 function_capacity;
     u32 global_count;
@@ -656,6 +687,8 @@ struct IrModule
     u32 assembly_capacity;
     u32 alias_count;
     u32 alias_capacity;
+    u32 initializer_count;
+    u32 initializer_capacity;
     u32 lowered_function_count;
     u32 rejected_function_count;
     // How many relocations across `globals` take a block label's address — the
@@ -705,6 +738,7 @@ typedef enum IrValidationError
     IR_VALIDATION_ALIGNMENT,
     IR_VALIDATION_INSTRUCTION_OWNERSHIP,
     IR_VALIDATION_ALIAS_TARGET,
+    IR_VALIDATION_INITIALIZER_TARGET,
     IR_VALIDATION_COUNT,
 } IrValidationError;
 
@@ -758,6 +792,7 @@ BUSTER_F_DECL IrSourceId ir_program_add_source(IrProgram* program, IrSource sour
 BUSTER_F_DECL IrFunction* ir_module_add_function(Arena* arena, IrModule* module, IrFunction function);
 BUSTER_F_DECL IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrGlobal global);
 BUSTER_F_DECL IrSymbolAlias* ir_module_add_alias(Arena* arena, IrModule* module, IrSymbolAlias alias);
+BUSTER_F_DECL IrModuleInitializer* ir_module_add_initializer(Arena* arena, IrModule* module, IrModuleInitializer initializer);
 BUSTER_F_DECL IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block);
 BUSTER_F_DECL IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue value);
 BUSTER_F_DECL IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, IrInstruction instruction, IrSourceRange canonical_source);

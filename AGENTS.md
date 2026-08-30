@@ -3010,6 +3010,54 @@ on a commit you already know is incomplete tells nobody anything.
   marker attribute has no argument shape to recognise it by, and `weak` and
   `alias` are ordinary identifiers, so `int weak;` must stay a strong
   definition.
+- **`__attribute__((constructor))` and `__attribute__((destructor))`** run a
+  function before and after `main`. They are read out of the declaration's
+  attribute list by the same `c_declaration_binding` walk as `weak` and
+  `alias`, with the reserved `__constructor__`/`__destructor__` spellings
+  beside the plain ones and the optional `constructor(101)` priority; the
+  attribute may be written on any declaration of the function, so the flag is
+  collected per entity the way `noreturn` is. Three consequences follow, and
+  each was a separate hole before issue 771 closed them. A registered function
+  is **reachable by definition** -- no expression names it -- so it is a root
+  of the unused-static elimination in `c_gen.c`, without which a translation
+  unit whose only function is a static constructor came out with an empty
+  `.text`. The registration is a module-level list, `IrModule.initializers`,
+  for the reason aliases are: it is a relation, not a property of a symbol,
+  and nearly every module has none. And the two targets with no initializer
+  array at all -- core Wasm, which starts one function of its own, and eBPF,
+  which has no startup -- **diagnose** the attribute rather than dropping it.
+- **`.init_array` and `.fini_array` are section kinds**,
+  `OBJECT_SECTION_INIT_ARRAY` and `OBJECT_SECTION_FINI_ARRAY`, holding one
+  pointer-wide slot per initializer with an `ABSOLUTE64` relocation against
+  the function. ELF writes them `SHT_INIT_ARRAY`/`SHT_FINI_ARRAY`, Mach-O
+  `__DATA,__mod_init_func`/`__mod_term_func` with the `S_MOD_*_FUNC_POINTERS`
+  types, and COFF keeps this model's neutral names the way `.rodata` and
+  `.tdata` already do. **Priority orders within the translation unit, not
+  across one.** `ld` gets the GNU order by sorting `.init_array.NNNNN` ahead
+  of the unsuffixed `.init_array`, and this model has one section per kind, so
+  the object writer sorts the entries instead: ascending priority, with an
+  attribute that named none last, and equal priorities left in declaration
+  order. That reproduces GNU's order exactly inside one object and leaves the
+  order between objects to the linker's concatenation, which is what
+  `ld` would give two unprioritized ones anyway.
+- **An image this linker produces calls its initializers from the entry
+  stub.** There is no libc startup object in it -- the stub *is* the startup,
+  which is why `link_x86_build_elf_entry_stub` exists at all -- so nothing
+  would walk the arrays, and the linker already knows every entry's target at
+  layout time. `link_initializer_plan_build` reads the two sections into a
+  plan and hands back the object with them removed; each writer then emits one
+  direct call per constructor before `main` and one per destructor after it,
+  patched exactly like the call to `main` beside them. ELF passes argc, argv
+  and envp to each constructor as GNU does; PE passes nothing, which is MSVC's
+  `.CRT$XCU` contract and all that is available before the argv machinery
+  runs. Two limits are worth knowing. A program that terminates by calling
+  `exit` rather than returning from `main` does not run its destructors,
+  because the stub owns that sequence rather than an `atexit` registration.
+  And the Mach-O and UEFI writers synthesize no entry point of their own --
+  LC_MAIN hands `main` straight to dyld, and a UEFI image's entry is the
+  firmware's -- so they **refuse** a program with initializers, naming the
+  first one, rather than placing an array nothing will call. The objects those
+  targets produce are correct and link through the system linker.
 - **An undefined weak symbol resolves to address zero**, which is what a
   program asks for by declaring one: musl's startup takes the address of a
   weak hidden `_DYNAMIC` and reads zero to learn it is static. Which party

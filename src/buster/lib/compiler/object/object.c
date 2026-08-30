@@ -629,6 +629,10 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
             return S8("\t.section __DATA,__thread_data\n");
         case OBJECT_SECTION_THREAD_LOCAL_ZERO:
             return S8("\t.section __DATA,__thread_bss\n");
+        case OBJECT_SECTION_INIT_ARRAY:
+            return S8("\t.section __DATA,__mod_init_func,mod_init_funcs\n");
+        case OBJECT_SECTION_FINI_ARRAY:
+            return S8("\t.section __DATA,__mod_term_func,mod_term_funcs\n");
         case OBJECT_SECTION_UNWIND:
             return S8("\t.section __TEXT,__eh_frame,coalesced,no_toc+strip_static_syms+live_support\n");
         case OBJECT_SECTION_WINDOWS_PDATA:
@@ -671,6 +675,12 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
     case OBJECT_SECTION_THREAD_LOCAL_ZERO:
         return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .tbss\n")
                                                                                            : S8("\t.section .tbss,\"awT\",@nobits\n");
+    case OBJECT_SECTION_INIT_ARRAY:
+        return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .init_array\n")
+                                                                                           : S8("\t.section .init_array,\"aw\",@init_array\n");
+    case OBJECT_SECTION_FINI_ARRAY:
+        return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .fini_array\n")
+                                                                                           : S8("\t.section .fini_array,\"aw\",@fini_array\n");
     case OBJECT_SECTION_UNWIND:
         return S8("\t.section .eh_frame,\"a\",@progbits\n");
     case OBJECT_SECTION_WINDOWS_PDATA:
@@ -3483,6 +3493,10 @@ String8 object_section_name_for_kind(ObjectSectionKind kind)
         return S8(".tdata");
     case OBJECT_SECTION_THREAD_LOCAL_ZERO:
         return S8(".tbss");
+    case OBJECT_SECTION_INIT_ARRAY:
+        return S8(".init_array");
+    case OBJECT_SECTION_FINI_ARRAY:
+        return S8(".fini_array");
     case OBJECT_SECTION_UNWIND:
         return S8(".eh_frame");
     case OBJECT_SECTION_WINDOWS_PDATA:
@@ -3518,8 +3532,11 @@ u32 object_section_default_alignment(ObjectSectionKind kind)
     {
         result = 1;
     }
-    else if (kind == OBJECT_SECTION_UNWIND)
+    else if (kind == OBJECT_SECTION_UNWIND || kind == OBJECT_SECTION_INIT_ARRAY || kind == OBJECT_SECTION_FINI_ARRAY)
     {
+        // The initializer arrays hold one pointer per entry and nothing wider,
+        // so the pointer's own alignment is the section's; over-aligning would
+        // pad between two objects' contributions and put a zero in the array.
         result = 8;
     }
     else
@@ -3751,6 +3768,15 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             {
                 unwind_type = section_type == 1 || (target.cpu_arch == CPU_ARCH_X86_64 && section_type == 0x70000001);
             }
+            // SHT_INIT_ARRAY and SHT_FINI_ARRAY.  Their type is what names
+            // them, not their section name: `ld` sorts `.init_array.NNNNN`
+            // into the array by priority and every one of those spellings is
+            // the same kind here.
+            bool initializer_array = false;
+            if (read_ok)
+            {
+                initializer_array = section_type == 14 || section_type == 15;
+            }
             bool ignored = false;
             if (read_ok)
             {
@@ -3761,7 +3787,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             if (read_ok)
             {
                 debug_kind = flags & 0x2 ? OBJECT_SECTION_COUNT : object_debug_section_kind_from_name(name);
-                if ((!(flags & 0x2) && debug_kind == OBJECT_SECTION_COUNT) || (unwind ? !unwind_type : section_type != 1 && section_type != 8) || ignored)
+                if ((!(flags & 0x2) && debug_kind == OBJECT_SECTION_COUNT) ||
+                    (unwind ? !unwind_type : !initializer_array && section_type != 1 && section_type != 8) || ignored)
                 {
                     continue;
                 }
@@ -3778,6 +3805,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
             if (read_ok)
             {
                 kind = unwind                             ? OBJECT_SECTION_UNWIND
+                                         : initializer_array                  ? (section_type == 14 ? OBJECT_SECTION_INIT_ARRAY : OBJECT_SECTION_FINI_ARRAY)
                                          : debug_kind != OBJECT_SECTION_COUNT ? debug_kind
                                          : flags & 0x400                    ? (section_type == 8 ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
                                          : flags & 0x4                      ? OBJECT_SECTION_TEXT
@@ -9058,6 +9086,56 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     }
     IrModule* ir_module = module->ir_module;
     u32 alias_count = ir_module ? ir_module->alias_count : 0;
+    // __attribute__((constructor))/((destructor)) arrive as
+    // IrModule.initializers and become one pointer-sized, relocated slot each
+    // in .init_array or .fini_array.  The order inside a section is the order
+    // the entries run in, so the list is sorted by priority here rather than
+    // left to the format: this model has one section per kind, so a
+    // translation unit's whole array is one section and the sort is what makes
+    // `constructor(101)` run before an unprioritized sibling.  Across
+    // translation units the order is `ld`'s, which concatenates the arrays in
+    // link order.
+    u32 initializer_count = ir_module ? ir_module->initializer_count : 0;
+    u32* initializer_order = arena_allocate(arena, u32, initializer_count ? initializer_count : 1);
+    u32 initializer_counts[2] = {0};
+    for (u32 index = 0; index < initializer_count; index += 1)
+    {
+        // Insertion by (destructor, priority) keeps equal priorities in the
+        // declaration order the frontend appended them in.
+        IrModuleInitializer current = ir_module->initializers[index];
+        u32 position = index;
+        while (position)
+        {
+            IrModuleInitializer previous = ir_module->initializers[initializer_order[position - 1]];
+            bool after = previous.is_destructor < current.is_destructor ||
+                         (previous.is_destructor == current.is_destructor && previous.priority <= current.priority);
+            if (after)
+            {
+                break;
+            }
+            initializer_order[position] = initializer_order[position - 1];
+            position -= 1;
+        }
+        initializer_order[position] = index;
+        initializer_counts[current.is_destructor ? 1 : 0] += 1;
+    }
+    for (u32 slot = 0; slot < 2; slot += 1)
+    {
+        ObjectSectionKind kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+        u64 length = (u64)initializer_counts[slot] * OBJECT_INITIALIZER_ENTRY_SIZE;
+        u8* entries = arena_allocate(arena, u8, length ? length : 1);
+        memset(entries, 0, length);
+        result.sections[kind] = (ObjectSection){
+            .name = object_section_name_for_kind(kind),
+            .data =
+                {
+                    .pointer = entries,
+                    .length = length,
+                },
+            .kind = kind,
+            .alignment = object_section_default_alignment(kind),
+        };
+    }
     result.symbols = arena_allocate(arena, ObjectSymbol, module->entry_count + module->global_count + alias_count + module->relocation_count +
                                                              (apple_thread_local ? 1 : 0) + (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) +
                                                              (windows_unwind.function_count ? 1 : 0) + (module->position_independent ? 1 : 0));
@@ -9163,7 +9241,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .global = true,
         };
     }
-    result.relocations = arena_allocate(arena, ObjectRelocation, module->relocation_count + metadata_relocation_count);
+    result.relocations = arena_allocate(arena, ObjectRelocation, module->relocation_count + metadata_relocation_count + initializer_count);
     Arena* name_conflicts[] = {
         arena,
     };
@@ -9250,6 +9328,29 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .symbol = symbol_index,
             .kind = kind,
         };
+    }
+    // One absolute pointer-width relocation per initializer, in the sorted
+    // order, filling the two sections reserved above.  The target is always a
+    // function this module emits (ir_validate_initializer), so its symbol is
+    // the entry index the table above already carries.
+    u64 initializer_offsets[2] = {0};
+    for (u32 index = 0; index < initializer_count && result.error == OBJECT_ERROR_NONE; index += 1)
+    {
+        IrModuleInitializer initializer = ir_module->initializers[initializer_order[index]];
+        u32 slot = initializer.is_destructor ? 1u : 0u;
+        u32 symbol_index = initializer.symbol.value < entry_symbol_capacity ? entry_by_symbol[initializer.symbol.value] : UINT32_MAX;
+        if (symbol_index == UINT32_MAX)
+        {
+            result.error = OBJECT_ERROR_INVALID_INPUT;
+            break;
+        }
+        result.relocations[result.relocation_count++] = (ObjectRelocation){
+            .offset = initializer_offsets[slot],
+            .section = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY,
+            .symbol = symbol_index,
+            .kind = OBJECT_RELOCATION_ABSOLUTE64,
+        };
+        initializer_offsets[slot] += OBJECT_INITIALIZER_ENTRY_SIZE;
     }
     scratch_end(name_temporary);
     if (result.error == OBJECT_ERROR_NONE)
@@ -9498,9 +9599,21 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
             {
                 type = 0x70000001;
             }
+            // SHT_INIT_ARRAY and SHT_FINI_ARRAY: the type is what tells `ld`
+            // these are the arrays to concatenate into DT_INIT_ARRAY and
+            // DT_FINI_ARRAY rather than ordinary writable data.
+            else if (source->kind == OBJECT_SECTION_INIT_ARRAY)
+            {
+                type = 14;
+            }
+            else if (source->kind == OBJECT_SECTION_FINI_ARRAY)
+            {
+                type = 15;
+            }
             flags = source->kind == OBJECT_SECTION_TEXT                                                                    ? 0x6
                     : source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA || source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? 0x403
-                    : source->kind == OBJECT_SECTION_DATA || source->kind == OBJECT_SECTION_ZERO                           ? 0x3
+                    : source->kind == OBJECT_SECTION_DATA || source->kind == OBJECT_SECTION_ZERO ||
+                              source->kind == OBJECT_SECTION_INIT_ARRAY || source->kind == OBJECT_SECTION_FINI_ARRAY      ? 0x3
                     : object_section_kind_is_debug(source->kind)                                                           ? 0x0
                                                                                                                            : 0x2;
             alignment = source->alignment;
@@ -10017,6 +10130,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
                                : source->kind == OBJECT_SECTION_ZERO              ? S8("__bss")
                                : source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ? S8("__thread_data")
                                : source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? S8("__thread_bss")
+                               : source->kind == OBJECT_SECTION_INIT_ARRAY        ? S8("__mod_init_func")
+                               : source->kind == OBJECT_SECTION_FINI_ARRAY        ? S8("__mod_term_func")
                                : source->kind == OBJECT_SECTION_UNWIND            ? S8("__eh_frame")
                                : source->kind == OBJECT_SECTION_WINDOWS_PDATA     ? S8("__pdata")
                                : source->kind == OBJECT_SECTION_WINDOWS_XDATA     ? S8("__xdata")
@@ -10030,7 +10145,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
         String8 segment_name =
             (source->kind == OBJECT_SECTION_DATA || source->kind == OBJECT_SECTION_ZERO || source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
              source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO || source->kind == OBJECT_SECTION_WINDOWS_PDATA ||
-             source->kind == OBJECT_SECTION_WINDOWS_XDATA)
+             source->kind == OBJECT_SECTION_WINDOWS_XDATA || source->kind == OBJECT_SECTION_INIT_ARRAY ||
+             source->kind == OBJECT_SECTION_FINI_ARRAY)
                 ? S8("__DATA")
             : object_section_kind_is_debug(source->kind) ? S8("__DWARF")
                                                          : S8("__TEXT");
@@ -10054,6 +10170,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
                             : source->kind == OBJECT_SECTION_ZERO              ? 0x1
                             : source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ? 0x11
                             : source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? 0x12
+                            : source->kind == OBJECT_SECTION_INIT_ARRAY        ? 0x9
+                            : source->kind == OBJECT_SECTION_FINI_ARRAY        ? 0xa
                             : source->kind == OBJECT_SECTION_UNWIND            ? 0x6800000b
                             : object_section_kind_is_debug(source->kind)       ? 0x02000000
                                                                                : 0);

@@ -133,18 +133,45 @@ BUSTER_C_INTERNAL u64 c_declaration_well_known_set(CPreprocessResult preprocess,
 }
 
 // How a file-scope declaration binds its symbol: __attribute__((weak)) makes
-// the definition replaceable, and __attribute__((alias("target"))) makes the
-// declaration a second name for a definition elsewhere in the unit. musl
-// spells its whole public surface this way -- `weak_alias(__libc_malloc,
-// malloc)` expands to both attributes at once -- so the two are found in one
-// walk.
+// the definition replaceable, __attribute__((alias("target"))) makes the
+// declaration a second name for a definition elsewhere in the unit, and
+// __attribute__((constructor))/((destructor)) put the function it names in
+// the module's initializer list. musl spells its whole public surface this
+// way -- `weak_alias(__libc_malloc, malloc)` expands to both of the first two
+// at once -- so they are found in one walk.
 typedef struct CDeclarationBinding CDeclarationBinding;
 struct CDeclarationBinding
 {
     String8 alias_target;
+    // IR_INITIALIZER_PRIORITY_NONE when the attribute named no priority; the
+    // written value otherwise. Meaningful only while the matching flag is set,
+    // because zero is a priority a program may write.
+    u32 constructor_priority;
+    u32 destructor_priority;
     bool is_weak;
-    u8 reserved[7];
+    bool is_constructor;
+    bool is_destructor;
+    u8 reserved[5];
 };
+
+// `constructor(101)`: the optional priority a GNU initializer attribute takes.
+// A malformed or out-of-range argument leaves the priority unset rather than
+// refusing the attribute, which keeps the function in the array where clang
+// and gcc also keep it. The bound is 16 bits because that is the width `ld`
+// sorts `.init_array.NNNNN` in.
+BUSTER_C_INTERNAL u32 c_declaration_initializer_priority(CPreprocessResult preprocess, u32 index, u32 end)
+{
+    u32 result = IR_INITIALIZER_PRIORITY_NONE;
+    u32 value = 0;
+    if (index + 3 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        preprocess.tokens[index + 2].kind == C_TOKEN_PREPROCESSING_NUMBER && c_token_is_punctuator(&preprocess.tokens[index + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+        c_parse_attribute_unsigned(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 2]), &value) && value <= UINT16_MAX)
+    {
+        result = value;
+    }
+
+    return result;
+}
 
 // One token range's `__attribute__((...))` lists, accumulated into `binding`.
 // Unlike `section` and `asm` these attributes are matched inside the list
@@ -200,6 +227,18 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
             {
                 binding->is_weak |= c_token_in_well_known_set(preprocess.spelling_base, inner,
                                                               C_SYMBOL_WELL_KNOWN_BIT(WEAK) | C_SYMBOL_WELL_KNOWN_BIT(WEAK_GNU));
+                if (c_token_in_well_known_set(preprocess.spelling_base, inner,
+                                              C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR_GNU)))
+                {
+                    binding->is_constructor = true;
+                    binding->constructor_priority = c_declaration_initializer_priority(preprocess, item, end);
+                }
+                if (c_token_in_well_known_set(preprocess.spelling_base, inner,
+                                              C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR_GNU)))
+                {
+                    binding->is_destructor = true;
+                    binding->destructor_priority = c_declaration_initializer_priority(preprocess, item, end);
+                }
                 ByteSlice decoded = {0};
                 if (c_token_in_well_known_set(preprocess.spelling_base, inner,
                                               C_SYMBOL_WELL_KNOWN_BIT(ALIAS) | C_SYMBOL_WELL_KNOWN_BIT(ALIAS_GNU)) &&
@@ -39177,11 +39216,14 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     // typedef of one are copies carrying the same bound record, and one report
     // per written `[N]` is what Clang produces; counting it on the bound is
     // also what keeps it out of the per-type budget the aggregate and alias
-    // reports share. The trailing two slots are the funnel's own and the
+    // reports share, and a third per declaration for a `constructor`/
+    // `destructor` on a target with no initializer array, which is reported
+    // after every body is lowered and so shares neither of the first two.
+    // The trailing two slots are the funnel's own and the
     // single report the array-type-name resolver makes for an array type name
     // that never reached the type table, and so has no bound record either.
     result.diagnostics = arena_allocate(arena, CDiagnostic,
-                                        2 * parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
+                                        3 * parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
                                             parse.array_bound_count + 2);
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
@@ -40412,6 +40454,19 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     bool* entity_weak = arena_allocate(arena, bool, parse.entity_count);
     memset(entity_alias_targets, 0xff, sizeof(*entity_alias_targets) * parse.entity_count);
     memset(entity_weak, 0, sizeof(*entity_weak) * parse.entity_count);
+    // __attribute__((constructor))/((destructor)) per entity, for the same
+    // reason: the attribute may be written on a declaration rather than on the
+    // definition, and it is what makes the definition reachable at all -- a
+    // static one nothing calls is otherwise dropped, which is what left
+    // libc-test's tls_align_dso.o with an empty .text (issue 771).
+    // IR_INITIALIZER_PRIORITY_NONE is the priority of an attribute that named
+    // none, and is only read where the matching flag is set.
+    bool* entity_constructor = arena_allocate(arena, bool, parse.entity_count);
+    bool* entity_destructor = arena_allocate(arena, bool, parse.entity_count);
+    u32* entity_constructor_priority = arena_allocate(arena, u32, parse.entity_count);
+    u32* entity_destructor_priority = arena_allocate(arena, u32, parse.entity_count);
+    memset(entity_constructor, 0, sizeof(*entity_constructor) * parse.entity_count);
+    memset(entity_destructor, 0, sizeof(*entity_destructor) * parse.entity_count);
     bool* object_referenced = arena_allocate(arena, bool, parse.entity_count);
     memset(object_referenced, 0, sizeof(*object_referenced) * parse.entity_count);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
@@ -40424,6 +40479,16 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         }
         CDeclarationBinding binding = c_declaration_binding(arena, preprocess, declaration);
         entity_weak[declaration.entity.value] |= binding.is_weak;
+        if (declaration.kind == C_DECLARATION_FUNCTION && binding.is_constructor)
+        {
+            entity_constructor_priority[declaration.entity.value] = binding.constructor_priority;
+            entity_constructor[declaration.entity.value] = true;
+        }
+        if (declaration.kind == C_DECLARATION_FUNCTION && binding.is_destructor)
+        {
+            entity_destructor_priority[declaration.entity.value] = binding.destructor_priority;
+            entity_destructor[declaration.entity.value] = true;
+        }
         if (!binding.alias_target.length)
         {
             continue;
@@ -41104,7 +41169,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         bool internal = c_declaration_well_known_set(preprocess, declaration, C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
         bool inline_definition = declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
         bool referenced_outside_body = declaration.entity.value < parse.entity_count && function_referenced_outside[declaration.entity.value];
-        if ((!internal && !inline_definition) || referenced_outside_body)
+        // A `constructor` or `destructor` is reachable by definition: the
+        // image's startup calls it and no expression in the unit names it.
+        bool registered = declaration.entity.value < parse.entity_count &&
+                          (entity_constructor[declaration.entity.value] || entity_destructor[declaration.entity.value]);
+        if ((!internal && !inline_definition) || referenced_outside_body || registered)
         {
             function_needed[declaration_index] = true;
             function_worklist[function_worklist_count++] = declaration_index;
@@ -41688,6 +41757,62 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                 .symbol = alias_symbol,
                                 .target = target_symbol,
                             });
+    }
+    // The initializer registrations go in beside the aliases and for the same
+    // reason: only now is it settled which bodies this module keeps, and an
+    // entry is a relocation against one of them. Declaration order is the
+    // order they are appended in, which is what decides the order of two
+    // initializers that share a priority; the object writer sorts by priority
+    // and leaves equal priorities where it found them.
+    //
+    // Two targets have no initializer array to put them in -- core Wasm starts
+    // one function of its own and eBPF has no startup at all -- so there the
+    // attribute is a refusal rather than a silently dropped marker, which is
+    // what it was everywhere before issue 771.
+    bool initializer_target = target.cpu_arch != CPU_ARCH_WASM64 && target.cpu_arch != CPU_ARCH_BPFEL;
+    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+    {
+        CDeclaration declaration = parse.declarations[declaration_index];
+        IrFunction* function = declaration_functions[declaration_index];
+        if (declaration.kind != C_DECLARATION_FUNCTION || !declaration.is_definition || !function || function->state != IR_FUNCTION_LOWERED ||
+            declaration.entity.value >= parse.entity_count)
+        {
+            continue;
+        }
+        bool is_constructor = entity_constructor[declaration.entity.value];
+        bool is_destructor = entity_destructor[declaration.entity.value];
+        if (!is_constructor && !is_destructor)
+        {
+            continue;
+        }
+        if (!initializer_target)
+        {
+            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                .message = string_format(arena, S8("'{S8}' is declared __attribute__(({S8})), which {S8} has no initializer array for"), declaration.name,
+                                         is_constructor ? S8("constructor") : S8("destructor"),
+                                         target.cpu_arch == CPU_ARCH_WASM64 ? S8("wasm64") : S8("eBPF")),
+                .location = declaration.location,
+                .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+            };
+            continue;
+        }
+        if (is_constructor)
+        {
+            ir_module_add_initializer(arena, module,
+                                      (IrModuleInitializer){
+                                          .symbol = function->symbol,
+                                          .priority = entity_constructor_priority[declaration.entity.value],
+                                      });
+        }
+        if (is_destructor)
+        {
+            ir_module_add_initializer(arena, module,
+                                      (IrModuleInitializer){
+                                          .symbol = function->symbol,
+                                          .priority = entity_destructor_priority[declaration.entity.value],
+                                          .is_destructor = true,
+                                      });
+        }
     }
     // The array-type-name resolver's own report, made after every declaration
     // has been lowered because that is when the earliest offending bracket is

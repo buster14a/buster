@@ -37,6 +37,13 @@ typedef enum ObjectSectionKind
     OBJECT_SECTION_ZERO,
     OBJECT_SECTION_THREAD_LOCAL_DATA,
     OBJECT_SECTION_THREAD_LOCAL_ZERO,
+    // The pointer arrays a `constructor`/`destructor` function is registered
+    // in: one relocated pointer per entry, in the order they are to run.  ELF
+    // spells them SHT_INIT_ARRAY/SHT_FINI_ARRAY `.init_array`/`.fini_array`
+    // and Mach-O `__DATA,__mod_init_func`/`__mod_term_func`; COFF keeps this
+    // model's neutral names, the way `.rodata` and `.tdata` already do.
+    OBJECT_SECTION_INIT_ARRAY,
+    OBJECT_SECTION_FINI_ARRAY,
     OBJECT_SECTION_UNWIND,
     OBJECT_SECTION_WINDOWS_PDATA,
     OBJECT_SECTION_WINDOWS_XDATA,
@@ -50,6 +57,12 @@ typedef enum ObjectSectionKind
     OBJECT_SECTION_DEBUG_CODEVIEW_TYPES,
     OBJECT_SECTION_COUNT,
 } ObjectSectionKind;
+
+// One entry of OBJECT_SECTION_INIT_ARRAY or OBJECT_SECTION_FINI_ARRAY: a
+// pointer to the function it registers.  Every target this model converts
+// codegen output for is 64-bit, and both the section's alignment and the
+// ABSOLUTE64 relocation the entry takes are stated in terms of this.
+#define OBJECT_INITIALIZER_ENTRY_SIZE 8u
 
 BUSTER_F_DECL bool object_section_kind_is_debug(ObjectSectionKind kind);
 BUSTER_F_DECL bool object_section_kind_is_zero_fill(ObjectSectionKind kind);

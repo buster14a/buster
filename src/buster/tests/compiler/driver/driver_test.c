@@ -4975,6 +4975,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             // model-dependent direct-or-hidden-pointer result, at the host's
             // model here and at the pinned sub-AVX-512 models below.
             S8("tests/basic_c_vector_argument_wide.c"),
+            // The PE entry stub calls the initializers itself, before the
+            // argv machinery runs; nothing else in the image would.
+            S8("tests/basic_c_constructor.c"),
         };
         for (u32 fixture_index = 0; wine_available && fixture_index < BUSTER_ARRAY_LENGTH(wine_fixtures); fixture_index += 1)
         {
@@ -5814,6 +5817,105 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
+    // The object side of the same fixture, checked for a fixed cross target so
+    // every host runs it: the array is what an external linker consumes, and
+    // its slot order is the only place a priority is recorded once the two
+    // sections are one each.  `ld` orders `.init_array.NNNNN` ahead of the
+    // unsuffixed `.init_array`, and this model has one section per kind, so
+    // the object writer sorts the entries instead -- 101 then 150 then the
+    // one written without a priority.
+    {
+        String8 constructor_object_command_line[] = {
+            S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_constructor.c"),
+        };
+        CompilerDriverResult constructor_object = compiler_driver_execute_invocation(
+            arguments->arena,
+            compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(constructor_object_command_line)));
+        BUSTER_TEST(arguments, constructor_object.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, constructor_object.has_object);
+        if (constructor_object.has_object)
+        {
+            ObjectFile* initializer_object = &constructor_object.object;
+            BUSTER_TEST(arguments, initializer_object->sections[OBJECT_SECTION_INIT_ARRAY].data.length == 3 * OBJECT_INITIALIZER_ENTRY_SIZE);
+            BUSTER_TEST(arguments, initializer_object->sections[OBJECT_SECTION_FINI_ARRAY].data.length == OBJECT_INITIALIZER_ENTRY_SIZE);
+            String8 initializer_expected_names[] = {
+                S8("with_earlier_priority"), S8("with_later_priority"), S8("without_priority"), S8("at_exit"),
+            };
+            u32 initializer_expected_sections[] = {
+                OBJECT_SECTION_INIT_ARRAY, OBJECT_SECTION_INIT_ARRAY, OBJECT_SECTION_INIT_ARRAY, OBJECT_SECTION_FINI_ARRAY,
+            };
+            u64 initializer_expected_offsets[] = {0, OBJECT_INITIALIZER_ENTRY_SIZE, 2 * OBJECT_INITIALIZER_ENTRY_SIZE, 0};
+            u32 initializer_found = 0;
+            for (u32 relocation_index = 0; relocation_index < initializer_object->relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation relocation = initializer_object->relocations[relocation_index];
+                if (relocation.section != OBJECT_SECTION_INIT_ARRAY && relocation.section != OBJECT_SECTION_FINI_ARRAY)
+                {
+                    continue;
+                }
+                BUSTER_TEST(arguments, initializer_found < BUSTER_ARRAY_LENGTH(initializer_expected_names));
+                if (initializer_found >= BUSTER_ARRAY_LENGTH(initializer_expected_names))
+                {
+                    break;
+                }
+                BUSTER_TEST(arguments, relocation.kind == OBJECT_RELOCATION_ABSOLUTE64);
+                BUSTER_TEST(arguments, relocation.addend == 0);
+                BUSTER_TEST(arguments, relocation.section == initializer_expected_sections[initializer_found]);
+                BUSTER_TEST(arguments, relocation.offset == initializer_expected_offsets[initializer_found]);
+                BUSTER_TEST(arguments, relocation.symbol < initializer_object->symbol_count);
+                if (relocation.symbol < initializer_object->symbol_count)
+                {
+                    BUSTER_TEST(arguments, string_equal(initializer_object->symbols[relocation.symbol].name, initializer_expected_names[initializer_found]));
+                    // A registered function is reachable by definition, so the
+                    // unused-static elimination has to have kept its body.
+                    BUSTER_TEST(arguments, initializer_object->symbols[relocation.symbol].section == OBJECT_SECTION_TEXT);
+                    BUSTER_TEST(arguments, !initializer_object->symbols[relocation.symbol].global);
+                }
+                initializer_found += 1;
+            }
+            BUSTER_TEST(arguments, initializer_found == BUSTER_ARRAY_LENGTH(initializer_expected_names));
+        }
+    }
+    // __attribute__((constructor)) and ((destructor)) (issue 771).  The
+    // fixture is every part of the contract at once: a constructor that
+    // writes a global `main` reads, two more with priorities that pin the
+    // order against the one written without, and a destructor `main` must not
+    // yet have seen.  It runs under all four allocators because the array is
+    // filled by the object writer and called by the linker, and a definition
+    // the allocator path rejected would drop out of both.
+    //
+    // Apple is excluded, and the exclusion is the gap rather than the fixture
+    // being unsuitable: LC_MAIN hands `main` straight to dyld, so the Mach-O
+    // writer synthesizes no entry stub to run initializers from and refuses
+    // the link instead of dropping them.  The object it produces carries
+    // `__DATA,__mod_init_func` and links correctly through the system linker.
+#if !BUSTER_APPLE
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+    {
+        TemporalArena constructor_temporary = scratch_begin(&arguments->arena, 1);
+        String8 constructor_path = buster_test_temporary_path(constructor_temporary.arena, S8("buster-c-constructor"), S8(""));
+        String8 constructor_command_line[] = {
+            c_lz4_regression_allocators[allocator_index], S8("-o"), constructor_path, S8("tests/basic_c_constructor.c"),
+        };
+        CompilerDriverResult constructor_build = compiler_driver_execute_invocation(
+            constructor_temporary.arena,
+            compiler_driver_parse_arguments(constructor_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(constructor_command_line)));
+        BUSTER_TEST(arguments, constructor_build.error == COMPILER_DRIVER_ERROR_NONE);
+        if (constructor_build.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 constructor_arguments[] = {constructor_path};
+            ProcessSpawnResult constructor_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(constructor_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, constructor_spawn.handle != 0);
+            if (constructor_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(constructor_temporary.arena, constructor_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(constructor_temporary);
+    }
+#endif
     // Returning from main is a call to exit (C 5.1.2.2.3), so the linked
     // image's entry point must go through libc rather than the raw exit
     // syscall: the syscall skips stdio flushing and every atexit handler, and

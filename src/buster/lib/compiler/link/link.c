@@ -340,15 +340,134 @@ BUSTER_GLOBAL_LOCAL bool link_x86_emit_push_imm32(LinkX86InstructionBuilder* bui
     return false;
 }
 
-// The two shapes link_x86_build_elf_entry_stub emits.  Both sizes are named
-// because the AArch64 dynamic writer overlays its own stub on the image the
-// x86-64 dynamic writer produced and has to reproduce that layout's section
-// offsets exactly; the builder validates its own output against them.
+// The two shapes link_x86_build_elf_entry_stub emits for a program with no
+// initializers.  Both sizes are named because the AArch64 dynamic writer
+// overlays its own stub on the image the x86-64 dynamic writer produced and
+// has to reproduce that layout's section offsets exactly; the builder
+// validates its own output against them.  A program that registers
+// initializers gets a longer stub whose size the builder reports instead, and
+// the two writers agree on it because they build it from the same plan.
 enum
 {
     LINK_ELF_HOSTED_ENTRY_STUB_SIZE = 33,
     LINK_ELF_FREESTANDING_ENTRY_STUB_SIZE = 35,
 };
+
+// One function an image has to call before or after `main`, as the merged
+// object spells it: the symbol its `.init_array`/`.fini_array` slot is
+// relocated against, plus that relocation's addend.  Buster's own objects
+// name the function itself with a zero addend; Clang's name the section
+// symbol plus the function's offset inside it, which is why the addend is
+// carried rather than assumed away.
+typedef struct LinkInitializerEntry LinkInitializerEntry;
+struct LinkInitializerEntry
+{
+    s64 addend;
+    u32 symbol;
+    u32 reserved;
+};
+
+// Every initializer of an image, in the order it runs.  The linker writes the
+// entry point itself -- there is no libc startup object in an image it
+// produces, so nothing else would walk the arrays -- and it knows every
+// entry's target at layout time, so it calls them directly rather than laying
+// the arrays out and looping over them.  The two array sections are dropped
+// from the image for exactly that reason: nothing in it would read them.
+//
+// `.fini_array` runs backwards, which is the order `destructors` is already
+// in: the plan reverses it while it is built so every consumer walks both
+// lists forwards.
+typedef struct LinkInitializerPlan LinkInitializerPlan;
+struct LinkInitializerPlan
+{
+    LinkInitializerEntry* constructors;
+    LinkInitializerEntry* destructors;
+    u32 constructor_count;
+    u32 destructor_count;
+    bool valid;
+    u8 reserved[3];
+};
+
+// The entries of one array section, ordered by slot.  A slot with no
+// relocation is a null pointer, which every startup implementation skips and
+// which this therefore drops too.
+BUSTER_GLOBAL_LOCAL u32 link_initializer_entries_collect(ObjectFile* object, ObjectSectionKind kind, LinkInitializerEntry* entries, bool reverse)
+{
+    u32 count = 0;
+    u64 length = object->sections[kind].data.length;
+    for (u64 offset = 0; offset + OBJECT_INITIALIZER_ENTRY_SIZE <= length; offset += OBJECT_INITIALIZER_ENTRY_SIZE)
+    {
+        for (u32 index = 0; index < object->relocation_count; index += 1)
+        {
+            ObjectRelocation relocation = object->relocations[index];
+            if (relocation.section == (u32)kind && relocation.offset == offset && relocation.kind == OBJECT_RELOCATION_ABSOLUTE64)
+            {
+                entries[count++] = (LinkInitializerEntry){
+                    .addend = relocation.addend,
+                    .symbol = relocation.symbol,
+                };
+                break;
+            }
+        }
+    }
+    for (u32 index = 0; reverse && index * 2 + 1 < count; index += 1)
+    {
+        LinkInitializerEntry swapped = entries[index];
+        entries[index] = entries[count - 1 - index];
+        entries[count - 1 - index] = swapped;
+    }
+
+    return count;
+}
+
+// Reads the two array sections into a plan and hands back the same object
+// with them, and the relocations that filled them, removed: the writers below
+// place every non-debug section they are given, and an array nothing reads is
+// storage the image does not need.  The object is copied rather than edited,
+// because a caller may link the same merged file twice -- the AArch64 dynamic
+// writer does exactly that.
+BUSTER_GLOBAL_LOCAL bool link_initializer_plan_build(Arena* arena, ObjectFile* object, ObjectFile* stripped, LinkInitializerPlan* plan)
+{
+    bool result = true;
+    *stripped = *object;
+    *plan = (LinkInitializerPlan){.valid = true};
+    u64 total = object->sections[OBJECT_SECTION_INIT_ARRAY].data.length + object->sections[OBJECT_SECTION_FINI_ARRAY].data.length;
+    if (total)
+    {
+        u64 capacity = total / OBJECT_INITIALIZER_ENTRY_SIZE;
+        if (capacity > UINT32_MAX)
+        {
+            result = false;
+        }
+        else
+        {
+            plan->constructors = arena_allocate(arena, LinkInitializerEntry, capacity ? capacity : 1);
+            plan->destructors = plan->constructors + object->sections[OBJECT_SECTION_INIT_ARRAY].data.length / OBJECT_INITIALIZER_ENTRY_SIZE;
+            plan->constructor_count = link_initializer_entries_collect(object, OBJECT_SECTION_INIT_ARRAY, plan->constructors, false);
+            plan->destructor_count = link_initializer_entries_collect(object, OBJECT_SECTION_FINI_ARRAY, plan->destructors, true);
+            ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count);
+            memcpy(sections, object->sections, (u64)object->section_count * sizeof(*sections));
+            sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice){0};
+            sections[OBJECT_SECTION_INIT_ARRAY].virtual_size = 0;
+            sections[OBJECT_SECTION_FINI_ARRAY].data = (ByteSlice){0};
+            sections[OBJECT_SECTION_FINI_ARRAY].virtual_size = 0;
+            stripped->sections = sections;
+            ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count ? object->relocation_count : 1);
+            stripped->relocation_count = 0;
+            for (u32 index = 0; index < object->relocation_count; index += 1)
+            {
+                u32 section = object->relocations[index].section;
+                if (section != OBJECT_SECTION_INIT_ARRAY && section != OBJECT_SECTION_FINI_ARRAY)
+                {
+                    relocations[stripped->relocation_count++] = object->relocations[index];
+                }
+            }
+            stripped->relocations = relocations;
+        }
+    }
+
+    return result;
+}
 
 // C 5.1.2.2.3 makes a return from `main` equivalent to calling `exit` with
 // that value, so the entry stub of a hosted link must end in libc's `exit`
@@ -360,29 +479,96 @@ enum
 // terminate with main's status.  `exit_displacement_offset` receives the
 // hosted shape's second rel32 field for the caller to patch, exactly like the
 // call to main; it is untouched in the freestanding shape.
-BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8 bytes[64], u32* byte_count, u32* call_displacement_offset, bool hosted,
-                                                       u32* exit_displacement_offset)
+// The stack an image's initializers are called on is the one the kernel
+// handed `_start`, which System V says is 16-byte aligned, so a `call` from
+// here leaves the callee with the misalignment by eight that every function
+// entry expects. That is why the ctor calls precede the `and rsp, -16` the
+// call to `main` needs: the mask is there for a start-up that did not honour
+// the guarantee, and applying it before reading argc off the stack would lose
+// the pointer. GNU hands argc, argv and envp to every initializer, so they are
+// read once into callee-saved registers and copied back into the argument
+// registers before each call, and `main`'s status is parked in ebx across the
+// destructors, which take no arguments.
+//
+// A program with no initializers gets exactly the byte sequence this emitted
+// before there was a plan, at the two sizes named above.
+BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8* bytes, u32 capacity, u32* byte_count, u32* call_displacement_offset, bool hosted,
+                                                       u32* exit_displacement_offset, LinkInitializerPlan const* plan,
+                                                       u32* initializer_displacement_offsets)
 {
-    LinkX86InstructionBuilder builder = {.bytes = bytes, .capacity = 64};
+    LinkX86InstructionBuilder builder = {.bytes = bytes, .capacity = capacity};
     BusterX86MetadataPhysicalOperand operands[2] = {0};
+    u32 constructor_count = plan ? plan->constructor_count : 0;
+    u32 destructor_count = plan ? plan->destructor_count : 0;
+    bool registered = constructor_count || destructor_count;
+    // rbx, r12 and r13 hold argc, argv and envp across the initializer calls;
+    // rdi, rsi and rdx are where the original shape leaves them for `main`.
+    u16 argc_register = registered ? 3 : 7;
+    u16 argv_register = registered ? 12 : 6;
+    u16 envp_register = registered ? 13 : 2;
+    u32 initializer_index = 0;
     operands[0] = link_x86_register(5, 32);
     operands[1] = link_x86_register(5, 32);
     if (!link_x86_emit(&builder, S8("XOR"), operands, 2)) return false;
-    operands[0] = link_x86_register(7, 64);
+    operands[0] = link_x86_register(argc_register, 64);
     operands[1] = link_x86_memory_base(4, 64, 0);
     if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
-    operands[0] = link_x86_register(6, 64);
+    operands[0] = link_x86_register(argv_register, 64);
     operands[1] = link_x86_memory_base(4, 64, 8);
     if (!link_x86_emit(&builder, S8("LEA"), operands, 2)) return false;
-    operands[0] = link_x86_register(2, 64);
-    operands[1] = link_x86_memory_base_index(6, 7, 8, 64, 8);
+    operands[0] = link_x86_register(envp_register, 64);
+    operands[1] = link_x86_memory_base_index(argv_register, argc_register, 8, 64, 8);
     if (!link_x86_emit(&builder, S8("LEA"), operands, 2)) return false;
+    for (u32 constructor = 0; constructor < constructor_count; constructor += 1)
+    {
+        operands[0] = link_x86_register(7, 64);
+        operands[1] = link_x86_register(argc_register, 64);
+        if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+        operands[0] = link_x86_register(6, 64);
+        operands[1] = link_x86_register(argv_register, 64);
+        if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+        operands[0] = link_x86_register(2, 64);
+        operands[1] = link_x86_register(envp_register, 64);
+        if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+        if (initializer_displacement_offsets) initializer_displacement_offsets[initializer_index] = builder.count + 1;
+        initializer_index += 1;
+        operands[0] = link_x86_relative(0, 32);
+        if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+    }
+    if (registered)
+    {
+        operands[0] = link_x86_register(7, 64);
+        operands[1] = link_x86_register(argc_register, 64);
+        if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+        operands[0] = link_x86_register(6, 64);
+        operands[1] = link_x86_register(argv_register, 64);
+        if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+        operands[0] = link_x86_register(2, 64);
+        operands[1] = link_x86_register(envp_register, 64);
+        if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    }
     operands[0] = link_x86_register(4, 64);
     operands[1] = link_x86_immediate(-16, 8);
     if (!link_x86_emit(&builder, S8("AND"), operands, 2)) return false;
     if (call_displacement_offset) *call_displacement_offset = builder.count + 1;
     operands[0] = link_x86_relative(0, 32);
     if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+    if (destructor_count)
+    {
+        operands[0] = link_x86_register(3, 32);
+        operands[1] = link_x86_register(0, 32);
+        if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+        for (u32 destructor = 0; destructor < destructor_count; destructor += 1)
+        {
+            if (initializer_displacement_offsets) initializer_displacement_offsets[initializer_index] = builder.count + 1;
+            initializer_index += 1;
+            operands[0] = link_x86_relative(0, 32);
+            if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+        }
+        operands[0] = link_x86_register(0, 32);
+        operands[1] = link_x86_register(3, 32);
+        if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    }
     operands[0] = link_x86_register(7, 32);
     operands[1] = link_x86_register(0, 32);
     if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
@@ -404,29 +590,164 @@ BUSTER_GLOBAL_LOCAL bool link_x86_build_elf_entry_stub(u8 bytes[64], u32* byte_c
     // Neither `exit` nor exit_group returns; the trap catches a libc that did.
     if (!link_x86_emit_zero(&builder, S8("HLT"))) return false;
     if (byte_count) *byte_count = builder.count;
-    return builder.count == expected_size;
+    return registered || builder.count == expected_size;
 }
 
-BUSTER_GLOBAL_LOCAL bool link_x86_build_pe_entry_stub(u8 bytes[64], u32* byte_count)
+// The buffer the stub above needs.  Sixteen bytes per initializer covers the
+// three argument moves and the call the constructor shape emits, and the
+// destructor shape is shorter; the base is the freestanding size plus the
+// status save and restore the destructors add.
+BUSTER_GLOBAL_LOCAL u32 link_x86_elf_entry_stub_capacity(LinkInitializerPlan const* plan)
 {
-    LinkX86InstructionBuilder builder = {.bytes = bytes, .capacity = 64};
+    u32 count = plan ? plan->constructor_count + plan->destructor_count : 0;
+    return 64 + 16 * count;
+}
+
+// The AArch64 spelling of the same stub, in whole words.  `ORR Xd, XZR, Xm`
+// is how A64 writes a register move; the argc/argv/envp sequence and the trap
+// are the ones this writer has always emitted.  Every branch is laid down as
+// a bare `bl #0` and its word index is reported, because the callers patch
+// displacements through link_aarch64_branch_encode after the layout settles
+// -- exactly what the call to `main` already needed.
+// Exactly how many words link_aarch64_build_elf_entry_stub emits: the
+// argument sequence, the copies back into x0-x2, four words per constructor,
+// one branch per destructor with the status save and restore around them, the
+// tail, and the trap.  Both the builder's own bound and the slot the AArch64
+// dynamic writer overlays are taken from here, so neither can drift from what
+// is emitted.
+BUSTER_GLOBAL_LOCAL u32 link_aarch64_elf_entry_stub_words(bool hosted, LinkInitializerPlan const* plan)
+{
+    u32 constructor_count = plan ? plan->constructor_count : 0;
+    u32 destructor_count = plan ? plan->destructor_count : 0;
+    bool registered = constructor_count || destructor_count;
+    return 4 + (registered ? 3u : 0u) + constructor_count * 4 + 1 + (destructor_count ? destructor_count + 2 : 0u) + (hosted ? 1u : 2u) + 1;
+}
+
+BUSTER_GLOBAL_LOCAL u32 link_aarch64_build_elf_entry_stub(u32* words, u32 capacity, bool hosted, LinkInitializerPlan const* plan, u32* entry_word,
+                                                          u32* exit_word, u32* initializer_words)
+{
+    u32 count = 0;
+    u32 constructor_count = plan ? plan->constructor_count : 0;
+    u32 destructor_count = plan ? plan->destructor_count : 0;
+    bool registered = constructor_count || destructor_count;
+    // x19, x20 and x21 hold argc, argv and envp across the initializer calls;
+    // x0, x1 and x2 are where the original shape leaves them for `main`.
+    u32 argc_register = registered ? 19u : 0u;
+    u32 argv_register = registered ? 20u : 1u;
+    u32 envp_register = registered ? 21u : 2u;
+    u32 initializer_index = 0;
+    if (capacity >= link_aarch64_elf_entry_stub_words(hosted, plan))
+    {
+        words[count++] = 0xf94003e0u | argc_register;
+        words[count++] = 0x910023e0u | argv_register;
+        words[count++] = 0x8b000000u | (argc_register << 16) | (3u << 10) | (argv_register << 5) | envp_register;
+        words[count++] = 0x91002000u | (envp_register << 5) | envp_register;
+        for (u32 constructor = 0; constructor < constructor_count; constructor += 1)
+        {
+            words[count++] = 0xaa0003e0u | (argc_register << 16);
+            words[count++] = 0xaa0003e0u | (argv_register << 16) | 1u;
+            words[count++] = 0xaa0003e0u | (envp_register << 16) | 2u;
+            if (initializer_words) initializer_words[initializer_index] = count;
+            initializer_index += 1;
+            words[count++] = 0x94000000u;
+        }
+        if (registered)
+        {
+            words[count++] = 0xaa0003e0u | (argc_register << 16);
+            words[count++] = 0xaa0003e0u | (argv_register << 16) | 1u;
+            words[count++] = 0xaa0003e0u | (envp_register << 16) | 2u;
+        }
+        if (entry_word) *entry_word = count;
+        words[count++] = 0x94000000u;
+        if (destructor_count)
+        {
+            // main's status parked in w19 across the destructors, which take no
+            // arguments, and put back where `exit` and the syscall both want it.
+            words[count++] = 0x2a0003f3u;
+            for (u32 destructor = 0; destructor < destructor_count; destructor += 1)
+            {
+                if (initializer_words) initializer_words[initializer_index] = count;
+                initializer_index += 1;
+                words[count++] = 0x94000000u;
+            }
+            words[count++] = 0x2a1303e0u;
+        }
+        if (hosted)
+        {
+            if (exit_word) *exit_word = count;
+            words[count++] = 0x94000000u;
+        }
+        else
+        {
+            words[count++] = 0xd2800ba8u;
+            words[count++] = 0xd4000001u;
+        }
+        words[count++] = 0xd4200000u;
+    }
+
+    return count;
+}
+
+// The file slot an ELF entry stub occupies.  The AArch64 dynamic writer
+// overlays its own stub on the image the x86-64 dynamic writer laid out, so
+// the slot has to hold whichever of the two shapes is longer.  With no
+// initializers the x86-64 stub is the longer one and the slot is exactly its
+// size, which is the layout every image had before there were initializers to
+// call; a constructor costs sixteen bytes on AArch64 against fourteen on
+// x86-64, so from two constructors on it is AArch64 that decides.
+BUSTER_GLOBAL_LOCAL u32 link_elf_entry_stub_slot(u32 x86_stub_size, LinkInitializerPlan const* plan)
+{
+    u32 aarch64_size = link_aarch64_elf_entry_stub_words(true, plan) * (u32)sizeof(u32);
+    return x86_stub_size > aarch64_size ? x86_stub_size : aarch64_size;
+}
+
+
+// The PE entry stub.  Its initializers are called straight after the prologue,
+// before the argv machinery runs, and they are called with no arguments: the
+// Windows convention for an initializer is MSVC's `.CRT$XCU` one, which takes
+// none, and there is no argc or argv to hand over at that point anyway.  That
+// is the one way this differs from the ELF stub above.  The prologue is left
+// exactly as it was because the unwind record beside it describes that and
+// nothing else; `sub rsp, 0x38` also leaves the stack aligned and reserves
+// more than the 32 bytes of home space a callee may write.  Every displacement
+// field is reported rather than counted by the caller, because inserting a
+// call moves all of them.
+BUSTER_GLOBAL_LOCAL bool link_x86_build_pe_entry_stub(u8* bytes, u32 capacity, u32* byte_count, LinkInitializerPlan const* plan,
+                                                      u32* startup_displacement_offsets, u32* main_displacement_offset, u32* exit_displacement_offset,
+                                                      u32* initializer_displacement_offsets)
+{
+    LinkX86InstructionBuilder builder = {.bytes = bytes, .capacity = capacity};
     BusterX86MetadataPhysicalOperand operands[2] = {0};
+    u32 constructor_count = plan ? plan->constructor_count : 0;
+    u32 destructor_count = plan ? plan->destructor_count : 0;
+    u32 initializer_index = 0;
     operands[0] = link_x86_register(4, 64);
     operands[1] = link_x86_immediate(0x38, 8);
     if (!link_x86_emit(&builder, S8("SUB"), operands, 2)) return false;
+    for (u32 constructor = 0; constructor < constructor_count; constructor += 1)
+    {
+        if (initializer_displacement_offsets) initializer_displacement_offsets[initializer_index] = builder.count + 1;
+        initializer_index += 1;
+        operands[0] = link_x86_relative(0, 32);
+        if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+    }
     operands[0] = link_x86_register(1, 32);
     operands[1] = link_x86_register(1, 32);
     if (!link_x86_emit(&builder, S8("XOR"), operands, 2)) return false;
     operands[0] = link_x86_register(1, 32);
     if (!link_x86_emit(&builder, S8("INC"), operands, 1)) return false;
     BusterX86MetadataPhysicalOperand indirect = link_x86_memory_rip(64, 0);
-    if (!link_x86_emit(&builder, S8("CALL"), &indirect, 1) || !link_x86_emit(&builder, S8("CALL"), &indirect, 1)) return false;
+    if (startup_displacement_offsets) startup_displacement_offsets[0] = builder.count + 2;
+    if (!link_x86_emit(&builder, S8("CALL"), &indirect, 1)) return false;
+    if (startup_displacement_offsets) startup_displacement_offsets[1] = builder.count + 2;
+    if (!link_x86_emit(&builder, S8("CALL"), &indirect, 1)) return false;
     operands[0] = link_x86_register(0, 32);
     operands[1] = link_x86_memory_base(0, 32, 0);
     if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
     operands[0] = link_x86_memory_base(4, 32, 0x20);
     operands[1] = link_x86_register(0, 32);
     if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    if (startup_displacement_offsets) startup_displacement_offsets[2] = builder.count + 2;
     if (!link_x86_emit(&builder, S8("CALL"), &indirect, 1)) return false;
     operands[0] = link_x86_register(2, 64);
     operands[1] = link_x86_memory_base(0, 64, 0);
@@ -434,15 +755,90 @@ BUSTER_GLOBAL_LOCAL bool link_x86_build_pe_entry_stub(u8 bytes[64], u32* byte_co
     operands[0] = link_x86_register(1, 32);
     operands[1] = link_x86_memory_base(4, 32, 0x20);
     if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    if (main_displacement_offset) *main_displacement_offset = builder.count + 1;
     operands[0] = link_x86_relative(0, 32);
     if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+    if (destructor_count)
+    {
+        // main's status parked in ebx, which a Win64 callee preserves, across
+        // the destructors and back into the register `exit` reads.
+        operands[0] = link_x86_register(3, 32);
+        operands[1] = link_x86_register(0, 32);
+        if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+        for (u32 destructor = 0; destructor < destructor_count; destructor += 1)
+        {
+            if (initializer_displacement_offsets) initializer_displacement_offsets[initializer_index] = builder.count + 1;
+            initializer_index += 1;
+            operands[0] = link_x86_relative(0, 32);
+            if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+        }
+        operands[0] = link_x86_register(0, 32);
+        operands[1] = link_x86_register(3, 32);
+        if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    }
     operands[0] = link_x86_register(1, 32);
     operands[1] = link_x86_register(0, 32);
-    if (!link_x86_emit(&builder, S8("MOV"), operands, 2) || !link_x86_emit(&builder, S8("CALL"), &indirect, 1) ||
-        !link_x86_emit_zero(&builder, S8("INT3")))
-        return false;
+    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    if (exit_displacement_offset) *exit_displacement_offset = builder.count + 2;
+    if (!link_x86_emit(&builder, S8("CALL"), &indirect, 1) || !link_x86_emit_zero(&builder, S8("INT3"))) return false;
     if (byte_count) *byte_count = builder.count;
-    return builder.count == 53;
+    return constructor_count || destructor_count || builder.count == 53;
+}
+
+// The PE stub's buffer: five bytes per initializer call plus the four the
+// destructor status save and restore add, over the 53-byte base.
+BUSTER_GLOBAL_LOCAL u32 link_x86_pe_entry_stub_capacity(LinkInitializerPlan const* plan)
+{
+    u32 count = plan ? plan->constructor_count + plan->destructor_count : 0;
+    return 64 + 8 * count;
+}
+
+// The AArch64 PE stub, in whole words: the frame the unwind record describes,
+// the initializer branches, `bl main`, `bl exit` and a trap.  Like the x86-64
+// shape above, initializers take no arguments here.
+BUSTER_GLOBAL_LOCAL u32 link_aarch64_pe_entry_stub_words(LinkInitializerPlan const* plan)
+{
+    u32 constructor_count = plan ? plan->constructor_count : 0;
+    u32 destructor_count = plan ? plan->destructor_count : 0;
+    return 2 + constructor_count + 1 + (destructor_count ? destructor_count + 2 : 0u) + 1 + 1;
+}
+
+BUSTER_GLOBAL_LOCAL u32 link_aarch64_build_pe_entry_stub(u32* words, u32 capacity, LinkInitializerPlan const* plan, u32* entry_word, u32* exit_word,
+                                                         u32* initializer_words)
+{
+    u32 count = 0;
+    u32 constructor_count = plan ? plan->constructor_count : 0;
+    u32 destructor_count = plan ? plan->destructor_count : 0;
+    u32 initializer_index = 0;
+    if (capacity >= link_aarch64_pe_entry_stub_words(plan))
+    {
+        words[count++] = 0xa9bf7bfdu;
+        words[count++] = 0x910003fdu;
+        for (u32 constructor = 0; constructor < constructor_count; constructor += 1)
+        {
+            if (initializer_words) initializer_words[initializer_index] = count;
+            initializer_index += 1;
+            words[count++] = 0x94000000u;
+        }
+        if (entry_word) *entry_word = count;
+        words[count++] = 0x94000000u;
+        if (destructor_count)
+        {
+            words[count++] = 0x2a0003f3u;
+            for (u32 destructor = 0; destructor < destructor_count; destructor += 1)
+            {
+                if (initializer_words) initializer_words[initializer_index] = count;
+                initializer_index += 1;
+                words[count++] = 0x94000000u;
+            }
+            words[count++] = 0x2a1303e0u;
+        }
+        if (exit_word) *exit_word = count;
+        words[count++] = 0x94000000u;
+        words[count++] = 0xd4200000u;
+    }
+
+    return count;
 }
 
 typedef struct LinkGlobalSymbolTable LinkGlobalSymbolTable;
@@ -2338,10 +2734,69 @@ BUSTER_GLOBAL_LOCAL bool link_elf_symbol_needs_dynamic_import(NativeExecutableLi
     return symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(options, symbol, true);
 }
 
+// The writers that place an image but do not synthesize an entry point of
+// their own -- Mach-O, whose LC_MAIN hands `main` straight to dyld, and the
+// UEFI writer, whose entry is the firmware's -- have nowhere to put the
+// initializer sequence.  They still have to take the arrays off the object,
+// because every writer places every non-debug section it is given and a
+// section with no offset of its own would be written over the image header;
+// what they must not do is drop them silently, which is the state issue 771
+// found the whole attribute in.  A refusal names the gap instead.
+BUSTER_GLOBAL_LOCAL bool link_initializer_plan_empty(LinkInitializerPlan const* plan)
+{
+    return !plan->constructor_count && !plan->destructor_count;
+}
+
+// The name of the first initializer a refusing writer could not place, so the
+// diagnostic points at a function in the program rather than at the format.
+BUSTER_GLOBAL_LOCAL String8 link_initializer_plan_first_name(ObjectFile* object, LinkInitializerPlan const* plan)
+{
+    String8 result = {0};
+    u32 symbol = plan->constructor_count ? plan->constructors[0].symbol : plan->destructor_count ? plan->destructors[0].symbol : UINT32_MAX;
+    if (symbol < object->symbol_count)
+    {
+        result = object->symbols[symbol].name;
+    }
+
+    return result;
+}
+
+// Patches the rel32 of every initializer call the entry stub emitted.  Each
+// target is the symbol that initializer's array slot named plus that slot's
+// addend, at the image address this layout gave it -- the same arithmetic the
+// call to `main` beside it takes.
+BUSTER_GLOBAL_LOCAL bool link_x86_patch_initializer_calls(u8* bytes, ObjectFile* object, LinkInitializerPlan const* plan, u64 const* section_offsets,
+                                                          u64 image_base, u64 entry_stub_offset, u32 const* displacement_offsets)
+{
+    bool result = true;
+    u32 count = plan->constructor_count + plan->destructor_count;
+    for (u32 index = 0; index < count && result; index += 1)
+    {
+        LinkInitializerEntry entry = index < plan->constructor_count ? plan->constructors[index] : plan->destructors[index - plan->constructor_count];
+        ObjectSymbol* symbol = entry.symbol < object->symbol_count ? object->symbols + entry.symbol : 0;
+        if (!symbol || symbol->section == OBJECT_SECTION_UNDEFINED || symbol->section >= OBJECT_SECTION_COUNT)
+        {
+            result = false;
+        }
+        else
+        {
+            u64 target = image_base + section_offsets[symbol->section] + symbol->value + (u64)entry.addend;
+            u64 field = entry_stub_offset + displacement_offsets[index];
+            s64 displacement = (s64)target - (s64)(image_base + field + 4);
+            result = displacement >= INT32_MIN && displacement <= INT32_MAX;
+            if (result)
+            {
+                link_write_u32(bytes, field, (u32)(s32)displacement);
+            }
+        }
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
-    u8 entry_stub[64] = {0};
     u32 entry_stub_size = 0;
     u32 entry_call_displacement_offset = 0;
     if ((options.dynamic_library_count && !options.dynamic_libraries) || (options.runtime_exported_symbol_count && !options.runtime_exported_symbols) ||
@@ -2351,11 +2806,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         result.error = LINK_ERROR_INVALID_INPUT;
         return result;
     }
+    ObjectFile stripped_object = {0};
+    LinkInitializerPlan plan = {0};
+    if (!link_initializer_plan_build(arena, object, &stripped_object, &plan))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    object = &stripped_object;
+    u8* entry_stub = arena_allocate(arena, u8, link_x86_elf_entry_stub_capacity(&plan));
+    u32* initializer_displacement_offsets =
+        arena_allocate(arena, u32, plan.constructor_count + plan.destructor_count ? plan.constructor_count + plan.destructor_count : 1);
     buster_x86_metadata_prewarm();
     // No libc in this image: every symbol is defined here, so the freestanding
     // syscall shape is the only way to terminate (see
     // link_x86_build_elf_entry_stub).
-    if (!link_x86_build_elf_entry_stub(entry_stub, &entry_stub_size, &entry_call_displacement_offset, false, 0))
+    if (!link_x86_build_elf_entry_stub(entry_stub, link_x86_elf_entry_stub_capacity(&plan), &entry_stub_size, &entry_call_displacement_offset, false, 0,
+                                       &plan, initializer_displacement_offsets))
     {
         result.error = LINK_ERROR_RELOCATION;
         return result;
@@ -2438,6 +2905,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     link_write_u32(bytes, call_displacement_offset, (u32)(s32)call_displacement);
+    if (!link_x86_patch_initializer_calls(bytes, object, &plan, section_offsets, image_base, entry_stub_offset, initializer_displacement_offsets))
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation* relocation = &object->relocations[index];
@@ -2674,7 +3146,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         ELF_BASE_PROGRAM_HEADER_COUNT = 7,
     };
-    u8 entry_stub[64] = {0};
     u32 entry_stub_size = 0;
     u32 entry_call_displacement_offset = 0;
     u32 entry_exit_displacement_offset = 0;
@@ -2701,7 +3172,19 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     {
         return link_native_executable_elf64_x86_64(arena, object, options);
     }
-    if (!link_x86_build_elf_entry_stub(entry_stub, &entry_stub_size, &entry_call_displacement_offset, true, &entry_exit_displacement_offset))
+    ObjectFile stripped_object = {0};
+    LinkInitializerPlan plan = {0};
+    if (!link_initializer_plan_build(arena, object, &stripped_object, &plan))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    object = &stripped_object;
+    u8* entry_stub = arena_allocate(arena, u8, link_x86_elf_entry_stub_capacity(&plan));
+    u32* initializer_displacement_offsets =
+        arena_allocate(arena, u32, plan.constructor_count + plan.destructor_count ? plan.constructor_count + plan.destructor_count : 1);
+    if (!link_x86_build_elf_entry_stub(entry_stub, link_x86_elf_entry_stub_capacity(&plan), &entry_stub_size, &entry_call_displacement_offset, true,
+                                       &entry_exit_displacement_offset, &plan, initializer_displacement_offsets))
     {
         result.error = LINK_ERROR_RELOCATION;
         return result;
@@ -2921,7 +3404,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 image_base = 0x400000;
     u64* copy_slot_addresses = arena_allocate(arena, u64, import_count);
     u64 entry_stub_offset = align_forward(header_end, 16);
-    section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + entry_stub_size, object->sections[OBJECT_SECTION_TEXT].alignment);
+    section_offsets[OBJECT_SECTION_TEXT] =
+        align_forward(entry_stub_offset + link_elf_entry_stub_slot(entry_stub_size, &plan), object->sections[OBJECT_SECTION_TEXT].alignment);
     u64 plt_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
     u64 plt_size = (u64)(import_count + 1) * ELF_PLT_ENTRY_SIZE;
     section_offsets[OBJECT_SECTION_READ_ONLY_DATA] = align_forward(plt_offset + plt_size, object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
@@ -3326,6 +3810,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     link_write_u32(bytes, exit_displacement_offset, (u32)(s32)exit_displacement);
+    if (!link_x86_patch_initializer_calls(bytes, object, &plan, section_offsets, image_base, entry_stub_offset, initializer_displacement_offsets))
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation* relocation = &object->relocations[index];
@@ -3658,16 +4147,64 @@ BUSTER_GLOBAL_LOCAL void link_pe_section_header(u8* bytes, u64 offset, char cons
     link_write_u32(bytes, offset + 36, characteristics);
 }
 
+// The AArch64 counterpart of link_x86_patch_initializer_calls: one `bl` per
+// initializer, at the word index the stub builder reported.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_patch_initializer_calls(u8* bytes, ObjectFile* object, LinkInitializerPlan const* plan, u64 const* section_offsets,
+                                                              u64 image_base, u64 entry_stub_offset, u32 const* initializer_words)
+{
+    bool result = true;
+    u32 count = plan->constructor_count + plan->destructor_count;
+    for (u32 index = 0; index < count && result; index += 1)
+    {
+        LinkInitializerEntry entry = index < plan->constructor_count ? plan->constructors[index] : plan->destructors[index - plan->constructor_count];
+        ObjectSymbol* symbol = entry.symbol < object->symbol_count ? object->symbols + entry.symbol : 0;
+        if (!symbol || symbol->section == OBJECT_SECTION_UNDEFINED || symbol->section >= OBJECT_SECTION_COUNT)
+        {
+            result = false;
+        }
+        else
+        {
+            u64 target = image_base + section_offsets[symbol->section] + symbol->value + (u64)entry.addend;
+            u64 offset = entry_stub_offset + (u64)initializer_words[index] * sizeof(u32);
+            u32 instruction = 0;
+            result = link_aarch64_branch_encode(A64_OPCODE_BL, (s64)target - (s64)(image_base + offset), &instruction);
+            if (result)
+            {
+                link_write_u32(bytes, offset, instruction);
+            }
+        }
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarch64(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
-    static u32 const entry_stub[] = {
-        0xf94003e0, 0x910023e1, 0x8b000c22, 0x91002042, 0x94000000, 0xd2800ba8, 0xd4000001, 0xd4200000,
-    };
     if ((options.dynamic_library_count && !options.dynamic_libraries) || object->section_count < OBJECT_SECTION_COUNT || !object->sections ||
         (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    ObjectFile stripped_object = {0};
+    LinkInitializerPlan plan = {0};
+    if (!link_initializer_plan_build(arena, object, &stripped_object, &plan))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    object = &stripped_object;
+    u32 entry_stub_capacity = link_aarch64_elf_entry_stub_words(false, &plan);
+    u32* entry_stub = arena_allocate(arena, u32, entry_stub_capacity);
+    u32* initializer_words =
+        arena_allocate(arena, u32, plan.constructor_count + plan.destructor_count ? plan.constructor_count + plan.destructor_count : 1);
+    u32 entry_stub_word = 0;
+    u32 entry_stub_words = link_aarch64_build_elf_entry_stub(entry_stub, entry_stub_capacity, false, &plan, &entry_stub_word, 0, initializer_words);
+    u64 entry_stub_size = (u64)entry_stub_words * sizeof(u32);
+    if (!entry_stub_words)
+    {
+        result.error = LINK_ERROR_RELOCATION;
         return result;
     }
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
@@ -3702,7 +4239,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     u64 entry_stub_offset = align_forward(header_end, 16);
-    section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + sizeof(entry_stub), object->sections[OBJECT_SECTION_TEXT].alignment);
+    section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_offset + entry_stub_size, object->sections[OBJECT_SECTION_TEXT].alignment);
     section_offsets[OBJECT_SECTION_READ_ONLY_DATA] = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length,
                                                                    object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
     u64 eh_frame_header_offset = align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length, 4);
@@ -3724,7 +4261,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     };
     u8* bytes = result.executable.pointer;
     memset(bytes, 0, file_size);
-    memcpy(bytes + entry_stub_offset, entry_stub, sizeof(entry_stub));
+    memcpy(bytes + entry_stub_offset, entry_stub, entry_stub_size);
     for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
     {
         if (object_section_kind_is_debug((ObjectSectionKind)section))
@@ -3740,7 +4277,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     u64 image_base = 0x400000;
     ObjectSymbol* entry_symbol = &object->symbols[entry_symbol_index];
     u64 entry_address = image_base + section_offsets[entry_symbol->section] + entry_symbol->value;
-    u64 call_offset = entry_stub_offset + 4 * sizeof(u32);
+    u64 call_offset = entry_stub_offset + (u64)entry_stub_word * sizeof(u32);
     s64 call_displacement = (s64)entry_address - (s64)(image_base + call_offset);
     u32 call_instruction = 0;
     if (!link_aarch64_branch_encode(A64_OPCODE_BL, call_displacement, &call_instruction))
@@ -3749,6 +4286,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         return result;
     }
     link_write_u32(bytes, call_offset, call_instruction);
+    if (!link_aarch64_patch_initializer_calls(bytes, object, &plan, section_offsets, image_base, entry_stub_offset, initializer_words))
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation* relocation = &object->relocations[index];
@@ -3911,14 +4453,11 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_adrp(u32 destination, u64 instruction_addre
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarch64_dynamic(Arena* arena, ObjectFile* object,
                                                                                             NativeExecutableLinkOptions options)
 {
-    // ldr x0,[sp] / add x1,sp,#8 / add x2,x1,x0,lsl #3 / add x2,x2,#8 —
-    // argc, argv and envp — then `bl main`, `bl exit` and a trap.  The hosted
-    // shape calls libc's exit for the reason link_x86_build_elf_entry_stub
-    // states; the freestanding writer above keeps `mov x8,#93 / svc #0`.
-    // main's status is already in w0 where exit wants it.
-    static u32 const entry_stub[] = {
-        0xf94003e0, 0x910023e1, 0x8b000c22, 0x91002042, 0x94000000, 0x94000000, 0xd4200000,
-    };
+    // argc, argv and envp off the stack, the initializers, `bl main`,
+    // `bl exit` and a trap — link_aarch64_build_elf_entry_stub emits the
+    // words.  The hosted shape calls libc's exit for the reason
+    // link_x86_build_elf_entry_stub states; the freestanding writer above
+    // keeps `mov x8,#93 / svc #0`.
     static char8 const interpreter[] = "/lib/ld-linux-aarch64.so.1";
     NativeExecutableLinkResult result = {0};
     ObjectFile hosted_object = {0};
@@ -3929,6 +4468,33 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         return result;
     }
     object = &hosted_object;
+    ObjectFile stripped_object = {0};
+    LinkInitializerPlan plan = {0};
+    if (!link_initializer_plan_build(arena, object, &stripped_object, &plan))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    u32 initializer_count = plan.constructor_count + plan.destructor_count;
+    u32 entry_stub_capacity = link_aarch64_elf_entry_stub_words(true, &plan);
+    u32* entry_stub = arena_allocate(arena, u32, entry_stub_capacity);
+    u32* initializer_words = arena_allocate(arena, u32, initializer_count ? initializer_count : 1);
+    u32 entry_stub_word = 0;
+    u32 exit_stub_word = 0;
+    u32 entry_stub_words =
+        link_aarch64_build_elf_entry_stub(entry_stub, entry_stub_capacity, true, &plan, &entry_stub_word, &exit_stub_word, initializer_words);
+    // The slot this overlays is the x86-64 hosted stub's, whatever length the
+    // same plan gave it there; building that stub here is how the two agree
+    // without either writer publishing a formula.
+    u32 x86_stub_capacity = link_x86_elf_entry_stub_capacity(&plan);
+    u8* x86_stub = arena_allocate(arena, u8, x86_stub_capacity);
+    u32 x86_stub_size = 0;
+    buster_x86_metadata_prewarm();
+    if (!entry_stub_words || !link_x86_build_elf_entry_stub(x86_stub, x86_stub_capacity, &x86_stub_size, 0, true, 0, &plan, 0))
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
     ObjectRelocation* converted_relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count);
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
@@ -3952,11 +4518,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     converted.relocations = converted_relocations;
     NativeExecutableLinkOptions staging_options = options;
     staging_options.output_path = (String8){0};
+    // The staging link is handed the object with its initializer arrays still
+    // on it, because the plan it derives from them is what decides the entry
+    // stub slot this overlay has to reproduce.  Everything below reads the
+    // stripped copy, whose relocations no longer name sections the image does
+    // not carry.
     result = link_native_executable_elf64_x86_64_dynamic(arena, &converted, staging_options);
     if (result.error != LINK_ERROR_NONE)
     {
         return result;
     }
+    object = &stripped_object;
     u8* bytes = result.executable.pointer;
     u64 image_base = 0x400000;
     u32 program_header_count = bytes[56] | ((u32)bytes[57] << 8);
@@ -3966,7 +4538,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     // The layout below has to be the one the x86-64 dynamic writer produced,
     // so the stub slot is that writer's hosted stub size, not this stub's.
     section_offsets[OBJECT_SECTION_TEXT] =
-        align_forward(entry_stub_offset + LINK_ELF_HOSTED_ENTRY_STUB_SIZE, object->sections[OBJECT_SECTION_TEXT].alignment);
+        align_forward(entry_stub_offset + link_elf_entry_stub_slot(x86_stub_size, &plan), object->sections[OBJECT_SECTION_TEXT].alignment);
     u64 plt_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
     u32 import_count = 0;
     u32* import_indices = arena_allocate(arena, u32, object->symbol_count);
@@ -3983,8 +4555,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     // Clear the whole slot: this stub is shorter than the x86-64 one it
     // replaces, and leaving that tail behind would put x86 bytes past the
     // trap.
-    memset(bytes + entry_stub_offset, 0, LINK_ELF_HOSTED_ENTRY_STUB_SIZE);
-    memcpy(bytes + entry_stub_offset, entry_stub, sizeof(entry_stub));
+    memset(bytes + entry_stub_offset, 0, link_elf_entry_stub_slot(x86_stub_size, &plan));
+    memcpy(bytes + entry_stub_offset, entry_stub, (u64)entry_stub_words * sizeof(u32));
     memcpy(bytes + link_read_u64(bytes, ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE + 8), interpreter, sizeof(interpreter));
     link_write_u16(bytes, 18, 183);
     u64 dynamic_program_header = ELF_HEADER_SIZE + 4 * ELF_PROGRAM_HEADER_SIZE;
@@ -4074,7 +4646,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     }
     ObjectSymbol* entry_symbol = &object->symbols[entry_symbol_index];
     u64 entry_address = image_base + section_offsets[entry_symbol->section] + entry_symbol->value;
-    u64 call_offset = entry_stub_offset + 4 * sizeof(u32);
+    u64 call_offset = entry_stub_offset + (u64)entry_stub_word * sizeof(u32);
     s64 call_displacement = (s64)entry_address - (s64)(image_base + call_offset);
     u32 call_instruction = 0;
     if (!link_aarch64_branch_encode(A64_OPCODE_BL, call_displacement, &call_instruction))
@@ -4102,7 +4674,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     {
         exit_address = image_base + section_offsets[exit_symbol->section] + exit_symbol->value;
     }
-    u64 exit_call_offset = entry_stub_offset + 5 * sizeof(u32);
+    u64 exit_call_offset = entry_stub_offset + (u64)exit_stub_word * sizeof(u32);
     u32 exit_instruction = 0;
     if (!link_aarch64_branch_encode(A64_OPCODE_BL, (s64)exit_address - (s64)(image_base + exit_call_offset), &exit_instruction))
     {
@@ -4110,6 +4682,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         return result;
     }
     link_write_u32(bytes, exit_call_offset, exit_instruction);
+    if (!link_aarch64_patch_initializer_calls(bytes, object, &plan, section_offsets, image_base, entry_stub_offset, initializer_words))
+    {
+        result.error = LINK_ERROR_RELOCATION;
+        return result;
+    }
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation* relocation = &object->relocations[index];
@@ -4334,11 +4911,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         PE_IMAGE_BASE_LOW = 0x40000000,
         PE_IMAGE_BASE_HIGH = 1,
     };
-    u8 entry_stub_x86_64[64] = {0};
+    u8* entry_stub_x86_64 = 0;
     u32 entry_stub_x86_64_size = 0;
-    static u32 const entry_stub_aarch64[] = {
-        0xa9bf7bfd, 0x910003fd, 0x94000000, 0x94000000, 0xd4200000,
-    };
+    u32* entry_stub_aarch64 = 0;
+    u32 entry_stub_aarch64_words = 0;
+    u32 startup_displacement_offsets[3] = {0};
+    u32 main_displacement_offset = 0;
+    u32 exit_displacement_offset = 0;
+    u32 entry_stub_word = 0;
+    u32 exit_stub_word = 0;
     static char8 const runtime_library[] = "ucrtbase.dll";
     // The entry stub terminates through the C runtime's `exit`, not through
     // kernel32's ExitProcess, because C 5.1.2.2.3 makes a return from `main`
@@ -4364,12 +4945,41 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     {
         result.error = LINK_ERROR_INVALID_INPUT;
     }
+    ObjectFile stripped_object = {0};
+    LinkInitializerPlan plan = {0};
     if (result.error == LINK_ERROR_NONE)
     {
-        if (!aarch64)
+        if (!link_initializer_plan_build(arena, object, &stripped_object, &plan))
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+        }
+        else
+        {
+            object = &stripped_object;
+        }
+    }
+    u32 initializer_count = plan.constructor_count + plan.destructor_count;
+    u32* initializer_displacement_offsets = 0;
+    if (result.error == LINK_ERROR_NONE)
+    {
+        initializer_displacement_offsets = arena_allocate(arena, u32, initializer_count ? initializer_count : 1);
+        if (aarch64)
+        {
+            entry_stub_aarch64_words = link_aarch64_pe_entry_stub_words(&plan);
+            entry_stub_aarch64 = arena_allocate(arena, u32, entry_stub_aarch64_words);
+            if (!link_aarch64_build_pe_entry_stub(entry_stub_aarch64, entry_stub_aarch64_words, &plan, &entry_stub_word, &exit_stub_word,
+                                                  initializer_displacement_offsets))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+            }
+        }
+        else
         {
             buster_x86_metadata_prewarm();
-            if (!link_x86_build_pe_entry_stub(entry_stub_x86_64, &entry_stub_x86_64_size))
+            entry_stub_x86_64 = arena_allocate(arena, u8, link_x86_pe_entry_stub_capacity(&plan));
+            if (!link_x86_build_pe_entry_stub(entry_stub_x86_64, link_x86_pe_entry_stub_capacity(&plan), &entry_stub_x86_64_size, &plan,
+                                              startup_displacement_offsets, &main_displacement_offset, &exit_displacement_offset,
+                                              initializer_displacement_offsets))
             {
                 result.error = LINK_ERROR_RELOCATION;
             }
@@ -4648,7 +5258,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     u64 entry_stub_size = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        entry_stub_size = aarch64 ? sizeof(entry_stub_aarch64) : entry_stub_x86_64_size;
+        entry_stub_size = aarch64 ? (u64)entry_stub_aarch64_words * sizeof(u32) : entry_stub_x86_64_size;
         object_section_offsets[OBJECT_SECTION_TEXT] = align_forward(entry_stub_size, object->sections[OBJECT_SECTION_TEXT].alignment);
     }
     u64 thunk_offset = 0;
@@ -5166,11 +5776,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             u64 configure_argv_iat_rva = import_section_rva + runtime_address_offset + (u64)startup_import_slots[0] * sizeof(u64);
             u64 argc_iat_rva = import_section_rva + runtime_address_offset + (u64)startup_import_slots[1] * sizeof(u64);
             u64 argv_iat_rva = import_section_rva + runtime_address_offset + (u64)startup_import_slots[2] * sizeof(u64);
-            s64 configure_argv_displacement = (s64)configure_argv_iat_rva - (s64)(entry_rva + 14);
-            s64 argc_displacement = (s64)argc_iat_rva - (s64)(entry_rva + 20);
-            s64 argv_displacement = (s64)argv_iat_rva - (s64)(entry_rva + 32);
-            s64 main_displacement = (s64)main_rva - (s64)(entry_rva + 44);
-            s64 exit_displacement = (s64)exit_iat_rva - (s64)(entry_rva + 52);
+            // Each rip-relative field ends four bytes past its own offset,
+            // which is where the displacement is measured from; the builder
+            // reports every offset because an initializer call moves them all.
+            s64 configure_argv_displacement = (s64)configure_argv_iat_rva - (s64)(entry_rva + startup_displacement_offsets[0] + 4);
+            s64 argc_displacement = (s64)argc_iat_rva - (s64)(entry_rva + startup_displacement_offsets[1] + 4);
+            s64 argv_displacement = (s64)argv_iat_rva - (s64)(entry_rva + startup_displacement_offsets[2] + 4);
+            s64 main_displacement = (s64)main_rva - (s64)(entry_rva + main_displacement_offset + 4);
+            s64 exit_displacement = (s64)exit_iat_rva - (s64)(entry_rva + exit_displacement_offset + 4);
             if (configure_argv_displacement < INT32_MIN || configure_argv_displacement > INT32_MAX || argc_displacement < INT32_MIN ||
                 argc_displacement > INT32_MAX || argv_displacement < INT32_MIN || argv_displacement > INT32_MAX || main_displacement < INT32_MIN ||
                 main_displacement > INT32_MAX || exit_displacement < INT32_MIN || exit_displacement > INT32_MAX)
@@ -5179,11 +5792,33 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             }
             if (result.error == LINK_ERROR_NONE)
             {
-                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + 10, (u32)(s32)configure_argv_displacement);
-                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + 16, (u32)(s32)argc_displacement);
-                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + 28, (u32)(s32)argv_displacement);
-                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + 40, (u32)(s32)main_displacement);
-                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + 48, (u32)(s32)exit_displacement);
+                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + startup_displacement_offsets[0], (u32)(s32)configure_argv_displacement);
+                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + startup_displacement_offsets[1], (u32)(s32)argc_displacement);
+                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + startup_displacement_offsets[2], (u32)(s32)argv_displacement);
+                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + main_displacement_offset, (u32)(s32)main_displacement);
+                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + exit_displacement_offset, (u32)(s32)exit_displacement);
+                for (u32 index = 0; index < initializer_count && result.error == LINK_ERROR_NONE; index += 1)
+                {
+                    LinkInitializerEntry entry =
+                        index < plan.constructor_count ? plan.constructors[index] : plan.destructors[index - plan.constructor_count];
+                    ObjectSymbol* initializer = entry.symbol < object->symbol_count ? object->symbols + entry.symbol : 0;
+                    if (!initializer || initializer->section >= OBJECT_SECTION_COUNT ||
+                        object_output_sections[initializer->section] >= pe_section_count)
+                    {
+                        result.error = LINK_ERROR_RELOCATION;
+                        break;
+                    }
+                    u64 initializer_rva = section_rvas[object_output_sections[initializer->section]] + object_section_offsets[initializer->section] +
+                                          initializer->value + (u64)entry.addend;
+                    u32 field = initializer_displacement_offsets[index];
+                    s64 displacement = (s64)initializer_rva - (s64)(entry_rva + field + 4);
+                    if (displacement < INT32_MIN || displacement > INT32_MAX)
+                    {
+                        result.error = LINK_ERROR_RELOCATION;
+                        break;
+                    }
+                    link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + field, (u32)(s32)displacement);
+                }
             }
         }
         else
@@ -5209,12 +5844,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             s64 main_displacement = 0;
             if (result.error == LINK_ERROR_NONE)
             {
-                main_displacement = (s64)main_rva - (s64)(entry_rva + 8);
+                main_displacement = (s64)main_rva - (s64)(entry_rva + (u64)entry_stub_word * sizeof(u32));
             }
             s64 exit_displacement = 0;
             if (result.error == LINK_ERROR_NONE)
             {
-                exit_displacement = (s64)exit_thunk_rva - (s64)(entry_rva + 12);
+                exit_displacement = (s64)exit_thunk_rva - (s64)(entry_rva + (u64)exit_stub_word * sizeof(u32));
             }
             u32 main_instruction = 0;
             if (result.error == LINK_ERROR_NONE)
@@ -5233,8 +5868,30 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             }
             if (result.error == LINK_ERROR_NONE)
             {
-                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + 8, main_instruction);
-                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + 12, exit_instruction);
+                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + (u64)entry_stub_word * sizeof(u32), main_instruction);
+                link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + (u64)exit_stub_word * sizeof(u32), exit_instruction);
+                for (u32 index = 0; index < initializer_count && result.error == LINK_ERROR_NONE; index += 1)
+                {
+                    LinkInitializerEntry entry =
+                        index < plan.constructor_count ? plan.constructors[index] : plan.destructors[index - plan.constructor_count];
+                    ObjectSymbol* initializer = entry.symbol < object->symbol_count ? object->symbols + entry.symbol : 0;
+                    if (!initializer || initializer->section >= OBJECT_SECTION_COUNT ||
+                        object_output_sections[initializer->section] >= pe_section_count)
+                    {
+                        result.error = LINK_ERROR_RELOCATION;
+                        break;
+                    }
+                    u64 initializer_rva = section_rvas[object_output_sections[initializer->section]] + object_section_offsets[initializer->section] +
+                                          initializer->value + (u64)entry.addend;
+                    u64 field = (u64)initializer_displacement_offsets[index] * sizeof(u32);
+                    u32 instruction = 0;
+                    if (!link_aarch64_branch_encode(A64_OPCODE_BL, (s64)initializer_rva - (s64)(entry_rva + field), &instruction))
+                    {
+                        result.error = LINK_ERROR_RELOCATION;
+                        break;
+                    }
+                    link_write_u32(bytes, section_raw_offsets[PE_SECTION_TEXT] + field, instruction);
+                }
             }
         }
     }
@@ -5932,6 +6589,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
     static u32 const section_characteristics[PE_SECTION_KIND_COUNT] = {
         0x60000020, 0x40000040, 0xc0000040, 0xc0000080, 0x40000040, 0x40000040, 0x42000040, 0x42000040,
     };
+    ObjectFile stripped_object = {0};
+    LinkInitializerPlan plan = {0};
+    if (!link_initializer_plan_build(arena, object, &stripped_object, &plan))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    // A UEFI application's entry point is the firmware's call to the image,
+    // and this writer synthesizes no stub of its own to run initializers
+    // before it.  See link_initializer_plan_empty.
+    if (!link_initializer_plan_empty(&plan))
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+        result.symbol = link_initializer_plan_first_name(object, &plan);
+        return result;
+    }
+    object = &stripped_object;
     bool aarch64 = object->target.cpu_arch == CPU_ARCH_AARCH64;
     if (object->target.os != OPERATING_SYSTEM_UEFI || (object->target.cpu_arch != CPU_ARCH_X86_64 && !aarch64) ||
         object->section_count < OBJECT_SECTION_COUNT || !object->sections || (object->symbol_count && !object->symbols) ||
@@ -7076,6 +7750,28 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         (object->target.cpu_arch != CPU_ARCH_X86_64 && object->target.cpu_arch != CPU_ARCH_AARCH64))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
+    }
+    ObjectFile stripped_object = {0};
+    LinkInitializerPlan plan = {0};
+    if (result.error == LINK_ERROR_NONE)
+    {
+        if (!link_initializer_plan_build(arena, object, &stripped_object, &plan))
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+        }
+        // LC_MAIN hands `main` straight to dyld, so this writer has no entry
+        // stub of its own to run the initializers from, and it does not yet
+        // build the `__DATA,__mod_init_func` section dyld would run them out
+        // of instead.  See link_initializer_plan_empty.
+        else if (!link_initializer_plan_empty(&plan))
+        {
+            result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+            result.symbol = link_initializer_plan_first_name(object, &plan);
+        }
+        else
+        {
+            object = &stripped_object;
+        }
     }
     if (result.error == LINK_ERROR_NONE)
     {
