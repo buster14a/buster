@@ -95,6 +95,20 @@ jobs:
         run: |
           set -euo pipefail
           ./build.sh test_all_combinations_ci --verbose=1
+      # The execution-mode matrix cross-products every register-allocator
+      # mode with every linkable target (x86-64/AArch64 x ELF/PE/Mach-O),
+      # runs each leg natively or under qemu-aarch64/wine where the host
+      # allows, and oracle-checks the rest. It lives on the dedicated Linux
+      # box beside the Android job because that job is the runner's short
+      # leg, and on macOS where the Mach-O rows execute natively. Windows is
+      # excluded on purpose: that runner is the CI wall-time gate and its PE
+      # rows already run under wine here.
+      - name: Execution-mode matrix (Linux)
+        shell: bash
+        if: ${{ contains(matrix.runner, 'x86_64-linux-dedicated') }}
+        run: |
+          set -euo pipefail
+          ./build.sh test_mode_matrix --config Release
       - name: Test (macOS)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}
@@ -107,6 +121,12 @@ jobs:
         run: |
           set -euo pipefail
           ./ios/test_ci.sh --all
+      - name: Execution-mode matrix (macOS)
+        shell: bash
+        if: ${{ contains(matrix.runner, 'macos') }}
+        run: |
+          set -euo pipefail
+          ./build.sh test_mode_matrix --config Release
       - name: Test (Windows)
         shell: powershell
         if: ${{ contains(matrix.runner, 'windows') }}

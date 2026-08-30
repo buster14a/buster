@@ -86,6 +86,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_DOOM,
     BUILD_COMMAND_TEST_QUICKJS,
     BUILD_COMMAND_TEST_MUSL,
+    BUILD_COMMAND_TEST_MODE_MATRIX,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -14897,6 +14898,373 @@ BUSTER_GLOBAL_LOCAL void test_doom_action_add(Arena* arena, TestDoomOptions opti
     TestDoomOptions* options_copy = arena_allocate(arena, TestDoomOptions, 1);
     *options_copy = options;
     *run = (ProcessRun){.callback = test_doom_action, .callback_data = options_copy};
+}
+
+// --- Execution-mode matrix harness ----------------------------------------
+// One gated target that cross-products the compiler's execution modes: every
+// register-allocator mode (none, mir-stack, fast, quality) against every
+// native object format the toolchain links from any host (x86-64 and AArch64,
+// each as ELF, PE/COFF and Mach-O). test_self_host proves the FAST fixed
+// point deeply but on one mode and one target; this matrix is wide instead of
+// deep, so a mode/target pair whose generated code no longer works — the
+// canonical argument-capture crash, the machine placement's stacked-__int128
+// disagreement — fails a cheap fixture run here instead of shipping. Each leg
+// links a small self-checking fixture corpus and then takes the strongest
+// verification avenue the host offers: native execution when host and target
+// agree, qemu-aarch64 for AArch64 ELF, wine for x86-64 PE, and otherwise an
+// llvm-objdump disassembly oracle over the linked image. A leg whose avenue
+// tool is missing still compiles, links, and oracle-checks; it reports its
+// downgraded avenue in the MODE_MATRIX row rather than silently vanishing.
+// A leg that must fail belongs in mode_matrix_expected_failures with its
+// issue number — the leg is then required to fail, so both rot directions
+// are caught: a regression fails the run, and a fix demands its entry back
+// out in the same change.
+
+#define MODE_MATRIX_TIMEOUT_SECONDS 120
+
+typedef struct TestModeMatrixOptions TestModeMatrixOptions;
+struct TestModeMatrixOptions
+{
+    String8 build_directory;
+    String8 config;
+};
+
+typedef enum ModeMatrixAvenue
+{
+    MODE_MATRIX_AVENUE_LINK,
+    MODE_MATRIX_AVENUE_ORACLE,
+    MODE_MATRIX_AVENUE_NATIVE,
+    MODE_MATRIX_AVENUE_QEMU,
+    MODE_MATRIX_AVENUE_WINE,
+} ModeMatrixAvenue;
+
+typedef struct ModeMatrixTarget ModeMatrixTarget;
+struct ModeMatrixTarget
+{
+    String8 name;
+    String8 triple;
+    ModeMatrixAvenue avenue;
+    String8 runner;
+};
+
+typedef struct ModeMatrixExpectedFailure ModeMatrixExpectedFailure;
+struct ModeMatrixExpectedFailure
+{
+    String8 target;
+    String8 mode;
+    String8 issue;
+};
+
+// No leg is currently expected to fail. A red leg gets a filed issue and an
+// entry here naming it; the zeroed sentinel only keeps the array non-empty
+// for C and never matches a real leg.
+BUSTER_GLOBAL_LOCAL ModeMatrixExpectedFailure const mode_matrix_expected_failures[] = {
+    {{0}, {0}, {0}},
+};
+
+BUSTER_GLOBAL_LOCAL ModeMatrixExpectedFailure const* mode_matrix_expected_failure_find(String8 target, String8 mode)
+{
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(mode_matrix_expected_failures); index += 1)
+    {
+        ModeMatrixExpectedFailure const* entry = mode_matrix_expected_failures + index;
+        if (entry->target.length && string_equal(entry->target, target) && string_equal(entry->mode, mode))
+        {
+            return entry;
+        }
+    }
+    return 0;
+}
+
+typedef struct ModeMatrixCommandResult ModeMatrixCommandResult;
+struct ModeMatrixCommandResult
+{
+    ProcessResult result;
+    String8 output;
+    String8 error;
+    bool timed_out;
+};
+
+// One bounded child. The bound exists for the emulated runs: a wedged qemu
+// or wine process would otherwise hold a serialized CI runner, the same
+// reasoning as SELF_HOST_TIMEOUT_SECONDS. Fixture runs must not capture:
+// wine's background services inherit the pipe ends and keep them open for
+// seconds after the fixture exits, so a captured run pays their lifetime
+// while an uncaptured one pays the fixture's. The fixtures are silent and
+// answer through their exit status, so nothing is lost.
+BUSTER_GLOBAL_LOCAL ModeMatrixCommandResult mode_matrix_command(Arena* arena, SliceString8 arguments, bool capture)
+{
+    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0},
+                                                (ProcessSpawnOptions){
+                                                    .capture = capture ? ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR) : 0,
+                                                    .use_process_environment = 1,
+                                                });
+    if (!spawn.handle)
+    {
+        string_print(S8("error: test_mode_matrix could not start:\n"));
+        command_print(arguments);
+        return (ModeMatrixCommandResult){.result = PROCESS_RESULT_FAILED};
+    }
+    ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, (u64)MODE_MATRIX_TIMEOUT_SECONDS * 1000000);
+    return (ModeMatrixCommandResult){
+        .result = wait.result,
+        .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+        .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
+        .timed_out = wait.timed_out,
+    };
+}
+
+BUSTER_GLOBAL_LOCAL String8 mode_matrix_avenue_name(ModeMatrixAvenue avenue)
+{
+    switch (avenue)
+    {
+        break;
+    case MODE_MATRIX_AVENUE_LINK:
+        return S8("link");
+        break;
+    case MODE_MATRIX_AVENUE_ORACLE:
+        return S8("oracle");
+        break;
+    case MODE_MATRIX_AVENUE_NATIVE:
+        return S8("native");
+        break;
+    case MODE_MATRIX_AVENUE_QEMU:
+        return S8("qemu");
+        break;
+    case MODE_MATRIX_AVENUE_WINE:
+        return S8("wine");
+        break;
+    }
+    return S8("link");
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_action(Arena* arena, void* data)
+{
+    TestModeMatrixOptions options = *(TestModeMatrixOptions*)data;
+    u64 harness_start_us = os_now_microseconds();
+    String8 ide = path_join(arena, path_join(arena, options.build_directory, options.config),
+#if BUSTER_WINDOWS
+                            S8("ide.exe"));
+#else
+                            S8("ide"));
+#endif
+    if (!path_exists(arena, ide))
+    {
+        string_print(S8("error: test_mode_matrix requires a built ide executable at {S8}\n"), ide);
+        return PROCESS_RESULT_FAILED;
+    }
+    ide = os_path_absolute(arena, ide, true);
+    String8 output_directory = path_join(arena, path_join(arena, options.build_directory, S8("mode-matrix")), options.config);
+    remove_path_recursive(arena, output_directory);
+    make_directory_recursive(arena, output_directory);
+
+    // The verification avenue is decided by target, then downgraded when the
+    // host cannot serve it. Native execution needs the host to be that exact
+    // platform; qemu-aarch64 runs the static AArch64 ELF images anywhere it
+    // is installed; wine runs the x86-64 PE images on non-Windows x86-64
+    // hosts. AArch64 PE and both Mach-O rows have no emulator on the CI
+    // hosts, so they carry the disassembly oracle, as does any downgraded
+    // leg when llvm-objdump exists.
+    String8 qemu = executable_resolve_in_path(arena, S8("qemu-aarch64"));
+    String8 wine = executable_resolve_in_path(arena, S8("wine"));
+    String8 oracle = executable_resolve_in_path(arena, S8("llvm-objdump"));
+    ModeMatrixTarget targets[] = {
+        {.name = S8("x86_64-linux"), .triple = S8("x86_64-unknown-linux-gnu")},
+        {.name = S8("aarch64-linux"), .triple = S8("aarch64-unknown-linux-gnu")},
+        {.name = S8("x86_64-windows"), .triple = S8("x86_64-pc-windows-msvc")},
+        {.name = S8("aarch64-windows"), .triple = S8("aarch64-pc-windows-msvc")},
+        {.name = S8("x86_64-macos"), .triple = S8("x86_64-apple-macos")},
+        {.name = S8("aarch64-macos"), .triple = S8("aarch64-apple-macos")},
+    };
+    for (u64 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        ModeMatrixTarget* target = targets + target_index;
+        bool host_x86_64 = BUSTER_CPU_ARCH_X86_64 != 0;
+        bool host_aarch64 = !host_x86_64 && BUSTER_CPU_ARCH_AARCH64 != 0;
+        bool native = false;
+#if BUSTER_LINUX
+        native = (host_x86_64 && target_index == 0) || (host_aarch64 && target_index == 1);
+#elif BUSTER_WINDOWS
+        native = (host_x86_64 && target_index == 2) || (host_aarch64 && target_index == 3);
+#elif BUSTER_MACOS
+        native = (host_x86_64 && target_index == 4) || (host_aarch64 && target_index == 5);
+#endif
+        if (native)
+        {
+            target->avenue = MODE_MATRIX_AVENUE_NATIVE;
+        }
+        else if (target_index == 1 && qemu.length && !BUSTER_WINDOWS)
+        {
+            target->avenue = MODE_MATRIX_AVENUE_QEMU;
+            target->runner = qemu;
+        }
+        else if (target_index == 2 && host_x86_64 && wine.length && !BUSTER_WINDOWS)
+        {
+            target->avenue = MODE_MATRIX_AVENUE_WINE;
+            target->runner = wine;
+        }
+        else
+        {
+            target->avenue = oracle.length ? MODE_MATRIX_AVENUE_ORACLE : MODE_MATRIX_AVENUE_LINK;
+        }
+    }
+
+    // The corpus is small and allocator-focused on purpose: calls with
+    // callee-saved pressure and by-value aggregates, sixteen-aligned stack
+    // arguments, float classes with varargs, and vector-class register
+    // pressure. Every fixture is freestanding self-checking C whose main
+    // returns zero, so one exit status verifies a whole leg. The default CPU
+    // model keeps every leg byte-deterministic across hosts.
+    String8 fixtures[] = {
+        S8("tests/basic_c_call_abi.c"),
+        S8("tests/basic_c_x86_64_i128_stack_abi.c"),
+        S8("tests/basic_c_float_abi.c"),
+        S8("tests/basic_c_vector_register_pressure.c"),
+    };
+    String8 allocator_modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    string_print(S8("MODE_MATRIX_HARNESS ide={S8} targets={u64} modes={u64} fixtures={u64} qemu={u64} wine={u64} oracle={u64}\n"), ide,
+                 BUSTER_ARRAY_LENGTH(targets), BUSTER_ARRAY_LENGTH(allocator_modes), BUSTER_ARRAY_LENGTH(fixtures), (u64)(qemu.length != 0),
+                 (u64)(wine.length != 0), (u64)(oracle.length != 0));
+
+    u64 failures = 0;
+    u64 executed_legs = 0;
+    u64 oracle_legs = 0;
+    u64 expected_failures_hit = 0;
+    for (u64 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        ModeMatrixTarget* target = targets + target_index;
+        for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
+        {
+            String8 mode = allocator_modes[mode_index];
+            ModeMatrixExpectedFailure const* expected = mode_matrix_expected_failure_find(target->name, mode);
+            u64 leg_start_us = os_now_microseconds();
+            String8 leg_failure = {0};
+            for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(fixtures) && !leg_failure.length; fixture_index += 1)
+            {
+                TemporalArena leg_temporary = scratch_begin(&arena, 1);
+                String8 fixture = fixtures[fixture_index];
+                String8 image = path_join(leg_temporary.arena, output_directory,
+                                          string_format(leg_temporary.arena, S8("{S8}-{S8}-{u64}"), target->name, mode, fixture_index));
+                String8 compile_arguments[] = {
+                    ide,
+                    S8("cc"),
+                    S8("-target"),
+                    target->triple,
+                    string_format(leg_temporary.arena, S8("-fregister-allocator={S8}"), mode),
+                    S8("-o"),
+                    image,
+                    fixture,
+                };
+                ModeMatrixCommandResult compile =
+                    mode_matrix_command(leg_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_arguments), true);
+                if (compile.result != PROCESS_RESULT_SUCCESS)
+                {
+                    leg_failure = string_format(arena, S8("stage=compile fixture={S8}"), fixture);
+                    if (!expected && compile.error.length)
+                    {
+                        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(compile.error));
+                    }
+                }
+                else if (target->avenue == MODE_MATRIX_AVENUE_NATIVE || target->avenue == MODE_MATRIX_AVENUE_QEMU ||
+                         target->avenue == MODE_MATRIX_AVENUE_WINE)
+                {
+                    String8 run_arguments[3];
+                    u64 run_argument_count = 0;
+                    if (target->avenue != MODE_MATRIX_AVENUE_NATIVE)
+                    {
+                        run_arguments[run_argument_count++] = target->runner;
+                    }
+                    run_arguments[run_argument_count++] = image;
+                    ModeMatrixCommandResult run =
+                        mode_matrix_command(leg_temporary.arena, (SliceString8){.pointer = run_arguments, .length = run_argument_count}, false);
+                    if (run.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        leg_failure = string_format(arena, S8("stage=run fixture={S8}{S8}"), fixture,
+                                                    run.timed_out ? S8(" timeout=1") : S8(""));
+                    }
+                }
+                else if (target->avenue == MODE_MATRIX_AVENUE_ORACLE)
+                {
+                    // The strongest check an unrunnable image admits: the
+                    // oracle walks the headers, sections, symbols and every
+                    // instruction byte, so a malformed object or a
+                    // relocation left dangling fails here even though
+                    // nothing executes.
+                    String8 oracle_arguments[] = {oracle, S8("-d"), image};
+                    ModeMatrixCommandResult oracle_run =
+                        mode_matrix_command(leg_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(oracle_arguments), true);
+                    if (oracle_run.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        leg_failure = string_format(arena, S8("stage=oracle fixture={S8}"), fixture);
+                        if (!expected && oracle_run.error.length)
+                        {
+                            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(oracle_run.error));
+                        }
+                    }
+                }
+                scratch_end(leg_temporary);
+            }
+            u64 leg_elapsed_us = os_now_microseconds() - leg_start_us;
+            String8 status = S8("pass");
+            if (expected && leg_failure.length)
+            {
+                status = S8("expected-fail");
+                expected_failures_hit += 1;
+            }
+            else if (expected)
+            {
+                // The table says this leg must fail and it no longer does:
+                // the fix has landed and the entry has to leave with it.
+                status = S8("unexpected-pass");
+                failures += 1;
+            }
+            else if (leg_failure.length)
+            {
+                status = S8("fail");
+                failures += 1;
+            }
+            else if (target->avenue == MODE_MATRIX_AVENUE_NATIVE || target->avenue == MODE_MATRIX_AVENUE_QEMU || target->avenue == MODE_MATRIX_AVENUE_WINE)
+            {
+                executed_legs += 1;
+            }
+            else if (target->avenue == MODE_MATRIX_AVENUE_ORACLE)
+            {
+                oracle_legs += 1;
+            }
+            string_print(S8("MODE_MATRIX leg={S8}/{S8} avenue={S8} status={S8} fixtures={u64} elapsed_us={u64}{S8}{S8}{S8}{S8}\n"), target->name, mode,
+                         mode_matrix_avenue_name(target->avenue), status, BUSTER_ARRAY_LENGTH(fixtures), leg_elapsed_us,
+                         leg_failure.length ? S8(" ") : S8(""), leg_failure, expected ? S8(" issue=") : S8(""), expected ? expected->issue : S8(""));
+        }
+    }
+    u64 harness_elapsed_us = os_now_microseconds() - harness_start_us;
+    u64 leg_count = BUSTER_ARRAY_LENGTH(targets) * BUSTER_ARRAY_LENGTH(allocator_modes);
+    string_print(S8("MODE_MATRIX_RESULT legs={u64} executed={u64} oracle_checked={u64} expected_failures={u64} failures={u64} elapsed_us={u64} status={S8}\n"),
+                 leg_count, executed_legs, oracle_legs, expected_failures_hit, failures, harness_elapsed_us, failures ? S8("fail") : S8("pass"));
+    return failures ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_add(Arena* arena, String8 build_directory, CmakeBuildOptions options, Generate generate)
+{
+    String8 config = cmake_build_config(options);
+    String8 cmake_cache = path_join(arena, build_directory, S8("CMakeCache.txt"));
+    if (!path_exists(arena, cmake_cache))
+    {
+        generate.build_directory = build_directory;
+        generate.config = config;
+        generate.config_set = true;
+        BuildStep* generate_step = step_add(arena);
+        generate_add(arena, generate_step, generate);
+    }
+    String8 targets[] = {S8("ide")};
+    build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestModeMatrixOptions* action_options = arena_allocate(arena, TestModeMatrixOptions, 1);
+    *action_options = (TestModeMatrixOptions){
+        .build_directory = build_directory,
+        .config = config,
+    };
+    *run = (ProcessRun){.callback = test_mode_matrix_action, .callback_data = action_options};
+    return PROCESS_RESULT_SUCCESS;
 }
 
 // --- QuickJS compatibility harness ---------------------------------------
@@ -32391,6 +32759,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_DOOM] = S8_INITIALIZER("test_doom"),
         [BUILD_COMMAND_TEST_QUICKJS] = S8_INITIALIZER("test_quickjs"),
         [BUILD_COMMAND_TEST_MUSL] = S8_INITIALIZER("test_musl"),
+        [BUILD_COMMAND_TEST_MODE_MATRIX] = S8_INITIALIZER("test_mode_matrix"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -32891,7 +33260,8 @@ ProcessResult process_arguments(void)
                     string_print(S8("error: invalid configuration => \"{S8}\"\n"), config);
                     result = PROCESS_RESULT_FAILED;
                 }
-                else if (command == BUILD_COMMAND_BUILD || command == BUILD_COMMAND_TEST_SELF_HOST || command == BUILD_COMMAND_SELF_HOST_FROM_EXISTING)
+                else if (command == BUILD_COMMAND_BUILD || command == BUILD_COMMAND_TEST_SELF_HOST || command == BUILD_COMMAND_SELF_HOST_FROM_EXISTING ||
+                         command == BUILD_COMMAND_TEST_MODE_MATRIX)
                 {
                     options.config = config;
                 }
@@ -33532,6 +33902,12 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_MUSL:
         {
             test_musl_action_add(arena, test_musl_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_MODE_MATRIX:
+        {
+            machine_info_print();
+            result = test_mode_matrix_add(arena, build_directory, options, generate);
         }
         break;
         case BUILD_COMMAND_TEST_ALL_COMBINATIONS:

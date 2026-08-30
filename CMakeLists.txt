@@ -1803,6 +1803,16 @@ if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"
         USES_TERMINAL
         VERBATIM
     )
+    add_custom_target(test_mode_matrix
+        COMMAND
+            "${CMAKE_SOURCE_DIR}/build/build${CMAKE_EXECUTABLE_SUFFIX}"
+            test_mode_matrix
+            --build-directory "${CMAKE_BINARY_DIR}"
+            --config "$<CONFIG>"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        USES_TERMINAL
+        VERBATIM
+    )
 endif()
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Android")

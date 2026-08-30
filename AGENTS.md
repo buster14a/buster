@@ -1789,10 +1789,35 @@ run carries on reporting the missing output files as compiler failures.
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`,
 `import_assembly_metadata`, `import_arm_a64_metadata`,
-`import_arm_a64_sysregs`, `test_self_host`, `x86_64_completion_census`,
+`import_arm_a64_sysregs`, `test_self_host`, `test_mode_matrix`,
+`x86_64_completion_census`,
 `test_all_combinations`,
 `test_all_combinations_ci`; `self_host_from_existing` is an internal
 build-driver worker command used only by the pooled artifact-fanout target.
+
+`test_mode_matrix` (`./build.sh test_mode_matrix --config Release`, also a
+Ninja target) is the execution-mode cross product: every register-allocator
+mode (`none`, `mir-stack`, `fast`, `quality`) against every native target the
+toolchain cross-links from any host — x86-64 and AArch64, each as ELF, PE and
+Mach-O, 24 legs. Where `test_self_host` is deep on one mode and one target,
+this matrix is wide: each leg links a small self-checking fixture corpus
+(`basic_c_call_abi`, `basic_c_x86_64_i128_stack_abi`, `basic_c_float_abi`,
+`basic_c_vector_register_pressure`) at the default CPU model and then takes
+the strongest verification avenue the host offers — native execution when
+host and target agree, `qemu-aarch64` for AArch64 ELF, `wine` for x86-64 PE,
+and an `llvm-objdump` disassembly oracle for images nothing on the host can
+run. A leg whose avenue tool is missing still compiles, links and
+oracle-checks, and reports the downgraded avenue in its `MODE_MATRIX` row
+rather than vanishing. A leg that must fail belongs in
+`mode_matrix_expected_failures` in `build.c` with its issue number; the leg
+is then required to fail, so a regression and a silently landed fix are both
+caught. Fixture runs are deliberately uncaptured — wine's background services
+inherit captured pipe ends and stretch a 10 ms run to seconds — and every
+child is bounded by `MODE_MATRIX_TIMEOUT_SECONDS`. The whole matrix costs
+about four seconds on a warm tree; CI runs it on the dedicated Linux runner
+and on macOS (where the Mach-O rows execute natively), and skips the Windows
+runner because that box is the CI wall-time gate and its PE rows already run
+under wine on Linux.
 The combination matrix shares one multi-config build tree across configurations
 when their configure-time policy matches. Clang omits unsanitized Debug because
 sanitized Debug provides the stronger coverage; it builds and runs unsanitized
@@ -2035,7 +2060,8 @@ things in the x86-64 dynamic writer, and the AArch64 one through it:
 
 Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
 drives the simulator), `bench_all` (desktop only — runs `ide bench`),
-`test_self_host` (Linux and Windows x86-64, and macOS), `run_ide`,
+`test_self_host` (Linux and Windows x86-64, and macOS), `test_mode_matrix`
+(same platforms), `run_ide`,
 `test_ide`, `debug_ide`,
 `buster_shaders`, `apk` (Android), `clang_analyze`. Rendering backends and
 shader compilation are retained as opt-in infrastructure and default off. The
