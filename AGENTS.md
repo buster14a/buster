@@ -2609,6 +2609,38 @@ on a commit you already know is incomplete tells nobody anything.
   sentinels.
 - Validate IR before machine selection or Wasm emission. A diagnosed frontend
   failure must not publish an apparently valid partial function to codegen.
+- **`void` is one byte, and an object of it is still refused.** GNU gives
+  `void` a size and an alignment of one so that arithmetic on a `void *` steps
+  by bytes, and clang and gcc both fold `sizeof(void)`, `sizeof(const void)`
+  and `_Alignof(void)` to 1. This compiler folded 0, and the index that `p + 3`
+  becomes is scaled by the pointee's layout size, so the pointer did not move
+  at all -- a silently wrong address rather than a diagnostic, and `q - p` was
+  refused outright because the divide by the element size would have been a
+  divide by zero (#743). The answer lives in `c_parse_builtin_type_layout`,
+  which is the one table **both layout engines** read: `c_parse_type_layout`
+  folds `sizeof` through it during the parse and `c_ir_scalar_type` builds the
+  `IrType` from it, so there is no second place to keep in step. Nothing
+  downstream had to change, because every backend already scales an
+  `IR_OPCODE_INDEX` by the element type's size and every question about `void`
+  that is *not* its size is asked of `IR_TYPE_VOID` rather than of a zero.
+  The size is an extension for that arithmetic and for `sizeof`, **not a
+  licence to declare a `void` object**: C 6.7p7 wants a complete type and both
+  reference compilers refuse `void v;`, `void a[4];` and a `void` member. Those
+  refusals used to fall out of the zero size -- an aggregate whose layout never
+  resolved, a local whose alignment was zero, a file-scope object that reached
+  code generation and failed there naming `main` rather than the object -- so
+  they are asked of the kind now, through `c_ir_type_is_void_object` in
+  `c_gen.c`, at the two local-declaration sites, the global definition walk,
+  and the aggregate member layout, which reports through the same
+  one-per-type slot a rejected alignment specifier uses. The predicate
+  descends array elements alone: a qualified copy keeps the base's kind, so
+  `const void` answers the same, and a `void *` is a pointer and answers no.
+  `tests/basic_c_void_size.c` pins every runtime answer under all four
+  register allocators -- both orders of the addition, the two subtractions,
+  `++`/`--`/`+=`/`-=`, and the qualified pointees -- reading each stepped
+  pointer back through a live object so an address that folds correctly and
+  lowers wrongly still fails; `c_test_void_object_refusals` pins both layout
+  engines' number and the four refusals.
 - An integer converted to a pointer reaches pointer width in the frontend,
   before `IR_CONVERSION_INTEGER_TO_POINTER`, sign-extending when the operand is
   signed. All four backends lower that conversion as a plain register copy and

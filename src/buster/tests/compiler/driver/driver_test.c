@@ -7732,6 +7732,51 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(member_chain_temporary);
         }
     }
+    // `void *` arithmetic under every allocator.  GNU gives `void` a size of
+    // one so that a `void *` steps by bytes; this compiler folded 0, so the
+    // index `p + 3` becomes was scaled by nothing and the pointer never moved
+    // -- a silently wrong address rather than a diagnostic (#743).  The
+    // allocators are here because that index is materialized differently by
+    // each: a scale of one is the case where a shift or a LEA disappears, and
+    // where the multiply that is gone has to have been the right one.  The
+    // fixture reads every stepped pointer back through a live object, so an
+    // address that computes correctly and lowers wrongly still fails, and it
+    // exits non-zero at its first wrong answer, naming the case.
+    {
+        String8 void_size_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(void_size_allocators); allocator_index += 1)
+        {
+            Arena* void_size_conflicts[] = {
+                arguments->arena,
+                c_asm_arena,
+            };
+            TemporalArena void_size_temporary = scratch_begin(void_size_conflicts, BUSTER_ARRAY_LENGTH(void_size_conflicts));
+            Arena* void_size_arena = void_size_temporary.arena;
+            String8 void_size_path =
+                buster_test_temporary_path(void_size_arena, S8("buster-c-void-size"), string_format(void_size_arena, S8("-{u32}"), allocator_index));
+            String8 void_size_command_line[] = {
+                string_format(void_size_arena, S8("-fregister-allocator={S8}"), void_size_allocators[allocator_index]),
+                S8("-o"),
+                void_size_path,
+                S8("tests/basic_c_void_size.c"),
+            };
+            CompilerDriverResult void_size = compiler_driver_execute_invocation(
+                void_size_arena, compiler_driver_parse_arguments(void_size_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(void_size_command_line)));
+            BUSTER_TEST(arguments, void_size.error == COMPILER_DRIVER_ERROR_NONE);
+            if (void_size.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {void_size_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(void_size_arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(void_size_temporary);
+        }
+    }
     // An aggregate crossing a `volatile` qualifier under every allocator.  The
     // qualified copy of a struct is a second IR type with the same layout, and
     // the frontend's value conversion only spanned the scalar kinds, so

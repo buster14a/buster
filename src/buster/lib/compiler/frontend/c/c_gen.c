@@ -569,13 +569,15 @@ BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind k
     {
         return IR_TYPE_ID_INVALID;
     }
+    // The IR layout of every scalar is the one c_parse_builtin_type_layout
+    // folds, `void` included: the two engines answer one question and this is
+    // the single table they both read. `void` is one byte aligned one there,
+    // which is what makes a `void *` step by bytes -- the pointer arithmetic
+    // below scales by the pointee's layout size and the incomplete-type
+    // refusal beside it tests that size for zero.
     u64 size = 0;
     u32 storage_alignment = 0;
-    if (ir_kind == IR_TYPE_VOID)
-    {
-        size = 0;
-    }
-    else if (!c_parse_builtin_type_layout(context->target, kind, &size, &storage_alignment))
+    if (!c_parse_builtin_type_layout(context->target, kind, &size, &storage_alignment))
     {
         return IR_TYPE_ID_INVALID;
     }
@@ -603,6 +605,27 @@ BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind k
                                                         : (((u64)1 << bit_width) - 1);
     }
     return type;
+}
+
+// Is this the type of an object C refuses to declare -- `void`, or an array of
+// it? The size above and completeness are different questions: GNU gives
+// `void` a size of one so that a `void *` steps by bytes, and clang and gcc
+// still refuse `void v;`, `void a[4];` and a `void` member. Every refusal here
+// used to fall out of the zero size instead -- an unresolved aggregate layout,
+// a zero alignment, a codegen failure on an empty global that named `main`
+// rather than the object -- so the question is asked of the *kind* now, which
+// is the only spelling of it that survives the size. A qualified copy keeps
+// the base's kind, so `const void` answers the same, and a `void *` is a
+// pointer and answers no: the walk descends array elements alone.
+BUSTER_C_INTERNAL bool c_ir_type_is_void_object(IrProgram* program, IrTypeId type)
+{
+    IrType* value = ir_type_from_id(&program->types, type);
+    while (value && value->kind == IR_TYPE_ARRAY)
+    {
+        value = ir_type_from_id(&program->types, value->element_type);
+    }
+    bool result = value != 0 && value->kind == IR_TYPE_VOID;
+    return result;
 }
 
 typedef struct CIrArrayTypeSlot CIrArrayTypeSlot;
@@ -27915,13 +27938,18 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
     // the alignment the storage has to meet.
     u32 local_alignment = variable_element ? variable_element->layout.alignment : local_type_value ? local_type_value->layout.alignment : 0;
     String8 local_alignment_rejection = {0};
-    if (!local_type_value || !local_type_value->layout.resolved ||
+    bool void_local = c_ir_type_is_void_object(builder->program, local_type);
+    if (!local_type_value || !local_type_value->layout.resolved || void_local ||
         (variable_length_array && (!variable_element || !variable_element->layout.resolved || !variable_element->layout.size)) ||
         c_ir_alignment_evaluate(builder, local_entity->alignment_start, local_entity->alignment_count, local_alignment, &local_alignment,
                                 &local_alignment_rejection) != C_IR_ALIGNMENT_RESOLVED)
     {
-        builder->failure_message = local_alignment_rejection.length ? local_alignment_rejection : S8("automatic local declaration has an invalid alignment");
-        builder->failure_kind_plus_one = local_alignment_rejection.length ? C_DIAGNOSTIC_INVALID_ALIGNMENT + 1 : 0;
+        builder->failure_message = void_local  ? S8("a variable may not have type 'void'")
+                                   : local_alignment_rejection.length ? local_alignment_rejection
+                                                                     : S8("automatic local declaration has an invalid alignment");
+        builder->failure_kind_plus_one = void_local                     ? C_DIAGNOSTIC_INVALID_VOID_OBJECT + 1
+                                         : local_alignment_rejection.length ? C_DIAGNOSTIC_INVALID_ALIGNMENT + 1
+                                                                            : 0;
         return false;
     }
     if (variable_length_array && local_static)
@@ -31761,14 +31789,19 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 IrType* variable_element = variable_length_array ? ir_type_from_id(&builder->program->types, variable_element_type) : 0;
                 u32 local_alignment = variable_element ? variable_element->layout.alignment : local_type_value ? local_type_value->layout.alignment : 0;
                 String8 local_alignment_rejection = {0};
-                if (!local_type_value || !local_type_value->layout.resolved ||
+                bool void_local = c_ir_type_is_void_object(builder->program, local_type);
+                if (!local_type_value || !local_type_value->layout.resolved || void_local ||
                     (variable_length_array && (!variable_element || !variable_element->layout.resolved || !variable_element->layout.size)) ||
                     c_ir_alignment_evaluate(builder, builder->parse.entities[entity.value].alignment_start,
                                             builder->parse.entities[entity.value].alignment_count, local_alignment, &local_alignment,
                                             &local_alignment_rejection) != C_IR_ALIGNMENT_RESOLVED)
                 {
-                    builder->failure_message = local_alignment_rejection.length ? local_alignment_rejection : S8("local declaration has an invalid alignment");
-                    builder->failure_kind_plus_one = local_alignment_rejection.length ? C_DIAGNOSTIC_INVALID_ALIGNMENT + 1 : 0;
+                    builder->failure_message = void_local  ? S8("a variable may not have type 'void'")
+                                               : local_alignment_rejection.length ? local_alignment_rejection
+                                                                                 : S8("local declaration has an invalid alignment");
+                    builder->failure_kind_plus_one = void_local                     ? C_DIAGNOSTIC_INVALID_VOID_OBJECT + 1
+                                                     : local_alignment_rejection.length ? C_DIAGNOSTIC_INVALID_ALIGNMENT + 1
+                                                                                        : 0;
                     return false;
                 }
                 bool local_extern = false;
@@ -39447,6 +39480,17 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                         }
                     }
                     IrType* field_type = ir_type_from_id(&program->types, field_type_id);
+                    // A `void` member lays out beside the others rather than
+                    // holding the whole definition unresolved, exactly as a
+                    // rejected alignment specifier does: the program hears
+                    // about the member it wrote instead of about a type that
+                    // never got a layout, and the report fails the driver.
+                    if (c_ir_type_is_void_object(program, field_type_id) && !definition_rejection.length)
+                    {
+                        definition_rejection = S8("a member may not have type 'void'");
+                        definition_rejection_member = field_index;
+                        definition_rejection_kind = C_DIAGNOSTIC_INVALID_VOID_OBJECT;
+                    }
                     if (!field_type || !field_type->layout.resolved || !field_type->layout.alignment)
                     {
                         fields_resolved = false;
@@ -40441,6 +40485,15 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         }
         if (!definition)
         {
+            continue;
+        }
+        if (c_ir_type_is_void_object(program, type))
+        {
+            result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
+                .message = string_format(arena, S8("variable '{S8}' may not have type 'void'"), entity->name),
+                .location = entity->location,
+                .kind = C_DIAGNOSTIC_INVALID_VOID_OBJECT,
+            };
             continue;
         }
         if (!type_value || !type_value->layout.resolved)

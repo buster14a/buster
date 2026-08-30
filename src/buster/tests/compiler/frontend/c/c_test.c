@@ -6560,6 +6560,145 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_function_type_name(UnitTestArgu
     return result;
 }
 
+// `void` is one byte in both layout engines, and an object of it is still
+// refused. GNU gives `void` a size so that a `void *` steps by bytes, and both
+// reference compilers fold `sizeof(void)`, `sizeof(const void)` and
+// `_Alignof(void)` to 1; this compiler folded 0, so `p + 3` scaled the index
+// by nothing and answered the base address with no diagnostic (#743). The
+// size and completeness are different questions, though, and the refusals used
+// to fall out of the size: an unresolved aggregate layout, a zero alignment,
+// or -- for a file-scope object -- a code-generation failure that named `main`
+// and never named the object. Each of them is asked of the kind now, through
+// c_ir_type_is_void_object, so this test is both halves at once. The runtime
+// answers are tests/basic_c_void_size.c, under all four register allocators.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_void_object_refusals(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    // The parse engine folds the static assertions and the array bounds; the
+    // IR engine builds the type the pointer below points at. Both have to
+    // answer 1, which is the rule two layout engines share.
+    TemporalArena size_temporary = scratch_begin(0, 0);
+    CPreprocessResult size_tokens = c_preprocess(size_temporary.arena,
+                                                 S8("typedef void VoidAlias;\n"
+                                                    "_Static_assert(sizeof(void) == 1, \"sizeof void\");\n"
+                                                    "_Static_assert(sizeof(const void) == 1, \"sizeof const void\");\n"
+                                                    "_Static_assert(sizeof(volatile void) == 1, \"sizeof volatile void\");\n"
+                                                    "_Static_assert(sizeof(VoidAlias) == 1, \"sizeof void alias\");\n"
+                                                    "_Static_assert(_Alignof(void) == 1, \"alignof void\");\n"
+                                                    "static unsigned char folded_bound[sizeof(void) + 6];\n"
+                                                    "void *void_pointer;\n"
+                                                    "unsigned long void_step(void *p, void *q)\n"
+                                                    "{ return (unsigned long)((unsigned char *)(p + 3) - (unsigned char *)p) + (unsigned long)(q - p); }\n"),
+                                                 (CPreprocessOptions){0});
+    CParseResult size_parse = c_parse(size_temporary.arena, size_tokens);
+    CIRLowerResult size_ir = c_lower_to_ir(size_temporary.arena, S8("void-size.c"), size_tokens, size_parse, target_native);
+    BUSTER_TEST(arguments, size_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, size_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, size_ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, size_ir.program != 0);
+    if (size_ir.program)
+    {
+        IrModule* module = &size_ir.program->modules[0];
+        IrType* folded_bound_type = 0;
+        IrType* void_pointer_type = 0;
+        for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
+        {
+            IrGlobal* global = module->globals + global_index;
+            IrSymbol* symbol = ir_symbol_from_id(&size_ir.program->symbols, global->symbol);
+            if (symbol && string_equal(symbol->link_name, S8("folded_bound")))
+            {
+                folded_bound_type = ir_type_from_id(&size_ir.program->types, global->type);
+            }
+            if (symbol && string_equal(symbol->link_name, S8("void_pointer")))
+            {
+                void_pointer_type = ir_type_from_id(&size_ir.program->types, global->type);
+            }
+        }
+        // The bound is `sizeof(void) + 6`, so the parse engine's answer is
+        // readable as a count in the IR the way every other sizeof fold is.
+        BUSTER_TEST(arguments, folded_bound_type != 0 && folded_bound_type->kind == IR_TYPE_ARRAY && folded_bound_type->element_count == 7);
+        // The IR engine's own answer, read off the type a `void *` points at:
+        // this is the number the index the pointer arithmetic becomes is
+        // scaled by, and it was zero.
+        BUSTER_TEST(arguments, void_pointer_type != 0 && void_pointer_type->kind == IR_TYPE_POINTER);
+        if (void_pointer_type && void_pointer_type->kind == IR_TYPE_POINTER)
+        {
+            IrType* pointee = ir_type_from_id(&size_ir.program->types, void_pointer_type->element_type);
+            BUSTER_TEST(arguments, pointee != 0 && pointee->kind == IR_TYPE_VOID);
+            BUSTER_TEST(arguments, pointee != 0 && pointee->layout.resolved && pointee->layout.size == 1 && pointee->layout.alignment == 1);
+        }
+        BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("void_step")) != 0);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(size_ir.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(size_temporary);
+
+    // The negative half. Each spelling is its own lowering: a file-scope
+    // object and a file-scope array reach the definition walk, a block-scope
+    // object reaches the local declaration, and a member reaches the aggregate
+    // layout, which reports through the same one-per-type slot a rejected
+    // alignment specifier uses. Both reference compilers refuse all four.
+    struct
+    {
+        String8 source;
+        String8 path;
+        String8 message;
+    } refusals[] = {
+        {S8("void global_void_object;\n"), S8("void-global.c"), S8("variable 'global_void_object' may not have type 'void'")},
+        {S8("const void global_qualified_void_object;\n"), S8("void-global-qualified.c"),
+         S8("variable 'global_qualified_void_object' may not have type 'void'")},
+        {S8("void global_void_array[4];\n"), S8("void-global-array.c"), S8("variable 'global_void_array' may not have type 'void'")},
+        {S8("int local_void_object(void) { void v; return 0; }\n"), S8("void-local.c"),
+         S8("in function 'local_void_object': a variable may not have type 'void'")},
+        {S8("struct void_member { int a; void b; };\n"
+            "struct void_member void_member_object;\n"),
+         S8("void-member.c"), S8("a member may not have type 'void'")},
+    };
+    for (u32 refusal_index = 0; refusal_index < BUSTER_ARRAY_LENGTH(refusals); refusal_index += 1)
+    {
+        TemporalArena refusal_temporary = scratch_begin(0, 0);
+        CPreprocessResult refusal_preprocess = {0};
+        CParseResult refusal_parse = {0};
+        CIRLowerResult refusal = c_test_lower_source(refusal_temporary.arena, refusals[refusal_index].source, refusals[refusal_index].path,
+                                                     target_native, &refusal_preprocess, &refusal_parse);
+        BUSTER_TEST(arguments, refusal_preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, refusal_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, refusal.diagnostic_count == 1);
+        if (refusal.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, refusal.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_VOID_OBJECT);
+            BUSTER_STRING_TEST(arguments, refusal.diagnostics[0].message, refusals[refusal_index].message);
+        }
+        scratch_end(refusal_temporary);
+    }
+
+    // A `void *` object, a `void` return type and a `void` parameter list are
+    // not objects of type void and must stay accepted: the refusal keys on the
+    // kind the declarator arrived at, and a pointer to void is a pointer.
+    TemporalArena accepted_temporary = scratch_begin(0, 0);
+    CPreprocessResult accepted_preprocess = {0};
+    CParseResult accepted_parse = {0};
+    CIRLowerResult accepted = c_test_lower_source(accepted_temporary.arena,
+                                                  S8("typedef void VoidAlias;\n"
+                                                     "void *global_pointer;\n"
+                                                     "const void *global_const_pointer;\n"
+                                                     "void *global_pointer_array[4];\n"
+                                                     "void (*global_function_pointer)(void);\n"
+                                                     "VoidAlias accepted_void_function(void) { void *local = global_pointer; global_pointer = local + 1; }\n"),
+                                                  S8("void-accepted.c"), target_native, &accepted_preprocess, &accepted_parse);
+    BUSTER_TEST(arguments, accepted_preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, accepted_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, accepted.diagnostic_count == 0);
+    BUSTER_TEST(arguments, accepted.program != 0);
+    if (accepted.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(accepted.program, &accepted.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(accepted_temporary);
+
+    return result;
+}
+
 // An ellipsis makes a declarator variadic only where it is a parameter of that
 // declarator's own parameter list -- the one top-level parenthesis group. A
 // deeper one belongs to a nested type name: a parameter's own parameter list,
@@ -12129,6 +12268,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_global_array_sizeof_bound(arguments));
     c_test_result_add(&result, c_test_sizeof_constant_expression(arguments));
     c_test_result_add(&result, c_test_sizeof_function_type_name(arguments));
+    c_test_result_add(&result, c_test_void_object_refusals(arguments));
     c_test_result_add(&result, c_test_declarator_ellipsis_depth(arguments));
     c_test_result_add(&result, c_test_unprototyped_call_arguments(arguments));
     c_test_result_add(&result, c_test_call_arity_diagnostics(arguments));

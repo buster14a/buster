@@ -933,7 +933,15 @@ BUSTER_C_SHARED bool c_parse_builtin_type_layout(Target target, CTypeKind kind, 
         size = layout.va_list.size;
         alignment = layout.va_list.alignment;
         break;
+    // GNU gives `void` a size and an alignment of one so that arithmetic on a
+    // `void *` steps by bytes; clang and gcc both fold `sizeof(void)`,
+    // `sizeof(const void)` and `_Alignof(void)` to 1. It is an extension for
+    // that arithmetic and for `sizeof`, never a licence to declare a `void`
+    // object: every refusal of one keys on the *kind*, not on a zero size.
     case C_TYPE_VOID:
+        size = 1;
+        alignment = 1;
+        break;
     case C_TYPE_ARRAY:
     case C_TYPE_VECTOR:
     case C_TYPE_STRUCT:
