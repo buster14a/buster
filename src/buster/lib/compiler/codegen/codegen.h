@@ -501,6 +501,10 @@ BUSTER_F_DECL bool codegen_module_relocation_valid(CodegenModuleRelocation* relo
 // defined over; the AArch64 machine selector's VA_START mirrors the
 // canonical emitter's simulation through this exact walk.
 BUSTER_F_DECL bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type_id, u32* part_count);
+// The System V argument-area slot alignment the canonical layout gives one
+// stack argument; the x86-64 machine placement rounds its stack cursor by
+// this exact clamp so both emitters count the same padding eightbytes.
+BUSTER_F_DECL u32 codegen_canonical_x64_stack_argument_alignment(IrType* type);
 BUSTER_F_DECL String8 codegen_register_allocator_mode_string(CodegenRegisterAllocatorMode mode);
 // The ELF thread-local model for one symbol reference.  Windows and Mach-O
 // have their own sequences and never ask.

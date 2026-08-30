@@ -37,6 +37,13 @@ struct MachineX64ValueShape
     // SSE register sequence — and every consumer checks `vector` before the
     // scalar-float staging paths.
     bool vector;
+    // The System V argument-area alignment of the value's stack home in
+    // bytes when it exceeds the eightbyte floor: 16 for the __int128 pair
+    // and sixteen-aligned memory-class aggregates, 64 for a whole ZMM
+    // vector, zero for the plain eightbyte floor. The placement rounds the
+    // stack cursor up to it — the same padding eightbytes the canonical
+    // layout counts on both sides of a call.
+    u32 stack_alignment;
     // For a sub-32-bit scalar integer argument, the MOVSX/MOVZX opcode that
     // widens it into its argument register: the de-facto System V contract
     // clang's callers implement extends such arguments to 32 bits, and
@@ -347,6 +354,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
             .part_count = 1,
             .byte_size = 64,
             .vector = true,
+            .stack_alignment = 64,
         };
         return true;
     }
@@ -395,6 +403,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
             .part_count = 2,
             .byte_size = 16,
             .aggregate = true,
+            .stack_alignment = 16,
         };
         return true;
     }
@@ -427,6 +436,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
                 .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
                 .aggregate = true,
                 .force_stack = true,
+                .stack_alignment = codegen_canonical_x64_stack_argument_alignment(type),
             };
             return true;
         }
@@ -440,6 +450,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
         .part_count = abi.part_count,
         .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
         .aggregate = true,
+        .stack_alignment = codegen_canonical_x64_stack_argument_alignment(type),
     };
     for (u32 part_index = 0; part_index < abi.part_count; part_index += 1)
     {
@@ -506,12 +517,16 @@ BUSTER_GLOBAL_LOCAL void machine_x64_place_argument(MachineX64ValueShape* shape,
     }
     if (shape->force_stack || *integer_count + integer_parts > BUSTER_ARRAY_LENGTH(machine_x64_system_v_arguments) || *float_count + float_parts > 8)
     {
-        // A 64-byte vector's stack home starts at a 64-aligned offset in
-        // the argument area — the canonical layout pads the cursor with
-        // eightbytes the callee never reads, and both sides must count them.
-        if (shape->vector)
+        // A stack home starts at the offset its type's argument-area
+        // alignment asks for — a 64-byte vector at a 64-aligned offset, the
+        // System V __int128 pair and a sixteen-aligned memory-class
+        // aggregate at a sixteen-aligned one. The canonical layout pads the
+        // cursor with eightbytes the callee never reads, and both sides
+        // must count them.
+        u32 alignment_parts = shape->stack_alignment / 8;
+        if (alignment_parts > 1)
         {
-            *stack_part_count = (*stack_part_count + 7u) & ~7u;
+            *stack_part_count = (*stack_part_count + alignment_parts - 1u) & ~(alignment_parts - 1u);
         }
         *placement = (MachineX64ArgumentPlacement){
             .first_stack_part = (u16)*stack_part_count,
@@ -3388,10 +3403,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
             u32 tight_stack_parts = plan->stack_part_count;
             machine_x64_place_argument(plan->argument_shapes + argument_index, plan->windows_call, &plan->integer_count, &plan->float_count,
                                        &plan->stack_part_count, plan->argument_placements + argument_index);
-            // A stack vector argument whose 64-aligned offset opens a gap
-            // needs padding eightbytes the push machinery cannot produce;
-            // the canonical caller keeps that call.
-            planned = !(plan->argument_placements[argument_index].on_stack && plan->argument_shapes[argument_index].vector &&
+            // A stack argument whose aligned offset opens a gap needs
+            // padding eightbytes the push machinery cannot produce; the
+            // canonical caller keeps that call. Vectors opened such gaps
+            // first, and the sixteen-aligned __int128 pair and memory-class
+            // aggregates open them the same way.
+            planned = !(plan->argument_placements[argument_index].on_stack &&
                         plan->argument_placements[argument_index].first_stack_part != tight_stack_parts);
         }
     }

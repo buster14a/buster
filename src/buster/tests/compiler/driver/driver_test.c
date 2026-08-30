@@ -4567,6 +4567,63 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
     }
+    // The System V x86-64 side of the same stack boundary: a sixteen-aligned
+    // argument's stack home is rounded up to a sixteen-aligned offset, and
+    // the machine placement must count the same padding eightbytes the
+    // canonical emitter and clang do — its callee used to read a stacked
+    // __int128 one eightbyte early. The fixture's callees stay inside the
+    // machine subset by forwarding their halves to the one checker that owns
+    // the __int128 shifts, and the census pin below fails if lowering changes
+    // ever push them to the canonical fallback, which would silently retire
+    // this coverage. On an x86-64 Linux host each image also runs.
+    String8 x64_i128_stack_allocators[] = {
+        S8("none"),
+        S8("mir-stack"),
+        S8("fast"),
+        S8("quality"),
+    };
+    for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(x64_i128_stack_allocators); allocator_index += 1)
+    {
+        String8 x64_i128_stack_path =
+            buster_test_temporary_path(arguments->arena, S8("buster-c-x64-i128-stack"),
+                                       string_format(arguments->arena, S8("-{S8}.elf"), x64_i128_stack_allocators[allocator_index]));
+        String8 x64_i128_stack_command_line[] = {
+            S8("-target"),
+            S8("x86_64-unknown-linux-gnu"),
+            string_format(arguments->arena, S8("-fregister-allocator={S8}"), x64_i128_stack_allocators[allocator_index]),
+            S8("-o"),
+            x64_i128_stack_path,
+            S8("tests/basic_c_x86_64_i128_stack_abi.c"),
+        };
+        Arena* x64_i128_stack_arena = arena_create((ArenaCreation){0});
+        CompilerDriverResult x64_i128_stack = compiler_driver_execute_invocation(
+            x64_i128_stack_arena, compiler_driver_parse_arguments(x64_i128_stack_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(x64_i128_stack_command_line)));
+        BUSTER_TEST(arguments, x64_i128_stack.error == COMPILER_DRIVER_ERROR_NONE);
+        // NONE reports no fallbacks by definition; under the machine modes
+        // exactly the checker and main carry the __int128 shifts, so the
+        // four boundary callees remain machine-selected.
+        BUSTER_TEST(arguments, x64_i128_stack.codegen_statistics.fallback_function_count == (allocator_index == 0 ? 0u : 2u));
+        CompilerDriverError x64_i128_stack_error = x64_i128_stack.error;
+        BUSTER_TEST(arguments, arena_destroy(x64_i128_stack_arena, 1));
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+        if (x64_i128_stack_error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 x64_i128_stack_run_arguments[] = {x64_i128_stack_path};
+            ProcessSpawnResult x64_i128_stack_run =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(x64_i128_stack_run_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){
+                                     .use_process_environment = true,
+                                 });
+            BUSTER_TEST(arguments, x64_i128_stack_run.handle != 0);
+            if (x64_i128_stack_run.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, x64_i128_stack_run).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+#else
+        BUSTER_UNUSED(x64_i128_stack_error);
+#endif
+    }
 #if !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
     // Pair the boundary translation units with clang in both directions.  A
     // Buster caller linked to a clang callee checks incoming placement and a
