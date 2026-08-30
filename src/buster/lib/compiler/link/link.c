@@ -599,12 +599,6 @@ BUSTER_GLOBAL_LOCAL u32 link_x86_elf_entry_stub_capacity(LinkInitializerPlan con
     return 64 + 16 * count;
 }
 
-// The AArch64 spelling of the same stub, in whole words.  `ORR Xd, XZR, Xm`
-// is how A64 writes a register move; the argc/argv/envp sequence and the trap
-// are the ones this writer has always emitted.  Every branch is laid down as
-// a bare `bl #0` and its word index is reported, because the callers patch
-// displacements through link_aarch64_branch_encode after the layout settles
-// -- exactly what the call to `main` already needed.
 // Exactly how many words link_aarch64_build_elf_entry_stub emits: the
 // argument sequence, the copies back into x0-x2, four words per constructor,
 // one branch per destructor with the status save and restore around them, the
@@ -619,6 +613,13 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_elf_entry_stub_words(bool hosted, LinkIniti
     return 4 + (registered ? 3u : 0u) + constructor_count * 4 + 1 + (destructor_count ? destructor_count + 2 : 0u) + (hosted ? 1u : 2u) + 1;
 }
 
+// The AArch64 spelling of the same stub, in whole words.  `ORR Xd, XZR, Xm`
+// is how A64 writes a register move; the argc/argv/envp sequence and the trap
+// are the ones this writer has always emitted.  Every branch is laid down as
+// a bare `bl #0` and its word index is reported, because the callers patch
+// displacements through link_aarch64_branch_encode after the layout settles
+// -- exactly what the call to `main` already needed.  A capacity short of
+// what the shape needs writes nothing and reports zero words.
 BUSTER_GLOBAL_LOCAL u32 link_aarch64_build_elf_entry_stub(u32* words, u32 capacity, bool hosted, LinkInitializerPlan const* plan, u32* entry_word,
                                                           u32* exit_word, u32* initializer_words)
 {
@@ -696,7 +697,6 @@ BUSTER_GLOBAL_LOCAL u32 link_elf_entry_stub_slot(u32 x86_stub_size, LinkInitiali
     u32 aarch64_size = link_aarch64_elf_entry_stub_words(true, plan) * (u32)sizeof(u32);
     return x86_stub_size > aarch64_size ? x86_stub_size : aarch64_size;
 }
-
 
 // The PE entry stub.  Its initializers are called straight after the prologue,
 // before the argv machinery runs, and they are called with no arguments: the

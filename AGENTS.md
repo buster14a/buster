@@ -3055,9 +3055,12 @@ on a commit you already know is incomplete tells nobody anything.
   of the unsuffixed `.init_array`, and this model has one section per kind, so
   the object writer sorts the entries instead: ascending priority, with an
   attribute that named none last, and equal priorities left in declaration
-  order. That reproduces GNU's order exactly inside one object and leaves the
-  order between objects to the linker's concatenation, which is what
-  `ld` would give two unprioritized ones anyway.
+  order. That reproduces GNU's order exactly inside one object; between
+  objects the order is link order, for `ld` and for this linker alike, so an
+  unprioritized constructor in the first object still runs before a
+  `constructor(150)` in the second where GCC and Clang would run the
+  prioritized one first. That is issue #782, and it is the one part of the
+  attribute's contract this does not reproduce.
 - **An image this linker produces calls its initializers from the entry
   stub.** There is no libc startup object in it -- the stub *is* the startup,
   which is why `link_x86_build_elf_entry_stub` exists at all -- so nothing
