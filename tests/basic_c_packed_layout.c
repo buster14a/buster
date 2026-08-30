@@ -933,6 +933,14 @@ static char between_atomic_leading_objects = 19;
 // the machine is already running the enum body it is folding for.  That walk
 // dropped the leading run too, and dropped it for `const` and `volatile` hard
 // enough that the whole enumerator failed to fold.
+//
+// The fourth spelling, `_Atomic ( T )`, is the operator rather than the
+// qualifier, and that walk had no branch for it at all: it resolved nothing
+// whatever T was -- a tag, a typedef name, or `int` -- and the enumerator that
+// spelled it failed, which fails the enum type and leaves every enumerator
+// beside it undeclared for the rest of the file (#784).  It is pinned here on
+// all three operands, and with a `*` and an array suffix over it, because what
+// the branch has to do is resolve a whole type name rather than a base type.
 enum
 {
     atomic_leading_folded_size = sizeof(_Atomic struct atomic_tag_three),
@@ -940,7 +948,24 @@ enum
     atomic_trailing_folded_size = sizeof(struct atomic_tag_three _Atomic),
     atomic_plain_folded_size = sizeof(struct atomic_tag_three),
     atomic_const_folded_size = sizeof(const struct atomic_tag_three),
-    atomic_volatile_folded_size = sizeof(volatile struct atomic_tag_three)
+    atomic_volatile_folded_size = sizeof(volatile struct atomic_tag_three),
+    atomic_operator_folded_size = sizeof(_Atomic(struct atomic_tag_three)),
+    atomic_operator_folded_alignment = _Alignof(_Atomic(struct atomic_tag_three)),
+    atomic_operator_alias_folded_size = sizeof(_Atomic(atomic_three)),
+    atomic_operator_alias_folded_alignment = _Alignof(_Atomic(atomic_three)),
+    atomic_operator_scalar_folded_size = sizeof(_Atomic(int)),
+    atomic_operator_pointer_folded_size = sizeof(_Atomic(atomic_three) *),
+    atomic_operator_array_folded_size = sizeof(_Atomic(atomic_three)[2]),
+    // The qualifier the operand keeps is the one written outside the
+    // parentheses, in either position; neither moves the layout, so a run
+    // dropped on one side would show up as a failure to fold rather than as a
+    // changed number.
+    atomic_operator_const_leading_folded_size = sizeof(const _Atomic(int)),
+    atomic_operator_const_trailing_folded_size = sizeof(_Atomic(int) const),
+    // The operand of one specifier may be another one's pointer, so the
+    // nesting follows the source and the walk keeps its levels on an explicit
+    // stack.  This is the shape that unwinds it more than once.
+    atomic_operator_nested_folded_size = sizeof(_Atomic(_Atomic(int) *))
 };
 
 // A complex type is the one scalar whose size is a power of two while its
@@ -993,6 +1018,28 @@ _Static_assert(sizeof(struct atomic_leading_member) == 12, "the member sits at f
 _Static_assert(atomic_leading_folded_size == 4 && atomic_leading_folded_alignment == 4, "the enum-constant fold answers alike");
 _Static_assert(atomic_trailing_folded_size == 4 && atomic_plain_folded_size == 3, "and tells the two spellings apart");
 _Static_assert(atomic_const_folded_size == 3 && atomic_volatile_folded_size == 3, "a const or volatile operand folds at all");
+// The operator spelling folds the numbers the qualifier spellings fold, and
+// each one is stated against what `_Static_assert` answers for the same
+// operand rather than only against a literal: the two roads into the parse
+// engine answering differently is what #784 was.
+_Static_assert(atomic_operator_folded_size == 4 && atomic_operator_folded_alignment == 4, "the operator spelling folds over a tag");
+_Static_assert(atomic_operator_folded_size == sizeof(_Atomic(struct atomic_tag_three)) &&
+                   atomic_operator_folded_alignment == _Alignof(_Atomic(struct atomic_tag_three)),
+               "and folds what the type-parse machine folds");
+_Static_assert(atomic_operator_folded_size == atomic_leading_folded_size && atomic_operator_folded_size == atomic_trailing_folded_size,
+               "all four spellings of one tag are one type");
+_Static_assert(atomic_operator_alias_folded_size == 4 && atomic_operator_alias_folded_alignment == 4, "over a typedef name too");
+_Static_assert(atomic_operator_alias_folded_size == sizeof(_Atomic(atomic_three)) &&
+                   atomic_operator_alias_folded_alignment == _Alignof(_Atomic(atomic_three)),
+               "which the machine folds alike");
+// `int` is the operand that says the failure was never about tags.
+_Static_assert(atomic_operator_scalar_folded_size == sizeof(int), "a scalar operand is not promoted");
+_Static_assert(atomic_operator_pointer_folded_size == sizeof(void *), "a `*` over it is a pointer");
+_Static_assert(atomic_operator_array_folded_size == 8, "and an array suffix tiles the padded element");
+_Static_assert(atomic_operator_const_leading_folded_size == 4 && atomic_operator_const_trailing_folded_size == 4,
+               "a qualifier on either side of the parentheses folds at all");
+_Static_assert(atomic_operator_nested_folded_size == sizeof(_Atomic(_Atomic(int) *)), "a nested operand folds like the machine's");
+_Static_assert(atomic_operator_nested_folded_size == sizeof(void *), "and a pointer to an atomic is a pointer");
 
 int main(void)
 {

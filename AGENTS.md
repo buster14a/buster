@@ -3399,8 +3399,25 @@ on a commit you already know is incomplete tells nobody anything.
   evaluator uses because the type-parse machine is already running the body it
   is folding for -- that walk dropped the leading run before the tag and the
   trailing run after it alike, which failed a `const struct S` operand outright
-  rather than mis-sizing it. Its `_Atomic ( T )` spelling still resolves
-  nothing, for a tag and for `int` equally (#784), and an atomic aggregate is
+  rather than mis-sizing it. That walk had no branch for the `_Atomic ( T )`
+  spelling either, so it resolved nothing for a tag, a typedef name and `int`
+  equally, and the enumerator that spelled it failed -- which fails the enum
+  type and leaves every enumerator beside it undeclared for the rest of the
+  file (#784). The specifier's operand is a whole type name rather than a base
+  type, so the walk resolves it the way it resolves the outer one -- base type,
+  then `c_parse_machineless_declarator_suffixes`, the pointer/qualifier/array
+  chain shared with the sizeof operand walk -- and then applies the refusals
+  `c_type_parse_scalar_step` diagnoses at `C_DIAGNOSTIC_INVALID_ATOMIC_TYPE`:
+  an array, a function, `void`, or an already-qualified operand. It refuses
+  silently, because the walk has a fallback -- the caller tries the operand as
+  an expression next -- and a diagnostic would land in the caller's throwaway
+  copy of the parse result; an enum constant that does not fold reports the way
+  every other one does. `_Atomic(_Atomic(int) *)` is legal C, so the nesting
+  follows the source and the levels go on an explicit stack
+  (`C_PARSE_MACHINELESS_ATOMIC_LEVELS`, eight) rather than on the C call stack;
+  past it the operand does not fold, which is where every depth of it stood
+  before, and the machine-bearing path folds it at any depth either way. An
+  atomic aggregate is
   still not accepted as a **parameter** in any spelling (#786). On the argument side the promotion moves nothing: a promoted
   four-byte record is one INTEGER eightbyte where the three-byte one already
   was, and the rule that says so is the next bullet.
