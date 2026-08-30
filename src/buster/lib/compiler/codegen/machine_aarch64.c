@@ -2722,14 +2722,54 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_memory_order_releases(u8 memory_order)
     return memory_order == IR_MEMORY_ORDER_RELEASE || memory_order == IR_MEMORY_ORDER_ACQUIRE_RELEASE || memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
 }
 
+// Keeps the low `byte_count` bytes of a register and zeroes the rest, the
+// canonical a64_emit_keep_low_bytes contract: an atomic aggregate store
+// writes the place's promoted width, so the bytes between the value's real
+// size and that width must be zero, not value-slot residue. A full
+// eight-byte count needs no row at all.
+BUSTER_GLOBAL_LOCAL void machine_a64_select_keep_low_bytes(MachineA64Selector* selector, u32 data_register, u64 byte_count)
+{
+    if (byte_count < 8)
+    {
+        u16 extend_opcode = byte_count == 1 ? MACHINE_A64_UXTB : byte_count == 2 ? MACHINE_A64_UXTH : byte_count == 4 ? MACHINE_A64_MOV32_RR : 0;
+        if (extend_opcode)
+        {
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, data_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, data_register)},
+                                                 .opcode = extend_opcode,
+                                             });
+        }
+        else
+        {
+            u32 mask_register = machine_a64_synthesize_register(selector);
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register),
+                                                              machine_ref_make(MACHINE_REF_IMMEDIATE,
+                                                                               machine_a64_append_immediate(selector, ((u64)1 << (byte_count * 8)) - 1))},
+                                                 .opcode = MACHINE_A64_MOV_RI,
+                                             });
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, data_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, data_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register)},
+                                                 .opcode = MACHINE_A64_AND64,
+                                             });
+        }
+    }
+}
+
 // Scalar atomic load: the place's address into a fresh register, one
 // ldar-family word into the result. Every memory order takes the acquire
 // form — stronger than relaxed asks for, and what keeps the row count at
-// one. Aggregate results are slot-backed and never reach here (no result
-// register), exactly the canonical rejection.
+// one. An aggregate result is slot-backed instead: the access width is the
+// place's promoted size (#731), not the loaded value's, ldar zero-extends
+// every sub-eight width, and the full-slot store leaves the value's
+// padding zero exactly like the canonical path.
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_load(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
+    IrFunction* function = selector->function;
 
     bool selected = false;
     IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
@@ -2749,9 +2789,42 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_load(MachineA64Selector* sele
             machine_a64_define(selector, result_register, row);
         }
     }
+    else if (result_register == UINT32_MAX && instruction->operand_count >= 1 && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+             instruction->result.value < function->value_count && instruction->operands[0].value < function->value_count &&
+             loaded_type && (loaded_type->kind == IR_TYPE_STRUCT || loaded_type->kind == IR_TYPE_UNION))
+    {
+        u32 result_slot = selector->value_stack_slots[instruction->result.value];
+        IrType* place_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+        u64 atomic_width = place_type && place_type->layout.resolved ? place_type->layout.size : 0;
+        if (result_slot != UINT32_MAX && (atomic_width == 1 || atomic_width == 2 || atomic_width == 4 || atomic_width == 8))
+        {
+            u32 address_register = machine_a64_synthesize_register(selector);
+            selected = machine_a64_select_place_address_offset(selector, instruction->operands[0], address_register, 0);
+            if (selected)
+            {
+                u32 data_register = machine_a64_synthesize_register(selector);
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, data_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
+                                                     .payload = (u32)atomic_width,
+                                                     .opcode = MACHINE_A64_ATOMIC_LOAD,
+                                                 });
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, data_register)},
+                                                     .opcode = MACHINE_A64_STORE_FRAME64,
+                                                 });
+            }
+        }
+    }
     return selected;
 }
 
+// Scalar atomic store mirrors the load: one stlr-family word at the
+// stored scalar's width. An aggregate value is slot-backed instead: the
+// integer image loads from the value slot, keeps only the value's real
+// bytes (the slot's tail may be residue while the promoted padding must
+// store as zero), and one stlr writes the place's promoted width (#731).
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_store(MachineA64Selector* selector, IrInstruction* instruction)
 {
     IrProgram* program = selector->program;
@@ -2774,6 +2847,40 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_store(MachineA64Selector* sel
                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
                                                      .payload = (u32)size,
+                                                     .opcode = MACHINE_A64_ATOMIC_STORE,
+                                                 });
+            }
+        }
+    }
+    else if (instruction->operand_count >= 2 && instruction->operands[0].value < function->value_count &&
+             instruction->operands[1].value < function->value_count && selector->value_stack_slots[instruction->operands[1].value] != UINT32_MAX)
+    {
+        IrType* stored_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
+        IrType* place_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+        u64 stored_size = stored_type && stored_type->layout.resolved ? stored_type->layout.size : 0;
+        u64 atomic_width = place_type && place_type->layout.resolved ? place_type->layout.size : 0;
+        bool aggregate_kind = stored_type && (stored_type->kind == IR_TYPE_STRUCT || stored_type->kind == IR_TYPE_UNION);
+        if (aggregate_kind && stored_size && stored_size <= 8 && (atomic_width == 1 || atomic_width == 2 || atomic_width == 4 || atomic_width == 8))
+        {
+            u32 value_slot = selector->value_stack_slots[instruction->operands[1].value];
+            u32 data_register = machine_a64_synthesize_register(selector);
+            machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, data_register),
+                                                              machine_ref_make(MACHINE_REF_STACK_SLOT, value_slot)},
+                                                 .opcode = MACHINE_A64_LOAD_FRAME,
+                                             });
+            if (stored_size < atomic_width)
+            {
+                machine_a64_select_keep_low_bytes(selector, data_register, stored_size);
+            }
+            u32 address_register = machine_a64_synthesize_register(selector);
+            selected = machine_a64_select_place_address_offset(selector, instruction->operands[0], address_register, 0);
+            if (selected)
+            {
+                machine_a64_select_row(selector, (MachineInstruction){
+                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, data_register)},
+                                                     .payload = (u32)atomic_width,
                                                      .opcode = MACHINE_A64_ATOMIC_STORE,
                                                  });
             }
@@ -3878,7 +3985,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                                                                                              });
                     selector.value_virtual_registers[instruction->result.value] = register_index;
                 }
-                else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_CALL ||
+                else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD ||
+                          instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL ||
                           instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
                           instruction->opcode == IR_OPCODE_VA_ARG ||
                           (instruction->opcode == IR_OPCODE_BINARY && value_type && value_type->kind == IR_TYPE_VECTOR)) &&

@@ -2768,12 +2768,44 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
 
                 }
             }
+            else if (is_aggregate_load & (instruction->opcode == IR_OPCODE_ATOMIC_LOAD))
+            {
+                // An atomic aggregate loads through one sized integer access
+                // whose width is the place's promoted size (#731), not the
+                // loaded value's. The sized pointer load zero-extends, so
+                // the full-slot store leaves the value's padding zero
+                // exactly like the canonical path.
+                BUSTER_CHECK(loaded_type);
+                IrType* place_type = ir_type_from_id(&program->types, place->canonical_type);
+                u64 atomic_width = place_type && place_type->layout.resolved ? place_type->layout.size : 0;
+                u32 width_index = atomic_width == 1 ? 0 : atomic_width == 2 ? 1 : atomic_width == 4 ? 2 : atomic_width == 8 ? 3 : UINT32_MAX;
+                bool aggregate_kind = loaded_type->kind == IR_TYPE_STRUCT || loaded_type->kind == IR_TYPE_UNION;
+                if (aggregate_kind && width_index != UINT32_MAX)
+                {
+                    u32 address_register = machine_x64_synthesize_register(selector);
+                    selected = machine_x64_select_place_address(selector, value_id, address_register);
+                    if (selected)
+                    {
+                        u32 data_register = machine_x64_synthesize_register(selector);
+                        machine_x64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, data_register),
+                                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register)},
+                                                             .opcode = (u16)(MACHINE_X64_LOAD_PTR8 + width_index),
+                                                         });
+                        machine_x64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
+                                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, data_register)},
+                                                             .opcode = MACHINE_X64_STORE_FRAME64,
+                                                         });
+                    }
+                }
+            }
             else if (is_aggregate_load)
             {
                 // An aggregate load is an exact-size chunk copy into the result slot,
                 // from a direct local's slot or through an address vreg.
                 BUSTER_CHECK(loaded_type);
-                bool aggregate_supported = (instruction->opcode != IR_OPCODE_ATOMIC_LOAD) & loaded_type->layout.resolved & (loaded_type->layout.size <= UINT32_MAX);
+                bool aggregate_supported = loaded_type->layout.resolved & (loaded_type->layout.size <= UINT32_MAX);
                 if (aggregate_supported)
                 {
                     bool local_slot_valid = (definition->opcode == IR_OPCODE_LOCAL) & (slot != UINT32_MAX);
@@ -2981,7 +3013,48 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_store(MachineX64Selector* selector, 
             u64 size = stored_type && stored_type->layout.resolved ? stored_type->layout.size : 0;
             u32 slot = selector->value_stack_slots[instruction->operands[0].value];
             u32 value_slot = selector->value_stack_slots[instruction->operands[1].value];
-            if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL)
+            if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && value_slot != UINT32_MAX &&
+                selector->value_virtual_registers[instruction->operands[1].value] == UINT32_MAX)
+            {
+                // An atomic aggregate stores through one integer access at
+                // the place's promoted width (#731): the image loads from
+                // the value slot, keeps only the value's real bytes (the
+                // slot's tail may be residue while the promoted padding
+                // must store as zero), and one sized store — XCHG when
+                // sequential — writes the whole width.
+                IrType* place_type = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
+                u64 atomic_width = place_type && place_type->layout.resolved ? place_type->layout.size : 0;
+                u32 width_index = atomic_width == 1 ? 0 : atomic_width == 2 ? 1 : atomic_width == 4 ? 2 : atomic_width == 8 ? 3 : UINT32_MAX;
+                bool aggregate_kind = stored_type && (stored_type->kind == IR_TYPE_STRUCT || stored_type->kind == IR_TYPE_UNION);
+                if (aggregate_kind && size && size <= 8 && width_index != UINT32_MAX)
+                {
+                    u32 data_register = machine_x64_select_frame_load64(selector, value_slot, 0);
+                    if (size < atomic_width)
+                    {
+                        u32 mask_register = machine_x64_select_immediate_register(selector, ((u64)1 << (size * 8)) - 1);
+                        machine_x64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, data_register),
+                                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, data_register),
+                                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, mask_register)},
+                                                             .opcode = MACHINE_X64_AND64,
+                                                         });
+                    }
+                    u32 address_register = machine_x64_synthesize_register(selector);
+                    selected = machine_x64_select_place_address(selector, instruction->operands[0], address_register);
+                    if (selected)
+                    {
+                        bool sequential = instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL;
+                        machine_x64_select_row(selector, (MachineInstruction){
+                                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address_register),
+                                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, data_register)},
+                                                             .payload = sequential ? (u32)atomic_width : 0,
+                                                             .opcode = (u16)(sequential ? (u16)MACHINE_X64_ATOMIC_STORE_XCHG
+                                                                                        : (u16)(MACHINE_X64_STORE_PTR8 + width_index)),
+                                                         });
+                    }
+                }
+            }
+            else if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL)
             {
                 selected = machine_x64_select_sequential_atomic_store(selector, instruction, size);
             }
@@ -4728,7 +4801,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                                                             .typed_origin = instruction->result.value,
                                                                         });
             }
-            else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD || instruction->opcode == IR_OPCODE_CALL ||
+            else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD ||
+                      instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL ||
                       instruction->opcode == IR_OPCODE_VA_ARG ||
                       instruction->opcode == IR_OPCODE_CAST || instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
                       instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE || instruction->opcode == IR_OPCODE_BINARY) &&

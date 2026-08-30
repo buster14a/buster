@@ -7010,6 +7010,45 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         scratch_end(atomic_a64_temporary);
     }
 #endif
+    // The atomic-aggregate representation fixture again, cross-compiled to
+    // AArch64 through every allocator: the machine selector lowers an atomic
+    // aggregate access through one ldar/stlr of the place's promoted width,
+    // and this is the lane that executes those rows rather than only
+    // counting them.  The fixture bakes in the bytes Clang writes, so a
+    // machine path that stored residue where the promotion's padding
+    // belongs fails here byte by byte.
+    for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(aarch64_i128_allocators); allocator_index += 1)
+    {
+        TemporalArena atomic_a64_aggregate_temporary = scratch_begin(&arguments->arena, 1);
+        String8 atomic_a64_aggregate_path =
+            buster_test_temporary_path(atomic_a64_aggregate_temporary.arena, S8("buster-c-atomic-aggregate-a64"),
+                                       string_format(atomic_a64_aggregate_temporary.arena, S8("-{S8}.elf"), aarch64_i128_allocators[allocator_index]));
+        String8 atomic_a64_aggregate_command_line[] = {
+            S8("-target"),
+            S8("aarch64-unknown-linux-gnu"),
+            string_format(atomic_a64_aggregate_temporary.arena, S8("-fregister-allocator={S8}"), aarch64_i128_allocators[allocator_index]),
+            S8("-o"),
+            atomic_a64_aggregate_path,
+            S8("tests/basic_c_atomic_aggregate.c"),
+        };
+        CompilerDriverResult atomic_a64_aggregate = compiler_driver_execute_invocation(
+            atomic_a64_aggregate_temporary.arena,
+            compiler_driver_parse_arguments(atomic_a64_aggregate_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_a64_aggregate_command_line)));
+        BUSTER_TEST(arguments, atomic_a64_aggregate.error == COMPILER_DRIVER_ERROR_NONE);
+        if (atomic_a64_aggregate.error == COMPILER_DRIVER_ERROR_NONE && aarch64_i128_qemu_available)
+        {
+            String8 atomic_a64_aggregate_run[] = {S8("qemu-aarch64"), atomic_a64_aggregate_path};
+            ProcessSpawnResult atomic_a64_aggregate_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_a64_aggregate_run), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, atomic_a64_aggregate_spawn.handle != 0);
+            if (atomic_a64_aggregate_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(atomic_a64_aggregate_temporary.arena, atomic_a64_aggregate_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(atomic_a64_aggregate_temporary);
+    }
     // `__attribute__((packed))` and `__attribute__((aligned(N)))` decide
     // object representation, so a compiler that parses and ignores them lays
     // out a different object than every other compiler on the target while
