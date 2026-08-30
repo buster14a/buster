@@ -37731,7 +37731,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 
             *result = c_ir_constant_integer(type.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : type, value);
             return true;
         }
-        if (entity->kind == C_ENTITY_OBJECT && entity->type.value < builder->parse.type_count)
+        // A function-local static is C_ENTITY_LOCAL with a symbol -- the
+        // clinic macros write `.kwtuple = (&_kwtuple.ob_base.ob_base)` where
+        // _kwtuple is exactly that -- and it folds like any file-scope
+        // object.  An automatic local has no symbol and stays refused.
+        bool static_local = entity->kind == C_ENTITY_LOCAL && builder->entity_symbols[entity_id.value].value != IR_ID_UNDERLYING_INVALID;
+        if ((entity->kind == C_ENTITY_OBJECT || static_local) && entity->type.value < builder->parse.type_count)
         {
             IrSymbolId symbol = builder->entity_symbols[entity_id.value];
             IrTypeId type = builder->c_type_ir_map[entity->type.value];
@@ -39846,6 +39851,35 @@ BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDecl
             global->initializer_symbol = compound_literal_symbol;
             global->initializer_addend = compound_literal_addend;
             return true;
+        }
+        // The clinic macros parenthesize and cast their addresses --
+        // `(&_kwtuple.ob_base.ob_base)`, `(PyObject *)&_Py_ID(data)` -- and
+        // the shapes below read bare tokens, so the wrappers come off first:
+        // parens enclosing the whole range, then a leading group that names
+        // a type.  A cast between pointer types moves no bits, which is all
+        // a symbol-address initializer stores.
+        for (bool stripped = true; stripped && end > start + 1;)
+        {
+            stripped = false;
+            if (c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 group_close = c_ir_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                if (group_close == end - 1)
+                {
+                    start += 1;
+                    end -= 1;
+                    stripped = true;
+                }
+                // A type-name group followed by a brace is a compound
+                // literal, not a cast: `(int *){0}` keeps its type.
+                else if (group_close + 1 < end && group_close > start + 1 &&
+                         !c_token_is_punctuator(&preprocess.tokens[group_close + 1], C_PUNCTUATOR_LEFT_BRACE) &&
+                         c_ir_type_name(builder, start + 1, group_close).value != IR_ID_UNDERLYING_INVALID)
+                {
+                    start = group_close + 1;
+                    stripped = true;
+                }
+            }
         }
         if (end >= start + 2 && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND) &&
             preprocess.tokens[start + 1].kind == C_TOKEN_IDENTIFIER)
