@@ -591,6 +591,12 @@ static bool llvm_bc_add_ir_type(LlvmBcContext* context, u32 type_index)
     IrType* type = context->program->types.types + type_index;
     if (context->ir_type_ids[type_index] == LLVM_BC_INVALID_ID)
     {
+        // Exact for every atomic scalar, which is one LLVM type with its
+        // operand, and short by the padding for an atomic aggregate, whose C
+        // type is rounded up to the next power of two: Clang spells that one
+        // `{ %struct.three, [1 x i8] }` and this hands back the operand's own
+        // id (issue #767).  The native object is unaffected -- it takes the
+        // size off `IrType::layout` -- so this is the bitcode output alone.
         if (type->is_atomic && type->unqualified_type.value < context->program->types.count &&
             context->ir_type_ids[type->unqualified_type.value] != LLVM_BC_INVALID_ID)
         {

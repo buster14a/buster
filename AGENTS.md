@@ -3071,11 +3071,8 @@ on a commit you already know is incomplete tells nobody anything.
   the pair rather than only the number; they stay out of the cross-linked
   `basic_c_packed_layout_shapes.h`, whose other half is whichever host
   compiler the platform has and where a GCC host answers the alias's number.
-  Clang's `_Atomic` of an aggregate whose size is not a power of two is also
-  *padded* to one -- `_Atomic` of a three-byte struct is four bytes aligned
-  four where this answers three aligned one -- which is a divergence of its
-  own and not part of that rule. A *qualified* copy is built where the
-  qualifier is written, which is after the aggregate that embeds it, so the
+  A *qualified* copy is built where the qualifier
+  is written, which is after the aggregate that embeds it, so the
   scalar seed in `c_lower_to_ir` is cleared for every recorded type: the
   mapping round that lays the aggregate out would otherwise read the seed's
   natural alignment before the alias branch replaced it.
@@ -3114,6 +3111,51 @@ on a commit you already know is incomplete tells nobody anything.
   attempts run in, and it has no bound record to count on. It records without
   refusing the type, the way the settled-table scan reports without refusing
   one: the report is what refuses the translation unit.
+- **`_Atomic T` is a type built from T, not a qualified T, and its layout says
+  so.** Clang pads it up to the next power of two and aligns it there, so a
+  value the `__atomic` builtins could reach lock-free has an instruction that
+  covers it: there is no three-byte atomic access and there is a four-byte one.
+  `_Atomic` of a three-byte record is four bytes aligned four, of a five-byte
+  one eight aligned eight, of a twelve-byte one sixteen aligned sixteen, and a
+  zero-sized aggregate still takes a byte; every atomic scalar ends up aligned
+  to its size, which is the same sentence that answers `_Alignof(_Atomic
+  cache_line)` above and what moves `_Atomic _Complex double` from eight-byte
+  alignment to sixteen. The ceiling is the target's maximum lock-free width,
+  `TargetDataLayout::atomic_max_width` -- 128 bits everywhere here but wasm64
+  and BPF, where it is 64 -- and a type wider than that keeps T's own layout,
+  so the rule is not "round every aggregate up": `_Atomic` of a seventeen-byte
+  record is seventeen bytes aligned one in Clang too. GCC pads nothing and
+  raises the alignment only where the size is already a power of two, so this
+  is the second place the two references disagree and Clang is the oracle for
+  both (#731). `c_atomic_promoted_layout` in `c_parse.c` is the one rule and
+  both engines ask it: `c_parse_type_layout` at the seed, at the exit that
+  answers a builtin kind outright, and at an atomic branch of the solve that
+  answers for every kind a qualified copy can carry -- ahead of the branches
+  that would lay that copy out from its own kind -- and
+  `c_ir_add_qualified_type` for the copy the mapping pass builds. An **alias
+  over an atomic type** replaces the alignment and keeps the padding, so the
+  aligned-alias branch runs first and takes only the promoted size from the
+  rule: `typedef at3 t __attribute__((aligned(32)))` is four bytes aligned
+  thirty-two. A **type name** builds the atomic type as well, in each of the
+  three spellings that reach one: `c_ir_type_name_prefix` qualified only an
+  aligned alias before, which was invisible while `_Atomic T` was laid out like
+  T and became `sizeof` 3 written inline against 4 through a typedef the moment
+  it was not. The fourth spelling is not among them -- `_Atomic` written before
+  a `struct`, `union` or `enum` keyword never reaches the type at all, so it is
+  not atomic and this rule does not apply to it (#761) -- and an atomic
+  aggregate cannot be loaded or stored (#762); the two are ordered, because
+  closing the parse gap turns programs that compile into programs that hit the
+  codegen one. On the argument side the promotion moves nothing: a promoted
+  four-byte record is one INTEGER eightbyte where the three-byte one already
+  was. Clang classifying every record that *contains* an atomic member as
+  MEMORY is a divergence of its own, and one where GCC and this compiler agree
+  against it (#763), and the LLVM bitcode writer, which maps an atomic type
+  onto its operand's LLVM type, is short by the padding for an aggregate while
+  the native object takes the size off `IrType::layout` and is not (#767).
+  `tests/basic_c_packed_layout.c` pins the promoted sizes
+  next to the one-byte aggregate that agrees without them, once for each
+  engine, and they stay out of the cross-linked
+  `basic_c_packed_layout_shapes.h` for the same reason the shapes above do.
 - **A top-level `(` right after an identifier** is the parameter list of a
   function that identifier names in `T f(int)`, and a parenthesized declarator
   in `T (*p)[2]`, whose `T` is the last word of the declaration specifiers.

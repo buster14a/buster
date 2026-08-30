@@ -150,6 +150,9 @@ BUSTER_C_EXTERN CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId 
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
 BUSTER_C_EXTERN bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out);
+// `_Atomic T`'s size and alignment, given T's own; both layout engines ask it
+// (see c_atomic_promoted_layout in c_parse.c).
+BUSTER_C_EXTERN void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u32* alignment);
 BUSTER_C_EXTERN CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId base, CType qualifiers);
 BUSTER_C_EXTERN bool c_parse_atomic_drops_type_alignment(CParseResult const* result, CTypeId base, bool adds_atomic);
 BUSTER_C_EXTERN bool c_parse_type_qualifier_word(String8 spelling, CType* type);

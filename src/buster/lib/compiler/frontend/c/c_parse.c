@@ -956,6 +956,49 @@ BUSTER_C_SHARED bool c_parse_builtin_type_layout(Target target, CTypeKind kind, 
     return true;
 }
 
+/* The layout `_Atomic T` has, given T's own.  Clang treats `_Atomic T` as
+   *constructing* a type rather than qualifying one: a value it could operate on
+   lock-free is padded up to the next power of two and aligned there, which is
+   what makes `_Atomic struct { char a, b, c; }` four bytes aligned four where
+   the record itself is three bytes aligned one, and what gives every atomic
+   scalar an alignment equal to its size -- `_Atomic _Complex double` is
+   sixteen-byte aligned where the complex type is eight.  The ceiling is the
+   target's maximum lock-free width, `TargetDataLayout::atomic_max_width`: 128
+   bits everywhere here but wasm64 and BPF, where it is 64.  A type wider than
+   that keeps T's layout untouched, so the rule is not "round every aggregate
+   up" -- Clang leaves a seventeen-byte record seventeen bytes aligned one --
+   and a zero-sized aggregate still takes one byte, because an atomic operation
+   on it has to touch something.  GCC pads nothing and raises the alignment only
+   where the size is already a power of two; AGENTS.md names Clang the oracle
+   and the divergence is an ABI one (#731).
+
+   Both layout engines ask here, or a folded `sizeof` contradicts the object it
+   measures the way `packed` and `aligned` already have the rule for:
+   c_parse_type_layout below applies it to every atomic type it resolves, and
+   c_ir_add_qualified_type in c_gen.c applies it to the copy the mapping pass
+   builds.  Both read the width from the *preprocess* target's data layout --
+   `program->data_layout` is that same record -- so the two cannot answer with
+   different ceilings.  An **array keeps its own layout**: `_Atomic` of one is a
+   constraint violation Clang and GCC both refuse, this frontend does not
+   diagnose it in every position, and `c_ir_add_qualified_type` refuses to build
+   the type at all -- so promoting here would leave the two engines answering
+   16 and 12 for a type neither should have built.  Both callers below that can
+   see one say so; the seed cannot, because no array resolves there. */
+BUSTER_C_SHARED void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u32* alignment)
+{
+    u64 promoted = *size ? *size : 1;
+    if (promoted <= atomic_max_width / 8)
+    {
+        u64 rounded = 1;
+        while (rounded < promoted)
+        {
+            rounded *= 2;
+        }
+        *size = rounded;
+        *alignment = (u32)rounded;
+    }
+}
+
 BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
                                                           u32* index_out);
 
@@ -1087,6 +1130,14 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
         {
             if (direct_alignment)
             {
+                // The same promotion the seed below performs, on the one type
+                // this exit answers for; `_Atomic double` is the common shape
+                // and takes it unchanged, `_Atomic _Complex float` is the one
+                // that moves.
+                if (requested_type.is_atomic)
+                {
+                    c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &direct_size, &direct_alignment);
+                }
                 *size_out = direct_size;
                 *alignment_out = direct_alignment;
                 return true;
@@ -1147,6 +1198,14 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
         }
         if (alignment)
         {
+            // `_Atomic T` is a type built from T rather than a qualified T, so
+            // the copy the seed just answered from its kind takes the atomic
+            // layout of that kind.  The atomic branch of the solve below
+            // performs the same step for every kind this seed cannot answer.
+            if (result->types[type_index].is_atomic)
+            {
+                c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &size, &alignment);
+            }
             sizes[type_index] = size;
             alignments[type_index] = alignment;
             resolved[type_index] = true;
@@ -1206,9 +1265,56 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                 {
                     continue;
                 }
-                sizes[type_index] = sizes[type.unqualified_type.value];
+                // An alias over an atomic type replaces the alignment but not
+                // the padding: `typedef _Atomic struct three t; typedef t u
+                // __attribute__((aligned(32)));` is four bytes aligned
+                // thirty-two, because the size is the atomic type's rather than
+                // the three-byte record this copy points at.  The alignment the
+                // promotion would ask for is discarded here -- the request
+                // already answered that question, which is what the alias
+                // exists for.
+                u64 alias_size = sizes[type.unqualified_type.value];
+                u32 discarded_alignment = alias_alignment;
+                if (type.is_atomic && type.kind != C_TYPE_ARRAY)
+                {
+                    c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &alias_size, &discarded_alignment);
+                }
+                sizes[type_index] = alias_size;
                 alignments[type_index] = alias_alignment;
                 provisional[type_index] = alias_provisional;
+                resolved[type_index] = true;
+                if (type_index == requested.value)
+                {
+                    goto requested_resolved;
+                }
+                progress = true;
+                continue;
+            }
+            // `_Atomic T` constructs a type rather than qualifying one, so the
+            // copy is laid out from T's layout rather than from its own kind:
+            // one branch answers for every kind a copy can carry -- aggregate,
+            // enum, vector, pointer -- where re-running each of those branches
+            // would answer with the unpromoted layout.  A copy points at the
+            // type it strips to, which is what carries the natural layout here;
+            // the few atomic types built from specifiers rather than as a copy
+            // are scalars the seed above already promoted.  The aligned-alias
+            // branch runs first because a request on the alias wins over the
+            // alignment the promotion asks for: `_Atomic` written on a type
+            // that is already atomic constructs nothing, so
+            // `_Alignof(_Atomic atomic_raised_atomic)` is the alias's 32 in
+            // Clang and GCC alike.
+            if (type.is_atomic && type.kind != C_TYPE_ARRAY && type.has_unqualified_type && type.unqualified_type.value < type_count)
+            {
+                if (!resolved[type.unqualified_type.value])
+                {
+                    continue;
+                }
+                u64 atomic_size = sizes[type.unqualified_type.value];
+                u32 atomic_alignment = alignments[type.unqualified_type.value];
+                c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &atomic_size, &atomic_alignment);
+                sizes[type_index] = atomic_size;
+                alignments[type_index] = atomic_alignment;
+                provisional[type_index] = provisional[type.unqualified_type.value];
                 resolved[type_index] = true;
                 if (type_index == requested.value)
                 {

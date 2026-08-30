@@ -786,6 +786,145 @@ _Static_assert(sizeof(_Atomic raised_scalar) == sizeof(atomic_raised_alias), "on
 _Static_assert(_Alignof(_Atomic raised_scalar) == 4, "_Atomic drops the request");
 _Static_assert(_Alignof(_Atomic atomic_raised_atomic) == 32, "an already atomic type keeps it");
 
+// The other half of what `_Atomic` constructs: Clang pads an atomic aggregate
+// up to the next power of two and aligns it there, so a value it can operate
+// on lock-free has an instruction that reaches it -- there is no three-byte
+// atomic instruction and there is a four-byte one.  The ceiling is the
+// target's maximum lock-free width, 128 bits here, and above it the type keeps
+// the aggregate's own layout: `_Atomic` of a seventeen-byte record is
+// seventeen bytes aligned one in Clang too, so the rule is not "round every
+// aggregate up" (#731).  GCC pads nothing -- it answers 3 aligned 1 for the
+// first shape below and 12 aligned 4 for `atomic_twelve` -- and AGENTS.md
+// names Clang the oracle, which is what these numbers are.  Like the shapes
+// above they stay out of basic_c_packed_layout_shapes.h, whose other half is
+// whichever host compiler the platform has.
+//
+// `_Atomic` written directly on a tag -- `_Atomic struct three` -- is not
+// among the spellings below: that prefix never reaches the type at all here,
+// so the type is not atomic and this rule cannot apply to it (issue #761).
+// The three spellings that do build the type are pinned instead, and they have
+// to answer alike.
+typedef struct
+{
+    char a, b, c;
+} atomic_three;
+
+typedef union
+{
+    char a[3];
+} atomic_union_three;
+
+typedef struct
+{
+    char a[5];
+} atomic_five;
+
+typedef struct
+{
+    int word;
+    char tail[8];
+} atomic_twelve;
+
+typedef struct
+{
+    char a[16];
+} atomic_sixteen;
+
+// One byte past the ceiling, which is where the promotion stops.
+typedef struct
+{
+    char a[17];
+} atomic_seventeen;
+
+// A zero-sized aggregate still takes a byte: an atomic operation on it has to
+// touch something.  GCC answers zero for the record and one for the atomic,
+// like Clang.  Whether the record is zero-sized at all is the ABI's business
+// rather than this rule's -- it is four bytes under the Microsoft one -- so
+// the two shapes below are stated as a relation to it rather than as a number,
+// which is the same sentence on either: the padded size, or one byte when
+// there is nothing to pad.
+typedef struct
+{
+} atomic_empty;
+
+typedef _Atomic atomic_three atomic_three_alias;
+typedef _Atomic(atomic_three) atomic_three_operator_alias;
+typedef _Atomic atomic_union_three atomic_union_alias;
+typedef _Atomic atomic_five atomic_five_alias;
+typedef _Atomic atomic_twelve atomic_twelve_alias;
+typedef _Atomic atomic_sixteen atomic_sixteen_alias;
+typedef _Atomic atomic_seventeen atomic_seventeen_alias;
+typedef _Atomic atomic_empty atomic_empty_alias;
+
+// An alias over the atomic type replaces the alignment and keeps the padding,
+// in both directions: the size is four whether the request is above the
+// promoted alignment or below it.
+typedef atomic_three_alias atomic_three_raised __attribute__((aligned(32)));
+typedef atomic_three_alias atomic_three_lowered __attribute__((aligned(1)));
+
+// The array element position, where the padding is what the stride is.
+typedef atomic_three_alias atomic_three_pair[2];
+
+struct atomic_promoted_member
+{
+    char byte;
+    atomic_three_alias value;
+    char tail;
+};
+
+// Past the ceiling the member sits at one and the record is nineteen bytes,
+// which is the same aggregate laid out with no promotion at all.
+struct atomic_unpromoted_member
+{
+    char byte;
+    atomic_seventeen_alias value;
+    char tail;
+};
+
+struct atomic_promoted_array_member
+{
+    char byte;
+    atomic_three_pair values;
+    char tail;
+};
+
+static atomic_three_alias file_atomic_three_object;
+static char between_atomic_promoted_objects = 17;
+static atomic_three_pair file_atomic_three_array;
+
+// A complex type is the one scalar whose size is a power of two while its
+// alignment is not equal to it, so the promotion moves the alignment alone:
+// Clang and GCC agree on both of these.
+_Static_assert(sizeof(_Atomic _Complex float) == 8 && _Alignof(_Atomic _Complex float) == 8, "atomic complex float");
+_Static_assert(sizeof(_Atomic _Complex double) == 16 && _Alignof(_Atomic _Complex double) == 16, "atomic complex double");
+// `long double` is where the target shows through, so the third one is stated
+// as a relation rather than as a number: it is `double` on Apple AArch64,
+// where `_Complex long double` is sixteen bytes and does take the promotion,
+// and sixteen bytes wide elsewhere here, where the complex type is thirty-two
+// and past the ceiling.  Either way the size is untouched, which is the
+// sentence both answers share; `atomic_seventeen_alias` above pins the
+// ceiling itself with a size no target moves.
+_Static_assert(sizeof(_Atomic _Complex long double) == sizeof(_Complex long double), "the size is untouched");
+
+// The three spellings of one type, stated for the parse engine the way the
+// runtime checks state them for the lowering one.
+_Static_assert(sizeof(_Atomic atomic_three) == 4 && _Alignof(_Atomic atomic_three) == 4, "written inline");
+_Static_assert(sizeof(atomic_three_alias) == 4 && _Alignof(atomic_three_alias) == 4, "through a typedef");
+_Static_assert(sizeof(atomic_three_operator_alias) == 4 && _Alignof(atomic_three_operator_alias) == 4, "the operator spelling");
+_Static_assert(sizeof(atomic_union_alias) == 4 && _Alignof(atomic_union_alias) == 4, "a union promotes too");
+_Static_assert(sizeof(atomic_five_alias) == 8 && _Alignof(atomic_five_alias) == 8, "five rounds to eight");
+_Static_assert(sizeof(atomic_twelve_alias) == 16 && _Alignof(atomic_twelve_alias) == 16, "twelve rounds to sixteen");
+_Static_assert(sizeof(atomic_sixteen_alias) == 16 && _Alignof(atomic_sixteen_alias) == 16, "sixteen is the last one");
+_Static_assert(sizeof(atomic_seventeen_alias) == 17 && _Alignof(atomic_seventeen_alias) == 1, "seventeen is past the ceiling");
+_Static_assert(sizeof(atomic_empty_alias) == (sizeof(atomic_empty) ? sizeof(atomic_empty) : 1), "a zero-sized aggregate takes a byte");
+_Static_assert(_Alignof(atomic_empty_alias) == (sizeof(atomic_empty) ? sizeof(atomic_empty) : 1), "and is aligned to it");
+_Static_assert(sizeof(const atomic_three_alias) == 4 && _Alignof(const atomic_three_alias) == 4, "a qualifier keeps the promotion");
+_Static_assert(sizeof(atomic_three_raised) == 4 && _Alignof(atomic_three_raised) == 32, "an alias over it keeps the padding");
+_Static_assert(sizeof(atomic_three_lowered) == 4 && _Alignof(atomic_three_lowered) == 1, "and keeps it when it lowers too");
+_Static_assert(sizeof(atomic_three_pair) == 8 && _Alignof(atomic_three_pair) == 4, "the element tiles at four");
+_Static_assert(sizeof(struct atomic_promoted_member) == 12, "the member sits at four");
+_Static_assert(sizeof(struct atomic_unpromoted_member) == 19, "and at one past the ceiling");
+
 int main(void)
 {
     if (sizeof(struct leading) != 5 || _Alignof(struct leading) != 1) return 1;
@@ -1383,5 +1522,61 @@ int main(void)
     if (sizeof(_Atomic raised_scalar[2]) != 8) return 205;
     if ((char *)&atomic_raised_array[1] - (char *)&atomic_raised_array[0] != 4) return 206;
     if ((unsigned long long)(void *)atomic_raised_array % 4) return 207;
+
+    // The promotion, folded by the lowering engine this time.  Every number
+    // here is stated for the parse engine above; the two must agree or a
+    // folded `sizeof` contradicts the object it measures.
+    if (sizeof(_Atomic atomic_three) != 4 || _Alignof(_Atomic atomic_three) != 4) return 210;
+    if (sizeof(atomic_three_alias) != 4 || _Alignof(atomic_three_alias) != 4) return 211;
+    if (sizeof(atomic_three_operator_alias) != 4 || _Alignof(atomic_three_operator_alias) != 4) return 212;
+    if (sizeof(_Atomic(atomic_three)) != 4 || _Alignof(_Atomic(atomic_three)) != 4) return 213;
+    if (sizeof(atomic_union_alias) != 4 || _Alignof(atomic_union_alias) != 4) return 214;
+    if (sizeof(atomic_five_alias) != 8 || _Alignof(atomic_five_alias) != 8) return 215;
+    if (sizeof(atomic_twelve_alias) != 16 || _Alignof(atomic_twelve_alias) != 16) return 216;
+    if (sizeof(atomic_sixteen_alias) != 16 || _Alignof(atomic_sixteen_alias) != 16) return 217;
+    if (sizeof(atomic_seventeen_alias) != 17 || _Alignof(atomic_seventeen_alias) != 1) return 218;
+    if (sizeof(atomic_empty_alias) != (sizeof(atomic_empty) ? sizeof(atomic_empty) : 1)) return 219;
+    if (_Alignof(atomic_empty_alias) != (sizeof(atomic_empty) ? sizeof(atomic_empty) : 1)) return 245;
+    if (sizeof(const atomic_three_alias) != 4 || _Alignof(const atomic_three_alias) != 4) return 220;
+    if (sizeof(volatile atomic_three_alias) != 4 || _Alignof(volatile atomic_three_alias) != 4) return 221;
+    if (sizeof(atomic_three_raised) != 4 || _Alignof(atomic_three_raised) != 32) return 222;
+    if (sizeof(atomic_three_lowered) != 4 || _Alignof(atomic_three_lowered) != 1) return 223;
+    if (sizeof(_Atomic _Complex float) != 8 || _Alignof(_Atomic _Complex float) != 8) return 224;
+    if (sizeof(_Atomic _Complex double) != 16 || _Alignof(_Atomic _Complex double) != 16) return 225;
+    if (sizeof(_Atomic _Complex long double) != sizeof(_Complex long double)) return 226;
+
+    // The padding is where the object is, not only what `sizeof` says: the
+    // member sits past the whole promoted size and the array element tiles at
+    // it.
+    if (sizeof(struct atomic_promoted_member) != 12 || _Alignof(struct atomic_promoted_member) != 4) return 227;
+    struct atomic_promoted_member promoted_member = {0};
+    if ((char *)&promoted_member.value - (char *)&promoted_member != 4) return 228;
+    if ((char *)&promoted_member.tail - (char *)&promoted_member != 8) return 229;
+    if (sizeof(struct atomic_unpromoted_member) != 19 || _Alignof(struct atomic_unpromoted_member) != 1) return 230;
+    struct atomic_unpromoted_member unpromoted_member = {0};
+    if ((char *)&unpromoted_member.value - (char *)&unpromoted_member != 1) return 231;
+    if ((char *)&unpromoted_member.tail - (char *)&unpromoted_member != 18) return 232;
+    if (sizeof(struct atomic_promoted_array_member) != 16 || _Alignof(struct atomic_promoted_array_member) != 4) return 233;
+    struct atomic_promoted_array_member promoted_array_member = {0};
+    if ((char *)&promoted_array_member.values - (char *)&promoted_array_member != 4) return 234;
+    if ((char *)&promoted_array_member.tail - (char *)&promoted_array_member != 12) return 235;
+    if (sizeof(atomic_three_pair) != 8 || _Alignof(atomic_three_pair) != 4) return 236;
+    if ((char *)&file_atomic_three_array[1] - (char *)&file_atomic_three_array[0] != 4) return 237;
+    if ((unsigned long long)(void *)file_atomic_three_array % 4) return 238;
+    if ((unsigned long long)(void *)&file_atomic_three_object % 4) return 239;
+    if (between_atomic_promoted_objects != 17) return 240;
+
+    // The block-scope parser is a second parser and reads the same rule.
+    typedef struct
+    {
+        char a, b, c;
+    } block_three;
+    typedef _Atomic block_three block_atomic_three;
+    block_atomic_three block_atomic_three_object;
+    char between_block_atomic_three = 18;
+    if (sizeof(block_atomic_three) != 4 || _Alignof(block_atomic_three) != 4) return 241;
+    if (sizeof(_Atomic block_three) != 4 || _Alignof(_Atomic block_three) != 4) return 242;
+    if ((unsigned long long)(void *)&block_atomic_three_object % 4) return 243;
+    if (between_block_atomic_three != 18) return 244;
     return 0;
 }

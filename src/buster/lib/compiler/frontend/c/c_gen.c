@@ -806,6 +806,18 @@ BUSTER_C_INTERNAL IrTypeId c_ir_add_qualified_type(IrProgram* program, IrTypeId 
     qualified.unqualified_type = unqualified;
     qualified.is_atomic = is_atomic;
     qualified.is_volatile = is_volatile;
+    // `_Atomic` is the one qualifier that does not copy the layout: Clang
+    // constructs a type from the operand rather than qualifying it, padding it
+    // up to the next power of two and aligning it there so the `__atomic`
+    // builtins can reach it lock-free.  This is the lowering half of that rule
+    // and c_parse_type_layout folds `sizeof` through the other half; the two
+    // read the same ceiling out of the preprocess target's data layout, which
+    // is what `program->data_layout` holds.  `volatile` alone changes nothing,
+    // which is why the test is on the atomic flag rather than on the copy.
+    if (is_atomic)
+    {
+        c_atomic_promoted_layout(program->data_layout.atomic_max_width, &qualified.layout.size, &qualified.layout.alignment);
+    }
     return ir_program_add_type(program, qualified);
 }
 
@@ -17997,6 +18009,24 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
         if (atomic_alias.value != IR_ID_UNDERLYING_INVALID)
         {
             type = atomic_alias;
+        }
+        else if (qualifiers.is_atomic)
+        {
+            // Every other name reaches the atomic type here, which is what the
+            // `_Atomic ( T )` branch above already does for its own spelling:
+            // the two spell one type and may not answer differently.  It is
+            // the layout that made this visible -- `_Atomic T` is padded to a
+            // power of two and T is not, so a type name spelled inline
+            // answered `sizeof` 3 where a typedef of the atomic type answered
+            // 4 (#731) -- and c_ir_add_qualified_type's dedup hands back the
+            // very IrType that typedef mapped to.  It refuses an operand that
+            // is atomic already, and the void and array types `_Atomic` may
+            // not apply to at all, and the name stands unqualified for those.
+            IrTypeId qualified_name = c_ir_add_qualified_type(builder->program, type, true, false);
+            if (qualified_name.value != IR_ID_UNDERLYING_INVALID)
+            {
+                type = qualified_name;
+            }
         }
         while (index < end && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_STAR))
         {
