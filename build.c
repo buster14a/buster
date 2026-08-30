@@ -17211,7 +17211,7 @@ struct LibcTestSubsetTotals
 // `functional/tls_align_dlopen` and `functional/tls_init_dlopen` join the
 // local-exec TLS group that was already there. Nothing that passed before
 // stopped passing.
-// 2026-08-29: 377 -> PLACEHOLDER_PASSING, `functional/tgmath`.
+// 2026-08-29: 377 -> 381, `functional/tgmath`.
 // `ide cc` predefines `__GNUC__` in every dialect now, the way clang and gcc
 // both do, so under the suite's `-std=c99` the two compilers finally read the
 // same source out of musl's headers: <tgmath.h> keeps its `__typeof__` return
@@ -17223,12 +17223,17 @@ struct LibcTestSubsetTotals
 // is the spelling musl's <math.h> chooses once the builtins are advertised;
 // the last of those held 21 `src/math` units and `functional/strtold`
 // blocked-compile the moment the predefine changed. Three more units came in
-// with it and are not that change: `functional/setjmp` compiles now that an
-// aggregate can be assigned across a `volatile` qualifier (2c9b7cc1, issue
-// 735), and `functional/pthread_robust` and `regression/pthread-robust-detach`
-// pass now that a walked-through aggregate member is not loaded (84cdadc8,
-// issue 737). Everything the assembly work newly exposed is closed with them;
-// the seven units left in the suite are the local-exec TLS group.
+// with it. `functional/setjmp` is 2c9b7cc1's, an aggregate assigned across a
+// `volatile` qualifier (issue 735). `functional/pthread_robust` and
+// `regression/pthread-robust-detach` are the predefine's own and were credited
+// to 84cdadc8 here at first: both segfaulted in `pthread_exit`, which walks the
+// robust list through `offsetof` on a null pointer, and once `__GNUC__` is
+// defined musl takes `__builtin_offsetof` and stops writing the shape that
+// tripped. 84cdadc8 fixes that shape -- a member named through two accesses
+// loaded the aggregate it was reached through -- and closes issue 737 as a
+// defect, but it is not what moved these two units. Everything the assembly
+// work newly exposed is closed between them; the seven units left in the suite
+// are the local-exec TLS group.
 #define LIBC_TEST_EXPECTED_PASSING 381
 #define LIBC_TEST_EXPECTED_STATE_HASH 0x0e973f6c67fa1195ull
 
