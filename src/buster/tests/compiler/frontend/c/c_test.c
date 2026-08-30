@@ -2346,7 +2346,23 @@ BUSTER_GLOBAL_LOCAL bool c_test_lex_paths_agree(Arena* arena, String8 source)
     CLexResult reference = c_lex_reference(arena, source);
     bool result = dispatched.token_count == reference.token_count && dispatched.diagnostic_count == reference.diagnostic_count &&
                   memcmp(&dispatched.metrics, &reference.metrics, sizeof(dispatched.metrics)) == 0 &&
-                  dispatched.translated_source.length == reference.translated_source.length;
+                  dispatched.translated_source.length == reference.translated_source.length &&
+                  dispatched.checkpoint_count == reference.checkpoint_count && dispatched.checkpoint_page_count == reference.checkpoint_page_count;
+    if (result && dispatched.translated_source.length)
+    {
+        result = memcmp(dispatched.translated_source.pointer, reference.translated_source.pointer, dispatched.translated_source.length) == 0;
+    }
+    if (result && dispatched.checkpoint_count)
+    {
+        result = memcmp(dispatched.checkpoints, reference.checkpoints, dispatched.checkpoint_count * sizeof(*dispatched.checkpoints)) == 0 &&
+                 memcmp(dispatched.checkpoint_offsets, reference.checkpoint_offsets,
+                        dispatched.checkpoint_count * sizeof(*dispatched.checkpoint_offsets)) == 0;
+    }
+    if (result && dispatched.checkpoint_page_count)
+    {
+        result = memcmp(dispatched.checkpoint_pages, reference.checkpoint_pages,
+                        dispatched.checkpoint_page_count * sizeof(*dispatched.checkpoint_pages)) == 0;
+    }
     if (result && dispatched.token_count)
     {
         result = memcmp(dispatched.tokens, reference.tokens, dispatched.token_count * sizeof(CToken)) == 0;

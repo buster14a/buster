@@ -500,7 +500,10 @@ bool c_test_translate_plain_run_paths_agree(String8 source)
 }
 #endif
 
-BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSpace* space, String8 source)
+// force_scalar keeps the byte-at-a-time run loop as the whole implementation,
+// which is what c_lex_reference lexes through so the differential gate
+// compares the chunk fast path against it.
+BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSpace* space, String8 source, bool force_scalar)
 {
     CTranslatedSource result = {0};
     if (source.length <= UINT32_MAX - 2)
@@ -517,8 +520,93 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
         // The next output byte starts a new linear run; initially true so the
         // first byte records the first checkpoint.
         bool run_broken = true;
+#if !BUSTER_C_TRANSLATE_AVX512
+        BUSTER_UNUSED(force_scalar);
+#endif
         while (input < source.length)
         {
+#if BUSTER_C_TRANSLATE_AVX512
+            // Chunk fast path: a plain newline copies through unchanged, so a
+            // 64-byte chunk whose only stop bytes are newlines needs no
+            // per-run rescan -- the chunk stores whole, the newline mask
+            // yields one checkpoint per line start, and line/column advance
+            // by popcount and top-bit arithmetic.  Only the bytes that edit
+            // the stream fall to the exact scalar handling below, at their
+            // own position: every '\r' (folds to '\n'), a backslash whose
+            // next byte opens a splice, and a backslash on the last lane,
+            // whose next byte the chunk cannot see.
+            if (!force_scalar)
+            {
+                while (source.length - input >= 64)
+                {
+                    __m512i chunk = _mm512_loadu_si512((const void*)(source.pointer + input));
+                    u64 carriage = (u64)_mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\r'));
+                    u64 line_feed = (u64)_mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\n'));
+                    u64 backslash = (u64)_mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\\'));
+                    u64 stops = carriage | (backslash & ((line_feed | carriage) >> 1)) | (backslash & (UINT64_C(1) << 63));
+                    u64 limit = stops ? (u64)__builtin_ctzll(stops) : 64;
+                    if (!limit)
+                    {
+                        break;
+                    }
+                    u64 newlines = line_feed & (limit >= 64 ? ~UINT64_C(0) : ((UINT64_C(1) << limit) - 1));
+                    _mm512_storeu_si512((void*)(translated + output), chunk);
+                    if (run_broken)
+                    {
+                        checkpoints[checkpoint_count] = (IrSourceCheckpoint){
+                            .offset = (u32)input,
+                            .line = line,
+                            .column = column,
+                        };
+                        checkpoint_offsets[checkpoint_count] = (u32)output;
+                        checkpoint_count += 1;
+                        run_broken = false;
+                    }
+                    if (newlines)
+                    {
+                        column = (u32)(limit - (u64)(63 - __builtin_clzll(newlines)));
+                        for (u64 rest = newlines; rest; rest &= rest - 1)
+                        {
+                            u64 position = (u64)__builtin_ctzll(rest);
+                            line += 1;
+                            // The byte after this newline starts a line; when
+                            // it sits past the limit, the next iteration or
+                            // the stop byte's own handling records it, which
+                            // is what keeps a splice's skipped backslash from
+                            // acquiring a checkpoint here.
+                            if (position + 1 < limit)
+                            {
+                                checkpoints[checkpoint_count] = (IrSourceCheckpoint){
+                                    .offset = (u32)(input + position + 1),
+                                    .line = line,
+                                    .column = 1,
+                                };
+                                checkpoint_offsets[checkpoint_count] = (u32)(output + position + 1);
+                                checkpoint_count += 1;
+                            }
+                            else
+                            {
+                                run_broken = true;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        column += (u32)limit;
+                    }
+                    input += limit;
+                    output += limit;
+                    if (limit < 64)
+                    {
+                        break;
+                    }
+                }
+                if (input >= source.length)
+                {
+                    break;
+                }
+            }
+#endif
             // A run containing no '\r', '\n', or '\\' keeps line/column linear,
             // so it copies through whole and only those three bytes reach the exact
             // scalar handling below. Native AVX-512 hosts classify 64 bytes at a
@@ -2205,7 +2293,7 @@ BUSTER_C_INTERNAL CLexResult c_lex_dispatch(Arena* arena, CSpellingSpace* space,
     CLexResult result = {0};
     if (arena && (!source.length || source.pointer))
     {
-        CTranslatedSource translated = c_translate_source(arena, space, source);
+        CTranslatedSource translated = c_translate_source(arena, space, source, force_scalar);
         result.translated_source = translated.source;
         result.spelling_base = space ? space->base : translated.source.pointer;
         result.checkpoints = translated.checkpoints;
