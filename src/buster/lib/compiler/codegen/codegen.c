@@ -3236,6 +3236,19 @@ BUSTER_GLOBAL_LOCAL void a64_emit_atomic_pointer(CodegenBuffer* buffer, u32 valu
     a64_emit_instruction_word(buffer, (store ? UINT32_C(0x089ffc00) : UINT32_C(0x08dffc00)) | size_bits | (address << 5) | value);
 }
 
+// Keep the low `bytes` bytes of a register and zero the rest, through a
+// constant in `scratch`. The x86 twin, codegen_canonical_x64_keep_low_bytes,
+// says why an atomic aggregate needs it; a full or empty span is a no-op.
+BUSTER_GLOBAL_LOCAL void a64_emit_keep_low_bytes(CodegenBuffer* buffer, u32 value, u32 scratch, u64 bytes)
+{
+    if (bytes && bytes < 8)
+    {
+        a64_emit_constant(buffer, scratch, ((u64)1 << (bytes * 8)) - 1);
+        // AND Xvalue, Xvalue, Xscratch.
+        a64_emit_instruction_word(buffer, UINT32_C(0x8a000000) | (scratch << 16) | (value << 5) | value);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void a64_emit_atomic_exclusive_load(CodegenBuffer* buffer, u32 value, u32 address, u32 size, bool acquire)
 {
     u32 size_bits = size == 1 ? 0 : size == 2 ? UINT32_C(0x40000000) : size == 4 ? UINT32_C(0x80000000) : size == 8 ? UINT32_C(0xc0000000) : 0;
@@ -6032,6 +6045,25 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_sign_extend(CodegenBuffer* buffer
         BusterX86MetadataPhysicalOperand operands[2] = {
             codegen_canonical_x64_metadata_gpr(value, 64),
             codegen_canonical_x64_metadata_immediate(64 - width, 8),
+        };
+        (void)codegen_canonical_x64_metadata_emit(buffer, S8("SHL"), operands, BUSTER_ARRAY_LENGTH(operands));
+        (void)codegen_canonical_x64_metadata_emit(buffer, S8("SHR"), operands, BUSTER_ARRAY_LENGTH(operands));
+    }
+}
+
+// Keep the low `bytes` bytes of a register and zero the rest. An atomic
+// aggregate narrower than the width it is accessed through -- a three-byte
+// record stored through four bytes (#731) -- has to write its padding
+// deterministically, and Clang writes zero there; the shift pair needs neither
+// a second register nor a 64-bit immediate. A full or empty span is a no-op:
+// the shift amount would be out of range and there is nothing to clear.
+BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_keep_low_bytes(CodegenBuffer* buffer, X64Register value, u64 bytes)
+{
+    if (bytes && bytes < 8)
+    {
+        BusterX86MetadataPhysicalOperand operands[2] = {
+            codegen_canonical_x64_metadata_gpr(value, 64),
+            codegen_canonical_x64_metadata_immediate(64 - (s64)(bytes * 8), 8),
         };
         (void)codegen_canonical_x64_metadata_emit(buffer, S8("SHL"), operands, BUSTER_ARRAY_LENGTH(operands));
         (void)codegen_canonical_x64_metadata_emit(buffer, S8("SHR"), operands, BUSTER_ARRAY_LENGTH(operands));
@@ -10780,8 +10812,43 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD && aggregate)
                         {
-                            if (!aggregate_type || aggregate_type->kind != IR_TYPE_INTEGER || aggregate_type->layout.size != 16 ||
-                                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_CX16))
+                            // The access width is the *place's*: an atomic type is
+                            // padded up to the next power of two (#731) so that one
+                            // access of that width covers it, while the loaded value
+                            // keeps the unqualified type and can be narrower -- three
+                            // bytes read through four.
+                            IrType* atomic_place_type = ir_type_from_id(&program->types, place->canonical_type);
+                            u64 atomic_width = atomic_place_type && atomic_place_type->layout.resolved ? atomic_place_type->layout.size : 0;
+                            u64 loaded_size = aggregate_type && aggregate_type->layout.resolved ? aggregate_type->layout.size : 0;
+                            bool aggregate_kind = aggregate_type && (aggregate_type->kind == IR_TYPE_STRUCT || aggregate_type->kind == IR_TYPE_UNION);
+                            if (aggregate_kind && (atomic_width == 1 || atomic_width == 2 || atomic_width == 4 || atomic_width == 8))
+                            {
+                                // An aligned x86 load of a lock-free width already is
+                                // the atomic load. It zero-extends into rax, so the
+                                // eightbyte slot store below leaves the value's own
+                                // padding zero rather than stack residue.
+                                c_x64_atomic_address(&emitter, instruction->operands[0], indirect);
+                                u16 atomic_load_width = (u16)(atomic_width * 8);
+                                BusterX86MetadataPhysicalOperand atomic_load_operands[2] = {
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, atomic_width <= 2 ? 32 : atomic_load_width),
+                                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_R10, atomic_load_width, 0),
+                                };
+                                if (buffer.error || !codegen_canonical_x64_metadata_emit(&buffer, atomic_width <= 2 ? S8("MOVZX") : S8("MOV"),
+                                                                                         atomic_load_operands,
+                                                                                         BUSTER_ARRAY_LENGTH(atomic_load_operands)))
+                                {
+                                    result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                                c_x64_store_result(&emitter, result_displacement);
+                                instruction_id = instruction->next;
+                                continue;
+                            }
+                            // Sixteen bytes is a compare-exchange of the pair: the
+                            // `__int128` shape the sequence was written for, and any
+                            // aggregate the promotion padded into the same width.
+                            if (!aggregate_type || (aggregate_type->kind != IR_TYPE_INTEGER && !aggregate_kind) || atomic_width != 16 ||
+                                loaded_size <= 8 || loaded_size > 16 || !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_CX16))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
@@ -11929,8 +11996,41 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && aggregate)
                         {
-                            if (!stored_type || stored_type->kind != IR_TYPE_INTEGER || stored_type->layout.size != 16 ||
-                                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_CX16))
+                            // See the atomic load above: the width is the place's
+                            // promoted size, the value's own size can be smaller.
+                            IrType* atomic_place_type = ir_type_from_id(&program->types, place->canonical_type);
+                            u64 atomic_width = atomic_place_type && atomic_place_type->layout.resolved ? atomic_place_type->layout.size : 0;
+                            u64 atomic_stored_size = stored_type && stored_type->layout.resolved ? stored_type->layout.size : 0;
+                            bool aggregate_kind = stored_type && (stored_type->kind == IR_TYPE_STRUCT || stored_type->kind == IR_TYPE_UNION);
+                            if (aggregate_kind && (atomic_width == 1 || atomic_width == 2 || atomic_width == 4 || atomic_width == 8))
+                            {
+                                // The address goes first: the indirect form of
+                                // c_x64_atomic_address reloads the pointer through rax,
+                                // which is where the value is about to live.
+                                c_x64_atomic_address(&emitter, instruction->operands[0], indirect);
+                                c_x64_load(&emitter, 0x85, instruction->operands[1]);
+                                codegen_canonical_x64_keep_low_bytes(&buffer, X64_REGISTER_RAX, atomic_stored_size);
+                                u16 atomic_store_width = (u16)(atomic_width * 8);
+                                BusterX86MetadataPhysicalOperand aggregate_store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_R10, atomic_store_width, 0),
+                                    codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, atomic_store_width),
+                                };
+                                // Sequential consistency exchanges, exactly as the
+                                // scalar path below spells it; a weaker order is the
+                                // plain store an aligned x86 write already is.
+                                if (buffer.error ||
+                                    !codegen_canonical_x64_metadata_emit(&buffer,
+                                                                         instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL ? S8("XCHG") : S8("MOV"),
+                                                                         aggregate_store_operands, BUSTER_ARRAY_LENGTH(aggregate_store_operands)))
+                                {
+                                    result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                                instruction_id = instruction->next;
+                                continue;
+                            }
+                            if (!stored_type || (stored_type->kind != IR_TYPE_INTEGER && !aggregate_kind) || atomic_width != 16 ||
+                                atomic_stored_size <= 8 || atomic_stored_size > 16 || !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_CX16))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
@@ -11938,6 +12038,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             c_x64_atomic_address(&emitter, instruction->operands[0], indirect);
                             c_x64_load(&emitter, 0x9d, instruction->operands[1]);
                             c_x64_load_high(&emitter, 0x8d, instruction->operands[1]);
+                            // The high eightbyte of an aggregate shorter than the pair
+                            // is padding; zero it so the stored image is the value's,
+                            // not the slot's residue.
+                            codegen_canonical_x64_keep_low_bytes(&buffer, X64_REGISTER_RCX, atomic_stored_size - 8);
                             BusterX86MetadataPhysicalOperand zero_rax_operands[2] = {
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
@@ -16894,8 +16998,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
                         if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD && aggregate)
                         {
-                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-                            return result;
+                            // The access width is the place's promoted size (#731),
+                            // not the loaded value's: three bytes are read through
+                            // four. ldar zero-extends into the W form for every width
+                            // below eight, so the eightbyte slot store leaves the
+                            // value's padding zero rather than stack residue.
+                            IrType* atomic_place_type = ir_type_from_id(&program->types, place->canonical_type);
+                            u64 atomic_width = atomic_place_type && atomic_place_type->layout.resolved ? atomic_place_type->layout.size : 0;
+                            bool aggregate_kind = loaded_type && (loaded_type->kind == IR_TYPE_STRUCT || loaded_type->kind == IR_TYPE_UNION);
+                            if (!aggregate_kind || (atomic_width != 1 && atomic_width != 2 && atomic_width != 4 && atomic_width != 8))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            if (indirect)
+                            {
+                                c_a64_load(&emitter, 10, instruction->operands[0]);
+                            }
+                            else
+                            {
+                                codegen_canonical_a64_base_address(&buffer, 10, 28, value_offsets[instruction->operands[0].value]);
+                            }
+                            a64_emit_atomic_pointer(&buffer, 9, 10, (u32)atomic_width, false);
+                            c_a64_store(&emitter, 9, result_offset);
+                            instruction_id = instruction->next;
+                            continue;
                         }
                         if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD && instruction->memory_order != IR_MEMORY_ORDER_RELAXED)
                         {
@@ -17286,8 +17413,31 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
                         if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && aggregate)
                         {
-                            result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-                            return result;
+                            // See the atomic load above for the width. x10 carries the
+                            // mask constant before it carries the address, so the
+                            // padding is cleared first.
+                            IrType* atomic_place_type = ir_type_from_id(&program->types, place->canonical_type);
+                            u64 atomic_width = atomic_place_type && atomic_place_type->layout.resolved ? atomic_place_type->layout.size : 0;
+                            u64 atomic_stored_size = stored_type && stored_type->layout.resolved ? stored_type->layout.size : 0;
+                            bool aggregate_kind = stored_type && (stored_type->kind == IR_TYPE_STRUCT || stored_type->kind == IR_TYPE_UNION);
+                            if (!aggregate_kind || (atomic_width != 1 && atomic_width != 2 && atomic_width != 4 && atomic_width != 8))
+                            {
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
+                            }
+                            c_a64_load(&emitter, 9, instruction->operands[1]);
+                            a64_emit_keep_low_bytes(&buffer, 9, 10, atomic_stored_size);
+                            if (indirect)
+                            {
+                                c_a64_load(&emitter, 10, instruction->operands[0]);
+                            }
+                            else
+                            {
+                                codegen_canonical_a64_base_address(&buffer, 10, 28, value_offsets[instruction->operands[0].value]);
+                            }
+                            a64_emit_atomic_pointer(&buffer, 9, 10, (u32)atomic_width, true);
+                            instruction_id = instruction->next;
+                            continue;
                         }
                         if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && instruction->memory_order != IR_MEMORY_ORDER_RELAXED)
                         {

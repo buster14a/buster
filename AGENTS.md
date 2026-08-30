@@ -3259,10 +3259,7 @@ on a commit you already know is incomplete tells nobody anything.
   T and became `sizeof` 3 written inline against 4 through a typedef the moment
   it was not. The fourth spelling is not among them -- `_Atomic` written before
   a `struct`, `union` or `enum` keyword never reaches the type at all, so it is
-  not atomic and this rule does not apply to it (#761) -- and an atomic
-  aggregate cannot be loaded or stored (#762); the two are ordered, because
-  closing the parse gap turns programs that compile into programs that hit the
-  codegen one. On the argument side the promotion moves nothing: a promoted
+  not atomic and this rule does not apply to it (#761). On the argument side the promotion moves nothing: a promoted
   four-byte record is one INTEGER eightbyte where the three-byte one already
   was. Clang classifying every record that *contains* an atomic member as
   MEMORY is a divergence of its own, and one where GCC and this compiler agree
@@ -3273,6 +3270,32 @@ on a commit you already know is incomplete tells nobody anything.
   next to the one-byte aggregate that agrees without them, once for each
   engine, and they stay out of the cross-linked
   `basic_c_packed_layout_shapes.h` for the same reason the shapes above do.
+- **An atomic aggregate is loaded and stored as one integer access of its
+  promoted width**, which is what the promotion above exists for: a three-byte
+  record is read and written through four bytes, and the padding the promotion
+  added is written as zero, because Clang copies the value through a zeroed
+  temporary and that is the oracle. The widths the canonical emitters lower
+  that access at are one, two, four and eight bytes on both targets, plus
+  sixteen on x86-64 where `cx16` gives them `CMPXCHG16B` -- the sequence
+  `_Atomic __int128` already used, which now also takes any aggregate the
+  promotion padded into the same width. The machine selectors decline the
+  aggregate shapes and the function falls back to the canonical emitter, which
+  the fallback statistics already count, so all four allocators answer the same
+  bytes. Anything wider would need a `libatomic` lock and there is none here,
+  so lowering refuses it with a diagnostic naming the width rather than leaving
+  code generation to fail internally (#762). The refusal is
+  `c_ir_atomic_aggregate_accesses_lowerable` in `c_gen.c`, and it runs over the
+  *finished* body rather than where the access is built, because an operand is
+  lowered as a value before an expression that only wanted its address recovers
+  the place and drops the load again: refusing at the emit site rejects
+  `&object.atomic_member`, which performs no atomic access at all and is what
+  `tests/basic_c_packed_layout.c` writes over its seventeen-byte atomic
+  member. AArch64 has no 128-bit lock-free access
+  here -- `_Atomic __int128` does not lower there either -- so a sixteen-byte
+  atomic aggregate is one of the shapes that refusal covers, and the refusal is
+  therefore target-dependent where the layout rule above is not.
+  `tests/basic_c_atomic_aggregate.c` runs the bytes under every allocator with
+  Clang's answers baked in, including the padding.
 - **A top-level `(` right after an identifier** is the parameter list of a
   function that identifier names in `T f(int)`, and a parenthesized declarator
   in `T (*p)[2]`, whose `T` is the last word of the declaration specifiers.

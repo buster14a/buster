@@ -1,0 +1,208 @@
+/* `_Atomic` over a struct or union: the object is padded up to the next power
+   of two (#731) so that one integer access of that width covers it, and the
+   load and the store are that access (#762).  Every expected byte here is
+   baked in rather than computed, so the fixture pins the *representation* and
+   not merely self-consistency: it was read out of Clang, which zeroes an
+   atomic aggregate's padding through the temporary it copies the value into.
+
+   `signed char` is spelled out because plain `char` is unsigned on AArch64,
+   which would make the baked answers disagree with themselves across targets.
+
+   Widths one through eight run everywhere.  Sixteen is x86-64 only: it is the
+   CMPXCHG16B pair, and AArch64 has no 128-bit lock-free access here (nor for
+   `_Atomic __int128`), where the frontend refuses it with a diagnostic
+   instead. */
+
+typedef struct
+{
+    signed char a, b, c;
+} three;
+typedef _Atomic three atomic_three;
+
+typedef struct
+{
+    signed char a;
+} one;
+
+typedef struct
+{
+    short a;
+} two;
+
+typedef struct
+{
+    int a;
+    short b;
+} six;
+
+typedef struct
+{
+    long long a;
+} eight;
+typedef _Atomic six atomic_six;
+
+typedef union
+{
+    int word;
+    signed char bytes[3];
+} narrow_union;
+
+static atomic_three global_three;
+static _Atomic one global_one;
+static _Atomic two global_two;
+static _Atomic six global_six;
+static _Atomic eight global_eight;
+static _Atomic narrow_union global_union;
+
+typedef struct
+{
+    atomic_three member;
+    int tail;
+} holder;
+
+static holder global_holder;
+
+static int bytes_are(const void* object, const unsigned char* expected, unsigned count)
+{
+    const unsigned char* actual = (const unsigned char*)object;
+    int equal = 1;
+    for (unsigned index = 0; index < count; index += 1)
+    {
+        if (actual[index] != expected[index])
+        {
+            equal = 0;
+        }
+    }
+    return equal;
+}
+
+static int global_round_trip(void)
+{
+    unsigned char three_bytes[4] = {1, 2, 3, 0};
+    unsigned char one_bytes[1] = {0x7f};
+    unsigned char two_bytes[2] = {0x34, 0x12};
+    unsigned char six_bytes[8] = {0x44, 0x33, 0x22, 0x11, 0x66, 0x55, 0, 0};
+    unsigned char eight_bytes[8] = {0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11};
+
+    three value_three = {1, 2, 3};
+    global_three = value_three;
+    three read_three = global_three;
+
+    one value_one = {0x7f};
+    global_one = value_one;
+    one read_one = global_one;
+
+    two value_two = {0x1234};
+    global_two = value_two;
+    two read_two = global_two;
+
+    six value_six = {0x11223344, 0x5566};
+    global_six = value_six;
+    six read_six = global_six;
+
+    eight value_eight = {0x1122334455667788LL};
+    global_eight = value_eight;
+    eight read_eight = global_eight;
+
+    return bytes_are(&global_three, three_bytes, sizeof(three_bytes)) && read_three.a == 1 && read_three.b == 2 && read_three.c == 3 &&
+           bytes_are(&global_one, one_bytes, sizeof(one_bytes)) && read_one.a == 0x7f &&
+           bytes_are(&global_two, two_bytes, sizeof(two_bytes)) && read_two.a == 0x1234 &&
+           bytes_are(&global_six, six_bytes, sizeof(six_bytes)) && read_six.a == 0x11223344 && read_six.b == 0x5566 &&
+           bytes_are(&global_eight, eight_bytes, sizeof(eight_bytes)) && read_eight.a == 0x1122334455667788LL;
+}
+
+static int local_round_trip(void)
+{
+    unsigned char expected[4] = {4, 5, 6, 0};
+    three value = {4, 5, 6};
+    atomic_three local = value;
+    three read = local;
+    local = read;
+    return bytes_are(&local, expected, sizeof(expected)) && read.a == 4 && read.b == 5 && read.c == 6;
+}
+
+static int pointer_round_trip(void)
+{
+    unsigned char expected[4] = {7, 8, 9, 0};
+    atomic_three storage;
+    atomic_three* place = &storage;
+    three value = {7, 8, 9};
+    *place = value;
+    three read = *place;
+    return bytes_are(place, expected, sizeof(expected)) && read.a == 7 && read.b == 8 && read.c == 9;
+}
+
+static int member_round_trip(void)
+{
+    unsigned char expected[4] = {10, 11, 12, 0};
+    three value = {10, 11, 12};
+    global_holder.member = value;
+    global_holder.tail = 0x5a5a5a;
+    three read = global_holder.member;
+    return bytes_are(&global_holder.member, expected, sizeof(expected)) && read.a == 10 && read.b == 11 && read.c == 12 &&
+           global_holder.tail == 0x5a5a5a;
+}
+
+static int union_round_trip(void)
+{
+    unsigned char expected[4] = {0x11, 0x22, 0x33, 0};
+    narrow_union value;
+    value.word = 0;
+    value.bytes[0] = 0x11;
+    value.bytes[1] = 0x22;
+    value.bytes[2] = 0x33;
+    global_union = value;
+    narrow_union read = global_union;
+    return bytes_are(&global_union, expected, sizeof(expected)) && read.bytes[0] == 0x11 && read.bytes[1] == 0x22 && read.bytes[2] == 0x33;
+}
+
+static int sizes_are_promoted(void)
+{
+    return sizeof(atomic_three) == 4 && _Alignof(atomic_three) == 4 && sizeof(global_one) == 1 && sizeof(global_two) == 2 &&
+           sizeof(global_six) == 8 && _Alignof(atomic_six) == 8 && sizeof(global_eight) == 8 && sizeof(global_union) == 4 && sizeof(three) == 3;
+}
+
+#if defined(__x86_64__)
+typedef struct
+{
+    long long a, b;
+} sixteen;
+
+typedef struct
+{
+    long long a;
+    signed char b;
+} nine;
+
+typedef _Atomic nine atomic_nine;
+
+static _Atomic sixteen global_sixteen;
+static atomic_nine global_nine;
+
+static int wide_round_trip(void)
+{
+    unsigned char nine_bytes[16] = {0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x5a, 0, 0, 0, 0, 0, 0, 0};
+    sixteen value_sixteen = {0x1122334455667788LL, 0x0102030405060708LL};
+    global_sixteen = value_sixteen;
+    sixteen read_sixteen = global_sixteen;
+
+    nine value_nine = {0x1122334455667788LL, 0x5a};
+    global_nine = value_nine;
+    nine read_nine = global_nine;
+
+    return read_sixteen.a == 0x1122334455667788LL && read_sixteen.b == 0x0102030405060708LL && sizeof(global_sixteen) == 16 &&
+           bytes_are(&global_nine, nine_bytes, sizeof(nine_bytes)) && read_nine.a == 0x1122334455667788LL && read_nine.b == 0x5a &&
+           sizeof(global_nine) == 16 && _Alignof(atomic_nine) == 16;
+}
+#else
+static int wide_round_trip(void)
+{
+    return 1;
+}
+#endif
+
+int main(void)
+{
+    return !(sizes_are_promoted() && global_round_trip() && local_round_trip() && pointer_round_trip() && member_round_trip() && union_round_trip() &&
+             wide_round_trip());
+}

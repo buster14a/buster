@@ -9719,6 +9719,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         scratch_end(temporary);
     }
     {
+        // An atomic aggregate is accessed at the *promoted* width its type
+        // carries -- three bytes padded to four (#731) -- while the value the
+        // load produces keeps the unqualified type, which is the pairing
+        // ir_validate_canonical_module admits and the one codegen lowers to a
+        // single four-byte access (#762).  tests/basic_c_atomic_aggregate.c
+        // runs the bytes; this pins the IR shape underneath them.
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult atomic_aggregate_tokens = c_preprocess(temporary.arena,
+                                                                 S8("typedef struct { char a, b, c; } three;"
+                                                                    " static _Atomic three global_three;"
+                                                                    " int atomic_aggregate_round_trip(void) {"
+                                                                    " three value = {1, 2, 3};"
+                                                                    " global_three = value;"
+                                                                    " three read = global_three;"
+                                                                    " return read.a + read.b + read.c;"
+                                                                    " }\n"),
+                                                                 (CPreprocessOptions){0});
+        CParseResult atomic_aggregate_parse = c_parse(temporary.arena, atomic_aggregate_tokens);
+        CIRLowerResult atomic_aggregate_ir =
+            c_lower_to_ir(temporary.arena, S8("atomic-aggregate.c"), atomic_aggregate_tokens, atomic_aggregate_parse, target_native);
+        BUSTER_TEST(arguments, atomic_aggregate_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, atomic_aggregate_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, atomic_aggregate_ir.diagnostic_count == 0);
+        u32 aggregate_load_count = 0;
+        u32 aggregate_store_count = 0;
+        bool aggregate_widths_agree = false;
+        if (atomic_aggregate_ir.program)
+        {
+            IrModule* module = atomic_aggregate_ir.program->modules;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(atomic_aggregate_ir.program, module).error == IR_VALIDATION_NONE);
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    if (instruction->opcode != IR_OPCODE_ATOMIC_LOAD && instruction->opcode != IR_OPCODE_ATOMIC_STORE)
+                    {
+                        continue;
+                    }
+                    aggregate_load_count += instruction->opcode == IR_OPCODE_ATOMIC_LOAD;
+                    aggregate_store_count += instruction->opcode == IR_OPCODE_ATOMIC_STORE;
+                    if (!instruction->operand_count || instruction->operands[0].value >= function->value_count)
+                    {
+                        continue;
+                    }
+                    IrType* place_type =
+                        ir_type_from_id(&atomic_aggregate_ir.program->types, function->values[instruction->operands[0].value].canonical_type);
+                    IrType* value_type = place_type ? ir_type_from_id(&atomic_aggregate_ir.program->types, place_type->unqualified_type) : 0;
+                    aggregate_widths_agree |= place_type && value_type && place_type->is_atomic && place_type->layout.resolved &&
+                                              place_type->layout.size == 4 && place_type->layout.alignment == 4 && value_type->kind == IR_TYPE_STRUCT &&
+                                              value_type->layout.resolved && value_type->layout.size == 3;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, aggregate_load_count == 1);
+        BUSTER_TEST(arguments, aggregate_store_count == 1);
+        BUSTER_TEST(arguments, aggregate_widths_agree);
+        scratch_end(temporary);
+    }
+    {
+        // Wider than any lock-free access the target has, which would need a
+        // `libatomic` lock this toolchain does not link: lowering refuses it by
+        // name rather than leaving code generation to fail internally (#762).
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult wide_atomic_tokens = c_preprocess(temporary.arena,
+                                                            S8("typedef struct { long long a, b, c; } twentyfour;"
+                                                               " static _Atomic twentyfour wide;"
+                                                               " void atomic_aggregate_too_wide(twentyfour value) {"
+                                                               " wide = value;"
+                                                               " }\n"),
+                                                            (CPreprocessOptions){0});
+        CParseResult wide_atomic_parse = c_parse(temporary.arena, wide_atomic_tokens);
+        CIRLowerResult wide_atomic_ir =
+            c_lower_to_ir(temporary.arena, S8("atomic-aggregate-wide.c"), wide_atomic_tokens, wide_atomic_parse, target_native);
+        BUSTER_TEST(arguments, wide_atomic_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, wide_atomic_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, wide_atomic_ir.diagnostic_count == 1);
+        if (wide_atomic_ir.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, wide_atomic_ir.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+            BUSTER_STRING_TEST(arguments, wide_atomic_ir.diagnostics[0].message,
+                               S8("in function 'atomic_aggregate_too_wide': C IR lowering does not support an atomic store of a 24-byte aggregate: this target has no lock-free access that wide"));
+        }
+        scratch_end(temporary);
+    }
+    {
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult atomic_builtin_tokens = c_preprocess(temporary.arena,
                                                                S8("int atomic_builtin_ir(void) {"

@@ -6247,6 +6247,46 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         scratch_end(complex_pair_temporary);
     }
 #endif
+    // `_Atomic` over a struct or union is one integer access of the type's
+    // promoted width (#762), so the object's bytes -- the value's and the
+    // padding the promotion added -- are lowering's answer rather than the
+    // layout's, and every allocator has to give the same one.  The fixture
+    // bakes in the bytes Clang writes, so a single translation unit is enough
+    // to pin the representation and not merely self-consistency.  `+cx16` is
+    // forced on x86-64 because the sixteen-byte half of the fixture is the
+    // CMPXCHG16B pair: leaving it to CPU detection would make the coverage
+    // depend on which machine ran the suite.
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators); allocator_index += 1)
+    {
+        TemporalArena atomic_aggregate_temporary = scratch_begin(&arguments->arena, 1);
+        String8 atomic_aggregate_path = buster_test_temporary_path(atomic_aggregate_temporary.arena, S8("buster-c-atomic-aggregate"), S8(""));
+        String8 atomic_aggregate_command_line[] = {
+            c_long_double_allocators[allocator_index],
+#if BUSTER_CPU_ARCH_X86_64
+            S8("-mattr=+cx16"),
+#endif
+            S8("-o"),
+            atomic_aggregate_path,
+            S8("tests/basic_c_atomic_aggregate.c"),
+        };
+        CompilerDriverResult atomic_aggregate = compiler_driver_execute_invocation(
+            atomic_aggregate_temporary.arena,
+            compiler_driver_parse_arguments(atomic_aggregate_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_aggregate_command_line)));
+        BUSTER_TEST(arguments, atomic_aggregate.error == COMPILER_DRIVER_ERROR_NONE);
+        if (atomic_aggregate.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 atomic_aggregate_arguments[] = {atomic_aggregate_path};
+            ProcessSpawnResult atomic_aggregate_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_aggregate_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, atomic_aggregate_spawn.handle != 0);
+            if (atomic_aggregate_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(atomic_aggregate_temporary.arena, atomic_aggregate_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(atomic_aggregate_temporary);
+    }
     // `__attribute__((packed))` and `__attribute__((aligned(N)))` decide
     // object representation, so a compiler that parses and ignores them lays
     // out a different object than every other compiler on the target while

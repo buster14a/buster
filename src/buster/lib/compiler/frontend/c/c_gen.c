@@ -4212,6 +4212,86 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_temporary(CIntegerIrBuilder* builder, IrTy
     return place;
 }
 
+/* Whether an atomic load or store of `type` -- the `_Atomic`-qualified type a
+   place carries -- is one this toolchain can lower.
+
+   An atomic aggregate is read and written as a single integer access of its
+   *promoted* width, which is what c_atomic_promoted_layout pads the type up to
+   (#731): a three-byte record is four bytes aligned four so that one four-byte
+   access covers it.  The widths the backends implement that access at are one,
+   two, four and eight bytes everywhere, plus sixteen on x86-64 when `cx16`
+   gives them CMPXCHG16B -- see the IR_OPCODE_ATOMIC_LOAD and
+   IR_OPCODE_ATOMIC_STORE branches in codegen.c, which are where the aggregate
+   forms are emitted; the machine selectors refuse the aggregate shapes and fall
+   back to those.  Anything wider would need a `libatomic` lock, and there is
+   none here, so refusing in lowering is what turns an internal code generation
+   failure into a diagnostic that names the type (#762).
+
+   Only aggregates are asked about.  Every atomic scalar this frontend builds is
+   already a lock-free width or is refused nearer its own kind -- an atomic wide
+   float by the c_ir_type_contains_wide_float guards beside the callers -- so
+   widening the question here would change behaviour that is not this one's. */
+BUSTER_C_INTERNAL bool c_ir_atomic_aggregate_access_supported(CIntegerIrBuilder* builder, IrTypeId type)
+{
+    IrType* qualified = ir_type_from_id(&builder->program->types, type);
+    IrType* unqualified = qualified && qualified->is_atomic ? ir_type_from_id(&builder->program->types, qualified->unqualified_type) : 0;
+    bool result = true;
+    if (unqualified && (unqualified->kind == IR_TYPE_STRUCT || unqualified->kind == IR_TYPE_UNION) && qualified->layout.resolved)
+    {
+        u64 width = qualified->layout.size;
+        bool wide_pair = width == 16 && builder->target.cpu_arch == CPU_ARCH_X86_64 && target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_CX16);
+        result = width == 1 || width == 2 || width == 4 || width == 8 || wide_pair;
+    }
+
+    return result;
+}
+
+/* Whether every atomic access the lowered body kept is one the backends emit.
+
+   Asked here, over the finished body, rather than where the access is built:
+   an operand is lowered as a value first, and an expression that only wanted
+   its address then recovers the place and drops the load again, so refusing at
+   the emit site rejects `&object.atomic_member` -- which performs no atomic
+   access at all, and is exactly the shape tests/basic_c_packed_layout.c writes
+   over a seventeen-byte atomic member.  This walks the block chains, which is
+   what code generation walks, so an unlinked instruction is never blamed.
+
+   The blame is the function rather than a token: an instruction carries a
+   source range and not the token index the failure funnel wants, and two
+   tokens sharing a spelling offset would make a search for one answer with the
+   wrong occurrence. */
+BUSTER_C_INTERNAL bool c_ir_atomic_aggregate_accesses_lowerable(CIntegerIrBuilder* builder)
+{
+    IrFunction* function = builder->function;
+    bool supported = true;
+    for (u32 block_index = 0; block_index < function->block_count && supported; block_index += 1)
+    {
+        IrInstructionId instruction_id = function->blocks[block_index].first_instruction;
+        while (instruction_id.value != IR_ID_UNDERLYING_INVALID && supported)
+        {
+            IrInstruction* instruction = function->instructions + instruction_id.value;
+            bool atomic_access = instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_ATOMIC_STORE;
+            if (atomic_access && instruction->operand_count && instruction->operands[0].value < function->value_count)
+            {
+                IrTypeId place_type = function->values[instruction->operands[0].value].canonical_type;
+                if (!c_ir_atomic_aggregate_access_supported(builder, place_type))
+                {
+                    IrType* qualified = ir_type_from_id(&builder->program->types, place_type);
+                    builder->failure_message = string_format(
+                        builder->arena, S8("C IR lowering does not support an atomic {S8} of a {u64}-byte aggregate: this target has no lock-free access that wide"),
+                        instruction->opcode == IR_OPCODE_ATOMIC_LOAD ? S8("load") : S8("store"),
+                        qualified && qualified->layout.resolved ? qualified->layout.size : 0);
+                    builder->failure_token_index = UINT32_MAX;
+                    supported = false;
+                }
+            }
+            instruction_id = instruction->next;
+        }
+    }
+
+    return supported;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntegerIrLocal* local, CToken token)
 {
     IrType* place_type = ir_type_from_id(&builder->program->types, local->type);
@@ -41264,7 +41344,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         {
             builder.failure_message = S8("could not initialize cleanup state");
         }
-        if (!parameters_lowered || !delimiters_valid || !cleanup_flags_initialized || !c_ir_lower_body(&builder, declaration, false, 0))
+        if (!parameters_lowered || !delimiters_valid || !cleanup_flags_initialized || !c_ir_lower_body(&builder, declaration, false, 0) ||
+            !c_ir_atomic_aggregate_accesses_lowerable(&builder))
         {
             CSourceLocation failure_location = declaration.location;
             String8 failure_token = {0};
