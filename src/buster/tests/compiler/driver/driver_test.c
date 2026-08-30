@@ -3548,6 +3548,55 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_atomic_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // `_Atomic` over an aggregate is a *wider* type than its operand, because
+    // the promotion pads it up to the next power of two (#731), so the bitcode
+    // writer has to wrap the operand rather than hand back its id: an LLVM
+    // module that stopped at the operand sizes the object short of what the
+    // native object gives it (#767). The fixture holds the three positions a
+    // type is built for -- a file-scope object, a member, a block-scope object
+    // -- plus one atomic type that needs no padding and therefore still is its
+    // operand's type. It runs natively as well, which pins the sizes the
+    // bitcode has to agree with.
+    TemporalArena atomic_bitcode_temporary = arena_begin_temporal(arguments->arena);
+    String8 atomic_bitcode_output = buster_test_temporary_path(atomic_bitcode_temporary.arena, S8("buster-c-atomic-bitcode"), S8(".bc"));
+    String8 atomic_bitcode_command_line[] = {
+        S8("-emit-llvm"), S8("-c"), S8("-o"), atomic_bitcode_output, S8("tests/basic_c_atomic_bitcode.c"),
+    };
+    CompilerDriverResult atomic_bitcode = compiler_driver_execute_invocation(
+        atomic_bitcode_temporary.arena,
+        compiler_driver_parse_arguments(atomic_bitcode_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_bitcode_command_line)));
+    if (atomic_bitcode.error != COMPILER_DRIVER_ERROR_NONE && atomic_bitcode.diagnostic.length)
+    {
+        arguments->show(arguments, S8("Atomic bitcode driver error: {S8}\n"), atomic_bitcode.diagnostic);
+    }
+    BUSTER_TEST(arguments, atomic_bitcode.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, atomic_bitcode.has_llvm_bitcode && atomic_bitcode.llvm_bitcode.success);
+    BUSTER_TEST(arguments, atomic_bitcode.llvm_bitcode.bytes.length >= 4 && atomic_bitcode.llvm_bitcode.bytes.pointer[0] == 'B' &&
+                               atomic_bitcode.llvm_bitcode.bytes.pointer[1] == 'C' && atomic_bitcode.llvm_bitcode.bytes.pointer[2] == 0xc0 &&
+                               atomic_bitcode.llvm_bitcode.bytes.pointer[3] == 0xde);
+    BUSTER_TEST(arguments, file_read(atomic_bitcode_temporary.arena, atomic_bitcode_output, (FileReadOptions){0}).length ==
+                               atomic_bitcode.llvm_bitcode.bytes.length);
+    String8 atomic_bitcode_native_path = buster_test_temporary_path(atomic_bitcode_temporary.arena, S8("buster-c-atomic-bitcode-native"), S8(""));
+    String8 atomic_bitcode_native_command_line[] = {
+        S8("-o"), atomic_bitcode_native_path, S8("tests/basic_c_atomic_bitcode.c"),
+    };
+    CompilerDriverResult atomic_bitcode_native = compiler_driver_execute_invocation(
+        atomic_bitcode_temporary.arena,
+        compiler_driver_parse_arguments(atomic_bitcode_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_bitcode_native_command_line)));
+    BUSTER_TEST(arguments, atomic_bitcode_native.error == COMPILER_DRIVER_ERROR_NONE);
+    if (atomic_bitcode_native.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 atomic_bitcode_native_arguments[] = {atomic_bitcode_native_path};
+        ProcessSpawnResult atomic_bitcode_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_bitcode_native_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){.use_process_environment = true});
+        BUSTER_TEST(arguments, atomic_bitcode_spawn.handle != 0);
+        if (atomic_bitcode_spawn.handle)
+        {
+            BUSTER_TEST(arguments, os_process_wait_sync(atomic_bitcode_temporary.arena, atomic_bitcode_spawn).result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    scratch_end(atomic_bitcode_temporary);
     TemporalArena c_stdatomic_temporary = arena_begin_temporal(arguments->arena);
     String8 c_stdatomic_path = buster_test_temporary_path(c_stdatomic_temporary.arena, S8("buster-c-stdatomic"),
 #if BUSTER_WINDOWS

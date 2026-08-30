@@ -1,6 +1,71 @@
 #include <buster/tests/compiler/llvm/bitcode_test.h>
 #if BUSTER_INCLUDE_TESTS
 
+/* One module holding a three-byte record and an `_Atomic` copy of it whose
+   promoted size is `atomic_size`, emitted for its type table alone: the walk in
+   llvm_bc_build_types visits every type in the program, so no global has to
+   name them for the records to be written.
+
+   `atomic_size` 4 is what the frontend builds -- an atomic type is padded up to
+   the next power of two (#731) -- and 3 is the atomic-scalar shape, where the
+   operand's size already covers the object. The two answer differently: the
+   padded one needs a record of its own, the operand followed by a byte array
+   (#767), and the unpadded one is its operand's type exactly. */
+BUSTER_GLOBAL_LOCAL LlvmBitcodeArtifact llvm_bitcode_test_atomic_record(Arena* arena, u64 atomic_size, bool include_atomic)
+{
+    IrField* fields = arena_allocate(arena, IrField, 3);
+    for (u32 index = 0; index < 3; index += 1)
+    {
+        fields[index] = (IrField){.type = {.value = 1}, .offset = index};
+    }
+    IrType* types = arena_allocate(arena, IrType, 4);
+    types[0] = (IrType){
+        .kind = IR_TYPE_VOID,
+        .layout = {.resolved = true},
+    };
+    types[1] = (IrType){
+        .id = {.value = 1},
+        .kind = IR_TYPE_INTEGER,
+        .layout = {.size = 1, .alignment = 1, .resolved = true},
+        .bit_width = 8,
+        .is_signed = true,
+    };
+    types[2] = (IrType){
+        .id = {.value = 2},
+        .kind = IR_TYPE_STRUCT,
+        .layout = {.size = 3, .alignment = 1, .resolved = true},
+        .fields = fields,
+        .field_count = 3,
+    };
+    types[3] = (IrType){
+        .id = {.value = 3},
+        .unqualified_type = {.value = 2},
+        .kind = IR_TYPE_STRUCT,
+        .layout = {.size = atomic_size, .alignment = (u32)atomic_size, .resolved = true},
+        .fields = fields,
+        .field_count = 3,
+        .is_atomic = true,
+    };
+    IrModule modules[1] = {
+        {
+            .name = S8("bitcode_atomic_test"),
+        },
+    };
+    IrProgram program = {
+        .arena = arena,
+        .modules = modules,
+        .types = {.types = types, .count = include_atomic ? 4 : 3},
+        .module_count = 1,
+    };
+    LlvmBitcodeOptions options = LLVM_BITCODE_OPTIONS_DEFAULT;
+    options.target_triple = S8("x86_64-unknown-linux-gnu");
+    options.data_layout = S8("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    options.source_filename = S8("bitcode_atomic_test.c");
+    options.validate_ir = false;
+
+    return llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+}
+
 UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -132,6 +197,21 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     LlvmBitcodeArtifact invalid = llvm_bitcode_emit_with_options(0, &program, modules, 1, options);
     BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(invalid));
     BUSTER_TEST(arguments, invalid.error.code == LLVM_BITCODE_ERROR_INVALID_ARGUMENT);
+
+    // An atomic aggregate is wider than its operand, so it needs a record of
+    // its own -- the operand plus a `[1 x i8]` padding array, two records --
+    // where an atomic type the operand's own size is that operand's type and
+    // adds none. Clang writes the padded one as `{ %struct.three, [1 x i8] }`;
+    // this pins that a record is built at all and that the unpadded case still
+    // aliases, which is the half every atomic scalar depends on (#767).
+    LlvmBitcodeArtifact without_atomic = llvm_bitcode_test_atomic_record(arena, 3, false);
+    LlvmBitcodeArtifact atomic_alias = llvm_bitcode_test_atomic_record(arena, 3, true);
+    LlvmBitcodeArtifact atomic_padded = llvm_bitcode_test_atomic_record(arena, 4, true);
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(without_atomic));
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(atomic_alias));
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(atomic_padded));
+    BUSTER_TEST(arguments, atomic_alias.stats.type_count == without_atomic.stats.type_count);
+    BUSTER_TEST(arguments, atomic_padded.stats.type_count == without_atomic.stats.type_count + 2);
     return result;
 }
 #endif

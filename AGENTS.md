@@ -3263,10 +3263,19 @@ on a commit you already know is incomplete tells nobody anything.
   four-byte record is one INTEGER eightbyte where the three-byte one already
   was. Clang classifying every record that *contains* an atomic member as
   MEMORY is a divergence of its own, and one where GCC and this compiler agree
-  against it (#763), and the LLVM bitcode writer, which maps an atomic type
-  onto its operand's LLVM type, is short by the padding for an aggregate while
-  the native object takes the size off `IrType::layout` and is not (#767).
-  `tests/basic_c_packed_layout.c` pins the promoted sizes
+  against it (#763). The **LLVM bitcode writer** maps an atomic type onto its
+  operand's LLVM type, which is exact for every atomic scalar -- `_Atomic int`
+  and `int` are one type -- and short by the padding for an aggregate, so an
+  atomic type whose `layout.size` exceeds its operand's gets a record of its
+  own instead: the operand followed by a byte array of the padding, which is
+  what Clang writes as `{ %struct.three, [1 x i8] }` (#767). The operand is
+  then the atomic type's only dependency, so `llvm_bc_type_dependencies_ready`
+  answers for it directly rather than from the fields the qualified copy shares
+  with it -- otherwise the table walk builds the copy as a plain struct before
+  the operand it is meant to wrap has an id, and the padding is lost.
+  `tests/basic_c_atomic_bitcode.c` holds the three positions a type is built
+  for, and the native object it also runs pins the sizes the bitcode has to
+  agree with.  `tests/basic_c_packed_layout.c` pins the promoted sizes
   next to the one-byte aggregate that agrees without them, once for each
   engine, and they stay out of the cross-linked
   `basic_c_packed_layout_shapes.h` for the same reason the shapes above do.

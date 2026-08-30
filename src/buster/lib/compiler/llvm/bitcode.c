@@ -532,6 +532,19 @@ static bool llvm_bc_type_dependencies_ready(LlvmBcContext* context, IrType* type
 {
     if (type)
     {
+        // An atomic type is its operand's LLVM type, or that type wrapped with
+        // the promotion's padding (see llvm_bc_add_ir_type), so the operand is
+        // its only dependency and the kind below is the *operand's* kind --
+        // `_Atomic three` is an IR_TYPE_STRUCT carrying `three`'s own fields.
+        // Answering from those fields would let the walk build the atomic copy
+        // as a plain struct, before the operand it is supposed to wrap has an
+        // id, and the padding would be lost. The self-reference test keeps a
+        // malformed type a "cyclic or unresolved" failure rather than a hang.
+        if (type->is_atomic && type->unqualified_type.value < context->program->types.count &&
+            context->program->types.types + type->unqualified_type.value != type)
+        {
+            return context->ir_type_ids[type->unqualified_type.value] != LLVM_BC_INVALID_ID;
+        }
         switch (type->kind)
         {
         case IR_TYPE_ARRAY:
@@ -591,16 +604,32 @@ static bool llvm_bc_add_ir_type(LlvmBcContext* context, u32 type_index)
     IrType* type = context->program->types.types + type_index;
     if (context->ir_type_ids[type_index] == LLVM_BC_INVALID_ID)
     {
-        // Exact for every atomic scalar, which is one LLVM type with its
-        // operand, and short by the padding for an atomic aggregate, whose C
-        // type is rounded up to the next power of two: Clang spells that one
-        // `{ %struct.three, [1 x i8] }` and this hands back the operand's own
-        // id (issue #767).  The native object is unaffected -- it takes the
-        // size off `IrType::layout` -- so this is the bitcode output alone.
+        // An atomic type is its operand's LLVM type when the two are the same
+        // size, which is every atomic scalar: `_Atomic int` and `int` are one
+        // type. An atomic *aggregate* is wider than its operand, because the C
+        // type is padded up to the next power of two so that one lock-free
+        // access covers it (#731), and an LLVM type that stopped at the
+        // operand would size the object short of what `IrType::layout` -- and
+        // therefore the native object -- says. It gets a record of its own:
+        // the operand followed by a byte array of the padding, which is what
+        // Clang writes as `{ %struct.three, [1 x i8] }` (#767).
         if (type->is_atomic && type->unqualified_type.value < context->program->types.count &&
             context->ir_type_ids[type->unqualified_type.value] != LLVM_BC_INVALID_ID)
         {
-            context->ir_type_ids[type_index] = context->ir_type_ids[type->unqualified_type.value];
+            IrType* operand = context->program->types.types + type->unqualified_type.value;
+            u64 padding = type->layout.resolved && operand->layout.resolved && type->layout.size > operand->layout.size
+                              ? type->layout.size - operand->layout.size
+                              : 0;
+            if (padding)
+            {
+                u32 padding_type_id = llvm_bc_array_type(context, padding, context->i8_type_id);
+                u64 operands[3] = {0, context->ir_type_ids[type->unqualified_type.value], padding_type_id};
+                context->ir_type_ids[type_index] = llvm_bc_add_type_record(context, LLVM_BC_TYPE_STRUCT_ANON, operands, 3);
+            }
+            else
+            {
+                context->ir_type_ids[type_index] = context->ir_type_ids[type->unqualified_type.value];
+            }
             return true;
         }
         if (!llvm_bc_type_dependencies_ready(context, type))
