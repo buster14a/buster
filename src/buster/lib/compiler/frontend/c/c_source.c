@@ -4227,7 +4227,14 @@ BUSTER_C_SHARED bool c_conditional_number(String8 spelling, u64* value)
     return any;
 }
 
-BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* values, u32* value_count)
+// C11 6.10.1p4: conditional-inclusion arithmetic runs in intmax_t, or
+// uintmax_t where an operand is unsigned -- a `u` suffix, or a literal too
+// large for the signed type.  The evaluator's values ride u64 bit patterns
+// with a signedness flag beside each, and only the operations whose answers
+// differ consult it: the comparisons, division and remainder, and the right
+// shift.  An all-unsigned evaluator read `#if -1 < 0` as false, which is how
+// CPython's `static_assert(_Py_IS_TYPE_SIGNED(pid_t))` failed.
+BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* values, bool* unsigned_values, u32* value_count)
 {
     if (c_conditional_is_unary(operation))
     {
@@ -4245,6 +4252,7 @@ BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* 
             break;
         case C_CONDITIONAL_LOGICAL_NOT:
             *value = !*value;
+            unsigned_values[*value_count - 1] = false;
             break;
         case C_CONDITIONAL_BITWISE_NOT:
             *value = ~*value;
@@ -4261,9 +4269,12 @@ BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* 
             return false;
         }
         u64 false_value = values[--*value_count];
+        bool false_unsigned = unsigned_values[*value_count];
         u64 true_value = values[--*value_count];
+        bool true_unsigned = unsigned_values[*value_count];
         u64* condition = values + *value_count - 1;
         *condition = *condition ? true_value : false_value;
+        unsigned_values[*value_count - 1] = true_unsigned || false_unsigned;
         return true;
     }
     if (*value_count < 2)
@@ -4271,66 +4282,109 @@ BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* 
         return false;
     }
     u64 right = values[--*value_count];
+    bool right_unsigned = unsigned_values[*value_count];
     u64* left = values + *value_count - 1;
+    bool mixed_unsigned = unsigned_values[*value_count - 1] || right_unsigned;
     switch (operation)
     {
     case C_CONDITIONAL_MULTIPLY:
         *left *= right;
+        unsigned_values[*value_count - 1] = mixed_unsigned;
         break;
     case C_CONDITIONAL_DIVIDE:
         if (!right)
             return false;
-        *left /= right;
+        if (mixed_unsigned)
+        {
+            *left /= right;
+        }
+        else
+        {
+            if ((s64)*left == INT64_MIN && (s64)right == -1)
+                return false;
+            *left = (u64)((s64)*left / (s64)right);
+        }
+        unsigned_values[*value_count - 1] = mixed_unsigned;
         break;
     case C_CONDITIONAL_REMAINDER:
         if (!right)
             return false;
-        *left %= right;
+        if (mixed_unsigned)
+        {
+            *left %= right;
+        }
+        else
+        {
+            if ((s64)*left == INT64_MIN && (s64)right == -1)
+                return false;
+            *left = (u64)((s64)*left % (s64)right);
+        }
+        unsigned_values[*value_count - 1] = mixed_unsigned;
         break;
     case C_CONDITIONAL_ADD:
         *left += right;
+        unsigned_values[*value_count - 1] = mixed_unsigned;
         break;
     case C_CONDITIONAL_SUBTRACT:
         *left -= right;
+        unsigned_values[*value_count - 1] = mixed_unsigned;
         break;
     case C_CONDITIONAL_SHIFT_LEFT:
         *left = right < 64 ? *left << right : 0;
         break;
     case C_CONDITIONAL_SHIFT_RIGHT:
-        *left = right < 64 ? *left >> right : 0;
+        if (unsigned_values[*value_count - 1])
+        {
+            *left = right < 64 ? *left >> right : 0;
+        }
+        else
+        {
+            *left = right < 64 ? (u64)((s64)*left >> right) : (u64)((s64)*left >> 63);
+        }
         break;
     case C_CONDITIONAL_LESS:
-        *left = *left < right;
+        *left = mixed_unsigned ? *left < right : (s64)*left < (s64)right;
+        unsigned_values[*value_count - 1] = false;
         break;
     case C_CONDITIONAL_LESS_EQUAL:
-        *left = *left <= right;
+        *left = mixed_unsigned ? *left <= right : (s64)*left <= (s64)right;
+        unsigned_values[*value_count - 1] = false;
         break;
     case C_CONDITIONAL_GREATER:
-        *left = *left > right;
+        *left = mixed_unsigned ? *left > right : (s64)*left > (s64)right;
+        unsigned_values[*value_count - 1] = false;
         break;
     case C_CONDITIONAL_GREATER_EQUAL:
-        *left = *left >= right;
+        *left = mixed_unsigned ? *left >= right : (s64)*left >= (s64)right;
+        unsigned_values[*value_count - 1] = false;
         break;
     case C_CONDITIONAL_EQUAL:
         *left = *left == right;
+        unsigned_values[*value_count - 1] = false;
         break;
     case C_CONDITIONAL_NOT_EQUAL:
         *left = *left != right;
+        unsigned_values[*value_count - 1] = false;
         break;
     case C_CONDITIONAL_BITWISE_AND:
         *left &= right;
+        unsigned_values[*value_count - 1] = mixed_unsigned;
         break;
     case C_CONDITIONAL_BITWISE_XOR:
         *left ^= right;
+        unsigned_values[*value_count - 1] = mixed_unsigned;
         break;
     case C_CONDITIONAL_BITWISE_OR:
         *left |= right;
+        unsigned_values[*value_count - 1] = mixed_unsigned;
         break;
     case C_CONDITIONAL_LOGICAL_AND:
         *left = *left && right;
+        unsigned_values[*value_count - 1] = false;
         break;
     case C_CONDITIONAL_LOGICAL_OR:
         *left = *left || right;
+        unsigned_values[*value_count - 1] = false;
         break;
     default:
         return false;
@@ -4611,6 +4665,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
         return false;
     }
     u64* values = arena_allocate(arena, u64, expanded_count + 1);
+    bool* unsigned_values = arena_allocate(arena, bool, expanded_count + 1);
     CConditionalOperator* operations = arena_allocate(arena, CConditionalOperator, expanded_count + 1);
     u32 value_count = 0;
     u32 operation_count = 0;
@@ -4621,10 +4676,20 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
         if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
             u64 value = 0;
-            if (!expect_operand || !c_conditional_number(c_token_spelling(base, token), &value))
+            String8 number_spelling = c_token_spelling(base, token);
+            if (!expect_operand || !c_conditional_number(number_spelling, &value))
             {
                 return false;
             }
+            // The literal is uintmax_t when it says so or when its value
+            // does not fit the signed type; everything else -- including
+            // every character constant and keyword below -- is intmax_t.
+            bool literal_unsigned = value > (u64)INT64_MAX;
+            for (u64 suffix_index = 0; suffix_index < number_spelling.length; suffix_index += 1)
+            {
+                literal_unsigned |= number_spelling.pointer[suffix_index] == 'u' || number_spelling.pointer[suffix_index] == 'U';
+            }
+            unsigned_values[value_count] = literal_unsigned;
             values[value_count++] = value;
             expect_operand = false;
             continue;
@@ -4638,6 +4703,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
                 return false;
             }
             (void)character_kind;
+            unsigned_values[value_count] = false;
             values[value_count++] = character;
             expect_operand = false;
             continue;
@@ -4648,6 +4714,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
             {
                 return false;
             }
+            unsigned_values[value_count] = false;
             values[value_count++] = c_preprocess_dialect_is_c23(result->dialect) && c_token_spelling_equal(base, token, S8("true"));
             expect_operand = false;
             continue;
@@ -4673,7 +4740,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
             }
             while (operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN)
             {
-                if (!c_conditional_apply(operations[--operation_count], values, &value_count))
+                if (!c_conditional_apply(operations[--operation_count], values, unsigned_values, &value_count))
                 {
                     return false;
                 }
@@ -4695,7 +4762,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
             while (operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN &&
                    c_conditional_precedence(operations[operation_count - 1]) > precedence)
             {
-                if (!c_conditional_apply(operations[--operation_count], values, &value_count))
+                if (!c_conditional_apply(operations[--operation_count], values, unsigned_values, &value_count))
                 {
                     return false;
                 }
@@ -4713,7 +4780,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
             while (operation_count && operations[operation_count - 1] != C_CONDITIONAL_QUESTION)
             {
                 CConditionalOperator previous = operations[--operation_count];
-                if (previous == C_CONDITIONAL_OPEN || !c_conditional_apply(previous, values, &value_count))
+                if (previous == C_CONDITIONAL_OPEN || !c_conditional_apply(previous, values, unsigned_values, &value_count))
                 {
                     return false;
                 }
@@ -4746,7 +4813,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
                 break;
             }
             operation_count -= 1;
-            if (!c_conditional_apply(previous, values, &value_count))
+            if (!c_conditional_apply(previous, values, unsigned_values, &value_count))
             {
                 return false;
             }
@@ -4761,7 +4828,7 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
     while (operation_count)
     {
         CConditionalOperator operation = operations[--operation_count];
-        if (operation == C_CONDITIONAL_OPEN || operation == C_CONDITIONAL_QUESTION || !c_conditional_apply(operation, values, &value_count))
+        if (operation == C_CONDITIONAL_OPEN || operation == C_CONDITIONAL_QUESTION || !c_conditional_apply(operation, values, unsigned_values, &value_count))
         {
             return false;
         }

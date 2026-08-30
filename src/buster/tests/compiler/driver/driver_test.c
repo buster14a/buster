@@ -3612,6 +3612,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_extern_aligned_definition.c"),
         S8("tests/basic_c_macro_comment_bitfields.c"),
         S8("tests/basic_c_typeof_comma_base.c"),
+        S8("tests/basic_c_conditional_signed_arithmetic.c"),
     };
     for (u32 shape_index = 0; shape_index < BUSTER_ARRAY_LENGTH(c_cpython_shape_fixtures); shape_index += 1)
     {
