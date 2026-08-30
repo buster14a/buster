@@ -244,6 +244,7 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_SIMD,
     C_SYMBOL_BUILTIN_FRAME_ADDRESS,
     C_SYMBOL_BUILTIN_ALLOCA,
+    C_SYMBOL_BUILTIN_COMPLEX,
     C_SYMBOL_BUILTIN_COUNT,
 } CSymbolBuiltin;
 BUSTER_C_EXTERN CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling);

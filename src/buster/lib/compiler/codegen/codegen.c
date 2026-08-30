@@ -566,13 +566,21 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_transfers_control(String8 sourc
 // emitter cannot also hand to another operand, so a template naming it cannot
 // overwrite anything. musl's `fmodl` is the shape: `fnstsw %%ax` beside an
 // `"=a"` output, where the literal register *is* the operand's register.
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(String8 source, bool transfers_control, bool const* reserved_registers)
+//
+// `reason_out`, when the caller asks for one, receives the rule's own words for
+// the refusal instead of leaving the driver to report an opcode number (#831).
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(Arena* arena, String8 source, bool transfers_control, bool const* reserved_registers,
+                                                                        String8* reason_out)
 {
     for (u64 index = 0; index < source.length; index += 1)
     {
         u8 character = (u8)source.pointer[index];
         if (character == '[' || character == ']')
         {
+            if (reason_out)
+            {
+                *reason_out = S8("asm template writes a bracketed memory reference, which names a register no pass here has seen");
+            }
             return false;
         }
         if (character == '*')
@@ -582,6 +590,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(String8 
                                      (source.pointer[marked + 1] == '[' || (source.pointer[marked + 1] >= '0' && source.pointer[marked + 1] <= '9'));
             if (!operand_reference)
             {
+                if (reason_out)
+                {
+                    *reason_out = S8("asm template dereferences with '*' somewhere other than directly in front of an operand reference");
+                }
                 return false;
             }
             continue;
@@ -647,6 +659,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(String8 
             bool reserved = reserved_registers && codegen_inline_assembly_clobber_register(name, &named_register) && reserved_registers[named_register];
             if (!memory_base && !segment_override && !stack_hand_off && !reserved)
             {
+                if (reason_out)
+                {
+                    *reason_out = string_format(arena, S8("asm template names the literal register '%{S8}', which the emitter could also hand to an operand"), name);
+                }
                 return false;
             }
         }
@@ -667,7 +683,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(String8 
 // emitter, where the same table module-level assembly uses decides which
 // directives exist. `.hidden sym` in front of a PC-relative reference is what
 // a libc's GETFUNCSYM writes.
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(String8 source)
+//
+// `reason_out`, when the caller asks for one, receives the rule's own words for
+// the refusal instead of leaving the driver to report an opcode number (#831).
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(Arena* arena, String8 source, String8* reason_out)
 {
     u64 index = 0;
     while (index < source.length)
@@ -694,6 +713,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(String8 so
         bool directive = mnemonic.length && mnemonic.pointer[0] == '.';
         if (!directive && !codegen_inline_assembly_mnemonic_allowed(mnemonic))
         {
+            if (reason_out)
+            {
+                *reason_out = string_format(arena, S8("asm template names the instruction '{S8}', which is outside the mnemonics this emitter accepts"), mnemonic);
+            }
             return false;
         }
         u64 line_end = index;
@@ -717,6 +740,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(String8 so
             // pass above has seen, and stays out.
             if ((source.pointer[index] >= '0' && source.pointer[index] <= '9') || source.pointer[index] == '+' || source.pointer[index] == '-')
             {
+                if (reason_out)
+                {
+                    *reason_out = string_format(arena, S8("asm template writes a bare immediate operand to '{S8}', which no pass here has seen"), mnemonic);
+                }
                 return false;
             }
             while (index < line_end && source.pointer[index] != ',')
@@ -795,7 +822,7 @@ BUSTER_GLOBAL_LOCAL void codegen_inline_assembly_normalize_statements(String8* s
 
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
                                                                    IrInstructionExtra extra, X64Register* registers, u32* vector_registers,
-                                                                   AssemblySyntax syntax, String8* source_out)
+                                                                   AssemblySyntax syntax, String8* source_out, String8* reason_out)
 {
     String8 template_source = extra.literal;
     // The registers this asm has already committed to, which is what licenses a
@@ -822,8 +849,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, 
             reserved_registers[clobbered] = true;
         }
     }
-    if (!codegen_inline_assembly_template_literal_valid(template_source, codegen_inline_assembly_transfers_control(template_source),
-                                                       reserved_registers))
+    if (!codegen_inline_assembly_template_literal_valid(arena, template_source, codegen_inline_assembly_transfers_control(template_source),
+                                                       reserved_registers, reason_out))
     {
         return false;
     }
@@ -942,7 +969,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, 
     // The shape check runs before the prefix is folded in, so LOCK is still a
     // statement of its own there and is checked against the mnemonic list like
     // every other one.
-    if (!codegen_inline_assembly_register_only_source(*source_out))
+    if (!codegen_inline_assembly_register_only_source(arena, *source_out, reason_out))
     {
         return false;
     }
@@ -16354,7 +16381,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             String8 source = {0};
                             if (!codegen_inline_assembly_resolve_template(arena, program, function, instruction, asm_extra, asm_registers,
-                                                                           asm_vector_registers, codegen_inline_assembly_syntax(options), &source))
+                                                                           asm_vector_registers, codegen_inline_assembly_syntax(options), &source,
+                                                                           &result.failure_reason))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;

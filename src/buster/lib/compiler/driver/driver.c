@@ -3122,12 +3122,18 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             }
         }
         result.error = COMPILER_DRIVER_ERROR_CODEGEN;
+        // A refusal that has a rule behind it says so in the rule's own words
+        // and blames the source position, the way the frontend's refusals do;
+        // the instruction identity below is what is left for a shape that has
+        // no lowering yet, where there is no rule to name (#831).
         result.diagnostic =
-            string_format(arena,
-                          S8("C code generation failed with error {u32}, function {u32} ('{S8}', state {u32}, blocks {u32}, instructions {u32}), instruction "
-                             "{u32}, opcode {u32}, operation {u32}, source {u32}:{u32}, referenced symbol '{S8}'"),
-                          (u32)code.error, code.failed_function.value, function_name, function_state, function_block_count, function_instruction_count,
-                          code.failed_instruction.value, (u32)code.failed_opcode, operation, source_line, source_column, referenced_symbol);
+            code.failure_reason.length
+                ? string_format(arena, S8("{S8} (in function '{S8}', source {u32}:{u32})"), code.failure_reason, function_name, source_line, source_column)
+                : string_format(arena,
+                                S8("C code generation failed with error {u32}, function {u32} ('{S8}', state {u32}, blocks {u32}, instructions {u32}), "
+                                   "instruction {u32}, opcode {u32}, operation {u32}, source {u32}:{u32}, referenced symbol '{S8}'"),
+                                (u32)code.error, code.failed_function.value, function_name, function_state, function_block_count, function_instruction_count,
+                                code.failed_instruction.value, (u32)code.failed_opcode, operation, source_line, source_column, referenced_symbol);
         goto end;
     }
     ObjectFile object = object_from_canonical_codegen_module(arena, lowered.program, &code, invocation.target);

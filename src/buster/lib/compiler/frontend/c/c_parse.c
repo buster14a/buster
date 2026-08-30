@@ -722,6 +722,51 @@ BUSTER_C_INTERNAL bool c_parse_alignment_specifiers(CTypeParseMachine* machine, 
 // callers hold it while it is still the table's tail; the tail is rewound with
 // it there, which is what keeps the declarator-position records they append
 // next contiguous with what survives here.
+// Where a declaration's shared specifiers stop belonging to the declaration
+// and start belonging to an aggregate it defines. `struct
+// __attribute__((aligned(4))) T { ... }` and `struct T { ... }
+// __attribute__((aligned(4)))` both write the attribute on the definition, and
+// c_parse_layout_attributes already reads both positions into that aggregate's
+// CAggregateAttributes record. Scanning the same tokens again for the
+// declaration's own run gave the operand a second reader, and for a typedef
+// that reader *replaces* the alias's alignment where the definition's own
+// raises it: `typedef struct __attribute__((aligned(4))) T { long long f : 13; } T;`
+// made `_Alignof(T)` the literal 4 against `_Alignof(struct T)`'s computed 8,
+// and objects declared through the alias were laid out under-aligned to match
+// (#819). A definition is the last thing in the specifiers, so the boundary is
+// the tag keyword that introduces the one whose body opens in this range;
+// attributes written in front of it belong to the declaration and stay. Enum
+// definitions are left alone because no side table takes their attributes, so
+// cutting there would drop the request rather than move it.
+BUSTER_C_INTERNAL u32 c_parse_specifier_alignment_end(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 result = end;
+    u32 keyword = end;
+    u32 index = start;
+    bool body_reached = false;
+    while (index < end && !body_reached)
+    {
+        CToken token = preprocess.tokens[index];
+        // The first brace in the specifiers opens the definition's body. The
+        // keyword walk stops there whether or not a struct or union
+        // introduced it -- an `enum { ... }` body ends the scan with the range
+        // uncut, which is the deliberate no-op above.
+        body_reached = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE);
+        if (!body_reached && token.kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+            if (string_equal(spelling, S8("struct")) || string_equal(spelling, S8("union")))
+            {
+                keyword = index;
+            }
+        }
+        index += !body_reached;
+    }
+    result = body_reached ? keyword : end;
+
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_parse_typedef_alignment_run(CParseResult* result, CPreprocessResult preprocess, u32 alignment_start, u32* alignment_count)
 {
     u32 kept = 0;
@@ -1035,7 +1080,14 @@ struct CParseLayoutContext
 // evaluates the same records, reports those by name, and lays the type out
 // with this same maximum, and refusing the fold here only replaced that
 // diagnostic with whatever a caller says when a sizeof will not fold.
-BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* context, u32 start, u32 count, u32* alignment, bool* provisional_out)
+// `requested_out`, when asked for, receives the largest alignment any of the
+// records *asks* for, before it is merged with the declared type's natural
+// alignment. Only the bit-field placement rule needs that raw number: GNU
+// `aligned(N)` starts a bit-field at the next multiple of N bytes even when N
+// is below the declared type's own alignment, while every other reader of a
+// request only ever raises with it. Zero means no record resolved.
+BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* context, u32 start, u32 count, u32* alignment, u32* requested_out,
+                                                           bool* provisional_out)
 {
     bool valid = true;
     for (u32 specifier_index = 0; specifier_index < count; specifier_index += 1)
@@ -1102,6 +1154,10 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
         if (requested_alignment > UINT32_MAX || (requested_alignment & (requested_alignment - 1)))
         {
             continue;
+        }
+        if (requested_out)
+        {
+            *requested_out = BUSTER_MAX(*requested_out, (u32)requested_alignment);
         }
         *alignment = BUSTER_MAX(*alignment, (u32)requested_alignment);
     }
@@ -1264,7 +1320,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                 u32 alias_alignment = 1;
                 bool alias_provisional = provisional[type.unqualified_type.value];
                 if (!c_parse_layout_alignment_specifiers(&layout_context, requested_type_alignment->alignment_start,
-                                                         requested_type_alignment->alignment_count, &alias_alignment, &alias_provisional))
+                                                         requested_type_alignment->alignment_count, &alias_alignment, 0, &alias_provisional))
                 {
                     continue;
                 }
@@ -1673,8 +1729,9 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                 {
                     member_alignment = BUSTER_MIN(member_alignment, pack_alignment);
                 }
+                u32 member_alignment_request = 0;
                 bool alignment_resolved = c_parse_layout_alignment_specifiers(&layout_context, member.alignment_start, member.alignment_count,
-                                                                              &member_alignment, &aggregate_provisional);
+                                                                              &member_alignment, &member_alignment_request, &aggregate_provisional);
                 if (!alignment_resolved)
                 {
                     fields_resolved = false;
@@ -1695,10 +1752,30 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                         break;
                     }
                     // An unnamed bit-field's declared type does not raise the
-                    // aggregate's alignment; a named one's does.
+                    // aggregate's alignment; a named one's does, and neither
+                    // does a GNU `aligned` written on an unnamed one.
                     if (member.name.length)
                     {
                         alignment = BUSTER_MAX(alignment, member_alignment);
+                    }
+                    // GNU `aligned(N)` on a bit-field starts it at the next
+                    // multiple of N bytes -- unconditionally, not only when it
+                    // would straddle its storage unit there, and against the
+                    // operand rather than the alignment the declared type
+                    // raises it to. `unsigned a : 20; unsigned b : 5
+                    // __attribute__((aligned(1)));` puts b at bit 24 where the
+                    // straddle rule alone puts it at 20, so this is the one
+                    // request that moves a bit-field *down*. Measured against
+                    // clang and gcc 2026-08-30; the IR layout in c_gen spells
+                    // the same rule.
+                    if (type.kind != C_TYPE_UNION && member_alignment_request)
+                    {
+                        u64 request_bits = (u64)member_alignment_request * 8;
+                        u64 request_remainder = bit_position % request_bits;
+                        if (request_remainder)
+                        {
+                            bit_position += request_bits - request_remainder;
+                        }
                     }
                     if (type.kind == C_TYPE_UNION)
                     {
@@ -1762,7 +1839,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
                 continue;
             }
             if (!c_parse_layout_alignment_specifiers(&layout_context, aggregate_attributes.alignment_start, aggregate_attributes.alignment_count,
-                                                     &alignment, &aggregate_provisional))
+                                                     &alignment, 0, &aggregate_provisional))
             {
                 continue;
             }
@@ -6954,7 +7031,23 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     // declarator, reached backwards and moved every member before it.
     bool member_packed = frame->is_packed;
     c_parse_layout_attributes(result, preprocess, frame->declarator_start, frame->declarator_end, &member_packed, 0, 0);
-    if (is_bit_field && alignment_count)
+    // C11 6.7.5p2 forbids `_Alignas` on a bit-field and both reference
+    // compilers refuse it, but GNU `aligned` on one is accepted by clang and
+    // gcc and moves the field: it starts at the next multiple of the requested
+    // alignment, and raises the aggregate's alignment when the member has a
+    // name. The two spellings share this table, so the run is partitioned by
+    // c_alignment_specifier_is_standard the way a typedef's specifier-position
+    // run is, and only the standard half is refused. A run that mixes them is
+    // dropped whole: the program is already ill-formed, and the member row
+    // names one contiguous range, which the segment's run is not free to be
+    // compacted inside -- the next declarator of the same segment narrows the
+    // same records again.
+    bool standard_bit_field_alignment = false;
+    for (u32 index = 0; is_bit_field && index < alignment_count; index += 1)
+    {
+        standard_bit_field_alignment |= c_alignment_specifier_is_standard(preprocess, result->alignments[alignment_start + index]);
+    }
+    if (standard_bit_field_alignment)
     {
         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, frame->first), C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("alignment specifier cannot be applied to a bit-field"));
         alignment_count = 0;
@@ -9264,11 +9357,26 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
         u32 bound_start = open + 1;
         u32 bound_count = *index - bound_start - 1;
         bool is_static = false;
+        // `[*]` may carry the same qualifiers and `static` any other array
+        // parameter bound may -- `int a[const *]` is what a prototype writes
+        // for a definition's `int a[const n]` -- so the star is looked for
+        // among what is left after them rather than as the bound's only token.
+        u32 bound_word_count = 0;
+        u32 bound_word_index = bound_start;
         for (u32 token_index = bound_start; token_index < bound_start + bound_count; token_index += 1)
         {
-            is_static |= string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]), S8("static"));
+            CToken bound_token = preprocess.tokens[token_index];
+            String8 bound_spelling = c_token_spelling(preprocess.spelling_base, bound_token);
+            bool is_static_word = string_equal(bound_spelling, S8("static"));
+            is_static |= is_static_word;
+            CType bound_qualifiers = {0};
+            if (!is_static_word && !(bound_token.kind == C_TOKEN_IDENTIFIER && c_parse_type_qualifier_word(bound_spelling, &bound_qualifiers)))
+            {
+                bound_word_index = token_index;
+                bound_word_count += 1;
+            }
         }
-        bool is_star = bound_count == 1 && c_token_is_punctuator(&preprocess.tokens[bound_start], C_PUNCTUATOR_STAR);
+        bool is_star = bound_word_count == 1 && c_token_is_punctuator(&preprocess.tokens[bound_word_index], C_PUNCTUATOR_STAR);
         if (!c_parse_result_reserve_array_bounds(result, 1))
         {
             result->array_bound_count = first_bound;
@@ -9557,7 +9665,8 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
         u32 shared_end = declaration->is_declarator_continuation
                              ? c_ir_declarator_list_specifier_end(preprocess, declaration->token_start, name_index)
                              : name_index;
-        if (!c_parse_alignment_specifiers(machine, result, preprocess, declaration->token_start, shared_end, &declaration->alignment_start,
+        u32 specifier_alignment_end = c_parse_specifier_alignment_end(preprocess, declaration->token_start, shared_end);
+        if (!c_parse_alignment_specifiers(machine, result, preprocess, declaration->token_start, specifier_alignment_end, &declaration->alignment_start,
                                           &declaration->alignment_count))
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]), C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("invalid alignment specifier"));
@@ -10042,7 +10151,14 @@ BUSTER_C_SHARED bool c_parse_types_compatible(Arena* result_arena, CParseResult*
             }
             CArrayBound left_bound = result->array_bounds[left_type.array_bound];
             CArrayBound right_bound = result->array_bounds[right_type.array_bound];
-            if (left_bound.token_count && right_bound.token_count)
+            // C11 6.7.6.2p4: `[*]` is a variable-length array of unspecified
+            // size, valid only in a prototype that is not a definition -- it
+            // is the standard way to forward-declare the definition that
+            // spells the same parameter `[n]`. Its bound is one `*` token, so
+            // the spelling comparison below saw `*` against `n`, failed to
+            // evaluate `*` as a constant, and reported the pair as conflicting
+            // declarations (#825). An unspecified size agrees with any bound.
+            if (!left_bound.is_star && !right_bound.is_star && left_bound.token_count && right_bound.token_count)
             {
                 bool spelled_alike = left_bound.token_count == right_bound.token_count;
                 for (u32 token_index = 0; spelled_alike && token_index < left_bound.token_count; token_index += 1)

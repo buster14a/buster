@@ -7447,6 +7447,90 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_marked\"\n\t.byte 0x0f, 0x0b")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_scoped\"\n\t.byte 0x0f, 0x0b")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(c23_noreturn_assembly.output, S8("call \"die_plain\"\n\tmov eax, 0x0")) != BUSTER_STRING_NO_MATCH);
+    // Six frontend defects the 2026-08-30 differential harness run found, each
+    // with its own fixture so a regression names the contract it broke: a
+    // positional initializer storing into an anonymous bit-field instead of
+    // skipping it (#818), a typedef taking an attributed struct definition's
+    // attribute operand as the alias's own alignment (#819), a statement
+    // expression refused in every lazily lowered control position (#820), GNU
+    // `~` conjugation and `__builtin_complex` (#822, #823), GNU `aligned` on a
+    // bit-field (#824), and a `[*]` prototype conflicting with the `[n]`
+    // definition it forward-declares (#825). All six run under every register
+    // allocator: three are layout or lowering defects rather than parsing
+    // ones, and the layout pair has to agree between the sizeof folding in the
+    // parse and the IR layout, which only a running object proves.
+    String8 c_differential_regression_paths[] = {
+        S8("tests/basic_c_anonymous_bit_field_initializer.c"),
+        S8("tests/basic_c_attributed_struct_typedef_alignment.c"),
+        S8("tests/basic_c_statement_expression_condition.c"),
+        S8("tests/basic_c_complex_conjugate.c"),
+        S8("tests/basic_c_bit_field_aligned.c"),
+        S8("tests/basic_c_unspecified_array_parameter.c"),
+    };
+    String8 c_differential_regression_names[] = {
+        S8("buster-c-anonymous-bit-field-initializer"),
+        S8("buster-c-attributed-struct-typedef-alignment"),
+        S8("buster-c-statement-expression-condition"),
+        S8("buster-c-complex-conjugate"),
+        S8("buster-c-bit-field-aligned"),
+        S8("buster-c-unspecified-array-parameter"),
+    };
+    for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_differential_regression_paths); fixture_index += 1)
+    {
+        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            TemporalArena differential_temporary = scratch_begin(&arguments->arena, 1);
+            String8 fixture_path = buster_test_temporary_path(differential_temporary.arena, c_differential_regression_names[fixture_index], S8(""));
+            String8 fixture_command_line[] = {
+                c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_differential_regression_paths[fixture_index],
+            };
+            CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                differential_temporary.arena,
+                compiler_driver_parse_arguments(differential_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+            if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 fixture_arguments[] = {fixture_path};
+                ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                if (fixture_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(differential_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(differential_temporary);
+        }
+    }
+    // `_Alignas` on a bit-field stays refused, which is the half of #824 that
+    // is not a gap: C11 6.7.5p2 forbids it and both reference compilers refuse
+    // it. Asserting it here is what keeps the spelling partition above from
+    // being widened into an unconditional acceptance.
+    String8 c_bit_field_alignas_command_line[] = {
+        S8("-S"),
+        S8("-target"),
+        S8("x86_64-unknown-linux-gnu"),
+        S8("tests/basic_c_bit_field_alignas.c"),
+    };
+    CompilerDriverResult c_bit_field_alignas = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_bit_field_alignas_command_line)));
+    BUSTER_TEST(arguments, c_bit_field_alignas.error != COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, string_first_sequence(c_bit_field_alignas.diagnostic, S8("alignment specifier cannot be applied to a bit-field")) != BUSTER_STRING_NO_MATCH);
+    // An inline-assembly template the emitter refuses must name the rule that
+    // refused it and the register it named, not leak an opcode number (#831).
+    // The refusal itself is by design, so the assertion is on the wording; the
+    // fixture is expected never to compile.
+    String8 c_asm_literal_register_command_line[] = {
+        S8("-S"),
+        S8("-target"),
+        S8("x86_64-unknown-linux-gnu"),
+        S8("tests/basic_c_asm_literal_register.c"),
+    };
+    CompilerDriverResult c_asm_literal_register = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_asm_literal_register_command_line)));
+    BUSTER_TEST(arguments, c_asm_literal_register.error == COMPILER_DRIVER_ERROR_CODEGEN);
+    BUSTER_TEST(arguments, string_first_sequence(c_asm_literal_register.diagnostic, S8("names the literal register '%eax'")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(c_asm_literal_register.diagnostic, S8("opcode")) == BUSTER_STRING_NO_MATCH);
     // Decimal literals with a large exponent still require correctly rounded
     // binary conversion.  This exact bit pattern is the value Clang emits
     // for 123e+127; an accumulated decimal f64 can drift by two ulps.

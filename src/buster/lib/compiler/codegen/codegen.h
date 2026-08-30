@@ -402,6 +402,13 @@ struct CodegenModule
     bool position_independent;
     u8 reserved[2];
     CodegenError error;
+    // Why the failing shape was refused, in the words of the rule that refused
+    // it, for the refusals that have a rule worth naming: an inline assembly
+    // template spelling a register the emitter could also hand to an operand,
+    // or a mnemonic outside the allowlist. Empty means there is nothing to add
+    // to the instruction identity below, which is the case for every refusal
+    // that is a missing lowering rather than a stated rule.
+    String8 failure_reason;
     CodegenAbi abi;
     CodegenStatistics statistics;
     IrFunctionId failed_function;

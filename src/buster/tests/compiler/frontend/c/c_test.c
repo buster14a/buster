@@ -9511,7 +9511,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             S8("_Alignas(16) int function(void);\n"),
             S8("int function(_Alignas(16) int value);\n"),
             S8("struct Value { _Alignas(8) unsigned field : 1; };\n"),
-            S8("struct Value { unsigned field : 1 __attribute__((aligned(8))); };\n"),
             S8("int function(void) { register _Alignas(16) int value; return 0; }\n"),
         };
         for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_alignment_sources); source_index += 1)
@@ -9525,6 +9524,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
             {
                 BUSTER_TEST(arguments, invalid_parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_ALIGNMENT);
             }
+            scratch_end(temporary);
+        }
+    }
+    {
+        // GNU `aligned` on a bit-field is the one alignment spelling in that
+        // position both reference compilers accept, and it lays the field out
+        // (#824): it starts at the next multiple of the requested alignment
+        // and, when the member has a name, raises the aggregate's alignment.
+        // Only the `_Alignas` spelling above stays refused, which C11 6.7.5p2
+        // requires. Both spellings share one record table, so this positive
+        // case is what keeps the partition between them from being lost.
+        String8 aligned_bit_field_sources[] = {
+            S8("struct Value { unsigned lead : 3; unsigned field : 5 __attribute__((aligned(4))); };\n"),
+            S8("struct Value { unsigned lead : 3; __attribute__((aligned(4))) unsigned field : 5; };\n"),
+        };
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(aligned_bit_field_sources); source_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessResult aligned_tokens = c_preprocess(temporary.arena, aligned_bit_field_sources[source_index], (CPreprocessOptions){0});
+            CParseResult aligned_parse = c_parse(temporary.arena, aligned_tokens);
+            BUSTER_TEST(arguments, aligned_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, aligned_parse.diagnostic_count == 0);
             scratch_end(temporary);
         }
     }
