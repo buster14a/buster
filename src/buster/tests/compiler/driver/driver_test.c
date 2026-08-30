@@ -7512,18 +7512,23 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_atomic_byte_assembly.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(c_atomic_byte_assembly.output, S8("0x86, 0x02")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(c_atomic_byte_assembly.output, S8("0xf0, 0x40, 0x0f, 0xb0")) != BUSTER_STRING_NO_MATCH);
-    // Six frontend defects the 2026-08-30 differential harness run found, each
-    // with its own fixture so a regression names the contract it broke: a
+    // Eight frontend gaps, each with its own fixture so a regression names the
+    // contract it broke. Six came from the 2026-08-30 differential harness run
+    // and two from the CPython configure differential: a
     // positional initializer storing into an anonymous bit-field instead of
     // skipping it (#818), a typedef taking an attributed struct definition's
     // attribute operand as the alias's own alignment (#819), a statement
     // expression refused in every lazily lowered control position (#820), GNU
     // `~` conjugation and `__builtin_complex` (#822, #823), GNU `aligned` on a
     // bit-field (#824), and a `[*]` prototype conflicting with the `[n]`
-    // definition it forward-declares (#825). All six run under every register
-    // allocator: three are layout or lowering defects rather than parsing
-    // ones, and the layout pair has to agree between the sizeof folding in the
-    // parse and the IR layout, which only a running object proves.
+    // definition it forward-declares (#825), and the GNU `__atomic_*` builtin
+    // family, which the frontend had only the `__c11_atomic_*` spelling of
+    // (#829), and the function-pointer conversions that must stay legal beside
+    // the incompatible ones now refused (#830). All eight run under every
+    // register allocator: four are layout or lowering defects rather than
+    // parsing ones, and the layout pair has to agree between the sizeof
+    // folding in the parse and the IR layout, which only a running object
+    // proves.
     String8 c_differential_regression_paths[] = {
         S8("tests/basic_c_anonymous_bit_field_initializer.c"),
         S8("tests/basic_c_attributed_struct_typedef_alignment.c"),
@@ -7531,6 +7536,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_complex_conjugate.c"),
         S8("tests/basic_c_bit_field_aligned.c"),
         S8("tests/basic_c_unspecified_array_parameter.c"),
+        S8("tests/basic_c_gnu_atomic_builtins.c"),
+        S8("tests/basic_c_function_pointer_compatibility.c"),
     };
     String8 c_differential_regression_names[] = {
         S8("buster-c-anonymous-bit-field-initializer"),
@@ -7539,6 +7546,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-complex-conjugate"),
         S8("buster-c-bit-field-aligned"),
         S8("buster-c-unspecified-array-parameter"),
+        S8("buster-c-gnu-atomic-builtins"),
+        S8("buster-c-function-pointer-compatibility"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_differential_regression_paths); fixture_index += 1)
     {
@@ -7581,6 +7590,20 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_bit_field_alignas_command_line)));
     BUSTER_TEST(arguments, c_bit_field_alignas.error != COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(c_bit_field_alignas.diagnostic, S8("alignment specifier cannot be applied to a bit-field")) != BUSTER_STRING_NO_MATCH);
+    // The refused half of #830: an assignment between incompatible function
+    // prototypes. It used to compile in silence, which is what flipped
+    // CPython's readline probe. The assertion is on the diagnostic because a
+    // successful compile is the failure mode.
+    String8 c_function_pointer_conflict_command_line[] = {
+        S8("-S"),
+        S8("-target"),
+        S8("x86_64-unknown-linux-gnu"),
+        S8("tests/basic_c_function_pointer_conflict.c"),
+    };
+    CompilerDriverResult c_function_pointer_conflict = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_function_pointer_conflict_command_line)));
+    BUSTER_TEST(arguments, c_function_pointer_conflict.error != COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, string_first_sequence(c_function_pointer_conflict.diagnostic, S8("incompatible function pointer type")) != BUSTER_STRING_NO_MATCH);
     // An inline-assembly template the emitter refuses must name the rule that
     // refused it and the register it named, not leak an opcode number (#831).
     // The refusal itself is by design, so the assertion is on the wording; the

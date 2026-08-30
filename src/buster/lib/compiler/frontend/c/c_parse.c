@@ -10976,6 +10976,10 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier(Arena* arena, CParseResult* resul
                                     string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_va_end"));
     predefined_function_name |= string_starts_with_sequence(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_"));
     predefined_function_name |= string_starts_with_sequence(c_token_spelling(preprocess.spelling_base, token), S8("__c11_atomic_"));
+    // The GNU spelling of the same family, which takes ordinary pointers.
+    // CPython's configure probes it for HAVE_BUILTIN_ATOMIC and most Linux
+    // userland reaches for it in preference to the C11 one.
+    predefined_function_name |= string_starts_with_sequence(c_token_spelling(preprocess.spelling_base, token), S8("__atomic_"));
     // GCC's legacy full barrier is the one __sync builtin the compiler
     // implements; SQLite reaches for it in sqlite3MemoryBarrier.
     predefined_function_name |= string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__sync_synchronize"));
