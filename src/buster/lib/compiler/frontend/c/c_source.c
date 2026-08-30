@@ -2095,28 +2095,50 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
 
         // One finished line per newline in the window, classified by whether
         // any code or comment byte falls in the range since the last one.
+        // All lines resolve at once: subtracting a segment's marks from the
+        // newline mask borrows through exactly that segment -- marks between
+        // two newlines sum below the higher newline's bit, so the borrow
+        // clears it and stops -- and the cleared newlines are the lines
+        // holding a mark.  Marks above the last newline are the next window's
+        // carry and stay out of the subtraction.
         u64 code_bytes = token_span & ~line_feed & emitted;
         u64 comment_bytes = comment_span & emitted;
         u64 newlines = newline_starts & emitted;
-        u64 line_base = 0;
-        for (u64 rest = newlines; rest; rest &= rest - 1)
-        {
-            u64 position = (u64)__builtin_ctzll(rest);
-            u64 range = c_lex_mask_range(line_base, position);
-            c_source_metrics_line(&result->metrics, state->line_has_code | ((code_bytes & range) != 0),
-                                  state->line_has_comment | ((comment_bytes & range) != 0));
-            state->line_has_code = 0;
-            // A newline inside a block comment leaves the comment open, so the
-            // next line is a comment line too; a plain newline clears it.
-            state->line_has_comment = (u32)((comment_span >> position) & 1);
-            line_base = position + 1;
-        }
-        u64 tail = c_lex_mask_range(line_base, bound);
-        state->line_has_code |= (code_bytes & tail) != 0;
-        state->line_has_comment |= (comment_bytes & tail) != 0;
         if (newlines)
         {
-            state->line_start = offset + (u64)(63 - __builtin_clzll(newlines)) + 1;
+            u64 last = (u64)(63 - __builtin_clzll(newlines));
+            u64 below_last = c_lex_mask_below(last);
+            u64 first_line = newlines & (~newlines + 1);
+            u64 lines_with_code = newlines & ~(newlines - (code_bytes & below_last));
+            u64 lines_with_comment = newlines & ~(newlines - (comment_bytes & below_last & ~newlines));
+            // A newline inside a block comment leaves the comment open, so
+            // the next line is a comment line too; the carried state does the
+            // same for the first line.
+            u64 open_comment_newlines = comment_span & newlines & below_last;
+            lines_with_comment |= newlines & ~(newlines - (open_comment_newlines << 1));
+            if (state->line_has_code)
+            {
+                lines_with_code |= first_line;
+            }
+            if (state->line_has_comment)
+            {
+                lines_with_comment |= first_line;
+            }
+            u64 line_count = (u64)__builtin_popcountll(newlines);
+            result->metrics.translated_lines += line_count;
+            result->metrics.code_lines += (u64)__builtin_popcountll(lines_with_code);
+            result->metrics.comment_lines += (u64)__builtin_popcountll(lines_with_comment);
+            result->metrics.mixed_lines += (u64)__builtin_popcountll(lines_with_code & lines_with_comment);
+            result->metrics.blank_lines += line_count - (u64)__builtin_popcountll(lines_with_code | lines_with_comment);
+            u64 above_last = ~c_lex_mask_below(last + 1);
+            state->line_has_code = (code_bytes & above_last) != 0;
+            state->line_has_comment = (u32)((comment_span >> last) & 1) | ((comment_bytes & above_last) != 0);
+            state->line_start = offset + last + 1;
+        }
+        else
+        {
+            state->line_has_code |= code_bytes != 0;
+            state->line_has_comment |= comment_bytes != 0;
         }
         state->newline_tokens += (u64)__builtin_popcountll(newlines);
 
