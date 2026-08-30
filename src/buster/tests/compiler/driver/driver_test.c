@@ -3599,6 +3599,39 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    // The <float.h> predefine vocabulary, pinned as static initializers and
+    // compared against literal spellings so a predefine folding to the wrong
+    // bits fails at run time rather than compiling quietly.
+    String8 c_float_limits_path = buster_test_temporary_path(arguments->arena, S8("buster-c-float-limits"),
+#if BUSTER_WINDOWS
+                                                             S8(".exe"));
+#else
+                                                             S8(""));
+#endif
+    String8 c_float_limits_command_line[] = {
+        S8("-o"),
+        c_float_limits_path,
+        S8("tests/basic_c_float_limits.c"),
+    };
+    CompilerDriverResult c_float_limits = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_float_limits_command_line)));
+    BUSTER_TEST(arguments, c_float_limits.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_float_limits.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_float_limits_arguments[] = {
+            c_float_limits_path,
+        };
+        ProcessSpawnResult c_float_limits_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_float_limits_arguments), (SliceString8){0},
+                                                                   (SliceString8){0},
+                                                                   (ProcessSpawnOptions){
+                                                                       .use_process_environment = true,
+                                                                   });
+        BUSTER_TEST(arguments, c_float_limits_spawn.handle != 0);
+        if (c_float_limits_spawn.handle)
+        {
+            BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, c_float_limits_spawn).result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // `__typeof__` over a member read through a cast base -- CPython's
     // Py_SETREF writes `_Py_TYPEOF(((propertyobject *) new)->prop_name)` --
     // with the swap's answers checked.

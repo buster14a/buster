@@ -6431,6 +6431,91 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     // inherit a host compiler's macro set.
     C_DEFINE_TYPE_MACRO("__FLT_DECIMAL_DIG__", S8("9"));
     C_DEFINE_TYPE_MACRO("__DBL_DECIMAL_DIG__", S8("17"));
+    // The rest of the <float.h> vocabulary, with Clang's own spellings: the
+    // hosted header defines every FLT_/DBL_/LDBL_ constant in terms of these
+    // predefines, so a compiler that lacks one turns an ordinary
+    // `double m = DBL_MAX;` into an undeclared identifier -- which is where
+    // CPython's Objects/floatobject.c stopped.  float and double are IEEE
+    // binary32/64 on every hosted target here; the long double family
+    // follows the target's layout below.
+    C_DEFINE_TYPE_MACRO("__FLT_RADIX__", S8("2"));
+    C_DEFINE_TYPE_MACRO("__FLT_MANT_DIG__", S8("24"));
+    C_DEFINE_TYPE_MACRO("__FLT_DIG__", S8("6"));
+    C_DEFINE_TYPE_MACRO("__FLT_MAX__", S8("3.40282347e+38F"));
+    C_DEFINE_TYPE_MACRO("__FLT_NORM_MAX__", S8("3.40282347e+38F"));
+    C_DEFINE_TYPE_MACRO("__FLT_MIN__", S8("1.17549435e-38F"));
+    C_DEFINE_TYPE_MACRO("__FLT_DENORM_MIN__", S8("1.40129846e-45F"));
+    C_DEFINE_TYPE_MACRO("__FLT_EPSILON__", S8("1.19209290e-7F"));
+    C_DEFINE_TYPE_MACRO("__FLT_MAX_EXP__", S8("128"));
+    C_DEFINE_TYPE_MACRO("__FLT_MIN_EXP__", S8("(-125)"));
+    C_DEFINE_TYPE_MACRO("__FLT_MAX_10_EXP__", S8("38"));
+    C_DEFINE_TYPE_MACRO("__FLT_MIN_10_EXP__", S8("(-37)"));
+    C_DEFINE_TYPE_MACRO("__FLT_HAS_DENORM__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__FLT_HAS_INFINITY__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__FLT_HAS_QUIET_NAN__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__DBL_DIG__", S8("15"));
+    C_DEFINE_TYPE_MACRO("__DBL_MAX__", S8("1.7976931348623157e+308"));
+    C_DEFINE_TYPE_MACRO("__DBL_NORM_MAX__", S8("1.7976931348623157e+308"));
+    C_DEFINE_TYPE_MACRO("__DBL_MIN__", S8("2.2250738585072014e-308"));
+    C_DEFINE_TYPE_MACRO("__DBL_DENORM_MIN__", S8("4.9406564584124654e-324"));
+    C_DEFINE_TYPE_MACRO("__DBL_MAX_EXP__", S8("1024"));
+    C_DEFINE_TYPE_MACRO("__DBL_MIN_EXP__", S8("(-1021)"));
+    C_DEFINE_TYPE_MACRO("__DBL_MIN_10_EXP__", S8("(-307)"));
+    C_DEFINE_TYPE_MACRO("__DBL_HAS_DENORM__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__DBL_HAS_INFINITY__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__DBL_HAS_QUIET_NAN__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__DECIMAL_DIG__", S8("__LDBL_DECIMAL_DIG__"));
+    C_DEFINE_TYPE_MACRO("__LDBL_HAS_DENORM__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__LDBL_HAS_INFINITY__", S8("1"));
+    C_DEFINE_TYPE_MACRO("__LDBL_HAS_QUIET_NAN__", S8("1"));
+    if (layout.long_double_type.bit_width == 80)
+    {
+        // The x87 extended format, x86-64 Linux's long double.
+        C_DEFINE_TYPE_MACRO("__LDBL_MANT_DIG__", S8("64"));
+        C_DEFINE_TYPE_MACRO("__LDBL_DIG__", S8("18"));
+        C_DEFINE_TYPE_MACRO("__LDBL_DECIMAL_DIG__", S8("21"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MAX__", S8("1.18973149535723176502e+4932L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_NORM_MAX__", S8("1.18973149535723176502e+4932L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MIN__", S8("3.36210314311209350626e-4932L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_DENORM_MIN__", S8("3.64519953188247460253e-4951L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_EPSILON__", S8("1.08420217248550443401e-19L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MAX_EXP__", S8("16384"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MIN_EXP__", S8("(-16381)"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MAX_10_EXP__", S8("4932"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MIN_10_EXP__", S8("(-4931)"));
+    }
+    else if (layout.long_double_type.bit_width == 128)
+    {
+        // IEEE binary128, AArch64 Linux's long double.
+        C_DEFINE_TYPE_MACRO("__LDBL_MANT_DIG__", S8("113"));
+        C_DEFINE_TYPE_MACRO("__LDBL_DIG__", S8("33"));
+        C_DEFINE_TYPE_MACRO("__LDBL_DECIMAL_DIG__", S8("36"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MAX__", S8("1.18973149535723176508575932662800702e+4932L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_NORM_MAX__", S8("1.18973149535723176508575932662800702e+4932L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MIN__", S8("3.36210314311209350626267781732175260e-4932L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_DENORM_MIN__", S8("6.47517511943802511092443895822764655e-4966L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_EPSILON__", S8("1.92592994438723585305597794258492732e-34L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MAX_EXP__", S8("16384"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MIN_EXP__", S8("(-16381)"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MAX_10_EXP__", S8("4932"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MIN_10_EXP__", S8("(-4931)"));
+    }
+    else
+    {
+        // long double is double: Windows, and any other 64-bit layout.
+        C_DEFINE_TYPE_MACRO("__LDBL_MANT_DIG__", S8("53"));
+        C_DEFINE_TYPE_MACRO("__LDBL_DIG__", S8("15"));
+        C_DEFINE_TYPE_MACRO("__LDBL_DECIMAL_DIG__", S8("17"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MAX__", S8("1.7976931348623157e+308L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_NORM_MAX__", S8("1.7976931348623157e+308L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MIN__", S8("2.2250738585072014e-308L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_DENORM_MIN__", S8("4.9406564584124654e-324L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_EPSILON__", S8("2.2204460492503131e-16L"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MAX_EXP__", S8("1024"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MIN_EXP__", S8("(-1021)"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MAX_10_EXP__", S8("308"));
+        C_DEFINE_TYPE_MACRO("__LDBL_MIN_10_EXP__", S8("(-307)"));
+    }
     C_DEFINE_TYPE_MACRO("__SIZEOF_VA_LIST__", string_format(arena, S8("{u32}"), layout.va_list.size));
     C_DEFINE_TYPE_MACRO("__LONG_DOUBLE_WIDTH__", string_format(arena, S8("{u32}"), layout.long_double_type.bit_width));
     C_DEFINE_TYPE_MACRO("__WCHAR_WIDTH__", short_wchar_target ? S8("16") : S8("32"));
