@@ -1420,10 +1420,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_input(CompilerDriverInvocation
     return path.pointer[path.length - 2] == '.' && path.pointer[path.length - 1] == 's';
 }
 
-// GNU's `.S` runs the C preprocessor over assembly text before assembling it.
-// This frontend's preprocessor hands back C tokens, and assembly spellings
-// such as `%rax`, `$1` and `1f` do not survive that round trip, so a `.S` is
-// refused by name rather than assembled from a text it would have mangled.
+// GNU's `.S` runs the C preprocessor over assembly text before assembling
+// it; compiler_driver_execute_preprocessed_assembly_single is that route.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocessed_assembly_input(String8 path)
 {
     return path.length >= 2 && path.pointer[path.length - 2] == '.' && path.pointer[path.length - 1] == 'S';
@@ -2823,37 +2821,17 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(AssemblyReloca
 // One assembly input, from source text to the same three outputs a C input
 // reaches. The assembler is the whole front end here: there is no
 // preprocessor, no IR, and no code generation between the file and the object.
-BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_single(Arena* arena, CompilerDriverInvocation invocation,
-                                                                                  bool suppress_object_write)
+// The assemble-and-emit half shared by a `.s` input and a preprocessed `.S`
+// one: the caller owns the source text's lifetime, and the encoder keeps
+// nothing that points into it.
+BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source(Arena* arena, CompilerDriverInvocation invocation, String8 source,
+                                                                                  String8 path, bool suppress_object_write)
 {
     CompilerDriverResult result = {0};
-    String8 path = invocation.input_paths[0];
     if (invocation.emit_llvm_bitcode || invocation.target.cpu_arch == CPU_ARCH_WASM64 || invocation.target.cpu_arch == CPU_ARCH_BPFEL)
     {
         result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
         result.diagnostic = S8("assembly input has no LLVM bitcode, Wasm64, or eBPF emission");
-        return result;
-    }
-    FileMapRead source_file = file_map_read(arena, path, (FileReadOptions){0});
-    if (!source_file.bytes.pointer)
-    {
-        result.error = COMPILER_DRIVER_ERROR_FILE_READ;
-        result.diagnostic = string_format(arena, S8("could not read {S8}"), path);
-        file_map_unmap(source_file);
-        return result;
-    }
-    String8 source = BYTE_SLICE_TO_STRING(8, source_file.bytes);
-    if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
-    {
-        // An assembly unit is already what the preprocessor would have
-        // produced, so -E hands the text back unchanged.
-        result.output = string_duplicate_arena(arena, source, false);
-        if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
-        {
-            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
-            result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
-        }
-        file_map_unmap(source_file);
         return result;
     }
     AssemblyUnitResult unit = assembly_unit_encode(arena, source,
@@ -2862,7 +2840,6 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_single
                                                        .syntax = invocation.target.cpu_arch == CPU_ARCH_X86_64 ? invocation.assembly_syntax
                                                                                                               : ASSEMBLY_SYNTAX_DEFAULT,
                                                    });
-    file_map_unmap(source_file);
     if (unit.diagnostic_count)
     {
         AssemblyDiagnostic diagnostic = unit.diagnostics[0];
@@ -2934,6 +2911,138 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_single
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_single(Arena* arena, CompilerDriverInvocation invocation,
+                                                                                  bool suppress_object_write)
+{
+    CompilerDriverResult result = {0};
+    String8 path = invocation.input_paths[0];
+    FileMapRead source_file = file_map_read(arena, path, (FileReadOptions){0});
+    if (!source_file.bytes.pointer)
+    {
+        result.error = COMPILER_DRIVER_ERROR_FILE_READ;
+        result.diagnostic = string_format(arena, S8("could not read {S8}"), path);
+        file_map_unmap(source_file);
+        return result;
+    }
+    String8 source = BYTE_SLICE_TO_STRING(8, source_file.bytes);
+    if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
+    {
+        // An assembly unit is already what the preprocessor would have
+        // produced, so -E hands the text back unchanged.
+        result.output = string_duplicate_arena(arena, source, false);
+        if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
+        {
+            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
+            result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
+        }
+        file_map_unmap(source_file);
+        return result;
+    }
+    result = compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write);
+    file_map_unmap(source_file);
+    return result;
+}
+
+// GNU's `.S` runs the C preprocessor over the assembly text before it is
+// assembled.  The -E printer reproduces line structure and adjacency from
+// the source map, so `%rax`, `1f` and `.globl` survive the round trip, and
+// the preprocess itself runs with assembly_comment_lines: a `#` line whose
+// word is no directive is GNU-as commentary, not an error.  CPython's
+// Python/asm_trampoline.S is the load-bearing case -- one trampoline body
+// selected by #ifdef per architecture.
+BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_assembly_single(Arena* arena, CompilerDriverInvocation invocation,
+                                                                                               bool suppress_object_write)
+{
+    CompilerDriverResult result = {0};
+    String8 path = invocation.input_paths[0];
+    FileMapRead source_file = file_map_read(arena, path, (FileReadOptions){0});
+    if (!source_file.bytes.pointer)
+    {
+        result.error = COMPILER_DRIVER_ERROR_FILE_READ;
+        result.diagnostic = string_format(arena, S8("could not read {S8}"), path);
+        file_map_unmap(source_file);
+        return result;
+    }
+    CPreprocessorDefinition* definitions = arena_allocate(arena, CPreprocessorDefinition, invocation.definition_count);
+    for (u32 index = 0; index < invocation.definition_count; index += 1)
+    {
+        definitions[index] = compiler_driver_c_definition(invocation.definitions[index]);
+    }
+    // GNU-as spells an immediate `$NAME`, and the C lexer reads `$` as an
+    // identifier character, which would glue the prefix onto a macro name
+    // and keep it from expanding.  A space after every `$` splits the two
+    // the way GNU cpp's assembler mode tokenizes them, and the assembler
+    // reads `$ 0` and `$0` alike; quoted regions keep their bytes.
+    String8 raw = BYTE_SLICE_TO_STRING(8, source_file.bytes);
+    char8* split = arena_allocate(arena, char8, raw.length * 2 + 1);
+    u64 split_length = 0;
+    bool in_string = false;
+    char8 quote = 0;
+    for (u64 byte_index = 0; byte_index < raw.length; byte_index += 1)
+    {
+        char8 byte = raw.pointer[byte_index];
+        split[split_length++] = byte;
+        if (in_string)
+        {
+            if (byte == '\\' && byte_index + 1 < raw.length)
+            {
+                split[split_length++] = raw.pointer[++byte_index];
+            }
+            else if (byte == quote)
+            {
+                in_string = false;
+            }
+        }
+        else if (byte == '"' || byte == '\'')
+        {
+            in_string = true;
+            quote = byte;
+        }
+        else if (byte == '$')
+        {
+            split[split_length++] = ' ';
+        }
+    }
+    CPreprocessResult preprocess = c_preprocess(arena, (String8){.pointer = split, .length = split_length},
+                                                (CPreprocessOptions){
+                                                    .definitions = definitions,
+                                                    .undefinitions = invocation.undefinitions,
+                                                    .include_paths = invocation.include_paths,
+                                                    .system_include_paths = invocation.system_include_paths,
+                                                    .source_path = path,
+                                                    .target = invocation.target,
+                                                    .data_layout = target_data_layout(invocation.target),
+                                                    .dialect = compiler_driver_preprocess_dialect(invocation.c_dialect),
+                                                    .definition_count = invocation.definition_count,
+                                                    .undefinition_count = invocation.undefinition_count,
+                                                    .include_path_count = invocation.include_path_count,
+                                                    .system_include_path_count = invocation.system_include_path_count,
+                                                    .assembly_comment_lines = true,
+                                                });
+    file_map_unmap(source_file);
+    if (preprocess.error_count)
+    {
+        CDiagnostic* diagnostic = compiler_driver_first_preprocess_error(preprocess);
+        result.error = COMPILER_DRIVER_ERROR_TOKENIZE;
+        result.tokenizer_error_count = (u32)preprocess.error_count;
+        result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), path, diagnostic->location.line, diagnostic->location.column,
+                                          diagnostic->message);
+        return result;
+    }
+    String8 source = compiler_driver_preprocess_text(arena, preprocess);
+    if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
+    {
+        result.output = source;
+        if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
+        {
+            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
+            result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
+        }
+        return result;
+    }
+    return compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write);
+}
+
 static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, CompilerDriverInvocation invocation, bool suppress_object_write,
                                                              CompilerDriverWarningCollector* warnings)
 {
@@ -2945,6 +3054,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         return result;
+    }
+    if (invocation.input_count == 1 && compiler_driver_preprocessed_assembly_input(invocation.input_paths[0]))
+    {
+        return compiler_driver_execute_preprocessed_assembly_single(arena, invocation, suppress_object_write);
     }
     if (invocation.input_count == 1 && compiler_driver_assembly_input(invocation, invocation.input_paths[0]))
     {
@@ -3433,14 +3546,11 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.diagnostic = string_format(arena, S8("prebuilt input {S8} is only valid while linking"), path);
             goto finish;
         }
-        if (!object_input && !archive_input && !compiler_driver_c_input(invocation, path) && !compiler_driver_assembly_input(invocation, path))
+        if (!object_input && !archive_input && !compiler_driver_c_input(invocation, path) && !compiler_driver_assembly_input(invocation, path) &&
+            !compiler_driver_preprocessed_assembly_input(path))
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-            result.diagnostic = compiler_driver_preprocessed_assembly_input(path)
-                                    ? string_format(arena, S8("assembly input {S8} requires the C preprocessor, which this driver does not run over "
-                                                              "assembly; preprocess it and pass the resulting .s"),
-                                                    path)
-                                    : string_format(arena, S8("unsupported C input {S8}"), path);
+            result.diagnostic = string_format(arena, S8("unsupported C input {S8}"), path);
             goto finish;
         }
     }

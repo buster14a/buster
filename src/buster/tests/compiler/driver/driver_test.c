@@ -10175,17 +10175,20 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, unsupported.error != COMPILER_DRIVER_ERROR_NONE);
         BUSTER_TEST(arguments, string_first_sequence(unsupported.diagnostic, S8(".subsection")) < unsupported.diagnostic.length);
         BUSTER_TEST(arguments, string_first_sequence(unsupported.diagnostic, S8(":9:")) < unsupported.diagnostic.length);
-        // A `.S` is asm_unit with the C preprocessor in front of it. This
-        // driver does not run one over asm_unit text, and says so instead of
-        // assembling the macro spellings as if they were instructions.
+        // A `.S` is asm_unit with the C preprocessor in front of it: the
+        // faithful -E text preserves the assembly spellings, `#` commentary
+        // reads as GNU-as commentary, and the `$` immediate prefix splits
+        // off the macro name it would otherwise glue shut.  The fixture's
+        // status comes from a macro, so an unexpanded name fails to
+        // assemble rather than encoding the wrong immediate.
         String8 preprocessed_path = buster_test_temporary_path(asm_unit_arena, S8("buster-asm-preprocessed"), S8(".o"));
         String8 preprocessed_command_line[] = {
             S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), preprocessed_path, S8("tests/basic_asm_preprocessed.S"),
         };
         CompilerDriverResult preprocessed = compiler_driver_execute_invocation(
             asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocessed_command_line)));
-        BUSTER_TEST(arguments, preprocessed.error == COMPILER_DRIVER_ERROR_INVALID_INPUT);
-        BUSTER_TEST(arguments, string_first_sequence(preprocessed.diagnostic, S8("requires the C preprocessor")) < preprocessed.diagnostic.length);
+        BUSTER_TEST(arguments, preprocessed.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, preprocessed.has_object);
         scratch_end(asm_unit_temporary);
     }
     Arena* c_multi_conflicts[] = {

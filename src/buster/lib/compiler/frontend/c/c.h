@@ -458,7 +458,11 @@ struct CPreprocessOptions
     u32 include_depth_limit;
     CPreprocessDialect dialect;
     bool disable_external_includes;
-    u8 reserved[3];
+    // GNU-as sources use `#` for line comments, so a `.S` run treats a `#`
+    // line whose word is no known directive as a comment instead of an
+    // error; conditionals, defines and includes keep their meaning.
+    bool assembly_comment_lines;
+    u8 reserved[2];
 };
 
 typedef struct CSymbolTable CSymbolTable;

@@ -6791,8 +6791,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             bool is_line_marker = token_index < lex.token_count && lex.tokens[token_index].kind == C_TOKEN_PREPROCESSING_NUMBER;
             if (token_index >= lex.token_count || (lex.tokens[token_index].kind != C_TOKEN_IDENTIFIER && !is_line_marker))
             {
-                c_preprocess_diagnostic_push(arena, &result, c_lex_token_location(&source_frame->lex, token), C_DIAGNOSTIC_EXPECTED_DIRECTIVE,
-                                             S8("expected preprocessing directive after '#'"));
+                if (!options.assembly_comment_lines)
+                {
+                    c_preprocess_diagnostic_push(arena, &result, c_lex_token_location(&source_frame->lex, token), C_DIAGNOSTIC_EXPECTED_DIRECTIVE,
+                                                 S8("expected preprocessing directive after '#'"));
+                }
             }
             else
             {
@@ -7193,7 +7196,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                         c_preprocess_handle_pragma(pragma_context, base, pragma_tokens, expanded_pragma_count);
                     }
                 }
-                else if (active)
+                else if (active && !options.assembly_comment_lines)
                 {
                     c_preprocess_diagnostic_push(arena, &result, directive_location, C_DIAGNOSTIC_UNSUPPORTED_DIRECTIVE,
                                                  string_format(arena, S8("{S8}: preprocessing directive is not implemented yet: {S8}"), source_frame->path,
