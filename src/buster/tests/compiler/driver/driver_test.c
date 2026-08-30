@@ -3599,6 +3599,39 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    // `__typeof__` over a member read through a cast base -- CPython's
+    // Py_SETREF writes `_Py_TYPEOF(((propertyobject *) new)->prop_name)` --
+    // with the swap's answers checked.
+    String8 c_typeof_cast_member_path = buster_test_temporary_path(arguments->arena, S8("buster-c-typeof-cast-member"),
+#if BUSTER_WINDOWS
+                                                                   S8(".exe"));
+#else
+                                                                   S8(""));
+#endif
+    String8 c_typeof_cast_member_command_line[] = {
+        S8("-o"),
+        c_typeof_cast_member_path,
+        S8("tests/basic_c_typeof_cast_member.c"),
+    };
+    CompilerDriverResult c_typeof_cast_member = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_typeof_cast_member_command_line)));
+    BUSTER_TEST(arguments, c_typeof_cast_member.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_typeof_cast_member.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_typeof_cast_member_arguments[] = {
+            c_typeof_cast_member_path,
+        };
+        ProcessSpawnResult c_typeof_cast_member_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_typeof_cast_member_arguments),
+                                                                         (SliceString8){0}, (SliceString8){0},
+                                                                         (ProcessSpawnOptions){
+                                                                             .use_process_environment = true,
+                                                                         });
+        BUSTER_TEST(arguments, c_typeof_cast_member_spawn.handle != 0);
+        if (c_typeof_cast_member_spawn.handle)
+        {
+            BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, c_typeof_cast_member_spawn).result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // A call whose callee is a member read off another call's result --
     // `Py_TYPE(self)->tp_free(self)`, how CPython frees every object -- with
     // the answers checked so a callee read off the wrong base returns the

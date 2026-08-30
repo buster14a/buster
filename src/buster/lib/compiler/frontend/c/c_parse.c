@@ -2010,31 +2010,71 @@ BUSTER_C_INTERNAL bool c_parse_direct_expression_type(Arena* arena, CPreprocessR
         base_start += 1;
         base_end -= 1;
     }
-    if (base_end != base_start + 1 || preprocess.tokens[base_start].kind != C_TOKEN_IDENTIFIER)
+    CTypeId type = C_TYPE_ID_INVALID;
+    if (base_end == base_start + 1 && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER)
     {
-        return false;
+        CEntityId entity_id = C_ENTITY_ID_INVALID;
+        u32 base_use_index = c_parse_identifier_use_index(result, base_start);
+        if (base_use_index != C_ID_UNDERLYING_INVALID)
+        {
+            entity_id = result->identifier_uses[base_use_index].entity;
+        }
+        CScopeId lookup_scope = scope;
+        if (lookup_scope.value == C_ID_UNDERLYING_INVALID && result->scope_count)
+        {
+            lookup_scope = (CScopeId){
+                .value = 0,
+            };
+        }
+        if (entity_id.value == C_ID_UNDERLYING_INVALID && lookup_scope.value != C_ID_UNDERLYING_INVALID)
+        {
+            entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[base_start]);
+        }
+        type = entity_id.value < result->entity_count && result->entities[entity_id.value].kind != C_ENTITY_TYPEDEF &&
+                       result->entities[entity_id.value].kind != C_ENTITY_ENUMERATOR
+                   ? result->entities[entity_id.value].type
+                   : C_TYPE_ID_INVALID;
     }
-    CEntityId entity_id = C_ENTITY_ID_INVALID;
-    u32 base_use_index = c_parse_identifier_use_index(result, base_start);
-    if (base_use_index != C_ID_UNDERLYING_INVALID)
+    else if (base_start < base_end && c_token_is_punctuator(&preprocess.tokens[base_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
-        entity_id = result->identifier_uses[base_use_index].entity;
+        // A cast base: `((propertyobject *) new)->prop_name` is what
+        // Py_SETREF writes through _Py_TYPEOF, so `__typeof__` over it must
+        // resolve or the declaration it types declares nothing.  The cast's
+        // own type is the whole answer -- the operand after it only carries
+        // the value -- and the machineless resolvers exist exactly for walks
+        // like this one that may run inside a machine step.
+        u32 cast_depth = 1;
+        u32 cast_close = base_start + 1;
+        while (cast_close < base_end && cast_depth)
+        {
+            if (c_token_is_punctuator(&preprocess.tokens[cast_close], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                cast_depth += 1;
+            }
+            else if (c_token_is_punctuator(&preprocess.tokens[cast_close], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+            {
+                cast_depth -= 1;
+                if (!cast_depth)
+                {
+                    break;
+                }
+            }
+            cast_close += 1;
+        }
+        if (!cast_depth && cast_close + 1 < base_end)
+        {
+            u32 type_index = base_start + 1;
+            CTypeId cast_type = c_parse_machineless_base_type(result, preprocess, scope, base_start + 1, cast_close, &type_index);
+            if (cast_type.value != C_ID_UNDERLYING_INVALID)
+            {
+                cast_type = c_parse_pointer_chain(result, preprocess, cast_type, &type_index, cast_close);
+                if (type_index == cast_close)
+                {
+                    type = cast_type;
+                }
+            }
+        }
     }
-    CScopeId lookup_scope = scope;
-    if (lookup_scope.value == C_ID_UNDERLYING_INVALID && result->scope_count)
-    {
-        lookup_scope = (CScopeId){
-            .value = 0,
-        };
-    }
-    if (entity_id.value == C_ID_UNDERLYING_INVALID && lookup_scope.value != C_ID_UNDERLYING_INVALID)
-    {
-        entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[base_start]);
-    }
-    CTypeId type = entity_id.value < result->entity_count && result->entities[entity_id.value].kind != C_ENTITY_TYPEDEF &&
-                           result->entities[entity_id.value].kind != C_ENTITY_ENUMERATOR
-                       ? result->entities[entity_id.value].type
-                       : C_TYPE_ID_INVALID;
     if (type.value == C_ID_UNDERLYING_INVALID)
     {
         return false;
