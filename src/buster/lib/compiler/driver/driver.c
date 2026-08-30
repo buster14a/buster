@@ -2297,18 +2297,36 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
     return result;
 }
 
+// The -E text is read by other programs, not only by people: autoconf's
+// established idiom preprocesses a file of literal lines and greps the output
+// for one of them -- CPython's Misc/platform_triplet.c is
+// `grep '^PLATFORM_TRIPLET='` -- so tokens that shared a source line must
+// share an output line, and tokens that touched in the source must touch in
+// the output.  A printer that space-joined the whole stream onto one line
+// made that grep read the triplet as empty.  Both facts are recovered from
+// the source map: a line gap becomes a newline (capped, since without line
+// markers a skipped conditional's size is not information), and adjacency is
+// the previous token's column plus its width reaching the next token's
+// column.  Tokens a macro expansion synthesized share the use site's
+// location, where the column arithmetic does not hold; they keep the single
+// space, which is also what a hand-built result with no recovery map
+// degrades to for every token.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPreprocessResult preprocess)
 {
-    u64 capacity = 1;
+    enum { compiler_driver_preprocess_line_gap_cap = 8 };
+    u64 capacity = 2;
     for (u64 index = 0; index < preprocess.token_count; index += 1)
     {
         if (preprocess.tokens[index].kind != C_TOKEN_END_OF_FILE)
         {
-            capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[index]) + 1;
+            capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[index]) + compiler_driver_preprocess_line_gap_cap + 1;
         }
     }
     char8* text = arena_allocate(arena, char8, capacity);
     u64 length = 0;
+    u32 previous_line = 1;
+    u32 previous_file = 0;
+    u32 previous_end_column = 0;
     for (u64 index = 0; index < preprocess.token_count; index += 1)
     {
         CToken token = preprocess.tokens[index];
@@ -2316,13 +2334,33 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
         {
             break;
         }
+        CSourceLocation location = c_preprocess_token_location(&preprocess, token);
         if (length)
         {
-            text[length++] = ' ';
+            if (location.file != previous_file || location.line < previous_line)
+            {
+                text[length++] = '\n';
+            }
+            else if (location.line > previous_line)
+            {
+                u32 gap = location.line - previous_line;
+                gap = gap > compiler_driver_preprocess_line_gap_cap ? compiler_driver_preprocess_line_gap_cap : gap;
+                for (u32 newline = 0; newline < gap; newline += 1)
+                {
+                    text[length++] = '\n';
+                }
+            }
+            else if (location.column != previous_end_column)
+            {
+                text[length++] = ' ';
+            }
         }
         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
         memcpy(text + length, spelling.pointer, spelling.length);
         length += spelling.length;
+        previous_line = location.line;
+        previous_file = location.file;
+        previous_end_column = location.column + (u32)spelling.length;
     }
     text[length++] = '\n';
     text[length] = 0;

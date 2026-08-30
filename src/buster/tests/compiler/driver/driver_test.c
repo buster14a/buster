@@ -1773,7 +1773,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, warning_cross_target.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, warning_cross_target.tokenizer_error_count == 0);
     BUSTER_TEST(arguments, warning_cross_target.tokenizer_warning_count == 1);
-    BUSTER_TEST(arguments, string_first_sequence(warning_cross_target.output, S8("int main ( void )")) != BUSTER_STRING_NO_MATCH);
+    // The -E text reproduces the source's own spacing: adjacency and line
+    // structure are recovered from the source map, so `int main(void)` comes
+    // back as written rather than space-joined, and the brace stays on its
+    // own line.  autoconf's grep-the-preprocessor idiom -- CPython's
+    // `grep '^PLATFORM_TRIPLET='` over Misc/platform_triplet.c -- reads
+    // exactly these two facts.
+    BUSTER_TEST(arguments, string_first_sequence(warning_cross_target.output, S8("int main(void)\n{\n")) != BUSTER_STRING_NO_MATCH);
     String8 error_command_line[] = {
         S8("-fsyntax-only"),
         S8("tests/basic_c_preprocessor_error.c"),
