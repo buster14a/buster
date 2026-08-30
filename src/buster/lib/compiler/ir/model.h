@@ -375,6 +375,10 @@ struct IrType
     bool is_atomic;
     bool is_nullptr;
     bool is_volatile;
+    // GNU's transparent_union, carried from the C type so argument
+    // conversion can pass a member-typed value as the union's bits.  Only
+    // the C frontend sets and reads it.
+    bool is_transparent_union;
     // A C complex type, modelled as the two-field struct the psABIs classify
     // it as (see c_ir_complex_type). Only the C frontend sets and reads it;
     // to the backends the type is an ordinary aggregate.

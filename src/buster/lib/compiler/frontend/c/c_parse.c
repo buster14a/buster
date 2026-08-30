@@ -10190,6 +10190,44 @@ BUSTER_C_SHARED void c_parse_declaration_type(CTypeParseMachine* machine, CParse
     {
         c_parse_add_noreturn_function_type(result, function);
     }
+    // GNU's transparent_union is read against the declaration the same way
+    // the noreturn marker just was: glibc writes it after the typedef name --
+    // `typedef union { ... } __SOCKADDR_ARG __attribute__((__transparent_union__));`
+    // -- so the aggregate parser's own attribute positions never see it.  The
+    // scan stays outside the union's braces, where a member could carry the
+    // same spelling as a name.
+    if (declaration->type.value < result->type_count)
+    {
+        CType* derived_type = result->types + declaration->type.value;
+        if (derived_type->has_unqualified_type && derived_type->unqualified_type.value < result->type_count)
+        {
+            derived_type = result->types + derived_type->unqualified_type.value;
+        }
+        if (derived_type->kind == C_TYPE_UNION)
+        {
+            u32 attribute_depth = 0;
+            u32 scan_end = declaration->token_start + declaration->token_count;
+            for (u32 scan_index = declaration->token_start; scan_index < scan_end; scan_index += 1)
+            {
+                CToken scan_token = preprocess.tokens[scan_index];
+                if (c_token_is_punctuator(&scan_token, C_PUNCTUATOR_LEFT_BRACE))
+                {
+                    attribute_depth += 1;
+                }
+                else if (c_token_is_punctuator(&scan_token, C_PUNCTUATOR_RIGHT_BRACE))
+                {
+                    attribute_depth -= attribute_depth != 0;
+                }
+                else if (!attribute_depth && scan_token.kind == C_TOKEN_IDENTIFIER &&
+                         (c_token_spelling_equal(preprocess.spelling_base, scan_token, S8("__transparent_union__")) ||
+                          c_token_spelling_equal(preprocess.spelling_base, scan_token, S8("transparent_union"))))
+                {
+                    derived_type->is_transparent_union = true;
+                    break;
+                }
+            }
+        }
+    }
     // The derivation leaves a typedef declarator's `aligned` run on the
     // declaration because its type is only final here: the derivation reaches
     // it through half a dozen returns, one per declarator shape.  A typedef

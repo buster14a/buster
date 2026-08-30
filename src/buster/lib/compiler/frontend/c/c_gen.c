@@ -5146,6 +5146,36 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     {
         return c_ir_emit_atomic_aggregate_conversion(builder, value, atomic_aggregate_type, atomic_aggregate_type.value == target_type.value, source);
     }
+    // GNU's transparent_union: an argument of any member's type converts to
+    // the union by becoming its bits -- glibc's accept4 takes __SOCKADDR_ARG
+    // and CPython's socketmodule hands it a struct sockaddr*.  The same
+    // store-and-reload bridge the atomic aggregates use carries the value:
+    // the member starts at offset zero, so the raw store lays the argument
+    // exactly where the union's ABI reads it.
+    if (target_value->kind == IR_TYPE_UNION && target_value->is_transparent_union && target_value->layout.resolved)
+    {
+        bool member_matches = false;
+        for (u32 field_index = 0; field_index < target_value->field_count && !member_matches; field_index += 1)
+        {
+            member_matches = target_value->fields[field_index].type.value == source_type.value;
+        }
+        if (member_matches)
+        {
+            IrValueId slot = c_ir_emit_temporary(builder, target_type, source);
+            if (slot.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return IR_VALUE_ID_INVALID;
+            }
+            IrValueId* store_operands = arena_allocate(builder->arena, IrValueId, 2);
+            store_operands[0] = slot;
+            store_operands[1] = value;
+            IrInstruction store = c_ir_instruction_initialize(IR_OPCODE_STORE, builder->void_type);
+            store.operands = store_operands;
+            store.operand_count = 2;
+            c_ir_append_instruction(builder, store, source);
+            return c_ir_emit_load_place_raw(builder, slot, target_type, source);
+        }
+    }
     // A complex type on either end converts half by half, and the halves are
     // what the ladders below can reason about: the wide-float arm sees only a
     // FLOAT kind, so a `(long double)z` -- which is how <complex.h> spells
@@ -40777,6 +40807,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                                      .layout = (IrTypeLayout){0},
                                                                      .kind = c_type->kind == C_TYPE_STRUCT ? IR_TYPE_STRUCT : IR_TYPE_UNION,
                                                                      .field_count = c_type->member_count,
+                                                                     .is_transparent_union = c_type->is_transparent_union,
                                                                  });
     }
     // One slot per aligned typedef, not per type: the table behind

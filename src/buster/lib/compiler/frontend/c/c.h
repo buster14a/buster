@@ -730,6 +730,9 @@ struct CType
     bool is_atomic;
     bool is_variadic;
     bool is_complete;
+    // GNU's transparent_union: a parameter of this union type accepts an
+    // argument of any member's type, passed as that member's own bits.
+    bool is_transparent_union;
     bool has_unqualified_type;
     // The function type was written `()`, with no parameter list at all --
     // not `(void)`, which declares zero parameters. C11 6.2.7p3 makes an
