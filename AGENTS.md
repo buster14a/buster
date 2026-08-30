@@ -3077,6 +3077,21 @@ on a commit you already know is incomplete tells nobody anything.
   entry-stub writers do. An input that states no priorities (the COFF and
   Mach-O readers, the assembler's objects) has every entry unprioritized,
   which leaves it in link order.
+- **A relocatable object keeps its arrays in all three formats, but only ELF
+  can state a priority.** The COFF reader classifies them by this model's
+  neutral name (`.init_array`; COFF has no section type for them, and MSVC's
+  own `.CRT$XC*` convention is written and read by nothing here) and the
+  Mach-O reader by the `S_MOD_INIT_FUNC_POINTERS`/`S_MOD_TERM_FUNC_POINTERS`
+  types dyld dispatches on. Without those two the arrays came back as `.data`
+  and read-only data, and a program linked from an object ran **no
+  constructor at all** on Windows and macOS -- the entries reached no
+  initializer plan, and nothing diagnosed it. Priority is the part that does
+  not survive: COFF's section name would have to take ELF's suffix as a
+  private convention, and a Mach-O section name has no room past
+  `__mod_init_func`, so on those two formats `ide cc a.o b.o` concatenates in
+  link order. That is issue #795, and it is why `driver_test`'s
+  cross-translation-unit object route is ELF-only while its source route --
+  where the priorities never touch a format -- runs on every host.
 - **An image this linker produces calls its initializers from the entry
   stub.** There is no libc startup object in it -- the stub *is* the startup,
   which is why `link_x86_build_elf_entry_stub` exists at all -- so nothing

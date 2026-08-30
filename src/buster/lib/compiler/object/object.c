@@ -4842,12 +4842,27 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             {
                 zero_fill = !raw_offset || (characteristics & 0x80) != 0;
             }
+            // COFF has no section type for the initializer arrays -- MSVC's
+            // own convention is the lexicographically ordered `.CRT$XCU`
+            // group, which no producer here writes -- so this model's neutral
+            // name is what names them, exactly as it wrote them.  Without
+            // this an object written here and read back had its arrays in
+            // `.data`, and the constructors of a program linked from an
+            // object never ran at all.
+            ObjectSectionKind initializer_kind = {0};
+            if (read_ok)
+            {
+                initializer_kind = string_equal(name, object_section_name_for_kind(OBJECT_SECTION_INIT_ARRAY))   ? OBJECT_SECTION_INIT_ARRAY
+                                   : string_equal(name, object_section_name_for_kind(OBJECT_SECTION_FINI_ARRAY)) ? OBJECT_SECTION_FINI_ARRAY
+                                                                                                                 : OBJECT_SECTION_COUNT;
+            }
             ObjectSectionKind kind = {0};
             if (read_ok)
             {
                 kind = string_equal(name, S8(".pdata")) ? OBJECT_SECTION_WINDOWS_PDATA
                                          : string_equal(name, S8(".xdata")) ? OBJECT_SECTION_WINDOWS_XDATA
                                          : debug_kind != OBJECT_SECTION_COUNT ? debug_kind
+                                         : initializer_kind != OBJECT_SECTION_COUNT ? initializer_kind
                                          : is_thread_local                  ? (zero_fill ? OBJECT_SECTION_THREAD_LOCAL_ZERO : OBJECT_SECTION_THREAD_LOCAL_DATA)
                                          : characteristics & 0x20           ? OBJECT_SECTION_TEXT
                                          : zero_fill                         ? OBJECT_SECTION_ZERO

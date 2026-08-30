@@ -733,6 +733,37 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             }
             BUSTER_TEST(arguments, initializer_entries_found == BUSTER_ARRAY_LENGTH(expected_initializer_names));
         }
+        // The other two formats have nowhere to put a priority -- COFF has no
+        // convention of its own for these arrays and a Mach-O section name has
+        // no room past `__mod_init_func` -- but they must still come back as
+        // the arrays they were written as.  Read as data, the entries reach no
+        // initializer plan at all and a program linked from an object runs no
+        // constructor, which is what this pins.
+        ObjectFormat initializer_formats[] = {OBJECT_FORMAT_COFF, OBJECT_FORMAT_MACH_O64};
+        OperatingSystem initializer_systems[] = {OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
+        for (u64 format_index = 0; format_index < BUSTER_ARRAY_LENGTH(initializer_formats); format_index += 1)
+        {
+            ObjectArtifact initializer_artifact = object_write(arguments->arena, &initializer_object, initializer_formats[format_index]);
+            BUSTER_TEST(arguments, initializer_artifact.error == OBJECT_ERROR_NONE);
+            ObjectFile initializer_read = object_read(arguments->arena, initializer_artifact.bytes,
+                                                      (Target){
+                                                          .cpu_arch = CPU_ARCH_X86_64,
+                                                          .os = initializer_systems[format_index],
+                                                      });
+            BUSTER_TEST(arguments, initializer_read.error == OBJECT_ERROR_NONE);
+            if (initializer_read.error != OBJECT_ERROR_NONE)
+            {
+                continue;
+            }
+            BUSTER_TEST(arguments, initializer_read.sections[OBJECT_SECTION_INIT_ARRAY].data.length == sizeof(initializer_entries));
+            BUSTER_TEST(arguments, initializer_read.sections[OBJECT_SECTION_INIT_ARRAY].kind == OBJECT_SECTION_INIT_ARRAY);
+            u32 initializer_read_found = 0;
+            for (u32 relocation_index = 0; relocation_index < initializer_read.relocation_count; relocation_index += 1)
+            {
+                initializer_read_found += initializer_read.relocations[relocation_index].section == OBJECT_SECTION_INIT_ARRAY ? 1 : 0;
+            }
+            BUSTER_TEST(arguments, initializer_read_found == BUSTER_ARRAY_LENGTH(initializer_relocations));
+        }
     }
     bool elf_relocation_valid = elf_roundtrip.relocations && elf_roundtrip.relocation_count && elf_roundtrip.symbols &&
                                 elf_roundtrip.relocations[0].symbol < elf_roundtrip.symbol_count;
