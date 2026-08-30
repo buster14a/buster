@@ -4924,7 +4924,17 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast_instruction(CIntegerIrBuilder* builde
     IrValueId result = c_ir_add_result(builder, target_type);
     if (value.value < builder->function->value_count)
     {
-        builder->function->values[result.value].points_to_read_only = builder->function->values[value.value].points_to_read_only;
+        // A pointer reinterpretation takes the target type's own
+        // qualification, and IR types carry no const: the flag clears, so
+        // `((char *)formatted)[size-1] = '\0'` -- CPython casting away the
+        // const its own accessor returned -- stores where the reference
+        // compilers store.  The cost is one diagnostic, not a miscompile: a
+        // cast that *adds* const is no longer refused as a store target,
+        // which is the same laxity the reference compilers only warn about
+        // under -Wcast-qual.  Stores through const lvalues keep their
+        // refusal -- those places read their entity's own C type.
+        builder->function->values[result.value].points_to_read_only =
+            operation != IR_CONVERSION_POINTER_REINTERPRET && builder->function->values[value.value].points_to_read_only;
         c_ir_copy_label_provenance(builder, result, value);
     }
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, 1);
@@ -5098,6 +5108,22 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     }
     if (source_type.value == target_type.value)
     {
+        // `const char *` and `char *` are one IR pointer type, so this is
+        // where a cast that discards const is elided with the read-only mark
+        // still on the value -- and `((char *)formatted)[size-1] = '\0'`,
+        // CPython casting away the const its own accessor returned, was
+        // refused as a store.  The target type's own qualification decides,
+        // so the mark clears off the elided value; an identity cast is not
+        // valid IR, and every other consumer of this value inside the
+        // expression re-derives its own answer from the entity it loads.
+        // The cost is one diagnostic, not a miscompile: a conversion that
+        // *adds* const no longer refuses a later store either, the same
+        // laxity the reference compilers only warn about under -Wcast-qual.
+        if (source_value->kind == IR_TYPE_POINTER && value.value < builder->function->value_count &&
+            builder->function->values[value.value].points_to_read_only)
+        {
+            builder->function->values[value.value].points_to_read_only = false;
+        }
         return value;
     }
     // Two types that differ only in a `volatile` qualifier are one type as far
