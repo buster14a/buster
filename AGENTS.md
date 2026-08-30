@@ -840,8 +840,10 @@ divergence taught is still worth keeping: a class that looks like a Buster gap
 can be a branch the reference never took, so check what the unit actually
 preprocessed to (`ide cc -E` with the same flags) before naming a construct.
 `tests/basic_c_null_pointer_offsetof.c` still pins that the two `offsetof`
-spellings agree, and `tests/basic_c_type_generic_math.c` pins the predefines
-themselves.
+spellings agree for the single-member designator it covers; they did not agree
+for a nested one, which is what `pthread_exit` walking the robust list stopped
+reaching when the predefine changed and is fixed one commit later, and
+`tests/basic_c_type_generic_math.c` pins the predefines themselves.
 
 `<math.h>` splits on the same macro, and there the two branches are not
 interchangeable, which is why the fold below outlived the divergence. `NAN` is
@@ -1385,16 +1387,24 @@ by how many tests wanted each. It is the work list in the order that unblocks
 the most tests, and it is why this stage grows by itself as the compiler
 improves rather than needing to be extended by hand.
 
-Today 243 of 424 units pass (measured 2026-08-29). Seventy-eight are
-`src/api`: 78 of its 79 units compile against musl's headers under both
-compilers, and one — `api/unistd` — is held out because musl defines neither
-`_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the reference fails on
-too. The other 165 are runtime tests that link and run green: `src/functional`
-is 55 passing against 2 failing, 2 blocked-link and 18 excluded-reference;
-`src/math` is 55 passing and 144 excluded-reference; `src/regression` is 55
-passing against none failing, 1 blocked-link and 13 excluded-reference.
-`src/math` passes every one of the 55 units the reference can run, and
-`src/regression` has no failing unit left.
+Today 381 of 424 units pass (measured 2026-08-29, twice on one machine).
+Seventy-eight are `src/api`: 78 of its 79 units compile against musl's headers
+under both compilers, and one — `api/unistd` — is held out because musl
+defines neither `_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the
+reference fails on too. The other 303 are runtime tests that link and run
+green: `src/functional` is 69 passing against 2 failing, 3 blocked-link and 3
+excluded-reference; `src/math` is 168 passing and 31 excluded-reference;
+`src/regression` is 66 passing against none failing, 2 blocked-link and 1
+excluded-reference. `src/math` passes every one of the 168 units the reference
+can run, `src/regression` has no failing unit left, and nothing in the suite is
+blocked on a compile.
+
+Most of that total is the reference's reach rather than Buster's, and it
+arrived with the assembly stage: both archives hold musl's own x86-64 assembly
+now, so `fenv` is real, `clone` is present and `setjmp` is not a trap. The
+number the assembly stage itself reaches is 377; the four above it are this
+tree's, and only two of them are a fix — see the `LIBC_TEST_EXPECTED_PASSING`
+note in `build.c`, which is where each step is written down.
 
 The nine units with a sibling `.mk` are what this stage's newest counts are.
 `functional/tls_align_dso` is the one that passes: both sides build that
@@ -1432,11 +1442,12 @@ now. The state counts had understated that gap by three: 63 of the 199
 because an `excluded-reference` unit is classified by the reference's reach
 and its own diagnostic never reaches a state count. `buster_compile_failed` on
 the `LIBCTEST_SUBSET` line is the number to read for a compile gap, and it is
-0 in every subset but `api` and `functional` now.
+0 in every subset but `api` now.
 
-One failing unit is left, and it is a wrong answer rather than a missing
-component: `functional/tls_align`, the thread-local model described above. Its
-cause is known. Every one of the five this stage started with is attributed.
+Two failing units are left, and both are the same wrong answer rather than a
+missing component: `functional/tls_align` and `functional/tls_align_dlopen`,
+the thread-local model described above. Their cause is known, and every one of
+the five this stage started with is attributed.
 
 `functional/fcntl` was the fourth of the original five to go, and it was a
 lazy operand inside a call argument. Its child process exits on
@@ -1498,6 +1509,24 @@ transcript back -- and `tests/basic_c_pointer_to_array_place.c` pins the shape
 under all four allocators: the pointee crossing a call boundary by decay and
 the place surviving the return, beside the three store spellings
 `tests/basic_c_packed_layout.c` already carries.
+
+`functional/pthread_robust` and `regression/pthread-robust-detach` pass beside
+it and are *not* what fixed them, which matters because the number moved by
+four rather than by two. Both segfaulted inside `pthread_exit`, which walks the
+robust list through `offsetof` on a null pointer. Without `__GNUC__`
+<stddef.h> spells that as pointer arithmetic through a nested member, and
+lowering `&(((type *)0)->a.b)` loaded the member instead of walking through it;
+with `__GNUC__` musl takes `__builtin_offsetof` and never reaches the defect,
+which is why these two moved at the predefine rather than at the fix. The
+defect itself is described below and is fixed one commit later, so the claim
+above that "both spellings mean the same offset" holds for a nested designator
+too now.
+
+`functional/setjmp` is the fourth, and unlike those two it is a fix: an
+aggregate assigned to a `volatile`-qualified object of the same type produced
+two IR types for one struct and the conversion was refused. libc-test's
+`functional/setjmp` writes `volatile sigset_t oldset; ... oldset = set2;` at
+its third assignment, which is the whole of it.
 
 `functional/tgmath` was the last of the original five, and it went the way
 `ide cc` predefines `__GNUC__`: in every dialect now, rather than only in a
