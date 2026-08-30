@@ -666,6 +666,10 @@ typedef enum MachineOpcode
     MACHINE_X64_INDIRECT_BRANCH,     // use general; payload/flags = switch_cases range; terminator
     MACHINE_A64_LEA_BLOCK,           // def general; payload = block index
     MACHINE_A64_INDIRECT_BRANCH,     // use general; payload/flags = switch_cases range; terminator
+    // -fPIC's symbol address: `mov dest, [rip + sym@GOTPCREL]`, the same one
+    // row LEA_SYMBOL is with the address read out of the linker's GOT slot
+    // instead of computed. def; payload indexes call_targets.
+    MACHINE_X64_LOAD_SYMBOL_GOT,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -1132,6 +1136,11 @@ struct MachineFunction
     u32* stack_slot_alignments;
     // Direct-call callees, indexed by MACHINE_X64_CALL_DIRECT payloads.
     IrSymbolId* call_targets;
+    // One MachineSymbolReference per call-target row, parallel to
+    // `call_targets`: how the site that names it is patched. The selector
+    // decides it, because the code model and the callee's linkage are both
+    // its to read; the encoder only carries the row's offset out.
+    u8* call_target_references;
     MachineSwitchCase* switch_cases;
     MachineLineMark* line_marks;
     MachineVaArg* va_args;
@@ -1276,6 +1285,20 @@ typedef enum MachineEditKind
 // Result of selecting one canonical typed-IR function into machine IR.
 // `supported` false is an explicit per-function fallback: `failed_opcode`
 // names the first construct outside the selected subset.
+// How the relocation at a call-target site resolves. DIRECT is rip-relative
+// to the symbol, which is every reference outside the position-independent
+// code model and every one inside it to a symbol nothing can interpose. GOT
+// names the linker-owned slot holding the symbol's address, PLT its procedure
+// linkage entry; the object layer turns them into R_X86_64_GOTPCREL and
+// R_X86_64_PLT32.
+typedef enum MachineSymbolReference
+{
+    MACHINE_SYMBOL_REFERENCE_DIRECT,
+    MACHINE_SYMBOL_REFERENCE_GOT,
+    MACHINE_SYMBOL_REFERENCE_PLT,
+    MACHINE_SYMBOL_REFERENCE_COUNT,
+} MachineSymbolReference;
+
 typedef struct MachineSelectResult MachineSelectResult;
 struct MachineSelectResult
 {
@@ -1565,11 +1588,14 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena
 // Codegen calls this only after the canonical validator or a private producer
 // certificate has established ownership and value integrity. The target pass
 // can then accumulate its compact value facts inside an existing row walk.
+// `position_independent` is -fPIC resolved for this target: it picks the
+// thread-local model and selects the GOT and PLT forms for the symbols
+// another object could interpose. The unqualified entry point above passes
+// false, which is every caller that is not module code generation.
 BUSTER_F_DECL MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                              bool position_independent);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                          bool position_independent,
-                                                                           bool assume_validated);
+                                                                          bool position_independent, bool assume_validated);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                             bool assume_validated);
 BUSTER_F_DECL MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function);

@@ -91,6 +91,8 @@ struct MachineX64Selector
     MachineBuilderStream immediates;
     MachineBuilderStream stack_slots;
     MachineBuilderStream call_targets;
+    // One MachineSymbolReference byte per call-target row, appended with it.
+    MachineBuilderStream call_target_references;
     MachineBuilderStream switch_cases;
     MachineBuilderStream stack_slot_alignments;
     MachineBuilderStream va_args;
@@ -104,8 +106,9 @@ struct MachineX64Selector
     // as data, and every access dispatches down the same pointer paths a
     // GLOBAL's address takes.
     u32* value_indirect_slots;
-    // -fPIC: decided by the driver, read only where a thread-local symbol
-    // reference picks its model.
+    // -fPIC, resolved for this target by the caller: it picks the thread-local
+    // model, and an interposable symbol is addressed through its GOT slot and
+    // called through its procedure linkage entry.
     bool position_independent;
     // Result value per argument index, captured at entry before any scratch
     // register can clobber the incoming fixed registers; IR_ID_UNDERLYING_INVALID
@@ -144,6 +147,29 @@ struct MachineX64Selector
     IrOpcode failed_opcode;
     bool supported;
 };
+
+// The reference form a symbol takes in this module: its own address under
+// the default model, the linker's slot or entry under -fPIC when another
+// object could supply the definition. `call_site` distinguishes the two
+// -fPIC forms, which differ only in what names the symbol -- a call's rel32
+// or a load's displacement.
+BUSTER_GLOBAL_LOCAL u8 machine_x64_symbol_reference(MachineX64Selector* selector, IrSymbolId symbol, bool call_site)
+{
+    bool indirect = selector->position_independent && ir_symbol_is_interposable(ir_symbol_from_id(&selector->program->symbols, symbol));
+    return (u8)(!indirect ? MACHINE_SYMBOL_REFERENCE_DIRECT : call_site ? MACHINE_SYMBOL_REFERENCE_PLT : MACHINE_SYMBOL_REFERENCE_GOT);
+}
+
+// One call-target row and the reference form beside it, which are appended
+// together everywhere or the two columns stop being parallel.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_call_target(MachineX64Selector* selector, IrSymbolId symbol, u8 reference)
+{
+    u32 target_index = selector->call_targets.total_count;
+    IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
+    *target_row = symbol;
+    u8* reference_row = (u8*)machine_stream_append(selector->arena, &selector->call_target_references);
+    *reference_row = reference;
+    return target_index;
+}
 
 BUSTER_GLOBAL_LOCAL u8 const machine_x64_system_v_arguments[6] = {
     MACHINE_X64_RDI, MACHINE_X64_RSI, MACHINE_X64_RDX, MACHINE_X64_RCX, MACHINE_X64_R8, MACHINE_X64_R9,
@@ -2243,9 +2269,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_global_address(MachineX64Selector* s
         symbol && (!symbol->is_thread_local || selector->target.os == OPERATING_SYSTEM_LINUX || selector->target.os == OPERATING_SYSTEM_ANDROID);
     if (result_register != UINT32_MAX && thread_local_supported)
     {
-        u32 target_index = selector->call_targets.total_count;
-        IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
-        *target_row = instruction->symbol;
+        // A thread-local address is the loader's to compute whatever the code
+        // model is, and the model below says how; the reference form is about
+        // the ordinary global, whose definition another object could replace.
+        u8 reference =
+            symbol->is_thread_local ? (u8)MACHINE_SYMBOL_REFERENCE_DIRECT : machine_x64_symbol_reference(selector, instruction->symbol, false);
+        u32 target_index = machine_x64_call_target(selector, instruction->symbol, reference);
         CodegenThreadLocalModel model = symbol->is_thread_local
                                             ? codegen_thread_local_model(selector->position_independent, symbol->is_definition)
                                             : CODEGEN_THREAD_LOCAL_LOCAL_EXEC;
@@ -2268,13 +2297,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_global_address(MachineX64Selector* s
         }
         else
         {
+            u16 address_opcode = (u16)(!symbol->is_thread_local
+                                           ? (reference == MACHINE_SYMBOL_REFERENCE_GOT ? MACHINE_X64_LOAD_SYMBOL_GOT : MACHINE_X64_LEA_SYMBOL)
+                                       : model == CODEGEN_THREAD_LOCAL_INITIAL_EXEC ? MACHINE_X64_LEA_TLS_INITIAL_EXEC
+                                                                                    : MACHINE_X64_LEA_TLS);
             u32 row = machine_x64_select_row(selector,
                                              (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
                                                  .payload = target_index,
-                                                 .opcode = (u16)(!symbol->is_thread_local              ? MACHINE_X64_LEA_SYMBOL
-                                                                 : model == CODEGEN_THREAD_LOCAL_INITIAL_EXEC ? MACHINE_X64_LEA_TLS_INITIAL_EXEC
-                                                                                                              : MACHINE_X64_LEA_TLS),
+                                                 .opcode = address_opcode,
                                              });
             machine_x64_define(selector, result_register, row);
         }
@@ -2989,13 +3020,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_function(MachineX64Selector* selecto
     bool selected = false;
     if (result_register != UINT32_MAX && instruction->symbol.value != IR_ID_UNDERLYING_INVALID)
     {
-        u32 target_index = selector->call_targets.total_count;
-        IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
-        *target_row = instruction->symbol;
+        // The address of a function is data like any other address: under
+        // -fPIC an interposable one comes out of the GOT, so every object in
+        // the image agrees on which definition `&f` names.
+        u8 reference = machine_x64_symbol_reference(selector, instruction->symbol, false);
+        u32 target_index = machine_x64_call_target(selector, instruction->symbol, reference);
         u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
                                                        .payload = target_index,
-                                                       .opcode = MACHINE_X64_LEA_SYMBOL,
+                                                       .opcode = (u16)(reference == MACHINE_SYMBOL_REFERENCE_GOT ? MACHINE_X64_LOAD_SYMBOL_GOT
+                                                                                                                 : MACHINE_X64_LEA_SYMBOL),
                                                    });
         machine_x64_define(selector, result_register, row);
         selected = true;
@@ -3648,9 +3682,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_call(MachineX64Selector* selector, I
         u16 call_flags = machine_x64_stage_call_arguments(selector, &plan);
         if (plan.direct_call)
         {
-            u32 target_index = selector->call_targets.total_count;
-            IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
-            *target_row = instruction->symbol;
+            u32 target_index =
+                machine_x64_call_target(selector, instruction->symbol, machine_x64_symbol_reference(selector, instruction->symbol, true));
             machine_x64_select_row(selector, (MachineInstruction){
                                                  .payload = target_index,
                                                  .opcode = MACHINE_X64_CALL_DIRECT,
@@ -4258,6 +4291,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     machine_stream_initialize(&selector.immediates, sizeof(u64));
     machine_stream_initialize(&selector.stack_slots, sizeof(u32));
     machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
+    machine_stream_initialize(&selector.call_target_references, sizeof(u8));
     machine_stream_initialize(&selector.switch_cases, sizeof(MachineSwitchCase));
     machine_stream_initialize(&selector.va_args, sizeof(MachineVaArg));
     MachineBuilderStream line_marks;
@@ -5459,6 +5493,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     result.function.call_targets = arena_allocate(arena, IrSymbolId, selector.call_targets.total_count);
     result.function.call_target_count = selector.call_targets.total_count;
     machine_stream_flatten(&selector.call_targets, result.function.call_targets);
+    result.function.call_target_references = arena_allocate(arena, u8, selector.call_targets.total_count);
+    machine_stream_flatten(&selector.call_target_references, result.function.call_target_references);
     result.function.line_marks = arena_allocate(arena, MachineLineMark, line_marks.total_count);
     result.function.line_mark_count = line_marks.total_count;
     machine_stream_flatten(&line_marks, result.function.line_marks);
@@ -9956,6 +9992,25 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     break; case MACHINE_X64_INDIRECT_BRANCH:
                     {
                         (void)machine_x64_emit_metadata_register(&encoder, S8("JMP"), operand_registers[0], 64, 0);
+                    }
+                    break; case MACHINE_X64_LOAD_SYMBOL_GOT:
+                    {
+                        // mov dest, [rip + 0], with the displacement patched
+                        // to the symbol's GOT slot. The rip-relative operand
+                        // is LEA_SYMBOL's; only the mnemonic differs, so the
+                        // patched field sits at the same three bytes in.
+                        u32 load_start = encoder.count;
+                        BusterX86MetadataPhysicalOperand load_operands[2] = {
+                            machine_x64_exact_gpr_operand(operand_registers[0], 64), machine_x64_exact_rip_memory_operand(),
+                        };
+                        (void)machine_x64_emit_metadata_instruction(&encoder, S8("MOV"), load_operands, 2,
+                                                                     (BusterX86MetadataFeatureInput){0},
+                                                                     (BusterX86MetadataPhysicalAttributes){0}, 0);
+                        MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                        *site = (MachineCallSite){
+                            .code_offset = load_start + 3,
+                            .target = instruction->payload,
+                        };
                     }
                     break; case MACHINE_X64_LEA_TLS:
                     {

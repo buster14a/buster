@@ -16922,16 +16922,20 @@ BUSTER_GLOBAL_LOCAL bool musl_archive(Arena* arena, String8 ar, String8 archive,
 //                    that reason, and here it is what turns the seven
 //                    assembly-only translation units from a runtime failure
 //                    into a link error naming the symbol.
-//   -Bsymbolic       neither compiler is asked for position-independent code:
-//                    the harness drives one flag set and Buster has no -fPIC
-//                    to give. What both of them do emit is PC-relative, so the
-//                    only references `ld` cannot place in a shared object are
-//                    the ones to symbols another object could interpose.
-//                    Binding them at link time is what musl's own build does
-//                    for all but its public data, through --dynamic-list; this
-//                    takes the whole set, which costs the copy relocations
-//                    that list exists to preserve and buys a shared musl out
-//                    of the object set that is already built.
+//   -Bsymbolic       this library is linked from the one object set the rest
+//                    of the harness already measured, and that set is compiled
+//                    without -fPIC. The flag is a real code model now, so what
+//                    forces this one is the single object set rather than a
+//                    missing flag: a second, position-independent set would
+//                    retire it and cost another two thousand compiles. What
+//                    the non-PIC set does emit is PC-relative, so the only
+//                    references `ld` cannot place in a shared object are the
+//                    ones to symbols another object could interpose. Binding
+//                    them at link time is what musl's own build does for all
+//                    but its public data, through --dynamic-list; this takes
+//                    the whole set, which costs the copy relocations that list
+//                    exists to preserve and buys a shared musl out of the
+//                    object set that is already built.
 BUSTER_GLOBAL_LOCAL bool musl_link_shared(Arena* arena, String8 linker, String8 output, String8* objects, u64 object_count, String8 response_path,
                                           u64* elapsed_us, String8* error_out)
 {
@@ -17374,8 +17378,27 @@ struct LibcTestSubsetTotals
 // would show it -- these are its implementations -- and every one of its 168
 // passing units answers the same as before, which is what a correctly rounded
 // portable implementation standing in for a hardware one should do.
-#define LIBC_TEST_EXPECTED_PASSING 381
-#define LIBC_TEST_EXPECTED_STATE_HASH 0x0e973f6c67fa1195ull
+// 2026-08-30: 381 -> 386, and it is the whole shared-object group at once.
+// -fPIC is a code model rather than an accepted flag now: a symbol another
+// object could interpose has its address loaded out of its GOT slot and a
+// direct call to one is relocated through the PLT, and an unwind record's
+// function pointer is relocated against the text section rather than against
+// the function it describes. That last one is what the entry above predicted
+// -- `functional/tls_init_dso` and `regression/tls_get_new-dtv_dso` had moved
+// off the thread-local relocation and onto `R_X86_64_PC32 against symbol
+// 'gettls'`, their FDE naming an interposable function -- and it took those
+// two, `functional/dlopen_dso` (the same refusal for a data object), and the
+// two dependents waiting on those siblings: `functional/tls_init_dlopen` and
+// `regression/tls_get_new-dtv`. Nothing in the suite is blocked on a link any
+// more, in any subset. The two failing units left are
+// `functional/tls_align` and `functional/tls_align_dlopen`, whose shared
+// object is one `__attribute__((constructor))` this compiler accepts and
+// drops (issue 771) -- neither is a relocation and neither is a code model.
+// The shared musl above is still linked -Bsymbolic, because it is built from
+// the one non-PIC object set the rest of the harness measures rather than
+// because the flag is missing.
+#define LIBC_TEST_EXPECTED_PASSING 386
+#define LIBC_TEST_EXPECTED_STATE_HASH 0x7f7d113b6cd1805aull
 
 // The same gate for the second allocator, over LIBC_TEST_ALLOCATOR_SUBSET
 // alone, and deliberately not folded into the two above: a unit that answers
@@ -17392,8 +17415,14 @@ struct LibcTestSubsetTotals
 // than anything an allocator decides), the same three blocked-link and the
 // same three excluded-reference. NONE and FAST agreeing across 69 running
 // programs is what this pass exists to be able to state rather than assume.
-#define LIBC_TEST_ALLOCATOR_EXPECTED_PASSING 69
-#define LIBC_TEST_ALLOCATOR_EXPECTED_STATE_HASH 0xd8d4dc347e1bddc9ull
+// 2026-08-30: 69 -> 72, the same units and the same reason as the inventory
+// above: `functional/dlopen_dso` and `functional/tls_init_dso` are shared
+// objects and `functional/tls_init_dlopen` is the program that opens one, so
+// making -fPIC a code model moves them here too. The two allocators still
+// classify `src/functional` identically, which is the fact this pass exists
+// to state.
+#define LIBC_TEST_ALLOCATOR_EXPECTED_PASSING 72
+#define LIBC_TEST_ALLOCATOR_EXPECTED_STATE_HASH 0xa8900b760d0d4598ull
 
 // A test program is a child with a deadline. A miscompiled test does not
 // always crash: upstream's own runner kills the child rather than trusting it
@@ -17596,10 +17625,12 @@ BUSTER_GLOBAL_LOCAL bool libc_test_compile(Arena* arena, LibcTestBuild* build, L
     libc_test_append_common_flags(&builder, flags, extended);
     if (shared_object)
     {
-        // Upstream's own .lo rule, and the one place a flag set here is not
-        // the same for both compilers by accident rather than by choice: the
-        // Buster driver takes -fPIC and does nothing with it, so what a shared
-        // object needs of the code generator is exactly what this measures.
+        // Upstream's own .lo rule, and the same code model on both sides: a
+        // symbol another object could interpose is addressed through the GOT
+        // and called through the PLT. This is where that model is measured
+        // against a real linker, because what a shared object needs of the
+        // code generator is exactly the set of references `ld` refuses to
+        // place otherwise, and it names each missing one.
         os_argument_builder_append(&builder, S8("-fPIC"));
         os_argument_builder_append(&builder, S8("-DSHARED"));
     }

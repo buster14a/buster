@@ -448,6 +448,8 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12, true, false, true, true, false},
         {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21, true, false, false, false, false},
         {CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12, true, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL, false, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_X86_64_PLT32, false, false, false, false, false},
     };
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(relocation_kinds) == CODEGEN_MODULE_RELOCATION_COUNT);
     for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(relocation_kinds); kind_index += 1)
@@ -693,20 +695,42 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                absolute32s_rel_roundtrip.relocation_count == 1 &&
                                absolute32s_rel_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S &&
                                absolute32s_rel_roundtrip.relocations[0].addend == -4);
-    ObjectArtifact gotpc_rel_elf = object_write(arguments->arena, &absolute32s_object, OBJECT_FORMAT_ELF64);
-    u64 gotpc_rel_section = 0;
-    u64 gotpc_rel_target_data = 0;
-    bool gotpc_rel_offsets_valid = object_test_elf_relocation_offsets(gotpc_rel_elf.bytes, &gotpc_rel_section, &gotpc_rel_target_data);
-    u64 gotpc_rel_data = 0;
-    if (gotpc_rel_offsets_valid)
+    // The three GOTPCREL spellings are one kind on the way in, which is what
+    // lets a -fPIC object -- this compiler's or clang's -- be linked here at
+    // all.  Local dynamic is the one thread-local model with no kind, and the
+    // refusal names it.
+    u32 gotpc_rel_types[] = {9, 41, 42};
+    for (u32 type_index = 0; type_index < BUSTER_ARRAY_LENGTH(gotpc_rel_types); type_index += 1)
     {
-        memcpy(&gotpc_rel_data, gotpc_rel_elf.bytes.pointer + gotpc_rel_section + 24, sizeof(gotpc_rel_data));
-        object_test_write_u32(gotpc_rel_elf.bytes, gotpc_rel_data + 8, 9);
+        ObjectArtifact gotpc_rel_elf = object_write(arguments->arena, &absolute32s_object, OBJECT_FORMAT_ELF64);
+        u64 gotpc_rel_section = 0;
+        u64 gotpc_rel_target_data = 0;
+        bool gotpc_rel_offsets_valid = object_test_elf_relocation_offsets(gotpc_rel_elf.bytes, &gotpc_rel_section, &gotpc_rel_target_data);
+        u64 gotpc_rel_data = 0;
+        if (gotpc_rel_offsets_valid)
+        {
+            memcpy(&gotpc_rel_data, gotpc_rel_elf.bytes.pointer + gotpc_rel_section + 24, sizeof(gotpc_rel_data));
+            object_test_write_u32(gotpc_rel_elf.bytes, gotpc_rel_data + 8, gotpc_rel_types[type_index]);
+        }
+        ObjectFile gotpc_rel_roundtrip = object_read(arguments->arena, gotpc_rel_elf.bytes, absolute32s_object.target);
+        BUSTER_TEST(arguments, gotpc_rel_offsets_valid && gotpc_rel_roundtrip.error == OBJECT_ERROR_NONE &&
+                                   gotpc_rel_roundtrip.relocation_count == 1 &&
+                                   gotpc_rel_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_GOTPCREL);
     }
-    ObjectFile gotpc_rel_roundtrip = object_read(arguments->arena, gotpc_rel_elf.bytes, absolute32s_object.target);
-    BUSTER_TEST(arguments, gotpc_rel_offsets_valid && gotpc_rel_roundtrip.error == OBJECT_ERROR_UNSUPPORTED_TARGET &&
-                               object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(gotpc_rel_roundtrip.diagnostic), S8("R_X86_64_GOTPCREL")) &&
-                               object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(gotpc_rel_roundtrip.diagnostic), S8("GOT model")));
+    ObjectArtifact tls_local_dynamic_elf = object_write(arguments->arena, &absolute32s_object, OBJECT_FORMAT_ELF64);
+    u64 tls_local_dynamic_section = 0;
+    u64 tls_local_dynamic_target_data = 0;
+    bool tls_local_dynamic_offsets_valid =
+        object_test_elf_relocation_offsets(tls_local_dynamic_elf.bytes, &tls_local_dynamic_section, &tls_local_dynamic_target_data);
+    u64 tls_local_dynamic_data = 0;
+    if (tls_local_dynamic_offsets_valid)
+    {
+        memcpy(&tls_local_dynamic_data, tls_local_dynamic_elf.bytes.pointer + tls_local_dynamic_section + 24, sizeof(tls_local_dynamic_data));
+        object_test_write_u32(tls_local_dynamic_elf.bytes, tls_local_dynamic_data + 8, 20);
+    }
+    ObjectFile tls_local_dynamic_roundtrip = object_read(arguments->arena, tls_local_dynamic_elf.bytes, absolute32s_object.target);
+    BUSTER_TEST(arguments, tls_local_dynamic_offsets_valid && tls_local_dynamic_roundtrip.error == OBJECT_ERROR_UNSUPPORTED_TARGET &&
+                               object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(tls_local_dynamic_roundtrip.diagnostic), S8("R_X86_64_TLSLD")));
     ObjectArtifact coff = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
     ObjectFile coff_roundtrip = object_read(arguments->arena, coff.bytes,
                                             (Target){

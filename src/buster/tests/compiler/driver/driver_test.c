@@ -2217,14 +2217,94 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         file_map_unmap(ucontext_map);
         scratch_end(ucontext_temporary);
     }
+    {
+        // -fPIC as a code model, read back out of the object it produces.
+        // Every allocator has to make the same four decisions, because the
+        // musl harness gates the dynamic probe's transcript under each of
+        // them: the two interposable data symbols through the GOT, the
+        // static one still rip-relative, the direct call through the PLT and
+        // the interposable function's address through the GOT as well.
+        String8 pic_model_modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(pic_model_modes); mode_index += 1)
+        {
+            TemporalArena pic_model_temporary = arena_begin_temporal(c_object_arena);
+            Arena* pic_model_arena = pic_model_temporary.arena;
+            String8 pic_model_object_path = buster_test_temporary_path(pic_model_arena, S8("buster-c-pic-model"), S8(".o"));
+            String8 pic_model_allocator = string_format(pic_model_arena, S8("-fregister-allocator={S8}"), pic_model_modes[mode_index]);
+            String8 pic_model_command_line[] = {
+                S8("-c"),  S8("-target"), S8("x86_64-unknown-linux-gnu"), pic_model_allocator, S8("-fPIC"),
+                S8("-o"), pic_model_object_path, S8("tests/basic_c_pic_model.c"),
+            };
+            CompilerDriverResult pic_model = compiler_driver_execute_invocation(
+                pic_model_arena,
+                compiler_driver_parse_arguments(pic_model_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pic_model_command_line)));
+            if (pic_model.error != COMPILER_DRIVER_ERROR_NONE && pic_model.diagnostic.length)
+            {
+                arguments->show(arguments, S8("-fPIC code model driver error: {S8}\n"), pic_model.diagnostic);
+            }
+            BUSTER_TEST(arguments, pic_model.error == COMPILER_DRIVER_ERROR_NONE && pic_model.has_object);
+            // The driver's own object, before it is written: R_X86_64_PLT32
+            // reads back as PC32, which is what it means once a static link
+            // has bound the callee, so the call form is only inspectable
+            // here.
+            ObjectFile pic_model_object = pic_model.object;
+            bool global_through_got = false;
+            bool external_through_got = false;
+            bool static_direct = false;
+            bool call_through_plt = false;
+            bool function_address_through_got = false;
+            for (u32 relocation_index = 0; relocation_index < pic_model_object.relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation* relocation = pic_model_object.relocations + relocation_index;
+                if (relocation->section != OBJECT_SECTION_TEXT || relocation->symbol >= pic_model_object.symbol_count)
+                {
+                    continue;
+                }
+                String8 name = pic_model_object.symbols[relocation->symbol].name;
+                bool got = relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL;
+                global_through_got = global_through_got || (got && string_equal(name, S8("buster_pic_model_global")));
+                external_through_got = external_through_got || (got && string_equal(name, S8("buster_pic_model_external")));
+                function_address_through_got = function_address_through_got || (got && string_equal(name, S8("buster_pic_model_callee")));
+                static_direct = static_direct || (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 &&
+                                                  string_equal(name, S8("buster_pic_model_static")));
+                call_through_plt = call_through_plt || (relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 &&
+                                                        string_equal(name, S8("buster_pic_model_bump")));
+            }
+            BUSTER_TEST(arguments, global_through_got && external_through_got && function_address_through_got && static_direct && call_through_plt);
+            // The same fixture without the flag: nothing goes through the GOT
+            // or the PLT, which is what makes the checks above the flag's own
+            // rather than the fixture's.
+            String8 pic_model_default_path = buster_test_temporary_path(pic_model_arena, S8("buster-c-pic-model-default"), S8(".o"));
+            String8 pic_model_default_command_line[] = {
+                S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), pic_model_allocator,
+                S8("-o"), pic_model_default_path, S8("tests/basic_c_pic_model.c"),
+            };
+            CompilerDriverResult pic_model_default = compiler_driver_execute_invocation(
+                pic_model_arena,
+                compiler_driver_parse_arguments(pic_model_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pic_model_default_command_line)));
+            BUSTER_TEST(arguments, pic_model_default.error == COMPILER_DRIVER_ERROR_NONE && pic_model_default.has_object);
+            bool default_indirect_found = false;
+            for (u32 relocation_index = 0; relocation_index < pic_model_default.object.relocation_count; relocation_index += 1)
+            {
+                ObjectRelocationKind kind = pic_model_default.object.relocations[relocation_index].kind;
+                default_indirect_found =
+                    default_indirect_found || kind == OBJECT_RELOCATION_X86_64_GOTPCREL || kind == OBJECT_RELOCATION_X86_64_PLT32;
+            }
+            BUSTER_TEST(arguments, !default_indirect_found);
+            scratch_end(pic_model_temporary);
+        }
+    }
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
     {
         // Keep one real external-compiler fixture in the driver suite.  The
-        // non-PIC form exercises clang's R_X86_64_32S, while -fPIC emits the
-        // GOTPCRELX family that this linker deliberately rejects without a
-        // GOT model.  Keep debug sections out of this fixture: clang's newer
-        // .debug_addr/.debug_str_offsets sections are outside this object's
-        // intentionally narrow debug-section model.
+        // non-PIC form exercises clang's R_X86_64_32S; the -fPIC form is the
+        // REX_GOTPCRELX family, which this reader takes as one GOT kind and
+        // this linker resolves the way it resolves its own -fPIC output --
+        // by relaxing each load back into the address it would have computed,
+        // because a static image binds every name in it.  Keep debug sections
+        // out of this fixture: clang's newer .debug_addr/.debug_str_offsets
+        // sections are outside this object's intentionally narrow
+        // debug-section model.
         TemporalArena pic_temporary = arena_begin_temporal(c_object_arena);
         Arena* pic_arena = pic_temporary.arena;
         String8 no_pic_object_path = buster_test_temporary_path(pic_arena, S8("buster-c-clang-no-pic"), S8(".o"));
@@ -2272,9 +2352,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             file_map_unmap(no_pic_map);
             FileMapRead pic_map = file_map_read(pic_arena, pic_object_path, (FileReadOptions){0});
             ObjectFile pic = object_read(pic_arena, pic_map.bytes, elf_target);
-            BUSTER_TEST(arguments, pic.error == OBJECT_ERROR_UNSUPPORTED_TARGET &&
-                                   string_first_sequence(pic.diagnostic, S8("R_X86_64_REX_GOTPCRELX")) != UINT64_MAX &&
-                                   string_first_sequence(pic.diagnostic, S8("GOT model")) != UINT64_MAX);
+            bool got_indirect_found = false;
+            for (u32 relocation_index = 0; relocation_index < pic.relocation_count; relocation_index += 1)
+            {
+                got_indirect_found = got_indirect_found || pic.relocations[relocation_index].kind == OBJECT_RELOCATION_X86_64_GOTPCREL;
+            }
+            BUSTER_TEST(arguments, pic.error == OBJECT_ERROR_NONE && got_indirect_found);
             file_map_unmap(pic_map);
             String8 no_pic_link_output = buster_test_temporary_path(pic_arena, S8("buster-c-clang-no-pic"), S8(""));
             String8 no_pic_link_arguments[] = {S8("-o"), no_pic_link_output, no_pic_object_path};
@@ -2285,9 +2368,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 pic_link_arguments[] = {S8("-o"), pic_link_output, pic_object_path};
             CompilerDriverResult pic_link = compiler_driver_execute_invocation(
                 pic_arena, compiler_driver_parse_arguments(pic_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pic_link_arguments)));
-            BUSTER_TEST(arguments, pic_link.error == COMPILER_DRIVER_ERROR_OBJECT &&
-                                   string_first_sequence(pic_link.diagnostic, S8("R_X86_64_REX_GOTPCRELX")) != UINT64_MAX &&
-                                   string_first_sequence(pic_link.diagnostic, S8("GOT model")) != UINT64_MAX);
+            if (pic_link.error != COMPILER_DRIVER_ERROR_NONE && pic_link.diagnostic.length)
+            {
+                arguments->show(arguments, S8("clang -fPIC object link error: {S8}\n"), pic_link.diagnostic);
+            }
+            BUSTER_TEST(arguments, pic_link.error == COMPILER_DRIVER_ERROR_NONE && pic_link.native_link.executable.length != 0);
         }
         scratch_end(pic_temporary);
     }

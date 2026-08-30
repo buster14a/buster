@@ -350,6 +350,16 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
     },
+    // A load, but not a memory row: the GOT slot holds one address for the
+    // life of the image, so nothing this function stores can change what it
+    // reads and rematerializing it anywhere yields the value LEA_SYMBOL's
+    // rematerialization does.
+    [MACHINE_X64_LOAD_SYMBOL_GOT] = {
+        .name = S8_INITIALIZER("x64_load_symbol_got"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE,
+    },
     [MACHINE_X64_LEA_TLS_INITIAL_EXEC] = {
         .name = S8_INITIALIZER("x64_lea_tls_initial_exec"),
         .operand_count = 1,
@@ -1221,6 +1231,7 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_X64_INDIRECT_BRANCH] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 48,
     [MACHINE_A64_LEA_BLOCK] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 49,
     [MACHINE_A64_INDIRECT_BRANCH] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 50,
+    [MACHINE_X64_LOAD_SYMBOL_GOT] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 51,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)

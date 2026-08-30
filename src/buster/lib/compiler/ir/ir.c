@@ -78,6 +78,11 @@ u32 ir_field_access_pieces(u64 access_size, IrFieldAccessPiece* pieces)
     return result;
 }
 
+bool ir_symbol_is_interposable(IrSymbol const* symbol)
+{
+    return symbol && symbol->linkage != IR_LINKAGE_INTERNAL && !symbol->is_hidden;
+}
+
 IrSymbol* ir_symbol_from_id(IrSymbolTable* table, IrSymbolId id)
 {
     IrSymbol* result;

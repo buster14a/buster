@@ -994,16 +994,20 @@ three of those are musl's own.
   exit 127, before the program's first instruction; upstream's `configure` asks
   for the flag for exactly that reason, and here it turns a name the object set
   is missing from a silent runtime death into a link error naming the symbol.
-- `-Bsymbolic`, because neither compiler is asked for position-independent
-  code: the harness drives one flag set and Buster's `-fPIC` reaches only the
-  thread-local model, not the rest of the code model (issue 752).
-  What both of them do emit is PC-relative, so the only references `ld` refuses
-  to place in a shared object are the ones to symbols another object could
-  interpose. Binding those at link time is what musl's own build does for
-  everything except its public data, through `--dynamic-list`; taking the whole
-  set costs the copy relocations that list exists to preserve and buys a shared
-  musl out of the object set that is already built. The probe below references
-  no libc data object, so nothing it measures turns on the difference.
+- `-Bsymbolic`, because this library is linked from the one object set the
+  rest of the harness already measured and that set is compiled without
+  `-fPIC`. The flag is a code model now rather than an accepted no-op --
+  described under machine selection below -- so what forces `-Bsymbolic` here
+  is the single object set and not a missing flag: a second,
+  position-independent set would retire it, at the cost of another two
+  thousand compiles. What the non-PIC set does emit is PC-relative, so the only
+  references `ld` refuses to place in a shared object are the ones to symbols
+  another object could interpose. Binding those at link time is what musl's own
+  build does for everything except its public data, through `--dynamic-list`;
+  taking the whole set costs the copy relocations that list exists to preserve
+  and buys a shared musl out of the object set that is already built. The probe
+  below references no libc data object, so nothing it measures turns on the
+  difference.
 
 One object set rather than two is the other departure. musl compiles a second,
 `-fPIC` copy of every unit for `libc.so`; this harness links the one set both
@@ -1044,7 +1048,10 @@ below. Twenty-one musl units hold one -- `__ctype_b_loc`'s `ptable`, the
 `FILE *const stdout` trio, the locale tables -- and each of them put a
 write-when-relocated word on a page the loader maps read-only, which is a
 `DT_TEXTREL` musl's loader does not undo for the file it was itself started
-from.
+from. `-fPIC` does not retire this one: a relocation into a read-only object
+still has to be applied when the image loads whatever the code model is, and
+what would retire it is a relocated-read-only section of its own, which this
+object writer does not have.
 
 The manifest is musl's own x86-64 configuration, replacement rule included and
 whole. Every `.c` in a source directory is collected, and so is every `.c`,
@@ -1318,13 +1325,14 @@ this does not understand shows up as a unit that fails to build rather than as
 one quietly held out, which is the trade this stage wants.
 
 What comes out of that is three link shapes rather than one. A shared-object
-unit is compiled `-fPIC -DSHARED`, which is upstream's own `.lo` rule and the
-one flag in this stage that the two compilers do different things with -- the
-Buster driver reads `-fPIC` for the thread-local model and absorbs the rest of
-it, so what a shared object demands of the code generator is exactly what this
-measures -- and linked
-`-shared` against the shared musl; upstream never runs one, so both sides
-building it is the pass. A program with a `.mk` is linked against the shared
+unit is compiled `-fPIC -DSHARED`, which is upstream's own `.lo` rule, and
+linked `-shared` against the shared musl; upstream never runs one, so both
+sides building it is the pass. That flag is the same code model on both sides
+now, and this stage is where it is measured against a real linker: what a
+shared object demands of the code generator is a thread-local model the loader
+can place and a GOT-indirect reference for every other symbol another object
+could interpose, and `ld` says so by name for each one that is missing. A
+program with a `.mk` is linked against the shared
 musl rather than the archive, with that musl as its interpreter and its own
 directory as its run path, which is upstream's `-rpath='$ORIGIN'` spelled as a
 directory this harness knows. Every other program is linked `-static` exactly
@@ -1372,8 +1380,9 @@ compiles once an aggregate can be assigned across a `volatile` qualifier
 `regression/pthread-robust-detach` pass once a walked-through aggregate member
 is not loaded (issue 737). The other two, `functional/tls_align_dlopen` and
 `functional/tls_init_dlopen`, joined the shared-object group that was already
-there rather than being anything new -- and that group is the whole of what
-the suite does not pass. 243 to 381, and nothing that passed before stopped
+there rather than being anything new; `tls_init_dlopen` is closed with the
+rest of that group and `tls_align_dlopen` is one of the two the dropped
+constructor still holds. 243 to 386, and nothing that passed before stopped
 passing.
 
 Applying `ARCH_SRCS` whole moved the reference and not the suite. The Clang
@@ -1460,61 +1469,62 @@ difference between two allocators and a regression under both the same moved
 number. The pass runs whether or not the first inventory moved, so one run
 reports both.
 
-`src/functional` classifies identically under both allocators today: 69
+`src/functional` classifies identically under both allocators today: 72
 passing, the same two wrong answers — `functional/tls_align` and
-`functional/tls_align_dlopen`, both of them the local-exec TLS model rather
-than anything an allocator decides — the same three blocked-link and the same
-three excluded-reference. That agreement across 69 running programs is what
-the pass exists to be able to state.
+`functional/tls_align_dlopen`, both of them a dropped constructor rather than
+anything an allocator decides — and the same three excluded-reference. That
+agreement across 72 running programs is what the pass exists to be able to
+state.
 
-Today 381 of 424 units pass (measured 2026-08-29, twice on one machine).
+Today 386 of 424 units pass (measured 2026-08-30, on one machine).
 Seventy-eight are `src/api`: 78 of its 79 units compile against musl's headers
 under both compilers, and one — `api/unistd` — is held out because musl
 defines neither `_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the
-reference fails on too. The other 303 are runtime tests that link and run
-green: `src/functional` is 69 passing against 2 failing, 3 blocked-link and 3
+reference fails on too. The other 308 are runtime tests that link and run
+green: `src/functional` is 72 passing against 2 failing and 3
 excluded-reference; `src/math` is 168 passing and 31 excluded-reference;
-`src/regression` is 66 passing against none failing, 2 blocked-link and 1
-excluded-reference. `src/math` passes every one of the 168 units the reference
-can run, `src/regression` has no failing unit left, and nothing in the suite is
-blocked on a compile.
+`src/regression` is 68 passing against none failing and 1 excluded-reference.
+`src/math` passes every one of the 168 units the reference can run,
+`src/regression` has no failing unit left, and nothing in the suite is blocked
+on a compile or on a link.
 
 Most of that total is the reference's reach rather than Buster's, and it
 arrived with the assembly stage: both archives hold musl's own x86-64 assembly
 now, so `fenv` is real, `clone` is present and `setjmp` is not a trap. The
-number the assembly stage itself reaches is 377; the four above it are this
-tree's, and only two of them are a fix — see the `LIBC_TEST_EXPECTED_PASSING`
+number the assembly stage itself reaches is 377; the nine above it are this
+tree's, and seven of them are a fix — see the `LIBC_TEST_EXPECTED_PASSING`
 note in `build.c`, which is where each step is written down.
 
-The nine units with a sibling `.mk` are what this stage's newest counts are.
-`functional/tls_align_dso` is the one that passes: both sides build that
-shared object. What holds the other three is no longer the thread-local model.
-Buster picks between all three ELF models now — local-exec for a definition
-in an executable, initial-exec for a declaration it does not define,
-general-dynamic under `-fPIC` — so nothing in this group is behind a
-thread-local relocation `ld` refuses. `functional/tls_init_dso` and
-`regression/tls_get_new-dtv_dso` are blocked one relocation further on: their
-`.eh_frame` FDE names the function it describes, where clang names `.text`
-plus an offset, and a PC-relative reference to a symbol another object could
-interpose is what `-shared` refuses. That is the same relocation
-`functional/dlopen_dso` is blocked on — there for a reference to a data
-object — and it is the `-fPIC` code model, which `-Bsymbolic` is what hides
-for `libc.so` above. `functional/tls_align` links against its shared object,
-runs, and still gets the wrong answer, and its cause is neither of those:
-`tls_align_dso.c` is one `__attribute__((constructor))` filling the table the
-test reads, nothing in this tree emits `.init_array`, and the attribute is
-accepted and dropped, so that object's `.text` comes out empty. The remaining
-four — `functional/dlopen`, `tls_align_dlopen`, `tls_init_dlopen` and
-`regression/tls_get_new-dtv` — are `excluded-reference` or blocked on a
-sibling this side did not build; every one of them calls `dlopen`.
+The nine units with a sibling `.mk` are what this stage's newest counts are,
+and seven of them pass. Both compilers build all four shared objects —
+`functional/tls_align_dso`, `functional/tls_init_dso`,
+`functional/dlopen_dso` and `regression/tls_get_new-dtv_dso` — and the two
+programs that open one of them and had been waiting on it,
+`functional/tls_init_dlopen` and `regression/tls_get_new-dtv`, run and match.
+Two code models between them are why. Buster picks between all three ELF
+thread-local models now — local-exec for a definition in an executable,
+initial-exec for a declaration it does not define, general-dynamic under
+`-fPIC` — so nothing here is behind a thread-local relocation `ld` refuses;
+and `-fPIC` is the rest of the position-independent model, so a reference to
+any other symbol another object could interpose goes through the GOT and a
+direct call to one through the PLT. An unwind record was the last of those
+references and the least obvious: an FDE named the function it describes,
+where clang names `.text` plus an offset, and that is a PC-relative reference
+to an interposable symbol like any other. `functional/dlopen` is
+`excluded-reference`, because musl's loader saves a jump buffer around
+`dlopen` and the reference dies on the same trapping `setjmp` the Buster
+build does. The two that are left, `functional/tls_align` and
+`tls_align_dlopen`, link and run and get the wrong answer, and their cause is
+neither code model: `tls_align_dso.c` is one `__attribute__((constructor))`
+filling the table the test reads, nothing in this tree emits `.init_array`,
+and the attribute is accepted and dropped, so that object's `.text` comes out
+empty.
 
-`LIBCTEST_BLOCKER` still prints nothing, and the three blocked-link units are
-why the list did not come back with them. It ranks the symbols a link could
-not resolve, and none of those three is short a symbol: each is short a
-relocation the shared object cannot carry, which the unit's own
-`LIBCTEST_UNIT` line carries in the linker's words. The work list this stage
-generates for itself is a list of missing components, and what is left now is
-a code model, an unwind-table reference and one unimplemented attribute.
+`LIBCTEST_BLOCKER` still prints nothing, and now neither does any
+blocked-link state: every unit in the suite compiles and links under both
+compilers. The work list this stage generates for itself is a list of missing
+components, and what is left is one unimplemented attribute and the two wrong
+answers it causes.
 
 The last 22 blocked-compile units went together, 21 in `src/math` and
 `functional/strtold`, when the x87 static-initializer folder stopped refusing
@@ -1533,7 +1543,8 @@ Two failing units are left, and both are the same wrong answer rather than a
 missing component: `functional/tls_align` and `functional/tls_align_dlopen`,
 whose shared object is a constructor this compiler drops, as described above.
 Their cause is known, and every one of the five this stage started with is
-attributed.
+attributed. They are also the only units in the suite in any state but
+`pass` or `excluded-reference`.
 
 `functional/fcntl` was the fourth of the original five to go, and it was a
 lazy operand inside a call argument. Its child process exits on
@@ -2447,6 +2458,44 @@ on a commit you already know is incomplete tells nobody anything.
   counted per register class; metadata supplies barriers, memory membership,
   and vector scheduling membership while compatibility opcode classifiers
   cover legacy rows during migration.
+- `-fPIC` is a code model, not an accepted flag. It reaches code generation as
+  `CodegenModuleOptions.position_independent`, and generation resolves it for
+  the target: x86-64 ELF, where the relocations it changes are the ones `ld`
+  refuses in a shared object. A symbol another object could interpose --
+  `ir_symbol_is_interposable`, which is external or imported linkage without
+  hidden visibility -- has its address loaded out of its GOT slot
+  (`R_X86_64_GOTPCREL`) instead of computed rip-relative, and a direct call to
+  one is relocated `R_X86_64_PLT32` so the linker may route it through a
+  procedure linkage entry. Internal and hidden symbols keep the rip-relative
+  form, and a thread-local address is the thread-local model's to pick --
+  `codegen_thread_local_model` reads the same flag and answers general-dynamic
+  under it. The canonical emitter and the machine path make
+  the same decision from the same predicate: the selector writes a
+  `MachineSymbolReference` beside each call-target row and the module
+  relocation is derived from it, so the four allocators cannot disagree. One
+  object-writer decision follows from the model rather than from a relocation:
+  an unwind record's function pointer is relocated against a local text symbol
+  with the function's own offset, because an FDE naming a preemptible function
+  is the same PC-relative reference to an interposable symbol that `ld`
+  refuses in the body.
+- `-fPIE`/`-fpie` stay accepted and inert, and that is a statement rather than
+  an omission: every reference this compiler emits is already rip-relative, an
+  executable's own definitions are not interposable, its references to another
+  image's data are what the linker's copy relocation is for, and its own
+  thread-local block is still the initial one -- so the
+  position-independent-executable model asks for no code this compiler does not
+  already produce. `-fno-pic` clears the model; `-fno-pie` clears nothing
+  because nothing was set.
+- The built-in linker resolves both forms for the image it writes, which binds
+  every name in it: `PLT32` patches the same rel32 `PC32` does, and a GOT load
+  is relaxed back into the `lea` it would have been (`link_x86_relax_got_load`),
+  the same relaxation `ld` performs for a `GOTPCRELX` it can resolve. The ELF
+  reader takes `R_X86_64_GOTPCREL`, `GOTPCRELX` and `REX_GOTPCRELX` as one
+  kind for that reason, so a `-fPIC` object -- this compiler's or clang's --
+  links here. An instruction shape the relaxation does not recognize fails the
+  link by name rather than being rewritten. It relaxes the two indirect
+  thread-local models back to local-exec for the same reason
+  (`link_elf_relax_thread_local`).
 
 - **C only.** No C++, no exceptions. `-fwrapv`, `-fno-strict-aliasing`,
   `-funsigned-char`.

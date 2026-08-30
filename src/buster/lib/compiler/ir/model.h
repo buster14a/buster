@@ -510,6 +510,14 @@ BUSTER_F_DECL u32 ir_field_access_pieces(u64 access_size, IrFieldAccessPiece* pi
 // unqualified value themselves.
 BUSTER_F_DECL bool ir_types_differ_only_in_volatile(IrTypeTable* table, IrTypeId left, IrTypeId right);
 BUSTER_F_DECL IrSymbol* ir_symbol_from_id(IrSymbolTable* table, IrSymbolId id);
+// Whether another object loaded into the same image could supply this
+// symbol's definition. Internal linkage names nothing outside its own module
+// and a hidden symbol is not exported, so both are bound where they are
+// written; every other name is the dynamic linker's to resolve, and the
+// position-independent code model reaches it through its GOT slot rather than
+// rip-relative for exactly that reason. A null symbol answers false: a
+// reference the module cannot resolve to a row has no linkage to read.
+BUSTER_F_DECL bool ir_symbol_is_interposable(IrSymbol const* symbol);
 BUSTER_F_DECL IrSource* ir_source_from_id(IrSourceTable* table, IrSourceId id);
 
 // The mapped byte space, resolved. `cursor` may be null; passing one across a

@@ -133,6 +133,9 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
         case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12:
             aarch64 = true;
             break;
+        case CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL:
+        case CODEGEN_MODULE_RELOCATION_X86_64_PLT32:
+            break;
         case CODEGEN_MODULE_RELOCATION_COUNT:
             return false;
     }
@@ -8157,6 +8160,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         .ir_module = module,
         .abi = codegen_abi_for_target(target),
     };
+    // The one place -fPIC is turned into a fact about this module. It is a
+    // statement about which references `ld` will place in a shared object, so
+    // it is scoped to the format and architecture whose relocations say that:
+    // x86-64 ELF. Windows images relocate as a whole and Mach-O's model is
+    // its own; neither reads this flag.
+    bool position_independent =
+        options.position_independent && target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64;
+    result.position_independent = position_independent;
     result.globals = arena_allocate(arena, CodegenModuleGlobal, module->global_count);
     u64 read_only_capacity = 0;
     u64 writable_capacity = 0;
@@ -8967,7 +8978,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         {
             TemporalArena machine_scratch = scratch_begin(&arena, 1);
             MachineSelectResult selected = {0};
-            selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target, options.position_independent);
+            selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target, position_independent);
             machine_simd_operation_count = selected.simd_operation_count;
             if (!selected.supported)
             {
@@ -9295,9 +9306,22 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 MachineThreadLocalSite thread_local_site =
                                     (MachineThreadLocalSite)encoded.call_sites[site_index].thread_local_site;
                                 bool site_is_thread_local = encoded.call_sites[site_index].is_thread_local != 0;
+                                // Everything that is not thread-local takes
+                                // the reference form the selector wrote beside
+                                // the call target, so a GOT load and a PLT
+                                // call are told apart here by what the symbol
+                                // is rather than by which row emitted them.
+                                u32 site_target = encoded.call_sites[site_index].target;
+                                u8 site_reference = selected.function.call_target_references
+                                                        ? selected.function.call_target_references[site_target]
+                                                        : (u8)MACHINE_SYMBOL_REFERENCE_DIRECT;
+                                CodegenModuleRelocationKind site_direct_kind =
+                                    site_reference == MACHINE_SYMBOL_REFERENCE_GOT   ? CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL
+                                    : site_reference == MACHINE_SYMBOL_REFERENCE_PLT ? CODEGEN_MODULE_RELOCATION_X86_64_PLT32
+                                                                                     : CODEGEN_MODULE_RELOCATION_X86_64_PC32;
                                 CodegenModuleRelocationKind site_kind =
                                     thread_local_site == MACHINE_THREAD_LOCAL_SITE_TLS_GET_ADDR ? CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32
-                                    : !site_is_thread_local                                     ? CODEGEN_MODULE_RELOCATION_X86_64_PC32
+                                    : !site_is_thread_local                                     ? site_direct_kind
                                     : target.os == OPERATING_SYSTEM_WINDOWS                     ? CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32
                                     : (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
                                         ? CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32
@@ -9305,7 +9329,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     : thread_local_site == MACHINE_THREAD_LOCAL_SITE_GENERAL_DYNAMIC ? CODEGEN_MODULE_RELOCATION_X86_64_TLSGD
                                                                                                      : CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32;
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
-                                    .symbol = selected.function.call_targets[encoded.call_sites[site_index].target],
+                                    .symbol = selected.function.call_targets[site_target],
                                     .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
                                     .kind = (u8)site_kind,
                                     .is_thread_local = site_is_thread_local,
@@ -10600,12 +10624,21 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         else
                         {
+                            // Under -fPIC an interposable symbol's address is
+                            // loaded out of its GOT slot rather than computed
+                            // from the instruction pointer: the slot is what
+                            // every object in the image shares, so a
+                            // definition that replaces this one replaces it
+                            // here too. `mov` and `lea` take the same
+                            // rip-relative operand, so only the mnemonic and
+                            // the relocation family differ.
+                            bool got_indirect = position_independent && ir_symbol_is_interposable(symbol);
                             BusterX86MetadataPhysicalOperand address_operands[2] = {
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
                                 codegen_canonical_x64_metadata_rip_relative(64, 0),
                             };
                             u32 address_relocation_offset = 0;
-                            if (!codegen_canonical_x64_metadata_emit_relocation(&buffer, S8("LEA"), address_operands,
+                            if (!codegen_canonical_x64_metadata_emit_relocation(&buffer, got_indirect ? S8("MOV") : S8("LEA"), address_operands,
                                                                                  BUSTER_ARRAY_LENGTH(address_operands),
                                                                                  &address_relocation_offset))
                             {
@@ -10615,7 +10648,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                 .symbol = instruction->symbol,
                                 .offset = address_relocation_offset,
-                                .kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32,
+                                .kind = (u8)(got_indirect ? CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL : CODEGEN_MODULE_RELOCATION_X86_64_PC32),
                             };
                         }
                         BusterX86MetadataPhysicalOperand global_store_operands[2] = {
@@ -13629,10 +13662,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error;
                                 return result;
                             }
+                            // The call itself is the same rel32 either way.
+                            // Under -fPIC an interposable callee asks for the
+                            // PLT family instead, which is the linker's
+                            // permission to point that rel32 at a procedure
+                            // linkage entry -- without it `ld` refuses a
+                            // direct call to a preemptible function in a
+                            // shared object rather than routing it.
+                            bool procedure_linkage =
+                                position_independent && ir_symbol_is_interposable(ir_symbol_from_id(&program->symbols, instruction->symbol));
                             result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                 .symbol = instruction->symbol,
                                 .offset = call_offset + 1,
-                                .kind = CODEGEN_MODULE_RELOCATION_X86_64_PC32,
+                                .kind = (u8)(procedure_linkage ? CODEGEN_MODULE_RELOCATION_X86_64_PLT32 : CODEGEN_MODULE_RELOCATION_X86_64_PC32),
                             };
                         }
                         // Bring a bounced hidden-pointer result home before the

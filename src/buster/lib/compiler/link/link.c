@@ -1237,6 +1237,27 @@ BUSTER_GLOBAL_LOCAL bool link_address_addend(u64 address, s64 addend, u64* resul
     return true;
 }
 
+// -fPIC's GOT load, resolved for an image this linker binds whole. Nothing
+// in that image can be interposed -- one file, every name bound inside it --
+// so the slot a `mov` would read can only ever hold the address the matching
+// `lea` computes, and rewriting the opcode byte is the relaxation `ld`
+// performs for a GOTPCRELX it can resolve. The instruction is `REX.W 8b /r`
+// over a rip-relative ModRM, which puts its three bytes immediately ahead of
+// the patched displacement and leaves that displacement and everything after
+// it exactly where the PC32 arithmetic expects them. Anything else under a
+// GOT relocation is a shape this linker did not emit, and it fails rather
+// than rewriting a byte it cannot account for.
+BUSTER_GLOBAL_LOCAL bool link_x86_relax_got_load(u8* bytes, u64 output_offset, u64 available)
+{
+    bool relaxed = bytes && output_offset >= 3 && output_offset <= available && (bytes[output_offset - 3] & 0xf8) == 0x48 &&
+                   bytes[output_offset - 2] == 0x8b && (bytes[output_offset - 1] & 0xc7) == 0x05;
+    if (relaxed)
+    {
+        bytes[output_offset - 2] = 0x8d;
+    }
+    return relaxed;
+}
+
 BUSTER_GLOBAL_LOCAL bool link_absolute32s_value(u64 address, s64 addend, s32* result)
 {
     bool valid = result && address <= (u64)INT64_MAX;
@@ -2456,7 +2477,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         u64 place_address = image_base + section_offsets[relocation->section] + relocation->offset;
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL && !link_x86_relax_got_load(bytes, output_offset, file_size))
+        {
+            result.error = LINK_ERROR_RELOCATION;
+            result.symbol = symbol->name;
+            return result;
+        }
+        // A relaxed GOT load and a PLT call both patch the same rel32 the
+        // direct form does, against the same address: this image has one
+        // definition of every name in it.
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
+            relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL)
         {
             s64 value = 0;
             if (!link_address_difference(symbol_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
@@ -2860,7 +2891,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         // zero, and re-deriving that per relocation would rescan every
         // library's exports for every reference to an absent weak name.
         if (import_indices[relocation->symbol] != UINT32_MAX && symbol->kind == OBJECT_SYMBOL_DATA &&
-            relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64)
+            relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_GOTPCREL &&
+            relocation->kind != OBJECT_RELOCATION_ABSOLUTE64)
         {
             result.error = LINK_ERROR_RELOCATION;
             result.symbol = symbol->name;
@@ -3355,7 +3387,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             // entry on first use.  Reject every other undefined relocation so
             // data imports cannot be mistaken for callable symbols.
             if (import_index == UINT32_MAX ||
-                (relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64))
+                (relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PLT32 &&
+                 relocation->kind != OBJECT_RELOCATION_X86_64_GOTPCREL && relocation->kind != OBJECT_RELOCATION_ABSOLUTE64))
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;
@@ -3388,7 +3421,17 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         u64 place_address = image_base + section_offsets[relocation->section] + relocation->offset;
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32)
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL && !link_x86_relax_got_load(bytes, output_offset, file_size))
+        {
+            result.error = LINK_ERROR_RELOCATION;
+            result.symbol = symbol->name;
+            return result;
+        }
+        // A relaxed GOT load and a PLT call both patch the same rel32 the
+        // direct form does, against the same address: this image has one
+        // definition of every name in it.
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 ||
+            relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL)
         {
             s64 value = 0;
             if (!link_address_difference(symbol_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)

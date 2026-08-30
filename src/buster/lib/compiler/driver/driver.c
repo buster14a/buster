@@ -1274,13 +1274,19 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         bool debug_option = argument.length >= 2 && argument.pointer[0] == '-' && argument.pointer[1] == 'g';
         bool warning_option =
             argument.length >= 2 && argument.pointer[0] == '-' && argument.pointer[1] == 'W' && !string_starts_with_sequence(argument, S8("-Wl,"));
-        // -fPIC/-fpic is the one entry in this list that is not purely
-        // accepted: it decides the thread-local model, because an object that
-        // may end up in a shared library cannot fold an offset from the
-        // thread pointer.  The rest of the position-independent code model is
-        // still absorbed here; that is #752.  -fPIE/-fpie stay absorbed --
-        // a position-independent executable's own thread-local block is still
-        // the initial one, which is what clang emits for them too.
+        // The code model, which is a fact about the emitted references
+        // rather than a flag to absorb. It decides the thread-local model,
+        // because an object that may end up in a shared library cannot fold
+        // an offset from the thread pointer, and it decides how every other
+        // reference to an interposable symbol is spelled: through the GOT for
+        // an address and the PLT for a direct call. -fno-pic asks for the
+        // rip-relative forms back. -fPIE/-fpie stay accepted and inert on
+        // purpose -- a position-independent executable's own thread-local
+        // block is still the initial one, its own definitions are not
+        // interposable, its references to another image's data are what the
+        // linker's copy relocation is for, and every reference this compiler
+        // emits is already rip-relative, so that model asks for no code this
+        // one does not already produce.
         if (string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fpic")))
         {
             invocation.position_independent = true;

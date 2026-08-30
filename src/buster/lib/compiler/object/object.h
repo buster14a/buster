@@ -101,6 +101,13 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_JUMP26,
     OBJECT_RELOCATION_AARCH64_MACH_PAGE21,
     OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
+    // The position-independent code model's own form: R_X86_64_GOTPCREL
+    // names the linker's slot holding the symbol's address rather than the
+    // symbol, and is patched rip-relative like PC32. Its sibling is
+    // OBJECT_RELOCATION_X86_64_PLT32 above, which the thread-local models
+    // introduced for __tls_get_addr and which every interposable direct call
+    // takes under -fPIC.
+    OBJECT_RELOCATION_X86_64_GOTPCREL,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 

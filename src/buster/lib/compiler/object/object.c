@@ -998,6 +998,15 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TLVP"));
             object_assembly_append_string(buffer, S8(" - .\n"));
             return true;
+        // -fPIC's GOT form as a data directive. It is never emitted into a
+        // data section by this compiler -- it names a field inside an
+        // instruction -- but the printer is exhaustive over the vocabulary
+        // and an assembler reading this back needs the modifier.
+        case OBJECT_RELOCATION_X86_64_GOTPCREL:
+            object_assembly_append_string(buffer, S8("\t.long "));
+            object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@GOTPCREL"));
+            object_assembly_append_string(buffer, S8(" - .\n"));
+            return true;
         case OBJECT_RELOCATION_X86_64_TPOFF32:
             object_assembly_append_string(buffer, S8("\t.long "));
             object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TPOFF"));
@@ -1566,6 +1575,14 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_x86_relocation_expression(Object
     {
         object_assembly_append_string(buffer, S8("@TLVP"));
     }
+    else if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL)
+    {
+        object_assembly_append_string(buffer, S8("@GOTPCREL"));
+    }
+    else if (relocation->kind == OBJECT_RELOCATION_X86_64_PLT32)
+    {
+        object_assembly_append_string(buffer, S8("@PLT"));
+    }
     s64 addend = relocation->addend + (pc_relative ? 4 : 0);
     object_assembly_append_s64_addend(buffer, addend);
 }
@@ -1805,7 +1822,8 @@ BUSTER_GLOBAL_LOCAL void object_assembly_mark_internal_label(ObjectAssemblyBuffe
 BUSTER_GLOBAL_LOCAL bool object_assembly_x86_is_pc_relocation(ObjectRelocation* relocation)
 {
     return relocation && (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
-                          relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32);
+                          relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL ||
+                          relocation->kind == OBJECT_RELOCATION_X86_64_PLT32);
 }
 
 BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section,
@@ -3560,6 +3578,17 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind object_debug_section_kind_from_name(String
     return result;
 }
 
+// The families this reader does not carry, by name, so a refusal says which
+// one it met. The supported vocabulary is deliberately absent: R_X86_64_64,
+// PC32, PLT32, 32, 32S, TPOFF32 and the three GOTPCREL spellings all read,
+// and the ones left here are the thread-local models -- general dynamic,
+// local dynamic and initial exec -- which this compiler neither emits nor
+// resolves.
+// The x86-64 ELF relocation vocabulary this file knows by name, which the
+// refusal above uses to say which one it met. Most of these read: the GOT
+// families and the initial-exec and general-dynamic thread-local pairs all
+// have a kind. R_X86_64_TLSLD is the one named here that has none -- local
+// dynamic is a model this compiler neither emits nor resolves.
 BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
 {
     switch (type)
@@ -3578,6 +3607,8 @@ BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
         return S8("R_X86_64_32S");
     case 19:
         return S8("R_X86_64_TLSGD");
+    case 20:
+        return S8("R_X86_64_TLSLD");
     case 22:
         return S8("R_X86_64_GOTTPOFF");
     case 23:
@@ -3597,7 +3628,7 @@ BUSTER_GLOBAL_LOCAL void object_elf_unsupported_relocation(ObjectFile* object, A
     {
         object->error = OBJECT_ERROR_UNSUPPORTED_TARGET;
         String8 name = object_elf_x86_64_relocation_name(type);
-        object->diagnostic = name.length ? string_format(arena, S8("unsupported ELF x86-64 relocation {S8} (type {u32}); GOT relocations require a GOT model"), name, type)
+        object->diagnostic = name.length ? string_format(arena, S8("unsupported ELF x86-64 relocation {S8} (type {u32})"), name, type)
                                          : string_format(arena, S8("unsupported ELF x86-64 relocation type {u32}"), type);
     }
 }
@@ -4199,14 +4230,21 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             // resolve identically here, and only the writer
                             // has to keep the distinction (a shared link
                             // refuses PC32 against an undefined function).
+                            // The three GOT families are one kind for a
+                            // similar reason: a GOTPCRELX is a GOTPCREL the
+                            // producer promises is relaxable, and the linker
+                            // this reader feeds relaxes every one it can
+                            // resolve or refuses the shape by name.
                             kind = relocation_type == 1                           ? OBJECT_RELOCATION_ABSOLUTE64
                                    : relocation_type == 2 || relocation_type == 4 ? OBJECT_RELOCATION_X86_64_PC32
-                                   : relocation_type == 10                        ? OBJECT_RELOCATION_ABSOLUTE32
-                                   : relocation_type == 11                        ? OBJECT_RELOCATION_X86_64_ABSOLUTE32S
-                                   : relocation_type == 19                        ? OBJECT_RELOCATION_X86_64_TLSGD
-                                   : relocation_type == 22                        ? OBJECT_RELOCATION_X86_64_GOTTPOFF
-                                   : relocation_type == 23                        ? OBJECT_RELOCATION_X86_64_TPOFF32
-                                                                                  : OBJECT_RELOCATION_COUNT;
+                                   : relocation_type == 9 || relocation_type == 41 || relocation_type == 42
+                                       ? OBJECT_RELOCATION_X86_64_GOTPCREL
+                                   : relocation_type == 10 ? OBJECT_RELOCATION_ABSOLUTE32
+                                   : relocation_type == 11 ? OBJECT_RELOCATION_X86_64_ABSOLUTE32S
+                                   : relocation_type == 19 ? OBJECT_RELOCATION_X86_64_TLSGD
+                                   : relocation_type == 22 ? OBJECT_RELOCATION_X86_64_GOTTPOFF
+                                   : relocation_type == 23 ? OBJECT_RELOCATION_X86_64_TPOFF32
+                                                           : OBJECT_RELOCATION_COUNT;
                             if (relocation_type == 4)
                             {
                                 result.symbols[symbol_map[source_symbol]].kind = OBJECT_SYMBOL_FUNCTION;
@@ -4315,7 +4353,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                 }
                                 addend = (s64)(s32)stored;
                             }
-                            else if (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
+                            else if (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_GOTPCREL ||
+                                     kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
                                      kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
                                      kind == OBJECT_RELOCATION_AARCH64_PREL32)
                             {
@@ -8036,11 +8075,13 @@ enum
     OBJECT_DWARF_EXTRA_SYMBOLS = 1 + DWARF_SECTION_COUNT,
 };
 
-BUSTER_GLOBAL_LOCAL void object_append_dwarf(ObjectFile* object, DwarfResult built)
+// Returns the local text-section symbol it adds, which the unwind records
+// share when they need one, or UINT32_MAX when there was no DWARF to append.
+BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult built)
 {
     if (!built.valid)
     {
-        return;
+        return UINT32_MAX;
     }
     for (u32 kind = 0; kind < DWARF_SECTION_COUNT; kind += 1)
     {
@@ -8086,9 +8127,18 @@ BUSTER_GLOBAL_LOCAL void object_append_dwarf(ObjectFile* object, DwarfResult bui
         };
     }
     scratch_end(name_temporary);
+    return text_symbol;
 }
 
-BUSTER_GLOBAL_LOCAL bool object_append_dwarf_cfi(ObjectFile* object, DwarfCfiResult built)
+// Each FDE's initial location, as a PC-relative reference to the function it
+// describes. `text_symbol` is the local symbol covering the text section, or
+// UINT32_MAX to name the function itself. Under -fPIC it has to be the
+// former: an FDE naming a preemptible function is a PC-relative reference to
+// an interposable symbol, which `ld` refuses in a shared object for the same
+// reason it refuses one in the body -- and every consumer of these records
+// resolves the symbol's address plus the addend, so the section symbol with
+// the function's own offset names the identical byte.
+BUSTER_GLOBAL_LOCAL bool object_append_dwarf_cfi(ObjectFile* object, DwarfCfiResult built, u32 text_symbol)
 {
     if (!built.valid)
     {
@@ -8102,10 +8152,12 @@ BUSTER_GLOBAL_LOCAL bool object_append_dwarf_cfi(ObjectFile* object, DwarfCfiRes
         {
             return false;
         }
+        bool through_section = text_symbol < object->symbol_count && object->symbols[relocation.function].section == OBJECT_SECTION_TEXT;
         object->relocations[object->relocation_count++] = (ObjectRelocation){
+            .addend = through_section ? (s64)object->symbols[relocation.function].value : 0,
             .offset = relocation.offset,
             .section = OBJECT_SECTION_UNWIND,
-            .symbol = relocation.function,
+            .symbol = through_section ? text_symbol : relocation.function,
             .kind = object->target.cpu_arch == CPU_ARCH_X86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_PREL32,
         };
     }
@@ -8733,6 +8785,8 @@ BUSTER_GLOBAL_LOCAL bool object_relocation_kind_from_codegen(CodegenModuleReloca
             case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12; return true;
             case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGE21; return true;
             case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12; return true;
+            case CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL: *destination = OBJECT_RELOCATION_X86_64_GOTPCREL; return true;
+            case CODEGEN_MODULE_RELOCATION_X86_64_PLT32: *destination = OBJECT_RELOCATION_X86_64_PLT32; return true;
             case CODEGEN_MODULE_RELOCATION_COUNT: return false;
         }
     }
@@ -9006,7 +9060,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     u32 alias_count = ir_module ? ir_module->alias_count : 0;
     result.symbols = arena_allocate(arena, ObjectSymbol, module->entry_count + module->global_count + alias_count + module->relocation_count +
                                                              (apple_thread_local ? 1 : 0) + (dwarf.valid ? OBJECT_DWARF_EXTRA_SYMBOLS : 0) +
-                                                             (windows_unwind.function_count ? 1 : 0));
+                                                             (windows_unwind.function_count ? 1 : 0) + (module->position_independent ? 1 : 0));
     for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
     {
         CodegenModuleEntry entry = module->entries[entry_index];
@@ -9182,6 +9236,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         }
         result.relocations[result.relocation_count++] = (ObjectRelocation){
             .addend = source.addend + (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
+                                               kind == OBJECT_RELOCATION_X86_64_GOTPCREL ||
                                                kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
                                                kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 ||
                                                kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD
@@ -9199,9 +9254,27 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     scratch_end(name_temporary);
     if (result.error == OBJECT_ERROR_NONE)
     {
-        object_append_dwarf(&result, dwarf);
+        u32 dwarf_text_symbol = object_append_dwarf(&result, dwarf);
         object_append_codeview(&result, codeview);
-        if (cfi.valid && !object_append_dwarf_cfi(&result, cfi))
+        // One local symbol over the text section, added only for the code
+        // model that needs it and only when the debug sections did not
+        // already contribute the same one, so an object built without -fPIC
+        // keeps the symbol table it has always had.
+        u32 cfi_text_symbol = UINT32_MAX;
+        if (cfi.valid && module->position_independent)
+        {
+            cfi_text_symbol = dwarf_text_symbol;
+            if (cfi_text_symbol == UINT32_MAX)
+            {
+                cfi_text_symbol = result.symbol_count++;
+                result.symbols[cfi_text_symbol] = (ObjectSymbol){
+                    .name = S8(".text"),
+                    .section = OBJECT_SECTION_TEXT,
+                    .kind = OBJECT_SYMBOL_FUNCTION,
+                };
+            }
+        }
+        if (cfi.valid && !object_append_dwarf_cfi(&result, cfi, cfi_text_symbol))
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
             return result;
@@ -9223,6 +9296,7 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
     {
         return kind == OBJECT_RELOCATION_X86_64_PC32          ? 2
                : kind == OBJECT_RELOCATION_X86_64_PLT32       ? 4
+               : kind == OBJECT_RELOCATION_X86_64_GOTPCREL    ? 9
                : kind == OBJECT_RELOCATION_X86_64_TLSGD       ? 19
                : kind == OBJECT_RELOCATION_X86_64_GOTTPOFF    ? 22
                : kind == OBJECT_RELOCATION_X86_64_TPOFF32     ? 23

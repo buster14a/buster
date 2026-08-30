@@ -231,6 +231,16 @@ typedef enum CodegenModuleRelocationKind
     CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12,
     CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21,
     CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12,
+    // The position-independent code model's two forms, both x86-64 ELF and
+    // both rip-relative like PC32. GOTPCREL patches the displacement of a
+    // load whose result is the symbol's address, read out of the slot the
+    // linker reserves for it, so an interposing definition is the one every
+    // reference sees. PLT32 patches a direct call's rel32 and tells the
+    // linker it may route that call through a procedure linkage entry --
+    // which is what makes a call to an interposable function placeable in a
+    // shared object at all.
+    CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL,
+    CODEGEN_MODULE_RELOCATION_X86_64_PLT32,
     CODEGEN_MODULE_RELOCATION_COUNT,
 } CodegenModuleRelocationKind;
 
@@ -385,7 +395,12 @@ struct CodegenModule
     u32 line_entry_count;
     u32 debug_location_count;
     bool debug_info;
-    u8 reserved[3];
+    // -fPIC as this module was generated under it, carried past code
+    // generation because the object writer has one decision of its own to
+    // make from it: which symbol an unwind record's function pointer is
+    // relocated against.
+    bool position_independent;
+    u8 reserved[2];
     CodegenError error;
     CodegenAbi abi;
     CodegenStatistics statistics;
@@ -456,10 +471,14 @@ struct CodegenModuleOptions
 {
     bool debug_info;
     bool assume_validated;
-    // -fPIC/-fpic: this object may end up in a shared library, so no
+    // -fPIC/-fpic: this object may end up in a shared library. No
     // thread-local definition it names can be assumed to sit in the initial
-    // thread-local block.  Only the thread-local model reads it today; the
-    // rest of the position-independent code model is #752.
+    // thread-local block, and a symbol another object could interpose is
+    // addressed through its GOT slot rather than rip-relative and called
+    // through its procedure linkage entry. The second half is honored on
+    // x86-64 ELF, where those are the references `ld -shared` refuses; every
+    // other target's address materialization is a different one and this flag
+    // does not reach it.
     bool position_independent;
     // A CodegenRegisterAllocatorMode value; u8 storage keeps the options
     // record at its existing size.
