@@ -3123,6 +3123,36 @@ BUSTER_GLOBAL_LOCAL bool link_elf_symbol_needs_dynamic_import(NativeExecutableLi
     return symbol->section == OBJECT_SECTION_UNDEFINED && !link_elf_symbol_resolves_to_zero(options, symbol, true);
 }
 
+// A strong undefined reference no library on the link line publishes a
+// default definition of.  The static writer refuses every undefined symbol,
+// but the dynamic writers refused none, so `char fdwalk(); return fdwalk();`
+// linked into an executable whose .dynsym asks the loader for a name nothing
+// exports -- ld reports "undefined reference" at link time, and every
+// autoconf AC_CHECK_FUNC probe reads that difference, so CPython's configure
+// found fdwalk, fork1, plock, rtpspawn and _getpty on Linux.  The refusal
+// asks the same questions the weak promotion above asks: only when every
+// library's export list was read is absence evidence of absence, and a name
+// published only as `name@VER` has no default an unversioned reference could
+// bind to, which is ld's answer too.
+BUSTER_GLOBAL_LOCAL bool link_elf_strong_import_unresolved(NativeExecutableLinkOptions options, ObjectSymbol const* symbol)
+{
+    bool result = false;
+    // __tls_get_addr is defined by the dynamic loader rather than by
+    // libc.so.6 -- glibc's libc.so linker script names ld-linux beside the
+    // library so ld resolves it, but the driver's export scan reads only the
+    // library file.  The writer names that same loader in PT_INTERP, so the
+    // name is answered in every image this writer can produce.
+    if (!symbol->weak && link_elf_exports_complete(options) && !string_equal(symbol->name, S8("__tls_get_addr")))
+    {
+        u32 library_index = 0;
+        String8 version = {0};
+        bool no_default = false;
+        result = !link_elf_symbol_version(options, symbol->name, &library_index, &version, &no_default);
+    }
+
+    return result;
+}
+
 // The UEFI writer places an image but synthesizes no entry point of its own
 // -- the entry is the firmware's call to the application, with the image
 // handle and the system table in the argument registers -- so it has nowhere
@@ -3685,6 +3715,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         if (!link_elf_symbol_needs_dynamic_import(options, symbol))
         {
             continue;
+        }
+        if (link_elf_strong_import_unresolved(options, symbol))
+        {
+            result.error = LINK_ERROR_UNRESOLVED_SYMBOL;
+            result.symbol = symbol->name;
+            return result;
         }
         if (!symbol->global || (symbol->kind != OBJECT_SYMBOL_FUNCTION && symbol->kind != OBJECT_SYMBOL_DATA) || !symbol->name.length ||
             symbol->name.length > UINT32_MAX ||

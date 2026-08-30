@@ -3827,12 +3827,15 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         // exports `weak_absent`, so there is no loader to ask and the linker
         // owes it the zero `ld` gives it: it leaves .dynsym entirely, which
         // is what keeps its own copy slot from being the non-zero answer
-        // (issue #656). `imported` is strong and stays an import either way,
-        // which is what makes this a rule about weak references rather than
-        // about undefined ones.
+        // (issue #656). `imported` is strong, so a complete export list must
+        // now publish it -- and `exit`, which the hosted entry stub's own
+        // call appends -- or the link is refused as unresolved rather than
+        // silently deferred to the loader.
         NativeDynamicVersionedSymbol weak_known_exports[] = {
             {.name = S8("unrelated"), .has_default = true},
             {.name = S8("imported"), .has_default = true},
+            {.name = S8("exit"), .has_default = true},
+            {.name = S8("atexit"), .has_default = true},
         };
         NativeExecutableLinkOptions weak_known_options = {
             .entry_symbol = S8("main"),
@@ -3860,6 +3863,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         // not regress -- a weak reference to `puts` still has to reach libc.
         NativeDynamicVersionedSymbol weak_defined_exports[] = {
             {.name = S8("weak_absent"), .has_default = true},
+            {.name = S8("imported"), .has_default = true},
+            {.name = S8("exit"), .has_default = true},
+            {.name = S8("atexit"), .has_default = true},
         };
         NativeExecutableLinkOptions weak_defined_options = weak_known_options;
         weak_defined_options.runtime_versioned_symbols = weak_defined_exports;
@@ -3882,6 +3888,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         // is the same answer as for a name no library has at all.
         NativeDynamicVersionedSymbol weak_hidden_version_exports[] = {
             {.name = S8("weak_absent"), .version = S8("GLIBC_2.2.5")},
+            {.name = S8("imported"), .has_default = true},
+            {.name = S8("exit"), .has_default = true},
+            {.name = S8("atexit"), .has_default = true},
         };
         NativeExecutableLinkOptions weak_hidden_version_options = weak_known_options;
         weak_hidden_version_options.runtime_versioned_symbols = weak_hidden_version_exports;
@@ -3890,6 +3899,23 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, weak_hidden_version.error == LINK_ERROR_NONE);
         BUSTER_TEST(arguments,
                     link_test_elf_relative_symbol_address(weak_hidden_version.executable, weak_relocation.offset, weak_relocation.addend) == 0);
+
+        // A strong reference is owed the opposite answer: with every export
+        // list read and no library publishing `imported`, the link is
+        // refused with the name -- ld's "undefined reference" -- rather than
+        // emitted as a .dynsym entry the loader will fault on.  Every
+        // autoconf AC_CHECK_FUNC probe reads this difference.
+        NativeDynamicVersionedSymbol strong_absent_exports[] = {
+            {.name = S8("weak_absent"), .has_default = true},
+            {.name = S8("exit"), .has_default = true},
+            {.name = S8("atexit"), .has_default = true},
+        };
+        NativeExecutableLinkOptions strong_absent_options = weak_known_options;
+        strong_absent_options.runtime_versioned_symbols = strong_absent_exports;
+        strong_absent_options.runtime_versioned_symbol_count = BUSTER_ARRAY_LENGTH(strong_absent_exports);
+        NativeExecutableLinkResult strong_absent = link_native_executable(arguments->arena, &weak_visible_hosted_object, strong_absent_options);
+        BUSTER_TEST(arguments, strong_absent.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+        BUSTER_TEST(arguments, string_equal(strong_absent.symbol, S8("imported")));
 
         // A library the driver could not read is what `exports_known` is for:
         // one unread library and the link is back to not knowing, whatever

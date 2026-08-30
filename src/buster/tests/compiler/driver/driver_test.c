@@ -3552,6 +3552,24 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_missing_library_command_line)));
     BUSTER_TEST(arguments, c_missing_library.error == COMPILER_DRIVER_ERROR_LINK);
     BUSTER_STRING_TEST(arguments, c_missing_library.diagnostic, S8("cannot find -lbuster-no-such-library"));
+    // And the symbol-level twin: a strong reference no linked library
+    // exports must fail the link like ld's "undefined reference", not become
+    // a .dynsym entry the loader faults on.  This is the AC_CHECK_FUNC shape
+    // -- `char fdwalk(); return fdwalk();` -- that made CPython's configure
+    // find fdwalk, fork1, plock, rtpspawn and _getpty on Linux.
+    String8 c_undefined_reference_source_path = buster_test_temporary_path(arguments->arena, S8("buster-c-undefined-reference"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(c_undefined_reference_source_path,
+                                      BUSTER_SLICE_TO_BYTE_SLICE(S8("char buster_no_such_function();\nint main(void) { return buster_no_such_function(); }\n"))));
+    String8 c_undefined_reference_path = buster_test_temporary_path(arguments->arena, S8("buster-c-undefined-reference"), S8(""));
+    String8 c_undefined_reference_command_line[] = {
+        S8("-o"),
+        c_undefined_reference_path,
+        c_undefined_reference_source_path,
+    };
+    CompilerDriverResult c_undefined_reference = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_undefined_reference_command_line)));
+    BUSTER_TEST(arguments, c_undefined_reference.error == COMPILER_DRIVER_ERROR_LINK);
+    BUSTER_TEST(arguments, string_ends_with_sequence(c_undefined_reference.diagnostic, S8("unresolved symbol: buster_no_such_function")));
     // A hosted dynamic link must also resolve an imported function used as a
     // data initializer.  This is the relocation shape cJSON uses for its
     // global allocator hooks (R_X86_64_64 -> the generated PLT entry).
