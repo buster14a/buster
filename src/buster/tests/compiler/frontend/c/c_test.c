@@ -5445,6 +5445,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
         }
         BUSTER_TEST(arguments, ir_validate_canonical_module(pointer_to_array_ir.program, module).error == IR_VALIDATION_NONE);
     }
+    // An aggregate member the next `.` walks through is a place, and so is the
+    // object a group hands back to that `.`.  The member arm sees the token
+    // after the member identifier, which is a `)` in both spellings below, so
+    // it emitted the copy and recovered the place it needed from that load's
+    // own operand: right answer, dead read, offsetof faulting on the null
+    // pointer (#741).  The recovery now drops the load it recovers from, so no
+    // lowered function may hold a load of a struct or union type that nothing
+    // reads -- while a chain that ends at the aggregate keeps the one it needs.
+    CPreprocessResult member_group_tokens = c_preprocess(scalar_arena,
+                                                         S8("struct Inner { long v[5]; int x; };\n"
+                                                            "struct Outer { int a; struct Inner in; };\n"
+                                                            "int dereference_group(struct Outer *o) { return (*o).in.x; }\n"
+                                                            "void *member_group(void) { return &(((struct Outer *)0)->in).v[3]; }\n"
+                                                            "int chain(struct Outer *o) { return o->in.x; }\n"
+                                                            "struct Inner by_value(struct Outer *o) { return o->in; }\n"),
+                                                         (CPreprocessOptions){0});
+    CParseResult member_group_parse = c_parse(scalar_arena, member_group_tokens);
+    CIRLowerResult member_group_ir = c_lower_to_ir(scalar_arena, S8("member-group.c"), member_group_tokens, member_group_parse, lp64_target);
+    BUSTER_TEST(arguments, member_group_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, member_group_ir.diagnostic_count == 0);
+    if (member_group_ir.program)
+    {
+        IrModule* module = &member_group_ir.program->modules[0];
+        BUSTER_TEST(arguments, module->function_count == 4);
+        if (module->function_count == 4)
+        {
+            u32 unread_aggregate_loads = 0;
+            u32 walked_aggregate_loads = 0;
+            u32 by_value_aggregate_loads = 0;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = &module->functions[function_index];
+                BUSTER_TEST(arguments, function->state == IR_FUNCTION_LOWERED);
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    IrType* type = ir_type_from_id(&member_group_ir.program->types, instruction->canonical_type);
+                    if (instruction->opcode != IR_OPCODE_LOAD || !type || (type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION))
+                    {
+                        continue;
+                    }
+                    if (function_index + 1 == module->function_count)
+                    {
+                        by_value_aggregate_loads += 1;
+                    }
+                    else
+                    {
+                        walked_aggregate_loads += 1;
+                    }
+                    bool read = false;
+                    for (u32 reader_index = 0; reader_index < function->instruction_count && !read; reader_index += 1)
+                    {
+                        IrInstruction* reader = function->instructions + reader_index;
+                        for (u32 operand_index = 0; operand_index < reader->operand_count; operand_index += 1)
+                        {
+                            if (reader->operands[operand_index].value == instruction->result.value)
+                            {
+                                read = true;
+                                break;
+                            }
+                        }
+                    }
+                    unread_aggregate_loads += !read;
+                }
+            }
+            BUSTER_TEST(arguments, unread_aggregate_loads == 0);
+            // The three walks name a scalar or an address inside the member,
+            // so none of them reads a whole aggregate; the by-value return
+            // reads exactly one.
+            BUSTER_TEST(arguments, walked_aggregate_loads == 0);
+            BUSTER_TEST(arguments, by_value_aggregate_loads == 1);
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(member_group_ir.program, module).error == IR_VALIDATION_NONE);
+    }
     CPreprocessResult function_pointer_tokens =
         c_preprocess(scalar_arena,
                      S8("extern int launch(void *(*)(void *), void *);\n"

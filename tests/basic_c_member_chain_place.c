@@ -28,6 +28,12 @@
 // chains through a live pointer so the place still reads and writes the object
 // the expression names, and the member that really is a value, so keeping a
 // place does not swallow the load a by-value read needs.
+//
+// The last cases are the parenthesized spellings, `(*o).a.b` and
+// `&(((T *)0)->a).b[i]`.  The walk cannot see the `.` that follows a group
+// from inside it, so those two emitted the copy whatever the peek decided, and
+// dropping it is the load-recovery every `E.m` behind a just-emitted load now
+// performs (#741).
 
 typedef unsigned long size_type;
 
@@ -169,6 +175,46 @@ int main(void)
     if (object.in.x != 7)
     {
         return 13;
+    }
+
+    // The parenthesized spellings of the same walk.  The `.` that continues
+    // the chain sits outside the group the intermediate member was produced
+    // in, so the token peek in the member arm cannot see it and the walk
+    // emitted the copy anyway, recovering the place it needed from the load's
+    // own operand (#741).  These two are offsetof again, so the copy faults on
+    // the null pointer exactly the way #737 did.
+    if ((size_type)(char*)&(((struct Outer*)0)->in).v[3] != (size_type)((char*)&object.in.v[3] - (char*)base))
+    {
+        return 14;
+    }
+    if ((size_type)(char*)&(*(struct Outer*)0).in.x != (size_type)((char*)&object.in.x - (char*)base))
+    {
+        return 15;
+    }
+    // A group around the middle of three accesses, walked into and out of.
+    if ((size_type)(char*)&(((struct Deep*)0)->out).in.x != (size_type)((char*)&deep_object.out.in.x - (char*)&deep_object))
+    {
+        return 16;
+    }
+
+    // The same groups through a pointer that does name an object: the place
+    // has to be the object's own storage, not the copy the group emitted.
+    (((struct Outer*)pointer)->in).v[2] = 31;
+    (*(struct Outer*)pointer).in.x = 29;
+    if (object.in.v[2] != 31 || object.in.x != 29)
+    {
+        return 17;
+    }
+    if ((((struct Outer*)pointer)->in).v[2] != 31 || (*(struct Outer*)pointer).in.x != 29)
+    {
+        return 18;
+    }
+    // A chain that ends at the aggregate still reads it, group or no group.
+    struct Inner group_copy = (*(struct Outer*)pointer).in;
+    group_copy.x = 71;
+    if (group_copy.v[2] != 31 || object.in.x != 29)
+    {
+        return 19;
     }
 
     return 0;

@@ -5106,6 +5106,8 @@ BUSTER_C_INTERNAL bool c_ir_type_queued(const IrTypeId* queued, u32 count, IrTyp
     return found;
 }
 
+BUSTER_C_INTERNAL IrValueId c_ir_recover_place_from_value(CIntegerIrBuilder* builder, IrValueId value);
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* builder, IrValueId operand, CToken access, CToken member)
 {
     if (operand.value >= builder->function->value_count)
@@ -5164,7 +5166,20 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
         IrInstruction* instruction = &builder->function->instructions[definition.value];
         if (instruction->opcode == IR_OPCODE_LOAD && instruction->operand_count == 1)
         {
-            base = instruction->operands[0];
+            // The load only materialized the aggregate for the expression
+            // walk; `E.m` designates a member of the object E names and never
+            // reads the whole of it. Drop it when it is still the last
+            // instruction emitted, the way the address-of arm of
+            // c_ir_apply_operation drops the load behind `&E`. The token peek
+            // in the member arm keeps the place before the load exists, but it
+            // only sees the token that follows the member identifier, so a
+            // group between the two accesses hides the `.` from it:
+            // `(*o).in.x` and `&(((T *)0)->in).v[3]` arrive here with the copy
+            // already emitted (#741). The recovery falls back to the load's own
+            // operand when something was emitted after it -- the same address
+            // either way, with the copy left where it stands.
+            IrValueId recovered = c_ir_recover_place_from_value(builder, operand);
+            base = recovered.value != IR_ID_UNDERLYING_INVALID ? recovered : instruction->operands[0];
         }
         else
         {
@@ -10049,7 +10064,6 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
 BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end);
 BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* builder, u32 token_index);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token_index);
-BUSTER_C_INTERNAL IrValueId c_ir_recover_place_from_value(CIntegerIrBuilder* builder, IrValueId value);
 
 BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {

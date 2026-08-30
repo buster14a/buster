@@ -2705,9 +2705,21 @@ on a commit you already know is incomplete tells nobody anything.
   `tests/basic_c_member_chain_place.c` pins the offsets against a live object
   under all four register allocators, spelling the pointer form directly so it
   does not depend on which offsetof a header picks, and faults the way musl did
-  if the copy comes back. The parenthesized spellings of the same walk still
-  emit one — `(*o).a.b` and `(((T *)0)->a).b` load the intermediate through the
-  group that produced it, where this arm cannot see the `.` that follows (#741).
+  if the copy comes back. The peek only sees the token after the member
+  identifier, so a group hides the `.` that follows from it — `(*o).a.b` and
+  `&(((T *)0)->a).b[i]` reach the next access with the load already emitted,
+  the dereference arm having emitted the first one and the member arm the
+  second (#741). The place `c_ir_emit_field_place_from_value` recovers from
+  such a load therefore *drops* it, through the same
+  `c_ir_recover_place_from_value` the address-of arm of `c_ir_apply_operation`
+  uses for `&E`: the load must still be the last instruction emitted, which it
+  is because the access that recovers from it is the next thing the walk does.
+  A group is not a frame of its own — an ordinary one is a `C_CONDITIONAL_OPEN`
+  marker on the same expression frame's operator stack — so nothing about this
+  needs a place-or-value request threaded through the lowering machines.
+  `c_test_frontend_global_types` pins that no lowered function holds a load of
+  a struct or union type nothing reads, and that the by-value read beside it
+  keeps the one it needs.
 - **A value never carries a qualifier.** The frontend builds a qualified copy
   of a type wherever a qualifier is written, because a place, a pointee or a
   member has to carry it, and that copy keeps the base's kind and layout: it is
