@@ -4118,53 +4118,21 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                                            S8("C code generation failed with error 2, function 0 ('conditional_asm_goto'")));
     }
     {
-        // The inline-assembly operand classes musl's own x86-64 math asks for
-        // and this frontend does not have.  musl's ARCH_SRCS replaces eighteen
-        // portable src/math units with the files under src/math/x86_64, and
-        // the ones still refused here are reported by test_musl on a
-        // MUSL_UNSUPPORTED line with its archive falling back to the portable
-        // file; these fixtures are the reduction of that report to one
-        // construct apiece.  The exact diagnostic is pinned rather than merely
-        // the refusal, because implementing one class must move exactly one of
-        // these and not quietly reclassify another.  The SSE half is gone from
-        // this list: tests/basic_c_asm_sse_output.c and
-        // tests/basic_c_asm_sse_input.c are positive fixtures now, run below.
-        struct
-        {
-            String8 fixture;
-            String8 diagnostic;
-        } refused_asm_operands[] = {
-            {S8("tests/basic_c_asm_x87_output.c"),
-             S8("tests/basic_c_asm_x87_output.c:7:28: in function 'asm_x87_output': unsupported asm output constraint")},
-            {S8("tests/basic_c_asm_x87_clobber.c"),
-             S8("tests/basic_c_asm_x87_clobber.c:8:5: in function 'asm_x87_clobber': unsupported GNU inline assembly clobber")},
-        };
-        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(refused_asm_operands); index += 1)
-        {
-            String8 refused_object_path = buster_test_temporary_path(arguments->arena, S8("buster-refused-asm-operand"), S8(".o"));
-            String8 refused_command_line[] = {
-                S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), refused_object_path, refused_asm_operands[index].fixture,
-            };
-            CompilerDriverResult refused = compiler_driver_execute_invocation(
-                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(refused_command_line)));
-            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ANALYSIS);
-            BUSTER_TEST(arguments, refused.tokenizer_error_count == 0 && refused.parser_diagnostic_count == 0 &&
-                                   refused.analysis_diagnostic_count == 1 && !refused.has_object);
-            BUSTER_STRING_TEST(arguments, refused.diagnostic, refused_asm_operands[index].diagnostic);
-        }
-    }
-    {
-        // The two halves of what makes an operand belong in the SSE class, each
-        // refused where it fails: a value the scalar SSE instructions do not
-        // operate on, and a target that has no such register file at all. Both
-        // are named by the frontend rather than left to the emitter, because
-        // "invalid IR" is not what a source-level constraint is wrong about.
+        // What an inline-assembly operand class refuses, each case named where
+        // it fails rather than left to the emitter, because "invalid IR" is not
+        // what a source-level constraint is wrong about.  The four classes
+        // themselves are positive fixtures now --
+        // tests/basic_c_asm_{sse_output,sse_input,x87_output,x87_clobber}.c,
+        // each run below -- so what is pinned here is the boundary around them:
+        // a value the class cannot carry, a target that has no such register
+        // file, and the stack shapes the x87 emitter's push/pop model does not
+        // hold for.
         struct
         {
             String8 target;
             String8 source;
             String8 diagnostic;
-        } refused_sse_operands[] = {
+        } refused_asm_operands[] = {
             {S8("x86_64-unknown-linux-gnu"), S8("int sse_integer(int value) { __asm__(\"sqrtsd %1, %0\" : \"=x\"(value) : \"x\"(value)); return value; }\n"),
              S8("an asm operand in the SSE register class must be a float or a double")},
             {S8("x86_64-unknown-linux-gnu"),
@@ -4172,26 +4140,41 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
              S8("an asm operand in the SSE register class must be a float or a double")},
             {S8("aarch64-unknown-linux-gnu"), S8("double sse_target(double value) { __asm__(\"fsqrt %d0, %d1\" : \"=x\"(value) : \"x\"(value)); return value; }\n"),
              S8("unsupported asm constraint for target")},
+            {S8("x86_64-unknown-linux-gnu"), S8("double x87_double(double value) { __asm__(\"fsqrt\" : \"+t\"(value)); return value; }\n"),
+             S8("an asm operand on the x87 register stack must be a long double")},
+            {S8("aarch64-unknown-linux-gnu"), S8("double x87_target(double value) { __asm__(\"fsqrt\" : \"+t\"(value)); return value; }\n"),
+             S8("unsupported asm constraint for target")},
+            {S8("x86_64-unknown-linux-gnu"),
+             S8("long double x87_below_alone(long double x, long double y) { __asm__(\"fprem\" : \"+r\"(x) : \"u\"(y)); return x; }\n"),
+             S8("an asm operand in x87 st(1) requires one in st(0)")},
+            {S8("x86_64-unknown-linux-gnu"),
+             S8("long double x87_twice(long double x, long double y) { __asm__(\"fprem\" : \"+t\"(x) : \"t\"(y)); return x; }\n"),
+             S8("asm names an x87 stack position more than once")},
+            {S8("x86_64-unknown-linux-gnu"),
+             S8("long double x87_popped_output(long double x) { __asm__(\"fsqrt\" : \"+t\"(x) : : \"st\"); return x; }\n"),
+             S8("an asm that clobbers st must take exactly one x87 input and no output")},
+            {S8("x86_64-unknown-linux-gnu"), S8("int x87_bare_clobber(int value) { __asm__(\"nop\" : \"+r\"(value) : : \"st\"); return value; }\n"),
+             S8("an asm that clobbers st must take exactly one x87 input and no output")},
         };
-        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_sse_operands); index += 1)
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_asm_operands); index += 1)
         {
-            String8 refused_sse_source_path = buster_test_temporary_path(arguments->arena, S8("buster-refused-sse-operand"),
-                                                                        string_format(arguments->arena, S8("-{u32}.c"), index));
-            BUSTER_TEST(arguments, file_write(refused_sse_source_path, BUSTER_SLICE_TO_BYTE_SLICE(refused_sse_operands[index].source)));
-            String8 refused_sse_command_line[] = {
+            String8 refused_source_path = buster_test_temporary_path(arguments->arena, S8("buster-refused-asm-operand"),
+                                                                     string_format(arguments->arena, S8("-{u32}.c"), index));
+            BUSTER_TEST(arguments, file_write(refused_source_path, BUSTER_SLICE_TO_BYTE_SLICE(refused_asm_operands[index].source)));
+            String8 refused_command_line[] = {
                 S8("-c"),
                 S8("-target"),
-                refused_sse_operands[index].target,
+                refused_asm_operands[index].target,
                 S8("-o"),
-                buster_test_temporary_path(arguments->arena, S8("buster-refused-sse-operand"), string_format(arguments->arena, S8("-{u32}.o"), index)),
-                refused_sse_source_path,
+                buster_test_temporary_path(arguments->arena, S8("buster-refused-asm-operand"), string_format(arguments->arena, S8("-{u32}.o"), index)),
+                refused_source_path,
             };
-            CompilerDriverResult refused_sse = compiler_driver_execute_invocation(
-                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(refused_sse_command_line)));
-            BUSTER_TEST(arguments, refused_sse.error == COMPILER_DRIVER_ERROR_ANALYSIS);
-            BUSTER_TEST(arguments, refused_sse.tokenizer_error_count == 0 && refused_sse.parser_diagnostic_count == 0 &&
-                                   refused_sse.analysis_diagnostic_count == 1 && !refused_sse.has_object);
-            BUSTER_TEST(arguments, string_ends_with_sequence(refused_sse.diagnostic, refused_sse_operands[index].diagnostic));
+            CompilerDriverResult refused = compiler_driver_execute_invocation(
+                arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(refused_command_line)));
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ANALYSIS);
+            BUSTER_TEST(arguments, refused.tokenizer_error_count == 0 && refused.parser_diagnostic_count == 0 &&
+                                   refused.analysis_diagnostic_count == 1 && !refused.has_object);
+            BUSTER_TEST(arguments, string_ends_with_sequence(refused.diagnostic, refused_asm_operands[index].diagnostic));
         }
     }
     {
@@ -8406,15 +8389,24 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
-    // The SSE register class as an inline-assembly operand, which is what
-    // musl's own x86-64 sqrt, fabs and lrint are written in. Both fixtures are
-    // programs rather than compilations: an operand carried into the wrong
-    // register, or spelled at the wrong width, still assembles and still hands
-    // back a number, so the answers are checked. Each runs under every
-    // allocator because the operand's frame slot is placed differently by each.
+    // The two register files an inline-assembly operand may name besides the
+    // general registers: the SSE class musl's own x86-64 sqrt, fabs and lrint
+    // are written in, and the x87 stack its `long double` math is. All four
+    // fixtures are programs rather than compilations: an operand carried into
+    // the wrong register, or pushed into the wrong stack position, still
+    // assembles and still hands back a number, so the answers are checked --
+    // and `remquol`'s quotient, which is decoded out of the x87 status word, is
+    // the one that a plausible remainder would otherwise hide. Each runs under
+    // every allocator because the operand's frame slot is placed differently by
+    // each.
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
     {
-        String8 sse_operand_fixtures[] = {S8("tests/basic_c_asm_sse_output.c"), S8("tests/basic_c_asm_sse_input.c")};
+        String8 sse_operand_fixtures[] = {
+            S8("tests/basic_c_asm_sse_output.c"),
+            S8("tests/basic_c_asm_sse_input.c"),
+            S8("tests/basic_c_asm_x87_output.c"),
+            S8("tests/basic_c_asm_x87_clobber.c"),
+        };
         String8 sse_operand_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
         for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(sse_operand_fixtures); fixture_index += 1)
         {

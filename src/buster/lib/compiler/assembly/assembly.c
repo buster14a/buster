@@ -11169,10 +11169,25 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, Assem
     {
         suffix_width = suffixed_info.suffix_width;
     }
-    String8 candidate = string_slice(mnemonic, 0, mnemonic.length - 1);
+    // GNU spells the 64-bit x87 integer forms with a doubled `l` -- `fistpll`,
+    // `fildll`, `fisttpll` -- which is one suffix character more than the
+    // single-character strip below reads. Stripping one leaves `fistpl`, which
+    // is the *32-bit* alias and is not a mnemonic the metadata tables know at
+    // all, so the whole spelling was reported as an unknown instruction. The
+    // typed alias table above already carries the doubled spelling and its
+    // width, so a doubled suffix strips two characters and keeps that width
+    // rather than rediscovering a narrower one from what one strip left behind.
+    u64 suffix_length = 1;
+    if (suffix == 'l' && mnemonic.length > 2 && assembly_ascii_lower(mnemonic.pointer[mnemonic.length - 2]) == 'l' && suffix_width == 64 &&
+        (suffixed_info.opcode == ASSEMBLY_OPCODE_X86_FILD || suffixed_info.opcode == ASSEMBLY_OPCODE_X86_FIST ||
+         suffixed_info.opcode == ASSEMBLY_OPCODE_X86_FISTP || suffixed_info.opcode == ASSEMBLY_OPCODE_X86_FISTTP))
+    {
+        suffix_length = 2;
+    }
+    String8 candidate = string_slice(mnemonic, 0, mnemonic.length - suffix_length);
     AssemblyInstructionInfo info = {.opcode = ASSEMBLY_OPCODE_COUNT};
     bool has_handwritten_base = assembly_instruction_lookup(target, syntax, candidate, &info);
-    if (has_handwritten_base)
+    if (has_handwritten_base && suffix_length == 1)
     {
         // x87 AT&T suffix aliases carry their architectural element width in
         // the handwritten lookup table (`fiadds` is mem16int, while `fadds`

@@ -4016,6 +4016,33 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         arguments->arena, x86_att_x87_source, (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
     BUSTER_TEST(arguments, x86_att_x87.diagnostic_count == 0 && x86_att_x87.bytes.length == sizeof(expected_x86_x87) &&
                                memcmp(x86_att_x87.bytes.pointer, expected_x86_x87, sizeof(expected_x86_x87)) == 0);
+    // GNU spells the 64-bit x87 integer forms with a doubled `l`, which is one
+    // suffix character more than the metadata bridge's single-character strip
+    // reads: stripping one leaves `fistpl`, the *32-bit* alias, and the whole
+    // spelling was reported as an unknown instruction. musl's `llrintl` writes
+    // `fistpll`. Each doubled spelling has to encode as the `q` one beside it
+    // and not as the `l` one the single strip would find.
+    struct
+    {
+        String8 doubled;
+        String8 quad;
+    } x86_att_x87_doubled_suffixes[] = {
+        {S8("fildll (%rdi)\n"), S8("fildq (%rdi)\n")},
+        {S8("fistpll (%r11)\n"), S8("fistpq (%r11)\n")},
+        // `fisttpll` takes the same path and is left out only because FISTTP
+        // is an SSE3 row and this target declares no features.
+    };
+    for (u32 doubled_index = 0; doubled_index < BUSTER_ARRAY_LENGTH(x86_att_x87_doubled_suffixes); doubled_index += 1)
+    {
+        AssemblyEncodeResult doubled = assembly_encode(arguments->arena, x86_att_x87_doubled_suffixes[doubled_index].doubled,
+                                                        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        AssemblyEncodeResult quad = assembly_encode(arguments->arena, x86_att_x87_doubled_suffixes[doubled_index].quad,
+                                                     (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, doubled.diagnostic_count == 0);
+        BUSTER_TEST(arguments, quad.diagnostic_count == 0);
+        BUSTER_TEST(arguments, doubled.bytes.length && doubled.bytes.length == quad.bytes.length &&
+                                   memcmp(doubled.bytes.pointer, quad.bytes.pointer, doubled.bytes.length) == 0);
+    }
     AssemblyEncodeResult x86_x87_relocation = assembly_encode(
         arguments->arena, S8("fld qword ptr [rip + external_x87]\n"),
         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});

@@ -161,12 +161,22 @@ typedef enum IrInlineAssemblyConstraint
     // integer, so nothing that reasons about the general registers reaches it.
     // musl's own x86-64 sqrt, fabs and lrint are written in it.
     IR_INLINE_ASSEMBLY_CONSTRAINT_X,
+    // GNU's 't' and 'u': the top of the x87 register stack and the one below
+    // it. They are positions in a stack rather than registers to allocate, so
+    // the emitter pushes the operands into them before the template and pops
+    // whatever is left after it; the register file is the one an x86-64
+    // `long double` already lives in, which is why musl's own `sqrtl`, `fmodl`
+    // and `remquol` need no move around their templates at all.
+    IR_INLINE_ASSEMBLY_CONSTRAINT_T,
+    IR_INLINE_ASSEMBLY_CONSTRAINT_U,
     IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT,
 } IrInlineAssemblyConstraint;
 
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_IS_FIXED(class) ((class) < (u64)IR_INLINE_ASSEMBLY_CONSTRAINT_R)
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(class) ((class) == (u64)IR_INLINE_ASSEMBLY_CONSTRAINT_M)
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(class) ((class) == (u64)IR_INLINE_ASSEMBLY_CONSTRAINT_X)
+#define IR_INLINE_ASSEMBLY_CONSTRAINT_IS_X87(class)                                                                                    \
+    ((class) == (u64)IR_INLINE_ASSEMBLY_CONSTRAINT_T || (class) == (u64)IR_INLINE_ASSEMBLY_CONSTRAINT_U)
 
 #define IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER 0
 #define IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER 1

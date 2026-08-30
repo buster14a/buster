@@ -28464,6 +28464,16 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_vector_operand(IrType* type)
     return type && type->layout.resolved && type->kind == IR_TYPE_FLOAT && (type->layout.size == 4 || type->layout.size == 8);
 }
 
+// What GNU's 't' and 'u' may carry: the 80-bit x87 spelling, which is the one
+// an x86-64 `long double` already has. It is deliberately the same shape test
+// codegen_canonical_x64_type_is_f80 makes -- a float whose bit width is 80 in a
+// sixteen-byte slot -- because a `long double` that is an f64 or an f128 is a
+// different register file on the target that spells it that way.
+BUSTER_C_INTERNAL bool c_ir_inline_assembly_x87_operand(IrType* type)
+{
+    return type && type->kind == IR_TYPE_FLOAT && type->bit_width == 80 && type->layout.resolved && type->layout.size == 16;
+}
+
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_operand_types_compatible(CIntegerIrBuilder* builder, IrValueId output, IrValueId input)
 {
     if (!builder || !builder->function || output.value >= builder->function->value_count || input.value >= builder->function->value_count)
@@ -28699,6 +28709,9 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
         case 'x':
             constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_X;
             break;
+        case 't':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_T;
+            break;
         default:
             builder->failure_message = S8("unsupported asm output constraint");
             return false;
@@ -28734,6 +28747,20 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
             break;
         case 'x':
             constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_X;
+            break;
+        case 't':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_T;
+            break;
+        case 'u':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_U;
+            break;
+        // GNU's 'X' allows any operand whatsoever, so a register is one of the
+        // answers it accepts and is the one given here. musl's `remquol` writes
+        // an empty template with two 'X' inputs for exactly that reason: it
+        // asks for the addresses of its operands to escape rather than for a
+        // particular place to read them from.
+        case 'X':
+            constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_R;
             break;
         default:
         {
@@ -28807,6 +28834,23 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
         if (!c_ir_inline_assembly_vector_operand(operand_type))
         {
             builder->failure_message = S8("an asm operand in the SSE register class must be a float or a double");
+            return false;
+        }
+    }
+    // The x87 stack is asked the same two questions, and it is the register
+    // file an x86-64 `long double` lives in rather than one values are moved
+    // into: a value of any other type would have to be converted to reach it,
+    // which is not something an operand does.
+    if (!matching && IR_INLINE_ASSEMBLY_CONSTRAINT_IS_X87(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
+    {
+        if (builder->target.cpu_arch != CPU_ARCH_X86_64)
+        {
+            builder->failure_message = S8("unsupported asm constraint for target");
+            return false;
+        }
+        if (!c_ir_inline_assembly_x87_operand(operand_type))
+        {
+            builder->failure_message = S8("an asm operand on the x87 register stack must be a long double");
             return false;
         }
     }
@@ -28896,10 +28940,17 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_valid(CIntegerIrBuilder* bui
         {
             return false;
         }
+        // `st` is the top of the x87 register stack, and a template declares it
+        // clobbered to say that it popped what it was handed -- musl's
+        // `llrintl` and `lrintl` are `fistpll`, which does. The deeper
+        // positions (`st(1)` and below) are not here: each would say that the
+        // template popped a different number of registers, and the emitter's
+        // model is the one pop this spelling states.
         String8 names[] = {
             S8("rax"), S8("eax"), S8("ax"), S8("al"), S8("rbx"), S8("ebx"), S8("bx"), S8("bl"),
             S8("rcx"), S8("ecx"), S8("cx"), S8("cl"), S8("rdx"), S8("edx"), S8("dx"), S8("dl"),
             S8("rsi"), S8("esi"), S8("si"), S8("sil"), S8("rdi"), S8("edi"), S8("di"), S8("dil"),
+            S8("st"),
         };
         for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
         {
@@ -29014,6 +29065,14 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_matches_constraint(String8 c
     case IR_INLINE_ASSEMBLY_CONSTRAINT_R:
     case IR_INLINE_ASSEMBLY_CONSTRAINT_M:
     case IR_INLINE_ASSEMBLY_CONSTRAINT_X:
+    // `st` names the top of the x87 stack, which is where a 't' operand sits,
+    // and the two are written together on purpose rather than in conflict:
+    // musl's `llrintl` declares the clobber to say that its `fistpll` popped
+    // the operand it was handed. The conflict rule is about a clobber that
+    // destroys an operand the emitter still has to read back, and that is not
+    // this.
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_T:
+    case IR_INLINE_ASSEMBLY_CONSTRAINT_U:
     case IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT:
         break;
     }
@@ -29065,6 +29124,60 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_fixed_operands_conflict(CIntegerIrBu
         }
     }
     return false;
+}
+
+// The x87 stack is a stack rather than a set of registers, so what an asm may
+// say about it is a shape rather than a per-operand fact. The emitter pushes
+// the operands into their positions before the template and pops what is left
+// after it, and every rule here is one that model needs to hold:
+//
+//   - each position is named at most once, because two operands cannot occupy
+//     one slot;
+//   - `u` needs a `t`, because st(1) is only st(1) when something is at st(0);
+//   - an `st` clobber says the template popped what it was handed, so it comes
+//     with exactly one x87 operand and that operand is an input. A popped
+//     output is one the emitter would have to read back out of a register the
+//     template already discarded.
+BUSTER_C_INTERNAL bool c_ir_inline_assembly_x87_operands_valid(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state)
+{
+    u32 top_count = 0;
+    u32 below_count = 0;
+    bool top_is_output = false;
+    for (u32 operand_index = 0; operand_index < state->operand_count; operand_index += 1)
+    {
+        u64 constraint = state->constraints[operand_index];
+        u64 constraint_class = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+        if (constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_T)
+        {
+            top_count += 1;
+            top_is_output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+        }
+        else if (constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_U)
+        {
+            below_count += 1;
+        }
+    }
+    bool stack_clobber = false;
+    for (u32 clobber_index = 0; clobber_index < state->clobber_count; clobber_index += 1)
+    {
+        stack_clobber |= string_equal(state->clobbers[clobber_index], S8("st"));
+    }
+    if (top_count > 1 || below_count > 1)
+    {
+        builder->failure_message = S8("asm names an x87 stack position more than once");
+        return false;
+    }
+    if (below_count && !top_count)
+    {
+        builder->failure_message = S8("an asm operand in x87 st(1) requires one in st(0)");
+        return false;
+    }
+    if (stack_clobber && (top_count != 1 || below_count || top_is_output))
+    {
+        builder->failure_message = S8("an asm that clobbers st must take exactly one x87 input and no output");
+        return false;
+    }
+    return true;
 }
 
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_labels_parse(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u32 start, u32 end)
@@ -29494,6 +29607,10 @@ BUSTER_C_INTERNAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder, C
         return false;
     }
     if (c_ir_inline_assembly_clobbers_conflict(builder, state))
+    {
+        return false;
+    }
+    if (!c_ir_inline_assembly_x87_operands_valid(builder, state))
     {
         return false;
     }

@@ -219,6 +219,13 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // literal, which the operand scan below already admits.
     S8_INITIALIZER("sqrtsd"), S8_INITIALIZER("sqrtss"), S8_INITIALIZER("cvtsd2si"), S8_INITIALIZER("cvtss2si"),
     S8_INITIALIZER("pcmpeqd"), S8_INITIALIZER("psrlq"), S8_INITIALIZER("psrld"), S8_INITIALIZER("andps"),
+    // The x87 instructions musl's own `long double` math is written in. Each
+    // reads and writes the stack positions the 't'/'u' operands were pushed
+    // into and nothing else, except FISTP, which also pops -- which is what the
+    // `st` clobber beside it declares. FNSTSW writes AX, and the template names
+    // that register literally because the same asm pins it with an `a` output.
+    S8_INITIALIZER("fsqrt"), S8_INITIALIZER("frndint"), S8_INITIALIZER("fabs"), S8_INITIALIZER("fprem"),
+    S8_INITIALIZER("fprem1"), S8_INITIALIZER("fnstsw"), S8_INITIALIZER("fistpll"), S8_INITIALIZER("fistpq"),
 };
 
 // The registers a template may name literally. The rule the ban exists for is
@@ -258,6 +265,13 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_registers[] = {
     S8_INITIALIZER("xmm0"), S8_INITIALIZER("xmm1"), S8_INITIALIZER("xmm2"), S8_INITIALIZER("xmm3"), S8_INITIALIZER("xmm4"), S8_INITIALIZER("xmm5"),
     S8_INITIALIZER("xmm6"), S8_INITIALIZER("xmm7"), S8_INITIALIZER("xmm8"), S8_INITIALIZER("xmm9"), S8_INITIALIZER("xmm10"), S8_INITIALIZER("xmm11"),
     S8_INITIALIZER("xmm12"), S8_INITIALIZER("xmm13"), S8_INITIALIZER("xmm14"), S8_INITIALIZER("xmm15"),
+    // `st` covers every spelling of an x87 stack position, because the scan
+    // that reaches this table reads letters and digits and stops at the
+    // parenthesis: `%st`, `%st(0)` and `%st(3)` all arrive here as "st". None
+    // of them may be written by hand. The emitter pushes the operands into
+    // their positions before the template and pops what is left after it, so a
+    // template that moved the stack itself would leave that accounting wrong.
+    S8_INITIALIZER("st"),
 };
 
 // The vector registers an 'x' operand may be allocated. The canonical emitter
@@ -286,6 +300,8 @@ BUSTER_GLOBAL_LOCAL void codegen_emit_u8(CodegenBuffer* buffer, u8 value);
 BUSTER_GLOBAL_LOCAL void codegen_emit_u32(CodegenBuffer* buffer, u32 value);
 BUSTER_GLOBAL_LOCAL BUSTER_COLD BUSTER_PRESERVE_MOST void codegen_buffer_report_exhausted(CodegenBuffer* buffer);
 BUSTER_GLOBAL_LOCAL u32 codegen_inline_assembly_type_class(IrType* type);
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_clobber_register(String8 clobber, X64Register* register_out);
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_constraint_register(u64 constraint, X64Register* register_out);
 
 BUSTER_GLOBAL_LOCAL bool codegen_decimal_number(String8 string, u64* value_out)
 {
@@ -433,16 +449,27 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_name(String8 token)
     return result;
 }
 
-// The name an operand in the SSE class is spelled with, or an empty string for
-// an operand in any other class. Keeping the two files behind one lookup is
-// what lets the template walk stay a single pass over the references.
+// The name an operand outside the general registers is spelled with, or an
+// empty string for one inside them. Keeping every file behind one lookup is
+// what lets the template walk stay a single pass over the references. An x87
+// operand names its position rather than a register, because that is what it
+// is: the emitter pushed it there.
 BUSTER_GLOBAL_LOCAL String8 codegen_inline_assembly_vector_register_name(u64 constraint, u32 const* vector_registers, u32 operand_index)
 {
     String8 result = {0};
-    if (vector_registers && IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) &&
+    u64 constraint_class = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+    if (vector_registers && IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint_class) &&
         vector_registers[operand_index] < BUSTER_ARRAY_LENGTH(codegen_x64_asm_vector_names))
     {
         result = codegen_x64_asm_vector_names[vector_registers[operand_index]];
+    }
+    else if (constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_T)
+    {
+        result = S8("st");
+    }
+    else if (constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_U)
+    {
+        result = S8("st(1)");
     }
 
     return result;
@@ -532,7 +559,14 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_transfers_control(String8 sourc
 // `transfers_control` is the caller's answer for this same template, and it is
 // what the stack-pointer exception hangs on; see
 // codegen_x64_asm_literal_base_registers.
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(String8 source, bool transfers_control)
+//
+// `reserved_registers` is the third exception, and it is the one that makes the
+// reason above stop applying: a register this asm has already committed to --
+// pinned by a fixed-class operand, or named in its clobber list -- is one the
+// emitter cannot also hand to another operand, so a template naming it cannot
+// overwrite anything. musl's `fmodl` is the shape: `fnstsw %%ax` beside an
+// `"=a"` output, where the literal register *is* the operand's register.
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(String8 source, bool transfers_control, bool const* reserved_registers)
 {
     for (u64 index = 0; index < source.length; index += 1)
     {
@@ -609,7 +643,9 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(String8 
             // anything reads.
             bool stack_hand_off = transfers_control && codegen_inline_assembly_name_in_set(name, codegen_x64_asm_literal_base_registers,
                                                                                           BUSTER_ARRAY_LENGTH(codegen_x64_asm_literal_base_registers));
-            if (!memory_base && !segment_override && !stack_hand_off)
+            X64Register named_register = X64_REGISTER_RAX;
+            bool reserved = reserved_registers && codegen_inline_assembly_clobber_register(name, &named_register) && reserved_registers[named_register];
+            if (!memory_base && !segment_override && !stack_hand_off && !reserved)
             {
                 return false;
             }
@@ -762,7 +798,32 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, 
                                                                    AssemblySyntax syntax, String8* source_out)
 {
     String8 template_source = extra.literal;
-    if (!codegen_inline_assembly_template_literal_valid(template_source, codegen_inline_assembly_transfers_control(template_source)))
+    // The registers this asm has already committed to, which is what licenses a
+    // template to name one of them literally. Only the pinned operand classes
+    // and the clobbers are here: a generically allocated `r` operand is a
+    // register the emitter chose, and a template naming it by hand is exactly
+    // the collision the refusal exists for.
+    bool reserved_registers[16] = {0};
+    for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+    {
+        X64Register pinned = X64_REGISTER_RAX;
+        if (instruction->immediates && codegen_inline_assembly_constraint_register(instruction->immediates[operand_index], &pinned) &&
+            (u32)pinned < BUSTER_ARRAY_LENGTH(reserved_registers))
+        {
+            reserved_registers[pinned] = true;
+        }
+    }
+    for (u32 clobber_index = 0; clobber_index < extra.clobber_count; clobber_index += 1)
+    {
+        X64Register clobbered = X64_REGISTER_RAX;
+        if (codegen_inline_assembly_clobber_register(extra.clobbers[clobber_index], &clobbered) &&
+            (u32)clobbered < BUSTER_ARRAY_LENGTH(reserved_registers))
+        {
+            reserved_registers[clobbered] = true;
+        }
+    }
+    if (!codegen_inline_assembly_template_literal_valid(template_source, codegen_inline_assembly_transfers_control(template_source),
+                                                       reserved_registers))
     {
         return false;
     }
@@ -15790,7 +15851,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             String8 clobber = asm_extra.clobbers[clobber_index];
                             bool accepted = string_equal(clobber, S8("memory")) || string_equal(clobber, S8("cc")) ||
-                                            string_equal(clobber, S8("rax")) || string_equal(clobber, S8("eax")) || string_equal(clobber, S8("ax")) ||
+                                            string_equal(clobber, S8("st")) || string_equal(clobber, S8("rax")) || string_equal(clobber, S8("eax")) || string_equal(clobber, S8("ax")) ||
                                             string_equal(clobber, S8("al")) || string_equal(clobber, S8("rbx")) || string_equal(clobber, S8("ebx")) ||
                                             string_equal(clobber, S8("bx")) || string_equal(clobber, S8("bl")) || string_equal(clobber, S8("rcx")) ||
                                             string_equal(clobber, S8("ecx")) || string_equal(clobber, S8("cx")) || string_equal(clobber, S8("cl")) ||
@@ -15825,6 +15886,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         X64Register* asm_registers = arena_allocate(arena, X64Register, instruction->operand_count ? instruction->operand_count : 1);
                         u32* asm_vector_registers = arena_allocate(arena, u32, instruction->operand_count ? instruction->operand_count : 1);
                         bool asm_vector_operands = false;
+                        // The x87 stack is a stack, so what the emitter needs
+                        // is which operand goes where rather than a register
+                        // per operand. The frontend already refused every
+                        // shape but the ones below; these say which of them
+                        // this asm is.
+                        u32 asm_x87_top = UINT32_MAX;
+                        u32 asm_x87_below = UINT32_MAX;
+                        bool asm_x87_stack_clobber = false;
+                        for (u32 clobber_index = 0; clobber_index < asm_extra.clobber_count; clobber_index += 1)
+                        {
+                            asm_x87_stack_clobber |= string_equal(asm_extra.clobbers[clobber_index], S8("st"));
+                        }
                         for (u32 clobber_index = 0; clobber_index < asm_extra.clobber_count; clobber_index += 1)
                         {
                             X64Register clobber_register = X64_REGISTER_RAX;
@@ -15917,17 +15990,40 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             indirect_operands |= indirect[operand_index];
                             IrType* operand_type = ir_type_from_id(&program->types, function->values[operand.value].canonical_type);
                             bool vector_operand = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint_index);
-                            // A vector operand is checked whatever the template
-                            // is, because the move that carries it in and out is
-                            // emitted for the empty template too; the general
-                            // file's check is the ordinary-template one it has
-                            // always been.
+                            bool x87_operand = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_X87(constraint_index);
+                            // A vector or x87 operand is checked whatever the
+                            // template is, because the move that carries it in
+                            // and out is emitted for the empty template too;
+                            // the general file's check is the
+                            // ordinary-template one it has always been.
                             if (vector_operand && !codegen_inline_assembly_vector_operand(operand_type))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            if (!vector_operand && ordinary &&
+                            if (x87_operand)
+                            {
+                                // The push and the pop-store are written
+                                // against a frame slot, whose sixteen bytes the
+                                // emitter owns down to the six it zeroes behind
+                                // an eighty-bit value. An operand reached
+                                // through a pointer is somebody else's storage,
+                                // so it stays out rather than being written
+                                // through a rule this path cannot state.
+                                if (!codegen_canonical_x64_type_is_f80(operand_type) || indirect[operand_index] || x87_stack_depth)
+                                {
+                                    result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                    return result;
+                                }
+                                u32* position = constraint_index == IR_INLINE_ASSEMBLY_CONSTRAINT_T ? &asm_x87_top : &asm_x87_below;
+                                if (*position != UINT32_MAX)
+                                {
+                                    result.error = CODEGEN_ERROR_INVALID_IR;
+                                    return result;
+                                }
+                                *position = operand_index;
+                            }
+                            if (!vector_operand && !x87_operand && ordinary &&
                                 (codegen_inline_assembly_type_class(operand_type) == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID ||
                                  !codegen_canonical_x64_asm_memory_width((u32)operand_type->layout.size)))
                             {
@@ -15967,6 +16063,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 asm_registers[operand_index] = asm_registers[match_index];
                                 asm_vector_registers[operand_index] = asm_vector_registers[match_index];
+                                continue;
+                            }
+                            if (x87_operand)
+                            {
+                                // A stack position is not allocated, so this
+                                // operand takes nothing out of either pool; the
+                                // parked general-file entry is the same one a
+                                // vector operand gets, for the same reason.
+                                asm_registers[operand_index] = X64_REGISTER_RSP;
                                 continue;
                             }
                             if (vector_operand)
@@ -16062,6 +16167,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             u64 constraint = instruction->immediates[operand_index];
                             bool memory_operand = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
+                            // An x87 operand is pushed by the step below rather
+                            // than here, because the order the pushes go in is
+                            // what puts each operand in its position and that
+                            // order is not the operand order.
+                            if (IR_INLINE_ASSEMBLY_CONSTRAINT_IS_X87(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
+                            {
+                                continue;
+                            }
                             if (!memory_operand && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) &&
                                 !(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE))
                             {
@@ -16122,6 +16235,26 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                               (u32)c_x64_frame_displacement(&emitter, value_offsets[input.value]),
                                                               (u32)input_type->layout.size);
                             }
+                        }
+                        // The x87 operands go onto the stack last and deepest
+                        // first, so the `u` operand ends at ST(1) and the `t`
+                        // operand on top -- which is what their names mean.
+                        // musl's `fprem` reads both that way.
+                        if (asm_x87_below != UINT32_MAX &&
+                            !codegen_canonical_x64_x87_push(&buffer, false, X64_REGISTER_RBP,
+                                                            c_x64_frame_displacement(&emitter, value_offsets[instruction->operands[asm_x87_below].value]),
+                                                            80, &x87_stack_depth))
+                        {
+                            result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                            return result;
+                        }
+                        if (asm_x87_top != UINT32_MAX &&
+                            !codegen_canonical_x64_x87_push(&buffer, false, X64_REGISTER_RBP,
+                                                            c_x64_frame_displacement(&emitter, value_offsets[instruction->operands[asm_x87_top].value]),
+                                                            80, &x87_stack_depth))
+                        {
+                            result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                            return result;
                         }
                         if (cpuid || undefined || nop || interrupt)
                         {
@@ -16199,6 +16332,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
                         {
                             u64 constraint = instruction->immediates[operand_index];
+                            // An x87 output was stored and popped by the unwind
+                            // above, which is where the stack discipline is;
+                            // storing a register over it here would have no
+                            // register to store.
+                            if (IR_INLINE_ASSEMBLY_CONSTRAINT_IS_X87(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK))
+                            {
+                                continue;
+                            }
                             // A memory output was written by the assembly
                             // itself, through the address its register holds.
                             // Storing a register back over it here would undo
@@ -16257,6 +16398,46 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 codegen_canonical_x64_asm_store(&buffer, X64_REGISTER_RBP, asm_registers[operand_index],
                                                                (u32)c_x64_frame_displacement(&emitter, value_offsets[place_id.value]),
                                                                (u32)output_type->layout.size);
+                            }
+                        }
+                        // Unwinding the stack the pushes above built, and it
+                        // runs after the general-file stores rather than
+                        // straight after the template: the six padding bytes a
+                        // stored eighty-bit value is followed by are zeroed
+                        // through RAX, and musl's `fmodl` reads its status word
+                        // back out of AX through an `"=a"` output. Storing that
+                        // output first is what keeps the two apart.
+                        //
+                        // A template that declared the `st` clobber popped what
+                        // it was handed -- musl's `fistpll` -- so the depth is
+                        // one shallower than the pushes left it and nothing is
+                        // read back; an output in ST(0) is stored and popped;
+                        // and whatever is still standing after that is the `u`
+                        // operand, which the template read and nobody else
+                        // wants.
+                        if (asm_x87_stack_clobber)
+                        {
+                            if (!x87_stack_depth)
+                            {
+                                result.error = CODEGEN_ERROR_INVALID_IR;
+                                return result;
+                            }
+                            x87_stack_depth -= 1;
+                        }
+                        if (asm_x87_top != UINT32_MAX && (instruction->immediates[asm_x87_top] & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) &&
+                            !codegen_canonical_x64_x87_pop_store(&buffer, false, X64_REGISTER_RBP,
+                                                                 c_x64_frame_displacement(&emitter, value_offsets[instruction->operands[asm_x87_top].value]),
+                                                                 80, &x87_stack_depth))
+                        {
+                            result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                            return result;
+                        }
+                        while (x87_stack_depth)
+                        {
+                            if (!codegen_canonical_x64_x87_discard(&buffer, &x87_stack_depth))
+                            {
+                                result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+                                return result;
                             }
                         }
                         // A template that ran with operands in the SSE file

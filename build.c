@@ -16187,8 +16187,17 @@ struct MuslManifest
 // -- sqrt, sqrtf, fabs, fabsf as outputs and llrint, llrintf, lrint, lrintf as
 // inputs -- hold musl's own x86-64 implementation rather than a substituted
 // portable one. The eight left are the x87 register stack, issue 766.
-#define MUSL_EXPECTED_COMPILED_UNITS 1348
-#define MUSL_EXPECTED_FAILURE_HASH 0x30f0106d42042a1aull
+// 2026-08-30: 1348 -> 1356, which is the whole manifest, so the failing set is
+// empty again and its hash is the hash of nothing. The x87 half is implemented
+// too: `t` and `u` are the top of the x87 stack and the one below it, `st` is
+// the clobber a template that pops declares, and the emitter pushes the
+// operands into their positions before the template and pops what is left
+// after it. fabsl, fmodl, remainderl, remquol, rintl, sqrtl, llrintl and
+// lrintl are musl's own now, and no unit is MUSL_SUBSTITUTED any more: the
+// archive holds musl's x86-64 implementation of every one of the eighteen
+// architecture C units the way the Clang reference archive already did.
+#define MUSL_EXPECTED_COMPILED_UNITS 1356
+#define MUSL_EXPECTED_FAILURE_HASH 0x0ull
 
 // The environment a dynamically linked program is given. musl's own loader
 // reads LD_PRELOAD and LD_LIBRARY_PATH out of the environment it is handed,

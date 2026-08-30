@@ -806,9 +806,17 @@ a thread-pointer read is spelled. GNU's semicolon separates statements while
 this assembler reads one as a comment, so the inline-assembly path rewrites
 the separators, folding `lock ; insn` into the single statement the assembler
 wants and splitting the rest onto their own lines. The operand classes are the
-fixed general registers, `r`, `m` and `x`: the x87 class musl's own x86-64
-math is written in is the whole of what the manifest below reports as
-unsupported.
+fixed general registers, `r`, `m`, `x`, `t` and `u`, and `X` for an operand a
+template does not care about the placement of, which is how musl's `remquol`
+keeps the addresses of its arguments from being discarded. Every unit in the
+manifest below compiles.
+
+A literal register a template names has a third exception beside those two, and
+it is the one that makes the reason above stop applying: a register the asm has
+*already* committed to -- pinned by a fixed-class operand, or in its clobber
+list -- is one the emitter cannot hand to anything else, so a template naming it
+cannot overwrite anything. musl's `fmodl` is the shape: `fnstsw %%ax` beside an
+`"=a"` output, where the literal register is that operand's own.
 
 `x` is GNU's SSE register class, and it is a second register file rather than
 another name for a general register. An operand in it is allocated a vector
@@ -829,6 +837,30 @@ overwrite it. `tests/basic_c_asm_sse_output.c` and
 reduced to their operands and run under every allocator, with their answers
 checked -- an operand carried into the wrong register still assembles and still
 hands back a number.
+
+`t` and `u` are the top of the x87 register stack and the one below it, and
+`st` is the clobber a template that pops declares. That file is where an
+x86-64 `long double` already lives, so these operands need no conversion around
+them at all -- and it is a stack rather than a set of registers, which is the
+whole of the emitter's model: the operands are pushed deepest first, so `u`
+lands in ST(1) and `t` on top; the template runs; an output in ST(0) is stored
+and popped; and whatever is still standing is discarded. An `st` clobber says
+the template popped what it was handed, so the depth is one shallower than the
+pushes left it and nothing is read back -- musl's `llrintl` is `fistpll`, which
+pops. The unwind runs *after* the general-file stores rather than straight
+after the template, because the six padding bytes a stored eighty-bit value is
+followed by are zeroed through RAX and `fmodl` reads its status word back out
+of AX. What the frontend refuses is everything that model does not hold for: a
+position named twice, a `u` without a `t`, an `st` clobber that is not beside
+exactly one `t` input, an operand that is not the 80-bit spelling, an operand
+reached through a pointer rather than sitting in a frame slot, and the class on
+a target with no x87 file. A literal `%st` in a template stays refused whatever
+the operands are, because a template that moved the stack itself would leave
+that accounting wrong. `tests/basic_c_asm_x87_output.c` and
+`tests/basic_c_asm_x87_clobber.c` are the fixtures, and `remquol` is the reason
+their answers are checked rather than assembled: its quotient bits are decoded
+out of the x87 status word, so a `fprem1` against the wrong stack position
+returns a plausible remainder beside a wrong quotient.
 
 Two more things a template may do, and they are what a libc's startup and its
 dynamic loader are written in rather than its atomics. It may **name a
@@ -1086,37 +1118,39 @@ than an exclusion. One unit's `.c` is empty with no architecture file to
 replace it -- `src/thread/tls`, which x86-64 does not need -- and it is the
 empty translation unit musl itself compiles rather than a reported gap.
 
-1348 of the 1356 build. The 8 that do not are architecture C under
-`src/math/x86_64`, and the whole of the refusal is the x87 register stack as an
-inline-assembly operand class the frontend does not have: the stack as an
-operand (`"+t"`, `"u"`: `fabsl`, `fmodl`, `remainderl`, `remquol`, `rintl`,
-`sqrtl`) and `st` as a clobber (`llrintl`, `lrintl`). Those are one register
-file rather than two gaps, and they are issue 766. The SSE half was issue 765
-and is closed: `x` is an operand class of its own now, so `sqrt`, `sqrtf`,
-`fabs` and `fabsf` (`"=x"`, `"+x"`) and `llrint`, `llrintf`, `lrint` and
-`lrintf` (`"x"`) hold musl's own x86-64 implementation. The other two
-architecture C units, `fma` and `fmaf`, build: neither `__FMA__` nor `__FMA4__`
-is defined under this flag set, so both fall through to
+All 1356 build, so the failing set is empty and its hash is the hash of
+nothing. The last class to go was the inline-assembly operand classes musl's
+own math is written in, and it went in two halves: the SSE register class as an
+output (`"=x"`, `"+x"`: `sqrt`, `sqrtf`, `fabs`, `fabsf`) and as an input
+(`"x"`: `llrint`, `llrintf`, `lrint`, `lrintf`), which was issue 765; and the
+x87 stack as an operand (`"+t"`, `"u"`: `fabsl`, `fmodl`, `remainderl`,
+`remquol`, `rintl`, `sqrtl`) with `st` as a clobber (`llrintl`, `lrintl`),
+which was issue 766. Those were two register files rather than four gaps, and
+both are described with the vocabulary above. The other two architecture C
+units, `fma` and `fmaf`, build for a different reason: neither `__FMA__` nor
+`__FMA4__` is defined under this flag set, so both fall through to
 `#include "../fma.c"` and are the portable code reached by an architecture
-path. Clang compiles all eighteen, so the reference archive holds musl's own
-implementations and the comparison is a real one. Each class has its fixture --
-`tests/basic_c_asm_sse_output.c` and `tests/basic_c_asm_sse_input.c` are the
-two the SSE class turned into programs that check their answers, and
-`tests/basic_c_asm_x87_output.c` and `tests/basic_c_asm_x87_clobber.c` are
-still reductions asserting their exact diagnostic -- so implementing a class
-moves the musl count and one fixture together.
+path. Clang compiles all eighteen, and so does Buster now, so the two archives
+hold musl's own implementations of the same units. The four classes are pinned
+as fixtures -- `tests/basic_c_asm_sse_output.c`,
+`tests/basic_c_asm_sse_input.c`, `tests/basic_c_asm_x87_output.c` and
+`tests/basic_c_asm_x87_clobber.c` -- each musl's own templates reduced to their
+operands and run under every allocator with their answers checked, so a class
+that regresses moves the musl count and one fixture together.
 
-A refused architecture unit does not leave a hole in the archive. `hypot`
-calls `sqrt`, so a `libc.a` without one is a `libc.a` nothing links against,
-and every stage after the archive -- the freestanding probe, both ABI links,
-the shared object, the whole libc-test suite -- would stop measuring anything
-at all. The archive therefore falls back to the portable file the architecture
-source displaced, and says so: each fallback is a `MUSL_SUBSTITUTED` line
-naming the file refused and the file taken, beside the `MUSL_UNSUPPORTED` line
-carrying the diagnostic. The unit still does not count as compiled, so the
-substitution is a reported gap rather than a repaired one; the two lines
-together are exactly how this archive differs from a native musl one. Both
-archives are 1349 members.
+A refused architecture unit does not leave a hole in the archive, and the
+fallback that makes that true is still here even though nothing takes it now.
+`hypot` calls `sqrt`, so a `libc.a` without one is a `libc.a` nothing links
+against, and every stage after the archive -- the freestanding probe, both ABI
+links, the shared object, the whole libc-test suite -- would stop measuring
+anything at all. The archive therefore falls back to the portable file the
+architecture source displaced, and says so: each fallback is a
+`MUSL_SUBSTITUTED` line naming the file refused and the file taken, beside the
+`MUSL_UNSUPPORTED` line carrying the diagnostic. The unit still does not count
+as compiled, so the substitution is a reported gap rather than a repaired one.
+There are none today -- `substituted=0` on the `MUSL_SUMMARY` line -- which is
+what makes this archive musl's own rather than a portable stand-in for it.
+Both archives are 1349 members.
 
 Before the driver took assembly input this was three groups of reported
 exclusions: seven `assembly-only` units whose `.c` is empty because the
@@ -1147,7 +1181,10 @@ where the row's address was meant. Inline assembly is no
 longer a class: `crt/rcrt1`, `ldso/dlstart`, `ldso/dynlink` and
 `src/thread/__unmapself` were the four units that reached code generation and
 stopped on a template, and they compile now that the inline path relocates a
-symbol reference and takes musl's two hand-off shapes.
+symbol reference and takes musl's two hand-off shapes. Neither is an
+inline-assembly *operand* class: the sixteen architecture C units under
+`src/math/x86_64` stopped on the SSE register class and on the x87 stack, and
+both are implemented, which is what took the count to the whole manifest.
 
 `src/complex` is no longer a class either. Eighteen units returned a
 `long double _Complex` and were refused at the signature boundary until the
