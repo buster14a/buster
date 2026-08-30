@@ -472,8 +472,9 @@ Two upstream constructs stay outside the harness for reasons worth keeping.
 A `SQLITE_DEBUG` build is not part of the matrix: `assert()` expands to a GNU
 statement expression, and `if( p->apCsr ) for(i=0; i<p->nCursor; i++) assert(
 p->apCsr[i]==0 );` was measured as ending at the assert's closing brace rather
-than at its semicolon until `c_ir_control_statement_ends_with_body` learned to
-find the body past the header. That shape now compiles, but the debug build
+than at its semicolon until the statement-extent walk in `c_gen.c` (today
+`c_ir_statement_end`) learned to find the body past the header. That shape
+now compiles, but the debug build
 still fails an internal assertion of its own, so it is a documented gap rather
 than a passing configuration. And the harness never builds `testfixture`, as
 above.
@@ -641,7 +642,10 @@ commit, the working tree and the `VERSION` file before it compiles anything.
 The Test262 path is optional: without it the conformance stage reports itself
 skipped, since it is a second external dependency an order of magnitude larger
 than the engine. Its pin is upstream's own `TEST262_COMMIT`,
-`5c8206929d81b2d3d727ca6aac56c18358c8d790`.
+`5c8206929d81b2d3d727ca6aac56c18358c8d790` — advisory rather than enforced:
+unlike the QuickJS checkout, the harness does not verify the Test262
+checkout's commit, and the exact Buster-vs-Clang runner-summary comparison is
+what gates the stage.
 
 The harness owns an explicit 9-unit manifest and compiles it in named stages,
 failing at the first one that breaks: the library (`quickjs.c`, `dtoa.c`,
@@ -1197,9 +1201,6 @@ implemented: 1344 to 1346. Conflicting
 declarations are no longer a class: C11 6.2.7p3 makes an unprototyped
 `long f();` compatible with a non-variadic prototype for the same function,
 which is what musl's `pthread_cancel.c` and `__libc_start_main.c` write.
-Neither is wide floating-point `va_arg`, which is what `vfprintf` and
-`vfwprintf` stopped on until the read described with the type below was
-implemented (measured 2026-08-29).
 
 `_Complex` is a two-field aggregate of its real type, real part first. That is
 the layout every psABI specifies and, with one exception, also the argument
@@ -1413,8 +1414,8 @@ sides do, not written down:
   was a stub, `clone` was absent and the thread tests hung out their
   ten-second deadline, and `setjmp` was a trap so nothing that called `dlopen`
   could run -- and building the assembly is what released it: 144 of the 199
-  `src/math` units and 34 of the 69 `regression` ones left this state, 31 and
-  1 remain, and the suite's run time fell from 53,6 seconds to 3,9.
+  `src/math` units and 34 of the 69 `regression` ones were in this state, 31
+  and 1 remain, and the suite's run time fell from 53,6 seconds to 3,9.
 - `blocked-compile` — Buster cannot compile the test itself.
 - `blocked-link` — Buster compiled it and the link against the Buster-built
   libc could not be made. Every undefined symbol is recorded, not just the
@@ -1438,9 +1439,9 @@ compiles once an aggregate can be assigned across a `volatile` qualifier
 is not loaded (issue 737). The other two, `functional/tls_align_dlopen` and
 `functional/tls_init_dlopen`, joined the shared-object group that was already
 there rather than being anything new; `tls_init_dlopen` is closed with the
-rest of that group and `tls_align_dlopen` is one of the two the dropped
-constructor still holds. 243 to 386, and nothing that passed before stopped
-passing.
+rest of that group and `tls_align_dlopen` was one of the two the dropped
+constructor held until issue 771 closed it. 243 to 388, and nothing that
+passed before stopped passing.
 
 Applying `ARCH_SRCS` whole moved the reference and not the suite. The Clang
 archive holds musl's own x86-64 `sqrt`, `fabs`, the `lrint` family and the x87
@@ -1526,11 +1527,9 @@ difference between two allocators and a regression under both the same moved
 number. The pass runs whether or not the first inventory moved, so one run
 reports both.
 
-`src/functional` classifies identically under both allocators today: 72
-passing, the same two wrong answers — `functional/tls_align` and
-`functional/tls_align_dlopen`, both of them a dropped constructor rather than
-anything an allocator decides — and the same three excluded-reference. That
-agreement across 72 running programs is what the pass exists to be able to
+`src/functional` classifies identically under both allocators today: 74
+passing, none failing, and the same three excluded-reference. That
+agreement across 74 running programs is what the pass exists to be able to
 state.
 
 Today 388 of 424 units pass (measured 2026-08-30, on one machine).
@@ -1548,12 +1547,12 @@ on a compile, nothing on a link, and nothing answers differently.
 Most of that total is the reference's reach rather than Buster's, and it
 arrived with the assembly stage: both archives hold musl's own x86-64 assembly
 now, so `fenv` is real, `clone` is present and `setjmp` is not a trap. The
-number the assembly stage itself reaches is 377; the nine above it are this
-tree's, and seven of them are a fix — see the `LIBC_TEST_EXPECTED_PASSING`
+number the assembly stage itself reaches is 377; the eleven above it are this
+tree's, and nine of them are a fix — see the `LIBC_TEST_EXPECTED_PASSING`
 note in `build.c`, which is where each step is written down.
 
 The nine units with a sibling `.mk` are what this stage's newest counts are,
-and seven of them pass. Both compilers build all four shared objects —
+and eight of them pass. Both compilers build all four shared objects —
 `functional/tls_align_dso`, `functional/tls_init_dso`,
 `functional/dlopen_dso` and `regression/tls_get_new-dtv_dso` — and the two
 programs that open one of them and had been waiting on it,
@@ -1789,7 +1788,9 @@ run carries on reporting the missing output files as compiler failures.
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
 `test_timing_summary_self_test`,
-`import_assembly_metadata`, `test_self_host`, `test_all_combinations`,
+`import_assembly_metadata`, `import_arm_a64_metadata`,
+`import_arm_a64_sysregs`, `test_self_host`, `x86_64_completion_census`,
+`test_all_combinations`,
 `test_all_combinations_ci`; `self_host_from_existing` is an internal
 build-driver worker command used only by the pooled artifact-fanout target.
 The combination matrix shares one multi-config build tree across configurations
@@ -2034,7 +2035,8 @@ things in the x86-64 dynamic writer, and the AArch64 one through it:
 
 Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
 drives the simulator), `bench_all` (desktop only — runs `ide bench`),
-`test_self_host` (Linux x86-64 and macOS), `run_ide`, `test_ide`, `debug_ide`,
+`test_self_host` (Linux and Windows x86-64, and macOS), `run_ide`,
+`test_ide`, `debug_ide`,
 `buster_shaders`, `apk` (Android), `clang_analyze`. Rendering backends and
 shader compilation are retained as opt-in infrastructure and default off. The
 Vulkan SDK (`VULKAN_SDK` env) is required only when Vulkan or Slang shader
@@ -2125,7 +2127,7 @@ compilation is explicitly enabled.
   bootstrap's table does not match the self-hosted stages' and is not meant
   to: the bootstrap finds its host compiler's resource headers and the
   self-hosted stages fall back to the builtin ones, which is why the file
-  table is populated lazily (see `map_entry` in `c.c`).
+  table is populated lazily (see `map_entry` in `c_source.c`).
 - **The `SELF_HOST stage <1|2> throughput` block** is the division done: its
   `workload` row reports bytes, LOC, SLOC and tokens; its `bandwidth` row
   reports MB/s, LOC/s and SLOC/s from the execution time shown immediately
@@ -2445,7 +2447,7 @@ the constraints and do-not-retries that earlier work already paid for, how to
 validate the fix (which oracle, which harness, which counters), and a
 definition of done. State what was measured and when, so a stale claim is
 recognisable as stale; the tree moves fast enough that a count quoted without
-a date is a trap. Issues #537-#549 are the current examples of the form.
+a date is a trap. Issues #537-#549 are examples of the form.
 
 **Push a rebase before you re-verify it.** A rebase onto a moved `main` is
 followed by a full local pass — `test_all`, `test_self_host`, whichever compat
@@ -3912,6 +3914,7 @@ Compiler (`src/buster/lib/compiler/`):
 | `link/link.{c,h}` | Section merging, symbol resolution, hosted native executable linking, and imports-free PE32+ UEFI application output. |
 | `jit/jit.{c,h}` | Host-native in-process object loader with explicit imports and W^X finalization. |
 | `wasm/wasm.{c,h}` | Direct canonical-IR-to-core-Wasm64 emitter using Memory64. |
+| `ebpf/ebpf.{c,h}` | Linux eBPF direct backend with its own instruction, ELF, relocation, and BTF encoders. |
 | `gpu/gpu.{c,h}` | Target parsing, deterministic command planning/execution, tool discovery, temporary ownership, and artifact validation for external SPIR-V, NVPTX/PTX, AMDGCN/HSA, Metal AIR/metallib, and DXIL pipelines. |
 | `llvm/bitcode.{c,h}` | Dependency-free canonical typed-IR to binary LLVM bitcode emitter. It writes the bitstream directly, preserves deterministic value numbering, records target metadata, and diagnoses unsupported IR instead of routing through textual LLVM IR. |
 | `driver/driver.{c,h}` | Clang-like C command-line parsing and end-to-end preprocess/compile/assemble/object/link dispatch, including hosted and freestanding UEFI links, plus direct LLVM bitcode output and isolated external GPU-pipeline orchestration. |
