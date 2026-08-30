@@ -699,6 +699,13 @@ typedef struct CType CType;
 struct CType
 {
     String8 tag;
+    // The scope a tagged aggregate was declared in, so two block-scope
+    // definitions of one tag in sibling functions stay two types -- clang's
+    // xmmintrin.h defines `struct __mm_storeh_pi_struct` inside two
+    // intrinsics -- and a reference resolves to the innermost visible one.
+    // Meaningful only for struct/union/enum types with a tag; everything
+    // else leaves it zero, which is the file scope.
+    CScopeId tag_scope;
     CTypeId element_type;
     CTypeId return_type;
     CTypeId unqualified_type;
@@ -1056,6 +1063,12 @@ struct CAggregateLookupSlot
     u32 kind;
     u32 type_index;
     bool used;
+    // A second live type was recorded under this (kind, tag): the slot's one
+    // id can no longer answer alone, so lookups fall to the linear scan and
+    // resolve by scope.  Never cleared -- a rollback that removes the second
+    // type leaves the flag costing a scan, which is the same time-not-answers
+    // contract staleness already has.
+    bool multiple;
 };
 
 typedef struct CAggregateLookup CAggregateLookup;

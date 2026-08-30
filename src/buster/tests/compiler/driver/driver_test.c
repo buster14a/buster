@@ -3599,6 +3599,42 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    // A block-scope tag definition is its own type: two sibling functions
+    // defining one tag are two layouts, an inner definition shadows the file
+    // scope's, and the file scope keeps its own answer after the function
+    // closes.  Sizes are asserted in every direction, so a resolver that
+    // aliases tags by name across scopes fails at run time rather than
+    // linking a wrong layout silently.
+    String8 c_block_scope_tag_path = buster_test_temporary_path(arguments->arena, S8("buster-c-block-scope-tag"),
+#if BUSTER_WINDOWS
+                                                                S8(".exe"));
+#else
+                                                                S8(""));
+#endif
+    String8 c_block_scope_tag_command_line[] = {
+        S8("-o"),
+        c_block_scope_tag_path,
+        S8("tests/basic_c_block_scope_tag.c"),
+    };
+    CompilerDriverResult c_block_scope_tag = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_block_scope_tag_command_line)));
+    BUSTER_TEST(arguments, c_block_scope_tag.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_block_scope_tag.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_block_scope_tag_arguments[] = {
+            c_block_scope_tag_path,
+        };
+        ProcessSpawnResult c_block_scope_tag_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_block_scope_tag_arguments), (SliceString8){0},
+                                                                      (SliceString8){0},
+                                                                      (ProcessSpawnOptions){
+                                                                          .use_process_environment = true,
+                                                                      });
+        BUSTER_TEST(arguments, c_block_scope_tag_spawn.handle != 0);
+        if (c_block_scope_tag_spawn.handle)
+        {
+            BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, c_block_scope_tag_spawn).result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // A block-scope tag definition's suffix attribute list --
     // `struct S { ... } __attribute__((__packed__));` -- with and without a
     // declarator after the list, sizes asserted so a parse that skips the

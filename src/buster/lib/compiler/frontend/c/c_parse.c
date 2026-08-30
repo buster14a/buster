@@ -4674,7 +4674,11 @@ BUSTER_C_INTERNAL void c_parse_aggregate_lookup_insert(CParseResult* result, CTy
 {
     CAggregateLookup* lookup = result->aggregate_lookup;
     CType* type = &result->types[id.value];
-    if (lookup && !lookup->saturated && type->tag.length)
+    // A qualified copy carries its base's tag but is not the tag's type --
+    // `typedef const struct T*` adds one per qualifier run -- so indexing it
+    // would both mark the slot as holding several types and let a lookup
+    // answer with the copy.  The tag's own record is the unqualified one.
+    if (lookup && !lookup->saturated && type->tag.length && !type->has_unqualified_type)
     {
         u32 mask = lookup->slot_count - 1;
         u32 slot_index = (u32)(c_macro_name_hash(type->tag) & mask) ^ ((u32)type->kind & mask);
@@ -4687,10 +4691,13 @@ BUSTER_C_INTERNAL void c_parse_aggregate_lookup_insert(CParseResult* result, CTy
         if (slot->used)
         {
             // Keep the recorded id only while it still names an older live type
-            // with this key; a rolled-back id is replaced by the new one.
+            // with this key; a rolled-back id is replaced by the new one.  Two
+            // live types under one key mark the slot, which is what sends
+            // lookups to the scope-aware scan.
             u32 existing = slot->type_index;
             if (existing < id.value && result->types[existing].kind == type->kind && string_equal(result->types[existing].tag, type->tag))
             {
+                slot->multiple = true;
                 return;
             }
             slot->type_index = id.value;
@@ -5305,11 +5312,37 @@ BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessR
 
 BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end);
 
-BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKind kind, String8 tag)
+// How many parent links separate `scope` from `candidate`, or UINT32_MAX when
+// `candidate` is not `scope` or one of its ancestors.  Distance is what makes
+// the innermost visible tag win the scan below.
+BUSTER_C_SHARED u32 c_parse_scope_distance(CParseResult* result, CScopeId candidate, CScopeId scope)
+{
+    // A type recorded without a scope -- a hand-built result, or a parse that
+    // ran before the scope table existed -- reads as the file scope, which is
+    // scope zero whenever there are scopes at all.
+    if (candidate.value == C_ID_UNDERLYING_INVALID)
+    {
+        candidate = (CScopeId){0};
+    }
+    u32 distance = 0;
+    while (scope.value != C_ID_UNDERLYING_INVALID && scope.value < result->scope_count)
+    {
+        if (scope.value == candidate.value)
+        {
+            return distance;
+        }
+        scope = result->scopes[scope.value].parent;
+        distance += 1;
+    }
+    return UINT32_MAX;
+}
+
+BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope)
 {
     if (tag.length)
     {
         CAggregateLookup* lookup = result->aggregate_lookup;
+        bool scan_by_scope = false;
         if (lookup)
         {
             u32 mask = lookup->slot_count - 1;
@@ -5323,9 +5356,17 @@ BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKi
                     u32 type_index = slot->type_index;
                     if (type_index < result->type_count && result->types[type_index].kind == kind && string_equal(result->types[type_index].tag, tag))
                     {
-                        return (CTypeId){
-                            .value = type_index,
-                        };
+                        // One live type under this key answers for every
+                        // scope, which is the whole translation unit's common
+                        // case; a marked slot resolves by scope instead.
+                        if (!slot->multiple)
+                        {
+                            return (CTypeId){
+                                .value = type_index,
+                            };
+                        }
+                        scan_by_scope = true;
+                        break;
                     }
                     stale = true;
                     break;
@@ -5333,15 +5374,42 @@ BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKi
                 slot_index = (slot_index + 1) & mask;
                 slot = lookup->slots + slot_index;
             }
-            if (!stale && !lookup->saturated)
+            if (!stale && !scan_by_scope && !lookup->saturated)
             {
                 return C_TYPE_ID_INVALID;
             }
         }
+        // With several same-named tags alive, the innermost visible one wins
+        // and a later definition beats an earlier one at equal depth (`<=`).
+        // A scope the caller does not have keeps the pre-scope behavior: the
+        // oldest match, which is also what every unique-tag unit resolved to
+        // before scopes were consulted.
+        if (scan_by_scope && scope.value != C_ID_UNDERLYING_INVALID)
+        {
+            CTypeId best = C_TYPE_ID_INVALID;
+            u32 best_distance = UINT32_MAX;
+            for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
+            {
+                CType* type = &result->types[type_index];
+                if (type->kind != kind || type->has_unqualified_type || !string_equal(type->tag, tag))
+                {
+                    continue;
+                }
+                u32 distance = c_parse_scope_distance(result, type->tag_scope, scope);
+                if (distance <= best_distance)
+                {
+                    best = (CTypeId){
+                        .value = type_index,
+                    };
+                    best_distance = distance;
+                }
+            }
+            return best_distance != UINT32_MAX ? best : C_TYPE_ID_INVALID;
+        }
         for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
         {
             CType* type = &result->types[type_index];
-            if (type->kind == kind && string_equal(type->tag, tag))
+            if (type->kind == kind && !type->has_unqualified_type && string_equal(type->tag, tag))
             {
                 return (CTypeId){
                     .value = type_index,
@@ -8254,7 +8322,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_machineless_base_type(CParseResult* result, CP
                     u32 name_index = c_parse_skip_attributes(preprocess, tag_index + 1, base_end);
                     if (name_index < base_end && preprocess.tokens[name_index].kind == C_TOKEN_IDENTIFIER)
                     {
-                        type = c_parse_aggregate_lookup(result, tag_kind, c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_index]));
+                        type = c_parse_aggregate_lookup(result, tag_kind, c_token_spelling(preprocess.spelling_base, preprocess.tokens[name_index]), scope);
                         index = c_parse_skip_attributes(preprocess, name_index + 1, base_end);
                         type = has_tag_qualifier ? c_parse_add_qualified_type(result, type, tag_qualifiers) : type;
                     }
@@ -8821,7 +8889,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
         }
         index = underlying_end;
     }
-    CTypeId type = c_parse_aggregate_lookup(result, kind, tag);
+    CTypeId type = c_parse_aggregate_lookup(result, kind, tag, frame->scope);
     bool definition = index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE);
     if (!definition)
     {
@@ -8833,6 +8901,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
         {
             type = c_parse_add_type(result, (CType){
                                                 .tag = tag,
+                                                .tag_scope = frame->scope,
                                                 .element_type = enum_underlying_type,
                                                 .return_type = C_TYPE_ID_INVALID,
                                                 .array_bound = C_ARRAY_BOUND_INVALID,
@@ -8864,20 +8933,34 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     }
     u32 close = index - 1;
     u32 definition_type_start = result->type_count;
+    // A body against a tag that is already complete is two different things
+    // by scope.  In the same scope it is a redefinition and stays refused.
+    // In an inner scope it is a new, distinct type that shadows the outer one
+    // -- clang's xmmintrin.h defines `struct __mm_storeh_pi_struct` inside
+    // two intrinsics, and the second body must not be read against the
+    // first's completed record, which both mis-sized the second struct and
+    // sent the whole statement back through the expression parser.  An
+    // incomplete found tag keeps its existing completion path whatever the
+    // scope, which is the `struct S; struct S { ... };` forward idiom.
+    if (type.value != C_ID_UNDERLYING_INVALID && result->types[type.value].is_complete)
+    {
+        if (result->types[type.value].tag_scope.value == frame->scope.value)
+        {
+            return C_TYPE_ID_INVALID;
+        }
+        type = C_TYPE_ID_INVALID;
+    }
     if (type.value == C_ID_UNDERLYING_INVALID)
     {
         type = c_parse_add_type(result, (CType){
                                             .tag = tag,
+                                            .tag_scope = frame->scope,
                                             .element_type = enum_underlying_type,
                                             .return_type = C_TYPE_ID_INVALID,
                                             .array_bound = C_ARRAY_BOUND_INVALID,
                                             .member_start = result->member_count,
                                             .kind = kind,
                                         });
-    }
-    else if (result->types[type.value].is_complete)
-    {
-        return C_TYPE_ID_INVALID;
     }
     if (type.value < definition_type_start && !c_type_parse_record_mutation(machine, result, type))
     {

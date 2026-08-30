@@ -18665,13 +18665,28 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
         {
             bool named = builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER;
             String8 tag = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
+            // Several types may carry one tag -- a block-scope definition
+            // shadows a sibling's or the file scope's -- so among candidates
+            // visible from the reference the innermost wins, exactly as the
+            // parse-side lookup resolves it.  The first match stays the
+            // answer when nothing is visible or nothing beats it, which is
+            // what every unique-tag unit resolved to before scopes were
+            // consulted -- including the forward-declared tag whose pointer
+            // typedef was lowered against the opaque made before the
+            // definition.
+            CScopeId reference_scope = c_parse_scope_for_token(&builder->parse, (CScopeId){0}, index + 1);
+            u32 best_distance = UINT32_MAX;
             for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
             {
                 CType* candidate = &builder->parse.types[type_index];
-                if (candidate->kind == kind && string_equal(candidate->tag, tag))
+                if (candidate->kind == kind && !candidate->has_unqualified_type && string_equal(candidate->tag, tag))
                 {
-                    type = builder->c_type_ir_map[type_index];
-                    break;
+                    u32 distance = c_parse_scope_distance(&builder->parse, candidate->tag_scope, reference_scope);
+                    if (type.value == IR_ID_UNDERLYING_INVALID || (distance < best_distance))
+                    {
+                        type = builder->c_type_ir_map[type_index];
+                        best_distance = distance;
+                    }
                 }
             }
             // A tag first named inside a type name declares an incomplete
