@@ -3599,6 +3599,41 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+    // A block-scope tag definition's suffix attribute list --
+    // `struct S { ... } __attribute__((__packed__));` -- with and without a
+    // declarator after the list, sizes asserted so a parse that skips the
+    // list without applying it fails too.  clang's xmmintrin.h wraps its
+    // unaligned loads in exactly this shape inside every intrinsic body.
+    String8 c_local_suffix_attribute_path = buster_test_temporary_path(arguments->arena, S8("buster-c-local-suffix-attribute"),
+#if BUSTER_WINDOWS
+                                                                       S8(".exe"));
+#else
+                                                                       S8(""));
+#endif
+    String8 c_local_suffix_attribute_command_line[] = {
+        S8("-o"),
+        c_local_suffix_attribute_path,
+        S8("tests/basic_c_local_struct_suffix_attribute.c"),
+    };
+    CompilerDriverResult c_local_suffix_attribute = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_local_suffix_attribute_command_line)));
+    BUSTER_TEST(arguments, c_local_suffix_attribute.error == COMPILER_DRIVER_ERROR_NONE);
+    if (c_local_suffix_attribute.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 c_local_suffix_attribute_arguments[] = {
+            c_local_suffix_attribute_path,
+        };
+        ProcessSpawnResult c_local_suffix_attribute_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_local_suffix_attribute_arguments),
+                                                                             (SliceString8){0}, (SliceString8){0},
+                                                                             (ProcessSpawnOptions){
+                                                                                 .use_process_environment = true,
+                                                                             });
+        BUSTER_TEST(arguments, c_local_suffix_attribute_spawn.handle != 0);
+        if (c_local_suffix_attribute_spawn.handle)
+        {
+            BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, c_local_suffix_attribute_spawn).result == PROCESS_RESULT_SUCCESS);
+        }
+    }
     // GNU's `, ## __VA_ARGS__` comma-deletion idiom, both ways and through a
     // forwarding macro layer: empty varargs delete the comma, present ones
     // are placed with no paste at all.  A real paste of `,` against the

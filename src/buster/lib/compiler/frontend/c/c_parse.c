@@ -11888,6 +11888,18 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
     {
         declarator_start = auto_info.name_index;
     }
+    // A tag definition's suffix attribute list --
+    // `struct S { ... } __attribute__((__packed__));` at block scope, which
+    // is how clang's own xmmintrin.h wraps its unaligned-load structs inside
+    // every _mm_loadh_pi-shaped intrinsic -- sits past the closing brace, so
+    // the specifier parse above stops before it.  Left in place, the
+    // declarator walk below would read `__attribute__` as the declarator
+    // name and its parenthesized list as a function suffix.  The aggregate
+    // parser already read the list's layout facts off the definition, and
+    // the declaration-level scans read (start, declarator_start), so moving
+    // declarator_start past the list keeps those scans' range intact for an
+    // `aligned` that must reach every declarator.
+    declarator_start = c_parse_skip_attributes(preprocess, declarator_start, end);
     if (base.value == C_ID_UNDERLYING_INVALID)
     {
         if (!is_auto_type)
