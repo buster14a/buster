@@ -87,6 +87,45 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u64 compiler_driver_test_elf_section_addr
     return result;
 }
 
+// The function the one R_X86_64_64 in `.rela<section>` registers, for an
+// initializer array section.  A relocated slot carries no name of its own, so
+// naming its symbol is the only way to prove a `.init_array.NNNNN` group holds
+// the constructor whose priority it is spelled with rather than merely
+// existing; the slot offset has to be zero because the group was rebased to
+// the front of its own section.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL String8 compiler_driver_test_elf_initializer_symbol(Arena* arena, ByteSlice image, String8 section)
+{
+    enum
+    {
+        ELF_SYMBOL_SIZE = 24,
+        ELF_RELOCATION_SIZE = 24,
+        ELF_RELOCATION_X86_64_64 = 1,
+    };
+    String8 result = {0};
+    ByteSlice relocations = compiler_driver_test_elf_section(image, string_format(arena, S8(".rela{S8}"), section));
+    ByteSlice symbols = compiler_driver_test_elf_section(image, S8(".symtab"));
+    ByteSlice strings = compiler_driver_test_elf_section(image, S8(".strtab"));
+    if (relocations.length == ELF_RELOCATION_SIZE && symbols.length && strings.length)
+    {
+        u64 offset;
+        u64 information;
+        memcpy(&offset, relocations.pointer, sizeof(offset));
+        memcpy(&information, relocations.pointer + 8, sizeof(information));
+        u64 symbol = information >> 32;
+        if (!offset && (information & UINT32_MAX) == ELF_RELOCATION_X86_64_64 && (symbol + 1) * ELF_SYMBOL_SIZE <= symbols.length)
+        {
+            u32 name_offset;
+            memcpy(&name_offset, symbols.pointer + symbol * ELF_SYMBOL_SIZE, sizeof(name_offset));
+            if (name_offset < strings.length)
+            {
+                result = string_from_pointer((char8*)strings.pointer + name_offset);
+            }
+        }
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_bytes_contain(ByteSlice bytes, String8 needle)
 {
     if (needle.length && needle.length <= bytes.length)
@@ -5818,12 +5857,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
     // The object side of the same fixture, checked for a fixed cross target so
-    // every host runs it: the array is what an external linker consumes, and
-    // its slot order is the only place a priority is recorded once the two
-    // sections are one each.  `ld` orders `.init_array.NNNNN` ahead of the
-    // unsuffixed `.init_array`, and this model has one section per kind, so
-    // the object writer sorts the entries instead -- 101 then 150 then the
-    // one written without a priority.
+    // every host runs it: the array is what an external linker consumes.  This
+    // model has one section per kind, so the converter sorts a translation
+    // unit's whole array into one section -- 101 then 150 then the one written
+    // without a priority -- and records each entry's priority beside it; the
+    // ELF writer then splits that back into the `.init_array.NNNNN` sections
+    // `ld` orders across translation units by.  Both halves are checked below.
     {
         String8 constructor_object_command_line[] = {
             S8("-c"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_constructor.c"),
@@ -5874,6 +5913,38 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 initializer_found += 1;
             }
             BUSTER_TEST(arguments, initializer_found == BUSTER_ARRAY_LENGTH(initializer_expected_names));
+            // And the written ELF, which is what an external linker actually
+            // reads (issue 782).  `ld` orders the arrays by section name --
+            // every `.init_array.NNNNN` ahead of the unsuffixed `.init_array`,
+            // ascending -- so the sorted slot order above only settles the
+            // order inside one translation unit; the split into one section
+            // per priority group is what settles it against another's.  The
+            // model still has one section per kind: the split lives in the ELF
+            // writer, so it is only observable here, on the bytes.
+            ObjectArtifact initializer_artifact = object_write(arguments->arena, initializer_object, OBJECT_FORMAT_ELF64);
+            BUSTER_TEST(arguments, initializer_artifact.error == OBJECT_ERROR_NONE);
+            String8 initializer_group_names[] = {
+                S8(".init_array.00101"), S8(".init_array.00150"), S8(".init_array"), S8(".fini_array"),
+            };
+            String8 initializer_group_symbols[] = {
+                S8("with_earlier_priority"), S8("with_later_priority"), S8("without_priority"), S8("at_exit"),
+            };
+            for (u64 group_index = 0; group_index < BUSTER_ARRAY_LENGTH(initializer_group_names); group_index += 1)
+            {
+                u64 group_offset = 0;
+                u64 group_size = 0;
+                u64 group_address = 0;
+                BUSTER_TEST(arguments,
+                            compiler_driver_test_elf_section_find(initializer_artifact.bytes, initializer_group_names[group_index], &group_offset, &group_size,
+                                                                  &group_address));
+                // One entry each: the two suffixed sections hold exactly the
+                // constructor written with that priority, and the unsuffixed
+                // ones hold only what named none.
+                BUSTER_TEST(arguments, group_size == OBJECT_INITIALIZER_ENTRY_SIZE);
+                BUSTER_TEST(arguments, string_equal(compiler_driver_test_elf_initializer_symbol(arguments->arena, initializer_artifact.bytes,
+                                                                                               initializer_group_names[group_index]),
+                                                    initializer_group_symbols[group_index]));
+            }
         }
     }
     // __attribute__((constructor)) and ((destructor)) (issue 771).  The
@@ -5912,6 +5983,50 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
         scratch_end(constructor_temporary);
+    }
+    // The same fixture compiled to an object first and linked from it, which
+    // is the one path where the array reaches the linker through a format
+    // reader instead of straight from the module.  The ELF writer splits the
+    // array into one `.init_array.NNNNN` section per priority group and leaves
+    // the unsuffixed one at its fixed kind index, ahead of them (issue 782),
+    // so the reader has to merge those back in `ld`'s order rather than in
+    // section header order: a header-order merge runs `without_priority`
+    // first, which is exit status 2 out of the fixture rather than a link that
+    // fails.
+    {
+        TemporalArena constructor_object_temporary = scratch_begin(&arguments->arena, 1);
+        String8 constructor_object_path = buster_test_temporary_path(constructor_object_temporary.arena, S8("buster-c-constructor-object"), S8(".o"));
+        String8 constructor_image_path = buster_test_temporary_path(constructor_object_temporary.arena, S8("buster-c-constructor-from-object"), S8(""));
+        String8 constructor_compile_command_line[] = {
+            S8("-c"), S8("-o"), constructor_object_path, S8("tests/basic_c_constructor.c"),
+        };
+        CompilerDriverResult constructor_compile = compiler_driver_execute_invocation(
+            constructor_object_temporary.arena,
+            compiler_driver_parse_arguments(constructor_object_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(constructor_compile_command_line)));
+        BUSTER_TEST(arguments, constructor_compile.error == COMPILER_DRIVER_ERROR_NONE);
+        if (constructor_compile.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 constructor_link_command_line[] = {
+                S8("-o"), constructor_image_path, constructor_object_path,
+            };
+            CompilerDriverResult constructor_link = compiler_driver_execute_invocation(
+                constructor_object_temporary.arena,
+                compiler_driver_parse_arguments(constructor_object_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(constructor_link_command_line)));
+            BUSTER_TEST(arguments, constructor_link.error == COMPILER_DRIVER_ERROR_NONE);
+            if (constructor_link.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 constructor_image_arguments[] = {constructor_image_path};
+                ProcessSpawnResult constructor_image_spawn =
+                    os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(constructor_image_arguments), (SliceString8){0}, (SliceString8){0},
+                                     (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, constructor_image_spawn.handle != 0);
+                if (constructor_image_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(constructor_object_temporary.arena, constructor_image_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+        scratch_end(constructor_object_temporary);
     }
     // Returning from main is a call to exit (C 5.1.2.2.3), so the linked
     // image's entry point must go through libc rather than the raw exit

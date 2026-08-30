@@ -202,6 +202,16 @@ struct ObjectFile
     u32 relocation_count;
     ObjectDebugModule* debug_modules;
     u32 debug_module_count;
+    // The GNU `constructor(N)`/`destructor(N)` priority of every entry of
+    // OBJECT_SECTION_INIT_ARRAY (index 0) and OBJECT_SECTION_FINI_ARRAY
+    // (index 1): one u32 per OBJECT_INITIALIZER_ENTRY_SIZE bytes of that
+    // section, in slot order, ascending because the entries were sorted into
+    // it, with IR_INITIALIZER_PRIORITY_NONE for an attribute that named none.
+    // Only object_from_canonical_codegen_module fills these; the readers leave
+    // them null, because this model has one section per kind and the section
+    // name a priority is spelled in does not survive a read.  The ELF writer
+    // is the only consumer -- see object_elf_split_initializer_priorities.
+    u32* initializer_priorities[2];
 };
 
 typedef struct ObjectArtifact ObjectArtifact;

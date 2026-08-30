@@ -35,6 +35,8 @@
 //                                                  codegen unwind actions
 //   object_relocation_kind_from_codegen            codegen -> format
 //                                                  relocation mapping
+//   object_elf_split_initializer_priorities        `.init_array.NNNNN` groups
+//                                                  for the ELF writer alone
 //   object_write_elf64, object_write_coff,         the three format writers
 //   object_write_mach_o64, object_write            and their dispatcher
 
@@ -3650,6 +3652,33 @@ BUSTER_GLOBAL_LOCAL void object_elf_unsupported_relocation(ObjectFile* object, A
     }
 }
 
+// The GNU priority an initializer array section's name is spelled with:
+// `.init_array.00101` as GCC and the ELF writer here emit it,
+// `.init_array.101` as Clang does, both of which `ld` accepts.  Anything else
+// -- the unsuffixed section, or a suffix that is not a priority in the
+// 0..65535 GNU range -- answers IR_INITIALIZER_PRIORITY_NONE, which is where
+// `ld` puts it: after every suffixed one.
+BUSTER_GLOBAL_LOCAL u32 object_elf_initializer_section_priority(String8 name, ObjectSectionKind kind)
+{
+    String8 unsuffixed = object_section_name_for_kind(kind);
+    u32 result = IR_INITIALIZER_PRIORITY_NONE;
+    if (name.length > unsuffixed.length + 1 && string_equal(string_slice(name, 0, unsuffixed.length), unsuffixed) && name.pointer[unsuffixed.length] == '.')
+    {
+        u64 value = 0;
+        bool digits = true;
+        for (u64 index = unsuffixed.length + 1; index < name.length && digits; index += 1)
+        {
+            // The bound is what keeps the accumulation from wrapping: a value
+            // already at the top of the range cannot take another digit.
+            digits = code_unit_is_decimal(name.pointer[index]) && value < IR_INITIALIZER_PRIORITY_NONE;
+            value = digits ? value * 10 + (u64)(name.pointer[index] - '0') : value;
+        }
+        result = digits && value < IR_INITIALIZER_PRIORITY_NONE ? (u32)value : result;
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, Target target)
 {
     bool read_ok = true;
@@ -3727,6 +3756,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
     }
     u64 section_sizes[OBJECT_SECTION_COUNT] = {0};
     u32 section_alignments[OBJECT_SECTION_COUNT];
+    // How many input sections merge into OBJECT_SECTION_INIT_ARRAY and
+    // OBJECT_SECTION_FINI_ARRAY: the placement loop below re-lays those two
+    // kinds in priority order and this is how it knows when it has placed
+    // them all.
+    u32 initializer_section_counts[2] = {0};
     if (read_ok)
     {
         for (u32 alignment_kind = 0; alignment_kind < OBJECT_SECTION_COUNT; alignment_kind += 1)
@@ -3828,7 +3862,88 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 section_bases[section_index] = base;
                 section_sizes[kind] = base + size;
                 section_alignments[kind] = BUSTER_MAX(section_alignments[kind], (u32)alignment);
+                initializer_section_counts[0] += kind == OBJECT_SECTION_INIT_ARRAY ? 1 : 0;
+                initializer_section_counts[1] += kind == OBJECT_SECTION_FINI_ARRAY ? 1 : 0;
             }
+        }
+    }
+    // An input file may spell one kind of initializer array as several
+    // sections, and `ld` merges those by *name* -- every `.init_array.NNNNN`
+    // ahead of the unsuffixed `.init_array`, ascending by NNNNN -- not by
+    // section header order.  This model has one section per kind, so the merge
+    // above is where that rule has to be applied: the ELF writer emits the
+    // unsuffixed section at its fixed kind index, ahead of the priority groups
+    // it appends (see object_elf_split_initializer_priorities), and a plain
+    // header-order concatenation would run an unprioritized constructor before
+    // a `constructor(101)` from the same file.  Only the bases move, so
+    // nothing above needs redoing; the merged size is recomputed anyway
+    // because a different order can pad differently.
+    for (u32 slot = 0; slot < 2 && read_ok; slot += 1)
+    {
+        ObjectSectionKind kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+        u64 base = 0;
+        // Placing in (priority, header index) order one at a time, each step
+        // taking the smallest pair after the last placed, is a stable sort
+        // that needs no per-section state beyond that pair.
+        u32 placed_priority = 0;
+        u16 placed_index = 0;
+        for (u32 placed = 0; placed < initializer_section_counts[slot] && read_ok; placed += 1)
+        {
+            u32 next_priority = 0;
+            u16 next_index = 0;
+            bool found = false;
+            for (u16 section_index = 0; section_index < section_count && read_ok; section_index += 1)
+            {
+                u32 name_offset = 0;
+                String8 name = {0};
+                if (section_kinds[section_index] != (u32)kind)
+                {
+                    continue;
+                }
+                if (!object_read_u32(bytes, section_table + (u64)section_index * ELF_SECTION_HEADER_SIZE, &name_offset) ||
+                    !object_read_string_checked(bytes, section_string_offset, section_string_size, name_offset, &name))
+                {
+                    read_ok = false;
+                    continue;
+                }
+                u32 priority = object_elf_initializer_section_priority(name, kind);
+                bool after_placed = !placed || priority > placed_priority || (priority == placed_priority && section_index > placed_index);
+                bool before_next = !found || priority < next_priority || (priority == next_priority && section_index < next_index);
+                if (after_placed && before_next)
+                {
+                    next_priority = priority;
+                    next_index = section_index;
+                    found = true;
+                }
+            }
+            u64 size = 0;
+            u64 alignment = 0;
+            if (read_ok &&
+                (!found || !object_read_u64(bytes, section_table + (u64)next_index * ELF_SECTION_HEADER_SIZE + 32, &size) ||
+                 !object_read_u64(bytes, section_table + (u64)next_index * ELF_SECTION_HEADER_SIZE + 48, &alignment)))
+            {
+                read_ok = false;
+            }
+            if (read_ok)
+            {
+                alignment = alignment ? alignment : 1;
+                base = align_forward(base, alignment);
+                section_bases[next_index] = base;
+                if (size > UINT64_MAX - base)
+                {
+                    read_ok = false;
+                }
+                else
+                {
+                    base += size;
+                }
+                placed_priority = next_priority;
+                placed_index = next_index;
+            }
+        }
+        if (read_ok)
+        {
+            section_sizes[kind] = base;
         }
     }
     if (read_ok)
@@ -9092,9 +9207,10 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     // the entries run in, so the list is sorted by priority here rather than
     // left to the format: this model has one section per kind, so a
     // translation unit's whole array is one section and the sort is what makes
-    // `constructor(101)` run before an unprioritized sibling.  Across
-    // translation units the order is `ld`'s, which concatenates the arrays in
-    // link order.
+    // `constructor(101)` run before an unprioritized sibling.  The priority
+    // itself is kept beside the section in ObjectFile.initializer_priorities,
+    // because the cross-translation-unit order is `ld`'s and `ld` reads it off
+    // the section name -- see object_elf_split_initializer_priorities.
     u32 initializer_count = ir_module ? ir_module->initializer_count : 0;
     u32* initializer_order = arena_allocate(arena, u32, initializer_count ? initializer_count : 1);
     u32 initializer_counts[2] = {0};
@@ -9125,6 +9241,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         u64 length = (u64)initializer_counts[slot] * OBJECT_INITIALIZER_ENTRY_SIZE;
         u8* entries = arena_allocate(arena, u8, length ? length : 1);
         memset(entries, 0, length);
+        result.initializer_priorities[slot] = arena_allocate(arena, u32, initializer_counts[slot] ? initializer_counts[slot] : 1);
         result.sections[kind] = (ObjectSection){
             .name = object_section_name_for_kind(kind),
             .data =
@@ -9350,6 +9467,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .symbol = symbol_index,
             .kind = OBJECT_RELOCATION_ABSOLUTE64,
         };
+        result.initializer_priorities[slot][initializer_offsets[slot] / OBJECT_INITIALIZER_ENTRY_SIZE] = initializer.priority;
         initializer_offsets[slot] += OBJECT_INITIALIZER_ENTRY_SIZE;
     }
     scratch_end(name_temporary);
@@ -9416,11 +9534,128 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
                                                                     : 0;
 }
 
+// `ld` gets GNU's cross-translation-unit initializer order off the *section
+// name*: it places every `.init_array.NNNNN` ahead of the unsuffixed
+// `.init_array`, ascending by NNNNN, and concatenates the result.  This model
+// has one section per ObjectSectionKind, so a translation unit's whole array
+// is one OBJECT_SECTION_INIT_ARRAY and the priority lives beside it in
+// ObjectFile.initializer_priorities; the ELF writer splits it back out here,
+// one section per priority group, named the way GCC spells it -- zero-padded
+// to five digits, which `ld` accepts alongside Clang's unpadded
+// `.init_array.101`.
+//
+// The split is deliberately confined to this writer: the returned ObjectFile
+// is a private copy whose extra sections are *appended* past
+// OBJECT_SECTION_COUNT, so every symbol's section index still means what it
+// meant and only the initializer relocations are rewritten.  Nothing else --
+// the readers, link_objects, the JIT, the disassembly printer, the COFF and
+// Mach-O writers -- ever sees a section count other than OBJECT_SECTION_COUNT.
+BUSTER_GLOBAL_LOCAL ObjectFile object_elf_split_initializer_priorities(Arena* arena, ObjectFile* object)
+{
+    ObjectFile result = *object;
+    ObjectSectionKind initializer_kinds[2] = {OBJECT_SECTION_INIT_ARRAY, OBJECT_SECTION_FINI_ARRAY};
+    u32 initializer_entries[2] = {0};
+    u32 group_count = 0;
+    for (u32 slot = 0; slot < 2; slot += 1)
+    {
+        u32* priorities = object->initializer_priorities[slot];
+        if (priorities && (u32)initializer_kinds[slot] < object->section_count)
+        {
+            initializer_entries[slot] = (u32)(object->sections[initializer_kinds[slot]].data.length / OBJECT_INITIALIZER_ENTRY_SIZE);
+        }
+        for (u32 entry = 0; entry < initializer_entries[slot]; entry += 1)
+        {
+            // A group starts wherever the priority changes.  The entries that
+            // named none sort last and keep the unsuffixed section, so they
+            // are the one run that never becomes a group.
+            bool starts_group = priorities[entry] != IR_INITIALIZER_PRIORITY_NONE && (!entry || priorities[entry - 1] != priorities[entry]);
+            group_count += starts_group ? 1 : 0;
+        }
+    }
+    if (group_count)
+    {
+        ObjectSection* sections = arena_allocate(arena, ObjectSection, object->section_count + group_count);
+        memcpy(sections, object->sections, (u64)object->section_count * sizeof(ObjectSection));
+        ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count ? object->relocation_count : 1);
+        memcpy(relocations, object->relocations, (u64)object->relocation_count * sizeof(ObjectRelocation));
+        result.sections = sections;
+        result.relocations = relocations;
+        for (u32 slot = 0; slot < 2; slot += 1)
+        {
+            // Zero entries is also the shape an ObjectFile that carries no
+            // priorities at all takes, and the one where the section this
+            // reads may not exist.
+            if (!initializer_entries[slot])
+            {
+                continue;
+            }
+            ObjectSectionKind kind = initializer_kinds[slot];
+            u32* priorities = object->initializer_priorities[slot];
+            ByteSlice array = object->sections[kind].data;
+            u32 entry = 0;
+            while (entry < initializer_entries[slot] && priorities[entry] != IR_INITIALIZER_PRIORITY_NONE)
+            {
+                u32 end = entry + 1;
+                while (end < initializer_entries[slot] && priorities[end] == priorities[entry])
+                {
+                    end += 1;
+                }
+                u64 group_start = (u64)entry * OBJECT_INITIALIZER_ENTRY_SIZE;
+                u64 group_end = (u64)end * OBJECT_INITIALIZER_ENTRY_SIZE;
+                u32 group = result.section_count++;
+                sections[group] = (ObjectSection){
+                    .name = string_format(arena, S8("{S8}.{u32:width=[0,5]}"), object_section_name_for_kind(kind), priorities[entry]),
+                    .data =
+                        {
+                            .pointer = array.pointer + group_start,
+                            .length = group_end - group_start,
+                        },
+                    .kind = kind,
+                    .alignment = object->sections[kind].alignment,
+                };
+                for (u32 index = 0; index < result.relocation_count; index += 1)
+                {
+                    ObjectRelocation* relocation = relocations + index;
+                    if (relocation->section == (u32)kind && relocation->offset >= group_start && relocation->offset < group_end)
+                    {
+                        relocation->section = group;
+                        relocation->offset -= group_start;
+                    }
+                }
+                entry = end;
+            }
+            // What is left in the unsuffixed section is the unprioritized run,
+            // which now starts at the array's front rather than after the
+            // groups that moved out.
+            u64 remainder_start = (u64)entry * OBJECT_INITIALIZER_ENTRY_SIZE;
+            if (remainder_start)
+            {
+                sections[kind].data.pointer = array.pointer + remainder_start;
+                sections[kind].data.length = array.length - remainder_start;
+                for (u32 index = 0; index < result.relocation_count; index += 1)
+                {
+                    if (relocations[index].section == (u32)kind)
+                    {
+                        relocations[index].offset -= remainder_start;
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* object)
 {
     ObjectArtifact result = {
         .format = OBJECT_FORMAT_ELF64,
     };
+    // One `.init_array.NNNNN`/`.fini_array.NNNNN` section per GNU priority
+    // group, appended past OBJECT_SECTION_COUNT.  Everything below is already
+    // generic over section_count and reads each section's own name, so the
+    // split costs the writer's body nothing.
+    ObjectFile split_object = object_elf_split_initializer_priorities(arena, object);
+    object = &split_object;
     u64 capacity = object_writer_capacity(object);
     ObjectBuffer buffer = {
         .bytes = arena_allocate(arena, u8, capacity),
