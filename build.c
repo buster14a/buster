@@ -19949,14 +19949,19 @@ BUSTER_GLOBAL_LOCAL bool cpython_run_workload(Arena* arena, String8 tree_directo
 }
 
 BUSTER_GLOBAL_LOCAL bool cpython_configure_and_build(Arena* arena, String8 source_directory, String8 tree_directory, String8 cc, String8 clang,
-                                                      String8 label)
+                                                      String8 label, String8 allocator_flag, bool substitute_trampoline)
 {
     make_directory_recursive(arena, tree_directory);
     u64 configure_start = os_now_microseconds();
+    // The allocator flag rides CFLAGS rather than CC: driver options follow
+    // last-option-wins, and CC flags come before the project's own
+    // `-g -O3`, whose -O would restore the default allocator.  Restating
+    // upstream's optimization pair keeps the build shape identical.
     String8 configure_arguments[] = {
         S8("/bin/sh"),
         path_join(arena, source_directory, S8("configure")),
         string_format(arena, S8("CC={S8}"), cc),
+        string_format(arena, S8("CFLAGS=-g -O3{S8}{S8}"), allocator_flag.length ? S8(" ") : S8(""), allocator_flag),
         S8("MODULE_BUILDTYPE=static"),
     };
     CpythonCommandResult configure = cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(configure_arguments), tree_directory, true,
@@ -19973,7 +19978,11 @@ BUSTER_GLOBAL_LOCAL bool cpython_configure_and_build(Arena* arena, String8 sourc
         string_print(S8("error: test_cpython could not write Modules/Setup.local for tree={S8}\n"), label);
         return false;
     }
-    if (!cpython_substitute_trampoline(arena, clang, source_directory, tree_directory))
+    // Only the Buster trees take the substitute: its -fno-pic spelling is
+    // what the Buster linker can read (issues 838/840/841), and the same
+    // object breaks the Clang tree's PIE link.  The reference compiles the
+    // unit natively with the same clang anyway.
+    if (substitute_trampoline && !cpython_substitute_trampoline(arena, clang, source_directory, tree_directory))
     {
         string_print(S8("error: test_cpython could not build the clang perf_jit_trampoline.o substitute for tree={S8}\n"), label);
         return false;
@@ -20139,7 +20148,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     // The Clang reference first: a reference that cannot build or answer the
     // workload means the environment, not the compiler, is what broke.
     String8 clang_tree = path_join(arena, output_directory, S8("clang"));
-    if (!cpython_configure_and_build(arena, source_directory, clang_tree, clang, clang, S8("clang")))
+    if (!cpython_configure_and_build(arena, source_directory, clang_tree, clang, clang, S8("clang"), (String8){0}, false))
     {
         return PROCESS_RESULT_FAILED;
     }
@@ -20159,8 +20168,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     {
         String8 mode = allocators[allocator_index];
         String8 tree = path_join(arena, output_directory, string_format(arena, S8("buster-{S8}"), mode));
-        String8 cc = string_format(arena, S8("{S8} cc -fregister-allocator={S8}"), ide, mode);
-        if (!cpython_configure_and_build(arena, source_directory, tree, cc, clang, mode))
+        String8 cc = string_format(arena, S8("{S8} cc"), ide);
+        String8 allocator_flag = string_format(arena, S8("-fregister-allocator={S8}"), mode);
+        if (!cpython_configure_and_build(arena, source_directory, tree, cc, clang, mode, allocator_flag, true))
         {
             string_print(S8("error: test_cpython allocator={S8} build failed\n"), mode);
             return PROCESS_RESULT_FAILED;

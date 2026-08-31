@@ -3628,6 +3628,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_date_time_predefines.c"),
         S8("tests/basic_c_plain_char_literal_sign.c"),
         S8("tests/basic_c_char_limits.c"),
+        S8("tests/basic_c_explicit_allocator_sticks.c"),
     };
     // Each iteration compiles in-process; the module arena is never rewound,
     // so the loop's allocation lives in its own scratch or an unrelated
@@ -10233,6 +10234,35 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             if (export_dynamic_spawn.handle)
             {
                 BUSTER_TEST(arguments, os_process_wait_sync(asm_unit_arena, export_dynamic_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        // Driver options follow last-option-wins: an allocator named AFTER
+        // the -O flag decides the emitter, and the two objects must differ.
+        // (The reverse order deliberately restores the default -- the
+        // parse-level contract earlier in this file pins that -- which is
+        // why the CPython harness carries its allocator in CFLAGS, after
+        // configure's own -O3.)
+        {
+            String8 sticky_none_path = buster_test_temporary_path(asm_unit_arena, S8("buster-c-allocator-sticky-none"), S8(".o"));
+            String8 sticky_fast_path = buster_test_temporary_path(asm_unit_arena, S8("buster-c-allocator-sticky-fast"), S8(".o"));
+            String8 sticky_none_command_line[] = {
+                S8("-O2"), S8("-fregister-allocator=none"), S8("-c"), S8("-o"), sticky_none_path, S8("tests/basic_c_explicit_allocator_sticks.c"),
+            };
+            String8 sticky_fast_command_line[] = {
+                S8("-O2"), S8("-fregister-allocator=fast"), S8("-c"), S8("-o"), sticky_fast_path, S8("tests/basic_c_explicit_allocator_sticks.c"),
+            };
+            CompilerDriverResult sticky_none = compiler_driver_execute_invocation(
+                asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(sticky_none_command_line)));
+            CompilerDriverResult sticky_fast = compiler_driver_execute_invocation(
+                asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(sticky_fast_command_line)));
+            BUSTER_TEST(arguments, sticky_none.error == COMPILER_DRIVER_ERROR_NONE && sticky_fast.error == COMPILER_DRIVER_ERROR_NONE);
+            if (sticky_none.error == COMPILER_DRIVER_ERROR_NONE && sticky_fast.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                ByteSlice none_bytes = file_read(asm_unit_arena, sticky_none_path, (FileReadOptions){0});
+                ByteSlice fast_bytes = file_read(asm_unit_arena, sticky_fast_path, (FileReadOptions){0});
+                bool identical = none_bytes.length == fast_bytes.length && none_bytes.length &&
+                                 memcmp(none_bytes.pointer, fast_bytes.pointer, none_bytes.length) == 0;
+                BUSTER_TEST(arguments, none_bytes.length && fast_bytes.length && !identical);
             }
         }
         // A directive the vocabulary does not cover is refused by name and by
