@@ -20186,15 +20186,33 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     // The gate: a test the Buster build fails that the Clang build passes.
     // Tests failing in BOTH builds are environment findings, reported and
     // not gated on; the reverse direction (Clang fails, Buster passes) is
-    // reported for the record and never fails the run.
+    // reported for the record and never fails the run.  test_gdb's two
+    // tests are the one expected buster-only divergence: gdb inspects a
+    // running python, and Buster-linked executables carry no .symtab
+    // (issue 843).
+    String8 expected_divergences[] = {
+        S8("test.test_gdb.test_misc"),
+        S8("test.test_gdb.test_pretty_print"),
+    };
     u64 buster_only = 0;
     for (u64 index = 0; index < buster_failed.length; index += 1)
     {
-        if (!cpython_failed_contains(clang_failed, buster_failed.pointer[index]))
+        if (cpython_failed_contains(clang_failed, buster_failed.pointer[index]))
         {
-            buster_only += 1;
-            string_print(S8("CPYTHON_VERDICT test={S8} buster=fail clang=pass\n"), buster_failed.pointer[index]);
+            continue;
         }
+        bool expected_divergence = false;
+        for (u64 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected_divergences); expected_index += 1)
+        {
+            expected_divergence |= string_equal(buster_failed.pointer[index], expected_divergences[expected_index]);
+        }
+        if (expected_divergence)
+        {
+            string_print(S8("CPYTHON_VERDICT test={S8} buster=fail clang=pass expected=issue-843\n"), buster_failed.pointer[index]);
+            continue;
+        }
+        buster_only += 1;
+        string_print(S8("CPYTHON_VERDICT test={S8} buster=fail clang=pass\n"), buster_failed.pointer[index]);
     }
     for (u64 index = 0; index < clang_failed.length; index += 1)
     {
