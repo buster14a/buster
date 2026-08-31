@@ -8690,8 +8690,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         MACH_BUILD_VERSION_COMMAND_SIZE = 24,
         MACH_SYMTAB_COMMAND_SIZE = 24,
         MACH_DYSYMTAB_COMMAND_SIZE = 80,
+        MACH_UUID_COMMAND_SIZE = 24,
         MACH_CODE_SIGNATURE_COMMAND_SIZE = 16,
-        MACH_BASE_COMMAND_COUNT = 12,
+        MACH_BASE_COMMAND_COUNT = 13,
         MACH_PAGE_SIZE = 0x4000,
         MACH_CODE_PAGE_SIZE = 0x1000,
         MACH_CODE_DIRECTORY_HEADER_SIZE = 48,
@@ -8913,7 +8914,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     {
         command_size = 2 * MACH_SEGMENT_COMMAND_SIZE + text_command_size + data_command_size + dwarf_command_size + MACH_DYLD_INFO_COMMAND_SIZE +
                            MACH_DYLINKER_COMMAND_SIZE + MACH_DYLIB_COMMAND_SIZE + extra_dylib_command_size + MACH_MAIN_COMMAND_SIZE +
-                           MACH_BUILD_VERSION_COMMAND_SIZE + MACH_SYMTAB_COMMAND_SIZE + MACH_DYSYMTAB_COMMAND_SIZE + MACH_CODE_SIGNATURE_COMMAND_SIZE;
+                           MACH_BUILD_VERSION_COMMAND_SIZE + MACH_SYMTAB_COMMAND_SIZE + MACH_DYSYMTAB_COMMAND_SIZE + MACH_UUID_COMMAND_SIZE +
+                           MACH_CODE_SIGNATURE_COMMAND_SIZE;
     }
     u64 header_end = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -9944,6 +9946,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         link_write_u32(bytes, 24, 0x200084 | (thread_local_count ? 0x800000 : 0));
     }
     u64 command = 0;
+    u64 uuid_command_offset = 0;
     if (result.error == LINK_ERROR_NONE)
     {
         command = MACH_HEADER_SIZE;
@@ -10153,6 +10156,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         link_write_u32(bytes, command + 24, 0);
         link_write_u32(bytes, command + 28, import_count);
         command += MACH_DYSYMTAB_COMMAND_SIZE;
+        // dyld_info in newer command-line tools refuses to report on an
+        // image without LC_UUID.  The sixteen bytes stay zero here and are
+        // filled from a hash of the finished image just before the code
+        // directory below hashes its pages, so identical inputs keep
+        // producing identical binaries.
+        uuid_command_offset = command;
+        link_write_u32(bytes, command, 0x1b);
+        link_write_u32(bytes, command + 4, MACH_UUID_COMMAND_SIZE);
+        command += MACH_UUID_COMMAND_SIZE;
         link_write_u32(bytes, command, 0x1d);
         link_write_u32(bytes, command + 4, MACH_CODE_SIGNATURE_COMMAND_SIZE);
         link_write_u32(bytes, command + 8, (u32)signature_offset);
@@ -10162,6 +10174,20 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
         {
             result.error = LINK_ERROR_INVALID_INPUT;
         }
+    }
+    if (result.error == LINK_ERROR_NONE)
+    {
+        // Everything up to the signature is final and the uuid bytes are
+        // still zero, so this hash is deterministic; the code directory
+        // below then hashes pages that already carry the finished uuid.
+        u64 uuid_low = buster_hash_64(bytes, signature_offset);
+        u64 uuid_high = buster_hash_64((u8*)&uuid_low, sizeof(uuid_low)) ^ signature_offset;
+        link_write_u64(bytes, uuid_command_offset + 8, uuid_low);
+        link_write_u64(bytes, uuid_command_offset + 16, uuid_high);
+        // RFC 4122 version and variant bits, the way ld64 stamps its
+        // content-derived uuids.
+        bytes[uuid_command_offset + 8 + 6] = (u8)((bytes[uuid_command_offset + 8 + 6] & 0x0f) | 0x40);
+        bytes[uuid_command_offset + 8 + 8] = (u8)((bytes[uuid_command_offset + 8 + 8] & 0x3f) | 0x80);
     }
     u64 code_directory = 0;
     if (result.error == LINK_ERROR_NONE)

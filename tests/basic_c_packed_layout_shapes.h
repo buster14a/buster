@@ -219,6 +219,8 @@ extern unsigned long long packed_layout_const_record_value_offset(void);
 extern unsigned long long packed_layout_volatile_record_size(void);
 extern unsigned long long packed_layout_volatile_record_value_offset(void);
 extern struct packed_layout_const_record packed_layout_make_const_record(char tag, int value);
+#if PACKED_LAYOUT_HOST_PASSES_UNDERALIGNED_IN_MEMORY
 extern int packed_layout_volatile_middle(struct packed_layout_volatile_record record);
+#endif
 
 #endif

@@ -287,7 +287,9 @@ struct packed_layout_const_record packed_layout_make_const_record(char tag, int 
     return record;
 }
 
+#if PACKED_LAYOUT_HOST_PASSES_UNDERALIGNED_IN_MEMORY
 int packed_layout_volatile_middle(struct packed_layout_volatile_record record)
 {
     return record.value;
 }
+#endif
