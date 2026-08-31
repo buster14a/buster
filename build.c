@@ -19842,17 +19842,16 @@ BUSTER_GLOBAL_LOCAL bool cpython_substitute_trampoline(Arena* arena, String8 cla
 
 // pyconfig.h is the record of what ~700 autoconf probes concluded about the
 // compiler, so the diff against the Clang configure is the probe-fidelity
-// gate.  Exactly three divergences are expected, each pinned to an issue:
-// HAVE_BUILTIN_ATOMIC (the __atomic_* builtin family, issue 829),
-// HAVE_GCC_ASM_FOR_X64 (bare literal-register asm is refused by design), and
-// Py_RL_STARTUP_HOOK_TAKES_ARGS (an incompatible-function-pointer probe that
-// wants a hard error, issue 830; GNU readline's _RL_FUNCTION_TYPEDEF
-// neutralizes the consequence).
+// gate.  One divergence is expected: HAVE_GCC_ASM_FOR_X64, whose probe writes
+// a bare literal-register `asm` this compiler refuses by design.  The two
+// that stood beside it are gone -- HAVE_BUILTIN_ATOMIC once the __atomic_*
+// family landed (issue 829) and Py_RL_STARTUP_HOOK_TAKES_ARGS once an
+// incompatible function-pointer assignment became the hard error its probe
+// wants (issue 830) -- so they are gated rather than allowed: a regression
+// in either now fails this run.
 BUSTER_GLOBAL_LOCAL bool cpython_line_is_expected_divergence(String8 line)
 {
-    return string_first_sequence(line, S8("HAVE_BUILTIN_ATOMIC")) < line.length ||
-           string_first_sequence(line, S8("HAVE_GCC_ASM_FOR_X64")) < line.length ||
-           string_first_sequence(line, S8("Py_RL_STARTUP_HOOK_TAKES_ARGS")) < line.length;
+    return string_first_sequence(line, S8("HAVE_GCC_ASM_FOR_X64")) < line.length;
 }
 
 BUSTER_GLOBAL_LOCAL bool cpython_pyconfig_compare(Arena* arena, String8 buster_tree, String8 clang_tree)

@@ -1822,11 +1822,12 @@ per side.
 
 pyconfig.h is the record of what ~700 autoconf probes concluded about the
 compiler, and the harness diffs it against the Clang configure with exactly
-three expected divergences, each pinned: `HAVE_BUILTIN_ATOMIC` (the
-`__atomic_*` builtin family, issue 829), `HAVE_GCC_ASM_FOR_X64` (bare
-literal-register asm is refused by design), and
-`Py_RL_STARTUP_HOOK_TAKES_ARGS` (a probe that wants incompatible function
-pointers to be a hard error, issue 830). Any other divergence fails the run.
+one expected divergence: `HAVE_GCC_ASM_FOR_X64`, whose probe writes a bare
+literal-register `asm` this compiler refuses by design. Two others stood
+there until the `__atomic_*` family (issue 829) and the hard error for an
+incompatible function-pointer assignment (issue 830) landed on main; both are
+gated now rather than allowed, so a regression in either fails the run. Any
+other divergence fails it too.
 Getting the probes to this state was most of the harness's yield: autoconf
 reads link failures, `-E` output and `sizeof` refusals as answers, so a
 compiler that mispronounces any of them silently configures a different
