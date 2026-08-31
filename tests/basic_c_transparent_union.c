@@ -3,7 +3,6 @@
 // accept4 takes __SOCKADDR_ARG this way, and CPython's socketmodule hands
 // it a struct sockaddr* -- both member spellings are called and the family
 // read back through the union.
-#include <stdio.h>
 struct sockaddr_like { unsigned short family; };
 struct sockaddr_in_like { unsigned short family; unsigned short port; };
 typedef union {
@@ -22,6 +21,5 @@ int main(void)
     struct sockaddr_like* base = (struct sockaddr_like*)&in;
     if (read_family(base) != 7) { return 1; }
     if (read_family(&in) != 7) { return 2; }
-    printf("transparent union ok\n");
     return 0;
 }

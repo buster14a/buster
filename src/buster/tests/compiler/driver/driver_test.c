@@ -3619,8 +3619,14 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_static_assert_shadowed_typedef.c"),
         S8("tests/basic_c_cast_deref_conditional.c"),
         S8("tests/basic_c_typeof_update_operand.c"),
+#if BUSTER_CPU_ARCH_X86_64
+        // <emmintrin.h> refuses to be included anywhere else.
         S8("tests/basic_c_spin_pause_builtin.c"),
+#endif
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+        // %fs:0 is glibc's thread pointer; no other platform keeps one there.
         S8("tests/basic_c_asm_memory_operand_no_load.c"),
+#endif
         S8("tests/basic_c_static_pointer_subtraction.c"),
         S8("tests/basic_c_static_local_member_address.c"),
         S8("tests/basic_c_tied_operand_reused_source.c"),
@@ -3651,6 +3657,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         CompilerDriverResult c_shape = compiler_driver_execute_invocation(
             c_shape_temporary.arena, compiler_driver_parse_arguments(c_shape_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_shape_command_line)));
+        if (c_shape.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            // Name the fixture and the driver's own words: a bare assertion
+            // line says only that some shape failed, which is what made the
+            // first non-Linux CI failure of this loop undiagnosable.
+            arguments->show(arguments, S8("CPython shape fixture {S8} failed: {S8}\n"), c_cpython_shape_fixtures[shape_index], c_shape.diagnostic);
+        }
         BUSTER_TEST(arguments, c_shape.error == COMPILER_DRIVER_ERROR_NONE);
         if (c_shape.error == COMPILER_DRIVER_ERROR_NONE)
         {
@@ -10186,7 +10199,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, os_process_wait_sync(asm_unit_arena, asm_unit_mixed_spawn).result == PROCESS_RESULT_SUCCESS);
             }
         }
-#endif
         // A `.long symbol` in an assembled unit is R_X86_64_32, the
         // zero-extended absolute form -fno-pic small-model foreign objects
         // use for every address literal.  The linked program reads a
@@ -10236,6 +10248,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, os_process_wait_sync(asm_unit_arena, export_dynamic_spawn).result == PROCESS_RESULT_SUCCESS);
             }
         }
+#endif
         // Driver options follow last-option-wins: an allocator named AFTER
         // the -O flag decides the emitter, and the two objects must differ.
         // (The reverse order deliberately restores the default -- the

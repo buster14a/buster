@@ -7,7 +7,6 @@
 // object's base and the first insertion walked into it.  The invariant
 // checked here is the trick's own: head->nextpool must alias the slot
 // pair the head was derived from.
-#include <stdio.h>
 
 typedef unsigned char uint8_t;
 typedef struct pool* poolp;
@@ -56,6 +55,5 @@ int main(void)
     {
         return 2;
     }
-    printf("static pointer subtraction ok\n");
     return 0;
 }

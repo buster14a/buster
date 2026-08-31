@@ -7,7 +7,6 @@
 // frame executed the zeroed slot and aborted the interpreter.  The
 // switching cases must still clear, and later same-subfield designators
 // still override.
-#include <stdio.h>
 
 struct pair
 {
@@ -41,6 +40,5 @@ int main(void)
     {
         return 2;
     }
-    printf("union designator merge ok\n");
     return 0;
 }

@@ -5,7 +5,6 @@
 // every protocol-2+ stream "invalid load key".  Multi-character constants
 // keep the concatenated spelling, and the prefixed forms keep their own
 // types.
-#include <stdio.h>
 
 enum opcode
 {
@@ -34,7 +33,6 @@ int main(void)
     switch ((enum opcode)byte)
     {
     case PROTO:
-        printf("plain char literal sign ok\n");
         return 0;
     default:
         return 5;

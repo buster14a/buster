@@ -5,7 +5,6 @@
 // zero -- every keyword tuple pointed at the wrong subobject.  The
 // parenthesized and cast spellings exercise the scalar path's wrapper
 // stripping; the checks compare against runtime-computed addresses.
-#include <stdio.h>
 
 struct inner
 {
@@ -53,6 +52,5 @@ int main(void)
     {
         return status;
     }
-    printf("static local member address ok\n");
     return 0;
 }

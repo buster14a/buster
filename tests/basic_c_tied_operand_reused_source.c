@@ -5,7 +5,6 @@
 // operand then reloaded from a home slot nothing ever stored, and the
 // allocator walked into unmapped memory.  A vreg another use slot of the
 // same row still reads has not died for the transfer.
-#include <stdio.h>
 
 struct pool
 {
@@ -34,6 +33,5 @@ int main(void)
     {
         return 1;
     }
-    printf("tied operand reuse ok\n");
     return 0;
 }

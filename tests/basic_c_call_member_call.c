@@ -8,7 +8,6 @@
 // the answers are checked so a callee read off the wrong base -- `(self)`
 // alone was the failure shape -- returns the wrong number rather than
 // compiling quietly.
-#include <stdio.h>
 
 struct table
 {
@@ -74,6 +73,5 @@ int main(void)
     {
         return 3;
     }
-    printf("call member call ok\n");
     return 0;
 }

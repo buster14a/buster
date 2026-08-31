@@ -4,9 +4,11 @@
 // faults on address zero before the assembly ever runs.  The recovered
 // place must still reach the template: the returned thread pointer is
 // checked as nonzero, which only the fs-relative read can produce.  The
-// printf keeps the image hosted; the freestanding stub never installs a
-// thread pointer, and %fs there faults legitimately.
-#include <stdio.h>
+// puts call keeps the image hosted -- the freestanding stub installs no
+// thread pointer, and %fs there faults legitimately -- and its prototype is
+// written out rather than included, because these driver invocations name
+// no sysroot.  Linux x86-64 only: %fs:0 is glibc's thread pointer.
+int puts(const char* text);
 
 static void* basic_asm_read_thread_pointer(void)
 {
@@ -22,6 +24,5 @@ int main(void)
     {
         return 1;
     }
-    printf("memory operand ok\n");
-    return 0;
+    return puts("memory operand ok") < 0;
 }

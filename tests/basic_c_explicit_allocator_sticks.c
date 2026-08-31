@@ -4,7 +4,6 @@
 // CFLAGS, after the project's own -O3).  The driver test compiles this
 // fixture under two allocators spelled after -O2 and asserts the objects
 // differ; the runtime body only proves each object still computes.
-#include <stdio.h>
 
 __attribute__((noinline)) static int accumulate(const int* values, int count)
 {
@@ -23,6 +22,5 @@ int main(void)
     {
         return 1;
     }
-    printf("explicit allocator sticks ok\n");
     return 0;
 }

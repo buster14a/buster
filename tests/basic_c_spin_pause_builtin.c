@@ -3,8 +3,11 @@
 // (mi_atomic_yield, reached through every CPython allocation) left an
 // unresolved _mm_pause behind unless the name is a builtin.  The pause is
 // a hint: the observable contract is only that evaluation around it stays
-// ordered.
-#include <emmintrin.h>
+// ordered.  The prototype is written out exactly as <emmintrin.h> spells
+// it, rather than included: that header pulls the platform's own <stdlib.h>
+// in behind it, and these driver invocations name no sysroot.
+
+void _mm_pause(void);
 
 int main(void)
 {
