@@ -6677,6 +6677,13 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     // The string form beside the three numbers: CPython's Python/getcompiler.c
     // builds sys.version's compiler field from it.
     C_DEFINE_TYPE_MACRO("__clang_version__", S8("\"18.0.0 (buster)\""));
+    // C11 6.10.8.1 mandates both, in exactly these spellings ("Mmm dd yyyy"
+    // and "hh:mm:ss").  A fixed epoch keeps builds reproducible; consumers
+    // parse the SHAPE -- CPython's platform.py rejects sys.version when the
+    // date field carries anything outside [\w ], which is what the
+    // getbuildinfo fallback ("xx/xx/xx") for a missing __DATE__ does.
+    C_DEFINE_TYPE_MACRO("__DATE__", S8("\"Jan  1 1970\""));
+    C_DEFINE_TYPE_MACRO("__TIME__", S8("\"00:00:00\""));
     if (!layout.plain_char_is_signed)
     {
         C_DEFINE_TYPE_MACRO("__CHAR_UNSIGNED__", S8("1"));
