@@ -5722,8 +5722,19 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
                     "#define SCHAR_MIN (-128)\n"
                     "#define SCHAR_MAX 127\n"
                     "#define UCHAR_MAX 255\n"
+                    // Plain char's range follows the target: signed on
+                    // every SysV target, and the predefine block above
+                    // spells __CHAR_UNSIGNED__ only where it is not.
+                    // _testbuffer's `return CHAR_MAX;` sentinel through a
+                    // plain char compared unequal to the unsigned spelling,
+                    // and every error path fell through it.
+                    "#ifdef __CHAR_UNSIGNED__\n"
                     "#define CHAR_MIN 0\n"
                     "#define CHAR_MAX UCHAR_MAX\n"
+                    "#else\n"
+                    "#define CHAR_MIN SCHAR_MIN\n"
+                    "#define CHAR_MAX SCHAR_MAX\n"
+                    "#endif\n"
                     "#define SHRT_MIN (-32768)\n"
                     "#define SHRT_MAX 32767\n"
                     "#define USHRT_MAX 65535\n"

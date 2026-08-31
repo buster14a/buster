@@ -3627,6 +3627,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_union_designator_merge.c"),
         S8("tests/basic_c_date_time_predefines.c"),
         S8("tests/basic_c_plain_char_literal_sign.c"),
+        S8("tests/basic_c_char_limits.c"),
     };
     // Each iteration compiles in-process; the module arena is never rewound,
     // so the loop's allocation lives in its own scratch or an unrelated
