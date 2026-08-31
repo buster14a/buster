@@ -3018,6 +3018,15 @@ BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 comp
         os_argument_builder_append(&builder, frameworks[framework_index]);
     }
 #endif
+    // The bootstrap links libm (CMakeLists' `target_link_libraries(... m)`),
+    // and the compiler's float.c imports floorf-family symbols that only
+    // libm exports.  The stages used to omit it and survive on lazy PLT
+    // binding; the linker now refuses a strong import nothing on the link
+    // line exports -- the same refusal every autoconf AC_CHECK_FUNC probe
+    // depends on -- so the stages spell the dependency the bootstrap has.
+#if !BUSTER_WINDOWS
+    os_argument_builder_append(&builder, S8("-lm"));
+#endif
     os_argument_builder_append(&builder, S8("-o"));
     os_argument_builder_append(&builder, output);
     *run = (ProcessRun){
