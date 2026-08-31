@@ -34946,6 +34946,13 @@ struct CIrConstantInitializerFrame
     u32 cursor;
     u32 limit;
     u64 next_index;
+    // The union region and member the previous designated element cleared:
+    // a following designator into the same member of the same union merges
+    // instead of clearing (C11 6.7.9 -- both subobjects belong to one
+    // active member).  Switching members clears as before.
+    u64 last_union_offset;
+    u32 last_union_field;
+    bool has_last_union;
     bool borrowed;
     bool root;
 };
@@ -36180,6 +36187,11 @@ struct CIrConstantInitializerDesignator
     u64 clear_offset;
     u64 clear_size;
     u32 clear_range_count;
+    // Which member of the cleared union the walk entered, so a second
+    // designator into the same member merges rather than wiping the first:
+    // `{ .op.code = NOP, .op.arg = 0 }` is CPython's interpreter trampoline,
+    // and clearing at the second designator zeroed every opcode.
+    u32 clear_field;
     CIrConstantInitializerRange* ranges;
     u32 range_count;
     CIrConstantInitializerContinuation* continuations;
@@ -36462,6 +36474,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder* b
                 result->clear_union = true;
                 result->clear_offset = current_offset;
                 result->clear_size = container->layout.size;
+                result->clear_field = UINT32_MAX;
             }
             IrType* element = ir_type_from_id(&builder->program->types, container->element_type);
             if (!element || (designated && element->layout.size > UINT64_MAX / designated) ||
@@ -36521,6 +36534,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder* b
                 result->clear_offset = current_offset + path.union_offset;
                 result->clear_size = path.union_size;
                 result->clear_range_count = result->range_count;
+                result->clear_field = path.root_field;
             }
             u32 member_slot = c_ir_constant_initializer_field_slot(container, path.root_field);
             if (member_slot == UINT32_MAX || member_slot == UINT32_MAX - 1)
@@ -36714,13 +36728,26 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
             context->step = C_IR_CONSTANT_INITIALIZER_CONTEXT_PUSH_RANGE;
             return true;
         }
-        u64 clear_offset = designator.clear_union ? designator.clear_offset : child_offset;
-        u64 clear_size = designator.clear_union ? designator.clear_size : child->layout.size;
-        bool clear_value = designator.has_designator && (designator.clear_union || !designator.value_field || !designator.value_field->is_bit_field);
+        bool merge_union = designator.clear_union && frame->has_last_union && designator.clear_field != UINT32_MAX &&
+                           frame->last_union_offset == designator.clear_offset && frame->last_union_field == designator.clear_field;
+        bool clear_whole_union = designator.clear_union && !merge_union;
+        u64 clear_offset = clear_whole_union ? designator.clear_offset : child_offset;
+        u64 clear_size = clear_whole_union ? designator.clear_size : child->layout.size;
+        bool clear_value = designator.has_designator && (clear_whole_union || !designator.value_field || !designator.value_field->is_bit_field);
         if (clear_value &&
             !c_ir_constant_initializer_clear_subobject(builder, bytes, byte_count, clear_offset, clear_size, 0, relocations, relocation_count))
         {
             return c_ir_constant_initializer_fail(builder, S8("designated initializer exceeds the target object"), value_start);
+        }
+        if (designator.clear_union)
+        {
+            frame->has_last_union = true;
+            frame->last_union_offset = designator.clear_offset;
+            frame->last_union_field = designator.clear_field;
+        }
+        else
+        {
+            frame->has_last_union = false;
         }
         bool aggregate = child && (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR || child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION);
         if (aggregate)
