@@ -240,10 +240,12 @@ struct packed_layout_raised_record packed_layout_make_raised_record(char tag, in
     return record;
 }
 
+#if PACKED_LAYOUT_HOST_PASSES_UNDERALIGNED_IN_MEMORY
 int packed_layout_lowered_middle(struct packed_layout_lowered_record record)
 {
     return record.value;
 }
+#endif
 
 void packed_layout_fill_raised_object(int value)
 {

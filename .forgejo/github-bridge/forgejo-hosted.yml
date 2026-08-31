@@ -171,14 +171,18 @@ jobs:
           set -euo pipefail
           ulimit -c 0
           export TMPDIR="$BUSTER_RAM_ROOT/tmp"
+          # Keep unit/driver-test fixtures off the host disk as well.
+          export BUSTER_TEST_TEMPORARY_BASE="$TMPDIR/"
           log="$TMPDIR/buster-ci.log"
+          # generate wipes build/, so the bootstrap driver must live outside
+          # it. The hosted images have no mold, so pin the default linker.
+          driver="$BUSTER_RAM_ROOT/bootstrap-driver"
           set +e
           (
-            cd "$BUSTER_RAM_ROOT/source"
-            mkdir -p build
-            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
-            build/build generate --cc clang --ci
-            build/build build --config Release -t test_all --verbose
+            cd "$BUSTER_RAM_ROOT/source" &&
+            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver" &&
+            "$driver" generate --cc clang --ci --linker DEFAULT &&
+            "$driver" build --config Release -t test_all --verbose
           ) >"$log" 2>&1
           status=$?
           set -e
@@ -191,31 +195,32 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $Log = Join-Path $env:BUSTER_RAM_ROOT 'tmp\buster-ci.log'
+          # generate wipes build/ (and Windows cannot delete a running exe),
+          # so the bootstrap driver must live outside the build directory.
+          $Driver = Join-Path $env:BUSTER_RAM_ROOT 'bootstrap-driver.exe'
           $Status = 1
           try {
             $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
             $VsPath = (& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1).Trim()
             if (-not $VsPath) { throw 'Visual Studio with VC tools was not found' }
-            & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation *> $Log
+            & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation *> $null
             Push-Location (Join-Path $env:BUSTER_RAM_ROOT 'source')
             try {
-              New-Item -ItemType Directory -Path build -Force | Out-Null
-              & clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -lws2_32 -o build/build.exe *>> $Log
-              if ($LASTEXITCODE -ne 0) {
-                $Status = $LASTEXITCODE
-              } else {
-                & ./build/build.exe generate --cc clang --ci *>> $Log
-                if ($LASTEXITCODE -ne 0) {
-                  $Status = $LASTEXITCODE
-                } else {
-                  & ./build/build.exe build --config Release -t test_all --verbose *>> $Log
-                  $Status = $LASTEXITCODE
+              # Native toolchain output goes through cmd so stderr progress
+              # cannot become a terminating PowerShell error record.
+              cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`" >> `"$Log`" 2>&1"
+              if ($LASTEXITCODE -eq 0) {
+                cmd /c "`"$Driver`" generate --cc clang --ci >> `"$Log`" 2>&1"
+                if ($LASTEXITCODE -eq 0) {
+                  cmd /c "`"$Driver`" build --config Release -t test_all --verbose >> `"$Log`" 2>&1"
                 }
               }
+              $Status = $LASTEXITCODE
             } finally {
               Pop-Location
             }
           } catch {
+            Write-Output "BUSTER_GITHUB_CI setup_error=$($_.Exception.Message)"
             $Status = 1
           }
           Write-Output "BUSTER_GITHUB_CI platform=Windows exit_code=$Status"

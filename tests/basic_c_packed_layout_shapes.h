@@ -118,6 +118,19 @@ struct below_natural_record
 typedef int packed_layout_raised __attribute__((aligned(16)));
 typedef int packed_layout_lowered __attribute__((aligned(2)));
 
+// clang before 19 classified a record holding a member whose typedef
+// alignment sits below natural as INTEGER, so it crossed the call boundary
+// in a register; clang 19+, GCC, and Buster follow the psABI reading that an
+// unaligned field makes the record MEMORY.  The driver passes the host
+// compiler's clang major so the one by-value check of that shape only runs
+// when both halves agree on the convention; the layout answers above it stay
+// active everywhere.  Zero means "not clang" or "unknown", which keeps the
+// check on.
+#ifndef PACKED_LAYOUT_HOST_CLANG_MAJOR
+#define PACKED_LAYOUT_HOST_CLANG_MAJOR 0
+#endif
+#define PACKED_LAYOUT_HOST_PASSES_UNDERALIGNED_IN_MEMORY (PACKED_LAYOUT_HOST_CLANG_MAJOR == 0 || PACKED_LAYOUT_HOST_CLANG_MAJOR >= 19)
+
 struct packed_layout_raised_record
 {
     char tag;
@@ -196,7 +209,9 @@ extern unsigned long long packed_layout_raised_record_value_offset(void);
 extern unsigned long long packed_layout_lowered_record_size(void);
 extern unsigned long long packed_layout_lowered_record_value_offset(void);
 extern struct packed_layout_raised_record packed_layout_make_raised_record(char tag, int value);
+#if PACKED_LAYOUT_HOST_PASSES_UNDERALIGNED_IN_MEMORY
 extern int packed_layout_lowered_middle(struct packed_layout_lowered_record record);
+#endif
 extern void packed_layout_fill_raised_object(int value);
 extern unsigned long long packed_layout_const_record_size(void);
 extern unsigned long long packed_layout_const_record_alignment(void);

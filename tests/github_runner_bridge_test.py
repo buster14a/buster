@@ -450,6 +450,12 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("choco install", broker)
         self.assertIn("clang -Isrc", broker)
         self.assertIn('rm -rf "$source_dir/.git"', broker)
+        # generate wipes build/: the bootstrap driver must never live inside
+        # it, and the hosted images have no mold, so the linker stays DEFAULT.
+        self.assertIn("bootstrap-driver", broker)
+        self.assertNotIn("-o build/build", broker)
+        self.assertIn("--linker DEFAULT", broker)
+        self.assertIn("BUSTER_TEST_TEMPORARY_BASE", broker)
         # The deploy key may only travel through a pipe into ssh-agent: a
         # heredoc or herestring would become a shell temporary file on disk.
         self.assertNotIn("<<<", broker)

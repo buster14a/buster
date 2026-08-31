@@ -500,13 +500,23 @@ BUSTER_GLOBAL_LOCAL u64 buster_test_temporary_path_call_count;
 
 BUSTER_GLOBAL_LOCAL String8 buster_test_temporary_base(void)
 {
-#if BUSTER_WINDOWS
-    return S8("build/");
-#elif BUSTER_ANDROID
-    return buster_android_internal_data_path.length ? buster_android_internal_data_path : S8(".");
+#if BUSTER_ANDROID
+    String8 result = buster_android_internal_data_path.length ? buster_android_internal_data_path : S8(".");
 #else
-    return S8("/tmp/");
+    // The GitHub-hosted privacy broker keeps every source-derived byte on a
+    // memory-backed filesystem; this override points the fixture root there
+    // instead of the platform default, which persists on the host disk.
+    String8 result = os_get_environment_variable(S8("BUSTER_TEST_TEMPORARY_BASE"));
+    if (!result.length)
+    {
+#if BUSTER_WINDOWS
+        result = S8("build/");
+#else
+        result = S8("/tmp/");
 #endif
+    }
+#endif
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_make_directory(String8 path)

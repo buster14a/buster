@@ -7761,17 +7761,54 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         TemporalArena packed_pair_temporary = scratch_begin(&arguments->arena, 1);
         Arena* packed_pair_arena = packed_pair_temporary.arena;
+        // clang 18 and older classified the lowered-alignment record as
+        // INTEGER rather than MEMORY (see basic_c_packed_layout_shapes.h).
+        // Probe the host compiler once so both halves of every pair carry its
+        // clang major and the convention-sensitive check participates only
+        // when the host agrees on the psABI reading; layout answers stay
+        // active against every host.
+        u64 host_clang_major = 0;
+        {
+            String8 host_version_command[] = {S8(BUSTER_HOST_C_COMPILER), S8("--version")};
+            ProcessSpawnResult host_version_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_version_command), (SliceString8){0}, (SliceString8){0},
+                                                                     (ProcessSpawnOptions){
+                                                                         .capture = ((u64)1 << STANDARD_STREAM_OUTPUT),
+                                                                         .use_process_environment = true,
+                                                                     });
+            if (host_version_spawn.handle)
+            {
+                ProcessWaitResult host_version_wait = os_process_wait_sync(packed_pair_arena, host_version_spawn);
+                String8 host_version_output = {
+                    .pointer = (char8*)host_version_wait.streams[STANDARD_STREAM_OUTPUT].pointer,
+                    .length = host_version_wait.streams[STANDARD_STREAM_OUTPUT].length,
+                };
+                u64 marker = string_first_sequence(host_version_output, S8("clang version "));
+                if (host_version_wait.result == PROCESS_RESULT_SUCCESS && marker != BUSTER_STRING_NO_MATCH)
+                {
+                    for (u64 index = marker + (sizeof("clang version ") - 1); index < host_version_output.length; index += 1)
+                    {
+                        char8 character = host_version_output.pointer[index];
+                        if (character < '0' || character > '9')
+                        {
+                            break;
+                        }
+                        host_clang_major = host_clang_major * 10 + (u64)(character - '0');
+                    }
+                }
+            }
+        }
+        String8 host_clang_major_define = string_format(packed_pair_arena, S8("-DPACKED_LAYOUT_HOST_CLANG_MAJOR={u64}"), host_clang_major);
         String8 host_packed_callee_path = buster_test_temporary_path(packed_pair_arena, S8("buster-c-packed-host-callee"), S8(".o"));
         String8 host_packed_caller_path = buster_test_temporary_path(packed_pair_arena, S8("buster-c-packed-host-caller"), S8(".o"));
         // -fno-pic and -g0 for the same reasons the x87 pair above uses them:
         // this linker has no GOT model, and clang's newer debug sections sit
         // outside the object reader's model.
         String8 host_packed_callee_command[] = {
-            S8(BUSTER_HOST_C_COMPILER), S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_packed_callee_path,
+            S8(BUSTER_HOST_C_COMPILER), host_clang_major_define, S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_packed_callee_path,
             S8("tests/basic_c_packed_layout_callee.c"),
         };
         String8 host_packed_caller_command[] = {
-            S8(BUSTER_HOST_C_COMPILER), S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_packed_caller_path,
+            S8(BUSTER_HOST_C_COMPILER), host_clang_major_define, S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_packed_caller_path,
             S8("tests/basic_c_packed_layout_caller.c"),
         };
         ProcessSpawnOptions host_packed_options = {
@@ -7794,11 +7831,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 buster_packed_callee_path = buster_test_temporary_path(packed_pair_arena, S8("buster-c-packed-callee"), S8(".o"));
             String8 buster_packed_caller_path = buster_test_temporary_path(packed_pair_arena, S8("buster-c-packed-caller"), S8(".o"));
             String8 buster_packed_callee_command[] = {
-                c_long_double_allocators[allocator_index], S8("-c"), S8("-o"), buster_packed_callee_path,
+                c_long_double_allocators[allocator_index], host_clang_major_define, S8("-c"), S8("-o"), buster_packed_callee_path,
                 S8("tests/basic_c_packed_layout_callee.c"),
             };
             String8 buster_packed_caller_command[] = {
-                c_long_double_allocators[allocator_index], S8("-c"), S8("-o"), buster_packed_caller_path,
+                c_long_double_allocators[allocator_index], host_clang_major_define, S8("-c"), S8("-o"), buster_packed_caller_path,
                 S8("tests/basic_c_packed_layout_caller.c"),
             };
             CompilerDriverResult buster_packed_callee = compiler_driver_execute_invocation(

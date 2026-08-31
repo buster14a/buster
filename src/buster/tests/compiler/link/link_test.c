@@ -5027,7 +5027,19 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, string_first_sequence(dyld_info_output, S8("mis-aligned")) == BUSTER_STRING_NO_MATCH);
         BUSTER_TEST(arguments, string_first_sequence(dyld_info_error, S8("mis-aligned")) == BUSTER_STRING_NO_MATCH);
         // The table itself, which is what the refusal used to replace.
-        BUSTER_TEST(arguments, string_first_sequence(dyld_info_output, S8("__DATA")) != BUSTER_STRING_NO_MATCH);
+        bool dyld_info_lists_data_segment = string_first_sequence(dyld_info_output, S8("__DATA")) != BUSTER_STRING_NO_MATCH;
+        if (!dyld_info_lists_data_segment)
+        {
+            // dyld_info's report format follows the host's dyld release, so
+            // keep the tool's own words in the failure; a format drift on a
+            // newer macOS must be diagnosable from a CI log alone.
+            String8 output_head = dyld_info_output;
+            output_head.length = output_head.length > 1500 ? 1500 : output_head.length;
+            String8 error_head = dyld_info_error;
+            error_head.length = error_head.length > 500 ? 500 : error_head.length;
+            arguments->show(arguments, S8("LINK_TEST dyld_info stdout head: {S8}\nLINK_TEST dyld_info stderr head: {S8}\n"), output_head, error_head);
+        }
+        BUSTER_TEST(arguments, dyld_info_lists_data_segment);
     }
     for (u32 path_index = 0; path_index < native_mach_path_count; path_index += 1)
     {

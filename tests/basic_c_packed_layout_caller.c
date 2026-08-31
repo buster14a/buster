@@ -148,11 +148,13 @@ int main(void)
     if (raised.tag != 'v' || raised.value != -13572468) return 25;
     if ((unsigned long long)(void *)&raised % 16) return 26;
 
+#if PACKED_LAYOUT_HOST_PASSES_UNDERALIGNED_IN_MEMORY
     struct packed_layout_lowered_record lowered;
     lowered.tag = 'w';
     lowered.value = 0x1a2b3c4d;
     lowered.trailer = 'x';
     if (packed_layout_lowered_middle(lowered) != 0x1a2b3c4d) return 27;
+#endif
 
     packed_layout_fill_raised_object(864209);
     if (packed_layout_raised_object != 864209) return 28;
