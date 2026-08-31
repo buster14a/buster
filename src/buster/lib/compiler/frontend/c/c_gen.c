@@ -9237,6 +9237,17 @@ BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spel
         {
             value = (value << 8) | bytes.pointer[index];
         }
+        // A plain single-character constant has the value a plain char
+        // object with that byte would have (C11 6.4.4.4p10): where the
+        // target's plain char is signed, '\x80' is -128, and pickle's
+        // opcode enum -- `PROTO = '\x80'` -- must agree with the signed
+        // byte the unpickler switches on.  Multi-character constants keep
+        // the concatenated spelling every compiler answers, and u8'' is
+        // unsigned by type.
+        if (!opening && bytes.length == 1 && target_data_layout(target).plain_char_is_signed && (value & 0x80))
+        {
+            value |= ~(u64)0xff;
+        }
         *value_out = value;
         *kind_out = opening ? C_TYPE_UNSIGNED_CHAR : C_TYPE_INT;
         return true;

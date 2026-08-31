@@ -3626,11 +3626,16 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_tied_operand_reused_source.c"),
         S8("tests/basic_c_union_designator_merge.c"),
         S8("tests/basic_c_date_time_predefines.c"),
+        S8("tests/basic_c_plain_char_literal_sign.c"),
     };
+    // Each iteration compiles in-process; the module arena is never rewound,
+    // so the loop's allocation lives in its own scratch or an unrelated
+    // later invocation runs the reservation dry.
     for (u32 shape_index = 0; shape_index < BUSTER_ARRAY_LENGTH(c_cpython_shape_fixtures); shape_index += 1)
     {
-        String8 c_shape_path = buster_test_temporary_path(arguments->arena, S8("buster-c-cpython-shape"),
-                                                          string_format(arguments->arena,
+        TemporalArena c_shape_temporary = scratch_begin(&arguments->arena, 1);
+        String8 c_shape_path = buster_test_temporary_path(c_shape_temporary.arena, S8("buster-c-cpython-shape"),
+                                                          string_format(c_shape_temporary.arena,
 #if BUSTER_WINDOWS
                                                                         S8("-{u32}.exe"),
 #else
@@ -3643,7 +3648,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             c_cpython_shape_fixtures[shape_index],
         };
         CompilerDriverResult c_shape = compiler_driver_execute_invocation(
-            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_shape_command_line)));
+            c_shape_temporary.arena, compiler_driver_parse_arguments(c_shape_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_shape_command_line)));
         BUSTER_TEST(arguments, c_shape.error == COMPILER_DRIVER_ERROR_NONE);
         if (c_shape.error == COMPILER_DRIVER_ERROR_NONE)
         {
@@ -3657,9 +3662,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_shape_spawn.handle != 0);
             if (c_shape_spawn.handle)
             {
-                BUSTER_TEST(arguments, os_process_wait_sync(arguments->arena, c_shape_spawn).result == PROCESS_RESULT_SUCCESS);
+                BUSTER_TEST(arguments, os_process_wait_sync(c_shape_temporary.arena, c_shape_spawn).result == PROCESS_RESULT_SUCCESS);
             }
         }
+        scratch_end(c_shape_temporary);
     }
     // The <float.h> predefine vocabulary, pinned as static initializers and
     // compared against literal spellings so a predefine folding to the wrong
