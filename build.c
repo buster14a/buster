@@ -86,6 +86,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_DOOM,
     BUILD_COMMAND_TEST_QUICKJS,
     BUILD_COMMAND_TEST_MUSL,
+    BUILD_COMMAND_TEST_CPYTHON,
     BUILD_COMMAND_TEST_MODE_MATRIX,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
@@ -757,6 +758,16 @@ struct TestQuickjsOptions
 
 #define QUICKJS_COMPATIBILITY_VERSION "2026-06-04"
 #define QUICKJS_COMPATIBILITY_COMMIT "3d5e064e9dd67c70f7962836505a7fa067bf0a4e"
+
+typedef struct TestCpythonOptions TestCpythonOptions;
+struct TestCpythonOptions
+{
+    String8 source_directory;
+    String8 config;
+};
+
+#define CPYTHON_COMPATIBILITY_TAG "v3.13.9"
+#define CPYTHON_COMPATIBILITY_COMMIT "8183fa5e3f78ca6ab862de7fb8b14f3d929421e0"
 
 BUSTER_GLOBAL_LOCAL String8 cmake_path = {0};
 
@@ -19610,6 +19621,603 @@ BUSTER_GLOBAL_LOCAL void test_musl_action_add(Arena* arena, TestMuslOptions opti
     *run = (ProcessRun){.callback = test_musl_action, .callback_data = options_copy};
 }
 
+// ---------------------------------------------------------------------------
+// CPython compatibility harness.  An external, pristine CPython v3.13.9
+// checkout is configured and built twice with its own autoconf build system
+// -- once with `ide cc`, once with clang -- and CPython's own regression
+// suite is the oracle: the gate is the verdict comparison, a test the Buster
+// build fails while the Clang build of the same tree passes.  Fixed seeds and
+// environment keep both runs deterministic; nothing here touches the network
+// (`-u none` withholds every optional resource).
+//
+// What this harness does NOT gate: the modules Setup.local disables (the
+// seven shared-only test modules -- the driver has no -shared -- and
+// _testinternalcapi, whose static build cannot link into the _freeze_module
+// bootstrap under ANY toolchain, since it references getpath.o's
+// _Py_Get_Getpath_CodeObject while the bootstrap deliberately links
+// getpath_noop.o); Python/perf_jit_trampoline.o, which is compiled with
+// clang -fno-pic -gdwarf-4 in BOTH trees (conditional directives inside a
+// macro argument, issue 838; DWARF 5 reader, issue 840; GOTPCRELX
+// conversion, issue 841); refleak hunting; the resource-gated suite
+// surface; and performance.  pyconfig.h must match the Clang configure
+// exactly except for the three expected divergences asserted below.
+
+BUSTER_GLOBAL_LOCAL String8 cpython_trim_ascii_space(String8 text)
+{
+    while (text.length && (text.pointer[0] == ' ' || text.pointer[0] == '\n' || text.pointer[0] == '\r' || text.pointer[0] == '\t'))
+    {
+        text.pointer += 1;
+        text.length -= 1;
+    }
+    while (text.length && (text.pointer[text.length - 1] == ' ' || text.pointer[text.length - 1] == '\n' || text.pointer[text.length - 1] == '\r' ||
+                           text.pointer[text.length - 1] == '\t'))
+    {
+        text.length -= 1;
+    }
+    return text;
+}
+
+typedef struct CpythonCommandResult CpythonCommandResult;
+struct CpythonCommandResult
+{
+    ProcessResult result;
+    String8 output;
+    String8 error;
+};
+
+BUSTER_GLOBAL_LOCAL CpythonCommandResult cpython_command(Arena* arena, SliceString8 arguments, String8 working_directory, bool capture,
+                                                          SliceString8 environment_keys, SliceString8 environment_values, u64 timeout_us)
+{
+    ProcessRun run = {
+        .arguments = arguments,
+        .environment_keys = environment_keys,
+        .environment_values = environment_values,
+        .working_directory = working_directory,
+        .spawn_options =
+            {
+                .capture = capture ? (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)) : 0,
+                .use_process_environment = 1,
+            },
+    };
+    command_print(arguments);
+    run.spawn = process_run_spawn(arena, &run);
+    if (!run.spawn.handle)
+    {
+        string_print(S8("error: test_cpython could not start the command above\n"));
+        return (CpythonCommandResult){.result = PROCESS_RESULT_FAILED};
+    }
+    ProcessWaitResult wait = timeout_us ? os_process_wait_deadline(arena, run.spawn, timeout_us) : os_process_wait_sync(arena, run.spawn);
+    return (CpythonCommandResult){
+        .result = wait.result,
+        .output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+        .error = {.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length},
+    };
+}
+
+BUSTER_GLOBAL_LOCAL bool cpython_git_verify(Arena* arena, String8 source_directory)
+{
+    String8 git = executable_resolve_in_path(arena, S8("git"));
+    if (!git.length)
+    {
+        string_print(S8("error: test_cpython requires git in PATH\n"));
+        return false;
+    }
+    String8 head_arguments[] = {git, S8("rev-parse"), S8("HEAD")};
+    CpythonCommandResult head =
+        cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(head_arguments), source_directory, true, (SliceString8){0}, (SliceString8){0}, 0);
+    String8 commit = cpython_trim_ascii_space(head.output);
+    if (head.result != PROCESS_RESULT_SUCCESS || !string_equal(commit, S8(CPYTHON_COMPATIBILITY_COMMIT)))
+    {
+        string_print(S8("error: test_cpython requires the pristine CPython {S8} commit {S8}; found {S8}\n"), S8(CPYTHON_COMPATIBILITY_TAG),
+                     S8(CPYTHON_COMPATIBILITY_COMMIT), commit);
+        return false;
+    }
+    String8 status_arguments[] = {git, S8("status"), S8("--porcelain"), S8("--untracked-files=all")};
+    CpythonCommandResult status =
+        cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(status_arguments), source_directory, true, (SliceString8){0}, (SliceString8){0}, 0);
+    if (status.result != PROCESS_RESULT_SUCCESS || status.output.length)
+    {
+        string_print(S8("error: test_cpython checkout has local changes or untracked files; upstream sources must remain unmodified\n"));
+        if (status.output.length)
+        {
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(status.output));
+        }
+        return false;
+    }
+    string_print(S8("CPYTHON_SOURCE tag={S8} commit={S8} pristine=1 path={S8}\n"), S8(CPYTHON_COMPATIBILITY_TAG), commit, source_directory);
+    return true;
+}
+
+// Same shape and rationale as quickjs_raise_stack_limit: Buster frames are
+// larger than Clang's, and CPython tunes Py_C_RECURSION_LIMIT assuming an
+// eval frame well under a kilobyte where Buster's is 4 KB (issue 842), so
+// the C-stack recursion tests need an OS limit the budget actually fits in.
+// Both suite runs get the same limit, so the comparison stays symmetric.
+#define CPYTHON_STACK_LIMIT_BYTES (512ull * 1024ull * 1024ull)
+
+BUSTER_GLOBAL_LOCAL void cpython_raise_stack_limit(u64 requested_bytes)
+{
+#if BUSTER_LINUX || BUSTER_MACOS
+    struct rlimit limit = {0};
+    if (getrlimit(RLIMIT_STACK, &limit) != 0)
+    {
+        string_print(S8("warning: test_cpython could not read RLIMIT_STACK; the suite runs with the inherited stack\n"));
+        return;
+    }
+    if (limit.rlim_cur == RLIM_INFINITY || (u64)limit.rlim_cur >= requested_bytes)
+    {
+        string_print(S8("CPYTHON_STACK_LIMIT requested_bytes={u64} status=already-sufficient\n"), requested_bytes);
+        return;
+    }
+    u64 previous = (u64)limit.rlim_cur;
+    u64 target = requested_bytes;
+    if (limit.rlim_max != RLIM_INFINITY && (u64)limit.rlim_max < target)
+    {
+        target = (u64)limit.rlim_max;
+    }
+    limit.rlim_cur = (rlim_t)target;
+    if (setrlimit(RLIMIT_STACK, &limit) != 0)
+    {
+        string_print(S8("warning: test_cpython could not raise RLIMIT_STACK from {u64} to {u64} bytes\n"), previous, target);
+        return;
+    }
+    string_print(S8("CPYTHON_STACK_LIMIT previous_soft_bytes={u64} soft_bytes={u64} reason=buster-frame-layout status=raised\n"), previous, target);
+#else
+    string_print(S8("CPYTHON_STACK_LIMIT requested_bytes={u64} status=unsupported-platform\n"), requested_bytes);
+#endif
+}
+
+// The modules both trees disable, and why each is here rather than built:
+// the driver has no -shared, so the seven modules upstream marks *shared*
+// (each exists to exercise shared-object import) cannot be produced; and a
+// static _testinternalcapi cannot link into the _freeze_module bootstrap
+// under any toolchain -- it references _Py_Get_Getpath_CodeObject, defined
+// only by getpath.o, while the bootstrap deliberately links getpath_noop.o.
+// Both trees carry the same file, so their suites skip the same tests.
+BUSTER_GLOBAL_LOCAL bool cpython_write_setup_local(Arena* arena, String8 tree_directory)
+{
+    String8 path = path_join(arena, path_join(arena, tree_directory, S8("Modules")), S8("Setup.local"));
+    String8 content = S8("# test_cpython harness: the driver has no -shared; these modules exist only\n"
+                         "# as shared libraries, so both trees exclude them and their tests skip alike.\n"
+                         "*disabled*\n"
+                         "# _testinternalcapi references _Py_Get_Getpath_CodeObject, which only\n"
+                         "# getpath.o defines; the _freeze_module bootstrap links every static module\n"
+                         "# against getpath_noop.o instead, so a static _testinternalcapi cannot link\n"
+                         "# under any toolchain.\n"
+                         "_testinternalcapi\n"
+                         "_testimportmultiple\n"
+                         "_testmultiphase\n"
+                         "_testsinglephase\n"
+                         "_testexternalinspection\n"
+                         "_ctypes_test\n"
+                         "xxlimited\n"
+                         "xxlimited_35\n");
+    return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(content));
+}
+
+// The one object neither tree lets `ide cc` build: perf_jit_trampoline.c
+// nests conditional directives inside a macro argument (issue 838), and the
+// object clang produces must avoid DWARF 5 (issue 840) and PIE-style GOT
+// references (issue 841) for the Buster linker to read it.  Substituting it
+// in BOTH trees keeps the comparison about everything else.
+BUSTER_GLOBAL_LOCAL bool cpython_substitute_trampoline(Arena* arena, String8 clang, String8 source_directory, String8 tree_directory)
+{
+    make_directory_recursive(arena, path_join(arena, tree_directory, S8("Python")));
+    String8 include_internal = path_join(arena, path_join(arena, source_directory, S8("Include")), S8("internal"));
+    String8 arguments[] = {
+        clang,
+        S8("-fno-pic"),
+        S8("-ftls-model=local-exec"),
+        S8("-gdwarf-4"),
+        S8("-fno-strict-aliasing"),
+        S8("-DNDEBUG"),
+        S8("-O3"),
+        S8("-std=c11"),
+        string_format(arena, S8("-I{S8}"), include_internal),
+        string_format(arena, S8("-I{S8}"), path_join(arena, include_internal, S8("mimalloc"))),
+        S8("-IObjects"),
+        S8("-IInclude"),
+        S8("-IPython"),
+        S8("-I."),
+        string_format(arena, S8("-I{S8}"), path_join(arena, source_directory, S8("Include"))),
+        S8("-DPy_BUILD_CORE"),
+        S8("-c"),
+        path_join(arena, path_join(arena, source_directory, S8("Python")), S8("perf_jit_trampoline.c")),
+        S8("-o"),
+        S8("Python/perf_jit_trampoline.o"),
+    };
+    CpythonCommandResult result =
+        cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), tree_directory, false, (SliceString8){0}, (SliceString8){0}, 0);
+    return result.result == PROCESS_RESULT_SUCCESS;
+}
+
+// pyconfig.h is the record of what ~700 autoconf probes concluded about the
+// compiler, so the diff against the Clang configure is the probe-fidelity
+// gate.  Exactly three divergences are expected, each pinned to an issue:
+// HAVE_BUILTIN_ATOMIC (the __atomic_* builtin family, issue 829),
+// HAVE_GCC_ASM_FOR_X64 (bare literal-register asm is refused by design), and
+// Py_RL_STARTUP_HOOK_TAKES_ARGS (an incompatible-function-pointer probe that
+// wants a hard error, issue 830; GNU readline's _RL_FUNCTION_TYPEDEF
+// neutralizes the consequence).
+BUSTER_GLOBAL_LOCAL bool cpython_line_is_expected_divergence(String8 line)
+{
+    return string_first_sequence(line, S8("HAVE_BUILTIN_ATOMIC")) < line.length ||
+           string_first_sequence(line, S8("HAVE_GCC_ASM_FOR_X64")) < line.length ||
+           string_first_sequence(line, S8("Py_RL_STARTUP_HOOK_TAKES_ARGS")) < line.length;
+}
+
+BUSTER_GLOBAL_LOCAL bool cpython_pyconfig_compare(Arena* arena, String8 buster_tree, String8 clang_tree)
+{
+    ByteSlice buster_bytes = file_read(arena, path_join(arena, buster_tree, S8("pyconfig.h")), (FileReadOptions){0});
+    ByteSlice clang_bytes = file_read(arena, path_join(arena, clang_tree, S8("pyconfig.h")), (FileReadOptions){0});
+    if (!buster_bytes.length || !clang_bytes.length)
+    {
+        string_print(S8("error: test_cpython could not read both pyconfig.h files\n"));
+        return false;
+    }
+    String8 buster_text = {.pointer = (char8*)buster_bytes.pointer, .length = buster_bytes.length};
+    String8 clang_text = {.pointer = (char8*)clang_bytes.pointer, .length = clang_bytes.length};
+    u64 buster_cursor = 0;
+    u64 clang_cursor = 0;
+    u64 expected = 0;
+    u64 unexpected = 0;
+    while (buster_cursor < buster_text.length || clang_cursor < clang_text.length)
+    {
+        u64 buster_end = buster_cursor;
+        while (buster_end < buster_text.length && buster_text.pointer[buster_end] != '\n')
+        {
+            buster_end += 1;
+        }
+        u64 clang_end = clang_cursor;
+        while (clang_end < clang_text.length && clang_text.pointer[clang_end] != '\n')
+        {
+            clang_end += 1;
+        }
+        String8 buster_line = {.pointer = buster_text.pointer + buster_cursor, .length = buster_end - buster_cursor};
+        String8 clang_line = {.pointer = clang_text.pointer + clang_cursor, .length = clang_end - clang_cursor};
+        if (!string_equal(buster_line, clang_line))
+        {
+            bool allowed = cpython_line_is_expected_divergence(buster_line) && cpython_line_is_expected_divergence(clang_line);
+            if (allowed)
+            {
+                expected += 1;
+                string_print(S8("CPYTHON_PYCONFIG_DIVERGENCE expected=1 buster={S8} clang={S8}\n"), buster_line, clang_line);
+            }
+            else
+            {
+                unexpected += 1;
+                string_print(S8("CPYTHON_PYCONFIG_DIVERGENCE expected=0 buster={S8} clang={S8}\n"), buster_line, clang_line);
+            }
+        }
+        buster_cursor = buster_end + 1;
+        clang_cursor = clang_end + 1;
+    }
+    string_print(S8("CPYTHON_PYCONFIG expected_divergences={u64} unexpected_divergences={u64} status={S8}\n"), expected, unexpected,
+                 unexpected ? S8("fail") : S8("pass"));
+    return unexpected == 0;
+}
+
+// One deterministic workload both interpreters must answer byte for byte:
+// arithmetic, unicode, json, hashlib (the HACL* backends), pickle round
+// trips (the '\x80' opcode family), and the class machinery whose first
+// exercise is what the interpreter trampoline runs.
+BUSTER_GLOBAL_LOCAL String8 cpython_workload_source(void)
+{
+    return S8("import hashlib, json, math, pickle, sys\n"
+              "values = {'answer': 42, 'pi': math.pi, 'text': '\\u00e9\\u4e16\\u754c'}\n"
+              "encoded = json.dumps(values, sort_keys=True)\n"
+              "digest = hashlib.sha256(encoded.encode()).hexdigest()\n"
+              "round_trip = pickle.loads(pickle.dumps((values, [1, 2, 3]), 5))\n"
+              "class Meta(type):\n"
+              "    pass\n"
+              "class Widget(metaclass=Meta):\n"
+              "    __slots__ = ('x',)\n"
+              "widget = Widget()\n"
+              "widget.x = 7\n"
+              "print(encoded)\n"
+              "print(digest)\n"
+              "print(round_trip == (values, [1, 2, 3]))\n"
+              "print(widget.x, type(Widget).__name__)\n"
+              "print(sorted({3, 1, 2}), [i * i for i in range(6)])\n"
+              "print(2 ** 200)\n");
+}
+
+BUSTER_GLOBAL_LOCAL bool cpython_run_workload(Arena* arena, String8 tree_directory, String8 workload_path, String8* output)
+{
+    String8 python = path_join(arena, tree_directory, S8("python"));
+    String8 environment_keys[] = {S8("PYTHONHASHSEED"), S8("TZ")};
+    String8 environment_values[] = {S8("0"), S8("UTC")};
+    String8 arguments[] = {python, workload_path};
+    CpythonCommandResult result =
+        cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), tree_directory, true,
+                        (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values), 120000000ull);
+    if (result.result != PROCESS_RESULT_SUCCESS)
+    {
+        return false;
+    }
+    *output = result.output;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool cpython_configure_and_build(Arena* arena, String8 source_directory, String8 tree_directory, String8 cc, String8 clang,
+                                                      String8 label)
+{
+    make_directory_recursive(arena, tree_directory);
+    u64 configure_start = os_now_microseconds();
+    String8 configure_arguments[] = {
+        S8("/bin/sh"),
+        path_join(arena, source_directory, S8("configure")),
+        string_format(arena, S8("CC={S8}"), cc),
+        S8("MODULE_BUILDTYPE=static"),
+    };
+    CpythonCommandResult configure = cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(configure_arguments), tree_directory, true,
+                                                     (SliceString8){0}, (SliceString8){0}, 0);
+    if (configure.result != PROCESS_RESULT_SUCCESS)
+    {
+        string_print(S8("error: test_cpython configure failed for tree={S8}\n"), label);
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(configure.error));
+        return false;
+    }
+    string_print(S8("CPYTHON_CONFIGURE tree={S8} elapsed_us={u64} status=pass\n"), label, os_now_microseconds() - configure_start);
+    if (!cpython_write_setup_local(arena, tree_directory))
+    {
+        string_print(S8("error: test_cpython could not write Modules/Setup.local for tree={S8}\n"), label);
+        return false;
+    }
+    if (!cpython_substitute_trampoline(arena, clang, source_directory, tree_directory))
+    {
+        string_print(S8("error: test_cpython could not build the clang perf_jit_trampoline.o substitute for tree={S8}\n"), label);
+        return false;
+    }
+    String8 make = executable_resolve_in_path(arena, S8("make"));
+    if (!make.length)
+    {
+        string_print(S8("error: test_cpython requires make in PATH\n"));
+        return false;
+    }
+    u64 make_start = os_now_microseconds();
+    // Two invocations by design: writing Setup.local regenerates the
+    // Makefile through makesetup mid-run, and upstream's own advice on that
+    // path is "you may need to re-run make".
+    String8 make_arguments[] = {make, S8("-j4")};
+    CpythonCommandResult first = cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(make_arguments), tree_directory, true, (SliceString8){0},
+                                                 (SliceString8){0}, 0);
+    CpythonCommandResult second = first;
+    if (first.result != PROCESS_RESULT_SUCCESS)
+    {
+        second = cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(make_arguments), tree_directory, true, (SliceString8){0},
+                                 (SliceString8){0}, 0);
+    }
+    if (second.result != PROCESS_RESULT_SUCCESS)
+    {
+        string_print(S8("error: test_cpython make failed for tree={S8}\n"), label);
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(second.error));
+        return false;
+    }
+    u64 image_bytes = 0;
+    compat_hash_file(arena, path_join(arena, tree_directory, S8("python")), &image_bytes);
+    string_print(S8("CPYTHON_BUILD tree={S8} elapsed_us={u64} image_bytes={u64} status=pass\n"), label, os_now_microseconds() - make_start, image_bytes);
+    return true;
+}
+
+// The failed-test list from a regrtest summary.  The block opens with a line
+// ending "tests failed:" (or the singular "test failed:") and lists names on
+// indented continuation lines; the parse collects every indented token until
+// the first line that is neither.
+BUSTER_GLOBAL_LOCAL SliceString8 cpython_parse_failed_tests(Arena* arena, String8 output)
+{
+    String8* names = arena_allocate(arena, String8, 1024);
+    u64 count = 0;
+    u64 cursor = 0;
+    bool in_failed_block = false;
+    while (cursor < output.length && count < 1024)
+    {
+        u64 end = cursor;
+        while (end < output.length && output.pointer[end] != '\n')
+        {
+            end += 1;
+        }
+        String8 line = {.pointer = output.pointer + cursor, .length = end - cursor};
+        String8 trimmed = cpython_trim_ascii_space(line);
+        bool header = trimmed.length &&
+                      (string_ends_with_sequence(trimmed, S8("tests failed:")) || string_ends_with_sequence(trimmed, S8("test failed:")));
+        if (header)
+        {
+            in_failed_block = true;
+        }
+        else if (in_failed_block && line.length && (line.pointer[0] == ' ' || line.pointer[0] == '\t'))
+        {
+            u64 token_start = 0;
+            for (u64 index = 0; index <= trimmed.length && count < 1024; index += 1)
+            {
+                if (index == trimmed.length || trimmed.pointer[index] == ' ')
+                {
+                    if (index > token_start)
+                    {
+                        names[count++] = (String8){.pointer = trimmed.pointer + token_start, .length = index - token_start};
+                    }
+                    token_start = index + 1;
+                }
+            }
+        }
+        else
+        {
+            in_failed_block = false;
+        }
+        cursor = end + 1;
+    }
+    return (SliceString8){.pointer = names, .length = count};
+}
+
+BUSTER_GLOBAL_LOCAL bool cpython_failed_contains(SliceString8 failed, String8 name)
+{
+    for (u64 index = 0; index < failed.length; index += 1)
+    {
+        if (string_equal(failed.pointer[index], name))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool cpython_run_suite(Arena* arena, String8 tree_directory, String8 label, SliceString8* failed_out)
+{
+    String8 python = path_join(arena, tree_directory, S8("python"));
+    String8 environment_keys[] = {S8("PYTHONHASHSEED"), S8("TZ")};
+    String8 environment_values[] = {S8("0"), S8("UTC")};
+    String8 arguments[] = {python, S8("-m"), S8("test"), S8("-j2"), S8("-u"), S8("none"), S8("--timeout"), S8("120")};
+    u64 start_us = os_now_microseconds();
+    CpythonCommandResult result =
+        cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), tree_directory, true,
+                        (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values),
+                        3600ull * 1000000ull);
+    // A nonzero exit is the expected shape whenever any test fails; the
+    // verdicts come from the summary, and only a run that produced no
+    // summary at all is a harness failure.
+    String8 output = result.output;
+    if (string_first_sequence(output, S8("Total test files:")) >= output.length)
+    {
+        string_print(S8("error: test_cpython suite run for tree={S8} produced no summary\n"), label);
+        os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(result.error));
+        return false;
+    }
+    *failed_out = cpython_parse_failed_tests(arena, output);
+    string_print(S8("CPYTHON_SUITE tree={S8} failed_tests={u64} elapsed_us={u64}\n"), label, failed_out->length, os_now_microseconds() - start_us);
+    for (u64 index = 0; index < failed_out->length; index += 1)
+    {
+        string_print(S8("CPYTHON_SUITE_FAILURE tree={S8} test={S8}\n"), label, failed_out->pointer[index]);
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
+{
+    TestCpythonOptions options = *(TestCpythonOptions*)data;
+    if (!options.source_directory.length)
+    {
+        string_print(S8("error: test_cpython requires an external CPython {S8} checkout path\n"), S8(CPYTHON_COMPATIBILITY_TAG));
+        string_print(S8("usage: ./build/build test_cpython [--config Debug|Release] /path/to/cpython-{S8}\n"), S8(CPYTHON_COMPATIBILITY_TAG));
+        string_print(S8("fetch: tools/fetch_cpython.sh /path/to/cpython-{S8}\n"), S8(CPYTHON_COMPATIBILITY_TAG));
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 source_directory = os_path_absolute(arena, options.source_directory, true);
+    if (!cpython_git_verify(arena, source_directory))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 ide = compat_ide_path(arena, options.config);
+    String8 clang = executable_resolve_in_path(arena, S8("clang"));
+    if (!ide.length || !clang.length)
+    {
+        string_print(S8("error: test_cpython requires a built ide executable and clang in PATH\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ide = os_path_absolute(arena, ide, true);
+    String8 output_directory = string_format_z(arena, S8("build/cpython-{S8}-{u64}"), S8(CPYTHON_COMPATIBILITY_TAG), os_get_current_process_id());
+    make_directory_recursive(arena, output_directory);
+    output_directory = os_path_absolute(arena, output_directory, true);
+    string_print(S8("CPYTHON_HARNESS ide={S8} clang={S8} output={S8}\n"), ide, clang, output_directory);
+    cpython_raise_stack_limit(CPYTHON_STACK_LIMIT_BYTES);
+
+    String8 workload_path = path_join(arena, output_directory, S8("workload.py"));
+    if (!file_write(workload_path, BUSTER_SLICE_TO_BYTE_SLICE(cpython_workload_source())))
+    {
+        string_print(S8("error: test_cpython could not write {S8}\n"), workload_path);
+        return PROCESS_RESULT_FAILED;
+    }
+
+    // The Clang reference first: a reference that cannot build or answer the
+    // workload means the environment, not the compiler, is what broke.
+    String8 clang_tree = path_join(arena, output_directory, S8("clang"));
+    if (!cpython_configure_and_build(arena, source_directory, clang_tree, clang, clang, S8("clang")))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
+    String8 clang_workload = {0};
+    if (!cpython_run_workload(arena, clang_tree, workload_path, &clang_workload))
+    {
+        string_print(S8("error: test_cpython Clang reference workload failed\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
+    // The FAST build carries the full gate; the other three allocators prove
+    // the whole tree still compiles, links, and answers the workload.
+    String8 allocators[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    SliceString8 buster_failed = {0};
+    SliceString8 clang_failed = {0};
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(allocators); allocator_index += 1)
+    {
+        String8 mode = allocators[allocator_index];
+        String8 tree = path_join(arena, output_directory, string_format(arena, S8("buster-{S8}"), mode));
+        String8 cc = string_format(arena, S8("{S8} cc -fregister-allocator={S8}"), ide, mode);
+        if (!cpython_configure_and_build(arena, source_directory, tree, cc, clang, mode))
+        {
+            string_print(S8("error: test_cpython allocator={S8} build failed\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        String8 workload_output = {0};
+        if (!cpython_run_workload(arena, tree, workload_path, &workload_output))
+        {
+            string_print(S8("error: test_cpython allocator={S8} workload failed\n"), mode);
+            return PROCESS_RESULT_FAILED;
+        }
+        if (!string_equal(workload_output, clang_workload))
+        {
+            string_print(S8("error: test_cpython allocator={S8} workload output diverges from the Clang reference\n"), mode);
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(workload_output));
+            return PROCESS_RESULT_FAILED;
+        }
+        string_print(S8("CPYTHON_WORKLOAD allocator={S8} bytes={u64} status=match\n"), mode, workload_output.length);
+        if (allocator_index == 0)
+        {
+            if (!cpython_pyconfig_compare(arena, tree, clang_tree))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+            if (!cpython_run_suite(arena, tree, S8("buster-fast"), &buster_failed) ||
+                !cpython_run_suite(arena, clang_tree, S8("clang"), &clang_failed))
+            {
+                return PROCESS_RESULT_FAILED;
+            }
+        }
+    }
+
+    // The gate: a test the Buster build fails that the Clang build passes.
+    // Tests failing in BOTH builds are environment findings, reported and
+    // not gated on; the reverse direction (Clang fails, Buster passes) is
+    // reported for the record and never fails the run.
+    u64 buster_only = 0;
+    for (u64 index = 0; index < buster_failed.length; index += 1)
+    {
+        if (!cpython_failed_contains(clang_failed, buster_failed.pointer[index]))
+        {
+            buster_only += 1;
+            string_print(S8("CPYTHON_VERDICT test={S8} buster=fail clang=pass\n"), buster_failed.pointer[index]);
+        }
+    }
+    for (u64 index = 0; index < clang_failed.length; index += 1)
+    {
+        if (!cpython_failed_contains(buster_failed, clang_failed.pointer[index]))
+        {
+            string_print(S8("CPYTHON_VERDICT test={S8} buster=pass clang=fail\n"), clang_failed.pointer[index]);
+        }
+    }
+    string_print(S8("CPYTHON_RESULT tag={S8} buster_failed={u64} clang_failed={u64} buster_only_failures={u64} status={S8}\n"),
+                 S8(CPYTHON_COMPATIBILITY_TAG), buster_failed.length, clang_failed.length, buster_only,
+                 buster_only ? S8("fail") : S8("pass"));
+    return buster_only ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL void test_cpython_action_add(Arena* arena, TestCpythonOptions options)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
+    TestCpythonOptions* options_copy = arena_allocate(arena, TestCpythonOptions, 1);
+    *options_copy = options;
+    *run = (ProcessRun){.callback = test_cpython_action, .callback_data = options_copy};
+}
+
 typedef struct X86CompletionCensusPlan X86CompletionCensusPlan;
 struct X86CompletionCensusPlan
 {
@@ -32759,6 +33367,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_DOOM] = S8_INITIALIZER("test_doom"),
         [BUILD_COMMAND_TEST_QUICKJS] = S8_INITIALIZER("test_quickjs"),
         [BUILD_COMMAND_TEST_MUSL] = S8_INITIALIZER("test_musl"),
+        [BUILD_COMMAND_TEST_CPYTHON] = S8_INITIALIZER("test_cpython"),
         [BUILD_COMMAND_TEST_MODE_MATRIX] = S8_INITIALIZER("test_mode_matrix"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
@@ -32840,6 +33449,7 @@ ProcessResult process_arguments(void)
     TestDoomOptions test_doom_options = {0};
     TestQuickjsOptions test_quickjs_options = {0};
     TestMuslOptions test_musl_options = {0};
+    TestCpythonOptions test_cpython_options = {0};
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -33023,6 +33633,12 @@ ProcessResult process_arguments(void)
                 argument_i += 1;
             }
             // The second positional path is the optional libc-test checkout.
+            else if (command == BUILD_COMMAND_TEST_CPYTHON && !test_cpython_options.source_directory.length &&
+                     !string_starts_with_sequence(argument, S8("--")))
+            {
+                test_cpython_options.source_directory = argument;
+                argument_i += 1;
+            }
             else if (command == BUILD_COMMAND_TEST_MUSL && !test_musl_options.libc_test_directory.length &&
                      !string_starts_with_sequence(argument, S8("--")))
             {
@@ -33317,6 +33933,10 @@ ProcessResult process_arguments(void)
                 else if (command == BUILD_COMMAND_TEST_MUSL)
                 {
                     test_musl_options.config = config;
+                }
+                else if (command == BUILD_COMMAND_TEST_CPYTHON)
+                {
+                    test_cpython_options.config = config;
                 }
                 else if (command == BUILD_COMMAND_X86_64_COMPLETION_CENSUS && string_equal(config, S8("Release")))
                 {
@@ -33902,6 +34522,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_MUSL:
         {
             test_musl_action_add(arena, test_musl_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_CPYTHON:
+        {
+            test_cpython_action_add(arena, test_cpython_options);
         }
         break;
         case BUILD_COMMAND_TEST_MODE_MATRIX:

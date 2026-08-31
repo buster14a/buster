@@ -3958,6 +3958,43 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         library_name_offsets[library_index + 1] = 1 + (u32)library_name_size;
         library_name_size += library.length + 1;
     }
+    // --export-dynamic (clang spells it -rdynamic; configure scripts pass
+    // `-Xlinker -export-dynamic`): every defined global lands in .dynsym so
+    // dlopen(NULL)/dlsym can find the program's own definitions.  CPython's
+    // ctypes.pythonapi is exactly that call, and every
+    // `pythonapi.PyBytes_FromFormat` lookup died with "undefined symbol"
+    // while the flag was ignored.  Thread-local symbols are excluded: their
+    // st_value speaks TLS-offset, not address, and nothing dlsym-shaped asks
+    // for them.
+    bool export_dynamic = false;
+    for (u32 argument_index = 0; argument_index < options.linker_argument_count; argument_index += 1)
+    {
+        String8 linker_argument = options.linker_arguments[argument_index];
+        export_dynamic |= string_equal(linker_argument, S8("-export-dynamic")) || string_equal(linker_argument, S8("--export-dynamic")) ||
+                          string_equal(linker_argument, S8("-E"));
+    }
+    u32 export_count = 0;
+    u32* export_symbols = arena_allocate(arena, u32, object->symbol_count ? object->symbol_count : 1);
+    u64 exported_name_size = 0;
+    for (u32 symbol_index = 0; export_dynamic && symbol_index < object->symbol_count; symbol_index += 1)
+    {
+        ObjectSymbol* export_symbol = object->symbols + symbol_index;
+        if ((!export_symbol->global && !export_symbol->weak) || export_symbol->hidden || export_symbol->section >= OBJECT_SECTION_COUNT ||
+            object_section_kind_is_debug((ObjectSectionKind)export_symbol->section) || export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+            export_symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO || !export_symbol->name.length ||
+            (export_symbol->kind != OBJECT_SYMBOL_FUNCTION && export_symbol->kind != OBJECT_SYMBOL_DATA))
+        {
+            continue;
+        }
+        if (export_symbol->name.length > UINT32_MAX || exported_name_size > UINT32_MAX - export_symbol->name.length - 1)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+            result.symbol = export_symbol->name;
+            return result;
+        }
+        export_symbols[export_count++] = symbol_index;
+        exported_name_size += export_symbol->name.length + 1;
+    }
     // Symbol versions.  A reference GNU ld resolves records the version it
     // bound to, so the image keeps that one answer for its whole life instead
     // of taking whatever the running library happens to call default; that is
@@ -4042,9 +4079,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     }
     u64 dynamic_string_offset = interpreter_offset + interpreter_size;
     u32 first_symbol_name_offset = 1 + (u32)library_name_size;
-    u64 dynamic_string_size = 1 + library_name_size + imported_name_size + version_name_size;
+    u64 dynamic_string_size = 1 + library_name_size + imported_name_size + version_name_size + exported_name_size;
     u64 dynamic_symbol_offset = align_forward(dynamic_string_offset + dynamic_string_size, 8);
-    u64 dynamic_symbol_count = (u64)import_count + 1 + alias_count;
+    u64 dynamic_symbol_count = (u64)import_count + 1 + alias_count + export_count;
     if (dynamic_symbol_count > UINT32_MAX)
     {
         // The hash table states its chain length in one 32-bit word.
@@ -4174,6 +4211,23 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             alias_symbol_index += 1;
         }
     }
+    u64 export_symbol_slot = (u64)import_count + 1 + alias_count;
+    for (u32 export_index = 0; export_index < export_count; export_index += 1)
+    {
+        ObjectSymbol* export_symbol = object->symbols + export_symbols[export_index];
+        u64 symbol_offset = dynamic_symbol_offset + export_symbol_slot * ELF_SYMBOL_SIZE;
+        link_write_u32(bytes, symbol_offset, (u32)(dynamic_name_cursor - dynamic_string_offset));
+        memcpy(bytes + dynamic_name_cursor, export_symbol->name.pointer, export_symbol->name.length);
+        dynamic_name_cursor += export_symbol->name.length + 1;
+        // Binding and type in st_info; SHN_ABS in st_shndx, the shape the
+        // copy-slot aliases above already use -- the loader reads only the
+        // value, and the value is the final image address.
+        bytes[symbol_offset + 4] = (u8)(((export_symbol->weak ? 2u : 1u) << 4) | (export_symbol->kind == OBJECT_SYMBOL_FUNCTION ? 2u : 1u));
+        link_write_u16(bytes, symbol_offset + 6, 0xfff1);
+        link_write_u64(bytes, symbol_offset + 8, image_base + section_offsets[export_symbol->section] + export_symbol->value);
+        link_write_u64(bytes, symbol_offset + 16, export_symbol->size);
+        export_symbol_slot += 1;
+    }
     link_write_u32(bytes, hash_offset, 1);
     link_write_u32(bytes, hash_offset + 4, (u32)dynamic_symbol_count);
     link_write_u32(bytes, hash_offset + 8, 1);
@@ -4200,6 +4254,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         for (u32 alias_index = 0; alias_index < alias_count; alias_index += 1)
         {
             link_write_u16(bytes, version_symbol_offset + ((u64)import_count + 1 + alias_index) * sizeof(u16), alias_versions[alias_index]);
+        }
+        // An exported definition is VER_NDX_GLOBAL: the zero the buffer
+        // holds means "local", which the lookup skips, and dlsym would once
+        // again answer nothing.
+        for (u32 export_index = 0; export_index < export_count; export_index += 1)
+        {
+            link_write_u16(bytes, version_symbol_offset + ((u64)import_count + 1 + alias_count + export_index) * sizeof(u16), 1);
         }
         u64 need_cursor = version_need_offset;
         u64 previous_need = 0;

@@ -10210,6 +10210,30 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, os_process_wait_sync(asm_unit_arena, abs32_spawn).result == PROCESS_RESULT_SUCCESS);
             }
         }
+        // -rdynamic: the program's own globals land in .dynsym, and
+        // dlopen(NULL)+dlsym finds them -- ctypes.pythonapi's whole
+        // mechanism.  The fixture exits nonzero when the lookup fails.
+        String8 export_dynamic_path = buster_test_temporary_path(asm_unit_arena, S8("buster-c-export-dynamic"), S8(""));
+        String8 export_dynamic_command_line[] = {
+            S8("-rdynamic"), S8("-o"), export_dynamic_path, S8("tests/basic_c_export_dynamic.c"), S8("-ldl"),
+        };
+        CompilerDriverResult export_dynamic = compiler_driver_execute_invocation(
+            asm_unit_arena, compiler_driver_parse_arguments(asm_unit_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(export_dynamic_command_line)));
+        BUSTER_TEST(arguments, export_dynamic.error == COMPILER_DRIVER_ERROR_NONE);
+        if (export_dynamic.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 export_dynamic_arguments[] = {export_dynamic_path};
+            ProcessSpawnResult export_dynamic_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(export_dynamic_arguments), (SliceString8){0}, (SliceString8){0},
+                                 (ProcessSpawnOptions){
+                                     .use_process_environment = true,
+                                 });
+            BUSTER_TEST(arguments, export_dynamic_spawn.handle != 0);
+            if (export_dynamic_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(asm_unit_arena, export_dynamic_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
         // A directive the vocabulary does not cover is refused by name and by
         // line, rather than dropped from an object that then quietly lacks
         // whatever it was there to do.

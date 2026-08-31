@@ -1307,6 +1307,14 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.position_independent = false;
             continue;
         }
+        // clang's spelling of the flag configure scripts pass the linker as
+        // `-Xlinker -export-dynamic`; both routes land in linker_arguments
+        // and the hosted ELF writer reads it there.
+        if (string_equal(argument, S8("-rdynamic")))
+        {
+            invocation.linker_arguments[invocation.linker_argument_count++] = S8("-export-dynamic");
+            continue;
+        }
         bool compatible_codegen_option =
             string_equal(argument, S8("-pipe")) || string_equal(argument, S8("-pthread")) ||
             string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie")) ||
