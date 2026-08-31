@@ -2514,6 +2514,12 @@ never a source mirror. Talk to Forgejo with **`fj`**, the Forgejo CLI. It reads
 the repository from the git remote, so run it from inside a checkout (or pass
 `-C <path>` / `-r buster/buster`).
 
+The issues open on 2026-08-31 were copied to `buster14a/buster` on GitHub as
+part of the migration under way there. Numbers did not survive the copy, so
+every reference in this file, in code comments, and in commit messages names
+the **Forgejo** number: resolve it through `docs/issue-migration-map.md`, or
+through `docs/forgejo-issue-archive.md` for issues already closed by then.
+
 `fj` needs a token once per machine. The password half of the
 `code.buster14a.com` line in `~/.git-credentials` is a valid API token, so
 authentication is a pipe, not a browser round trip:
