@@ -1128,17 +1128,17 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 80);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 81);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
-    for (u16 opcode = MACHINE_X64_MOV_RI; opcode <= MACHINE_X64_VBINARY; opcode += 1)
+    for (u16 opcode = MACHINE_X64_MOV_RI; opcode <= MACHINE_X64_MULH64; opcode += 1)
     {
         x64_counts[machine_emit_recipe_category(machine_opcode_emit_recipe(opcode))] += 1;
     }
     BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 47);
     BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 50);
-    BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 28);
+    BUSTER_TEST(arguments, x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 29);
 
     // The x86-64 producer registry is the Phase-0 census used to keep the
     // encoder switch and recipe projection from drifting independently.  It
@@ -1146,7 +1146,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // recipe category in the source registry for reviewability.
     u32 registry_count = machine_x86_64_emit_registry_count();
     BUSTER_TEST(arguments, registry_count == MACHINE_X86_64_EMIT_REGISTRY_COUNT);
-    BUSTER_TEST(arguments, (u32)(MACHINE_X64_VBINARY - MACHINE_X64_MOV_RI + 1) == registry_count);
+    BUSTER_TEST(arguments, (u32)(MACHINE_X64_MULH64 - MACHINE_X64_MOV_RI + 1) == registry_count);
     u32 registry_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
     u32 registry_status_counts[MACHINE_X64_EMIT_PRODUCER_STATUS_COUNT] = {0};
     bool registry_entries_are_complete = true;
@@ -1327,7 +1327,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, registry_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT);
     BUSTER_TEST(arguments, machine_x86_64_emit_registry_entry(registry_count) == 0);
     BUSTER_TEST(arguments, machine_x86_64_emit_registry_find(MACHINE_X64_MOV_RI - 1) == 0);
-    BUSTER_TEST(arguments, machine_x86_64_emit_registry_find(MACHINE_X64_VBINARY + 1) == 0);
+    BUSTER_TEST(arguments, machine_x86_64_emit_registry_find(MACHINE_X64_MULH64 + 1) == 0);
 
     // Serial exact prewarm publishes one immutable row map for all workers.
     // Audit every row after publication: exact forms and sequences must have
@@ -1350,7 +1350,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_map.variable_memory_encoding_tables == 9);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
-    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 170);
+    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 171);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
 
     // Canonical metadata authorities and neutral patch helpers are separate

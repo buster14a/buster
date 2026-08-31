@@ -130,6 +130,17 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
         .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_X64_RAX, MACHINE_X64_RCX},                                                                    \
         .implicit_physical_defs = 1ull << MACHINE_X64_RDX,                                                                                                     \
     }
+// The high half of an unsigned product borrows the divide rows' constrained
+// shape exactly -- RAX in and out, RCX the other source, RDX clobbered -- and
+// differs only in what the scheduler should cost it as.
+#define MACHINE_INFO_MULTIPLY_HIGH(name_literal)                                                                                                                \
+    {                                                                                                                                                          \
+        .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = 1u << MACHINE_X64_RDX,                     \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_MUL, .fixed_register_set = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX),                                 \
+        .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_X64_RAX, MACHINE_X64_RCX},                                                                     \
+        .implicit_physical_defs = 1ull << MACHINE_X64_RDX,                                                                                                      \
+    }
 #define MACHINE_INFO_MOVE_CONSTRAINED(name_literal)                                                                                                            \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
@@ -332,6 +343,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_X64_SREM64] = MACHINE_INFO_DIVIDE("x64_srem64"),
     [MACHINE_X64_UREM32] = MACHINE_INFO_DIVIDE("x64_urem32"),
     [MACHINE_X64_UREM64] = MACHINE_INFO_DIVIDE("x64_urem64"),
+    [MACHINE_X64_MULH64] = MACHINE_INFO_MULTIPLY_HIGH("x64_mulh64"),
     [MACHINE_X64_LEA_FRAME] = {
         .name = S8_INITIALIZER("x64_lea_frame"),
         .operand_count = 2,
@@ -987,7 +999,10 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
 // operand and hazard fields.  The low index is target-local; values are kept
 // target-local within each category so a future generated projection can
 // replace this audit table without changing MachineOpcode identities.
-BUSTER_CT_CHECK(MACHINE_X64_VBINARY - MACHINE_X64_MOV_RI + 1 == MACHINE_X86_64_EMIT_REGISTRY_COUNT);
+// The registry is indexed by opcode offset from MOV_RI, so it has to span the
+// whole x86-64 range: this names the last opcode in it, and a new one added
+// past that has to be named here instead.
+BUSTER_CT_CHECK(MACHINE_X64_MULH64 - MACHINE_X64_MOV_RI + 1 == MACHINE_X86_64_EMIT_REGISTRY_COUNT);
 
 BUSTER_GLOBAL_LOCAL MachineX64EmitRegistryEntry const machine_x86_64_emit_registry[MACHINE_X86_64_EMIT_REGISTRY_COUNT] = {
 #define MACHINE_X64_REGISTRY_ROW(opcode_value, category_value, index_value, status_value) \
@@ -1267,7 +1282,7 @@ MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_entry(u32 ordina
 MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_find(MachineOpcode opcode)
 {
     MachineX64EmitRegistryEntry const* result;
-    if (opcode < MACHINE_X64_MOV_RI || opcode > MACHINE_X64_VBINARY)
+    if (opcode < MACHINE_X64_MOV_RI || opcode > MACHINE_X64_MULH64)
     {
         result = 0;
     }

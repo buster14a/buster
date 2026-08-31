@@ -2455,6 +2455,27 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_select_arithmetic_row(MachineX64Selector* se
     return result;
 }
 
+// The constrained sibling of machine_x64_select_arithmetic_row, for an opcode
+// whose first slot is used *and* defined: the value is copied into a fresh
+// register first and the operation rewrites it in place, which is the two-row
+// shape the divides already use and the only one an opcode outside
+// machine_x64_opcode_is_ssa_two_address may be spelled with.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_select_constrained_row(MachineX64Selector* selector, u16 opcode, u32 left_register, u32 right_register)
+{
+    u32 result = machine_x64_synthesize_register(selector);
+    machine_x64_select_row(selector, (MachineInstruction){
+                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result),
+                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register)},
+                                         .opcode = MACHINE_X64_MOV_RR,
+                                     });
+    machine_x64_select_row(selector, (MachineInstruction){
+                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result),
+                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                         .opcode = opcode,
+                                     });
+    return result;
+}
+
 // One CMP64 + SETcc pair into a fresh synthesized register. The compare is
 // re-issued per SETcc so every flags read sits directly behind its producer,
 // which is the shape the scheduler's flag chain already models. SETcc's row is
@@ -2486,9 +2507,9 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_select_compare_set(MachineX64Selector* selec
 // x86 has ADC and SBB, which would carry the flags between the halves in one
 // instruction each; the boolean spelling is used instead because it needs no
 // flags-pairing row, and a row that produces flags for a *later* row to consume
-// is not something MachineInstruction models yet. Multiplies, divides,
-// remainders and variable-amount shifts keep the canonical pair lowerings --
-// the multiply needs a high-multiply row that neither target has.
+// is not something MachineInstruction models yet. The multiply is the
+// canonical emitter's own three-multiply sequence over MULH64. Divides,
+// remainders and variable-amount shifts keep the canonical pair lowerings.
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_i128_binary(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrFunction* function = selector->function;
@@ -2543,6 +2564,21 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_i128_binary(MachineX64Selector* sele
             machine_x64_select_frame_store64(selector, result_slot, 8,
                                              machine_x64_select_arithmetic_row(selector, MACHINE_X64_SUB64, difference_high, borrow));
         }
+        selected = true;
+    }
+    else if (operation == IR_BINARY_INTEGER_MULTIPLY && result_slot != UINT32_MAX &&
+             machine_x64_select_i128_halves(selector, instruction, &left_low, &left_high, &right_low, &right_high))
+    {
+        // low = a.lo * b.lo truncated, which is signedness-blind, so IMUL64
+        // serves; high = the *unsigned* high half of that same product plus
+        // the two cross terms, which is what MULH64 exists for. The canonical
+        // emitter writes the same three multiplies.
+        u32 product_high = machine_x64_select_constrained_row(selector, MACHINE_X64_MULH64, left_low, right_low);
+        u32 cross_low_high = machine_x64_select_arithmetic_row(selector, MACHINE_X64_IMUL64, left_low, right_high);
+        u32 cross_high_low = machine_x64_select_arithmetic_row(selector, MACHINE_X64_IMUL64, left_high, right_low);
+        u32 sum = machine_x64_select_arithmetic_row(selector, MACHINE_X64_ADD64, product_high, cross_low_high);
+        machine_x64_select_frame_store64(selector, result_slot, 0, machine_x64_select_arithmetic_row(selector, MACHINE_X64_IMUL64, left_low, right_low));
+        machine_x64_select_frame_store64(selector, result_slot, 8, machine_x64_select_arithmetic_row(selector, MACHINE_X64_ADD64, sum, cross_high_low));
         selected = true;
     }
     else if ((operation == IR_BINARY_INTEGER_EQUAL || operation == IR_BINARY_INTEGER_NOT_EQUAL) && result_register != UINT32_MAX &&
@@ -8786,6 +8822,13 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_unary(void)
     operand.width = operand.reg.width = 64;
     (void)machine_x64_metadata_shape_cache_add(S8("DIV"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("IDIV"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    // The one-operand MUL is the divides' sibling in every respect that
+    // matters here -- same encoding group, same implicit RDX:RAX pair -- and
+    // MACHINE_X64_MULH64 emits it for the high half of an i128 product. A
+    // shape absent from this cache fails closed at encode rather than falling
+    // back to handwritten bytes, so registering it is what makes the row
+    // reachable at all.
+    (void)machine_x64_metadata_shape_cache_add(S8("MUL"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
     for (u32 register_index = 0; register_index < 16; register_index += 1)
     {
         operand = machine_x64_exact_gpr_operand(register_index, 64);
@@ -10425,6 +10468,15 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         {
                             (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RDX, wide ? 64 : 32, 0);
                         }
+                    }
+                    break; case MACHINE_X64_MULH64:
+                    {
+                        // `mul r/m64` writes RDX:RAX, and only the high half is
+                        // wanted; the move back into RAX is the same one the
+                        // remainder rows above make, and for the same reason --
+                        // slot 0 says the answer is in RAX.
+                        (void)machine_x64_emit_metadata_register(&encoder, S8("MUL"), MACHINE_X64_RCX, 64, 0);
+                        (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RDX, 64, 0);
                     }
                     break; case MACHINE_X64_RET:
                     {

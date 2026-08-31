@@ -468,6 +468,13 @@ typedef enum MachineOpcode
     // opcode (vpaddb 0xfc family, vpand 0xdb family) chosen by the selector
     // from the operation and lane width.
     MACHINE_X64_VBINARY,      // def vec, use vec, use vec
+    // The high sixty-four bits of an unsigned 64x64 product, which the i128
+    // multiply needs and which no two-operand form produces: `mul r/m64`
+    // writes RDX:RAX, so this borrows the divide rows' constrained shape --
+    // operand 0 is used and defined in RAX, operand 1 is the multiplier in
+    // RCX, and RDX is clobbered. The expansion moves RDX back into RAX, the
+    // way the remainder rows do, so the answer arrives where slot 0 says.
+    MACHINE_X64_MULH64, // use/def RAX, use RCX; clobbers RDX
     // AArch64 scalar subset. Three-address forms carry no ties; the only
     // constrained rows are the remainder macro-ops, whose div-then-msub
     // sequence needs three distinct registers. Operand slot 0 is the
@@ -674,17 +681,17 @@ typedef enum MachineOpcode
 } MachineOpcode;
 
 // x86-64 encoder authority registry.  The opcode rows are a contiguous
-// projection of MACHINE_X64_MOV_RI..MACHINE_X64_VBINARY; the authority and
+// projection of MACHINE_X64_MOV_RI..MACHINE_X64_MULH64; the authority and
 // neutral-patch records below keep every remaining producer explicit while
 // migration work moves instruction construction behind metadata.
-#define MACHINE_X86_64_EMIT_REGISTRY_COUNT 125u
+#define MACHINE_X86_64_EMIT_REGISTRY_COUNT 126u
 #define MACHINE_X86_64_EMIT_REGISTRY_DIRECT_COUNT 47u
 #define MACHINE_X86_64_EMIT_REGISTRY_FAMILY_COUNT 50u
-#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT 28u
+#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_COUNT 29u
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT 78u
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT 19u
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT (MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT + MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT)
-#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 28u
+#define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 29u
 #define MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT 0u
 #define MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT 5u
 #define MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT 15u

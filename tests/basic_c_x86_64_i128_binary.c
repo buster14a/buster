@@ -37,6 +37,70 @@ static U64 low_half(U128 value)
     return (U64)value;
 }
 
+// The multiply lives in its own function on purpose. AArch64 still refuses it
+// -- it needs a UMULH row, and that mnemonic has no generated form id yet
+// (#810) -- so keeping it out of `main` leaves every other check in this file
+// machine-selected on both targets, and leaves the fallback count able to say
+// so: zero on x86-64, exactly this one function on AArch64.
+static int multiply_checks(void)
+{
+    if (high_half(make(0, 3) * make(0, 5)) != 0 || low_half(make(0, 3) * make(0, 5)) != 15)
+    {
+        return 43;
+    }
+    {
+        // The full-width product of two low halves, which is the whole reason
+        // the high multiply exists: neither operand has a high half and the
+        // answer does.
+        U128 product = make(0, all_ones) * make(0, all_ones);
+        if (high_half(product) != 0xfffffffffffffffeULL || low_half(product) != 1)
+        {
+            return 44;
+        }
+        product = make(0, 1ULL << 63) * make(0, 2);
+        if (high_half(product) != 1 || low_half(product) != 0)
+        {
+            return 45;
+        }
+    }
+    {
+        // Each cross term alone, then both at once.
+        U128 product = make(3, 4) * make(0, 5);
+        if (high_half(product) != 15 || low_half(product) != 20)
+        {
+            return 46;
+        }
+        product = make(0, 5) * make(3, 4);
+        if (high_half(product) != 15 || low_half(product) != 20)
+        {
+            return 47;
+        }
+        product = make(7, 0x0123456789abcdefULL) * make(0x11, 0xfedcba9876543210ULL);
+        if (high_half(product) != 0x0c82b00c0e2de291ULL || low_half(product) != 0x2236d88fe5618cf0ULL)
+        {
+            return 48;
+        }
+    }
+    {
+        // The truncated product is signedness-blind, so the signed spelling of
+        // the same bits answers the same way.
+        S128 negative = (S128)make(all_ones, 0xfffffffffffffffbULL);
+        S128 product = negative * (S128)7;
+        if (high_half((U128)product) != all_ones || low_half((U128)product) != 0xffffffffffffffddULL)
+        {
+            return 49;
+        }
+    }
+    {
+        U128 product = make(all_ones, all_ones) * make(0, 2);
+        if (high_half(product) != all_ones || low_half(product) != 0xfffffffffffffffeULL)
+        {
+            return 50;
+        }
+    }
+    return 0;
+}
+
 int main(void)
 {
     // Add: the carry out of the low half has to reach the high one.
@@ -278,6 +342,13 @@ int main(void)
         if (!((U128)negative > (U128)positive))
         {
             return 42;
+        }
+    }
+    {
+        int multiply_result = multiply_checks();
+        if (multiply_result)
+        {
+            return multiply_result;
         }
     }
     return 0;

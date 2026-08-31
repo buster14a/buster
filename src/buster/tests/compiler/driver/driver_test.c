@@ -4574,11 +4574,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // built for both targets and run on both: natively here, and under
     // qemu-aarch64 where that is installed.
     //
-    // The fallback count is pinned at zero because running alone proves
-    // nothing: the canonical emitter answers identically, and a selector that
-    // stopped firing would silently retire the coverage. Only the multiply is
-    // left refusing on either target, and this fixture deliberately has none --
-    // it needs a high-multiply row neither target has.
+    // The multiply came later, on the x86-64 side only, and it lives in a
+    // function of its own in the fixture so the AArch64 lane can still pin
+    // everything else at zero -- see the per-target expectation below.
+    //
+    // The fallback count is pinned because running alone proves nothing: the
+    // canonical emitter answers identically, and a selector that stopped
+    // firing would silently retire the coverage.
     String8 i128_binary_allocators[] = {
         S8("none"),
         S8("mir-stack"),
@@ -4609,7 +4611,15 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 i128_binary_temporary.arena,
                 compiler_driver_parse_arguments(i128_binary_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(i128_binary_command_line)));
             BUSTER_TEST(arguments, i128_binary.error == COMPILER_DRIVER_ERROR_NONE);
-            BUSTER_TEST(arguments, i128_binary.codegen_statistics.fallback_function_count == 0u);
+            // NONE is the canonical emitter and reports no fallbacks by
+            // definition. Under the machine modes x86-64 carries the whole
+            // file; AArch64 carries all of it but `multiply_checks`, which is
+            // why the multiply has a function of its own -- it needs a UMULH
+            // row and that mnemonic has no generated form id yet (#810). The
+            // day it lands this expectation becomes an unconditional zero.
+            bool machine_mode = allocator_index != 0;
+            u32 expected_i128_fallbacks = target_index == 1 && machine_mode ? 1u : 0u;
+            BUSTER_TEST(arguments, i128_binary.codegen_statistics.fallback_function_count == expected_i128_fallbacks);
             bool native_x64 = target_index == 0 && BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64;
             bool emulated_a64 = target_index == 1 && aarch64_i128_qemu_available;
             if (i128_binary.error == COMPILER_DRIVER_ERROR_NONE && (native_x64 || emulated_a64))
