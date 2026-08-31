@@ -180,6 +180,36 @@ coverage required by this repository.
   current Android and iOS workflows depend on KVM/emulator and simulator
   behavior that this desktop broker does not claim to reproduce.
 
+## Reading a run's logs
+
+Forgejo is the index and GitHub holds the (deliberately thin) detail. Each
+push to `main` produces a "GitHub hosted desktop matrix" run whose
+"Privacy bridge" job log is the audit trail:
+
+```text
+GITHUB_BRIDGE deploy_key_id=N created=true
+GITHUB_BRIDGE request_id=<nonce> dispatched=true
+GITHUB_BRIDGE run_id=<id> discovered=true
+GITHUB_BRIDGE run_id=<id> conclusion=success url=https://github.com/OWNER/BROKER/actions/runs/<id>
+GITHUB_BRIDGE secret_deleted=true
+GITHUB_BRIDGE deploy_key_id=N revoked=true
+```
+
+The `url=` line opens the GitHub run with its three platform jobs. Their
+retained logs carry step names, pass/fail, and the fixed
+`BUSTER_GITHUB_CI platform=... exit_code=...` line — nothing else: build
+output goes to a file on the memory workspace and dies with it, which is
+the log-minimization rule working. While the enable variable was unset,
+these Forgejo runs show as skipped with a zero duration; that is the
+designed inert state, not a failure.
+
+To debug a red hosted job, temporarily add a bounded failure tail to the
+**broker's** workflow copy (print the last N lines of the memory-workspace
+log only when the step failed), read the run, then restore the broker file
+from `.forgejo/github-bridge/forgejo-hosted.yml`. The canonical template
+stays clean, and the trust rules below still forbid verbose logging as a
+standing feature.
+
 ## Local verification
 
 The validation, sealing, polling, cancellation, and credential-lifecycle
