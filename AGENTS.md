@@ -160,11 +160,13 @@ Three layers: `./build.sh` bootstraps `build/build` from `build.c` using
 **tcc**, which then drives CMake + ninja (multi-config, outputs in
 `build/<Config>/`).
 
-The narrow, supplementary GitHub-hosted privacy broker is the only bootstrap
-exception: its fresh hosted images compile `build.c` with the preinstalled
-Clang so the broker neither downloads an unpinned compiler before receiving
-source nor depends on TCC where modern macOS cannot run it. It never produces a
-trusted or reusable compiler artifact; canonical local and Forgejo workflows
+The GitHub-hosted workflows are the bootstrap exception: the supplementary
+privacy broker and `.github/workflows/ci.yml` both compile `build.c` with the
+Clang already on the hosted image, because those images ship no TCC and modern
+macOS cannot run it, and because the broker must not download an unpinned
+compiler before it receives source. Neither produces a trusted or reusable
+compiler artifact, and neither runs the multi-compiler combination matrix,
+which needs TCC, GCC and Zig together. Canonical local and Forgejo workflows
 continue to bootstrap with TCC.
 
 Keep build orchestration and policy in `build.c`, with the least practical
@@ -2160,7 +2162,10 @@ compilation is explicitly enabled.
   exposed through a production public header.
 - CI is defined under `.forgejo/`; Forgejo remains the source of truth. The
   opt-in GitHub-hosted desktop capacity uses the source-free broker template in
-  `.forgejo/github-bridge/`, not a repository mirror. Preserve Debug/Release,
+  `.forgejo/github-bridge/`, not a repository mirror. `.github/workflows/ci.yml`
+  runs the same suite on GitHub's standard runners for the migration described
+  in `docs/ci-github-actions.md`; it stays inert until its repository variable
+  is set, and skips itself outright when Forgejo evaluates it. Preserve Debug/Release,
   unity/non-unity, sanitizer/fuzz, self-host, and supported-platform coverage
   when changing build orchestration or the compiler pipeline. Do not add source
   mirroring, Actions artifacts/caches, durable GitHub-side credentials, verbose

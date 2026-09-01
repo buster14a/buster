@@ -1,0 +1,125 @@
+name: Buster CI
+
+# GitHub-hosted CI for the migration to GitHub, on standard runners.
+#
+# Forgejo also reads .github/workflows, so every job is gated on actually
+# running at github.com. On Forgejo that condition is false and the job
+# skips, instead of queueing forever against a runner label no Forgejo
+# runner carries. The second half of the gate keeps the workflow inert
+# until GH_ACTIONS_CI_ENABLED is set, so a private repository spends none
+# of its included minutes before the migration is finished.
+#
+# Bootstrapping uses the Clang already present on the hosted images rather
+# than TCC: the images ship no TCC, and modern macOS cannot run it. The
+# multi-compiler combination matrix (tcc/gcc/zig) therefore still belongs
+# to the native runners; this workflow builds and runs the full Release
+# test suite on each platform.
+
+on:
+  push:
+  pull_request:
+
+# A newer push supersedes an in-flight run for the same ref, which is what
+# keeps queue latency flat when several batches land together.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: ${{ matrix.name }}
+    timeout-minutes: 60
+    strategy:
+      # Report every platform's result: a failure on one is not a reason to
+      # hide the others when the whole point is cross-platform coverage.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            runner: ubuntu-24.04
+            platform: unix
+          - name: macOS
+            runner: macos-15
+            platform: unix
+          - name: Windows
+            runner: windows-2022
+            platform: windows
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Test (Linux, macOS)
+        if: ${{ matrix.platform == 'unix' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # generate wipes build/, so the bootstrap driver lives outside it.
+          # The hosted images carry no mold, so the linker stays DEFAULT.
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --ci --linker DEFAULT
+          "$driver" build --config Release -t test_all --verbose
+
+      - name: Test (Windows)
+        if: ${{ matrix.platform == 'windows' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
+          $VsPath = (& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1).Trim()
+          if (-not $VsPath) { throw 'Visual Studio with VC tools was not found' }
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          # The native toolchain runs through cmd so its progress on stderr
+          # cannot become a terminating PowerShell error record. Clang on the
+          # MSVC triple also warns on build.c's forward-declared enums.
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" generate --cc clang --ci"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" build --config Release -t test_all --verbose"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  mode_matrix:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Execution-mode matrix (${{ matrix.name }})
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            runner: ubuntu-24.04
+          - name: macOS
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      # The matrix cross-products every register-allocator mode with every
+      # linkable target, running each leg natively or under an emulator the
+      # host provides and oracle-checking the rest. It runs beside the suite
+      # rather than after it, so wall time is the slower of the two.
+      - name: Execution-mode matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          # The matrix generates its own tree only when one is absent, and
+          # that generate would ask for mold, which the hosted images do not
+          # have. --linker belongs to the generate command alone, so the tree
+          # is prepared here and the matrix reuses it.
+          "$driver" generate --cc clang --config Release --linker DEFAULT
+          "$driver" test_mode_matrix --config Release
