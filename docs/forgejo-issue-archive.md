@@ -1428,7 +1428,7 @@ link that has no `crti.o` defines them. Buster compiles that startup object
 correctly (`readelf -sW` shows both as `FUNC WEAK UND`), but linking it with
 buster's own linker gives both a PLT thunk, so `__libc_start_main` sees them
 as present and calls into a null GOT slot. `ld -static` resolves both to zero.
-Reproduced by hand on 2026-08-29 against `/home/david/dev/musl-v1.2.6`, with a
+Reproduced by hand on 2026-08-29 against a local `musl-v1.2.6` checkout, with a
 stub `__libc_start_main` reporting which of the two came back non-null:
 
 ```sh

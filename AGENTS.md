@@ -2533,7 +2533,7 @@ authentication is a pipe, not a browser round trip:
 grep code.buster14a.com ~/.git-credentials \
   | sed 's|https://[^:]*:||; s|@code.buster14a.com.*||' \
   | fj auth add-token -H code.buster14a.com
-fj whoami          # verify: davidgmbb@code.buster14a.com
+fj whoami          # verify: <account>@code.buster14a.com
 ```
 
 `fj issue create "<title>" --body-file <path> --no-template`,
