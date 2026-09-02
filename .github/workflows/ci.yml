@@ -100,6 +100,7 @@ jobs:
             zig_sha256: 68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e
             vs_arch: amd64
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+            clang_arch: x86_64
           - name: Windows AArch64
             runner: windows-11-arm
             platform: windows
@@ -109,6 +110,7 @@ jobs:
             zig_sha256: aee38316ee4111717900f45dd3130145c39289e105541d737eb8c5ed653c78ef
             vs_arch: arm64
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.ARM64
+            clang_arch: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -199,6 +201,7 @@ jobs:
         env:
           VS_ARCH: ${{ matrix.vs_arch }}
           VS_COMPONENT: ${{ matrix.vs_component }}
+          CLANG_ARCH: ${{ matrix.clang_arch }}
         run: |
           $ErrorActionPreference = 'Stop'
           $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -211,6 +214,14 @@ jobs:
           # whatever it last ran internally; `where.exe cl` is the check that
           # the shell actually arrived.
           & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
+          # The dev shell puts Visual Studio's own x64 clang ahead of the
+          # image's standalone LLVM. On the AArch64 runner that clang emits
+          # x86-64 objects while the shell's LIB holds arm64 import
+          # libraries, and every link fails on strlen and
+          # __imp_GetCommandLineW. The standalone LLVM matches the host, so
+          # it goes first -- for the matrix's clang row as much as for the
+          # bootstrap below.
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
           where.exe cl
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           where.exe clang
@@ -219,6 +230,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           where.exe zig
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Name the mismatch here rather than leaving it to a wall of
+          # unresolved externals a minute later.
+          $ClangVersion = (& clang --version) -join "`n"
+          Write-Output $ClangVersion
+          if ($ClangVersion -notmatch "Target:\s*${env:CLANG_ARCH}-") {
+            throw "clang does not default to a ${env:CLANG_ARCH} target"
+          }
           # The native toolchain runs through cmd so its progress on stderr
           # cannot become a terminating PowerShell error record. Clang on the
           # MSVC triple also warns on build.c's forward-declared enums.

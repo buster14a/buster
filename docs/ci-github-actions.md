@@ -129,6 +129,14 @@ launched per target (`amd64` with `VC.Tools.x86.x64`, `arm64` with
 validates that parameter against `x86,amd64` alone, so the AArch64 runner
 drives an emulated x64 toolchain host at an arm64 target.
 
+That shell also puts Visual Studio's own x64 clang ahead of the image's
+standalone LLVM, which on the AArch64 runner emits x86-64 objects against the
+shell's arm64 import libraries — every link then fails on `strlen` and
+`__imp_GetCommandLineW`. `C:\Program Files\LLVM\bin` is therefore prepended
+after the shell is entered, and the step asserts clang's default target
+matches the runner rather than letting a wall of unresolved externals explain
+it a minute later.
+
 Two rows are weaker than they look. On macOS `/usr/bin/gcc` is an Apple Clang
 shim, so the GCC row is a second Clang row; the images do carry real Homebrew
 GCC, but only under versioned names (`gcc-15`), which is not what `build.c`
