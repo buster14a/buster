@@ -165,9 +165,11 @@ privacy broker and `.github/workflows/ci.yml` both compile `build.c` with the
 Clang already on the hosted image, because those images ship no TCC and modern
 macOS cannot run it, and because the broker must not download an unpinned
 compiler before it receives source. Neither produces a trusted or reusable
-compiler artifact, and neither runs the multi-compiler combination matrix,
-which needs TCC, GCC and Zig together. Canonical local and Forgejo workflows
-continue to bootstrap with TCC.
+compiler artifact. The broker also does not run the multi-compiler combination
+matrix, because it installs nothing; `.github/workflows/ci.yml` does, after
+installing a pinned and checksummed Zig and the distribution's mold, both of
+which the images lack. Canonical local and Forgejo workflows continue to
+bootstrap with TCC.
 
 Keep build orchestration and policy in `build.c`, with the least practical
 process-launch and scripting overhead. Shell and PowerShell scripts exist only
@@ -1888,7 +1890,9 @@ child is bounded by `MODE_MATRIX_TIMEOUT_SECONDS`. The whole matrix costs
 about four seconds on a warm tree; CI runs it on the dedicated Linux runner
 and on macOS (where the Mach-O rows execute natively), and skips the Windows
 runner because that box is the CI wall-time gate and its PE rows already run
-under wine on Linux.
+under wine on Linux. GitHub CI runs it on all four of its Unix runners, which
+is what makes the ELF and Mach-O rows execute natively at both x86-64 and
+AArch64; those images carry no wine, so their PE rows stay on the oracle.
 The combination matrix shares one multi-config build tree across configurations
 when their configure-time policy matches. Clang omits unsanitized Debug because
 sanitized Debug provides the stronger coverage; it builds and runs unsanitized
@@ -2163,11 +2167,16 @@ compilation is explicitly enabled.
 - CI is defined under `.forgejo/`; Forgejo remains the source of truth. The
   opt-in GitHub-hosted desktop capacity uses the source-free broker template in
   `.forgejo/github-bridge/`, not a repository mirror. `.github/workflows/ci.yml`
-  runs the same suite on GitHub's standard runners for the migration described
-  in `docs/ci-github-actions.md`; it stays inert until its repository variable
-  is set, and skips itself outright when Forgejo evaluates it. Preserve Debug/Release,
-  unity/non-unity, sanitizer/fuzz, self-host, and supported-platform coverage
-  when changing build orchestration or the compiler pipeline. Do not add source
+  runs the same steps as the Forgejo matrix — combination matrix, execution-mode
+  matrix, Android and iOS — on GitHub's standard runners for the migration
+  described in `docs/ci-github-actions.md`, and spends that platform's spare
+  capacity on testing every desktop OS at both x86-64 and AArch64; it stays
+  inert until its repository variable is set, and skips itself outright when
+  Forgejo evaluates it. Changing a `runs-on` label there means changing
+  `.github/actionlint.yaml` too, because actionlint knows only the labels its
+  own release predates. Preserve Debug/Release, unity/non-unity,
+  sanitizer/fuzz, self-host, and supported-platform coverage when changing
+  build orchestration or the compiler pipeline. Do not add source
   mirroring, Actions artifacts/caches, durable GitHub-side credentials, verbose
   broker logs, or untrusted-PR triggers to the broker; see
   `docs/ci-github-hosted-runners.md`.

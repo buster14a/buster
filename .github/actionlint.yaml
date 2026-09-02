@@ -1,0 +1,12 @@
+# actionlint validates `runs-on` against a list of runner labels compiled into
+# the binary, so a release older than a runner image reports a label it has
+# never heard of. These are all standard GitHub-hosted labels; the option is
+# named for self-hosted runners only because that is the sole mechanism
+# actionlint offers for teaching it a label.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm
+    - macos-26
+    - macos-26-intel
+    - windows-11-arm

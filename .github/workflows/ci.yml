@@ -2,18 +2,25 @@ name: Buster CI
 
 # GitHub-hosted CI for the migration to GitHub, on standard runners.
 #
+# It carries the same coverage as .forgejo/workflows/ci.yml — the
+# multi-compiler combination matrix, the execution-mode matrix, the Android
+# emulator suite and the iOS simulator suite — and runs the desktop half of it
+# on the newest standard image of every operating system in both
+# architectures, so x86-64 and AArch64 are first-class on Linux, macOS and
+# Windows alike. Forgejo remains the source of truth; this runs beside it.
+#
 # Forgejo also reads .github/workflows, so every job is gated on actually
-# running at github.com. On Forgejo that condition is false and the job
-# skips, instead of queueing forever against a runner label no Forgejo
-# runner carries. The second half of the gate keeps the workflow inert
-# until GH_ACTIONS_CI_ENABLED is set, so a private repository spends none
-# of its included minutes before the migration is finished.
+# running at github.com. On Forgejo that condition is false and the job skips,
+# instead of queueing forever against a runner label no Forgejo runner
+# carries. The second half of the gate keeps the workflow inert until
+# GH_ACTIONS_CI_ENABLED is set, so a private repository spends none of its
+# included minutes before the migration is finished.
 #
 # Bootstrapping uses the Clang already present on the hosted images rather
 # than TCC: the images ship no TCC, and modern macOS cannot run it. The
-# multi-compiler combination matrix (tcc/gcc/zig) therefore still belongs
-# to the native runners; this workflow builds and runs the full Release
-# test suite on each platform.
+# combination matrix itself needs Clang, GCC, Zig and — on Windows — MSVC as
+# application compilers; the images carry every one of those but Zig, which
+# each job installs from a pinned, checksummed upstream archive.
 
 on:
   push:
@@ -28,26 +35,60 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Pinned so the matrix's Zig row cannot change under a rerun of an old
+  # commit. The per-target checksums live in each job's matrix entry.
+  ZIG_VERSION: 0.16.0
+
 jobs:
   test:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: ${{ matrix.name }}
-    timeout-minutes: 60
+    # The combination matrix builds a tree for every compiler and
+    # configure-time policy and runs the suite in each Clang one. Hosted
+    # runners have a fraction of the cores of the native boxes, so the bound
+    # is generous; it stays well inside GitHub's own six-hour job limit.
+    timeout-minutes: 180
     strategy:
       # Report every platform's result: a failure on one is not a reason to
       # hide the others when the whole point is cross-platform coverage.
       fail-fast: false
       matrix:
         include:
-          - name: Linux
-            runner: ubuntu-24.04
+          - name: Linux x86-64
+            runner: ubuntu-26.04
             platform: unix
-          - name: macOS
-            runner: macos-15
+            zig_target: x86_64-linux
+            zig_sha256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+          - name: Linux AArch64
+            runner: ubuntu-26.04-arm
             platform: unix
-          - name: Windows
-            runner: windows-2022
+            zig_target: aarch64-linux
+            zig_sha256: ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+          - name: macOS x86-64
+            runner: macos-26-intel
+            platform: unix
+            zig_target: x86_64-macos
+            zig_sha256: 0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7
+          - name: macOS AArch64
+            runner: macos-26
+            platform: unix
+            zig_target: aarch64-macos
+            zig_sha256: b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+          - name: Windows x86-64
+            runner: windows-2025
             platform: windows
+            zig_target: x86_64-windows
+            zig_sha256: 68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e
+            vs_arch: amd64
+            vs_component: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+          - name: Windows AArch64
+            runner: windows-11-arm
+            platform: windows
+            zig_target: aarch64-windows
+            zig_sha256: aee38316ee4111717900f45dd3130145c39289e105541d737eb8c5ed653c78ef
+            vs_arch: arm64
+            vs_component: Microsoft.VisualStudio.Component.VC.Tools.ARM64
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -55,37 +96,114 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Test (Linux, macOS)
+      # Linux defaults to mold for every non-Zig compiler, and the images do
+      # not carry it. This is the distribution's own package, so the version
+      # is the one that image already pins.
+      - name: Install mold
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+
+      - name: Install Zig
+        if: ${{ matrix.platform == 'unix' }}
+        shell: bash
+        env:
+          ZIG_TARGET: ${{ matrix.zig_target }}
+          ZIG_SHA256: ${{ matrix.zig_sha256 }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/zig.tar.xz"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$archive" \
+            "https://ziglang.org/download/$ZIG_VERSION/zig-$ZIG_TARGET-$ZIG_VERSION.tar.xz"
+          printf '%s  %s\n' "$ZIG_SHA256" "$archive" | shasum --algorithm 256 --check -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$archive" -C "$RUNNER_TEMP/zig" --strip-components=1
+          printf '%s\n' "$RUNNER_TEMP/zig" >>"$GITHUB_PATH"
+
+      - name: Install Zig
+        if: ${{ matrix.platform == 'windows' }}
+        shell: powershell
+        env:
+          ZIG_TARGET: ${{ matrix.zig_target }}
+          ZIG_SHA256: ${{ matrix.zig_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Archive = Join-Path $env:RUNNER_TEMP 'zig.zip'
+          $Url = "https://ziglang.org/download/${env:ZIG_VERSION}/zig-${env:ZIG_TARGET}-${env:ZIG_VERSION}.zip"
+          # curl and bsdtar are both in-box on these images, and bsdtar reads
+          # the zip directly, which Expand-Archive takes minutes to do.
+          curl.exe --fail --silent --show-error --location --retry 3 --output $Archive $Url
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Archive).Hash.ToLower()
+          if ($Actual -ne $env:ZIG_SHA256) { throw "Zig archive checksum is $Actual, expected ${env:ZIG_SHA256}" }
+          $Root = Join-Path $env:RUNNER_TEMP 'zig'
+          New-Item -ItemType Directory -Force -Path $Root | Out-Null
+          tar.exe -x -f $Archive -C $Root --strip-components=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_PATH -Value $Root
+
+      # Name the application compilers before the matrix runs, because a
+      # missing one fails deep inside a CMake configure with a far less
+      # obvious message than an absent command here.
+      - name: Application compilers
         if: ${{ matrix.platform == 'unix' }}
         shell: bash
         run: |
           set -euo pipefail
-          # generate wipes build/, so the bootstrap driver lives outside it.
-          # The hosted images carry no mold, so the linker stays DEFAULT.
+          clang --version
+          # macOS answers /usr/bin/gcc with an Apple Clang shim; the matrix's
+          # GCC row is a real GCC only where the platform provides one.
+          gcc --version
+          zig version
+
+      - name: Combination matrix (Linux, macOS)
+        if: ${{ matrix.platform == 'unix' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The matrix wipes every build tree it generates, so the bootstrap
+          # driver lives outside build/.
           driver="$RUNNER_TEMP/buster-build"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
-          "$driver" generate --cc clang --ci --linker DEFAULT
-          "$driver" build --config Release -t test_all --verbose
+          "$driver" test_all_combinations_ci --verbose=1
 
-      - name: Test (Windows)
+      - name: Combination matrix (Windows)
         if: ${{ matrix.platform == 'windows' }}
         shell: powershell
+        env:
+          VS_ARCH: ${{ matrix.vs_arch }}
+          VS_COMPONENT: ${{ matrix.vs_component }}
         run: |
           $ErrorActionPreference = 'Stop'
           $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
-          $VsPath = (& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1).Trim()
-          if (-not $VsPath) { throw 'Visual Studio with VC tools was not found' }
-          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $VsPath = (& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath | Select-Object -First 1).Trim()
+          if (-not $VsPath) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
+          # Launch-VsDevShell is a script, not a native command, so it leaves
+          # $LASTEXITCODE to whatever it last ran internally; `where.exe cl` is
+          # the check that the shell actually arrived.
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch $env:VS_ARCH -SkipAutomaticLocation
+          where.exe cl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          where.exe clang
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          where.exe gcc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          where.exe zig
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # The native toolchain runs through cmd so its progress on stderr
           # cannot become a terminating PowerShell error record. Clang on the
-          # MSVC triple also warns on build.c's forward-declared enums.
+          # MSVC triple also warns on build.c's forward-declared enums. The
+          # driver lives outside build/ because the matrix wipes it, and
+          # Windows cannot delete a running executable.
           $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
           cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmd /c "`"$Driver`" generate --cc clang --ci"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmd /c "`"$Driver`" build --config Release -t test_all --verbose"
+          cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   mode_matrix:
@@ -96,10 +214,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux
-            runner: ubuntu-24.04
-          - name: macOS
-            runner: macos-15
+          - name: Linux x86-64
+            runner: ubuntu-26.04
+          - name: Linux AArch64
+            runner: ubuntu-26.04-arm
+          - name: macOS x86-64
+            runner: macos-26-intel
+          - name: macOS AArch64
+            runner: macos-26
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -109,17 +231,151 @@ jobs:
 
       # The matrix cross-products every register-allocator mode with every
       # linkable target, running each leg natively or under an emulator the
-      # host provides and oracle-checking the rest. It runs beside the suite
-      # rather than after it, so wall time is the slower of the two.
+      # host provides and oracle-checking the rest. Running it on both
+      # architectures of both Unix platforms is what makes the ELF and Mach-O
+      # legs execute natively on x86-64 and on AArch64. It runs beside the
+      # suite rather than after it, so wall time is the slower of the two.
+      # Windows is excluded here as it is on Forgejo, where that runner is the
+      # wall-time gate.
       - name: Execution-mode matrix
         shell: bash
         run: |
           set -euo pipefail
           driver="$RUNNER_TEMP/buster-build"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
-          # The matrix generates its own tree only when one is absent, and
-          # that generate would ask for mold, which the hosted images do not
-          # have. --linker belongs to the generate command alone, so the tree
-          # is prepared here and the matrix reuses it.
+          # The matrix generates its own tree only when one is absent, and on
+          # Linux that generate would ask for mold, which the images do not
+          # carry and this job has no other reason to install. --linker
+          # belongs to the generate command alone, so the tree is prepared
+          # here and the matrix reuses it.
           "$driver" generate --cc clang --config Release --linker DEFAULT
           "$driver" test_mode_matrix --config Release
+
+  android:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Android emulator
+    # Only the x86-64 Linux image carries an Android SDK and the nested
+    # virtualisation the x86-64 emulator image needs.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      BUSTER_ANDROID_AVD: buster-ci
+      BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
+      BUSTER_ANDROID_DEVICE: pixel_6
+      BUSTER_ANDROID_EMULATOR_GPU: swiftshader_indirect
+      BUSTER_ANDROID_EMULATOR_HEADLESS: "1"
+      BUSTER_ANDROID_EMULATOR_LOG: build/android-emulator.log
+      BUSTER_ANDROID_EMULATOR_STARTED_MARKER: build/android-emulator.started
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      # The image loads the kvm module but leaves the node owned by root, so
+      # the unprivileged runner user cannot accelerate the emulator without
+      # this rule. Without acceleration an x86-64 system image boots far
+      # beyond the emulator's own boot timeout.
+      - name: Grant the runner access to KVM
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # The image ships the SDK, the platform and the NDK, but no emulator
+      # system image; the AVD cannot be created without one.
+      - name: Install the emulator system image
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager=$(command -v sdkmanager || true)
+          if [[ -z $sdkmanager ]]; then
+            sdkmanager=$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -type f -name sdkmanager | sort | tail -n 1)
+          fi
+          if [[ -z $sdkmanager ]]; then
+            echo "error: sdkmanager was not found under $ANDROID_HOME" >&2
+            exit 1
+          fi
+          # The lifecycle script looks for avdmanager beside sdkmanager under
+          # cmdline-tools/latest; publish the directory it was actually found
+          # in so an image that names the directory by version still works.
+          printf '%s\n' "$(dirname "$sdkmanager")" >>"$GITHUB_PATH"
+          # The image accepts the SDK licences already, but sdkmanager still
+          # prompts on some packages. The acceptances come from a file rather
+          # than from `yes |`, whose SIGPIPE would fail the step under
+          # pipefail once sdkmanager stops reading.
+          accept="$RUNNER_TEMP/sdkmanager-accept"
+          printf 'y\n%.0s' {1..100} >"$accept"
+          "$sdkmanager" --install emulator "platforms;android-35" "$BUSTER_ANDROID_SYSTEM_IMAGE" <"$accept" >/dev/null
+          printf '%s\n' "$ANDROID_HOME/emulator" "$ANDROID_HOME/platform-tools" >>"$GITHUB_PATH"
+
+      - name: Test (Android)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cleanup_android_emulator() {
+            status=$?
+            trap - EXIT INT TERM
+            if [[ $status -ne 0 && -f "${BUSTER_ANDROID_EMULATOR_LOG:-}" ]]; then
+              echo "Last Android emulator log lines:"
+              tail -n 200 "$BUSTER_ANDROID_EMULATOR_LOG" || true
+            fi
+            if [[ -f "$BUSTER_ANDROID_EMULATOR_STARTED_MARKER" ]]; then
+              cleanup_timeout_seconds=${BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS:-${BUSTER_ANDROID_COMMAND_TIMEOUT_SECONDS:-30}}
+              if BUSTER_ANDROID_EMULATOR_STARTED_MARKER="$BUSTER_ANDROID_EMULATOR_STARTED_MARKER" \
+                BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS="$cleanup_timeout_seconds" \
+                bash ./android/start_emulator_ci.sh stop; then
+                :
+              else
+                cleanup_status=$?
+                echo "warning: Android emulator lifecycle cleanup failed with exit status $cleanup_status" >&2
+                if [[ $status -eq 0 ]]; then
+                  status=1
+                  if [[ -f "${BUSTER_ANDROID_EMULATOR_LOG:-}" ]]; then
+                    echo "Last Android emulator log lines:"
+                    tail -n 200 "$BUSTER_ANDROID_EMULATOR_LOG" || true
+                  fi
+                fi
+              fi
+            fi
+            exit "$status"
+          }
+          trap cleanup_android_emulator EXIT
+
+          bash ./android/start_emulator_ci.sh start
+          ./android/test_ci.sh --all
+
+  ios:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: iOS simulator (${{ matrix.name }})
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The simulator runs the host's own architecture, so the two macOS
+          # images cover the x86-64 and AArch64 simulator runtimes.
+          - name: x86-64
+            runner: macos-26-intel
+            arch: x86_64
+          - name: AArch64
+            runner: macos-26
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Test (iOS simulator)
+        shell: bash
+        env:
+          BUSTER_IOS_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          ./ios/test_ci.sh --all
