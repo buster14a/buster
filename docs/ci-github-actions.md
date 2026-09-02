@@ -64,6 +64,11 @@ That is the same set of steps `.forgejo/workflows/ci.yml` runs, on twice as
 many desktop configurations and in the same shape: a runner matrix with
 per-runner steps, rather than a job per concern.
 
+The workflow triggers on `push` alone, as Forgejo's does. Adding
+`pull_request` only duplicates every check on a branch that already gets a push
+run, and the two do not even cancel each other, because `concurrency` keys on
+`github.ref` and the events see different refs.
+
 The six runners work in parallel, but a runner's own steps are sequential and
 the first failure stops the rest of that runner's work. They are ordered
 broadest signal first — combination matrix, then execution-mode matrix, then
@@ -85,9 +90,18 @@ the Arm ones. Windows is excluded from it as it is on Forgejo.
 ## Bootstrapping and prerequisites
 
 `build.c` is compiled with the Clang already installed on the image rather than
-with TCC: the images ship no TCC, and modern macOS cannot run it. The bootstrap
-driver is written to `RUNNER_TEMP` rather than `build/`, because the matrix
-wipes every tree it generates — and Windows cannot delete a running executable.
+with TCC: the images ship no TCC, and modern macOS cannot run it. It lands at
+`build/build` (`build\build.exe` on Windows), where `build.sh` and `build.ps1`
+put it, because the superbuild writes that exact path into the manifest it
+hands CMake — anywhere else and configure stops at
+`BUSTER_SUPERBUILD_BUILD_DRIVER must name an existing absolute build driver`.
+The combination matrix removes only the `build/build-*` trees it generates, so
+the driver survives its own run.
+
+The execution-mode matrix is the exception: it bootstraps a second driver into
+`RUNNER_TEMP`, because its `generate` targets the default tree — `build/`
+itself — and removes it, which would delete a driver inside between that
+command and the next.
 
 The combination matrix needs Clang, GCC, Zig and, on Windows, MSVC together.
 The images provide all of those except Zig, so every runner installs a
@@ -109,9 +123,11 @@ a different toolchain. Two more image gaps are filled in place:
   x86-64 system image boots far past the emulator's own timeout.
 
 On Windows the native toolchain runs through `cmd` so its progress on stderr
-cannot become a terminating PowerShell error record, and the VS developer shell
-is launched per architecture (`amd64` with `VC.Tools.x86.x64`, `arm64` with
-`VC.Tools.ARM64`).
+cannot become a terminating PowerShell error record. The VS developer shell is
+launched per target (`amd64` with `VC.Tools.x86.x64`, `arm64` with
+`VC.Tools.ARM64`) but always with `-HostArch amd64`: `Launch-VsDevShell.ps1`
+validates that parameter against `x86,amd64` alone, so the AArch64 runner
+drives an emulated x64 toolchain host at an arm64 target.
 
 Two rows are weaker than they look. On macOS `/usr/bin/gcc` is an Apple Clang
 shim, so the GCC row is a second Clang row; the images do carry real Homebrew

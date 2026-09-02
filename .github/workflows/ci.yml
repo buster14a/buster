@@ -22,14 +22,16 @@ name: Buster CI
 # included minutes before the migration is finished.
 #
 # Bootstrapping uses the Clang already present on the hosted images rather
-# than TCC: the images ship no TCC, and modern macOS cannot run it. The
-# combination matrix itself needs Clang, GCC, Zig and — on Windows — MSVC as
-# application compilers; the images carry every one of those but Zig, which
-# each runner installs from a pinned, checksummed upstream archive.
+# than TCC: the images ship no TCC, and modern macOS cannot run it. It still
+# lands in build/, where build.sh and build.ps1 put it, because the superbuild
+# names that exact path in the manifest it hands CMake. The combination matrix
+# itself needs Clang, GCC, Zig and — on Windows — MSVC as application
+# compilers; the images carry every one of those but Zig, which each runner
+# installs from a pinned, checksummed upstream archive.
 
-on:
-  push:
-  pull_request:
+# Every push, as on Forgejo. A pull_request trigger would only duplicate each
+# check for a branch that already gets a push run.
+on: [push]
 
 # A newer push supersedes an in-flight run for the same ref, which is what
 # keeps queue latency flat when several batches land together.
@@ -183,11 +185,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The matrix wipes every build tree it generates, so the bootstrap
-          # driver lives outside build/.
-          driver="$RUNNER_TEMP/buster-build"
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
-          "$driver" test_all_combinations_ci --verbose=1
+          # build/build is where build.sh puts the driver and where the
+          # superbuild's manifest expects to find it; anywhere else and CMake
+          # rejects BUSTER_SUPERBUILD_BUILD_DRIVER. The matrix only removes
+          # the build/build-* trees it generates, so the driver survives.
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          ./build/build test_all_combinations_ci --verbose=1
 
       - name: Combination matrix (Windows)
         if: ${{ matrix.platform == 'windows' }}
@@ -201,10 +205,12 @@ jobs:
           if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
           $VsPath = (& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath | Select-Object -First 1).Trim()
           if (-not $VsPath) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
-          # Launch-VsDevShell is a script, not a native command, so it leaves
-          # $LASTEXITCODE to whatever it last ran internally; `where.exe cl` is
-          # the check that the shell actually arrived.
-          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch $env:VS_ARCH -SkipAutomaticLocation
+          # -HostArch takes only x86 or amd64, so the AArch64 runner drives an
+          # emulated x64 toolchain host at an arm64 target. Launch-VsDevShell
+          # is a script, not a native command, so it leaves $LASTEXITCODE to
+          # whatever it last ran internally; `where.exe cl` is the check that
+          # the shell actually arrived.
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
           where.exe cl
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           where.exe clang
@@ -215,10 +221,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # The native toolchain runs through cmd so its progress on stderr
           # cannot become a terminating PowerShell error record. Clang on the
-          # MSVC triple also warns on build.c's forward-declared enums. The
-          # driver lives outside build/ because the matrix wipes it, and
-          # Windows cannot delete a running executable.
-          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          # MSVC triple also warns on build.c's forward-declared enums.
+          # build/build.exe is where build.ps1 puts the driver and the path
+          # the superbuild's manifest names.
+          New-Item -ItemType Directory -Force -Path 'build' | Out-Null
+          $Driver = Join-Path (Get-Location) 'build\build.exe'
           cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1"
@@ -235,8 +242,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The driver is the one the combination matrix already bootstrapped.
+          # This driver deliberately lives outside build/: the generate below
+          # targets the default tree, which is build/ itself, and removes it.
+          # A driver inside would be deleted between the two invocations.
           driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
           # The matrix generates a tree only when none exists, and the
           # combination matrix leaves none at the default path. Preparing it
           # here pins the configuration and the linker rather than inheriting
