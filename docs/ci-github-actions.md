@@ -107,7 +107,7 @@ The combination matrix needs Clang, GCC, Zig and, on Windows, MSVC together.
 The images provide all of those except Zig, so every runner installs a
 **pinned, checksummed** Zig from `ziglang.org` — version and per-target
 SHA-256 both live in the workflow, so a rerun of an old commit cannot pick up
-a different toolchain. Two more image gaps are filled in place:
+a different toolchain. Three more image gaps are filled in place:
 
 - **mold.** On Linux `build.c` defaults every non-Zig tree to `CMAKE_LINKER_TYPE=MOLD`
   and the images carry no mold, so the Linux runners install the distribution's
@@ -115,6 +115,9 @@ a different toolchain. Two more image gaps are filled in place:
   with `--linker DEFAULT` regardless, so its tree is pinned rather than
   inherited: the matrix would otherwise generate one itself, and `--linker` is
   accepted by the `generate` command alone.
+- **`gtimeout`.** The iOS simulator launcher bounds every step with
+  `timeout(1)`, which macOS ships under neither name, so the macOS runners
+  install Homebrew's `coreutils`.
 - **The Android emulator system image.** The Linux image ships the SDK, the
   platform and the NDK but no system image, and it leaves `/dev/kvm` owned by
   root. The x86-64 Linux runner installs

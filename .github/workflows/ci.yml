@@ -129,6 +129,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes mold
 
+      # The iOS simulator launcher bounds every step with timeout(1), which
+      # macOS has under neither name until coreutils provides gtimeout.
+      - name: Install coreutils
+        if: ${{ matrix.os == 'macos' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install --quiet coreutils
+
       - name: Install Zig
         if: ${{ matrix.platform == 'unix' }}
         shell: bash
