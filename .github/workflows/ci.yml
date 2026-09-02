@@ -4,12 +4,17 @@ name: Buster CI
 #
 # It carries the same coverage as .forgejo/workflows/ci.yml — the
 # multi-compiler combination matrix, the execution-mode matrix, the Android
-# emulator suite and the iOS simulator suite — and runs the desktop half of it
-# on the newest standard image of every operating system in both
-# architectures, so x86-64 and AArch64 are first-class on Linux, macOS and
-# Windows alike. Forgejo remains the source of truth; this runs beside it.
+# emulator suite and the iOS simulator suite — and spreads it over one runner
+# per platform and architecture, so x86-64 and AArch64 are first-class on
+# Linux, macOS and Windows alike. Forgejo remains the source of truth; this
+# runs beside it.
 #
-# Forgejo also reads .github/workflows, so every job is gated on actually
+# One job per combination means a runner's steps are sequential and the first
+# failure stops the rest of that runner's work. They are ordered broadest
+# signal first: a compiler problem shows up in the combination matrix, and the
+# narrower suites after it would only repeat the news.
+#
+# Forgejo also reads .github/workflows, so the job is gated on actually
 # running at github.com. On Forgejo that condition is false and the job skips,
 # instead of queueing forever against a runner label no Forgejo runner
 # carries. The second half of the gate keeps the workflow inert until
@@ -20,7 +25,7 @@ name: Buster CI
 # than TCC: the images ship no TCC, and modern macOS cannot run it. The
 # combination matrix itself needs Clang, GCC, Zig and — on Windows — MSVC as
 # application compilers; the images carry every one of those but Zig, which
-# each job installs from a pinned, checksummed upstream archive.
+# each runner installs from a pinned, checksummed upstream archive.
 
 on:
   push:
@@ -36,19 +41,20 @@ permissions:
   contents: read
 
 env:
-  # Pinned so the matrix's Zig row cannot change under a rerun of an old
-  # commit. The per-target checksums live in each job's matrix entry.
+  # Pinned so the Zig row cannot change under a rerun of an old commit. The
+  # per-target checksums live in each matrix entry.
   ZIG_VERSION: 0.16.0
+  BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
 
 jobs:
   test:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: ${{ matrix.name }}
-    # The combination matrix builds a tree for every compiler and
-    # configure-time policy and runs the suite in each Clang one. Hosted
-    # runners have a fraction of the cores of the native boxes, so the bound
-    # is generous; it stays well inside GitHub's own six-hour job limit.
-    timeout-minutes: 180
+    # One runner now carries the combination matrix, the execution-mode
+    # matrix and its platform's mobile suite end to end, and hosted runners
+    # have a fraction of the cores of the native boxes. The bound is
+    # generous; it stays inside GitHub's own six-hour job limit.
+    timeout-minutes: 300
     strategy:
       # Report every platform's result: a failure on one is not a reason to
       # hide the others when the whole point is cross-platform coverage.
@@ -58,26 +64,36 @@ jobs:
           - name: Linux x86-64
             runner: ubuntu-26.04
             platform: unix
+            os: linux
+            arch: x86_64
             zig_target: x86_64-linux
             zig_sha256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
           - name: Linux AArch64
             runner: ubuntu-26.04-arm
             platform: unix
+            os: linux
+            arch: aarch64
             zig_target: aarch64-linux
             zig_sha256: ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
           - name: macOS x86-64
             runner: macos-26-intel
             platform: unix
+            os: macos
+            arch: x86_64
             zig_target: x86_64-macos
             zig_sha256: 0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7
           - name: macOS AArch64
             runner: macos-26
             platform: unix
+            os: macos
+            arch: aarch64
             zig_target: aarch64-macos
             zig_sha256: b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
           - name: Windows x86-64
             runner: windows-2025
             platform: windows
+            os: windows
+            arch: x86_64
             zig_target: x86_64-windows
             zig_sha256: 68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e
             vs_arch: amd64
@@ -85,6 +101,8 @@ jobs:
           - name: Windows AArch64
             runner: windows-11-arm
             platform: windows
+            os: windows
+            arch: aarch64
             zig_target: aarch64-windows
             zig_sha256: aee38316ee4111717900f45dd3130145c39289e105541d737eb8c5ed653c78ef
             vs_arch: arm64
@@ -100,7 +118,7 @@ jobs:
       # not carry it. This is the distribution's own package, so the version
       # is the one that image already pins.
       - name: Install mold
-        if: ${{ runner.os == 'Linux' }}
+        if: ${{ matrix.os == 'linux' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -206,77 +224,34 @@ jobs:
           cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  mode_matrix:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: Execution-mode matrix (${{ matrix.name }})
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux x86-64
-            runner: ubuntu-26.04
-          - name: Linux AArch64
-            runner: ubuntu-26.04-arm
-          - name: macOS x86-64
-            runner: macos-26-intel
-          - name: macOS AArch64
-            runner: macos-26
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-
       # The matrix cross-products every register-allocator mode with every
       # linkable target, running each leg natively or under an emulator the
       # host provides and oracle-checking the rest. Running it on both
       # architectures of both Unix platforms is what makes the ELF and Mach-O
-      # legs execute natively on x86-64 and on AArch64. It runs beside the
-      # suite rather than after it, so wall time is the slower of the two.
-      # Windows is excluded here as it is on Forgejo, where that runner is the
-      # wall-time gate.
+      # legs execute natively on x86-64 and on AArch64. Windows is excluded
+      # here as it is on Forgejo, where that runner is the wall-time gate.
       - name: Execution-mode matrix
+        if: ${{ matrix.platform == 'unix' }}
         shell: bash
         run: |
           set -euo pipefail
+          # The driver is the one the combination matrix already bootstrapped.
           driver="$RUNNER_TEMP/buster-build"
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
-          # The matrix generates its own tree only when one is absent, and on
-          # Linux that generate would ask for mold, which the images do not
-          # carry and this job has no other reason to install. --linker
-          # belongs to the generate command alone, so the tree is prepared
-          # here and the matrix reuses it.
+          # The matrix generates a tree only when none exists, and the
+          # combination matrix leaves none at the default path. Preparing it
+          # here pins the configuration and the linker rather than inheriting
+          # whatever generate would default to, which on Linux is mold;
+          # --linker is accepted by the generate command alone.
           "$driver" generate --cc clang --config Release --linker DEFAULT
           "$driver" test_mode_matrix --config Release
-
-  android:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: Android emulator
-    # Only the x86-64 Linux image carries an Android SDK and the nested
-    # virtualisation the x86-64 emulator image needs.
-    runs-on: ubuntu-26.04
-    timeout-minutes: 90
-    env:
-      BUSTER_ANDROID_AVD: buster-ci
-      BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
-      BUSTER_ANDROID_DEVICE: pixel_6
-      BUSTER_ANDROID_EMULATOR_GPU: swiftshader_indirect
-      BUSTER_ANDROID_EMULATOR_HEADLESS: "1"
-      BUSTER_ANDROID_EMULATOR_LOG: build/android-emulator.log
-      BUSTER_ANDROID_EMULATOR_STARTED_MARKER: build/android-emulator.started
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
 
       # The image loads the kvm module but leaves the node owned by root, so
       # the unprivileged runner user cannot accelerate the emulator without
       # this rule. Without acceleration an x86-64 system image boots far
-      # beyond the emulator's own boot timeout.
+      # beyond the emulator's own boot timeout. Only the x86-64 Linux image
+      # carries an Android SDK and that nested virtualisation.
       - name: Grant the runner access to KVM
+        if: ${{ matrix.os == 'linux' && matrix.arch == 'x86_64' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -288,6 +263,7 @@ jobs:
       # The image ships the SDK, the platform and the NDK, but no emulator
       # system image; the AVD cannot be created without one.
       - name: Install the emulator system image
+        if: ${{ matrix.os == 'linux' && matrix.arch == 'x86_64' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -313,7 +289,15 @@ jobs:
           printf '%s\n' "$ANDROID_HOME/emulator" "$ANDROID_HOME/platform-tools" >>"$GITHUB_PATH"
 
       - name: Test (Android)
+        if: ${{ matrix.os == 'linux' && matrix.arch == 'x86_64' }}
         shell: bash
+        env:
+          BUSTER_ANDROID_AVD: buster-ci
+          BUSTER_ANDROID_DEVICE: pixel_6
+          BUSTER_ANDROID_EMULATOR_GPU: swiftshader_indirect
+          BUSTER_ANDROID_EMULATOR_HEADLESS: "1"
+          BUSTER_ANDROID_EMULATOR_LOG: build/android-emulator.log
+          BUSTER_ANDROID_EMULATOR_STARTED_MARKER: build/android-emulator.started
         run: |
           set -euo pipefail
 
@@ -349,33 +333,13 @@ jobs:
           bash ./android/start_emulator_ci.sh start
           ./android/test_ci.sh --all
 
-  ios:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: iOS simulator (${{ matrix.name }})
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # The simulator runs the host's own architecture, so the two macOS
-          # images cover the x86-64 and AArch64 simulator runtimes.
-          - name: x86-64
-            runner: macos-26-intel
-            arch: x86_64
-          - name: AArch64
-            runner: macos-26
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-
+      # The simulator runs the host's own architecture, so the two macOS
+      # runners cover the x86-64 and AArch64 simulator runtimes between them.
       - name: Test (iOS simulator)
+        if: ${{ matrix.os == 'macos' }}
         shell: bash
         env:
-          BUSTER_IOS_ARCH: ${{ matrix.arch }}
+          BUSTER_IOS_ARCH: ${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}
         run: |
           set -euo pipefail
           ./ios/test_ci.sh --all

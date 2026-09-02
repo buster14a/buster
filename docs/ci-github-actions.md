@@ -23,17 +23,17 @@ validates `runs-on` against a list baked into its own release.
 
 ## Two gates
 
-Every job carries:
+The job carries:
 
 ```yaml
 if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
 ```
 
 The first half exists because **Forgejo also reads `.github/workflows`**.
-Without it, Forgejo would schedule these jobs against `runs-on: ubuntu-26.04`,
-a label no Forgejo runner carries, and they would queue until the workflow
-timed out. On Forgejo the expression is false — or empty, which is also false —
-so the jobs skip and no status context is created.
+Without it, Forgejo would schedule this job against `runs-on: ubuntu-26.04`, a
+label no Forgejo runner carries, and it would queue until the workflow timed
+out. On Forgejo the expression is false — or empty, which is also false — so
+the job skips and no status context is created.
 
 The second half keeps the workflow inert until the repository variable
 `GH_ACTIONS_CI_ENABLED` is set to `true`. A private repository draws on a
@@ -49,25 +49,38 @@ gh variable set GH_ACTIONS_CI_ENABLED --body true --repo OWNER/REPOSITORY
 
 ## What runs
 
-| Job | Runners | Command |
+There is one job, `test`, and its matrix is the six runners above — **one
+runner per platform and architecture, and no more.** Each runs the work its
+platform can carry:
+
+| Step | Runners | Command |
 |---|---|---|
-| `test` | all six | `test_all_combinations_ci` |
-| `mode_matrix` | the four Unix runners | `test_mode_matrix --config Release` |
-| `android` | `ubuntu-26.04` | `android/start_emulator_ci.sh start` then `android/test_ci.sh --all` |
-| `ios` | `macos-26-intel`, `macos-26` | `ios/test_ci.sh --all` |
+| Combination matrix | all six | `test_all_combinations_ci` |
+| Execution-mode matrix | the four Unix runners | `test_mode_matrix --config Release` |
+| Android | `ubuntu-26.04` | `android/start_emulator_ci.sh start`, then `android/test_ci.sh --all` |
+| iOS simulator | `macos-26-intel`, `macos-26` | `ios/test_ci.sh --all` |
 
 That is the same set of steps `.forgejo/workflows/ci.yml` runs, on twice as
-many desktop configurations. The jobs run in parallel rather than one after the
-other, so wall time is the slowest of them instead of their sum, and
-`fail-fast` is off everywhere: a failure on one platform is not a reason to
-hide the others when the whole point is cross-platform coverage. `concurrency`
-cancels an in-flight run when a newer commit lands on the same ref, which is
-what keeps latency flat when several pushes arrive together.
+many desktop configurations and in the same shape: a runner matrix with
+per-runner steps, rather than a job per concern.
 
-Both architectures of both Unix platforms run `mode_matrix` because that is
-what makes its legs *execute* rather than fall back to the disassembly oracle:
-x86-64 ELF and Mach-O on the Intel runners, AArch64 ELF and Mach-O on the Arm
-ones. Windows is excluded here as it is on Forgejo.
+The six runners work in parallel, but a runner's own steps are sequential and
+the first failure stops the rest of that runner's work. They are ordered
+broadest signal first — combination matrix, then execution-mode matrix, then
+the mobile suite — because a compiler problem surfaces in the combination
+matrix and the narrower suites after it would only repeat the news. Its cost is
+that a run reports the Linux Android result only after that runner's
+combination matrix has passed; on Forgejo those live on two different machines.
+
+`fail-fast` is off, so a failure on one platform is not a reason to hide the
+others when the whole point is cross-platform coverage. `concurrency` cancels
+an in-flight run when a newer commit lands on the same ref, which is what keeps
+latency flat when several pushes arrive together.
+
+Both architectures of both Unix platforms run the execution-mode matrix because
+that is what makes its legs *execute* rather than fall back to the disassembly
+oracle: x86-64 ELF and Mach-O on the Intel runners, AArch64 ELF and Mach-O on
+the Arm ones. Windows is excluded from it as it is on Forgejo.
 
 ## Bootstrapping and prerequisites
 
@@ -77,23 +90,23 @@ driver is written to `RUNNER_TEMP` rather than `build/`, because the matrix
 wipes every tree it generates — and Windows cannot delete a running executable.
 
 The combination matrix needs Clang, GCC, Zig and, on Windows, MSVC together.
-The images provide all of those except Zig, so each job installs a **pinned,
-checksummed** Zig from `ziglang.org` — version and per-target SHA-256 both live
-in the workflow, so a rerun of an old commit cannot pick up a different
-toolchain. Two more image gaps are filled in place:
+The images provide all of those except Zig, so every runner installs a
+**pinned, checksummed** Zig from `ziglang.org` — version and per-target
+SHA-256 both live in the workflow, so a rerun of an old commit cannot pick up
+a different toolchain. Two more image gaps are filled in place:
 
 - **mold.** On Linux `build.c` defaults every non-Zig tree to `CMAKE_LINKER_TYPE=MOLD`
-  and the images carry no mold, so the `test` job installs the distribution's
-  own package. `mode_matrix` instead pins `--linker DEFAULT` on its one
-  `generate`, which is also why that `generate` is spelled out in the workflow:
-  the matrix would otherwise generate its own tree, and `--linker` is accepted
-  by the `generate` command alone.
+  and the images carry no mold, so the Linux runners install the distribution's
+  own package. The execution-mode matrix keeps its own `generate` spelled out
+  with `--linker DEFAULT` regardless, so its tree is pinned rather than
+  inherited: the matrix would otherwise generate one itself, and `--linker` is
+  accepted by the `generate` command alone.
 - **The Android emulator system image.** The Linux image ships the SDK, the
   platform and the NDK but no system image, and it leaves `/dev/kvm` owned by
-  root; the job installs `system-images;android-35;google_apis;x86_64` and adds
-  the udev rule that lets the unprivileged runner user accelerate the emulator.
-  Without acceleration the x86-64 system image boots far past the emulator's
-  own timeout.
+  root. The x86-64 Linux runner installs
+  `system-images;android-35;google_apis;x86_64` and adds the udev rule that
+  lets the unprivileged runner user accelerate the emulator; unaccelerated, an
+  x86-64 system image boots far past the emulator's own timeout.
 
 On Windows the native toolchain runs through `cmd` so its progress on stderr
 cannot become a terminating PowerShell error record, and the VS developer shell
@@ -109,12 +122,12 @@ AArch64 desktop rows build and test without it.
 
 ## What does not run here
 
-- **Wine and `qemu-user`.** The images carry neither, so a `mode_matrix` leg
-  whose target no runner can execute is oracle-checked instead — the row still
-  reports, with its avenue downgraded. Between the four Unix runners every ELF
-  and Mach-O leg executes natively; the PE legs are the ones that stay on the
-  oracle, because Forgejo covers them under wine and this workflow does not run
-  `mode_matrix` on Windows.
+- **Wine and `qemu-user`.** The images carry neither, so an execution-mode
+  matrix leg whose target no runner can execute is oracle-checked instead —
+  the row still reports, with its avenue downgraded. Between the four Unix
+  runners every ELF and Mach-O leg executes natively; the PE legs are the ones
+  that stay on the oracle, because Forgejo covers them under wine and this
+  workflow does not run the execution-mode matrix on Windows.
 - **The performance series.** Hosted virtual machines expose no performance
   counters, and their wall times are too noisy to trend. `STEP_INSTRUCTIONS`
   needs hardware under your control.

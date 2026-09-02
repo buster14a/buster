@@ -2170,15 +2170,18 @@ compilation is explicitly enabled.
   runs the same steps as the Forgejo matrix — combination matrix, execution-mode
   matrix, Android and iOS — on GitHub's standard runners for the migration
   described in `docs/ci-github-actions.md`, and spends that platform's spare
-  capacity on testing every desktop OS at both x86-64 and AArch64; it stays
-  inert until its repository variable is set, and skips itself outright when
-  Forgejo evaluates it. Changing a `runs-on` label there means changing
-  `.github/actionlint.yaml` too, because actionlint knows only the labels its
-  own release predates. Preserve Debug/Release, unity/non-unity,
-  sanitizer/fuzz, self-host, and supported-platform coverage when changing
-  build orchestration or the compiler pipeline. Do not add source
-  mirroring, Actions artifacts/caches, durable GitHub-side credentials, verbose
-  broker logs, or untrusted-PR triggers to the broker; see
+  capacity on testing every desktop OS at both x86-64 and AArch64. It is one
+  job whose matrix is exactly one runner per platform and architecture, with
+  per-runner steps as on Forgejo, so nothing there is a second runner for a
+  combination already covered. It stays inert until its repository variable is
+  set, and skips itself outright when Forgejo evaluates it. Changing a
+  `runs-on` label there means changing `.github/actionlint.yaml` too, because
+  actionlint knows only the labels its own release predates. Preserve
+  Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and
+  supported-platform coverage when changing build orchestration or the
+  compiler pipeline. Do not add source mirroring, Actions artifacts/caches,
+  durable GitHub-side credentials, verbose broker logs, or untrusted-PR
+  triggers to the broker; see
   `docs/ci-github-hosted-runners.md`.
 
 ## Benchmarking and diagnostics
