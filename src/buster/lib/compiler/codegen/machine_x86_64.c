@@ -9946,15 +9946,6 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_push_register(MachineX64Encoder*
         operand_registers, 0, 0, false, counters);
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sub_rsp(MachineX64Encoder* encoder, u32 amount,
-                                                        MachineX64ExactEmitCounters* counters)
-{
-    u8 operand_registers[4] = {0};
-    return machine_x64_emit_exact_recipe(
-        encoder, machine_x64_exact_opcode_for_opcode(MACHINE_X64_SUB_RSP), 0, 0,
-        operand_registers, amount, 0, false, counters);
-}
-
 typedef struct MachineX64BranchFixup MachineX64BranchFixup;
 struct MachineX64BranchFixup
 {
@@ -10349,7 +10340,8 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     while (frame_remaining)
     {
         u32 frame_chunk = BUSTER_MIN(frame_remaining, 4096u);
-        (void)machine_x64_emit_exact_sub_rsp(&encoder, frame_chunk, 0);
+        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("SUB"), MACHINE_X64_RSP, frame_chunk, 64,
+                                                           frame_chunk <= INT8_MAX ? 8 : 32, 0);
         (void)machine_x64_emit_metadata_memory_immediate(&encoder, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
         frame_remaining -= frame_chunk;
     }
