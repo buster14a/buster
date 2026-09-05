@@ -512,6 +512,32 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
 // block may have another successor with a different parameter mapping, and
 // mutating its live register file would make the second edge observe the
 // first edge's SSA names.
+BUSTER_GLOBAL_LOCAL MachineEdge const* machine_fast_find_incoming_edge(MachineFunction* function, u32 const* incoming_edge_offsets,
+                                                                           u32 const* incoming_edge_indices, u32 source_block,
+                                                                           u32 destination_block)
+{
+    if (!function || !incoming_edge_offsets || !incoming_edge_indices || destination_block >= function->block_count)
+    {
+        return 0;
+    }
+    u32 first = incoming_edge_offsets[destination_block];
+    u32 limit = incoming_edge_offsets[destination_block + 1];
+    for (u32 incoming_index = first; incoming_index < limit; incoming_index += 1)
+    {
+        u32 edge_index = incoming_edge_indices[incoming_index];
+        if (edge_index >= function->edge_count)
+        {
+            continue;
+        }
+        MachineEdge const* edge = function->edges + edge_index;
+        if (edge->source_block == source_block)
+        {
+            return edge;
+        }
+    }
+    return 0;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_fast_edge_can_move(MachineFunction* function, MachineEdge const* edge)
 {
     if (!function || !edge || edge->source_block >= function->block_count || !function->blocks[edge->source_block].instruction_count)
@@ -936,6 +962,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
     prepass.interval_ends = arena_allocate(arena, u32, register_count ? register_count : 1);
     prepass.disqualified = arena_allocate(arena, u8, register_count ? register_count : 1);
     prepass.predecessor_offsets = arena_allocate(arena, u32, function->block_count + 1);
+    prepass.incoming_edge_offsets = arena_allocate(arena, u32, function->block_count + 1);
     prepass.cold_blocks = arena_allocate(arena, u8, function->block_count ? function->block_count : 1);
     if (description)
     {
@@ -979,9 +1006,14 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 prepass.interval_ends[virtual_register] = BUSTER_MAX(prepass.interval_ends[virtual_register], definition);
             }
         }
+        for (u32 block_index = 0; block_index <= function->block_count; block_index += 1)
+        {
+            prepass.incoming_edge_offsets[block_index] = 0;
+        }
         for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
         {
             MachineEdge const* edge = function->edges + edge_index;
+            prepass.incoming_edge_offsets[edge->destination_block + 1] += 1;
             for (u32 copy_index = 0; copy_index < edge->copy_count; copy_index += 1)
             {
                 u32 source_index = edge->copy_offset + copy_index;
@@ -1119,13 +1151,25 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             prepass.predecessor_offsets[block_index + 1] += prepass.predecessor_offsets[block_index];
+            prepass.incoming_edge_offsets[block_index + 1] += prepass.incoming_edge_offsets[block_index];
         }
         u32 predecessor_total = prepass.predecessor_offsets[function->block_count];
+        u32 incoming_edge_total = prepass.incoming_edge_offsets[function->block_count];
         prepass.predecessor_list = arena_allocate(arena, u32, predecessor_total ? predecessor_total : 1);
-        u32* predecessor_cursors = arena_allocate(arena, u32, function->block_count ? function->block_count : 1);
+        prepass.incoming_edge_indices = arena_allocate(arena, u32, incoming_edge_total ? incoming_edge_total : 1);
+        u32* block_cursors = arena_allocate(arena, u32, function->block_count ? function->block_count : 1);
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
-            predecessor_cursors[block_index] = prepass.predecessor_offsets[block_index];
+            block_cursors[block_index] = prepass.incoming_edge_offsets[block_index];
+        }
+        for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+        {
+            MachineEdge const* edge = function->edges + edge_index;
+            prepass.incoming_edge_indices[block_cursors[edge->destination_block]++] = edge_index;
+        }
+        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        {
+            block_cursors[block_index] = prepass.predecessor_offsets[block_index];
             prepass.cold_blocks[block_index] = 0;
         }
         for (u32 case_index = 0; case_index < function->switch_case_count; case_index += 1)
@@ -1159,7 +1203,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                     if (kind == MACHINE_REF_BLOCK)
                     {
                         u32 successor = machine_ref_payload(ref);
-                        prepass.predecessor_list[predecessor_cursors[successor]++] = block_index;
+                        prepass.predecessor_list[block_cursors[successor]++] = block_index;
                         target_references[target_reference_count++] = successor;
                         if (instruction->opcode == description->switch_opcode)
                         {
@@ -1188,7 +1232,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                     for (u32 target_index = 0; target_index < instruction->flags; target_index += 1)
                     {
                         u32 successor = function->switch_cases[instruction->payload + target_index].target_block;
-                        prepass.predecessor_list[predecessor_cursors[successor]++] = block_index;
+                        prepass.predecessor_list[block_cursors[successor]++] = block_index;
                         prepass.cold_blocks[successor] = 1;
                         if (successor <= block_index)
                         {
@@ -1326,6 +1370,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         };
         u32 const* predecessor_offsets = prepass->predecessor_offsets;
         u32 const* predecessor_list = prepass->predecessor_list;
+        u32 const* incoming_edge_offsets = prepass->incoming_edge_offsets;
+        u32 const* incoming_edge_indices = prepass->incoming_edge_indices;
         u8 const* cold_blocks = prepass->cold_blocks;
         u32 const* definition_blocks = prepass->definition_blocks;
         // Contracts and per-edge snapshots, one register file per block. A
@@ -1390,16 +1436,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 {
                     u32 const* donor_owner = out_owner + (u64)designated * register_count;
                     bool const* donor_dirty = out_dirty + (u64)designated * register_count;
-                    MachineEdge const* designated_edge = 0;
-                    for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
-                    {
-                        MachineEdge const* candidate = function->edges + edge_index;
-                        if (candidate->source_block == designated && candidate->destination_block == block_index)
-                        {
-                            designated_edge = candidate;
-                            break;
-                        }
-                    }
+                    MachineEdge const* designated_edge =
+                        machine_fast_find_incoming_edge(function, incoming_edge_offsets, incoming_edge_indices, designated, block_index);
                     // A register a pinned span holds at this block's entry
                     // belongs to the pinned value here, whatever any edge
                     // delivers, so the contract cannot promise it.
@@ -1444,16 +1482,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         }
                         u32 const* edge_owner = out_owner + (u64)predecessor * register_count;
                         bool const* edge_dirty = out_dirty + (u64)predecessor * register_count;
-                        MachineEdge const* predecessor_edge = 0;
-                        for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
-                        {
-                            MachineEdge const* candidate = function->edges + edge_index;
-                            if (candidate->source_block == predecessor && candidate->destination_block == block_index)
-                            {
-                                predecessor_edge = candidate;
-                                break;
-                            }
-                        }
+                        MachineEdge const* predecessor_edge =
+                            machine_fast_find_incoming_edge(function, incoming_edge_offsets, incoming_edge_indices, predecessor, block_index);
                         MachineBlock* predecessor_block = function->blocks + predecessor;
                         bool repairs_fully = false;
                         u64 repair_pin_active = 0;
@@ -1558,16 +1588,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     {
                         terminator_targets += machine_ref_kind(predecessor_terminator->operands[slot]) == MACHINE_REF_BLOCK;
                     }
-                    MachineEdge const* predecessor_edge = 0;
-                    for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
-                    {
-                        MachineEdge const* candidate = function->edges + edge_index;
-                        if (candidate->source_block == predecessor && candidate->destination_block == block_index)
-                        {
-                            predecessor_edge = candidate;
-                            break;
-                        }
-                    }
+                    MachineEdge const* predecessor_edge =
+                        machine_fast_find_incoming_edge(function, incoming_edge_offsets, incoming_edge_indices, predecessor, block_index);
                     machine_fast_conform_edge_parameters(&state, &retro_edits, machine_point_make(terminator_index, MACHINE_POINT_BEFORE), predecessor_edge,
                                                          out_owner + (u64)predecessor * register_count, out_dirty + (u64)predecessor * register_count, 0,
                                                          entry_owner, entry_dirty, terminator_targets == 1 && predecessor_terminator->opcode != description->switch_opcode);
@@ -2035,16 +2057,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         {
                             u32 slot = machine_fast_first_set(remaining);
                             u32 successor = machine_ref_payload(instruction->operands[slot]);
-                            MachineEdge const* successor_edge = 0;
-                            for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
-                            {
-                                MachineEdge const* candidate = function->edges + edge_index;
-                                if (candidate->source_block == block_index && candidate->destination_block == successor)
-                                {
-                                    successor_edge = candidate;
-                                    break;
-                                }
-                            }
+                            MachineEdge const* successor_edge =
+                                machine_fast_find_incoming_edge(function, incoming_edge_offsets, incoming_edge_indices, block_index, successor);
                             if (successor <= block_index)
                             {
                                 machine_fast_conform_edge_parameters(&state, &edits, state.current_point, successor_edge, state.owner, state.dirty,
