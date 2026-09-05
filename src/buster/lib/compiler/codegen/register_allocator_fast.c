@@ -545,16 +545,17 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         return;
     }
     u32 register_count = state->active_register_count;
-    u32* mapped_owner = arena_allocate(state->arena, u32, register_count);
-    bool* mapped_dirty = arena_allocate(state->arena, bool, register_count);
+    BUSTER_CHECK(register_count <= MACHINE_TARGET_REGISTER_LIMIT);
+    u32 mapped_owner[MACHINE_TARGET_REGISTER_LIMIT];
+    bool mapped_dirty[MACHINE_TARGET_REGISTER_LIMIT];
     memcpy(mapped_owner, owner, sizeof(u32) * register_count);
     memcpy(mapped_dirty, dirty, sizeof(bool) * register_count);
-    u32* mapped_locations = 0;
-    if (locations)
-    {
-        mapped_locations = arena_allocate(state->arena, u32, state->function->virtual_register_count);
-        memcpy(mapped_locations, locations, sizeof(u32) * state->function->virtual_register_count);
-    }
+    // This is a private edge snapshot: its owner file is authoritative.
+    // Rebuilding or copying a function-wide vreg->location inverse map is
+    // unnecessary; the few source lookups below scan at most the target
+    // register file, and conform_edge already has that fallback when the
+    // inverse map is null.
+    BUSTER_UNUSED(locations);
     MachineBlock const* destination = state->function->blocks + edge->destination_block;
     u32 copy_count = BUSTER_MIN(edge->copy_count, destination->parameter_count);
     for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
@@ -579,16 +580,12 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         if (machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER)
         {
             source_value = machine_ref_payload(source);
-            source_register = mapped_locations ? mapped_locations[source_value] : UINT32_MAX;
-            if (!mapped_locations)
+            for (u32 physical_register = 0; physical_register < register_count; physical_register += 1)
             {
-                for (u32 physical_register = 0; physical_register < register_count; physical_register += 1)
+                if (mapped_owner[physical_register] == source_value)
                 {
-                    if (mapped_owner[physical_register] == source_value)
-                    {
-                        source_register = physical_register;
-                        break;
-                    }
+                    source_register = physical_register;
+                    break;
                 }
             }
         }
@@ -600,17 +597,9 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         if (source_register != UINT32_MAX)
         {
             mapped_owner[source_register] = destination_value;
-            if (mapped_locations)
-            {
-                mapped_locations[destination_value] = source_register;
-                if (source_value != UINT32_MAX)
-                {
-                    mapped_locations[source_value] = UINT32_MAX;
-                }
-            }
         }
     }
-    machine_fast_conform_edge(state, stream, point, mapped_owner, mapped_dirty, mapped_locations, contract_owner, contract_dirty, allow_moves);
+    machine_fast_conform_edge(state, stream, point, mapped_owner, mapped_dirty, 0, contract_owner, contract_dirty, allow_moves);
 }
 
 BUSTER_GLOBAL_LOCAL u32 machine_fast_edge_mapped_owner(MachineFunction* function, MachineEdge const* edge, u32 value, u32 const* owner,
