@@ -9933,6 +9933,28 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_immediate_value(MachineX64Encode
         operand_registers, 0, value, false, counters);
 }
 
+// Function setup uses the same prepared exact forms as selected machine rows.
+// Keep these wrappers tiny so prologue emission never goes back through the
+// mnemonic/shape cache for operations whose physical form is already known.
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_push_register(MachineX64Encoder* encoder, u32 reg,
+                                                              MachineX64ExactEmitCounters* counters)
+{
+    if (reg >= 16) return machine_x64_exact_reject(encoder, counters);
+    u8 operand_registers[4] = {(u8)reg};
+    return machine_x64_emit_exact_recipe(
+        encoder, machine_x64_exact_opcode_for_opcode(MACHINE_X64_PUSH_REGISTER), 0, 0,
+        operand_registers, 0, 0, false, counters);
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sub_rsp(MachineX64Encoder* encoder, u32 amount,
+                                                        MachineX64ExactEmitCounters* counters)
+{
+    u8 operand_registers[4] = {0};
+    return machine_x64_emit_exact_recipe(
+        encoder, machine_x64_exact_opcode_for_opcode(MACHINE_X64_SUB_RSP), 0, 0,
+        operand_registers, amount, 0, false, counters);
+}
+
 typedef struct MachineX64BranchFixup MachineX64BranchFixup;
 struct MachineX64BranchFixup
 {
@@ -10299,10 +10321,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     // the placement's callee-saved registers push right after it in fixed
     // RBX, R14, R15 order so the unwind actions can name exact offsets.
     bool saves_first = function->target && function->target->saves_precede_frame_pointer;
-    (void)machine_x64_emit_metadata_register(&encoder, S8("PUSH"), MACHINE_X64_RBP, 64, 0);
+    (void)machine_x64_emit_exact_push_register(&encoder, MACHINE_X64_RBP, 0);
     if (!saves_first)
     {
-        (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64, 0);
+        (void)machine_x64_emit_exact_register_copy(&encoder, MACHINE_X64_RBP, MACHINE_X64_RSP, 0);
     }
     // Ascending register order, which is RBX, R12-R15 under System V and
     // gains RSI and RDI under Win64; the unwind actions walk the same mask
@@ -10311,14 +10333,14 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     {
         if (placement->callee_saved_mask & (1ull << push_register))
         {
-            (void)machine_x64_emit_metadata_register(&encoder, S8("PUSH"), push_register, 64, 0);
+            (void)machine_x64_emit_exact_push_register(&encoder, push_register, 0);
         }
     }
     if (saves_first)
     {
         // The frame pointer lands below the saves, so they sit at its
         // positive offsets and the epilogue recovers RSP with a plain move.
-        (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64, 0);
+        (void)machine_x64_emit_exact_register_copy(&encoder, MACHINE_X64_RBP, MACHINE_X64_RSP, 0);
     }
     // The stack allocation mirrors the canonical chunked form: at most a
     // page per subtract with a probe touch after each, so a frame larger
@@ -10327,8 +10349,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     while (frame_remaining)
     {
         u32 frame_chunk = BUSTER_MIN(frame_remaining, 4096u);
-        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("SUB"), MACHINE_X64_RSP, frame_chunk, 64,
-                                                           frame_chunk <= INT8_MAX ? 8 : 32, 0);
+        (void)machine_x64_emit_exact_sub_rsp(&encoder, frame_chunk, 0);
         (void)machine_x64_emit_metadata_memory_immediate(&encoder, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
         frame_remaining -= frame_chunk;
     }
@@ -10502,7 +10523,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                             }
                             if (function->target && function->target->saves_precede_frame_pointer)
                             {
-                                (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RSP, MACHINE_X64_RBP, 64, 0);
+                                (void)machine_x64_emit_exact_register_copy(&encoder, MACHINE_X64_RSP, MACHINE_X64_RBP, 0);
                             }
                             else
                             {
@@ -10520,7 +10541,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         }
                         else
                         {
-                            (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RSP, MACHINE_X64_RBP, 64, 0);
+                            (void)machine_x64_emit_exact_register_copy(&encoder, MACHINE_X64_RSP, MACHINE_X64_RBP, 0);
                         }
                         (void)machine_x64_emit_metadata_register(&encoder, S8("POP"), MACHINE_X64_RBP, 64, 0);
                         (void)machine_x64_emit_metadata_instruction(&encoder, S8("RET"), 0, 0,
