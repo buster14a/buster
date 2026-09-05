@@ -555,7 +555,6 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
     // unnecessary; the few source lookups below scan at most the target
     // register file, and conform_edge already has that fallback when the
     // inverse map is null.
-    BUSTER_UNUSED(locations);
     MachineBlock const* destination = state->function->blocks + edge->destination_block;
     u32 copy_count = BUSTER_MIN(edge->copy_count, destination->parameter_count);
     for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
