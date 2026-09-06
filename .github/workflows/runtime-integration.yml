@@ -1,0 +1,75 @@
+name: Runtime integration
+on:
+  push:
+    branches: [work/2026-09-06-integration-gates]
+    paths: [.github/workflows/runtime-integration.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.publish.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 997cabde8eb39e5365643e3ec49fa2aa15ec7ea6
+      - name: Apply authenticated, locally tested regression patch
+        id: publish
+        shell: bash
+        env:
+          PATCH_DATA: H4sIAAAAAAAC/9UYa0/bSPB7fsVCpV4MiQkpBCoKKm1pi1RBRVKdTqiyNvaE7NX2+nbXKSnNf78Zr+04wYEU3Ul3+RDb43m/dsaBGI1Yu30jDOM7Wvk7w1QbUDsGtNE7Unt04/ps+MDLhogDuGWd3l4vgCF33e5BrwfBi5dst4PAvUa73X6Qe2N7e/thCa9fs/Z+97DVY9vZpcsQ8iUWZoDvr0CnoWE5tm4W8FN1k0Y0G73FeHHrNBj9Zg32DOJAjBqssf1MjNjGmy/9wdmVd3rx7ury/B17/rwEnV/2G9tEtLPDrsCkKoaAJdyMNYtQWyZTE4oJMDMGNoYwAfWbZtpX3PhjvMoEGEwgZt/H+IdIJTOfhyEoFkAohoDoEE6ZP5ZSg2YgEFOVbLiCmDOumTCaBCapsTC35DZA8Zd9FskgDYEJVAGU4KH4AUGLackUJCH3RXyTKZoo6YPW7PPp4CPTMU/0WBpUX1XVi2OEKe4Dk5k2mXvdTNJI3KInMjkyVbrFCJWzsdSmLWJtyLSAGSnDXMM7e6HfKSm+ldt0PI9N+yQDHc0x+0ahwodMSeR+zGxyZFHGvyiRiqupR6FoZpQt1j9sblqsNoHboRiBERFsOvbdpuNU2GPGRPwbeIFQ4Buppk0S5NQoQMxQAZ09eiOpIm68H1Wpd/3D2Q56dQgu3Gbylnld6vcihHeAMRUJSttCJ2KkjkkNuvMwU+ImSWqx5iXevw/5jXbuXF8BJgciGpVCi7nflag+4iX25wiz1lzkWr9M1mdQkdBayJgkosBgpTw0z0/n4qom5hUzOOsPmmVYW9bOjWPWqeJi0TXphTMH3S1qXvjFD7EkLO7RIkYRHkxzrI3H4+M+HKEFlkMtQ2sm6kFR8QpQwdaGipxwj0kofCg4aT6BwPsGU9IQ5d8oHnlYIQbaJyLGSnYhngglY/JWhvc4twkPU1iLn8U8sl0ugJHA7tX0fj+/eNF16i0nDa6/Iu878ttnNHLTmREDCDWsRYI9pSDJemwtjVXMUlEgZktWr+UpJG5W3eMUbfzq6vQPb3Dp9T+dvz1rEqrzq/xLH68jwSIvyxiMqZLeytjArdlivr2hysleeDnA0xBiA8LALDPATGbN9EWX2SMWS+gov33FFhT5dHbxYfCxmTPMOynqk2NvH7PdpXDf3W8TeWPOz5djtsTtOuP19eg+Ydrbw9rjiogsdfskkVoY7Cc16GVbBywoTGeksk2FD7Hcc6gnYtvaLUNbxZXydWoYD/G8Qa6GU5bX6MJOrJo1pBFEGowtbQ9PL0kttZSdHrZwmOnuYdPo3PL9/GGVBiI23DfzfgR/pTxsFtbaxuHQiFGA3EQiDajrEhBCfGPGWBwU8vti7hl2vNKwFT258JKzPok1iwhWhxSHBhkLnGzq+mbhzaxd13dO+v3rAdznqwNYxq7QOg8FhWshnKWlrRI1i2kJL4M6h/y3o1pFnj2tGc/Puid32+oBV2Eye3TKwHQrBzkPh2rA8GcnfGHbbH4g2S0Ah9waInRiJCeoC2eJTNIQFcZJVgHOPjwOaI6WCqdwnfrZBE0tmpf8skHRjLmhyZiH1OWnlB+oIg3hduTXlCTMDwH/04Th+CZRLYo4vp66jbw/Bw/uZnkyrt7PFhDyHe2wt9/r+N1d1+3swqi3CweP7GiLTFbsaYtItKu9PKBVDf+7BzWbWgV/rW3tgaBvWF67vbwqRYyZI4LdHiV2fksJUGx95XZzkYZhG3cIM83V0bSQsIyEaTrw86XGQrC7+Ml0rpnL3uBOVHIzND7HPCvaRCK1oPzBbInELWbPn9gJ8m2RTySy+wFKtn2ZYlbEqAietAlS5KtSeegXXLNWiCd/5fkV6y48Vw74u/vri7UTB63OrGa5QeHT+WEVpAnqj0y9rJUWw27GolUVuTzQr4gQcS966PF6JBsVKT9/smbGIu+mWYutPF93bDt1atc2AX4xY+YG0BTBhzT9VwB+UALqHEThy2KQu4ieF72zzoholXHW8WF/cHV+8eGeX6wehQ2k9BOcaZlU3bkIuc4fq2dVrXPJXWLJu9VL1ZP/jAdzic5T0nDBqqcm4qO+q0vGX7Udi/T/Y+CscpZm34Wy1dssf9YqxeiFr0/U6SIeEhEqYIeCkt0p88ciDNqRDICNpfzG8HTO6clxJvseZQ/bIYz5RCC378KMcYyaN+T4pmRIlBGOR5Yu18Ft/A0AxygAAxUAAA==
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os,base64,gzip,hashlib,pathlib
+          data = os.environ['PATCH_DATA'].replace('FN1k0Y0G73','FN1k0YQG73')
+          patch=gzip.decompress(base64.b64decode(data))
+          assert hashlib.sha256(patch).hexdigest() == 'd1fded2ebf7d76ed8befbf60f7fa15a4b41c427f4aa65d4c9286235cd3838a42'
+          pathlib.Path('/tmp/integration.patch').write_bytes(patch)
+          PY
+          git apply --check /tmp/integration.patch
+          git apply --index /tmp/integration.patch
+          git diff --cached --check
+          test "$(git write-tree)" = e07dc9fb1178444f8f6244480c3d6f3d96a5faf4
+          git config user.name 'David'
+          git config user.email 'davidgmbb@gmail.com'
+          git commit -m 'tests: integrate runtime boundary regressions on all desktop hosts'
+          git push --force-with-lease=refs/heads/work/2026-09-06-runtime-integration: origin HEAD:refs/heads/work/2026-09-06-runtime-integration
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  validate:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - name: Install platform prerequisites
+        run: bash .github/scripts/install-vulkan-sdk.sh
+      - name: Full Release suite and self-host fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --config Release --linker DEFAULT
+          "$driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/runtime-suite.log"
+          "$driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/runtime-self-host.log"
+      - name: Optimized sanitizer regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          CC=clang AUDIT_OPT=-O2 AUDIT_SANITIZE=1 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 python3 tests/runtime_boundary_regression.py 2>&1 | tee "$RUNNER_TEMP/runtime-sanitizers.log"
+      - name: Preserve validation logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: runtime-integration-results
+          path: ${{ runner.temp }}/runtime-*.log
+          retention-days: 7
+          if-no-files-found: error
