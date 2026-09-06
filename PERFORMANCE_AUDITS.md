@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-06T161430Z`](docs/performance-audits/2026-09-06T161430Z.md) — eight parallel subsystem branches take stage 1 from 8.739,6 M to 7.927,6 M instructions (-9,29%) byte-identically, the per-invocation floor from 149,5 M to 91,2 M, and re-price the #embed route out of the ranking
 - [`2026-09-05T122006Z`](docs/performance-audits/2026-09-05T122006Z.md) — AVX-512/Zen 5 throughput audit of the whole pipeline: eleven changes take stage 1 from 11.230,4 M to 8.682,4 M instructions (-22,69%) byte-identically, the per-invocation metadata floor from 562 M to 165 M, and rank what is left
 - [`2026-08-30T182357Z`](docs/performance-audits/2026-08-30T182357Z.md) — the translation phase takes the chunk kernel and the window emitter's line metrics become one subtraction; the cursor residue and checkpoint-row stores are measured negative and closed
 - [`2026-08-24T174159Z`](docs/performance-audits/2026-08-24T174159Z.md) — #539 position-index tile classification A/B and fixed-point audit
