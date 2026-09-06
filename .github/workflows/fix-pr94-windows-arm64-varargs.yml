@@ -1,0 +1,440 @@
+name: Fix PR 94 Windows ARM64 formatter varargs
+
+on:
+  push:
+    branches:
+      - claude/unruffled-bhabha-f5d28a
+    paths:
+      - .github/workflows/fix-pr94-windows-arm64-varargs.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: claude/unruffled-bhabha-f5d28a
+          fetch-depth: 0
+
+      - name: Repair Windows ARM64 variadic formatting
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one replacement anchor, found {count}: {old[:100]!r}")
+              file.write_text(text.replace(old, new, 1))
+
+          # Restore the build-driver unity include order after removing the
+          # temporary allocator/formatter probes used to localize this failure.
+          build = Path("build.c")
+          text = build.read_text()
+          diagnostic_include_block = """#include <buster/lib/arena.h>
+          BUSTER_GLOBAL_LOCAL void* arena_allocate_bytes_with_location(Arena* arena, u64 size, u64 alignment, const char* file, u32 line);
+          #define arena_allocate_bytes(arena, size, alignment) arena_allocate_bytes_with_location((arena), (size), (alignment), __FILE__, __LINE__)
+          #define BUSTER_STRING_FORMAT_DIAGNOSTICS 1
+          #include <buster/lib/string.c>
+          #undef BUSTER_STRING_FORMAT_DIAGNOSTICS
+          #include <buster/lib/os.c>
+          #undef arena_allocate_bytes
+          #define BUSTER_ARENA_CAPACITY_DIAGNOSTICS 1
+          #include <buster/lib/arena.c>
+
+          BUSTER_GLOBAL_LOCAL void* arena_allocate_bytes_with_location(Arena* arena, u64 size, u64 alignment, const char* file, u32 line)
+          {
+              if (BUSTER_UNLIKELY(arena && (arena->position > arena->reserved_size || size > arena->reserved_size - arena->position)))
+              {
+                  fprintf(stderr, "ARENA_CALLSITE file=%s line=%u position=%llu size=%llu alignment=%llu reserved=%llu\\n", file, line,
+                          (unsigned long long)arena->position, (unsigned long long)size, (unsigned long long)alignment,
+                          (unsigned long long)arena->reserved_size);
+                  fflush(stderr);
+              }
+              return arena_allocate_bytes(arena, size, alignment);
+          }
+
+          #define arena_allocate_bytes(arena, size, alignment) arena_allocate_bytes_with_location((arena), (size), (alignment), __FILE__, __LINE__)
+          #include <buster/lib/file.c>
+          """
+          production_include_block = """#include <buster/lib/string.c>
+          #include <buster/lib/os.c>
+          #include <buster/lib/arena.c>
+          #include <buster/lib/file.c>
+          """
+          if text.count(diagnostic_include_block) != 1:
+              raise SystemExit("build.c: diagnostic unity include block not found")
+          text = text.replace(diagnostic_include_block, production_include_block, 1)
+          old = "string_format_va(output->capture_arena, format, variable_arguments)"
+          if text.count(old) != 1:
+              raise SystemExit(f"build.c: expected one summary formatter call, found {text.count(old)}")
+          text = text.replace(old, old[:-1] + ", STRING_FORMAT_VA_GP_SLOTS(3))", 1)
+          old_write = "string_write_to_file_va(output->file, format, variable_arguments)"
+          if old_write in text:
+              text = text.replace(old_write, old_write[:-1] + ", STRING_FORMAT_VA_GP_SLOTS(3))")
+          build.write_text(text)
+
+          # Remove the temporary arena capacity reporter.
+          arena = Path("src/buster/lib/arena.c")
+          text = arena.read_text()
+          text, count = re.subn(
+              r"#if defined\(BUSTER_ARENA_CAPACITY_DIAGNOSTICS\) && BUSTER_ARENA_CAPACITY_DIAGNOSTICS\n.*?#endif\n",
+              "",
+              text,
+              count=1,
+              flags=re.S,
+          )
+          if count != 1:
+              raise SystemExit("arena.c: capacity diagnostic block not found")
+          arena.write_text(text)
+
+          # The parameter records the x0-x7 slots left after the originating
+          # variadic function's named arguments. It is ignored except by the
+          # Clang/Windows/AArch64 workaround below.
+          header = Path("src/buster/lib/string.h")
+          text = header.read_text()
+          declarations = """BUSTER_F_DECL String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments);
+          BUSTER_F_DECL void string_write_to_file_va(OsFileDescriptor* file_handle, String8 format, va_list variable_arguments);
+          """
+          replacement = """// Windows ARM64 has eight general-purpose argument registers. Variadic
+          // wrappers pass the number still available after their named arguments so
+          // string_format_va can honor the no-register/stack-split rule for aggregates.
+          // Other targets retain their native va_arg implementation and ignore the value.
+          #define STRING_FORMAT_VA_GP_REGISTER_COUNT 8u
+          #define STRING_FORMAT_VA_GP_SLOTS(named_gp_slots) ((u32)(STRING_FORMAT_VA_GP_REGISTER_COUNT - (named_gp_slots)))
+          BUSTER_F_DECL String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments, u32 gp_register_slots_remaining);
+          BUSTER_F_DECL void string_write_to_file_va(OsFileDescriptor* file_handle, String8 format, va_list variable_arguments,
+                                                     u32 gp_register_slots_remaining);
+          """
+          if text.count(declarations) != 1:
+              raise SystemExit("string.h: formatter declaration anchor not found")
+          header.write_text(text.replace(declarations, replacement, 1))
+
+          source = Path("src/buster/lib/string.c")
+          text = source.read_text()
+
+          diagnostic_count = text.count("#if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)")
+          if diagnostic_count != 5:
+              raise SystemExit(f"string.c: expected five formatter diagnostic blocks, found {diagnostic_count}")
+          text, removed_count = re.subn(
+              r"#if defined\(BUSTER_STRING_FORMAT_DIAGNOSTICS\)\n.*?#endif\n",
+              "",
+              text,
+              flags=re.S,
+          )
+          if removed_count != diagnostic_count:
+              raise SystemExit(f"string.c: removed {removed_count} of {diagnostic_count} diagnostic blocks")
+
+          include_anchor = "#include <buster/lib/integer.h>\n\n"
+          reader = """#include <buster/lib/integer.h>
+
+          #if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && BUSTER_COMPILER_CLANG
+          // Clang's Windows ARM64 va_arg implementation treats the homed register
+          // area and the caller stack as one packed byte stream. The ABI does not:
+          // a value that cannot fit wholly in the remaining x-registers starts on
+          // the stack, leaving the final register unused, and 16-byte stack values
+          // retain 16-byte alignment. Reading the stream linearly combines x7 with
+          // the first stack word. Track the originating wrapper's register window
+          // explicitly so the formatter follows the caller's actual layout.
+          typedef struct StringFormatVaReader StringFormatVaReader;
+          struct StringFormatVaReader
+          {
+              u8* pointer;
+              u32 gp_register_slots_remaining;
+          };
+
+          BUSTER_CT_CHECK(sizeof(va_list) == sizeof(void*));
+
+          BUSTER_GLOBAL_LOCAL void string_format_va_reader_read(StringFormatVaReader* reader, void* destination, u64 size, u64 alignment)
+          {
+              BUSTER_CHECK(reader->gp_register_slots_remaining <= STRING_FORMAT_VA_GP_REGISTER_COUNT);
+              BUSTER_CHECK(size != 0 && size <= 2 * sizeof(u64));
+              BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(alignment) && alignment <= 2 * sizeof(u64));
+
+              u64 slot_count = (size + sizeof(u64) - 1) / sizeof(u64);
+              if (reader->gp_register_slots_remaining && alignment > sizeof(u64))
+              {
+                  u32 register_index = STRING_FORMAT_VA_GP_REGISTER_COUNT - reader->gp_register_slots_remaining;
+                  if (register_index & 1u)
+                  {
+                      reader->pointer += sizeof(u64);
+                      reader->gp_register_slots_remaining -= 1;
+                  }
+              }
+
+              if (slot_count > reader->gp_register_slots_remaining)
+              {
+                  reader->pointer += (u64)reader->gp_register_slots_remaining * sizeof(u64);
+                  reader->gp_register_slots_remaining = 0;
+              }
+
+              if (!reader->gp_register_slots_remaining && alignment > sizeof(u64))
+              {
+                  reader->pointer = (u8*)align_forward((u64)reader->pointer, alignment);
+              }
+
+              memcpy(destination, reader->pointer, size);
+              reader->pointer += slot_count * sizeof(u64);
+              if (reader->gp_register_slots_remaining)
+              {
+                  reader->gp_register_slots_remaining -= (u32)slot_count;
+              }
+          }
+          #endif
+
+          """
+          if text.count(include_anchor) != 1:
+              raise SystemExit("string.c: include anchor not found")
+          text = text.replace(include_anchor, reader, 1)
+
+          old_signature = "String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments)\n{\n    u64 original_position = arena->position;"
+          new_signature = """String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments, u32 gp_register_slots_remaining)
+          {
+          #if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && BUSTER_COMPILER_CLANG
+              StringFormatVaReader variable_argument_reader = {
+                  .pointer = (u8*)variable_arguments,
+                  .gp_register_slots_remaining = gp_register_slots_remaining,
+              };
+          #define STRING_FORMAT_VA_READ(type, name)                                                                                                            \
+              type name;                                                                                                                                       \
+              string_format_va_reader_read(&variable_argument_reader, &(name), sizeof(name), BUSTER_ALIGN_OF(type))
+          #else
+              BUSTER_UNUSED(gp_register_slots_remaining);
+          #define STRING_FORMAT_VA_READ(type, name) type name = va_arg(variable_arguments, type)
+          #endif
+              u64 original_position = arena->position;"""
+          if text.count(old_signature) != 1:
+              raise SystemExit("string.c: string_format_va signature anchor not found")
+          text = text.replace(old_signature, new_signature, 1)
+
+          replacements = {
+              "SliceString8 strings = va_arg(variable_arguments, SliceString8);": "STRING_FORMAT_VA_READ(SliceString8, strings);",
+              "StringOsList string_os_list = va_arg(variable_arguments, StringOsList);": "STRING_FORMAT_VA_READ(StringOsList, string_os_list);",
+              "String8 string = va_arg(variable_arguments, String8);": "STRING_FORMAT_VA_READ(String8, string);",
+              "String16 string16 = va_arg(variable_arguments, String16);": "STRING_FORMAT_VA_READ(String16, string16);",
+              "u32 code_point = (u32)(u16)va_arg(variable_arguments, int);": "STRING_FORMAT_VA_READ(int, promoted_character);\n                u32 code_point = (u32)(u16)promoted_character;",
+              "char8 character = (char8)va_arg(variable_arguments, int);": "STRING_FORMAT_VA_READ(int, promoted_character);\n                char8 character = (char8)promoted_character;",
+              "u128 argument = va_arg(variable_arguments, u128);": "STRING_FORMAT_VA_READ(u128, argument);",
+              "s8 argument = (s8)va_arg(variable_arguments, int);": "STRING_FORMAT_VA_READ(int, promoted_argument);\n                    s8 argument = (s8)promoted_argument;",
+              "s16 argument = (s16)va_arg(variable_arguments, int);": "STRING_FORMAT_VA_READ(int, promoted_argument);\n                    s16 argument = (s16)promoted_argument;",
+              "s32 argument = va_arg(variable_arguments, s32);": "STRING_FORMAT_VA_READ(s32, argument);",
+              "s64 argument = va_arg(variable_arguments, s64);": "STRING_FORMAT_VA_READ(s64, argument);",
+              "s128 argument = va_arg(variable_arguments, s128);": "STRING_FORMAT_VA_READ(s128, argument);",
+              "OsError os_error = va_arg(variable_arguments, OsError);": "STRING_FORMAT_VA_READ(OsError, os_error);",
+          }
+          for old, new in replacements.items():
+              count = text.count(old)
+              expected = 2 if old == "char8 character = (char8)va_arg(variable_arguments, int);" else 1
+              if count != expected:
+                  raise SystemExit(f"string.c: expected {expected} occurrence(s), found {count}: {old}")
+              text = text.replace(old, new)
+
+          integer_cases = {
+              """                case FORMAT_TYPE_UNSIGNED_INTEGER_8:
+                      value.low = (u8)va_arg(variable_arguments, int);
+                      bit_width = 8;
+                      break;""": """                case FORMAT_TYPE_UNSIGNED_INTEGER_8:
+                  {
+                      STRING_FORMAT_VA_READ(int, argument);
+                      value.low = (u8)argument;
+                      bit_width = 8;
+                  }
+                  break;""",
+              """                case FORMAT_TYPE_UNSIGNED_INTEGER_16:
+                      value.low = (u16)va_arg(variable_arguments, int);
+                      bit_width = 16;
+                      break;""": """                case FORMAT_TYPE_UNSIGNED_INTEGER_16:
+                  {
+                      STRING_FORMAT_VA_READ(int, argument);
+                      value.low = (u16)argument;
+                      bit_width = 16;
+                  }
+                  break;""",
+              """                case FORMAT_TYPE_UNSIGNED_INTEGER_32:
+                      value.low = va_arg(variable_arguments, u32);
+                      bit_width = 32;
+                      break;""": """                case FORMAT_TYPE_UNSIGNED_INTEGER_32:
+                  {
+                      STRING_FORMAT_VA_READ(u32, argument);
+                      value.low = argument;
+                      bit_width = 32;
+                  }
+                  break;""",
+              """                case FORMAT_TYPE_UNSIGNED_INTEGER_64:
+                      value.low = va_arg(variable_arguments, u64);
+                      bit_width = 64;
+                      break;""": """                case FORMAT_TYPE_UNSIGNED_INTEGER_64:
+                  {
+                      STRING_FORMAT_VA_READ(u64, argument);
+                      value.low = argument;
+                      bit_width = 64;
+                  }
+                  break;""",
+          }
+          for old, new in integer_cases.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f"string.c: integer case anchor not found: {old.splitlines()[0]}")
+              text = text.replace(old, new, 1)
+
+          function_end = """    return (String8){.pointer = (char8*)((u8*)arena + original_position), .length = (arena->position - original_position) / sizeof(char8)};
+          }
+
+          String8 string_duplicate_arena"""
+          function_end_replacement = """    return (String8){.pointer = (char8*)((u8*)arena + original_position), .length = (arena->position - original_position) / sizeof(char8)};
+          }
+          #undef STRING_FORMAT_VA_READ
+
+          String8 string_duplicate_arena"""
+          if text.count(function_end) != 1:
+              raise SystemExit("string.c: formatter end anchor not found")
+          text = text.replace(function_end, function_end_replacement, 1)
+
+          text = text.replace(
+              "String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments, u32 gp_register_slots_remaining)",
+              "String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments, u32 gp_register_slots_remaining)",
+              1,
+          )
+          old = "String8 result = string_format_va(arena, format, variable_arguments);"
+          if text.count(old) != 3:
+              raise SystemExit(f"string.c: expected three formatter forwarding calls, found {text.count(old)}")
+          # string_format, string_format_z, and string_write_to_file_va all
+          # forward the slot count belonging to the original variadic wrapper.
+          text = text.replace(old, "String8 result = string_format_va(arena, format, variable_arguments, gp_register_slots_remaining);", 3)
+
+          old_write_signature = "void string_write_to_file_va(OsFileDescriptor* file_handle, String8 format, va_list variable_arguments)"
+          new_write_signature = """void string_write_to_file_va(OsFileDescriptor* file_handle, String8 format, va_list variable_arguments,
+                                       u32 gp_register_slots_remaining)"""
+          if text.count(old_write_signature) != 1:
+              raise SystemExit("string.c: string_write_to_file_va signature not found")
+          text = text.replace(old_write_signature, new_write_signature, 1)
+
+          # string_format and string_format_z originate after one pointer and
+          # one two-slot String8. string_print originates after only String8.
+          format_function_anchor = """String8 string_format(Arena* arena, String8 format, ...)
+          {
+              va_list variable_arguments;
+              va_start(variable_arguments, format);
+              String8 result = string_format_va(arena, format, variable_arguments, gp_register_slots_remaining);"""
+          format_function_replacement = """String8 string_format(Arena* arena, String8 format, ...)
+          {
+              va_list variable_arguments;
+              va_start(variable_arguments, format);
+              String8 result = string_format_va(arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(3));"""
+          if text.count(format_function_anchor) != 1:
+              raise SystemExit("string.c: string_format wrapper anchor not found")
+          text = text.replace(format_function_anchor, format_function_replacement, 1)
+
+          format_z_anchor = """String8 string_format_z(Arena* arena, String8 format, ...)
+          {
+              va_list variable_arguments;
+              va_start(variable_arguments, format);
+              String8 result = string_format_va(arena, format, variable_arguments, gp_register_slots_remaining);"""
+          format_z_replacement = """String8 string_format_z(Arena* arena, String8 format, ...)
+          {
+              va_list variable_arguments;
+              va_start(variable_arguments, format);
+              String8 result = string_format_va(arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(3));"""
+          if text.count(format_z_anchor) != 1:
+              raise SystemExit("string.c: string_format_z wrapper anchor not found")
+          text = text.replace(format_z_anchor, format_z_replacement, 1)
+
+          old_print = "string_write_to_file_va(os_get_stdout(), format, variable_arguments);"
+          new_print = "string_write_to_file_va(os_get_stdout(), format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(2));"
+          if text.count(old_print) != 1:
+              raise SystemExit("string.c: string_print forwarding call not found")
+          text = text.replace(old_print, new_print, 1)
+
+          if "va_arg(variable_arguments" in text:
+              raise SystemExit("string.c: unconverted direct va_arg remains")
+          source.write_text(text)
+
+          # Forward the originating register window through every other
+          # variadic wrapper in the library and build driver.
+          call_updates = {
+              "src/buster/lib/os.c": {
+                  "string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), format, variable_arguments);":
+                      "string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(2));",
+                  "string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), context, variable_arguments);":
+                      "string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), context, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(7));",
+              },
+              "src/buster/tests/test.c": {
+                  "string_format_va(parallel_arguments->output_arena, format, variable_arguments);":
+                      "string_format_va(parallel_arguments->output_arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(3));",
+              },
+              "src/buster/lib/ui_core.c": {
+                  "string_format_va(arena, format, args);":
+                      "string_format_va(arena, format, args, STRING_FORMAT_VA_GP_SLOTS(3));",
+              },
+          }
+          for path, updates in call_updates.items():
+              file = Path(path)
+              contents = file.read_text()
+              for old, new in updates.items():
+                  expected = 2 if path.endswith("ui_core.c") else 1
+                  count = contents.count(old)
+                  if count != expected:
+                      raise SystemExit(f"{path}: expected {expected} occurrence(s), found {count}: {old}")
+                  contents = contents.replace(old, new)
+              file.write_text(contents)
+
+          # Exercise both ABI discontinuities: a 16-byte aggregate that cannot
+          # fit in the final x register, and a 16-byte integer aligned after an
+          # already stacked scalar.
+          tests = Path("src/buster/tests/string_test.c")
+          text = tests.read_text()
+          anchor = """    // string8_format
+              {
+                  {
+                      String8 formatted = string_format(arena, S8("{{ {S8} }}"), S8("value"));"""
+          replacement = """    // string8_format
+              {
+                  // Windows ARM64 must leave x7 unused rather than split a
+                  // two-slot aggregate between the register save area and stack.
+                  {
+                      String8 formatted = string_format(arena, S8("{S8}{S8}{S8}"), S8("a"), S8("b"), S8("c"));
+                      BUSTER_STRING_TEST(arguments, formatted, S8("abc"));
+                  }
+                  {
+                      String8 formatted =
+                          string_format(arena, S8("{u64}{u64}{u64}{u64}{S8}"), (u64)1, (u64)2, (u64)3, (u64)4, S8("x"));
+                      BUSTER_STRING_TEST(arguments, formatted, S8("1234x"));
+                  }
+                  // Once variadic arguments are on the stack, a u128 following
+                  // one u64 must advance across the ABI's 16-byte alignment gap.
+                  {
+                      u128 seven = string_test_u128(7, 0);
+                      String8 formatted = string_format(arena, S8("{u64}{u64}{u64}{u64}{u64}{u64}{u128}"), (u64)1, (u64)2,
+                                                        (u64)3, (u64)4, (u64)5, (u64)6, seven);
+                      BUSTER_STRING_TEST(arguments, formatted, S8("1234567"));
+                  }
+                  {
+                      String8 formatted = string_format(arena, S8("{{ {S8} }}"), S8("value"));"""
+          if text.count(anchor) != 1:
+              raise SystemExit("string_test.c: formatter test anchor not found")
+          tests.write_text(text.replace(anchor, replacement, 1))
+          PY
+
+      - name: Validate the repaired build driver
+        shell: bash
+        run: |
+          mkdir -p /tmp/buster-pr94
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o /tmp/buster-pr94/build
+          /tmp/buster-pr94/build time_trace_summary_self_test
+          /tmp/buster-pr94/build test_timing_summary_self_test
+
+      - name: Commit repair and remove this workflow
+        shell: bash
+        run: |
+          git config user.name David
+          git config user.email davidgmbb@gmail.com
+          git rm .github/workflows/fix-pr94-windows-arm64-varargs.yml
+          git add build.c src/buster/lib/arena.c src/buster/lib/string.h src/buster/lib/string.c src/buster/lib/os.c src/buster/lib/ui_core.c src/buster/tests/test.c src/buster/tests/string_test.c
+          git commit -m "fix: decode Windows ARM64 formatter varargs by ABI slots"
+          git push origin HEAD:claude/unruffled-bhabha-f5d28a
