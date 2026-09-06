@@ -55,6 +55,16 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install Vulkan SDK
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        run: bash .github/scripts/install-vulkan-sdk.sh
+
+      - name: Install Vulkan SDK (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: powershell
+        run: . .github/scripts/install-vulkan-sdk.ps1
+
       - name: Test (Linux, macOS)
         if: ${{ matrix.platform == 'unix' }}
         shell: bash
@@ -106,6 +116,10 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+
+      - name: Install Vulkan SDK
+        shell: bash
+        run: bash .github/scripts/install-vulkan-sdk.sh
 
       # The matrix cross-products every register-allocator mode with every
       # linkable target, running each leg natively or under an emulator the
