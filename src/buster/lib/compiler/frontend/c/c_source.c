@@ -39,6 +39,11 @@
 //   c_macro_name_hash .. c_symbol_intern       macro and symbol tables
 //   c_macro_invocation_arguments ..            macro expansion: arguments,
 //   c_preprocess_expand                        stringify, paste, rescan
+//   CPpClassMasks, c_pp_class_masks_build,     the per-64-token class
+//   c_pp_line_end_masked,                      projection of a lexed run's
+//   c_pp_parenthesis_depth                     shape sidecar, and what the
+//                                              driver's per-line scans read
+//                                              instead of walking token rows
 //   c_conditional_* ,                          #if evaluation including
 //   c_integer_expression_evaluate              __has_* feature tests
 //   c_preprocess_pragma_*                      pragmas: once, pack, push/pop
