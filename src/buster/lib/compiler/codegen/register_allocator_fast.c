@@ -1,6 +1,24 @@
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/os.h>
-#include <buster/lib/simd.h>
+
+// FRA stage 4: local fast register allocation over the compact machine IR.
+// Included by machine.c in the backend-implementation-file pattern. A
+// forward scan keeps values in registers between their uses inside one
+// block, spills lazily on eviction, calls, and block boundaries, and forces
+// the fixed-register operand layout for the constrained opcodes whose
+// encoder sequences pin specific registers. The output is the same
+// placement contract the MIR_STACK builder produces, so the encoder is
+// untouched: per-slot operand registers plus a point-sorted reload/spill
+// edit stream.
+
+// A physical register index is a bit lane, and every per-register predicate
+// the pass carries is a mask: the scan's occupancy and dirtiness, the
+// contract each block promises its predecessors, and the state each edge
+// delivers. Nothing walks the register file to its fixed maximum — the walks
+// iterate the lanes that can matter, which a stage-1 census puts at 2,75 of
+// sixteen held at a block's exit and 0,60 promised by its contract. The
+// per-block owner rows carry no free sentinel at all: a row is readable only
+// where its block's held mask says so.
 
 #define MACHINE_FAST_OPERAND_PHYSICAL_SHIFT 0u
 #define MACHINE_FAST_OPERAND_VIRTUAL_SHIFT 4u
@@ -38,16 +56,6 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_lane_held(u64 mask, u32 index)
 {
     return ((mask >> index) & 1u) != 0;
 }
-
-// FRA stage 4: local fast register allocation over the compact machine IR.
-// Included by machine.c in the backend-implementation-file pattern. A
-// forward scan keeps values in registers between their uses inside one
-// block, spills lazily on eviction, calls, and block boundaries, and forces
-// the fixed-register operand layout for the constrained opcodes whose
-// encoder sequences pin specific registers. The output is the same
-// placement contract the MIR_STACK builder produces, so the encoder is
-// untouched: per-slot operand registers plus a point-sorted reload/spill
-// edit stream.
 
 typedef struct MachineFastState MachineFastState;
 struct MachineFastState
