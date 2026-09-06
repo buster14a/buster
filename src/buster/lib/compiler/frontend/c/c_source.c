@@ -2778,6 +2778,9 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_memmove"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin_memset"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin_memcmp"), C_SYMBOL_BUILTIN_MEMORY },
+    { S8_INITIALIZER("__builtin___memcpy_chk"), C_SYMBOL_BUILTIN_MEMORY },
+    { S8_INITIALIZER("__builtin___memmove_chk"), C_SYMBOL_BUILTIN_MEMORY },
+    { S8_INITIALIZER("__builtin___memset_chk"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin_clz"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     // The `l` spellings sit between the int and long long ones and lower the
     // same way -- the operand's own width decides the operation -- so their
@@ -4866,6 +4869,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
         "__builtin_signbit",       "__builtin_signbitf", "__builtin_signbitl",
         "__builtin_memcpy",        "__builtin_memmove",
         "__builtin_memset",        "__builtin_memcmp",
+        "__builtin___memcpy_chk", "__builtin___memmove_chk", "__builtin___memset_chk",
         "__builtin_sqrt",          "__builtin_sqrtf",
         "__builtin_strlen",        "__builtin_trap",
         "__builtin_ia32_pause",
