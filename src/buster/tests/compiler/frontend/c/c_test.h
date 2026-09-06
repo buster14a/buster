@@ -25,6 +25,7 @@ BUSTER_F_DECL bool c_test_decode_quoted(Arena* arena, String8 spelling, u8 delim
 BUSTER_F_DECL bool c_test_decode_quoted_paths_agree(Arena* arena, String8 spelling, u8 delimiter, bool* accepted_out);
 BUSTER_F_DECL bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, bool* accepted_out);
 BUSTER_F_DECL u64 c_test_lex_punctuator_nfa_mismatches(void);
+BUSTER_F_DECL u64 c_test_lex_mask_below_mismatches(void);
 BUSTER_F_DECL bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* grew_out, bool* restored_pointer_out,
                                                            bool* old_tag_restored_out, bool* grown_tag_preserved_out);
 BUSTER_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments);
