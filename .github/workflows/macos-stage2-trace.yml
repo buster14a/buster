@@ -1,0 +1,56 @@
+name: macOS stage-2 trace
+on:
+  push:
+    branches: [work/2026-09-06-integration-gates]
+    paths: [.github/workflows/macos-stage2-trace.yml]
+permissions:
+  contents: read
+jobs:
+  trace:
+    if: github.server_url == 'https://github.com'
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: c640feaf5d5de15ba5f6192c7cc8c90c45340b89
+          persist-credentials: false
+      - name: Preserve exact source for local investigation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = c640feaf5d5de15ba5f6192c7cc8c90c45340b89
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/current-source.tar.gz"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/current-source-identity.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-stage2-exact-source
+          path: ${{ runner.temp }}/current-source*
+          retention-days: 3
+          if-no-files-found: error
+      - name: Install SDK
+        run: bash .github/scripts/install-vulkan-sdk.sh
+      - name: Reproduce unmodified candidate fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --ci --linker DEFAULT
+          "$driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/trace-self-host.log"
+      - name: Capture failure-time stack and generated instructions
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x build/self-host/Release/ide-stage1
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          lldb --batch -o 'settings set target.process.stop-on-sharedlibrary-events false' -o run -k 'thread backtrace -c 30' -k 'register read x0 x1 x19 x20 x21 x22 x29 x30 sp pc' -k 'disassemble --frame' -k 'memory read --size 8 --format x --count 24 $sp' -k 'frame select 1' -k 'disassemble --frame' -k 'frame select 2' -k 'disassemble --frame' -- build/self-host/Release/ide-stage1 cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -isysroot "$sdk" src/buster/apps/ide/ide.c -o "$RUNNER_TEMP/trace-stage2" 2>&1 | tee "$RUNNER_TEMP/trace-backtrace.log"
+      - name: Keep the failed gate and its diagnosis visible
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-stage2-trace
+          path: ${{ runner.temp }}/trace-*.log
+          retention-days: 7
+          if-no-files-found: error
