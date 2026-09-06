@@ -1,0 +1,33 @@
+name: Issue 32 bootstrap
+
+on:
+  push:
+    branches:
+      - fix/issue-32-machine-ir-contract
+
+permissions:
+  contents: write
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pack source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --exclude=.git --exclude=.github/workflows/issue-32-bootstrap.yml -czf "$RUNNER_TEMP/buster-source.tar.gz" .
+
+      - name: Upload source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-32-source
+          path: ${{ runner.temp }}/buster-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
