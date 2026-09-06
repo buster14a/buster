@@ -11628,6 +11628,44 @@ void buster_x86_metadata_prewarm_all_forms(void)
     }
 }
 
+#if BUSTER_INCLUDE_TESTS
+// The SPMD prerequisite, made checkable rather than asserted in a comment.
+// Every per-form and per-coverage cache in this module fills on the first
+// *serial* touch of its row, so a caller about to hand the tables to a worker
+// gang must leave none of them unfilled -- a lane that filled one would race
+// every other lane reading it, and BUSTER_CHECK_SERIAL_INITIALIZATION would
+// only report the first such fill it happened to reach.  This walks the flags
+// themselves after buster_x86_metadata_prewarm_all_forms and answers the
+// question the contract actually asks.  A form whose record does not validate
+// legitimately has no normalized row and no parsed pattern, so it is counted
+// as prepared once its validity is known.
+u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void)
+{
+    buster_x86_metadata_prewarm_all_forms();
+    u64 unprepared = 0;
+    for (u32 form_id = 0; form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
+    {
+        if (buster_x86_metadata_form_record_validity[form_id] == BUSTER_X86_METADATA_RECORD_UNKNOWN)
+        {
+            unprepared += 1;
+        }
+        else if (buster_x86_metadata_form_record_validity[form_id] == BUSTER_X86_METADATA_RECORD_VALID &&
+                 (!buster_x86_metadata_normalized_forms_cached[form_id] || !buster_x86_metadata_pattern_semantics_cached[form_id]))
+        {
+            unprepared += 1;
+        }
+    }
+    for (u32 coverage_id = 0; coverage_id < BUSTER_X86_GENERATED_COVERAGE_COUNT; coverage_id += 1)
+    {
+        if (buster_x86_metadata_coverage_record_validity[coverage_id] == BUSTER_X86_METADATA_RECORD_UNKNOWN)
+        {
+            unprepared += 1;
+        }
+    }
+    return unprepared;
+}
+#endif
+
 bool buster_x86_metadata_coverage(u32 coverage_id, BusterX86MetadataCoverage* result)
 {
     if (!result || coverage_id >= BUSTER_X86_GENERATED_COVERAGE_COUNT) return false;
