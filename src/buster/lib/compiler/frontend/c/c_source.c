@@ -5913,15 +5913,24 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
     // Every stamp of a line is pushed from a distinct token, so two tokens
     // carry one location exactly when they carry one stamp.
     u32 run_stamp = 0;
+    // The pack alignment can only change where a pragma marker fires, so the
+    // sample is taken at the line's first token and again at the first token
+    // after each marker, instead of asking the recorder once per token.
+    bool pack_pending = true;
     for (CPreprocessTokenNode* node = first_line; node; node = node->next)
     {
         if (node->token.token.kind == C_TOKEN_PRAGMA)
         {
             c_preprocess_pragma_marker(context, space->base, node->token.token);
+            pack_pending = true;
             continue;
         }
         CPpToken item = node->token;
-        c_pack_alignment_record(context.pack_changes, *output_count + count, *context.pack_alignment);
+        if (pack_pending)
+        {
+            c_pack_alignment_record(context.pack_changes, *output_count + count, *context.pack_alignment);
+            pack_pending = false;
+        }
         if (item.foreign)
         {
             String8 spelling = c_token_spelling(space->base, item.token);
