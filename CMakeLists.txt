@@ -1075,6 +1075,23 @@ set(GNU_FAMILY_UNITY_DISABLE_WARNINGS
 )
 
 set(GNU_FAMILY_NATIVE_TARGET -march=native)
+if (C_COMPILER_CLANG AND NOT BUSTER_CROSS_COMPILE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|X86_64|X86-64|AMD64)$")
+    # Some hosted Granite Rapids CPUs make Clang 18's native detection combine
+    # AVX10.1-256 with AVX-512, which fails under -Werror. Remove the conflicting
+    # AVX10 feature only when the native flags fail and that correction works;
+    # the independently detected AVX-512 features and native tuning stay enabled.
+    # Reprobe on configure: a native build tree can move between host CPUs.
+    unset(BUSTER_CLANG_NATIVE_FLAGS_WORK CACHE)
+    check_c_compiler_flag("-march=native -Werror" BUSTER_CLANG_NATIVE_FLAGS_WORK)
+    if (NOT BUSTER_CLANG_NATIVE_FLAGS_WORK)
+        unset(BUSTER_CLANG_NATIVE_WITHOUT_AVX10_WORKS CACHE)
+        check_c_compiler_flag("-march=native -mno-avx10.1-256 -Werror" BUSTER_CLANG_NATIVE_WITHOUT_AVX10_WORKS)
+        if (BUSTER_CLANG_NATIVE_WITHOUT_AVX10_WORKS)
+            list(APPEND GNU_FAMILY_NATIVE_TARGET -mno-avx10.1-256)
+            message(STATUS "Clang native feature workaround: disable conflicting AVX10.1-256")
+        endif()
+    endif()
+endif()
 if (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     # Win64 guarantees only 16-byte stack alignment. MinGW GCC 15 can emit
     # 32-byte-aligned AVX spills without realigning the incoming stack.
