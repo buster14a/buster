@@ -1,0 +1,4 @@
+N=2048 key_comparisons=2096128 elapsed_us=3658 count=2048
+N=4096 key_comparisons=8386560 elapsed_us=5966 count=4096
+N=8192 key_comparisons=33550336 elapsed_us=16765 count=8192
+N=16384 key_comparisons=134209536 elapsed_us=63632 count=16384

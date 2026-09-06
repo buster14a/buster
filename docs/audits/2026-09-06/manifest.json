@@ -1,0 +1,76 @@
+{
+  "repository": "buster14a/buster",
+  "audit_date": "2026-09-06",
+  "current_main_at_audit": "ee3b5c5022bdddef07840b9d787e76dfb6fe6e8b",
+  "local_test_checkout": "6d2bdbf9d19e15be93cb2f09fe0c467ba2fa70d2",
+  "publication_status": "not_published",
+  "issues": [
+    {
+      "key": "ebpf-boolean",
+      "title": "ebpf: comparison and logical-not branches skip the true result",
+      "body": "issues/ebpf-boolean.md",
+      "marker": "<!-- buster-audit-2026-09-06:ebpf-boolean -->"
+    },
+    {
+      "key": "ebpf-signed-not",
+      "title": "ebpf: signed narrow bitwise-not results are zero-extended",
+      "body": "issues/ebpf-signed-not.md",
+      "marker": "<!-- buster-audit-2026-09-06:ebpf-signed-not -->"
+    },
+    {
+      "key": "wasm-alignment",
+      "title": "wasm: over-aligned scalar loads and stores emit invalid memory alignment",
+      "body": "issues/wasm-alignment.md",
+      "marker": "<!-- buster-audit-2026-09-06:wasm-alignment -->"
+    },
+    {
+      "key": "ebpf-symbol-growth",
+      "title": "ebpf: symbol insertion performs a quadratic duplicate-key scan",
+      "body": "issues/ebpf-symbol-growth.md",
+      "marker": "<!-- buster-audit-2026-09-06:ebpf-symbol-growth -->"
+    }
+  ],
+  "pull_requests": [
+    {
+      "key": "ebpf-scalar",
+      "title": "ebpf: fix comparison branches and signed bitwise-not normalization",
+      "body": "prs/ebpf-scalar.md",
+      "marker": "<!-- buster-audit-2026-09-06:pr-ebpf-scalar -->",
+      "branch": "audit/2026-09-06-ebpf-scalar",
+      "patch": "patches/01-ebpf-scalar-correctness.patch",
+      "patch_sha256": "7050925c8996ba195470248916c5a0254955964486ba3394a0bc19a584914c8b",
+      "test": "tests/ebpf_scalar_regression.py",
+      "production_preimages": {
+        "src/buster/lib/compiler/ebpf/ebpf.c": "1b384582dc8ce38d171efd5bc765c46c6ce9c15d"
+      }
+    },
+    {
+      "key": "wasm-alignment",
+      "title": "wasm: cap scalar memory alignment hints at access width",
+      "body": "prs/wasm-alignment.md",
+      "marker": "<!-- buster-audit-2026-09-06:pr-wasm-alignment -->",
+      "branch": "audit/2026-09-06-wasm-alignment",
+      "patch": "patches/02-wasm-memory-alignment.patch",
+      "patch_sha256": "a6ea2fe7a0bb8590379e87a2e9e3b34bd22777652df9deb5a04a1257eb407897",
+      "test": "tests/wasm_memory_alignment_regression.py",
+      "production_preimages": {
+        "src/buster/lib/compiler/wasm/wasm.c": "2efa251bbfccf090d3407e82efb19760d87e235f"
+      }
+    },
+    {
+      "key": "runtime-boundaries",
+      "title": "runtime: preserve scratch output and handle relative maps and null empties",
+      "body": "prs/runtime-boundaries.md",
+      "marker": "<!-- buster-audit-2026-09-06:pr-runtime-boundaries -->",
+      "branch": "audit/2026-09-06-runtime-boundaries",
+      "patch": "patches/03-runtime-boundaries.patch",
+      "patch_sha256": "32e69de6473e0e67d398ece2af083ea3a0acb31bab39804936efb4f7164c63ca",
+      "test": "tests/runtime_boundary_regression.py",
+      "production_preimages": {
+        "src/buster/lib/os.c": "2af79fa8ddc6cd0ac9148a4d1cd931ec87f14e54",
+        "src/buster/lib/file.c": "77da7223b4cf602484a09167b93df3742e30dbfa",
+        "src/buster/lib/string.c": "2015b26554163e541ab0cf49a4ea04f691027da8"
+      }
+    }
+  ]
+}
