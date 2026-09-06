@@ -227,44 +227,63 @@ probe_app_process() {
 stop_launch_stream() {
     local stream_pid=$1
     local stop_deadline
-    if [[ -n $stream_pid ]] && kill -0 "$stream_pid" >/dev/null 2>&1; then
-        kill "$stream_pid" >/dev/null 2>&1 || true
-    fi
+    # Launch GNU timeout itself, not a shell around a pipeline: its PID owns
+    # the producer's private process group, including the attached xcrun.
     if [[ -n $stream_pid ]]; then
+        kill -TERM -- -"$stream_pid" 2>/dev/null || kill -TERM "$stream_pid" 2>/dev/null || true
         stop_deadline=$((SECONDS + monitor_command_timeout_seconds))
-        while kill -0 "$stream_pid" >/dev/null 2>&1 && (( SECONDS < stop_deadline )); do
+        while kill -0 -- -"$stream_pid" 2>/dev/null && (( SECONDS < stop_deadline )); do
             sleep 1
         done
-        if kill -0 "$stream_pid" >/dev/null 2>&1; then
-            kill -KILL "$stream_pid" >/dev/null 2>&1 || true
-        fi
+        kill -KILL -- -"$stream_pid" 2>/dev/null || true
         wait "$stream_pid" 2>/dev/null || true
+    fi
+    # Let tee drain to EOF after the producer closes its descriptor, but never
+    # let a stuck reader hold CI output or the next batch configuration open.
+    if [[ -n ${active_launch_reader_pid:-} ]]; then
+        stop_deadline=$((SECONDS + monitor_command_timeout_seconds))
+        while kill -0 "$active_launch_reader_pid" 2>/dev/null && (( SECONDS < stop_deadline )); do
+            sleep 1
+        done
+        kill -TERM "$active_launch_reader_pid" 2>/dev/null || true
+        kill -KILL "$active_launch_reader_pid" 2>/dev/null || true
+        wait "$active_launch_reader_pid" 2>/dev/null || true
+        active_launch_reader_pid=
+    fi
+    if [[ -n ${active_launch_pipe_dir:-} ]]; then
+        rm -f "$active_launch_pipe_dir/console"
+        rmdir "$active_launch_pipe_dir"
+        active_launch_pipe_dir=
     fi
 }
 
 launch_stream_is_running() {
     local stream_pid=$1
+    local pid
     local stream_state
-    if ! kill -0 "$stream_pid" >/dev/null 2>&1; then
-        return 1
-    fi
-    # A background pipeline can remain as a zombie until its parent calls wait;
-    # kill -0 alone reports that zombie as alive. Treat it as complete so the
-    # app-process probe can classify an early simctl exit immediately.
-    stream_state=$(ps -p "$stream_pid" -o stat= 2>/dev/null || true)
-    case "$stream_state" in
-        Z*|*Z*) return 1 ;;
-        *) return 0 ;;
-    esac
+    # Both sides must finish before the final marker read. This avoids racing
+    # tee's last buffered output when simctl exits immediately.
+    for pid in "$stream_pid" "${active_launch_reader_pid:-}"; do
+        if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
+            stream_state=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+            case "$stream_state" in
+                ''|Z*|*Z*) ;;
+                *) return 0 ;;
+            esac
+        fi
+    done
+    return 1
 }
 
 udid=${BUSTER_IOS_SIMULATOR_UDID:-}
 active_launch_stream_pid=
+active_launch_reader_pid=
+active_launch_pipe_dir=
 
 cleanup() {
     local status=$?
     trap - EXIT INT TERM
-    if [[ -n ${active_launch_stream_pid:-} ]]; then
+    if [[ -n ${active_launch_stream_pid:-}${active_launch_reader_pid:-}${active_launch_pipe_dir:-} ]]; then
         stop_launch_stream "$active_launch_stream_pid"
         active_launch_stream_pid=
     fi
@@ -458,10 +477,15 @@ run_one_bundle() {
     # "dev.buster.ide: <pid>" and return 0 immediately. Keep the command in the
     # background and watch both its console file and the launched app instead of
     # treating its status as the test result.
-    (
-        run_with_timeout "$launch_timeout_seconds" \
-            xcrun simctl launch --console-pty "$udid" "$bundle_id" test 2>&1 | tee "$console_log"
-    ) &
+    # A private FIFO works with macOS Bash 3.2 and gives the parent direct
+    # ownership of both children; $! from a background pipeline is not enough.
+    active_launch_pipe_dir=$(mktemp -d "${log_dir%/}/buster-ios-stream.XXXXXX")
+    mkfifo "$active_launch_pipe_dir/console"
+    tee "$console_log" <"$active_launch_pipe_dir/console" &
+    active_launch_reader_pid=$!
+    "$timeout_bin" --kill-after=10s "${launch_timeout_seconds}s" \
+        xcrun simctl launch --console-pty "$udid" "$bundle_id" test \
+        >"$active_launch_pipe_dir/console" 2>&1 &
     launch_stream_pid=$!
     active_launch_stream_pid=$launch_stream_pid
 
