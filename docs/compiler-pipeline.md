@@ -134,6 +134,14 @@ uses carried as edge-copy sources. A target two-address instruction is still
 represented as a machine-SSA definition with a tied source constraint; it is
 not represented by mutating the source virtual register.
 
+During the local-promotion migration, the only exception is a virtual register
+carrying `MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE`. The verifier rejects missing
+or duplicate definitions for every ordinary value, checks definition-point
+identity and dominance, and reports the explicit mutable count. FAST/QUALITY
+liveness scans every textual touch, while scheduling serializes every touch of
+a mutable value. No SSA-only consumer may infer a definition or dominance fact
+from a mutable register's `definition_point`.
+
 Register classes model every independently allocatable target bank. At minimum
 this distinguishes general, vector, predicate/mask and flags resources where a
 target exposes them. Reserved encodings such as x86 `k0` are target semantics,
@@ -213,7 +221,7 @@ bounded debt, not precedent for new code.
 
 | Exception on the current path | Removal owner |
 | --- | --- |
-| Target-local promotion may redefine one machine virtual register and `definition_point` records only part of that history. SSA-only consumers must not infer a complete dominance contract from it. | [#32](https://github.com/buster14a/buster/issues/32) |
+| Target-local promotion may still retain an explicitly flagged mutable machine virtual register. The verifier and telemetry count it; liveness and scheduling handle it conservatively, and SSA-only consumers must reject it. | [#33](https://github.com/buster14a/buster/issues/33), then [#34](https://github.com/buster14a/buster/issues/34) |
 | Eligible C locals can still enter canonical IR as `LOCAL`/`LOAD`/`STORE`, with overlapping promotion in native selectors. | [#33](https://github.com/buster14a/buster/issues/33), then [#34](https://github.com/buster14a/buster/issues/34) |
 | Native compilation may abandon machine selection, verification, placement or encoding and emit the whole function directly from canonical IR. | [#35](https://github.com/buster14a/buster/issues/35), then [#36](https://github.com/buster14a/buster/issues/36) |
 | Canonical instruction rows are dense, but complete CFG topology is not yet published through one immutable dense interface. | [#38](https://github.com/buster14a/buster/issues/38) |

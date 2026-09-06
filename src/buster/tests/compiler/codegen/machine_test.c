@@ -748,6 +748,7 @@ BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_function(Arena* arena)
                                                                      .register_class = MACHINE_REGISTER_CLASS_GENERAL,
                                                                      .typed_origin = IR_ID_UNDERLYING_INVALID,
                                                                  });
+    u32 source_parameter_offset = machine_builder_block_parameter(&builder, (MachineBlockParameter){.virtual_register = source});
     machine_builder_block_begin(&builder);
     machine_builder_instruction(&builder, (MachineInstruction){
                                               .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, destination),
@@ -757,7 +758,7 @@ BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_function(Arena* arena)
     machine_builder_instruction(&builder, (MachineInstruction){
                                               .opcode = MACHINE_OPCODE_SKELETON_RETURN,
                                           });
-    machine_builder_block_end(&builder, (MachineBlock){0});
+    machine_builder_block_end(&builder, (MachineBlock){.parameter_offset = source_parameter_offset, .parameter_count = 1});
     machine_builder_block_begin(&builder);
     machine_builder_instruction(&builder, (MachineInstruction){
                                               .opcode = MACHINE_OPCODE_SKELETON_NOP,
@@ -1455,13 +1456,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // must publish its live payload directly rather than copying it, while
     // retaining the ordinary row values and block layout.
     MachineFunctionBuilder alias_builder = machine_function_builder_begin(arguments->arena);
-    machine_builder_virtual_register(&alias_builder, (MachineVirtualRegister){
-                                                            .definition_point = MACHINE_POINT_INVALID,
-                                                            .register_class = MACHINE_REGISTER_CLASS_GENERAL,
-                                                        });
+    u32 alias_parameter = machine_builder_virtual_register(&alias_builder, (MachineVirtualRegister){
+                                                               .definition_point = MACHINE_POINT_INVALID,
+                                                               .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                           });
+    u32 alias_parameter_offset =
+        machine_builder_block_parameter(&alias_builder, (MachineBlockParameter){.virtual_register = alias_parameter});
     machine_builder_block_begin(&alias_builder);
     machine_builder_instruction(&alias_builder, (MachineInstruction){.opcode = MACHINE_OPCODE_SKELETON_RETURN});
-    machine_builder_block_end(&alias_builder, (MachineBlock){0});
+    machine_builder_block_end(&alias_builder, (MachineBlock){.parameter_offset = alias_parameter_offset, .parameter_count = 1});
     MachineBuilderChunk* alias_instruction_chunk = alias_builder.instructions.first;
     MachineBuilderChunk* alias_virtual_register_chunk = alias_builder.virtual_registers.first;
     MachineBuilderChunk* alias_block_chunk = alias_builder.blocks.first;
@@ -1556,6 +1559,36 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     bad_definition.virtual_registers[1].definition_point = machine_point_make(function.instruction_count, MACHINE_POINT_AFTER);
     BUSTER_TEST(arguments, machine_verify_function(&bad_definition).error == MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION);
 
+    MachineFunction missing_definition = machine_test_build_function(arguments->arena);
+    missing_definition.instructions[0].operands[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX);
+    BUSTER_TEST(arguments,
+                machine_verify_function(&missing_definition).error == MACHINE_VERIFY_VIRTUAL_REGISTER_MISSING_DEFINITION);
+
+    MachineFunction duplicate_definition = machine_test_build_function(arguments->arena);
+    duplicate_definition.instructions[2] = (MachineInstruction){
+        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1),
+                     machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX)},
+        .opcode = MACHINE_OPCODE_SKELETON_COPY,
+    };
+    BUSTER_TEST(arguments,
+                machine_verify_function(&duplicate_definition).error == MACHINE_VERIFY_VIRTUAL_REGISTER_DUPLICATE_DEFINITION);
+
+    MachineFunction explicit_mutable = machine_test_build_function(arguments->arena);
+    explicit_mutable.instructions[2] = duplicate_definition.instructions[2];
+    explicit_mutable.virtual_registers[1].flags |= MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE;
+    MachineVerifyResult mutable_result = machine_verify_function(&explicit_mutable);
+    BUSTER_TEST(arguments, mutable_result.error == MACHINE_VERIFY_NONE && mutable_result.mutable_virtual_register_count == 1);
+
+    MachineFunction use_before_definition = machine_test_build_function(arguments->arena);
+    use_before_definition.instructions[0].operands[1] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1);
+    BUSTER_TEST(arguments,
+                machine_verify_function(&use_before_definition).error == MACHINE_VERIFY_VIRTUAL_REGISTER_USE_BEFORE_DEFINITION);
+
+    MachineFunction mismatched_definition_point = machine_test_build_function(arguments->arena);
+    mismatched_definition_point.virtual_registers[1].definition_point = machine_point_make(1, MACHINE_POINT_AFTER);
+    BUSTER_TEST(arguments,
+                machine_verify_function(&mismatched_definition_point).error == MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION_POINT);
+
     // Replay round-trip: byte-exact reconstruction, then hard rejection of
     // corrupted headers and truncated payloads.
     ByteSlice replay = machine_replay_serialize(arguments->arena, &function);
@@ -1584,27 +1617,54 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                                                         .register_class = MACHINE_REGISTER_CLASS_GENERAL,
                                                                         .typed_origin = IR_ID_UNDERLYING_INVALID,
                                                                     });
-    machine_builder_block_parameter(&edge_builder, (MachineBlockParameter){.virtual_register = edge_parameter_register});
+    u32 edge_source_parameter_offset =
+        machine_builder_block_parameter(&edge_builder, (MachineBlockParameter){.virtual_register = edge_source_register});
+    u32 edge_destination_parameter_offset =
+        machine_builder_block_parameter(&edge_builder, (MachineBlockParameter){.virtual_register = edge_parameter_register});
     machine_builder_block_begin(&edge_builder);
     machine_builder_instruction(&edge_builder, (MachineInstruction){.opcode = MACHINE_OPCODE_SKELETON_RETURN});
-    machine_builder_block_end(&edge_builder, (MachineBlock){.successor_offset = 0, .successor_count = 1});
+    machine_builder_block_end(&edge_builder, (MachineBlock){
+                                                       .successor_offset = 0,
+                                                       .successor_count = 1,
+                                                       .parameter_offset = edge_source_parameter_offset,
+                                                       .parameter_count = 1,
+                                                   });
     machine_builder_block_begin(&edge_builder);
     machine_builder_instruction(&edge_builder, (MachineInstruction){.opcode = MACHINE_OPCODE_SKELETON_RETURN});
-    machine_builder_block_end(&edge_builder, (MachineBlock){.predecessor_offset = 0, .predecessor_count = 1, .parameter_offset = 0, .parameter_count = 1});
+    machine_builder_block_end(&edge_builder, (MachineBlock){
+                                                       .predecessor_offset = 0,
+                                                       .predecessor_count = 1,
+                                                       .parameter_offset = edge_destination_parameter_offset,
+                                                       .parameter_count = 1,
+                                                   });
     MachineRef edge_source_ref = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, edge_source_register);
     u32 edge_copy_offset = machine_builder_edge_copy_source(&edge_builder, edge_source_ref);
     machine_builder_edge(&edge_builder, (MachineEdge){.source_block = 0, .destination_block = 1, .copy_offset = edge_copy_offset, .copy_count = 1});
     MachineFunction edge_function = machine_function_builder_finish(arguments->arena, &edge_builder);
-    BUSTER_TEST(arguments, edge_function.edge_count == 1 && edge_function.block_parameter_count == 1 && edge_function.edge_copy_source_count == 1);
+    BUSTER_TEST(arguments, edge_function.edge_count == 1 && edge_function.block_parameter_count == 2 && edge_function.edge_copy_source_count == 1);
     BUSTER_TEST(arguments, machine_verify_function(&edge_function).error == MACHINE_VERIFY_NONE);
+
+    u16 valid_edge_copy_count = edge_function.edges[0].copy_count;
+    edge_function.edges[0].copy_count = 0;
+    BUSTER_TEST(arguments, machine_verify_function(&edge_function).error == MACHINE_VERIFY_EDGE_COPY);
+    edge_function.edges[0].copy_count = valid_edge_copy_count;
+
+    MachineRef valid_edge_source = edge_function.edge_copy_sources[0];
+    edge_function.edge_copy_sources[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, edge_parameter_register);
+    BUSTER_TEST(arguments,
+                machine_verify_function(&edge_function).error == MACHINE_VERIFY_VIRTUAL_REGISTER_USE_BEFORE_DEFINITION);
+    edge_function.edge_copy_sources[0] = valid_edge_source;
+
     ByteSlice edge_replay = machine_replay_serialize(arguments->arena, &edge_function);
     MachineFunction edge_replayed = {0};
     BUSTER_TEST(arguments, machine_replay_deserialize(arguments->arena, edge_replay, &edge_replayed));
     BUSTER_TEST(arguments, edge_replayed.edge_count == edge_function.edge_count && edge_replayed.block_parameter_count == edge_function.block_parameter_count &&
                               edge_replayed.edge_copy_source_count == edge_function.edge_copy_source_count);
-    BUSTER_TEST(arguments, memcmp(edge_replayed.edges, edge_function.edges, sizeof(MachineEdge)) == 0 &&
-                              memcmp(edge_replayed.block_parameters, edge_function.block_parameters, sizeof(MachineBlockParameter)) == 0 &&
-                              memcmp(edge_replayed.edge_copy_sources, edge_function.edge_copy_sources, sizeof(MachineRef)) == 0);
+    BUSTER_TEST(arguments, memcmp(edge_replayed.edges, edge_function.edges, edge_function.edge_count * sizeof(MachineEdge)) == 0 &&
+                              memcmp(edge_replayed.block_parameters, edge_function.block_parameters,
+                                     edge_function.block_parameter_count * sizeof(MachineBlockParameter)) == 0 &&
+                              memcmp(edge_replayed.edge_copy_sources, edge_function.edge_copy_sources,
+                                     edge_function.edge_copy_source_count * sizeof(MachineRef)) == 0);
     BUSTER_TEST(arguments, machine_verify_function(&edge_replayed).error == MACHINE_VERIFY_NONE);
 
     MachineFunction rejected = {0};
@@ -1616,6 +1676,54 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     corrupt_bytes[0] ^= 0xff;
     BUSTER_TEST(arguments, !machine_replay_deserialize(arguments->arena, (ByteSlice){.pointer = corrupt_bytes, .length = replay.length}, &rejected));
     BUSTER_TEST(arguments, !machine_replay_deserialize(arguments->arena, (ByteSlice){0}, &rejected));
+
+    // The transitional mutable classification is exercised through both
+    // target selectors on the control-flow shapes that motivated it: local
+    // reassignment across a diamond, a loop backedge, and a value live across
+    // a call. Every published MIR value is still defined, and the verifier's
+    // mutable count must agree with selector telemetry.
+    String8 definition_contract_source = S8(
+        "unsigned long mir_contract_sink(unsigned long value) { return value * 3 + 1; }\n"
+        "unsigned long mir_contract(unsigned long n) {\n"
+        "    unsigned long value = n + 1;\n"
+        "    if (n & 1) value = 7; else value = 11;\n"
+        "    unsigned long i = 0;\n"
+        "    while (i < n) { value += i; if (value & 1) value ^= n; i += 1; }\n"
+        "    value = mir_contract_sink(value);\n"
+        "    return value + n;\n"
+        "}\n");
+    Target definition_contract_targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(definition_contract_targets); target_index += 1)
+    {
+        IrProgram* contract_program = machine_test_compile_c(arguments->arena, S8("machine-definition-contract.c"), definition_contract_source,
+                                                              definition_contract_targets[target_index]);
+        BUSTER_TEST(arguments, contract_program && contract_program->module_count);
+        if (!contract_program || !contract_program->module_count)
+        {
+            continue;
+        }
+        IrFunction* contract_function = machine_test_ir_function_find(contract_program->modules, S8("mir_contract"));
+        BUSTER_TEST(arguments, contract_function != 0);
+        if (!contract_function)
+        {
+            continue;
+        }
+        MachineSelectResult contract_selected =
+            machine_select_canonical_function(arguments->arena, contract_program, contract_function, definition_contract_targets[target_index]);
+        BUSTER_TEST(arguments, contract_selected.supported && contract_selected.selector_certified);
+        if (!contract_selected.supported)
+        {
+            continue;
+        }
+        MachineVerifyResult contract_verified = machine_verify_function(&contract_selected.function);
+        BUSTER_TEST(arguments, contract_verified.error == MACHINE_VERIFY_NONE);
+        BUSTER_TEST(arguments, contract_selected.mutable_virtual_register_count != 0);
+        BUSTER_TEST(arguments,
+                    contract_selected.mutable_virtual_register_count == contract_verified.mutable_virtual_register_count);
+    }
 
     // Mode plumbing: the driver-facing enum and its report spelling.
     BUSTER_STRING_TEST(arguments, codegen_register_allocator_mode_string(CODEGEN_REGISTER_ALLOCATOR_NONE), S8("none"));

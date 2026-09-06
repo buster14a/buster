@@ -36,7 +36,9 @@
 // Callee-saved is the register class that makes a span binding sound
 // without a clobber analysis: calls preserve those registers, and every
 // encoder scratch and macro-op sequence in this backend works out of the
-// caller-saved half.
+// caller-saved half. Interval construction scans every textual touch; it does
+// not infer a live range from definition_point, so explicitly mutable values
+// retain the conservative FAST/QUALITY behavior until promotion becomes SSA.
 
 // Bounds keep the pass linear-ish and its worst case reportable.
 #define MACHINE_QUALITY_MAXIMUM_CANDIDATES 4096
