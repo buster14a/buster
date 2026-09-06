@@ -94,8 +94,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_named_label_at(CP
 }
 BUSTER_C_EXTERN bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
                                                                   u32 start, u32 end, CIrDecodedString* decoded_out);
+// The same answer without the bytes, for the callers that only size or type
+// the literal; see the definition.
+BUSTER_C_EXTERN bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
+                                                                 u32 start, u32 end, CIrDecodedString* decoded_out);
 BUSTER_C_EXTERN String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
 BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start);
+BUSTER_C_EXTERN bool c_parse_type_name_start_word_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_EXTERN u32 c_symbol_intern(CSymbolTable* table, String8 name);
 BUSTER_C_EXTERN bool c_type_parse_buffer_size_add(u64* size, u64 count, u64 element_size, u64 alignment);
 BUSTER_C_EXTERN void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
@@ -123,7 +128,9 @@ BUSTER_C_EXTERN void c_parse_validate_unattached_cleanup_attributes(CParseResult
 BUSTER_C_EXTERN u64 c_parse_name_hash(u32 symbol, String8 name);
 BUSTER_C_EXTERN u32 c_parse_name_symbol(CParseResult* result, String8 name);
 BUSTER_C_EXTERN bool c_parse_types_compatible(Arena* result_arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right);
-BUSTER_C_EXTERN void c_parse_scope_add_entity(CParseResult* result, CScopeId scope, CEntityId entity);
+// `symbol` is the interned id of the entity's name when the creating site
+// holds the declaring token, and 0 to have it interned here.
+BUSTER_C_EXTERN void c_parse_scope_add_entity(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol);
 BUSTER_C_EXTERN CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
 BUSTER_C_EXTERN bool c_parse_c23_attribute_at(CPreprocessResult preprocess, u32 index, u32 end, u32* after_out);
 BUSTER_C_EXTERN u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 index, u32 end);
@@ -134,9 +141,14 @@ BUSTER_C_EXTERN bool c_parse_attribute_unsigned(String8 spelling, u32* value_out
 BUSTER_C_EXTERN CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest);
+// The token forms of the String8 lookups: the token's own interned id keys
+// the probe, and only a symbol-0 token (pasted, synthesized, test-built)
+// pays an intern of its spelling.
+BUSTER_C_EXTERN CEntityId c_parse_lookup_typedef_name_token(CParseResult* result, char8 const* spelling_base, CToken token, bool oldest);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* result, String8 name);
 BUSTER_C_EXTERN u32 c_parse_identifier_use_index(CParseResult* result, u32 token_index);
 BUSTER_C_EXTERN CEntity* c_parse_first_constant_entity(CParseResult* result, String8 name);
+BUSTER_C_EXTERN CEntity* c_parse_first_constant_entity_token(CParseResult* result, char8 const* spelling_base, CToken token);
 BUSTER_C_EXTERN void c_parse_index_scope_children(CParseResult* result, Arena* arena);
 BUSTER_C_EXTERN void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
@@ -327,6 +339,18 @@ typedef enum CSymbolWellKnown
     C_SYMBOL_WELL_KNOWN_CONSTRUCTOR_GNU,
     C_SYMBOL_WELL_KNOWN_DESTRUCTOR,
     C_SYMBOL_WELL_KNOWN_DESTRUCTOR_GNU,
+    // The two decorations c_parse_skip_attributes steps over beside the
+    // attribute spellings above; every specifier scan runs it once per
+    // declaration, so the ladder it replaced ran on every identifier there.
+    C_SYMBOL_WELL_KNOWN_EXTENSION,
+    C_SYMBOL_WELL_KNOWN_DECLSPEC,
+    C_SYMBOL_WELL_KNOWN_REGISTER,
+    C_SYMBOL_WELL_KNOWN_BUILTIN_OFFSETOF,
+    C_SYMBOL_WELL_KNOWN_VOLATILE,
+    C_SYMBOL_WELL_KNOWN_VOLATILE_GNU_ALT,
+    C_SYMBOL_WELL_KNOWN_CONSTEXPR,
+    C_SYMBOL_WELL_KNOWN_CONST,
+    C_SYMBOL_WELL_KNOWN_ATOMIC,
     C_SYMBOL_WELL_KNOWN_COUNT,
 } CSymbolWellKnown;
 
@@ -371,6 +395,34 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_in_well_known_set(
         for (u64 remaining = set; remaining && !result; remaining &= remaining - 1)
         {
             result = string_equal(spelling, c_symbol_well_known_spellings[trailing_zeroes_u64(remaining)]);
+        }
+    }
+    return result;
+}
+
+// The member of `set` this identifier token spells, as its
+// C_SYMBOL_WELL_KNOWN_BIT, or 0 when it spells none: the membership test
+// that also says which name matched, for a specifier scan that folds several
+// flags out of one pass and reads them off the accumulated bits afterwards.
+// The interned answer is a shift and a mask; the uninterned fallback walks
+// the set bits the way c_token_in_well_known_set does.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE u64 c_token_well_known_bit(char8 const* spelling_base, CToken token, u64 set)
+{
+    u64 result;
+    if (token.symbol)
+    {
+        result = token.symbol < 64 ? set & (1ull << token.symbol) : 0;
+    }
+    else
+    {
+        String8 spelling = c_token_spelling(spelling_base, token);
+        result = 0;
+        for (u64 remaining = set; remaining && !result; remaining &= remaining - 1)
+        {
+            if (string_equal(spelling, c_symbol_well_known_spellings[trailing_zeroes_u64(remaining)]))
+            {
+                result = remaining & (0 - remaining);
+            }
         }
     }
     return result;

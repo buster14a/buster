@@ -1022,15 +1022,18 @@ struct BusterX86MetadataCoverageAuditResult
     u32 family_blocked_counts[BUSTER_X86_METADATA_ENCODER_COUNT];
 };
 
-// Decodes the generated tables and fills every demand-filled cache over them,
-// on the calling thread. Call before lane_run: the module's queries otherwise
-// write those caches on first use and read them back with plain loads, which
-// is only sound while nothing else can be reading. A gang that reaches one
-// unwarmed reports through BUSTER_CHECK_SERIAL_INITIALIZATION instead of
-// racing. The first call costs a full decode plus one normalization and
-// pattern parse per form; later calls are idempotent no-ops, so a program that
-// never queries x86 metadata should not call it.
+// Decodes and validates the generated tables on the calling thread.  The
+// per-form caches over them -- normalized row, pattern semantics, operand
+// views, derived facts -- fill on the first use of each form, and every such
+// fill checks BUSTER_CHECK_SERIAL_INITIALIZATION: the compiler is serial end
+// to end, so a compile prepares only the few hundred forms it reaches.  A
+// caller about to run a gang whose lanes may query any form prepares them all
+// with buster_x86_metadata_prewarm_all_forms first; a gang that reaches an
+// unprepared form is reported by that check rather than left to race.  Later
+// calls are idempotent no-ops, so a program that never queries x86 metadata
+// should not call either.
 BUSTER_F_DECL void buster_x86_metadata_prewarm(void);
+BUSTER_F_DECL void buster_x86_metadata_prewarm_all_forms(void);
 BUSTER_F_DECL u32 buster_x86_metadata_schema_version(void);
 BUSTER_F_DECL u32 buster_x86_metadata_form_count(void);
 BUSTER_F_DECL u32 buster_x86_metadata_normalized_form_count(void);
@@ -1288,4 +1291,8 @@ bool buster_x86_metadata_test_feature_available(u32 form_id, String8 const* name
 bool buster_x86_metadata_test_standalone_sae_pattern(u32 form_id);
 bool buster_x86_metadata_test_machine_fast_plan(u32 form_id);
 u32 buster_x86_metadata_test_exact_plan_count(void);
+// Every byte of the flat string pool and of every decoded blob against the
+// generated per-byte accessors, through both the vector and the scalar
+// base64 kernel.
+bool buster_x86_metadata_test_flat_decode_matches_generated(void);
 #endif

@@ -870,21 +870,19 @@ typedef enum MachineResourceMask
     MACHINE_RESOURCE_CONTROL_MASK = 1u << MACHINE_RESOURCE_CONTROL,
 } MachineResourceMask;
 
-// One source mark per lowered IR instruction: the machine row where its
-// rows begin and the canonical source position, consumed by the encoder's
-// per-row offsets into per-function line entries.
+// One mark per lowered IR instruction, in selection order: the machine row
+// where its rows begin and the IR row itself. The source position is not
+// carried: the encoder's line walk reads the range from the function's
+// canonical-source column and resolves the line and column once per emitted
+// row, the same on-demand contract the canonical path follows, so selection
+// writes eight sequential bytes per row and looks nothing up.
 typedef struct MachineLineMark MachineLineMark;
 struct MachineLineMark
 {
     u32 row;
-    u32 source;
-    // The byte offset inside that source, not a resolved position: the line
-    // and column are recovered once per emitted row, which is the same
-    // on-demand contract the canonical path follows.
-    u32 offset;
-    u32 reserved;
+    u32 instruction;
 };
-BUSTER_CT_CHECK(sizeof(MachineLineMark) == 16);
+BUSTER_CT_CHECK(sizeof(MachineLineMark) == 8);
 
 typedef struct MachineSwitchCase MachineSwitchCase;
 struct MachineSwitchCase
@@ -1479,6 +1477,11 @@ struct MachineBuilderStream
     u32 reserved;
 };
 
+// The three streams every selected function fills per row, per virtual
+// register and per block are appended through typed cursor/end pairs: the
+// hot append is a pointer bump plus the row store, and only a full chunk
+// reaches machine_stream_cursor_refill. The chunk counts of a cursor stream
+// are stamped by the refill and by the finish, never per append.
 typedef struct MachineFunctionBuilder MachineFunctionBuilder;
 struct MachineFunctionBuilder
 {
@@ -1487,7 +1490,11 @@ struct MachineFunctionBuilder
     MachineInstruction* instruction_cursor;
     MachineInstruction* instruction_end;
     MachineBuilderStream virtual_registers;
+    MachineVirtualRegister* virtual_register_cursor;
+    MachineVirtualRegister* virtual_register_end;
     MachineBuilderStream blocks;
+    MachineBlock* block_cursor;
+    MachineBlock* block_end;
     MachineBuilderStream edges;
     MachineBuilderStream block_parameters;
     MachineBuilderStream edge_copy_sources;
@@ -1567,6 +1574,17 @@ BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64_windows(void
 BUSTER_F_DECL MachineTargetDescription const* machine_target_aarch64(void);
 BUSTER_F_DECL void machine_stream_initialize(MachineBuilderStream* stream, u64 element_size);
 BUSTER_F_DECL void* machine_stream_append(Arena* arena, MachineBuilderStream* stream);
+// The typed-cursor append shape, for a stream whose rows are written through
+// a caller-held cursor/end pair instead of machine_stream_append: the caller
+// bumps the cursor and `total_count` per row, and calls the refill only when
+// the cursor reaches the end. The refill stamps the chunk it leaves as full
+// and returns the new chunk's first row, whose end is that row plus
+// `chunk_capacity`; the close stamps the open chunk's count from the cursor.
+// A stream is appended in one mode or the other, never both: the generic
+// append keeps counts per row, the cursor keeps them per chunk, and a
+// flatten reads whichever the close left exact.
+BUSTER_F_DECL void* machine_stream_cursor_refill(Arena* arena, MachineBuilderStream* stream);
+BUSTER_F_DECL void machine_stream_cursor_close(MachineBuilderStream* stream, void const* cursor);
 BUSTER_F_DECL void machine_stream_flatten(MachineBuilderStream* stream, void* destination);
 BUSTER_F_DECL MachineFunctionBuilder machine_function_builder_begin(Arena* arena);
 BUSTER_F_DECL u32 machine_builder_virtual_register(MachineFunctionBuilder* builder, MachineVirtualRegister virtual_register);
@@ -1599,10 +1617,15 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena
 // thread-local model and selects the GOT and PLT forms for the symbols
 // another object could interpose. The unqualified entry point above passes
 // false, which is every caller that is not module code generation.
+// `module` is the context machine_select_module_prepare built once for the
+// module before its functions select; a null one makes the x86-64 selector
+// prepare a context for this function alone, which is the unvalidated entry
+// point's cost and never module code generation's.
+BUSTER_F_DECL MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* program, Target target);
 BUSTER_F_DECL MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                             bool position_independent);
+                                                                             bool position_independent, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                          bool position_independent, bool assume_validated);
+                                                                          bool position_independent, bool assume_validated, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                             bool assume_validated);
 BUSTER_F_DECL MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function);
@@ -1690,7 +1713,10 @@ struct MachineFastPrepass
     bool valid;
     u8 reserved[3];
 };
-BUSTER_F_DECL MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* function);
+// `wants_quality_facts` false leaves the QUALITY-only facts — the touch
+// intervals, the disqualifications and the loop spans — unbuilt: their
+// pointers stay null and `loop_span_count` zero. FAST never reads them.
+BUSTER_F_DECL MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* function, bool wants_quality_facts);
 // The pinned scan against an already-built prepass of the same function,
 // same pin/span/split contract as `machine_fast_placement_build_pinned`.
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, MachineFunction* function, MachineFastPrepass const* prepass,
@@ -1763,6 +1789,10 @@ struct MachineX64ExactMapAudit
     u32 memory_base_tables;
     u32 displacement_patch_tables;
     u32 variable_memory_encoding_tables;
+    // Fixed-shape template rows allotted by prewarm, and how many of them
+    // the metadata authority refused (those rows keep their metadata lane).
+    u32 fixed_template_rows;
+    u32 fixed_template_invalid_rows;
     bool valid;
     u8 reserved[3];
 };

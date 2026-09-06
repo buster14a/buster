@@ -9186,6 +9186,16 @@ BUSTER_GLOBAL_LOCAL bool object_codegen_relocation_width(ObjectRelocationKind ki
     }
 }
 
+// The module writer hands the codegen line rows to the DWARF and CodeView
+// builders as DwarfLineEntry rows without copying them, which is sound only
+// while the two records agree byte for byte.
+BUSTER_CT_CHECK(sizeof(DwarfLineEntry) == sizeof(CodegenLineEntry));
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DwarfLineEntry, code_offset) == BUSTER_OFFSET_OF(CodegenLineEntry, code_offset));
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DwarfLineEntry, line) == BUSTER_OFFSET_OF(CodegenLineEntry, line));
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DwarfLineEntry, file) == BUSTER_OFFSET_OF(CodegenLineEntry, source));
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DwarfLineEntry, column) == BUSTER_OFFSET_OF(CodegenLineEntry, column));
+BUSTER_CT_CHECK(sizeof(((DwarfLineEntry*)0)->file) == sizeof(((CodegenLineEntry*)0)->source));
+BUSTER_CT_CHECK(sizeof(((DwarfLineEntry*)0)->line) == sizeof(((CodegenLineEntry*)0)->line));
 
 ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target)
 {
@@ -9360,17 +9370,12 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             };
         }
         u32 line_count = module->entry_count ? module->line_entry_count : 0;
-        DwarfLineEntry* lines = arena_allocate(arena, DwarfLineEntry, line_count);
-        for (u32 line_index = 0; line_index < line_count; line_index += 1)
-        {
-            CodegenLineEntry entry = module->line_entries[line_index];
-            lines[line_index] = (DwarfLineEntry){
-                .code_offset = entry.code_offset,
-                .file = entry.source < program->sources.count ? entry.source : 0,
-                .line = entry.line,
-                .column = entry.column,
-            };
-        }
+        // The module's own rows serve as the builders' input: DwarfLineEntry is
+        // CodegenLineEntry field for field, and codegen recorded every source
+        // already clamped to the program's source table (its
+        // `line_source_limit`), which is the one thing a copy here used to do
+        // to a million rows.
+        DwarfLineEntry* lines = (DwarfLineEntry*)module->line_entries;
         if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
         {
             DebugModel debug_model = debug_model_build(arena, (DebugModelInput){
@@ -9662,6 +9667,17 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 .hidden = !tls_get_addr && target_symbol->is_hidden,
             };
             object_symbol_name_index_add(name_index, &result.symbols[symbol_index], symbol_index);
+        }
+        // The answer holds for the rest of the loop -- a name in the index is
+        // never added again, and only undefined symbols are added here, so a
+        // name's first-defined-then-first-undefined resolution cannot change
+        // once it has one -- and a program symbol has one name, so every later
+        // relocation against it takes the index from the table instead of
+        // hashing the name: data symbols and externs, which the table above
+        // did not carry, are most of a module's relocations.
+        if (!tls_get_addr && source.symbol.value < entry_symbol_capacity)
+        {
+            entry_by_symbol[source.symbol.value] = symbol_index;
         }
         result.relocations[result.relocation_count++] = (ObjectRelocation){
             .addend = source.addend + (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
