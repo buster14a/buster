@@ -7916,11 +7916,25 @@ struct MachineX64GprEncoding
 struct MachineX64GprEncodingTable
 {
     MachineX64GprEncoding encodings[256];
+};
+// The five shape bytes a dense table's consumer reads per row, kept in their
+// own array instead of after the table's 4.096-byte encodings block: with
+// them inside the block a row touched two lines a whole table apart in a
+// 262 KB array, and the encodings block was no longer a power of two, so the
+// table index cost a 4.104-byte multiply. The parallel array is 512 bytes --
+// eight lines that stay resident across the whole encode -- and the block is
+// exactly 4 KB, so the index is a shift. `machine_x64_gpr_encoding_table_
+// count` counts both arrays; index `i` of one describes index `i` of the
+// other.
+typedef struct MachineX64GprEncodingTableShape MachineX64GprEncodingTableShape;
+struct MachineX64GprEncodingTableShape
+{
     u8 operand_slots[2];
     u8 operand_count;
     u8 flags;
     u8 immediate_width;
     u8 memory_operand_slot;
+    u8 reserved[2];
 };
 #define MACHINE_X64_GPR_ENCODING_TABLE_COMPACT 0x1u
 #define MACHINE_X64_GPR_ENCODING_TABLE_SELF_COPY_NOOP 0x2u
@@ -7930,8 +7944,12 @@ struct MachineX64GprEncodingTable
 #define MACHINE_X64_GPR_ENCODING_TABLE_INCOMING_DISPLACEMENT 0x20u
 #define MACHINE_X64_GPR_ENCODING_TABLE_IMMEDIATE_FROM_PAYLOAD 0x40u
 BUSTER_CT_CHECK(sizeof(MachineX64GprEncoding) == 16);
+BUSTER_CT_CHECK(sizeof(MachineX64GprEncodingTable) == 4096);
+BUSTER_CT_CHECK(sizeof(MachineX64GprEncodingTableShape) == 8);
 BUSTER_GLOBAL_LOCAL MachineX64GprEncodingTable
     machine_x64_gpr_encoding_tables[MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY];
+BUSTER_GLOBAL_LOCAL MachineX64GprEncodingTableShape
+    machine_x64_gpr_encoding_table_shapes[MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY];
 BUSTER_GLOBAL_LOCAL u32 machine_x64_gpr_encoding_table_count;
 
 // Variable base-register memory forms are another closed population.  Keep
@@ -8206,6 +8224,30 @@ struct MachineX64PreparedExactOpcode
 BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode machine_x64_exact_opcode_map[MACHINE_X86_64_EMIT_REGISTRY_COUNT] = {
     MACHINE_X86_64_EMIT_REGISTRY(MACHINE_X64_EXACT_OPCODE_MAP_ROW)
 };
+
+// Everything the encoder's row path decides before it emits, as one byte per
+// registry row. A prepared row is 1.064 bytes and the four facts below sit at
+// both of its ends, so reading them from it made every one of the 1,71 M
+// machine rows touch two lines a kilobyte apart in a 134 KB table; the same
+// facts here are 126 bytes -- two lines that stay resident for the whole
+// encode -- and the prepared row is then read only by the rows that emit
+// through it. The two required bits are the registry's own, so they cannot
+// drift from the map; the two descriptor bits are published beside the
+// descriptor in machine_x64_exact_prepare_opcode_map and are clear before
+// prewarm exactly as `entry->descriptor` is null before it.
+#define MACHINE_X64_EXACT_ROW_FLAG_EXACT 0x1u
+#define MACHINE_X64_EXACT_ROW_FLAG_SEQUENCE 0x2u
+#define MACHINE_X64_EXACT_ROW_FLAG_BRANCH_FIXUP 0x4u
+#define MACHINE_X64_EXACT_ROW_FLAG_CALL_SITE 0x8u
+#define MACHINE_X64_EXACT_ROW_FLAGS_PREPARED (MACHINE_X64_EXACT_ROW_FLAG_BRANCH_FIXUP | MACHINE_X64_EXACT_ROW_FLAG_CALL_SITE)
+#define MACHINE_X64_EXACT_ROW_FLAGS_ROW(opcode_value, category_value, index_value, status_value) \
+    [opcode_value - MACHINE_X64_MOV_RI] = \
+        (u8)(MACHINE_X64_EXACT_OPCODE_REQUIRED_##status_value * MACHINE_X64_EXACT_ROW_FLAG_EXACT + \
+             MACHINE_X64_EXACT_OPCODE_SEQUENCE_##status_value * MACHINE_X64_EXACT_ROW_FLAG_SEQUENCE),
+BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_row_flags[MACHINE_X86_64_EMIT_REGISTRY_COUNT] = {
+    MACHINE_X86_64_EMIT_REGISTRY(MACHINE_X64_EXACT_ROW_FLAGS_ROW)
+};
+#undef MACHINE_X64_EXACT_ROW_FLAGS_ROW
 #undef MACHINE_X64_EXACT_OPCODE_MAP_ROW
 #undef MACHINE_X64_EXACT_OPCODE_REQUIRED_EXPANSION_POLICY
 #undef MACHINE_X64_EXACT_OPCODE_REQUIRED_LEGACY_RAW
@@ -8417,6 +8459,7 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
         return 0;
 
     MachineX64GprEncodingTable* table = machine_x64_gpr_encoding_tables + machine_x64_gpr_encoding_table_count;
+    MachineX64GprEncodingTableShape* shape = machine_x64_gpr_encoding_table_shapes + machine_x64_gpr_encoding_table_count;
     bool compact = true;
     for (u32 register_key = 0; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
     {
@@ -8563,12 +8606,12 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
             table->encodings[register_key].bytes[3] = table->encodings[register_key].byte_count;
         }
     }
-    table->operand_slots[0] = operand_slots[0];
-    table->operand_slots[1] = operand_slots[1];
-    table->operand_count = register_operand_count;
-    table->immediate_width = immediate_width;
-    table->memory_operand_slot = displacement_operand_index == UINT8_MAX ? 0 : variant->operand_slots[displacement_operand_index];
-    table->flags = (compact ? MACHINE_X64_GPR_ENCODING_TABLE_COMPACT : 0u) |
+    shape->operand_slots[0] = operand_slots[0];
+    shape->operand_slots[1] = operand_slots[1];
+    shape->operand_count = register_operand_count;
+    shape->immediate_width = immediate_width;
+    shape->memory_operand_slot = displacement_operand_index == UINT8_MAX ? 0 : variant->operand_slots[displacement_operand_index];
+    shape->flags = (compact ? MACHINE_X64_GPR_ENCODING_TABLE_COMPACT : 0u) |
                    ((register_operand_count == 2 && (variant->flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP))
                         ? MACHINE_X64_GPR_ENCODING_TABLE_SELF_COPY_NOOP
                         : 0u) |
@@ -8796,6 +8839,14 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_opcode_map(BusterX86MetadataE
                 machine_x64_exact_prepare_form_entry(entry, registry_entry, prepared, plan_valid);
             }
         }
+        // The descriptor half of the row-flag projection, written where the
+        // descriptor itself is published. Masking the prepared bits away
+        // first keeps a repeated prewarm idempotent.
+        u32 descriptor_flags = entry->descriptor ? entry->descriptor->flags : 0u;
+        machine_x64_exact_row_flags[ordinal] =
+            (u8)((machine_x64_exact_row_flags[ordinal] & ~MACHINE_X64_EXACT_ROW_FLAGS_PREPARED) |
+                 ((descriptor_flags & MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP) ? MACHINE_X64_EXACT_ROW_FLAG_BRANCH_FIXUP : 0u) |
+                 ((descriptor_flags & MACHINE_X64_EXACT_RECIPE_FLAG_CALL_SITE) ? MACHINE_X64_EXACT_ROW_FLAG_CALL_SITE : 0u));
     }
 }
 
@@ -8897,11 +8948,11 @@ MachineX64ExactMapAudit machine_x86_64_exact_map_audit(void)
     for (u32 table_index = 0; table_index < machine_x64_gpr_encoding_table_count; table_index += 1)
     {
         result.immediate_patch_tables +=
-            (machine_x64_gpr_encoding_tables[table_index].flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_IMMEDIATE) != 0;
+            (machine_x64_gpr_encoding_table_shapes[table_index].flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_IMMEDIATE) != 0;
         result.memory_base_tables +=
-            (machine_x64_gpr_encoding_tables[table_index].flags & MACHINE_X64_GPR_ENCODING_TABLE_MEMORY_BASE) != 0;
+            (machine_x64_gpr_encoding_table_shapes[table_index].flags & MACHINE_X64_GPR_ENCODING_TABLE_MEMORY_BASE) != 0;
         result.displacement_patch_tables +=
-            (machine_x64_gpr_encoding_tables[table_index].flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT) != 0;
+            (machine_x64_gpr_encoding_table_shapes[table_index].flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT) != 0;
     }
     return result;
 }
@@ -10546,6 +10597,25 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_pointer_chunk(MachineX64Encod
     return result;
 }
 
+// The row flags of a machine opcode, zero for an opcode outside the registry
+// -- the same bounds the prepared-row accessor applies, so the two answers
+// cannot disagree about which rows are exact.
+BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_row_flags_for_opcode(u16 opcode)
+{
+    u8 result;
+    if (opcode < MACHINE_X64_MOV_RI || opcode > MACHINE_X64_VBINARY)
+    {
+        result = 0;
+    }
+    else
+    {
+        u32 ordinal = opcode - MACHINE_X64_MOV_RI;
+        result = ordinal < BUSTER_ARRAY_LENGTH(machine_x64_exact_row_flags) ? machine_x64_exact_row_flags[ordinal] : 0;
+    }
+
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL MachineX64PreparedExactOpcode const* machine_x64_exact_opcode_for_opcode(u16 opcode)
 {
     MachineX64PreparedExactOpcode const* result;
@@ -10567,11 +10637,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
                                                        u8 const* operand_registers, u32 payload, u64 immediate_value,
                                                        bool emit_self_copy, MachineX64ExactEmitCounters* counters)
 {
-    MachineX64ExactRecipe const* descriptor = entry ? entry->descriptor : 0;
     u32 variant_index = 0;
     u8 gpr_table_plus_one = entry ? entry->single_gpr_encoding_table : 0;
     if (!gpr_table_plus_one)
     {
+        // The descriptor sits a kilobyte before the bytes above in the same
+        // prepared row, so a single-variant dense row reads it not at all.
+        MachineX64ExactRecipe const* descriptor = entry ? entry->descriptor : 0;
         if (!descriptor || !entry->plan_valid)
         {
             if (counters) counters->attempts += 1;
@@ -10620,11 +10692,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
     if (gpr_table_plus_one && gpr_table_plus_one <= machine_x64_gpr_encoding_table_count)
     {
         MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + (gpr_table_plus_one - 1u);
-        u8 low_register = table->operand_count ? operand_registers[table->operand_slots[0]] : 0;
-        u8 high_register = table->operand_count > 1 ? operand_registers[table->operand_slots[1]] : 0;
+        MachineX64GprEncodingTableShape const* shape = machine_x64_gpr_encoding_table_shapes + (gpr_table_plus_one - 1u);
+        u8 low_register = shape->operand_count ? operand_registers[shape->operand_slots[0]] : 0;
+        u8 high_register = shape->operand_count > 1 ? operand_registers[shape->operand_slots[1]] : 0;
         if (low_register < 16 && high_register < 16)
         {
-            if (!emit_self_copy && (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_SELF_COPY_NOOP) && low_register == high_register)
+            if (!emit_self_copy && (shape->flags & MACHINE_X64_GPR_ENCODING_TABLE_SELF_COPY_NOOP) && low_register == high_register)
             {
                 if (counters)
                 {
@@ -10636,15 +10709,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             MachineX64GprEncoding const* encoding = table->encodings + low_register + ((u32)high_register << 4);
             u32 byte_count = encoding->byte_count;
             s32 displacement = 0;
-            if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT)
+            if (shape->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT)
             {
-                if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_INCOMING_DISPLACEMENT)
+                if (shape->flags & MACHINE_X64_GPR_ENCODING_TABLE_INCOMING_DISPLACEMENT)
                 {
                     displacement = (s32)(16u + (placement ? placement->incoming_base : 0u) + payload);
                 }
                 else
                 {
-                    u8 operand_slot = table->memory_operand_slot;
+                    u8 operand_slot = shape->memory_operand_slot;
                     if (!instruction || !placement || operand_slot >= 4 ||
                         machine_ref_kind(instruction->operands[operand_slot]) != MACHINE_REF_STACK_SLOT)
                     {
@@ -10666,7 +10739,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
                 if (counters) counters->fallbacks += 1;
                 return false;
             }
-            if ((table->flags & MACHINE_X64_GPR_ENCODING_TABLE_COMPACT) &&
+            if ((shape->flags & MACHINE_X64_GPR_ENCODING_TABLE_COMPACT) &&
                 encoder->capacity - encoder->count >= sizeof(u32))
             {
                 memcpy(encoder->bytes + encoder->count, encoding->bytes, sizeof(u32));
@@ -10675,15 +10748,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             {
                 memcpy(encoder->bytes + encoder->count, encoding->bytes, byte_count);
             }
-            if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_IMMEDIATE)
+            if (shape->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_IMMEDIATE)
             {
-                u32 immediate_width = table->immediate_width;
+                u32 immediate_width = shape->immediate_width;
                 if (!immediate_width || immediate_width > byte_count)
                 {
                     if (counters) counters->fallbacks += 1;
                     return false;
                 }
-                u64 patch_value = table->flags & MACHINE_X64_GPR_ENCODING_TABLE_IMMEDIATE_FROM_PAYLOAD
+                u64 patch_value = shape->flags & MACHINE_X64_GPR_ENCODING_TABLE_IMMEDIATE_FROM_PAYLOAD
                                       ? payload
                                       : immediate_value;
                 u32 immediate_offset = encoder->count + byte_count - immediate_width;
@@ -10692,7 +10765,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
                     encoder->bytes[immediate_offset + byte_index] = (u8)(patch_value >> (byte_index * 8u));
                 }
             }
-            if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT)
+            if (shape->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT)
             {
                 u32 displacement_offset = encoder->count + byte_count - (u32)sizeof(u32);
                 u32 value = (u32)displacement;
@@ -10726,7 +10799,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
         machine_x64_fixed_template_row(entry->fixed_templates[variant_index], entry->fixed_template_slots[variant_index], operand_registers),
         counters);
     if (fixed_result != MACHINE_X64_FIXED_TEMPLATE_UNPUBLISHED) return fixed_result == MACHINE_X64_FIXED_TEMPLATE_EMITTED;
-    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(descriptor, variant_index);
+    // Reached either without a dense table or after one declined a high
+    // register, so this is where the prepared row's descriptor is read on
+    // the paths that did not read it above.
+    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry ? entry->descriptor : 0, variant_index);
     if (!emit_self_copy && (variant.flags & MACHINE_X64_EXACT_RECIPE_FLAG_SELF_COPY_NOOP) &&
         operand_registers[variant.operand_slots[0]] == operand_registers[variant.operand_slots[1]])
     {
@@ -11341,10 +11417,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             {
                 edit_cursor = machine_x64_emit_edit_run(&encoder, function, placement, edit_cursor, before, false);
             }
-            MachineX64PreparedExactOpcode const* exact_entry = machine_x64_exact_opcode_for_opcode(instruction->opcode);
-            bool exact_required = exact_entry && exact_entry->exact_required;
+            u8 exact_row_flags = machine_x64_exact_row_flags_for_opcode(instruction->opcode);
+            bool exact_required = (exact_row_flags & MACHINE_X64_EXACT_ROW_FLAG_EXACT) != 0;
             if (exact_required)
             {
+                MachineX64PreparedExactOpcode const* exact_entry = machine_x64_exact_opcode_for_opcode(instruction->opcode);
                 u32 exact_start = encoder.count;
                 u64 exact_immediate = 0;
                 bool exact_immediate_valid = true;
@@ -11375,7 +11452,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 }
                 else
                 {
-                    exact_emitted = exact_entry->sequence_required
+                    exact_emitted = (exact_row_flags & MACHINE_X64_EXACT_ROW_FLAG_SEQUENCE)
                                          ? machine_x64_emit_exact_sequence(&encoder, exact_entry, instruction, placement, operand_registers,
                                                                            instruction->payload, exact_immediate, &exact_counters, arena, &fixups)
                                          : machine_x64_emit_exact_recipe(&encoder, exact_entry, instruction, placement, operand_registers,
@@ -11399,14 +11476,14 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     // authoritative.
                     encoder.overflow = true;
                 }
-                else if (exact_entry->descriptor)
+                else if (exact_row_flags & MACHINE_X64_EXACT_ROW_FLAGS_PREPARED)
                 {
                     // Relative and symbolic forms deliberately query the
                     // metadata encoder with a neutral zero displacement. The
                     // existing machine fixup/call-site streams remain the
                     // owner of target resolution, preserving their canonical
                     // offsets and relocation semantics.
-                    if (exact_entry->descriptor->flags & MACHINE_X64_EXACT_RECIPE_FLAG_BRANCH_FIXUP)
+                    if (exact_row_flags & MACHINE_X64_EXACT_ROW_FLAG_BRANCH_FIXUP)
                     {
                         MachineX64BranchFixup* fixup = (MachineX64BranchFixup*)machine_stream_append(arena, &fixups);
                         *fixup = (MachineX64BranchFixup){
@@ -11414,7 +11491,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                             .block = machine_ref_payload(instruction->operands[0]),
                         };
                     }
-                    if (exact_entry->descriptor->flags & MACHINE_X64_EXACT_RECIPE_FLAG_CALL_SITE)
+                    if (exact_row_flags & MACHINE_X64_EXACT_ROW_FLAG_CALL_SITE)
                     {
                         MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                         *site = (MachineCallSite){
