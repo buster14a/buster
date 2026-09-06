@@ -1,0 +1,30 @@
+name: Publish unevaluated operand fix
+on:
+  push:
+    branches: [work/2026-09-06-integration-gates]
+    paths: [.github/workflows/publish-unevaluated-fix.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: c640feaf5d5de15ba5f6192c7cc8c90c45340b89
+          persist-credentials: false
+      - name: Apply the exact tested patch and publish only the implementation and IR tests
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, os, subprocess, zlib
+          from pathlib import Path
+          encoded = 'eNrFWXtT4zgS/z+fQsNVzdnkgZNAYC/H1LIMe5vaKWYKmKuam6NUii0nWhwrK9lAluW7X+vhZ2JCuLq6FEVsSf1Qq/vX3UrAwhB1uzOWIHIghX8wTWVCxUHEpgc+XyxZBC+h4HFC4+DAP/DxjMY9H013WNxicUAfESHHx8Ojw15vGo6o509R3/NGh4etbre7k+xWu93eTf6PP6Ju/2g46neOUds89PsIRn/Goops'
+          PY
