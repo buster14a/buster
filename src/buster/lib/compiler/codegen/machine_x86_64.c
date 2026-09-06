@@ -5032,6 +5032,18 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_return(MachineX64Selector* selector,
     (IR_OPCODE_BIT(IR_OPCODE_LOAD) | IR_OPCODE_BIT(IR_OPCODE_STORE) | IR_OPCODE_BIT(IR_OPCODE_DEREFERENCE) |                           \
      IR_OPCODE_BIT(IR_OPCODE_BRANCH_IF))
 
+// A candidate's absolute row and the ordinal the walk gave it. Recording the
+// block-relative offset instead made each of the 1,28 M candidate visits
+// below rebuild both numbers: a `layout_rows ?` select, a load or a block-base
+// add for the row, and a block-base add for the ordinal, all from state the
+// walk was holding when it wrote the entry.
+typedef struct MachineX64CandidateRow MachineX64CandidateRow;
+struct MachineX64CandidateRow
+{
+    u32 row;
+    u32 ordinal;
+};
+
 MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                               bool position_independent, bool assume_validated, MachineSelectionModule* module)
 {
@@ -5245,7 +5257,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .block_row_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1),
     };
     u32* block_candidate_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1);
-    u32* candidate_rows = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
+    MachineX64CandidateRow* candidate_rows =
+        arena_allocate(arena, MachineX64CandidateRow, function->instruction_count ? function->instruction_count : 1);
     u32 candidate_count = 0;
     bool dense_rows = true;
     u32 walk_ordinal = 0;
@@ -5260,7 +5273,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             dense_rows &= id.value == block->first_instruction.value + block_row_count;
             if ((MACHINE_X64_CANDIDATE_OPCODES >> instruction->opcode) & 1)
             {
-                candidate_rows[candidate_count] = block_row_count;
+                // `walk_ordinal` is still this row's predecessor count here,
+                // so the row's own ordinal is one past it -- the same number
+                // the offset form rebuilt as `block base + offset + 1`.
+                candidate_rows[candidate_count] = (MachineX64CandidateRow){.row = id.value, .ordinal = walk_ordinal + 1};
                 candidate_count += 1;
                 block_candidate_count += 1;
             }
@@ -5372,24 +5388,20 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // index base folds its offset into a real lea and stops the chain.
     for (u32 alias_sweep = 0; alias_sweep < 2; alias_sweep += 1)
     {
-        u32 walked_ordinals = 0;
         u32 candidate_base = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
-            IrBlock* block = function->blocks + block_index;
             u32 epoch = alias_sweep * function->block_count + block_index + 1;
             u32 block_candidate_count = block_candidate_counts[block_index];
-            u32 const* block_rows = layout_rows ? layout_rows + walked_ordinals : 0;
-            u32 block_first_row = block->first_instruction.value;
             // Only the candidate rows can move this sweep: every other opcode
             // leaves the root unrooted and falls straight through, and the
             // candidates are a subsequence, so reversing them is reversing
             // the block.
             for (u32 remaining = block_candidate_count; remaining > 0; remaining -= 1)
             {
-                u32 row_offset = candidate_rows[candidate_base + remaining - 1];
-                IrInstruction* instruction = function->instructions + (block_rows ? block_rows[row_offset] : block_first_row + row_offset);
-                u32 instruction_ordinal = walked_ordinals + row_offset + 1;
+                MachineX64CandidateRow candidate_row = candidate_rows[candidate_base + remaining - 1];
+                IrInstruction* instruction = function->instructions + candidate_row.row;
+                u32 instruction_ordinal = candidate_row.ordinal;
                 if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
                     value_uses[instruction->operands[0].value].promotable_width)
                 {
@@ -5439,7 +5451,6 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     load_aliases[candidate] = root;
                 }
             }
-            walked_ordinals += row_layout.block_row_counts[block_index];
             candidate_base += block_candidate_count;
         }
     }
@@ -5634,22 +5645,17 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     u32* local_store_ordinals = local_store_counts;
     memset(local_store_ordinals, 0, sizeof(*local_store_ordinals) * function->value_count);
     // The stores this stamps and the branches it fuses are both candidate
-    // rows, so this pass reads the same compact list the sweeps did.  The
-    // ordinals stay the walk's own: candidate `row_offset` in a block that
-    // starts at `fused_rows` is the row the full walk numbered next.
-    u32 fused_rows = 0;
+    // rows, so this pass reads the same compact list the sweeps did, and each
+    // entry already carries the ordinal the full walk gave that row.
     u32 fusion_candidate_base = 0;
     for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
     {
-        IrBlock* block = function->blocks + block_index;
         u32 block_candidate_count = block_candidate_counts[block_index];
-        u32 const* block_rows = layout_rows ? layout_rows + fused_rows : 0;
-        u32 block_first_row = block->first_instruction.value;
         for (u32 candidate_index = 0; candidate_index < block_candidate_count; candidate_index += 1)
         {
-            u32 row_offset = candidate_rows[fusion_candidate_base + candidate_index];
-            IrInstruction* instruction = function->instructions + (block_rows ? block_rows[row_offset] : block_first_row + row_offset);
-            u32 fusion_ordinal = fused_rows + row_offset + 1;
+            MachineX64CandidateRow candidate_row = candidate_rows[fusion_candidate_base + candidate_index];
+            IrInstruction* instruction = function->instructions + candidate_row.row;
+            u32 fusion_ordinal = candidate_row.ordinal;
             if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
                 value_uses[instruction->operands[0].value].promotable_width)
             {
@@ -5830,7 +5836,6 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 selector.fused_dead[dead_zeros[zero_index]] = 1;
             }
         }
-        fused_rows += row_layout.block_row_counts[block_index];
         fusion_candidate_base += block_candidate_count;
     }
     selector.virtual_register_count = selector.builder.virtual_registers.total_count;
