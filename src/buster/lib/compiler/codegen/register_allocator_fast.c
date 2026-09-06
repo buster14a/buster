@@ -24,7 +24,10 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_operand_mask(u32 operand_masks, u32 shift)
 // encoder sequences pin specific registers. The output is the same
 // placement contract the MIR_STACK builder produces, so the encoder is
 // untouched: per-slot operand registers plus a point-sorted reload/spill
-// edit stream.
+// edit stream. Liveness is derived from the complete textual use/definition
+// stream rather than MachineVirtualRegister.definition_point, so explicit
+// mutable virtual registers are handled conservatively without an SSA
+// assumption.
 
 typedef struct MachineFastState MachineFastState;
 struct MachineFastState

@@ -2624,6 +2624,11 @@ on a commit you already know is incomplete tells nobody anything.
   `i`; keep these copies parallel through allocation so cycles are resolved as
   copies rather than serialized selector moves. Replay files include all three
   arrays and use the current replay version.
+- An ordinary machine virtual register has exactly one definition and every
+  use, including an edge-copy source, is dominated by it. The temporary
+  `MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE` exception is explicit and counted;
+  FAST/QUALITY liveness scans all textual touches, the scheduler preserves
+  their source order, and SSA-only consumers must reject mutable values.
 - Shared canonical-IR facts and the generated FAST/QUALITY rule decision tree
   live in `machine_select.{c,h}`, `machine_select_rules.h`, and
   `machine_select_generated.c`. Target selectors may retain custom ABI and

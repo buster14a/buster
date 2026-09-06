@@ -418,8 +418,10 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                 {
                     definition_totals[register_index] = 0;
                 }
-                // An opcode the table cannot describe leaves the function unscheduled;
-                // `described` both ends this pass and skips everything built on it.
+                // An opcode the table cannot describe, or an undeclared
+                // duplicate definition, leaves the function unscheduled.
+                // Explicit mutable values are supported conservatively: every
+                // touch is chained in source order below.
                 bool described = true;
                 for (u32 row = 0; row < row_count && described; row += 1)
                 {
@@ -440,6 +442,19 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                         definition_totals[machine_ref_payload(instruction->operands[slot])] +=
                             role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
                     }
+                }
+                for (u32 register_index = 0; register_index < register_count && described; register_index += 1)
+                {
+                    if (definition_totals[register_index] > 1 &&
+                        !(function->virtual_registers[register_index].flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE))
+                    {
+                        described = false;
+                    }
+                }
+                if (!described)
+                {
+                    scratch_end(scratch);
+                    return result;
                 }
                 // Per-block scheduling scratch, sized once at the widest block. Every
                 // array is indexed by block-local unit index; edge capacity is a hard
@@ -627,8 +642,9 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                                 u32 tracked_unit = tracked ? register_units[virtual_register] : UINT32_MAX;
                                 if (definition_totals[virtual_register] > 1)
                                 {
-                                    // Multi-definition value: every touch stays in
-                                    // source order.
+                                    // Explicit mutable value: every touch stays in
+                                    // source order. The verifier and the gate above
+                                    // reject an unclassified duplicate definition.
                                     if (tracked && tracked_unit != unit_index)
                                     {
                                         edge_sources[edge_count] = tracked_unit;

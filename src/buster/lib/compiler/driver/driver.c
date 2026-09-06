@@ -3803,6 +3803,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.codegen_statistics.exact_attempts += unit.codegen_statistics.exact_attempts;
         result.codegen_statistics.exact_successes += unit.codegen_statistics.exact_successes;
         result.codegen_statistics.exact_failures += unit.codegen_statistics.exact_failures;
+        result.codegen_statistics.mutable_virtual_register_count += unit.codegen_statistics.mutable_virtual_register_count;
         if (unit.error != COMPILER_DRIVER_ERROR_NONE)
         {
             if (unit.diagnostic.length)
