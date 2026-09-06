@@ -15,42 +15,41 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: c640feaf5d5de15ba5f6192c7cc8c90c45340b89
+          ref: 5d4cd562ad97235a5841f95195b07fcd2ce4698a
           persist-credentials: false
-      - name: Verify and publish only the implementation and IR tests
+      - name: Verify and publish the reconciled implementation and IR tests
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          git fetch origin 2c61f42ec1047c500bd093726c4cd6ec389d83de
           python3 - <<'PY'
-          import base64, hashlib, os, subprocess, zlib
-          encoded = 'eNrFWFtPGzkUfs+vOOWhmiF3oCkVS9UspbvRonQF6Uqrqhp5PGcSl4kd2R4opfz3PZ5b7pSwWi0P4LHPzcfn++xDJOIYms2xsMDaRvN2mBqLup2IsM3VdCYS+oi1khZl1OZtHoxRtjiEOwjXhIzwGzD2+vXhq6NWK4x72OEhdDnud3tFRrdls7uS7Vq/Xd/P/7h00u68Oe93Ga6jng24XaPbXT1ej88vgLBgM6e+wfwGhUgnwQOhgpnHGNAacJYkJImG4ukHtnQ3I+hj1QP+aiiRCvQ9hPmhAWoPFn2K++bYwFWW2AquuUQYSv9nPywtZmr7A6eOKE2SR+ewmEAMVxwbtl5MdHG/SJ58bQlmw+lBrlkMRg+ccWCFdelEL7tfq5Wq7DaMJGnT2IsGZRQNCmhlyC3aCQgPT43SKkj5dOAZuhZ2o1ALesCRlZHW8ZI2Upi34M4uO1oCBRDr0CFycMEGNcKvSJAKcUg0La8CICAHjmFyaJVMhxorEyeI8OhgjqTDgEyY5rSlwJ810lInhNxI0RijZWrI0kECmrIgFBTLFKZ/dwZRxrQypsWovaDIrEQUsJG1NSbC3guOCsQ3ZhB8/oJxS4VfaRmDEd1yc5koay6QNZv78jO6XiyAH3SnwRBlcOspoC+YpXmu2AMmtrcL+5/IF8nuHvd5Rh7VaB52ww7udrch/gsU18D9BJ8N/7+D4TaNH+M8Gr944/H+Swo5I5hJNmljCfamdaRqvXO8XNWv2q/I1/nK6DdfM8klAyl6oUjKhcSxchGRrOlOa6Tt/6RiKP/Wipj7Jsmqi8pxBzVAzGRmY0l5BKguzNEyEmWTVbyBKM0xkpcqIlCpjJV3dwS1LrltwRhHRaXObMqI3JpWk6k9yK43M8FfnQaNNtQQXB5qiSu/nxXplnbvjBViYz447FkQysWNvLwg2lLDnoOn5Dej4e35jV6Xuc5QOnqN0uIsS6Ugr7F2hvevuKqezXTUJW0LT15MSOmeMMs6nK6zucBfVKsZlpYeT+ZiYFLz08KBirM5JMfylvKD7l5f9v4OL8+Fvo9+9herzS8n6KZXH3ORKQY5yACZ9jZJBBUdyVaI2JKxKr+MSebKytaLmjUo1XRCkkk0EFPWU2eC7V5lrMWd+JTNldui2R0IWXTP0YMjyeKNERPEvLVSZzj79k711Y/SzB6k0YiyJKBJF8M9+xbkOzBqFLW+/TL6f+/Lh/r5E+P3V8cMJPNCZLIE5f4GspuDM3b5acZIqiLK4ugn5nYc1YaYNFnIzN94sNri8ULeoC8HEjWk/dF1l1BtkE0Ge9LUUF4fRyDKbznmzWVRgi7uNWaJqtIG7eG9I9mUeNA2yqFY3mT38yJBwQbzIZVuRYGOp6PbmVNSOQV++hBeZ+ualYhsbF8s1yuRYs+mK+6LQR+dXI6+6Yhp5QKuhujdDvrA8f79eLQP9IZXcvTz2IS5G8yTHdN7uqVuueCsxNt9OVZQmaPJMx3v+aiiPhF65e3G6jqpH9IrYKKzsJZrlzyuN+XC6mzUyk6WKyiOo7r0g39bqdhuwbf9+C7UmmiLng8vgr/7F4H1/NPg4DIYfh+er0Twsfy4+DBZfAvUN8s8lqicj9Ano/FfIXL8WthHfOrXtgVvZr5gsd0GsVZLW/IYJgvzRHfDJdXWBlqRw1ICfvT78nPvWo61e9U1DJJ9gs+xK1M6k8j8SylPJZBORrJDIf00gzyGPnxJHfu0t8sca0ksHeWCuMig2h+/uzt620dTBFpA/SghFW0BP+A9Vgxkmil83qeIVUUFR2AYm7AapcdVI7/iYSt9OwFV5YKsWpVHZEpInaeRahdsJSnrvQyJCTo0pT5jOG1NhXFNsSK0FQ6TWIa8v11sQSTBTmzfkGrFZdfG04wny66Ihp06F8pzcuUaacY4zigYmKmvYr97/Ae6fD6hbtX8Avim+4g=='
-          # Whitespace-free, authenticated transport of the locally tested diff.
-          encoded = encoded.replace('hdDnud3t', 'hdDud3t')
-          patch = zlib.decompress(base64.b64decode(encoded, validate=True))
-          assert hashlib.sha256(patch).hexdigest() == '9020e2478491ced9afac80adbd4bed95206e0eab0c740a1cd41bacdaf2583196'
+          import base64, hashlib, os, subprocess
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
-          base = 'c640feaf5d5de15ba5f6192c7cc8c90c45340b89'
+          patch = subprocess.check_output(['git', 'show', '2c61f42ec1047c500bd093726c4cd6ec389d83de:.github/integration/constant-p-reconciled.patch'])
+          assert hashlib.sha256(patch).hexdigest() == '3f22a50dc5f1579553b9ed0d84bf6ad6c4fcd34f4d4a78132991b67d3e86d9a3'
+          base = '5d4cd562ad97235a5841f95195b07fcd2ce4698a'
           branch = 'refs/heads/fix/2026-09-06-fortified-memory-builtins'
           assert git('rev-parse', 'HEAD') == base
-          assert git('ls-remote', 'origin', branch).split()[0] == base
+          observed = git('ls-remote', 'origin', branch).split()[0]
+          assert observed == base, 'Branch moved; preserving ' + observed
           subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
           subprocess.run(['git', 'apply', '-'], input=patch, check=True)
           paths = ['src/buster/lib/compiler/frontend/c/c_gen.c', 'src/buster/tests/compiler/frontend/c/c_test.c']
           assert sorted(git('diff', '--name-only').splitlines()) == paths
           subprocess.run(['git', 'diff', '--check'], check=True)
           subprocess.run(['git', 'add', '--', *paths], check=True)
-          assert git('write-tree') == 'aaf94026f0a50454410d4e6176a35e21b7103420'
+          assert git('write-tree') == '44a511b20b4d39efd861b98f9f0d02842144e3d5'
           subprocess.run(['git', 'config', 'user.name', 'github-actions[bot]'], check=True)
           subprocess.run(['git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], check=True)
-          subprocess.run(['git', 'commit', '-m', 'c: keep object-size and constant-p operands unevaluated'], check=True)
+          subprocess.run(['git', 'commit', '-m', 'c: keep constant predicates unevaluated and reject effectful comma constants'], check=True)
           env = os.environ.copy()
           token = env.pop('GH_TOKEN')
           env['GIT_CONFIG_COUNT'] = '1'
           env['GIT_CONFIG_KEY_0'] = 'http.https://github.com/.extraheader'
           env['GIT_CONFIG_VALUE_0'] = 'AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + token).encode()).decode()
           subprocess.run(['git', 'push', 'origin', 'HEAD:' + branch], env=env, check=True)
-          print('Published implementation and IR tests:', git('rev-parse', 'HEAD'), git('rev-parse', 'HEAD^{tree}'))
+          print('Published:', git('rev-parse', 'HEAD'), git('rev-parse', 'HEAD^{tree}'))
           PY
