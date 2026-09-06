@@ -51,6 +51,44 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
     file_map_unmap(fallback_map);
     arguments->arena->position = arena_position;
 
+    // Exercise relative paths without changing the process-wide working directory:
+    // like the compiler fixtures, these paths are relative to the checkout root.
+    String8 relative_paths[] = {S8("tests/file_map_read.txt"), S8("./tests/file_map_read.txt")};
+    String8 mapped_content = S8("buster file mapping test");
+    for (u64 path_index = 0; path_index < BUSTER_ARRAY_LENGTH(relative_paths); path_index += 1)
+    {
+        for (u32 map_required = 0; map_required < 2; map_required += 1)
+        {
+            FileMapRead relative_map = file_map_read(arguments->arena, relative_paths[path_index], (FileReadOptions){.map_required = map_required});
+            bool mapped = relative_map.mapped_pointer != 0 && relative_map.bytes.pointer != 0;
+            BUSTER_TEST(arguments, mapped);
+            if (mapped)
+            {
+                BUSTER_STRING_TEST(arguments, ((String8){(char8*)relative_map.bytes.pointer, relative_map.bytes.length}), mapped_content);
+            }
+            file_map_unmap(relative_map);
+            arguments->arena->position = arena_position;
+        }
+    }
+
+    FileMapRead padded_required = file_map_read(arguments->arena, relative_paths[0], (FileReadOptions){.end_padding = 4, .map_required = 1});
+    BUSTER_TEST(arguments, padded_required.bytes.pointer == 0 && padded_required.mapped_pointer == 0);
+    file_map_unmap(padded_required);
+    FileMapRead padded_fallback = file_map_read(arguments->arena, relative_paths[0], (FileReadOptions){.end_padding = 4});
+    BUSTER_TEST(arguments, padded_fallback.bytes.pointer != 0 && padded_fallback.mapped_pointer == 0);
+    if (padded_fallback.bytes.pointer)
+    {
+        BUSTER_STRING_TEST(arguments, ((String8){(char8*)padded_fallback.bytes.pointer, padded_fallback.bytes.length}), mapped_content);
+        bool padding_zero = true;
+        for (u64 padding_index = 0; padding_index < 4; padding_index += 1)
+        {
+            padding_zero &= padded_fallback.bytes.pointer[padded_fallback.bytes.length + padding_index] == 0;
+        }
+        BUSTER_TEST(arguments, padding_zero);
+    }
+    file_map_unmap(padded_fallback);
+    arguments->arena->position = arena_position;
+
     BUSTER_TEST(arguments, file_write(source_path, (ByteSlice){0}));
     ByteSlice empty = file_read(arguments->arena, source_path,
                                 (FileReadOptions){
