@@ -528,6 +528,62 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     }
 #endif
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // Returned paths must outlive the helper's scratch scope even when the
+    // caller deliberately chooses either scratch arena as its output arena.
+    // The OS module is serialized, so replacing the process PATH snapshot here
+    // cannot race other tests. The fixture is ours, not a host-installed tool.
+    {
+        Arena* arena = arguments->arena;
+        String8 root = buster_test_temporary_path(arena, S8("buster-path-lifetime"), S8(""));
+        os_make_directory(root);
+        String8 path = string_format_z(arena, S8("{S8}/probe.exe"), root);
+        OsFileDescriptor* file = os_file_open(path, (OpenFlags){.create = true, .write = true, .truncate = true},
+                                             (OpenPermissions){.read = true, .write = true, .execute = true});
+        BUSTER_TEST(arguments, file != 0);
+        if (file)
+        {
+            os_file_close(file);
+            String8 alias = string_format_z(arena, S8("{S8}/./probe.exe"), root);
+            String8 absolute = os_path_absolute(arena, path, true);
+            SliceString8 saved_keys = program_state->input.environment_keys;
+            SliceString8 saved_values = program_state->input.environment_values;
+#if defined(_WIN32)
+            String8 keys[] = {S8("Path")};
+#else
+            String8 keys[] = {S8("PATH")};
+#endif
+            String8 values[] = {root};
+            program_state->input.environment_keys = (SliceString8)BUSTER_ARRAY_TO_SLICE(keys);
+            program_state->input.environment_values = (SliceString8)BUSTER_ARRAY_TO_SLICE(values);
+            ThreadContext* context = thread_context_selected();
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(context->arenas); index += 1)
+            {
+                Arena* output = context->arenas[index];
+                u64 start = output->position;
+                String8 resolved = executable_resolve_in_path(output, S8("probe.exe"));
+                bool retained = output->position > start;
+                memset(arena_allocate(output, u8, 1024), 0xa5, 1024);
+                bool intact = string_equal(resolved, path) && resolved.pointer[resolved.length] == 0;
+                output->position = start;
+                BUSTER_TEST(arguments, retained);
+                BUSTER_TEST(arguments, intact);
+
+                String8 canonical = os_path_absolute(output, alias, true);
+                retained = output->position > start;
+                memset(arena_allocate(output, u8, 1024), 0x5a, 1024);
+                intact = absolute.length && string_equal(canonical, absolute) && canonical.pointer[canonical.length] == 0;
+                output->position = start;
+                BUSTER_TEST(arguments, retained);
+                BUSTER_TEST(arguments, intact);
+            }
+            program_state->input.environment_keys = saved_keys;
+            program_state->input.environment_values = saved_values;
+        }
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+#endif
+
     // os_directory_delete removes a populated tree, and reports success for a
     // path that is already absent so callers can clean up unconditionally.
     {
