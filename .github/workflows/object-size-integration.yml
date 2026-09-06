@@ -1,0 +1,168 @@
+name: Object-size integration
+on:
+  push:
+    branches: [work/2026-09-06-integration-gates]
+    paths: [.github/workflows/object-size-integration.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.publish.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: f452d90583f4098ff1ffa99d70bbbd590671b14e
+          fetch-depth: 0
+      - name: Publish the exact locally tested follow-up without changing main
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '0541fd44980d942068c597ce5c3671cd412362298797def218075d0b635bf1a8  .github/integration/object-size-unevaluated.patch' | sha256sum --check
+          cp .github/integration/object-size-unevaluated.patch "$RUNNER_TEMP/operand.patch"
+          git checkout --detach c640feaf5d5de15ba5f6192c7cc8c90c45340b89
+          git apply --check "$RUNNER_TEMP/operand.patch"
+          git apply --index "$RUNNER_TEMP/operand.patch"
+          git diff --cached --check
+          test "$(git write-tree)" = 1efd670b08fd0bb9f626a4bc45a82263b8cdec4f
+          git config user.name 'David'
+          git config user.email 'davidgmbb@gmail.com'
+          git commit -m 'c: keep object-size pointer operands unevaluated during call discovery'
+          git push --force-with-lease=refs/heads/work/2026-09-06-object-size-candidate: origin HEAD:refs/heads/work/2026-09-06-object-size-candidate
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/candidate-identity.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: object-size-candidate-identity
+          path: ${{ runner.temp }}/candidate-identity.txt
+          retention-days: 7
+          if-no-files-found: error
+  validate:
+    needs: prepare
+    name: ${{ matrix.prefix }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        prefix: [fortify, fortify-wasm, fortify-wasm-ebpf]
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Construct and identify the exact cumulative candidate
+        shell: bash
+        env:
+          PREFIX: ${{ matrix.prefix }}
+        run: |
+          set -euo pipefail
+          git config user.name 'Integration validation'
+          git config user.email 'noreply@localhost'
+          git config core.autocrlf false
+          base=017b0381ed75d859043b60a92f2ec2e9f5872980
+          expected=1efd670b08fd0bb9f626a4bc45a82263b8cdec4f
+          if [[ "$PREFIX" != fortify ]]; then
+            git fetch origin 120da7753d6419a54618abbc4c827e1123a863cc
+            while IFS= read -r commit; do git cherry-pick "$commit"; done < <(git rev-list --reverse "$base..120da7753d6419a54618abbc4c827e1123a863cc")
+            expected=f4d7398b30df714c6cdbccc439de0097a862a0a9
+          fi
+          if [[ "$PREFIX" == fortify-wasm-ebpf ]]; then
+            git fetch origin bb9a5d74288e6ada1d23492004974de7f75f5110
+            while IFS= read -r commit; do git cherry-pick "$commit"; done < <(git rev-list --reverse "$base..bb9a5d74288e6ada1d23492004974de7f75f5110")
+            expected=e33d14bce33b7be1226e2bec8c66d1d904b153d0
+          fi
+          test "$(git rev-parse HEAD^{tree})" = "$expected"
+          printf 'tree=%s\n' "$expected" | tee "$RUNNER_TEMP/object-size-identity.log"
+      - name: Install Vulkan SDK
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash .github/scripts/install-vulkan-sdk.sh
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: . .github/scripts/install-vulkan-sdk.ps1
+      - name: Full Release suite, fixed point and mode matrix (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          CFLAGS: -Wno-invalid-feature-combination
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --ci --linker DEFAULT
+          "$driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/object-size-suite.log"
+          "$driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/object-size-self-host.log"
+          "$driver" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/object-size-modes.log"
+      - name: Verify effects and explicit-bound failure against Clang
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python3 - <<'PY' 2>&1 | tee "$RUNNER_TEMP/object-size-runtime.log"
+          import os,pathlib,subprocess
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])
+          reference=root/'fortify-clang'
+          source='tests/basic_c_builtin_memory.c'
+          subprocess.run(['clang','-O2',source,'-o',str(reference)],check=True)
+          subprocess.run([str(reference)],check=True)
+          expected={}
+          for operation in ('copy','move','set'):
+              result=subprocess.run([str(reference),operation],capture_output=True)
+              assert result.returncode in (-6,-4), (operation,result.returncode,result.stderr)
+              expected[operation]=result.returncode
+          for allocator in ('fast','none','mir-stack','quality'):
+              executable=root/('fortify-'+allocator)
+              subprocess.run(['build/Release/ide','cc','-fregister-allocator='+allocator,source,'-o',str(executable)],check=True)
+              subprocess.run([str(executable)],check=True)
+              for operation in expected:
+                  result=subprocess.run([str(executable),operation],capture_output=True)
+                  assert result.returncode==expected[operation], (allocator,operation,result.returncode,expected[operation])
+                  print(allocator,operation,'checked failure preserved:',result.returncode)
+          PY
+      - name: Mandatory Wasm engine and optimized sanitizer regressions
+        if: runner.os == 'Linux' && matrix.prefix != 'fortify'
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/Release/ide cc -target wasm64-unknown-freestanding -nostdinc tests/basic_c_wasm64_alignment.c -o "$RUNNER_TEMP/alignment.wasm"
+          node --experimental-wasm-memory64 tests/wasm_memory_alignment_execution.js "$RUNNER_TEMP/alignment.wasm" | tee "$RUNNER_TEMP/object-size-wasm.log"
+          CC=clang AUDIT_OPT=-O2 AUDIT_SANITIZE=1 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 python3 tests/wasm_memory_alignment_regression.py 2>&1 | tee "$RUNNER_TEMP/object-size-wasm-sanitizers.log"
+          if [[ '${{ matrix.prefix }}' == fortify-wasm-ebpf ]]; then
+            CC=clang AUDIT_OPT=-O2 AUDIT_SANITIZE=1 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 python3 tests/ebpf_scalar_regression.py 2>&1 | tee "$RUNNER_TEMP/object-size-ebpf-sanitizers.log"
+          fi
+      - name: Full Release suite and fixed point (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPath = (& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1).Trim()
+          if (-not $VsPath) { throw 'Visual Studio with VC tools was not found' }
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" generate --cc clang --ci"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" build --config Release -t test_all"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" test_self_host --config Release"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve exact-candidate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: object-size-${{ matrix.prefix }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/object-size-*.log
+          retention-days: 7
+          if-no-files-found: error
