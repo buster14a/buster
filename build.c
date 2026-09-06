@@ -21732,28 +21732,37 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_generate_add(Arena* arena, BuildStep*
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
     // These synthetic diagnostics deliberately build large in-memory fixtures.
-    // Give them a transient reservation instead of consuming the long-lived
-    // matrix arena, and do not retain that large reservation in the arena pool.
-    ArenaCreation diagnostics_creation = {.reserved_size = BUSTER_MB(1024)};
+    // Each gets a fresh mapping: arena allocations are not zero-initialized after
+    // a rewind, and the self-tests exercise code that must begin from clean pages.
+    ArenaCreation diagnostics_creation = {.reserved_size = BUSTER_GB(1)};
     diagnostics_creation.flags.no_pool = 1;
-    Arena* diagnostics_arena = arena_create(diagnostics_creation);
-    if (!diagnostics_arena)
+
+    Arena* time_trace_self_test_arena = arena_create(diagnostics_creation);
+    if (!time_trace_self_test_arena)
     {
-        string_print(S8("error: failed to reserve the diagnostics self-test arena\n"));
+        string_print(S8("error: failed to reserve the time-trace self-test arena\n"));
         return PROCESS_RESULT_FAILED;
     }
-
-    ProcessResult diagnostics_result = time_trace_summary_self_test(diagnostics_arena);
-    if (diagnostics_result == PROCESS_RESULT_SUCCESS)
+    ProcessResult time_trace_self_test_result = time_trace_summary_self_test(time_trace_self_test_arena);
+    bool time_trace_arena_destroyed = arena_destroy(time_trace_self_test_arena, 1);
+    BUSTER_CHECK(time_trace_arena_destroyed);
+    if (time_trace_self_test_result != PROCESS_RESULT_SUCCESS)
     {
-        arena_reset_to_start(diagnostics_arena);
-        diagnostics_result = test_timing_summary_self_test(diagnostics_arena);
+        return time_trace_self_test_result;
     }
-    bool diagnostics_destroyed = arena_destroy(diagnostics_arena, 1);
-    BUSTER_CHECK(diagnostics_destroyed);
-    if (diagnostics_result != PROCESS_RESULT_SUCCESS)
+
+    Arena* test_timing_self_test_arena = arena_create(diagnostics_creation);
+    if (!test_timing_self_test_arena)
     {
-        return diagnostics_result;
+        string_print(S8("error: failed to reserve the test-timing self-test arena\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ProcessResult test_timing_self_test_result = test_timing_summary_self_test(test_timing_self_test_arena);
+    bool test_timing_arena_destroyed = arena_destroy(test_timing_self_test_arena, 1);
+    BUSTER_CHECK(test_timing_arena_destroyed);
+    if (test_timing_self_test_result != PROCESS_RESULT_SUCCESS)
+    {
+        return test_timing_self_test_result;
     }
 
     bool fanout_forced = environment_flag_is_on(S8("BUSTER_TEST_FORCE_ARTIFACT_FANOUT"));
