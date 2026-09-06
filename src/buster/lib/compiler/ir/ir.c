@@ -166,7 +166,7 @@ BUSTER_GLOBAL_LOCAL u32 ir_source_search_offsets(u32 const* offsets, u32 low, u3
         low += half & (u32)(((s64)offsets[middle] - (s64)probe - 1) >> 63);
         span -= half;
     }
-    if (span)
+    if (span > 1)
     {
         low = ir_source_search_vector(offsets + low, low, span, 1, probe);
     }
@@ -193,7 +193,12 @@ BUSTER_GLOBAL_LOCAL u32 ir_source_search_keys(IrSourceRegionKey const* keys, u32
         low += half & (u32)(((s64)keys[middle].start - (s64)probe - 1) >> 63);
         span -= half;
     }
-    if (span)
+    // A one-key span is already the answer -- the first key of any bracket
+    // satisfies the search by construction -- so the vector form would load,
+    // compare and population-count its way back to `low`. Half of the 331 k
+    // key searches a self-host stage runs arrive that way, from a kilobyte
+    // page lying wholly inside one region.
+    if (span > 1)
     {
         low = ir_source_search_vector(keys + low, low, span, 2, probe);
     }
@@ -234,28 +239,24 @@ BUSTER_GLOBAL_LOCAL u32 ir_source_map_find(IrSourceMap const* map, u32 offset)
     return ir_source_search_keys(keys, low, high, offset);
 }
 
+// Whether region `index` covers `offset`, without a branch. Unsigned
+// wraparound folds `start <= offset` into the width compare: an offset below
+// the start wraps to at least 2^32 minus the start, which no region width can
+// reach. Spelled with `&&` this was two data-dependent branches, and the two
+// slots the caller tests made four of them on the hot path -- 197 k of stage
+// 1's branch misses landed on this one line.
 BUSTER_GLOBAL_LOCAL bool ir_source_map_key_contains(IrSourceRegionKey const* keys, u32 index, u32 offset)
 {
-    return keys[index].start <= offset && keys[index + 1].start > offset;
+    u32 start = keys[index].start;
+    return (offset - start) < (keys[index + 1].start - start);
 }
 
-// The region an offset falls in, remembered in the cursor. Text and stamp
-// regions get a slot each: a line's macro-expanded output sits at the tail of
-// the space while the file bytes around it sit low, so one slot would miss on
-// every interleave. The stamp slot is checked first: it is the narrower of
-// the two, so a hit there is decisive, and asking the other way round
-// measured `+1 M` on the self-host stage.
-BUSTER_GLOBAL_LOCAL u32 ir_source_map_region(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
+// The 6,6% of lookups neither cursor slot answers: search, and re-aim the
+// slot whose kind the answer has. Outlined so the caller above it is small
+// enough to inline into the two entry points, which is where the saving is --
+// the search itself is unchanged.
+BUSTER_GLOBAL_LOCAL u32 ir_source_map_region_miss(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
 {
-    IrSourceRegionKey const* keys = map->keys;
-    if (ir_source_map_key_contains(keys, cursor->stamp_region, offset))
-    {
-        return cursor->stamp_region;
-    }
-    if (ir_source_map_key_contains(keys, cursor->text_region, offset))
-    {
-        return cursor->text_region;
-    }
     u32 index = ir_source_map_find(map, offset);
     if (map->regions[index].kind == IR_SOURCE_REGION_STAMP)
     {
@@ -266,7 +267,36 @@ BUSTER_GLOBAL_LOCAL u32 ir_source_map_region(IrSourceMap const* map, u32 offset,
         cursor->text_region = index;
         cursor->checkpoint = 0;
     }
+
     return index;
+}
+
+// The region an offset falls in, remembered in the cursor. Text and stamp
+// regions get a slot each: a line's macro-expanded output sits at the tail of
+// the space while the file bytes around it sit low, so one slot would miss on
+// every interleave.
+//
+// Both slots are tested and neither test branches. Asking them in sequence
+// let the answer return one compare sooner when the stamp slot hit, which is
+// 16,9% of the 2,34 M lookups a self-host stage runs, and paid four
+// mispredictable branches for it on the other 83%; testing both and selecting
+// with a conditional move leaves one branch, the 93,4%-taken "some slot hit",
+// and the two extra loads are the same two cache lines the cursor already
+// keeps hot.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 ir_source_map_region(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor)
+{
+    IrSourceRegionKey const* keys = map->keys;
+    u32 stamp_region = cursor->stamp_region;
+    u32 text_region = cursor->text_region;
+    bool stamp_hit = ir_source_map_key_contains(keys, stamp_region, offset);
+    bool text_hit = ir_source_map_key_contains(keys, text_region, offset);
+    u32 result = stamp_hit ? stamp_region : text_region;
+    if (!(stamp_hit | text_hit))
+    {
+        result = ir_source_map_region_miss(map, offset, cursor);
+    }
+
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL IrSourcePosition ir_source_region_position(IrSourceRegion const* region, u32 offset, u32* checkpoint_cursor)
@@ -315,19 +345,22 @@ BUSTER_GLOBAL_LOCAL IrSourcePosition ir_source_region_position(IrSourceRegion co
     }
     IrSourceCheckpoint checkpoint = region->checkpoints[cursor];
     u32 delta = local - offsets[cursor];
-    s64 line = (s64)checkpoint.line + region->line_delta;
-    if (line < 1)
+    // `line_delta` is what a `#line` moved this region by, and it is zero for
+    // every one of the 704 k text-region resolutions a self-host stage runs:
+    // the widened add and its two clamps are seven instructions of arithmetic
+    // that cannot change the answer, so they are spelled as the exception.
+    u32 line = checkpoint.line;
+    if (region->line_delta)
     {
-        line = 1;
-    }
-    if (line > (s64)UINT32_MAX)
-    {
-        line = (s64)UINT32_MAX;
+        s64 shifted = (s64)checkpoint.line + region->line_delta;
+        shifted = shifted < 1 ? 1 : shifted;
+        shifted = shifted > (s64)UINT32_MAX ? (s64)UINT32_MAX : shifted;
+        line = (u32)shifted;
     }
     return (IrSourcePosition){
         .source = region->source,
         .offset = checkpoint.offset + delta,
-        .line = (u32)line,
+        .line = line,
         .column = checkpoint.column + delta,
     };
 }
