@@ -2413,6 +2413,11 @@ struct CIntegerIrBuilder
     // scan touched one cache line per local to compare four bytes.  Sixteen
     // candidates share a line here.  Appended in lockstep with `locals`.
     u32* local_entities;
+    // `local_entities` keyed by entity: see c_ir_local_entity_probe.  Null for
+    // a builder with no locals table (the test hooks), which falls back to the
+    // scan the map replaces.
+    u32* local_entity_slots;
+    u32 local_entity_slot_mask;
     u32 local_count;
     u32 local_capacity;
     IrBlockId* label_metadata_store_blocks;
@@ -4047,16 +4052,100 @@ BUSTER_C_INTERNAL bool c_ir_value_contains_label_provenance(CIntegerIrBuilder* b
     return false;
 }
 
+// Where an entity's row sits in the locals table.  The table is keyed by
+// entity, and c_ir_find_local_by_entity used to answer every identifier the
+// body resolves by scanning it backwards: 397.442 calls over 16,4 M rows on a
+// self-compile, a function averaging 78 locals and a third of the calls
+// walking more than sixteen.  This is the same rows in an open-addressed map
+// of local indices, power-of-two sized at twice the local capacity so the load
+// factor stays at or below a half, with no deletion because the table only
+// ever grows.  A repeated entity overwrites its slot, which is the row the
+// backward scan answered with.
+// No row recorded in this slot.  A local index can never be this: the table's
+// capacity is bounded by the declaration's own local count.
+#define C_IR_LOCAL_SLOT_EMPTY UINT32_MAX
+// Knuth's multiplicative constant and the shift that brings the mixed bits
+// down into the mask.
+#define C_IR_LOCAL_ENTITY_HASH_MULTIPLIER UINT32_C(2654435761)
+#define C_IR_LOCAL_ENTITY_HASH_SHIFT 12
+// The map is sized to this multiple of the locals capacity, rounded up to a
+// power of two, so the load factor stays at or below a half.
+#define C_IR_LOCAL_SLOT_LOAD_DIVISOR 2
+#define C_IR_LOCAL_SLOT_MINIMUM 16
+
+BUSTER_C_INTERNAL u32 c_ir_local_entity_probe(u32 entity, u32 mask)
+{
+    // The ids are dense and a function's own locals are near-consecutive, so
+    // the multiplicative mix is what stops one function's block of ids from
+    // clustering into one run of a small table.
+    return ((entity * C_IR_LOCAL_ENTITY_HASH_MULTIPLIER) >> C_IR_LOCAL_ENTITY_HASH_SHIFT) & mask;
+}
+
+// Record the row `local_index`, whose entity is already stored in
+// `local_entities`, in the map.  A no-op for a builder without one (the test
+// hooks), whose locals table is empty.
+BUSTER_C_INTERNAL void c_ir_local_entity_record(CIntegerIrBuilder* builder, u32 entity, u32 local_index)
+{
+    if (builder->local_entity_slots)
+    {
+        u32 slot = c_ir_local_entity_probe(entity, builder->local_entity_slot_mask);
+        while (builder->local_entity_slots[slot] != C_IR_LOCAL_SLOT_EMPTY && builder->local_entities[builder->local_entity_slots[slot]] != entity)
+        {
+            slot = (slot + 1) & builder->local_entity_slot_mask;
+        }
+        builder->local_entity_slots[slot] = local_index;
+    }
+}
+
 BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_entity(CIntegerIrBuilder* builder, CEntityId entity)
 {
     CIntegerIrLocal* result = 0;
-    for (u32 index = builder->local_count; index != 0 && !result; index -= 1)
+    if (builder->local_entity_slots)
     {
-        if (builder->local_entities[index - 1] == entity.value)
+        u32 slot = c_ir_local_entity_probe(entity.value, builder->local_entity_slot_mask);
+        u32 candidate = builder->local_entity_slots[slot];
+        while (candidate != C_IR_LOCAL_SLOT_EMPTY && builder->local_entities[candidate] != entity.value)
         {
-            result = builder->locals + index - 1;
+            slot = (slot + 1) & builder->local_entity_slot_mask;
+            candidate = builder->local_entity_slots[slot];
+        }
+        result = candidate == C_IR_LOCAL_SLOT_EMPTY ? 0 : builder->locals + candidate;
+    }
+    else
+    {
+        for (u32 index = builder->local_count; index != 0 && !result; index -= 1)
+        {
+            if (builder->local_entities[index - 1] == entity.value)
+            {
+                result = builder->locals + index - 1;
+            }
         }
     }
+#if !BUSTER_OPTIMIZE
+    // The scan stays in the tree as the reference and answers every lookup
+    // beside the map.  Unlike the initializer slot projection's check, which
+    // runs once per type when the table is built, this one is per lookup and
+    // so is a debug build's alone: the Release tree carries the tests
+    // (BUSTER_INCLUDE_TESTS=1) and running the scan there would put the whole
+    // cost this removes straight back.  c_test_ir_local_entity_map_equivalent
+    // is the Release-side check.  BUSTER_CHECK is an assumption in an
+    // optimized build, so the report is spelled out.
+    if (builder->local_entity_slots)
+    {
+        CIntegerIrLocal* reference = 0;
+        for (u32 index = builder->local_count; index != 0 && !reference; index -= 1)
+        {
+            if (builder->local_entities[index - 1] == entity.value)
+            {
+                reference = builder->locals + index - 1;
+            }
+        }
+        if (reference != result)
+        {
+            os_fail_message(S8("local entity map disagrees with the locals scan"));
+        }
+    }
+#endif
     return result;
 }
 
@@ -4380,6 +4469,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken n
         .c_type = entity.value < builder->parse.entity_count ? builder->parse.entities[entity.value].type : C_TYPE_ID_INVALID,
         .entity = entity,
     };
+    c_ir_local_entity_record(builder, entity.value, builder->local_count - 1);
     return place;
 }
 
@@ -34063,6 +34153,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         .c_type = local_c_type_id,
                         .entity = entity,
                     };
+                    c_ir_local_entity_record(builder, entity.value, builder->local_count - 1);
                 }
                 else
                 {
@@ -44057,6 +44148,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         }
         TemporalArena lowering_temporary = arena_begin_temporal(lowering_arena);
         u64 local_capacity = (u64)signatures[declaration_index].parameter_count + declaration_local_counts[declaration_index];
+        u64 local_slot_capacity = C_IR_LOCAL_SLOT_MINIMUM;
+        while (local_slot_capacity < local_capacity * C_IR_LOCAL_SLOT_LOAD_DIVISOR)
+        {
+            local_slot_capacity *= 2;
+        }
         u64 prepared_call_capacity = 0;
         u64 prepared_control_expression_capacity = 0;
         u32 body_end = declaration.body_start + declaration.body_token_count;
@@ -44092,8 +44188,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         // the body is long does not exhaust the stack.  The other consumers of
         // lowering_capacity are per-value arrays the bound does not widen.
         u64 lower_frame_capacity = lowering_capacity + (u64)(declaration.body_start - declaration_start) * 3;
-        if (lowering_capacity > UINT32_MAX || local_capacity > UINT32_MAX || prepared_call_capacity > UINT32_MAX ||
-            prepared_control_expression_capacity > UINT32_MAX || lower_frame_capacity > UINT32_MAX)
+        if (lowering_capacity > UINT32_MAX || local_capacity > UINT32_MAX || local_slot_capacity > UINT32_MAX ||
+            prepared_call_capacity > UINT32_MAX || prepared_control_expression_capacity > UINT32_MAX || lower_frame_capacity > UINT32_MAX)
         {
             scratch_end(lowering_temporary);
             result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
@@ -44175,6 +44271,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .declaration_index = declaration_index,
             .locals = arena_allocate(lowering_temporary.arena, CIntegerIrLocal, local_capacity ? (u32)local_capacity : 1),
             .local_entities = arena_allocate(lowering_temporary.arena, u32, local_capacity ? (u32)local_capacity : 1),
+            .local_entity_slots = arena_allocate(lowering_temporary.arena, u32, (u32)local_slot_capacity),
+            .local_entity_slot_mask = (u32)local_slot_capacity - 1,
             .local_capacity = local_capacity ? (u32)local_capacity : 1,
             .label_metadata_store_blocks = arena_allocate(lowering_temporary.arena, IrBlockId, (u32)lowering_capacity),
             .label_metadata_store_valid = arena_allocate(lowering_temporary.arena, bool, (u32)lowering_capacity),
@@ -44206,6 +44304,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .returns_void = signatures[declaration_index].returns_void,
             .returns_zero_at_end = signatures[declaration_index].returns_zero_at_end,
         };
+        memset(builder.local_entity_slots, 0xff, sizeof(*builder.local_entity_slots) * (u64)local_slot_capacity);
         for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)
         {
             builder.prepared_call_indices[token_offset] = UINT32_MAX;
