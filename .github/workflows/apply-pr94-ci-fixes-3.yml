@@ -1,0 +1,108 @@
+name: Apply PR 94 fresh diagnostics arenas
+
+on:
+  push:
+    branches:
+      - claude/unruffled-bhabha-f5d28a
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.repository == 'buster14a/buster' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Give each diagnostics self-test a fresh arena
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("build.c")
+          text = path.read_text(encoding="utf-8")
+          old = '''BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
+          {
+              // These synthetic diagnostics deliberately build large in-memory fixtures.
+              // Give them a transient reservation instead of consuming the long-lived
+              // matrix arena, and do not retain that large reservation in the arena pool.
+              ArenaCreation diagnostics_creation = {.reserved_size = BUSTER_MB(1024)};
+              diagnostics_creation.flags.no_pool = 1;
+              Arena* diagnostics_arena = arena_create(diagnostics_creation);
+              if (!diagnostics_arena)
+              {
+                  string_print(S8("error: failed to reserve the diagnostics self-test arena\\n"));
+                  return PROCESS_RESULT_FAILED;
+              }
+
+              ProcessResult diagnostics_result = time_trace_summary_self_test(diagnostics_arena);
+              if (diagnostics_result == PROCESS_RESULT_SUCCESS)
+              {
+                  arena_reset_to_start(diagnostics_arena);
+                  diagnostics_result = test_timing_summary_self_test(diagnostics_arena);
+              }
+              bool diagnostics_destroyed = arena_destroy(diagnostics_arena, 1);
+              BUSTER_CHECK(diagnostics_destroyed);
+              if (diagnostics_result != PROCESS_RESULT_SUCCESS)
+              {
+                  return diagnostics_result;
+              }
+          '''
+          new = '''BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
+          {
+              // These synthetic diagnostics deliberately build large in-memory fixtures.
+              // Each gets a fresh mapping: arena allocations are not zero-initialized after
+              // a rewind, and the self-tests exercise code that must begin from clean pages.
+              ArenaCreation diagnostics_creation = {.reserved_size = BUSTER_GB(1)};
+              diagnostics_creation.flags.no_pool = 1;
+
+              Arena* time_trace_self_test_arena = arena_create(diagnostics_creation);
+              if (!time_trace_self_test_arena)
+              {
+                  string_print(S8("error: failed to reserve the time-trace self-test arena\\n"));
+                  return PROCESS_RESULT_FAILED;
+              }
+              ProcessResult time_trace_self_test_result = time_trace_summary_self_test(time_trace_self_test_arena);
+              bool time_trace_arena_destroyed = arena_destroy(time_trace_self_test_arena, 1);
+              BUSTER_CHECK(time_trace_arena_destroyed);
+              if (time_trace_self_test_result != PROCESS_RESULT_SUCCESS)
+              {
+                  return time_trace_self_test_result;
+              }
+
+              Arena* test_timing_self_test_arena = arena_create(diagnostics_creation);
+              if (!test_timing_self_test_arena)
+              {
+                  string_print(S8("error: failed to reserve the test-timing self-test arena\\n"));
+                  return PROCESS_RESULT_FAILED;
+              }
+              ProcessResult test_timing_self_test_result = test_timing_summary_self_test(test_timing_self_test_arena);
+              bool test_timing_arena_destroyed = arena_destroy(test_timing_self_test_arena, 1);
+              BUSTER_CHECK(test_timing_arena_destroyed);
+              if (test_timing_self_test_result != PROCESS_RESULT_SUCCESS)
+              {
+                  return test_timing_self_test_result;
+              }
+          '''
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f"build.c: expected one replacement site, found {count}")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
+      - name: Commit repair and remove this one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/apply-pr94-ci-fixes-3.yml
+          git config user.name "David"
+          git config user.email "davidgmbb@gmail.com"
+          git add build.c .github/workflows/apply-pr94-ci-fixes-3.yml
+          git diff --cached --check
+          git commit -m "ci: use fresh arenas for diagnostics self-tests"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
