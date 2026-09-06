@@ -20,7 +20,7 @@ jobs:
           ref: claude/unruffled-bhabha-f5d28a
           fetch-depth: 0
 
-      - name: Apply portability and CI fixes
+      - name: Apply code and test-runner fixes
         shell: bash
         run: |
           set -euo pipefail
@@ -67,21 +67,6 @@ jobs:
               host_gate + " && !BUSTER_MACOS",
               expected=4,
           )
-
-          replace_exact(
-              ".github/workflows/ci.yml",
-              "          ./build/build test_all_combinations_ci --verbose=1",
-              "          # The Intel macOS target does not yet self-host its System V-oriented\n"
-              "          # native compiler image. Direct mode still executes every compiler,\n"
-              "          # configuration and test tree, but omits only artifact fan-out.\n"
-              "          if [[ \"$(uname -s)\" == \"Darwin\" && \"$(uname -m)\" == \"x86_64\" ]]; then\n"
-              "            BUSTER_MATRIX_DIRECT=1 ./build/build test_all_combinations_ci --verbose=1\n"
-              "          else\n"
-              "            ./build/build test_all_combinations_ci --verbose=1\n"
-              "          fi",
-          )
-
-          Path(".github/workflows/repair-pr94.yml").unlink()
           PY
           git diff --check
           git status --short
@@ -92,6 +77,6 @@ jobs:
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add -A
-          git commit -m "ci: repair six-platform GitHub matrix"
+          git add CMakeLists.txt build.c src/buster/tests/compiler/driver/driver_test.c
+          git commit -m "ci: repair cross-platform matrix prerequisites"
           git push origin HEAD:claude/unruffled-bhabha-f5d28a
