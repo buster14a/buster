@@ -1,0 +1,64 @@
+name: macOS stage-2 diagnosis
+on:
+  push:
+    branches: [work/2026-09-06-integration-gates]
+    paths: [.github/workflows/macos-stage2-diagnosis.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    if: github.server_url == 'https://github.com'
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: c640feaf5d5de15ba5f6192c7cc8c90c45340b89
+          persist-credentials: false
+      - name: Install SDK
+        run: bash .github/scripts/install-vulkan-sdk.sh
+      - name: Add failure-only diagnostic context to the ephemeral checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/buster/lib/compiler/frontend/c/c_source.c')
+          s=p.read_text()
+          old='    BUSTER_CHECK(space->used + size <= space->capacity);'
+          assert s.count(old)==1
+          new='''    if (space->used + size > space->capacity)
+              {
+                  os_fail_message_format(S8("spelling capacity: used={u64} request={u64} capacity={u64} base={u64} arena={u64}"),
+                      space->used, size, space->capacity, (u64)space->base, (u64)space->arena);
+              }'''
+          p.write_text(s.replace(old,new))
+          PY
+          git diff --check
+          git diff > "$RUNNER_TEMP/diagnostic-only.patch"
+      - name: Reproduce stage-2 failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --ci --linker DEFAULT
+          "$driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/stage2-diagnostic.log"
+      - name: Capture assertion backtrace from the generated compiler
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x build/self-host/Release/ide-stage1
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          lldb --batch -o 'settings set target.process.stop-on-sharedlibrary-events false' -o run -o 'thread backtrace -c 20' -o 'frame variable' -- build/self-host/Release/ide-stage1 cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -isysroot "$sdk" src/buster/apps/ide/ide.c -o "$RUNNER_TEMP/diagnostic-stage2" 2>&1 | tee "$RUNNER_TEMP/stage2-backtrace.log"
+      - name: Preserve diagnosis, not a green acceptance claim
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-stage2-diagnosis
+          path: |
+            ${{ runner.temp }}/stage2-*.log
+            ${{ runner.temp }}/diagnostic-only.patch
+          retention-days: 7
+          if-no-files-found: error
