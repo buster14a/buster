@@ -5179,6 +5179,9 @@ BUSTER_C_INTERNAL bool c_preprocess_is_active(CConditionalFrame* conditional)
     return !conditional || conditional->active;
 }
 
+// The row scan the mask projection below replaces, kept as the definition of
+// a line's end for a run that carries no shape sidecar and as the reference
+// c_test_pp_class_masks_agree holds the mask path to.
 BUSTER_C_INTERNAL u64 c_preprocess_line_end(CLexResult lex, u64 token_index)
 {
     while (token_index < lex.token_count && lex.tokens[token_index].kind != C_TOKEN_NEWLINE && lex.tokens[token_index].kind != C_TOKEN_END_OF_FILE)
@@ -5187,6 +5190,178 @@ BUSTER_C_INTERNAL u64 c_preprocess_line_end(CLexResult lex, u64 token_index)
     }
     return token_index;
 }
+
+// The per-64-token class projection of one lexed run, built once when the run
+// becomes a source frame and read by every per-line scan of the driver below.
+//
+// Every one of those scans asks the same closed set of questions of a token —
+// does the line end here, is this a parenthesis, can this name a macro — and
+// the one-byte shape sidecar answers all of them without touching a 12-byte
+// row, so 64 tokens are one masked load and four compares. What that buys is
+// not the compare but the advance: a line end becomes a trailing-zero count
+// instead of a nine-step row loop with a mispredicted exit, and the
+// parenthesis and macro-name scans visit only the lanes that can answer
+// (12% and 20% of the stream on this workload) instead of every token of
+// every line. C_TOKEN_INVALID is 0, so the masked tail lanes of the last
+// window match no class and need no separate trim.
+#define C_PP_CLASS_MASK_WINDOW 64
+
+typedef struct CPpClassMasks CPpClassMasks;
+struct CPpClassMasks
+{
+    Mask64* stop;
+    Mask64* identifier;
+    Mask64* parenthesis_left;
+    Mask64* parenthesis_right;
+    // 0 when the run carried no shape sidecar; every consumer falls back to
+    // the row scans above on that run.
+    u64 word_count;
+};
+
+BUSTER_C_INTERNAL void c_pp_class_masks_build(Arena* arena, CPpClassMasks* masks, CTokenShape const* shapes, u64 token_count)
+{
+    u64 word_count = (token_count + (C_PP_CLASS_MASK_WINDOW - 1)) / C_PP_CLASS_MASK_WINDOW;
+    *masks = (CPpClassMasks){0};
+    if (shapes && word_count)
+    {
+        masks->stop = arena_allocate(arena, Mask64, word_count);
+        masks->identifier = arena_allocate(arena, Mask64, word_count);
+        masks->parenthesis_left = arena_allocate(arena, Mask64, word_count);
+        masks->parenthesis_right = arena_allocate(arena, Mask64, word_count);
+        Simd512 newline_shape = simd512_splat((u8)C_TOKEN_NEWLINE);
+        Simd512 end_shape = simd512_splat((u8)C_TOKEN_END_OF_FILE);
+        Simd512 identifier_shape = simd512_splat((u8)C_TOKEN_IDENTIFIER);
+        Simd512 left_shape = simd512_splat(c_token_shape_from_fields(C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_LEFT_PARENTHESIS));
+        Simd512 right_shape = simd512_splat(c_token_shape_from_fields(C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_RIGHT_PARENTHESIS));
+        for (u64 word_index = 0; word_index < word_count; word_index += 1)
+        {
+            u64 window_base = word_index * C_PP_CLASS_MASK_WINDOW;
+            Mask64 window_mask = mask64_prefix(token_count - window_base);
+            Simd512 window = simd512_load_masked(shapes + window_base, window_mask);
+            masks->stop[word_index] = mask64_or(simd512_equal_byte(window, newline_shape), simd512_equal_byte(window, end_shape));
+            masks->identifier[word_index] = simd512_equal_byte(window, identifier_shape);
+            masks->parenthesis_left[word_index] = simd512_equal_byte(window, left_shape);
+            masks->parenthesis_right[word_index] = simd512_equal_byte(window, right_shape);
+        }
+        masks->word_count = word_count;
+    }
+}
+
+// The lanes of `word_index` that lie in [first, end): the whole word except
+// at the two ends of the range.
+BUSTER_C_INTERNAL Mask64 c_pp_class_range_mask(u64 word_index, u64 first, u64 end)
+{
+    Mask64 result = mask64_not(0);
+    if (word_index == first / C_PP_CLASS_MASK_WINDOW)
+    {
+        result = mask64_and(result, mask64_shift_left(mask64_not(0), first % C_PP_CLASS_MASK_WINDOW));
+    }
+    if (word_index == (end - 1) / C_PP_CLASS_MASK_WINDOW)
+    {
+        result = mask64_and(result, mask64_prefix(((end - 1) % C_PP_CLASS_MASK_WINDOW) + 1));
+    }
+    return result;
+}
+
+// The first newline or end-of-file token at or after `token_index`, which is
+// what c_preprocess_line_end answers by walking rows.
+BUSTER_C_INTERNAL u64 c_pp_line_end_masked(CPpClassMasks const* masks, u64 token_count, u64 token_index)
+{
+    u64 result = token_count;
+    if (token_index < token_count)
+    {
+        u64 word_index = token_index / C_PP_CLASS_MASK_WINDOW;
+        Mask64 pending = mask64_and(masks->stop[word_index], mask64_shift_left(mask64_not(0), token_index % C_PP_CLASS_MASK_WINDOW));
+        while (!pending && word_index + 1 < masks->word_count)
+        {
+            word_index += 1;
+            pending = masks->stop[word_index];
+        }
+        if (pending)
+        {
+            result = word_index * C_PP_CLASS_MASK_WINDOW + mask64_first_set(pending);
+        }
+    }
+    return result;
+}
+
+// The clamped parenthesis depth after [first, end), entered at `depth`: a
+// ')' with nothing open is ignored, which is what the row scan did.
+BUSTER_C_INTERNAL u32 c_pp_parenthesis_depth(CPpClassMasks const* masks, u64 first, u64 end, u32 depth)
+{
+    u32 result = depth;
+    if (first < end)
+    {
+        u64 last_word = (end - 1) / C_PP_CLASS_MASK_WINDOW;
+        for (u64 word_index = first / C_PP_CLASS_MASK_WINDOW; word_index <= last_word; word_index += 1)
+        {
+            Mask64 range = c_pp_class_range_mask(word_index, first, end);
+            Mask64 opens = mask64_and(masks->parenthesis_left[word_index], range);
+            Mask64 closes = mask64_and(masks->parenthesis_right[word_index], range);
+            Mask64 pending = mask64_or(opens, closes);
+            while (pending)
+            {
+                u32 lane = mask64_first_set(pending);
+                bool opening = mask64_and(mask64_shift_right(opens, lane), 1) != 0;
+                result = opening ? result + 1 : (result ? result - 1 : 0);
+                pending = mask64_and(pending, pending - 1);
+            }
+        }
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+// The differential gate on the mask projection: every answer the driver takes
+// from a mask must equal the row scan it replaced, on a run whose lines cross
+// the 64-token windows at every offset.
+bool c_test_pp_class_masks_agree(Arena* arena, String8 source)
+{
+    bool result = true;
+    CLexResult lex = c_lex(arena, source);
+    CPpClassMasks masks;
+    c_pp_class_masks_build(arena, &masks, lex.token_shapes, lex.token_count);
+    if (!masks.word_count && lex.token_count)
+    {
+        result = false;
+    }
+    for (u64 token_index = 0; result && token_index < lex.token_count; token_index += 1)
+    {
+        Mask64 word = masks.identifier[token_index / C_PP_CLASS_MASK_WINDOW];
+        bool named = mask64_and(mask64_shift_right(word, token_index % C_PP_CLASS_MASK_WINDOW), 1) != 0;
+        if (named != (lex.tokens[token_index].kind == C_TOKEN_IDENTIFIER))
+        {
+            result = false;
+        }
+        if (c_pp_line_end_masked(&masks, lex.token_count, token_index) != c_preprocess_line_end(lex, token_index))
+        {
+            result = false;
+        }
+    }
+    for (u64 line_start = 0; result && line_start < lex.token_count;)
+    {
+        u64 line_end = c_preprocess_line_end(lex, line_start);
+        u32 rows = 0;
+        for (u64 scan = line_start; scan < line_end; scan += 1)
+        {
+            if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                rows += 1;
+            }
+            else if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS) && rows)
+            {
+                rows -= 1;
+            }
+        }
+        if (c_pp_parenthesis_depth(&masks, line_start, line_end, 0) != rows)
+        {
+            result = false;
+        }
+        line_start = line_end + 1;
+    }
+    return result;
+}
+#endif
 
 // The whole-file include-guard proof, per source frame: SEARCHING until the
 // file's first top-level directive, GUARDED while inside a leading
@@ -5213,6 +5388,9 @@ struct CPreprocessSourceFrame
     // and the interned symbol of its `#ifndef` name (see CIncludeGuardState).
     CConditionalFrame* guard;
     CLexResult lex;
+    // The class projection of `lex` (see CPpClassMasks); built once when the
+    // frame is pushed, read by every per-line scan of the driver.
+    CPpClassMasks class_masks;
     String8 path;
     String8 logical_path;
     s64 line_delta;
@@ -6694,6 +6872,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     *symbol_table = c_symbol_table_create(arena);
     result.symbols = symbol_table;
     c_symbols_intern_tokens(symbol_table, root_lex.spelling_base, root_lex.tokens, root_lex.token_shapes, root_lex.token_count);
+    CPpClassMasks root_class_masks;
+    c_pp_class_masks_build(arena, &root_class_masks, root_lex.token_shapes, root_lex.token_count);
     result.diagnostic_capacity = BUSTER_MIN(source.length + options.definition_count + 1, UINT64_C(64));
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
     for (u64 diagnostic_index = 0; diagnostic_index < root_lex.diagnostic_count; diagnostic_index += 1)
@@ -7161,6 +7341,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     CConditionalFrame* conditional = 0;
     CPreprocessSourceFrame root_frame = {
         .lex = root_lex,
+        .class_masks = root_class_masks,
         .path = options.source_path.length ? options.source_path : S8("."),
         .logical_path = options.source_path.length ? options.source_path : S8("."),
         .line_start = true,
@@ -7205,6 +7386,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     {
         pragma_context.current_path = source_frame->path;
         CLexResult lex = source_frame->lex;
+        CPpClassMasks const* class_masks = &source_frame->class_masks;
         u64 token_index = source_frame->token_index;
         bool line_start = source_frame->line_start;
         CToken token = lex.tokens[token_index];
@@ -7257,7 +7439,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 }
                 u32 physical_directive_line = c_lex_token_location(&source_frame->lex, directive).line;
                 CSourceLocation directive_location = c_preprocess_logical_location(source_frame, c_lex_token_location(&source_frame->lex, directive));
-                u64 line_end = c_preprocess_line_end(lex, token_index);
+                u64 line_end = class_masks->word_count ? c_pp_line_end_masked(class_masks, lex.token_count, token_index) : c_preprocess_line_end(lex, token_index);
                 bool active = c_preprocess_is_active(conditional);
                 char8 const* base = space->base;
                 bool is_if = c_token_spelling_equal(base, directive, S8("if"));
@@ -7592,6 +7774,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                 metrics_files.rows[include_row].lex_count += 1;
                             }
                             c_symbols_intern_tokens(symbol_table, include_lex.spelling_base, include_lex.tokens, include_lex.token_shapes, include_lex.token_count);
+                            CPpClassMasks include_class_masks;
+                            c_pp_class_masks_build(arena, &include_class_masks, include_lex.token_shapes, include_lex.token_count);
                             for (u64 index = 0; index < include_lex.diagnostic_count; index += 1)
                             {
                                 CDiagnostic diagnostic = include_lex.diagnostics[index];
@@ -7605,6 +7789,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                     .previous = source_frame,
                                     .conditional_base = conditional,
                                     .lex = include_lex,
+                                    .class_masks = include_class_masks,
                                     .path = include_path,
                                     .logical_path = include_path,
                                     .source_map = include_source_map,
@@ -7673,7 +7858,8 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         {
             source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
         }
-        u64 line_end = c_preprocess_line_end(lex, token_index);
+        bool classified = class_masks->word_count != 0;
+        u64 line_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, token_index) : c_preprocess_line_end(lex, token_index);
         if (!c_preprocess_is_active(conditional))
         {
             source_frame->token_index = line_end;
@@ -7681,15 +7867,22 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         }
         u64 logical_end = line_end;
         u32 parenthesis_depth = 0;
-        for (u64 scan = token_index; scan < logical_end; scan += 1)
+        if (classified)
         {
-            if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            parenthesis_depth = c_pp_parenthesis_depth(class_masks, token_index, logical_end, 0);
+        }
+        else
+        {
+            for (u64 scan = token_index; scan < logical_end; scan += 1)
             {
-                parenthesis_depth += 1;
-            }
-            else if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS) && parenthesis_depth)
-            {
-                parenthesis_depth -= 1;
+                if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    parenthesis_depth += 1;
+                }
+                else if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS) && parenthesis_depth)
+                {
+                    parenthesis_depth -= 1;
+                }
             }
         }
         while (parenthesis_depth && logical_end < lex.token_count && lex.tokens[logical_end].kind == C_TOKEN_NEWLINE)
@@ -7700,16 +7893,23 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 break;
             }
             logical_end += 1;
-            u64 next_line_end = c_preprocess_line_end(lex, logical_end);
-            for (u64 scan = logical_end; scan < next_line_end; scan += 1)
+            u64 next_line_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, logical_end) : c_preprocess_line_end(lex, logical_end);
+            if (classified)
             {
-                if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                parenthesis_depth = c_pp_parenthesis_depth(class_masks, logical_end, next_line_end, parenthesis_depth);
+            }
+            else
+            {
+                for (u64 scan = logical_end; scan < next_line_end; scan += 1)
                 {
-                    parenthesis_depth += 1;
-                }
-                else if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS) && parenthesis_depth)
-                {
-                    parenthesis_depth -= 1;
+                    if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        parenthesis_depth += 1;
+                    }
+                    else if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS) && parenthesis_depth)
+                    {
+                        parenthesis_depth -= 1;
+                    }
                 }
             }
             logical_end = next_line_end;
@@ -7721,12 +7921,30 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         // at all on this path: the file's source-map entry recovers them
         // from the offsets on demand.
         bool needs_expansion = false;
-        for (u64 scan = token_index; scan < logical_end && !needs_expansion; scan += 1)
+        if (classified)
         {
-            if (lex.tokens[scan].kind == C_TOKEN_IDENTIFIER)
+            u64 last_word = (logical_end - 1) / C_PP_CLASS_MASK_WINDOW;
+            for (u64 word_index = token_index / C_PP_CLASS_MASK_WINDOW; word_index <= last_word && !needs_expansion; word_index += 1)
             {
-                CMacro* line_macro = c_macro_find_token(first_macro, symbol_table, space->base, &lex.tokens[scan]);
-                needs_expansion = line_macro && line_macro->definition.defined;
+                Mask64 names = mask64_and(class_masks->identifier[word_index], c_pp_class_range_mask(word_index, token_index, logical_end));
+                while (names && !needs_expansion)
+                {
+                    u64 scan = word_index * C_PP_CLASS_MASK_WINDOW + mask64_first_set(names);
+                    CMacro* line_macro = c_macro_find_token(first_macro, symbol_table, space->base, &lex.tokens[scan]);
+                    needs_expansion = line_macro && line_macro->definition.defined;
+                    names = mask64_and(names, names - 1);
+                }
+            }
+        }
+        else
+        {
+            for (u64 scan = token_index; scan < logical_end && !needs_expansion; scan += 1)
+            {
+                if (lex.tokens[scan].kind == C_TOKEN_IDENTIFIER)
+                {
+                    CMacro* line_macro = c_macro_find_token(first_macro, symbol_table, space->base, &lex.tokens[scan]);
+                    needs_expansion = line_macro && line_macro->definition.defined;
+                }
             }
         }
         // The line holds at least one token: this path is only entered on a
@@ -7747,9 +7965,16 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             for (u64 scan = token_index; scan < logical_end;)
             {
                 u64 segment_start = scan;
-                while (scan < logical_end && lex.tokens[scan].kind != C_TOKEN_NEWLINE)
+                if (classified)
                 {
-                    scan += 1;
+                    scan = BUSTER_MIN(c_pp_line_end_masked(class_masks, lex.token_count, scan), logical_end);
+                }
+                else
+                {
+                    while (scan < logical_end && lex.tokens[scan].kind != C_TOKEN_NEWLINE)
+                    {
+                        scan += 1;
+                    }
                 }
                 u64 segment_count = scan - segment_start;
                 if (segment_count)
@@ -7782,16 +8007,37 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             CPpToken* wrapped_tokens = arena_allocate(arena, CPpToken, logical_end - token_index);
             u32 wrapped_count = 0;
             stamps.count = 0;
-            for (u64 scan = token_index; scan < logical_end; scan += 1)
+            if (classified)
             {
-                if (lex.tokens[scan].kind != C_TOKEN_NEWLINE)
+                // Wrapping runs of tokens between the line's newlines, the
+                // same segments the fast path copies, so the newline test is
+                // one mask lookup per segment instead of one per token.
+                for (u64 scan = token_index; scan < logical_end;)
                 {
-                    // Unstamped: an invocation recovers its own location
-                    // through the frame (c_preprocess_recover_location).
-                    wrapped_tokens[wrapped_count] = (CPpToken){
-                        .token = lex.tokens[scan],
-                    };
-                    wrapped_count += 1;
+                    u64 segment_end = BUSTER_MIN(c_pp_line_end_masked(class_masks, lex.token_count, scan), logical_end);
+                    for (; scan < segment_end; scan += 1)
+                    {
+                        // Unstamped: an invocation recovers its own location
+                        // through the frame (c_preprocess_recover_location).
+                        wrapped_tokens[wrapped_count] = (CPpToken){
+                            .token = lex.tokens[scan],
+                        };
+                        wrapped_count += 1;
+                    }
+                    scan += 1;
+                }
+            }
+            else
+            {
+                for (u64 scan = token_index; scan < logical_end; scan += 1)
+                {
+                    if (lex.tokens[scan].kind != C_TOKEN_NEWLINE)
+                    {
+                        wrapped_tokens[wrapped_count] = (CPpToken){
+                            .token = lex.tokens[scan],
+                        };
+                        wrapped_count += 1;
+                    }
                 }
             }
             CPreprocessTokenNode* first_line = 0;
@@ -7825,9 +8071,21 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     // The stream is contiguous, so the spellings sum in one linear pass
     // rather than one add per token as the lines were appended.
     result.detail->preprocessed.tokens = output_count;
-    for (u64 token_index = 0; token_index < output_count; token_index += 1)
     {
-        result.detail->preprocessed.bytes += c_token_length(space->base, result.tokens[token_index]);
+        // The accumulator and both bases are locals on purpose. c_token_length
+        // keeps a call in its oversized arm, so a member accumulator has to be
+        // reloaded and stored once per token against that call's possible
+        // writes, and the stream and spelling bases with it: three extra memory
+        // operations per token over a stream that is already the largest cold
+        // read of the phase.
+        char8 const* spelling_base = space->base;
+        CToken const* stream = result.tokens;
+        u64 spelled_bytes = 0;
+        for (u64 token_index = 0; token_index < output_count; token_index += 1)
+        {
+            spelled_bytes += c_token_length(spelling_base, stream[token_index]);
+        }
+        result.detail->preprocessed.bytes += spelled_bytes;
     }
     result.detail->preprocessed.spelling_bytes = space->used;
     result.files = file_table.files;
