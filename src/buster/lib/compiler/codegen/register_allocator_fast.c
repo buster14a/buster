@@ -952,10 +952,16 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
     MachineFastPrepass prepass = {0};
     MachineTargetDescription const* description = function->target;
     u32 register_count = function->virtual_register_count;
-    prepass.rematerialize_immediates = arena_allocate(arena, u32, register_count ? register_count : 1);
-    prepass.definition_blocks = arena_allocate(arena, u32, register_count ? register_count : 1);
-    prepass.last_use = arena_allocate(arena, u32, register_count ? register_count : 1);
-    prepass.escapes = arena_allocate(arena, u8, register_count ? register_count : 1);
+    // The two all-ones per-value arrays share one allocation so a single fill
+    // covers both, and the zero arrays fill by region beside them. A scalar
+    // loop over five side arrays wrote 1,17 M values five ways per stage-1
+    // compile; two regions and a memset each do the same work.
+    u32 value_count = register_count ? register_count : 1;
+    u32* sentinel_values = arena_allocate(arena, u32, (u64)value_count * 2u);
+    prepass.rematerialize_immediates = sentinel_values;
+    prepass.definition_blocks = sentinel_values + value_count;
+    prepass.last_use = arena_allocate(arena, u32, value_count);
+    prepass.escapes = arena_allocate(arena, u8, value_count);
     prepass.next_call = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
     prepass.operand_masks = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
     if (wants_quality_facts)
@@ -968,7 +974,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
     prepass.cold_blocks = arena_allocate(arena, u8, function->block_count ? function->block_count : 1);
     if (description)
     {
-        u8* definition_seen = arena_allocate(arena, u8, register_count ? register_count : 1);
+        u8* definition_seen = arena_allocate(arena, u8, value_count);
         // Most functions fit a defining/use block identity in sixteen bits. Keep
         // that transient classification dense; pathological block counts retain
         // the original all-row escape scan instead of widening every common row.
@@ -977,14 +983,10 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         {
             memset(use_blocks, 0xff, (u64)register_count * sizeof(*use_blocks));
         }
-        for (u32 register_index = 0; register_index < register_count; register_index += 1)
-        {
-            prepass.rematerialize_immediates[register_index] = UINT32_MAX;
-            prepass.definition_blocks[register_index] = UINT32_MAX;
-            prepass.last_use[register_index] = 0;
-            prepass.escapes[register_index] = 0;
-            definition_seen[register_index] = 0;
-        }
+        memset(sentinel_values, 0xff, (u64)value_count * 2u * sizeof(*sentinel_values));
+        memset(prepass.last_use, 0, (u64)value_count * sizeof(*prepass.last_use));
+        memset(prepass.escapes, 0, value_count);
+        memset(definition_seen, 0, value_count);
         for (u32 register_index = 0; wants_quality_facts && register_index < register_count; register_index += 1)
         {
             prepass.interval_starts[register_index] = UINT32_MAX;
@@ -1043,10 +1045,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 }
             }
         }
-        for (u32 block_index = 0; block_index <= function->block_count; block_index += 1)
-        {
-            prepass.predecessor_offsets[block_index] = 0;
-        }
+        memset(prepass.predecessor_offsets, 0, ((u64)function->block_count + 1u) * sizeof(*prepass.predecessor_offsets));
         u32 backward_edge_count = 0;
         bool block_references_only_in_terminators = true;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
@@ -1165,11 +1164,10 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         u32 predecessor_total = prepass.predecessor_offsets[function->block_count];
         prepass.predecessor_list = arena_allocate(arena, u32, predecessor_total ? predecessor_total : 1);
         u32* predecessor_cursors = arena_allocate(arena, u32, function->block_count ? function->block_count : 1);
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-        {
-            predecessor_cursors[block_index] = prepass.predecessor_offsets[block_index];
-            prepass.cold_blocks[block_index] = 0;
-        }
+        // The cursors start as the offsets themselves, so the prefix sum above
+        // is the whole of their initialization.
+        memcpy(predecessor_cursors, prepass.predecessor_offsets, (u64)function->block_count * sizeof(*predecessor_cursors));
+        memset(prepass.cold_blocks, 0, function->block_count);
         for (u32 case_index = 0; case_index < function->switch_case_count; case_index += 1)
         {
             prepass.cold_blocks[function->switch_cases[case_index].target_block] = 1;
@@ -1405,14 +1403,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         memset(block_masks, 0, (u64)mask_count * MACHINE_FAST_BLOCK_MASK_COUNT * sizeof(*block_masks));
         MachineBuilderStream retro_edits;
         machine_stream_initialize(&retro_edits, sizeof(MachineEdit));
-        for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
-        {
-            state.virtual_register_locations[register_index] = UINT32_MAX;
-        }
-        for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
-        {
-            state.owner[physical_register] = UINT32_MAX;
-        }
+        memset(state.virtual_register_locations, 0xff, (u64)function->virtual_register_count * sizeof(*state.virtual_register_locations));
+        memset(state.owner, 0xff, (u64)description->register_count * sizeof(*state.owner));
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             MachineBlock* block = function->blocks + block_index;
@@ -2171,10 +2163,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // through the edit stream, so only edit subjects get backing slots.
         // Values that never left their registers cost no frame bytes.
         u8* slot_needed = arena_allocate(arena, u8, function->virtual_register_count);
-        for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
-        {
-            slot_needed[register_index] = 0;
-        }
+        memset(slot_needed, 0, function->virtual_register_count);
         for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
         {
             // Only the memory edits name a virtual register: a copy's subject
