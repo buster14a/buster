@@ -8,8 +8,8 @@ switch ($runnerArch) {
         $sdkArch = 'x86_64'
     }
     'ARM64' {
-        Write-Host 'No Vulkan SDK package is published for Windows AArch64; using the default non-Vulkan configuration.'
-        return
+        $asset = 'vulkan-sdk-windows-aarch64.zip'
+        $sdkArch = 'aarch64'
     }
     default { throw "Unsupported GitHub runner architecture: $runnerArch" }
 }
