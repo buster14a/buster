@@ -1267,6 +1267,16 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
             case FORMAT_TYPE_STRING8:
             {
                 String8 string = va_arg(variable_arguments, String8);
+#if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)
+                if (BUSTER_UNLIKELY(string.length > ARENA_MAX_RESERVATION))
+                {
+                    fprintf(stderr,
+                            "STRING_FORMAT_BAD_S8 format=%.*s type=%.*s pointer=%p length=%llu format_index=%llu right_brace=%llu\\n",
+                            (int)format.length, format.pointer, (int)type_name.length, type_name.pointer, (void*)string.pointer,
+                            (unsigned long long)string.length, (unsigned long long)format_index, (unsigned long long)right_brace_index);
+                    fflush(stderr);
+                }
+#endif
                 arena_append_string(arena, string);
             }
             break;
