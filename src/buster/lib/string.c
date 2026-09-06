@@ -9,6 +9,10 @@
 #include <buster/lib/os.h>
 #include <buster/lib/integer.h>
 
+#if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)
+BUSTER_GLOBAL_LOCAL String8 string_format_diagnostic_format;
+BUSTER_GLOBAL_LOCAL String8 string_format_diagnostic_body;
+#endif
 BUSTER_GLOBAL_LOCAL bool code_unit_is_binary(char8 code_unit)
 {
     return (code_unit == '1') | (code_unit == '0');
@@ -800,6 +804,17 @@ BUSTER_GLOBAL_LOCAL void arena_append_string(Arena* arena, String8 string)
     {
         return;
     }
+#if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)
+    if (BUSTER_UNLIKELY(string.length > ARENA_MAX_RESERVATION))
+    {
+        fprintf(stderr,
+                "STRING_APPEND_BAD_LENGTH format=%.*s body=%.*s pointer=%p length=%llu\n",
+                (int)string_format_diagnostic_format.length, string_format_diagnostic_format.pointer,
+                (int)string_format_diagnostic_body.length, string_format_diagnostic_body.pointer, (void*)string.pointer,
+                (unsigned long long)string.length);
+        fflush(stderr);
+    }
+#endif
     char8* destination = arena_allocate(arena, char8, string.length);
     memcpy(destination, string.pointer, sizeof(char8) * string.length);
 }
@@ -939,6 +954,10 @@ BUSTER_GLOBAL_LOCAL Utf8Result utf8_from_code_point(u32 code_point)
 
 String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments)
 {
+#if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)
+    string_format_diagnostic_format = format;
+    string_format_diagnostic_body = (String8){0};
+#endif
     u64 original_position = arena->position;
     u64 format_index = 0;
 
@@ -978,7 +997,9 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
             }
 
             String8 format_body = string_slice(format, format_index + 1, right_brace_index);
-
+#if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)
+            string_format_diagnostic_body = format_body;
+#endif
             typedef enum FormatTypeId
             {
                 FORMAT_TYPE_STRING_SLICE,
