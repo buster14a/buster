@@ -1,0 +1,95 @@
+name: Merge prefix validation
+on:
+  push:
+    branches: [work/2026-09-06-integration-gates]
+    paths: [.github/workflows/merge-prefix-validation.yml]
+permissions:
+  contents: read
+jobs:
+  candidate:
+    if: github.server_url == 'https://github.com'
+    name: ${{ matrix.prefix }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        prefix: [runtime-wasm, runtime-wasm-ebpf]
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 017b0381ed75d859043b60a92f2ec2e9f5872980
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Construct the exact reviewed merge candidate
+        shell: bash
+        env:
+          PREFIX: ${{ matrix.prefix }}
+        run: |
+          set -euo pipefail
+          base=017b0381ed75d859043b60a92f2ec2e9f5872980
+          git config user.name 'Integration validation'
+          git config user.email 'noreply@localhost'
+          git config core.autocrlf false
+          heads=(c199a5735c824082e6c025bea0f18d0eda7fb0cc 120da7753d6419a54618abbc4c827e1123a863cc)
+          expected=be489073c2385b5d10876c3ccff12dbcd7575d0c
+          if [[ "$PREFIX" == runtime-wasm-ebpf ]]; then
+            heads+=(bb9a5d74288e6ada1d23492004974de7f75f5110)
+            expected=e4b687a8b56a708543f8aafeb2cddf36444ac79a
+          fi
+          for head in "${heads[@]}"; do
+            git fetch origin "$head"
+            while IFS= read -r commit; do git cherry-pick "$commit"; done < <(git rev-list --reverse "$base..$head")
+          done
+          git diff --check "$base" HEAD
+          actual=$(git rev-parse HEAD^{tree})
+          test "$actual" = "$expected"
+          printf 'base=%s\ntree=%s\n' "$base" "$actual" | tee "$RUNNER_TEMP/candidate-identity.log"
+      - name: Install Vulkan SDK
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash .github/scripts/install-vulkan-sdk.sh
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: . .github/scripts/install-vulkan-sdk.ps1
+      - name: Release suite, self-host and execution-mode matrix (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          CFLAGS: -Wno-invalid-feature-combination
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --ci --linker DEFAULT
+          "$driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/candidate-suite.log"
+          "$driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/candidate-self-host.log"
+          "$driver" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/candidate-modes.log"
+      - name: Release suite and self-host (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPath = (& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1).Trim()
+          if (-not $VsPath) { throw 'Visual Studio with VC tools was not found' }
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" generate --cc clang --ci"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" build --config Release -t test_all"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" test_self_host --config Release"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve candidate logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: candidate-${{ matrix.prefix }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/candidate-*.log
+          retention-days: 7
+          if-no-files-found: warn
