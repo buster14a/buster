@@ -2113,6 +2113,9 @@ struct BusterX86MetadataFormOperandFacts
     u8 effective_field_source;
 };
 BUSTER_CT_CHECK(sizeof(BusterX86MetadataFormOperandFacts) == 2);
+// The most operands any generated form declares, which both the record
+// validation and the operand-range partition proof bound against.
+#define BUSTER_X86_METADATA_FORM_OPERAND_LIMIT 16u
 BUSTER_GLOBAL_LOCAL BusterX86MetadataFormFacts buster_x86_metadata_form_facts[BUSTER_X86_GENERATED_FORM_COUNT];
 BUSTER_GLOBAL_LOCAL BusterX86MetadataFormOperandFacts
     buster_x86_metadata_form_operand_facts[BUSTER_X86_GENERATED_OPERAND_COUNT];
@@ -2134,18 +2137,29 @@ buster_x86_metadata_form_operand_facts_for(BusterX86MetadataForm form, u32 opera
 // a partition: the facts depend on both the operand record and its owning
 // form.  Check that snapshot invariant before publishing the cache.  A future
 // malformed or differently-shaped table simply retains the generic path.
+//
+// The walk proves the operand-range invariant itself -- consecutive ranges,
+// each inside the table, each within the per-form operand limit, and together
+// exactly the table -- rather than asking each form's full validity, which
+// would hash twenty strings per form for a fact none of them decide.  Per-form
+// validity stays the form's own cached flag, checked by
+// buster_x86_metadata_form() before any form reaches these facts, so a
+// malformed record is still refused; it just no longer withdraws the table
+// shape from the other 11.012 forms.  Reading the two fields out of the
+// decoded array also avoids copying a 156-byte record per form.
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_operand_ranges_partition(void)
 {
     u32 expected_first = 0;
-    for (u32 form_id = 0; form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
+    bool partitions = true;
+    for (u32 form_id = 0; partitions && form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
     {
-        BusterX86GeneratedForm form = buster_x86_metadata_form_record(form_id);
-        if (!buster_x86_metadata_form_record_valid(form_id) || form.operand_first != expected_first ||
-            form.operand_count > BUSTER_X86_GENERATED_OPERAND_COUNT - expected_first)
-            return false;
-        expected_first += form.operand_count;
+        u32 operand_first = buster_x86_metadata_form_records[form_id].operand_first;
+        u16 operand_count = buster_x86_metadata_form_records[form_id].operand_count;
+        partitions = operand_first == expected_first && operand_count <= BUSTER_X86_METADATA_FORM_OPERAND_LIMIT &&
+                     operand_count <= BUSTER_X86_GENERATED_OPERAND_COUNT - expected_first;
+        expected_first += operand_count;
     }
-    return expected_first == BUSTER_X86_GENERATED_OPERAND_COUNT;
+    return partitions && expected_first == BUSTER_X86_GENERATED_OPERAND_COUNT;
 }
 
 // Normalized operand views, one per generated operand record.  Building a view
@@ -10504,7 +10518,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_form_record(const BusterX8
         return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_FORM_HASH, index, 0);
     }
     if (form->operand_first > BUSTER_X86_GENERATED_OPERAND_COUNT ||
-        form->operand_count > BUSTER_X86_GENERATED_OPERAND_COUNT - form->operand_first || form->operand_count > 16)
+        form->operand_count > BUSTER_X86_GENERATED_OPERAND_COUNT - form->operand_first ||
+        form->operand_count > BUSTER_X86_METADATA_FORM_OPERAND_LIMIT)
     {
         return buster_x86_metadata_validation_fail(result, BUSTER_X86_METADATA_VALIDATION_OPERAND_RANGE, index, 0);
     }
