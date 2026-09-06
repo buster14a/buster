@@ -2606,6 +2606,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
     // can classify, the maximal munch its channels take must be the one
     // c_punctuator_length takes. One assertion, half a million comparisons.
     BUSTER_TEST(arguments, c_test_lex_punctuator_nfa_mismatches() == 0);
+
+    // The window loop's lane-prefix mask is one BMI2 instruction whose
+    // saturation reads only the low eight bits of its index; the portable
+    // expression it replaces stays in the tree as its reference and the two
+    // are compared over the whole index domain the emitter can form.
+    BUSTER_TEST(arguments, c_test_lex_mask_below_mismatches() == 0);
     return result;
 }
 

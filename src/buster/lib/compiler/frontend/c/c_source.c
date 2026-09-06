@@ -21,10 +21,17 @@
 //   c_source_metrics_add,                      the SOURCE table counters and
 //   c_source_metrics_file_row                  the per-file attribution rows
 //   c_lex_scan_one, c_lex_scalar               the scalar lexer
-//   c_lex_compact                              the SIMD lexer (Validark
-//                                              method, AGENTS.md); c_lex
-//                                              dispatches, c_lex_reference is
-//                                              the differential baseline
+//   c_lex_compact_tables_build,                the SIMD lexer (Validark
+//   c_lex_compact                              method, AGENTS.md): one
+//                                              window-wide class lookup
+//                                              (c_lex_byte_classes, authored
+//                                              from the scalar predicates
+//                                              above), the punctuator NFA and
+//                                              spelling tables, then the
+//                                              interleaved 16-row emitter;
+//                                              c_lex dispatches and
+//                                              c_lex_reference is the
+//                                              differential baseline
 //   CTokenStream, c_token_stream_reserve       final token rows plus the
 //                                              one-byte kind|punctuator
 //                                              sidecar consumed by parser
@@ -1183,15 +1190,45 @@ struct CLexState
 
 #if BUSTER_C_LEX_COMPACT
 
-BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_mask_below(u64 bit_index)
+// The reference spelling of "the lanes below `bit_index`", saturating at the
+// window width: one compare, one shift and one conditional move.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE u64 c_lex_mask_below_reference(u64 bit_index)
 {
     return bit_index >= 64 ? ~(u64)0 : (((u64)1 << bit_index) - 1);
 }
 
+// The same mask in one instruction.  BMI2's BZHI reads its lane count from the
+// low eight bits of the index operand and clears nothing when that count is 64
+// or more, which is exactly the reference's saturation, so the whole helper is
+// `bzhi $-1, index` for every index this lexer forms.  The bound is what makes
+// the low-eight-bits reading safe, so it is stated: every index here is a
+// window position (0..64) or a window position plus a punctuator spelling
+// (at most 67), and the check compiles to an optimizer assumption under
+// BUSTER_OPTIMIZE rather than to code.  c_lex_lane_mask keeps the reference
+// form because its callers pass whole-file byte counts.
+#define C_LEX_MASK_BELOW_LIMIT 68
+
+BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_mask_below(u64 bit_index)
+{
+    BUSTER_CHECK(bit_index < C_LEX_MASK_BELOW_LIMIT);
+#if defined(__BMI2__)
+    u64 result = _bzhi_u64(~(u64)0, (u32)bit_index);
+#else
+    u64 result = c_lex_mask_below_reference(bit_index);
+#endif
+    return result;
+}
+
 BUSTER_C_INLINE BUSTER_INLINE __mmask64 c_lex_lane_mask(u64 count)
 {
-    return count >= 64 ? ~(__mmask64)0 : (__mmask64)((((u64)1) << count) - 1);
+    return (__mmask64)c_lex_mask_below_reference(count);
 }
+
+// The bytes one window of the compact emitter reads: its own 64 lanes plus the
+// two the punctuator NFA's second and third lookups and the comment delimiters
+// see past the last of them.  A window with that many bytes left needs no lane
+// mask on any of its three loads.
+#define C_LEX_WINDOW_LOADED_BYTES 66
 
 // Lanes of a lookahead load that hold a real byte.  The window bounds do not
 // serve: a punctuator or comment delimiter near the window's end is classified
@@ -1536,6 +1573,24 @@ enum
     C_LEX_PAIR_TABLE_SIZE = 16,
 };
 
+// The four byte classes the window loop used to assemble out of thirteen
+// compares and seven ors.  One vpermi2b over the table below answers all of
+// them at once, and each falls out as a vptestmb against its own bit; the
+// table is authored from the very predicates the scalar lexer calls, so the
+// two spellings of "identifier byte" and "horizontal white space" cannot
+// drift apart.  It covers 0..127 only: every byte above ASCII is an
+// identifier byte by c_identifier_start and joins the word class through the
+// sign mask the permute already needs, and no byte above ASCII is in any of
+// the other three.
+enum
+{
+    C_LEX_CLASS_WORD = 1 << 0,
+    C_LEX_CLASS_WHITE = 1 << 1,
+    C_LEX_CLASS_DIGIT = 1 << 2,
+    C_LEX_CLASS_EXPONENT = 1 << 3,
+};
+
+BUSTER_C_INTERNAL _Alignas(64) u8 c_lex_byte_classes[128];
 BUSTER_C_INTERNAL _Alignas(64) u8 c_lex_single_punctuators[128];
 BUSTER_C_INTERNAL _Alignas(64) u8 c_lex_nfa_first[128];
 BUSTER_C_INTERNAL _Alignas(64) u8 c_lex_nfa_second[128];
@@ -1561,6 +1616,31 @@ BUSTER_C_INTERNAL void c_lex_compact_tables_build(void)
     for (u32 index = 0; index < 64; index += 1)
     {
         c_lex_iota[index] = (u8)index;
+    }
+    for (u32 value = 0; value < 128; value += 1)
+    {
+        char8 character = (char8)value;
+        u8 classes = 0;
+        if (c_identifier_continue(character))
+        {
+            classes |= (u8)C_LEX_CLASS_WORD;
+        }
+        if (c_horizontal_whitespace(character))
+        {
+            classes |= (u8)C_LEX_CLASS_WHITE;
+        }
+        if (c_ascii_digit(character))
+        {
+            classes |= (u8)C_LEX_CLASS_DIGIT;
+        }
+        // The letters that open a preprocessing number's exponent, in both
+        // cases: the emitter used to fold case by oring 0x20 into the whole
+        // window for this test and the alphabetic one alone.
+        if (character == 'e' || character == 'E' || character == 'p' || character == 'P')
+        {
+            classes |= (u8)C_LEX_CLASS_EXPONENT;
+        }
+        c_lex_byte_classes[value] = classes;
     }
     memset(c_lex_pair_row, 0xFF, sizeof(c_lex_pair_row));
     memset(c_lex_pair_column, 0xFF, sizeof(c_lex_pair_column));
@@ -1681,6 +1761,8 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
         c_lex_compact_tables_build();
     }
 
+    const __m512i class_low = _mm512_load_si512((const __m512i*)c_lex_byte_classes);
+    const __m512i class_high = _mm512_load_si512((const __m512i*)(c_lex_byte_classes + 64));
     const __m512i single_low = _mm512_load_si512((const __m512i*)c_lex_single_punctuators);
     const __m512i single_high = _mm512_load_si512((const __m512i*)(c_lex_single_punctuators + 64));
     const __m512i nfa_first_low = _mm512_load_si512((const __m512i*)c_lex_nfa_first);
@@ -1705,24 +1787,39 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
         u64 remaining = source.length - offset;
         u64 window_length = remaining < 64 ? remaining : 64;
         bool at_end_of_file = window_length == remaining;
-        __mmask64 valid_lanes = c_lex_lane_mask(window_length);
-        u64 valid = (u64)valid_lanes;
+        u64 valid;
+        __m512i chunk0;
+        __m512i chunk1;
+        __m512i chunk2;
+        if (remaining >= C_LEX_WINDOW_LOADED_BYTES)
+        {
+            // Every lane of the window and of both lookaheads holds a byte the
+            // file owns, so the three loads need no mask and the three lane
+            // masks no arithmetic at all — nine instructions of shift and
+            // conditional move that 92% of windows were paying to reconstruct
+            // an all-ones mask.  The bound is the window plus the two bytes
+            // the punctuator NFA and the comment delimiters look ahead by.
+            valid = ~(u64)0;
+            chunk0 = _mm512_loadu_si512((const void*)it);
+            chunk1 = _mm512_loadu_si512((const void*)(it + 1));
+            chunk2 = _mm512_loadu_si512((const void*)(it + 2));
+        }
+        else
+        {
+            __mmask64 valid_lanes = c_lex_lane_mask(window_length);
+            valid = (u64)valid_lanes;
+            chunk0 = _mm512_maskz_loadu_epi8(valid_lanes, it);
+            chunk1 = _mm512_maskz_loadu_epi8(c_lex_lookahead_mask(remaining, 1), it + 1);
+            chunk2 = _mm512_maskz_loadu_epi8(c_lex_lookahead_mask(remaining, 2), it + 2);
+        }
 
-        __m512i chunk0 = _mm512_maskz_loadu_epi8(valid_lanes, it);
-        __m512i chunk1 = _mm512_maskz_loadu_epi8(c_lex_lookahead_mask(remaining, 1), it + 1);
-        __m512i chunk2 = _mm512_maskz_loadu_epi8(c_lex_lookahead_mask(remaining, 2), it + 2);
-
-        // One masked load, every byte class in lockstep.
-        __m512i lowered = _mm512_or_si512(chunk0, _mm512_set1_epi8(0x20));
-        u64 alpha = (u64)_mm512_cmplt_epu8_mask(_mm512_sub_epi8(lowered, _mm512_set1_epi8('a')), _mm512_set1_epi8(26));
-        u64 digit = (u64)_mm512_cmplt_epu8_mask(_mm512_sub_epi8(chunk0, _mm512_set1_epi8('0')), _mm512_set1_epi8(10));
+        // One masked load, every byte class in lockstep.  The word, white,
+        // digit and exponent classes come out of one table lookup and four
+        // bit tests; the rest are single bytes, which a compare already
+        // answers in one instruction.
         u64 high_byte = (u64)_mm512_movepi8_mask(chunk0);
-        u64 underscore = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('_'));
-        u64 dollar = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('$'));
-        u64 space = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8(' '));
-        u64 tab = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\t'));
-        u64 vertical_tab = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\v'));
-        u64 form_feed = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\f'));
+        __m512i class_vector = _mm512_maskz_permutex2var_epi8((__mmask64)~high_byte, class_low, chunk0, class_high);
+        u64 digit = (u64)_mm512_test_epi8_mask(class_vector, _mm512_set1_epi8((char)C_LEX_CLASS_DIGIT));
         u64 line_feed = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\n'));
         u64 quote = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('"'));
         u64 apostrophe = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('\''));
@@ -1733,15 +1830,16 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
         u64 plus = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('+'));
         u64 minus = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('-'));
         u64 percent = (u64)_mm512_cmpeq_epi8_mask(chunk0, _mm512_set1_epi8('%'));
-        u64 exponent_letter = (u64)_mm512_cmpeq_epi8_mask(lowered, _mm512_set1_epi8('e')) | (u64)_mm512_cmpeq_epi8_mask(lowered, _mm512_set1_epi8('p'));
+        u64 exponent_letter = (u64)_mm512_test_epi8_mask(class_vector, _mm512_set1_epi8((char)C_LEX_CLASS_EXPONENT));
         u64 slash_next = (u64)_mm512_cmpeq_epi8_mask(chunk1, _mm512_set1_epi8('/'));
         u64 star_next = (u64)_mm512_cmpeq_epi8_mask(chunk1, _mm512_set1_epi8('*'));
         u64 colon_next = (u64)_mm512_cmpeq_epi8_mask(chunk1, _mm512_set1_epi8(':'));
         u64 repeated = (u64)_mm512_cmpeq_epi8_mask(chunk0, chunk1);
         // c_identifier_start admits `$` and every byte above ASCII, so those
-        // join the identifier class rather than the invalid one.
-        u64 word = alpha | digit | underscore | dollar | high_byte;
-        u64 white = space | tab | vertical_tab | form_feed;
+        // join the identifier class rather than the invalid one -- the table
+        // carries the ASCII half and the sign mask the rest.
+        u64 word = high_byte | (u64)_mm512_test_epi8_mask(class_vector, _mm512_set1_epi8((char)C_LEX_CLASS_WORD));
+        u64 white = (u64)_mm512_test_epi8_mask(class_vector, _mm512_set1_epi8((char)C_LEX_CLASS_WHITE));
 
         // Single-character punctuator ids double as the "byte can start a
         // punctuator" class, since C_PUNCTUATOR_NONE is zero.
@@ -2220,6 +2318,22 @@ bool c_test_lex_compact_tables_ready(void)
 #else
     return true;
 #endif
+}
+
+// Test seam: the one-instruction lane-prefix mask against its portable
+// reference, over the whole domain the emitter forms indices in — every window
+// position and every position a punctuator spelling carries past the last of
+// them. Counting mismatches keeps the sweep to one test assertion.
+u64 c_test_lex_mask_below_mismatches(void)
+{
+    u64 result = 0;
+#if BUSTER_C_LEX_COMPACT
+    for (u64 bit_index = 0; bit_index < C_LEX_MASK_BELOW_LIMIT; bit_index += 1)
+    {
+        result += c_lex_mask_below(bit_index) != c_lex_mask_below_reference(bit_index);
+    }
+#endif
+    return result;
 }
 
 // Test seam: reconcile the emitter's hand-assigned NFA channels with the
