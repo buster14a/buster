@@ -14,42 +14,19 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: 017b0381ed75d859043b60a92f2ec2e9f5872980
-          fetch-depth: 0
           persist-credentials: false
-      - name: Export exact source and review history
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = 017b0381ed75d859043b60a92f2ec2e9f5872980
-          git branch integration-baseline HEAD
-          for pr in 169 170 171; do
-            git fetch origin "refs/pull/$pr/head:refs/heads/review-$pr"
-          done
-          git bundle create "$RUNNER_TEMP/integration-source.bundle" integration-baseline review-169 review-170 review-171
-          git rev-parse integration-baseline integration-baseline^{tree} review-169 review-170 review-171 > "$RUNNER_TEMP/integration-identity.txt"
-          sha256sum "$RUNNER_TEMP/integration-source.bundle"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: integration-source
-          path: |
-            ${{ runner.temp }}/integration-source.bundle
-            ${{ runner.temp }}/integration-identity.txt
-          retention-days: 3
-          if-no-files-found: error
       - name: Install build prerequisites
         shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y tcc mold
-          bash .github/scripts/install-vulkan-sdk.sh
+        run: bash .github/scripts/install-vulkan-sdk.sh
       - name: Reproduce unmodified Release fixed point and full tests
         shell: bash
         run: |
           set -euo pipefail
-          ./build.sh generate --cc clang --config Release --linker DEFAULT
-          ./build.sh test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/baseline-self-host.log"
-          ./build.sh build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/baseline-test-all.log"
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --config Release --linker DEFAULT
+          "$driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/baseline-self-host.log"
+          "$driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/baseline-test-all.log"
       - name: Preserve exact baseline results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -58,3 +35,49 @@ jobs:
           path: ${{ runner.temp }}/baseline-*.log
           retention-days: 7
           if-no-files-found: warn
+  refresh:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - branch: audit/2026-09-06-ebpf-scalar
+            expected: b57c8a5f382d22f58d96c2e46832a315991c8c18
+            number: 169
+          - branch: audit/2026-09-06-wasm-alignment
+            expected: 91f54819a19d027d2e150a59b544171ecf328c72
+            number: 170
+          - branch: audit/2026-09-06-runtime-boundaries
+            expected: 06a95cea89ec36d12b6f679a15b40a1ecdf99c09
+            number: 171
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Rebase only the reviewed commit and preserve concurrent changes
+        shell: bash
+        env:
+          BRANCH: ${{ matrix.branch }}
+          EXPECTED: ${{ matrix.expected }}
+        run: |
+          set -euo pipefail
+          base=017b0381ed75d859043b60a92f2ec2e9f5872980
+          test "$(git rev-parse origin/main)" = "$base"
+          test "$(git rev-parse "origin/$BRANCH")" = "$EXPECTED"
+          git config user.name 'David'
+          git config user.email 'davidgmbb@gmail.com'
+          git checkout -B refreshed "$EXPECTED"
+          git rebase --onto "$base" "$EXPECTED^"
+          git diff --check "$base" HEAD
+          git push --force-with-lease="refs/heads/$BRANCH:$EXPECTED" origin "HEAD:refs/heads/$BRANCH"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/refreshed.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: refreshed-${{ matrix.number }}
+          path: ${{ runner.temp }}/refreshed.txt
+          retention-days: 3
+          if-no-files-found: error
