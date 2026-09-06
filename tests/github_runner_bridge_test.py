@@ -143,6 +143,32 @@ class ValidationTests(unittest.TestCase):
 
 
 class HttpWiringTests(unittest.TestCase):
+    def test_stale_key_cleanup_reads_all_pages_before_revoking(self):
+        ordinary = [{"id": key_id, "title": "permanent-%d" % key_id} for key_id in range(1, 51)]
+        stale = {"id": 51, "title": "github-bridge-crashed", "created_at": "2000-01-01T00:00:00Z"}
+        client = bridge.ForgejoClient("forgejo-token", "buster/buster", "https://forge.example/api/v1")
+        client.request = mock.Mock(side_effect=[ordinary, [stale], [], None])
+
+        bridge.cleanup_stale_deploy_keys(client)
+
+        self.assertEqual(client.request.call_args_list, [
+            mock.call("GET", "/repos/buster/buster/keys?limit=50&page=1"),
+            mock.call("GET", "/repos/buster/buster/keys?limit=50&page=2"),
+            mock.call("GET", "/repos/buster/buster/keys?limit=50&page=3"),
+            mock.call("DELETE", "/repos/buster/buster/keys/51", accept_missing=True),
+        ])
+
+    def test_deploy_key_pagination_handles_server_page_size_caps(self):
+        client = bridge.ForgejoClient("forgejo-token", "buster/buster", "https://forge.example/api/v1")
+        client.request = mock.Mock(side_effect=[[{"id": 1}], [{"id": 2}], []])
+        self.assertEqual(client.list_deploy_keys(), [{"id": 1}, {"id": 2}])
+
+    def test_deploy_key_pagination_rejects_a_malformed_later_page(self):
+        client = bridge.ForgejoClient("forgejo-token", "buster/buster", "https://forge.example/api/v1")
+        client.request = mock.Mock(side_effect=[[{"id": 1}], {"message": "invalid page"}])
+        with self.assertRaises(bridge.BridgeError):
+            client.list_deploy_keys()
+
     def test_github_dispatch_list_and_cancel(self):
         listed = json.dumps({"workflow_runs": [workflow_run()]}).encode()
         responses = [FakeResponse(), FakeResponse(listed), FakeResponse()]
