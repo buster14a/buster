@@ -1,0 +1,80 @@
+name: eBPF userspace integration
+on:
+  push:
+    branches: [work/2026-09-06-integration-gates]
+    paths: [.github/workflows/ebpf-userspace-integration.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.publish.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: f64c4d1bb200cace59cbbedd01fcc4a85cedd4d6
+          fetch-depth: 0
+      - name: Install the reviewed test-only VM into the normal codegen suite
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'a990133c5c52c0792c253684fc131eae76521b75096745388bca689353f16eb5  .github/integration/ebpf_test_internal.h' | sha256sum --check
+          cp .github/integration/ebpf_test_internal.h /tmp/ebpf_test_internal.h
+          git checkout --detach bcef8078172c4c143a8033d3cc1145314ed19973
+          cp /tmp/ebpf_test_internal.h src/buster/tests/compiler/codegen/ebpf_test_internal.h
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/buster/tests/compiler/codegen/codegen_test.c')
+          s=p.read_text()
+          s=s.replace('#if BUSTER_INCLUDE_TESTS\n','#if BUSTER_INCLUDE_TESTS\n#include <buster/tests/compiler/codegen/ebpf_test_internal.h>\n',1)
+          old='UnitTestResult codegen_tests(UnitTestArguments* arguments)\n{\n    UnitTestResult result = {0};'
+          assert s.count(old) == 1
+          s=s.replace(old,'UnitTestResult codegen_tests(UnitTestArguments* arguments)\n{\n    UnitTestResult result = codegen_test_ebpf_scalars(arguments);')
+          p.write_text(s)
+          PY
+          git add src/buster/tests/compiler/codegen/codegen_test.c src/buster/tests/compiler/codegen/ebpf_test_internal.h
+          git diff --cached --check
+          test "$(git write-tree)" = a6d5fc111c4b6c3c21d6561b4c6e38a2a9714cf4
+          git config user.name 'David'
+          git config user.email 'davidgmbb@gmail.com'
+          git commit -m 'tests: execute complete scalar eBPF functions in the normal suite'
+          git push --force-with-lease=refs/heads/work/2026-09-06-ebpf-userspace-integration: origin HEAD:refs/heads/work/2026-09-06-ebpf-userspace-integration
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  validate:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - name: Install platform prerequisites
+        run: bash .github/scripts/install-vulkan-sdk.sh
+      - name: Full Release suite and self-host fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --config Release --linker DEFAULT
+          "$driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/ebpf-suite.log"
+          "$driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/ebpf-self-host.log"
+      - name: Optimized sanitizer emitter regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          CC=clang AUDIT_OPT=-O2 AUDIT_SANITIZE=1 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 python3 tests/ebpf_scalar_regression.py 2>&1 | tee "$RUNNER_TEMP/ebpf-sanitizers.log"
+      - name: Preserve validation logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ebpf-integration-results
+          path: ${{ runner.temp }}/ebpf-*.log
+          retention-days: 7
+          if-no-files-found: error
