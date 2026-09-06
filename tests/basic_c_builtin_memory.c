@@ -6,6 +6,21 @@
 extern void *memcpy(void *destination, const void *source, unsigned long count);
 extern int memcmp(const void *left, const void *right, unsigned long count);
 
+// Object-size queries must never run a side-effecting pointer operand.
+// The same expression occurs twice in the SDK's fortified-memory macros.
+static char object_size_storage[16];
+static int object_size_calls;
+static char* object_size_destination(void)
+{
+    object_size_calls += 1;
+    return object_size_storage;
+}
+static __SIZE_TYPE__ object_size_outer(__SIZE_TYPE__ size)
+{
+    object_size_calls += 10;
+    return size;
+}
+
 // LZ4 spells its block copies __builtin_memcpy/__builtin_memmove once
 // __clang__ is defined, so the builtins have to lower to the library calls
 // they name, with the prototype's argument conversions and the destination
@@ -14,6 +29,17 @@ int main(int argc, char** argv)
 {
     (void)argc;
     (void)argv;
+    if (__builtin_object_size(object_size_destination(), 0) != (__SIZE_TYPE__)-1) return 15;
+    if (__builtin_object_size(object_size_destination(), 1) != (__SIZE_TYPE__)-1) return 16;
+    if (__builtin_object_size(object_size_destination(), 2) != 0) return 17;
+    if (__builtin_object_size(object_size_destination(), 3) != 0) return 18;
+    char* object_pointer = object_size_storage;
+    if (__builtin_object_size(object_pointer++, 0) != (__SIZE_TYPE__)-1) return 19;
+    (void)__builtin_object_size((object_size_destination(), object_pointer), 0);
+    if (object_pointer != object_size_storage || object_size_calls != 0) return 20;
+    if (object_size_outer(__builtin_object_size(object_size_destination(), 0)) != (__SIZE_TYPE__)-1) return 21;
+    if (object_size_calls != 10) return 22;
+    object_size_calls = 0;
     char source[16];
     char destination[16];
     __builtin_memset(source, 0x5a, sizeof(source));
@@ -43,6 +69,11 @@ int main(int argc, char** argv)
     if (destination[1] != 3) return 12;
     if (__builtin___memcpy_chk(destination, source, bounded_count, (__SIZE_TYPE__)-1) != destination) return 13;
     if (__builtin___memset_chk(destination, 0, 0, 0) != destination) return 14;
+    // The call used as the actual destination executes once; its second
+    // appearance in the size query does not execute at all.
+    if (__builtin___memcpy_chk(object_size_destination(), source, bounded_count,
+            __builtin_object_size(object_size_destination(), 0)) != object_size_storage) return 23;
+    if (object_size_calls != 1 || object_size_storage[3] != 0x5a) return 24;
     if (argc > 1)
     {
         // No physical overflow is possible: the array is sixteen bytes. The

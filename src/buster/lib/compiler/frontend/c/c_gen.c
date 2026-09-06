@@ -15361,7 +15361,11 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             builder->prepared_call_token_next[prepared_call_index] = builder->prepared_call_token_heads[callee_offset];
             builder->prepared_call_token_heads[callee_offset] = prepared_call_index;
         }
-        if (builtin_generic)
+        // The object-size operand is unevaluated. Preparing its nested calls
+        // here would run them before the builtin emits its constant result,
+        // duplicating a destination expression in fortified memory macros.
+        // _Generic likewise owns the lowering of its selected expression.
+        if (builtin_generic || builtin_object_size)
         {
             index = close;
         }
