@@ -13066,10 +13066,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArgumen
 #if BUSTER_COMPILER_CLANG
 __attribute__((optnone))
 #endif
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_null_preprocessing_directives(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 sources[] = {
+        S8("#\nint value;\n"),
+        S8("# /* comment */\nint value;\n"),
+        S8("#if 0\n#\n#endif\nint value;\n"),
+        S8("#if 1\n#\n#endif\nint value;\n#"),
+        S8("#"),
+        S8("# /* comment */"),
+    };
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(sources); ++i)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocessed = c_preprocess(temporary.arena, sources[i], (CPreprocessOptions){0});
+        BUSTER_TEST(arguments, preprocessed.diagnostic_count == 0);
+        scratch_end(temporary);
+    }
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult invalid = c_preprocess(temporary.arena, S8("#+\nint value;\n"), (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, invalid.diagnostic_count != 0);
+    if (invalid.diagnostic_count)
+        BUSTER_TEST(arguments, invalid.diagnostics[0].kind == C_DIAGNOSTIC_EXPECTED_DIRECTIVE);
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
+    c_test_result_add(&result, c_test_null_preprocessing_directives(arguments));
     c_test_result_add(&result, c_test_frontend_lex_differential(arguments));
     c_test_result_add(&result, c_test_intern_scan_by_shape(arguments));
     c_test_result_add(&result, c_test_pp_class_masks(arguments));

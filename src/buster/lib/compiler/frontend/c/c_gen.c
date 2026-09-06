@@ -39259,114 +39259,175 @@ BUSTER_C_INTERNAL bool c_ir_constant_normalize(CIntegerIrBuilder* builder, CIrCo
     return true;
 }
 
+// Round an integer magnitude once, at the destination precision. Converting
+// through a signed host integer loses unsigned values; converting through f64
+// before f32 can double-round. The two-limb path also retains all 128 bits.
+BUSTER_C_INTERNAL f64 c_ir_constant_integer_to_float(CIrConstantValue source, IrType* type, u32 precision)
+{
+    bool wide = type->bit_width == 128;
+    CIrWideInteger magnitude = {.low = source.integer & c_ir_integer_type_mask(type), .high = wide ? source.integer_high : 0};
+    bool negative = type->is_signed && (wide ? (magnitude.high >> 63) != 0 : c_ir_integer_signed_value(magnitude.low, type) < 0);
+    if (negative)
+    {
+        if (wide)
+            magnitude = c_ir_wide_negate(magnitude);
+        else
+            magnitude.low = 0 - (u64)c_ir_integer_signed_value(magnitude.low, type);
+    }
+    u64 bits = 0;
+    if (magnitude.low || magnitude.high)
+    {
+        u32 width = magnitude.high ? 128u - leading_zeroes_u64(magnitude.high) : 64u - leading_zeroes_u64(magnitude.low);
+        u32 kept = BUSTER_MIN(width, precision);
+        u32 shift = width - kept;
+        u32 exponent = width - 1;
+        u64 significand = magnitude.low;
+        if (shift)
+        {
+            bool guard;
+            bool sticky;
+            if (shift < 64)
+            {
+                significand = (magnitude.low >> shift) | (magnitude.high << (64 - shift));
+                guard = ((magnitude.low >> (shift - 1)) & 1) != 0;
+                sticky = (magnitude.low & (((u64)1 << (shift - 1)) - 1)) != 0;
+            }
+            else
+            {
+                u32 high_shift = shift - 64;
+                significand = magnitude.high >> high_shift;
+                if (high_shift)
+                {
+                    guard = ((magnitude.high >> (high_shift - 1)) & 1) != 0;
+                    sticky = magnitude.low != 0 || (magnitude.high & (((u64)1 << (high_shift - 1)) - 1)) != 0;
+                }
+                else
+                {
+                    guard = (magnitude.low >> 63) != 0;
+                    sticky = (magnitude.low & UINT64_C(0x7fffffffffffffff)) != 0;
+                }
+            }
+            if (guard && (sticky || (significand & 1)))
+            {
+                significand += 1;
+                if (significand == ((u64)1 << kept))
+                {
+                    significand >>= 1;
+                    exponent += 1;
+                }
+            }
+        }
+        // Every retained integer bit is exactly representable as f64. An f32
+        // overflow is infinity, not a finite f64 which a later consumer might
+        // accidentally use before narrowing.
+        if (precision == 24 && exponent > 127)
+            bits = UINT64_C(0x7ff0000000000000);
+        else
+            bits = ((u64)(exponent + 1023) << 52) | ((significand & (((u64)1 << (kept - 1)) - 1)) << (53 - kept));
+        bits |= (u64)negative << 63;
+    }
+    f64 result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, CIrConstantValue source, IrTypeId target_type, CIrConstantValue* result)
 {
     IrType* target = ir_type_from_id(&builder->program->types, target_type);
+    IrType* source_type = ir_type_from_id(&builder->program->types, source.type);
+    bool success = false;
     if (target)
     {
         if (source.kind == C_IR_CONSTANT_UNKNOWN)
         {
             *result = (CIrConstantValue){.type = target_type, .kind = C_IR_CONSTANT_UNKNOWN};
-            return true;
+            success = true;
         }
-        if (target->kind == IR_TYPE_POINTER)
+        else if (target->kind == IR_TYPE_POINTER)
         {
-            if (source.kind == C_IR_CONSTANT_POINTER)
+            if (source.kind == C_IR_CONSTANT_POINTER ||
+                (source.kind == C_IR_CONSTANT_LVALUE && source_type && source_type->kind == IR_TYPE_ARRAY))
             {
                 source.type = target_type;
+                source.kind = C_IR_CONSTANT_POINTER;
                 *result = source;
-                return true;
+                success = true;
             }
-            if (source.kind == C_IR_CONSTANT_LVALUE)
-            {
-                IrType* source_type = ir_type_from_id(&builder->program->types, source.type);
-                if (source_type && source_type->kind == IR_TYPE_ARRAY)
-                {
-                    source.type = target_type;
-                    source.kind = C_IR_CONSTANT_POINTER;
-                    *result = source;
-                    return true;
-                }
-            }
-            if (source.kind == C_IR_CONSTANT_INTEGER && source.integer == 0 && source.integer_high == 0)
+            else if (source.kind == C_IR_CONSTANT_INTEGER && source.integer == 0 && source.integer_high == 0)
             {
                 *result = (CIrConstantValue){.type = target_type, .symbol = IR_SYMBOL_ID_INVALID, .kind = C_IR_CONSTANT_POINTER};
-                return true;
+                success = true;
             }
-            return false;
         }
-        if (!c_ir_constant_normalize(builder, &source))
+        else
         {
-            return false;
-        }
-        if (target->kind == IR_TYPE_FLOAT)
-        {
-            f64 floating = source.kind == C_IR_CONSTANT_FLOAT ? source.floating
-                           : source.kind == C_IR_CONSTANT_INTEGER ? (f64)c_ir_integer_signed_value(source.integer,
-                                                                                                      ir_type_from_id(&builder->program->types, source.type))
-                                                                   : 0.0;
-            if (source.kind != C_IR_CONSTANT_FLOAT && source.kind != C_IR_CONSTANT_INTEGER)
+            // An array decays before scalar conversion; a scalar lvalue must
+            // instead be read/normalized, not mistaken for its own address.
+            if (target->kind == IR_TYPE_BOOLEAN && source.kind == C_IR_CONSTANT_LVALUE && source_type && source_type->kind == IR_TYPE_ARRAY)
             {
-                return false;
+                source.kind = C_IR_CONSTANT_POINTER;
             }
-            // A conversion rounds at the target's own precision (C 6.3.1.5),
-            // and this evaluator carries every float as an `f64`, so a `float`
-            // target has to round here or the narrowing never happens at all:
-            // `(double)(float)0.1` answered 0.1 rather than Clang's
-            // 0.10000000149011612.  The global-initializer image already
-            // rounds this way when the *destination* is a `float`; a cast in
-            // the middle of a constant expression rounds where the cast is.
-            if (target->bit_width == 32)
+            if (c_ir_constant_normalize(builder, &source))
             {
-                floating = (f64)(f32)floating;
-            }
-            *result = (CIrConstantValue){.type = target_type, .floating = floating, .kind = C_IR_CONSTANT_FLOAT};
-            return true;
-        }
-        if (c_ir_constant_type_is_integer(target))
-        {
-            u64 integer = source.kind == C_IR_CONSTANT_INTEGER ? source.integer
-                         : source.kind == C_IR_CONSTANT_FLOAT   ? (u64)source.floating
-                                                                  : 0;
-            if (source.kind != C_IR_CONSTANT_INTEGER && source.kind != C_IR_CONSTANT_FLOAT)
-            {
-                if (source.kind == C_IR_CONSTANT_POINTER && source.symbol.value == IR_ID_UNDERLYING_INVALID && source.addend == 0)
+                source_type = ir_type_from_id(&builder->program->types, source.type);
+                if (source.kind == C_IR_CONSTANT_UNKNOWN)
                 {
-                    integer = 0;
+                    *result = (CIrConstantValue){.type = target_type, .kind = C_IR_CONSTANT_UNKNOWN};
+                    success = true;
                 }
-                else
+                else if (target->kind == IR_TYPE_BOOLEAN)
                 {
-                    return false;
+                    // C 6.3.1.2: compare to zero before any truncation. This
+                    // includes floating fractions, NaNs, pointers and i128's
+                    // high limb; a one-bit integer mask cannot implement it.
+                    success = source.kind == C_IR_CONSTANT_POINTER || source.kind == C_IR_CONSTANT_FLOAT ||
+                              (source.kind == C_IR_CONSTANT_INTEGER && c_ir_constant_type_is_integer(source_type));
+                    if (success)
+                        *result = c_ir_constant_integer(target_type, c_ir_constant_truth(builder, source));
                 }
-            }
-            // A constant carries only the bits its own type is wide, so a
-            // negative narrow source has to replay its sign bit before the
-            // target's mask is applied.  Masking alone widens `(long long)-1`
-            // into 4294967295, and the callers that ask whether the converted
-            // value is negative -- the global initializer image among them --
-            // then see a positive number.  Narrowing casts are unaffected: the
-            // target mask still discards the bits above its own width.
-            IrType* source_integer_type = source.kind == C_IR_CONSTANT_INTEGER ? ir_type_from_id(&builder->program->types, source.type) : 0;
-            if (source_integer_type && source_integer_type->is_signed)
-            {
-                integer = (u64)c_ir_integer_signed_value(integer, source_integer_type);
-            }
-            *result = c_ir_constant_integer(target_type, integer & c_ir_integer_type_mask(target));
-            if (target->kind == IR_TYPE_INTEGER && target->bit_width == 128 && source.kind == C_IR_CONSTANT_INTEGER)
-            {
-                result->integer_high = source.integer_high;
-                if (source_integer_type && source_integer_type->kind == IR_TYPE_INTEGER && source_integer_type->bit_width < 128 &&
-                    source_integer_type->is_signed && source_integer_type->bit_width &&
-                    (source.integer & ((u64)1 << (source_integer_type->bit_width - 1))))
+                else if (target->kind == IR_TYPE_FLOAT)
                 {
-                    result->integer_high = UINT64_MAX;
+                    success = source.kind == C_IR_CONSTANT_FLOAT ||
+                              (source.kind == C_IR_CONSTANT_INTEGER && c_ir_constant_type_is_integer(source_type));
+                    if (success)
+                    {
+                        f64 floating = source.kind == C_IR_CONSTANT_FLOAT ? source.floating
+                                                                         : c_ir_constant_integer_to_float(source, source_type, target->bit_width == 32 ? 24 : 53);
+                        // A floating source still rounds at the destination's
+                        // precision; the integer path has already rounded once.
+                        if (target->bit_width == 32)
+                            floating = (f64)(f32)floating;
+                        *result = (CIrConstantValue){.type = target_type, .floating = floating, .kind = C_IR_CONSTANT_FLOAT};
+                    }
+                }
+                else if (c_ir_constant_type_is_integer(target))
+                {
+                    success = source.kind == C_IR_CONSTANT_INTEGER || source.kind == C_IR_CONSTANT_FLOAT ||
+                              (source.kind == C_IR_CONSTANT_POINTER && source.symbol.value == IR_ID_UNDERLYING_INVALID && source.addend == 0);
+                    if (success)
+                    {
+                        u64 integer = source.kind == C_IR_CONSTANT_INTEGER ? source.integer
+                                      : source.kind == C_IR_CONSTANT_FLOAT ? (u64)source.floating : 0;
+                        IrType* source_integer_type = source.kind == C_IR_CONSTANT_INTEGER ? source_type : 0;
+                        // Replay a negative narrow source's sign before the
+                        // target mask. Narrowing still discards the high bits.
+                        if (source_integer_type && source_integer_type->is_signed)
+                            integer = (u64)c_ir_integer_signed_value(integer, source_integer_type);
+                        *result = c_ir_constant_integer(target_type, integer & c_ir_integer_type_mask(target));
+                        if (target->kind == IR_TYPE_INTEGER && target->bit_width == 128 && source.kind == C_IR_CONSTANT_INTEGER)
+                        {
+                            result->integer_high = source.integer_high;
+                            if (source_integer_type && source_integer_type->kind == IR_TYPE_INTEGER && source_integer_type->bit_width < 128 &&
+                                source_integer_type->is_signed && source_integer_type->bit_width &&
+                                (source.integer & ((u64)1 << (source_integer_type->bit_width - 1))))
+                                result->integer_high = UINT64_MAX;
+                        }
+                    }
                 }
             }
-            return true;
         }
     }
-
-    return false;
+    return success;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_constant_common_type(CIntegerIrBuilder* builder, IrTypeId left, IrTypeId right)
@@ -39384,99 +39445,89 @@ BUSTER_C_INTERNAL IrTypeId c_ir_constant_common_type(CIntegerIrBuilder* builder,
 BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CConditionalOperator operation, IrTypeId cast_type,
                                                     CIrConstantValue* value)
 {
+    bool success = false;
     if (operation == C_CONDITIONAL_CAST)
     {
         CIrConstantValue cast = {0};
-        if (!c_ir_constant_cast(builder, *value, cast_type, &cast))
-        {
-            return false;
-        }
-        *value = cast;
-        return true;
+        success = c_ir_constant_cast(builder, *value, cast_type, &cast);
+        if (success)
+            *value = cast;
     }
-    if (operation == C_CONDITIONAL_ADDRESS_OF)
+    else if (operation == C_CONDITIONAL_ADDRESS_OF)
     {
-        if (value->kind != C_IR_CONSTANT_LVALUE)
+        if (value->kind == C_IR_CONSTANT_LVALUE)
         {
-            return false;
+            IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, value->type);
+            success = pointer_type.value != IR_ID_UNDERLYING_INVALID;
+            if (success)
+            {
+                value->type = pointer_type;
+                value->kind = C_IR_CONSTANT_POINTER;
+            }
         }
-        IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, value->type);
-        if (pointer_type.value == IR_ID_UNDERLYING_INVALID)
-        {
-            return false;
-        }
-        value->type = pointer_type;
-        value->kind = C_IR_CONSTANT_POINTER;
-        return true;
     }
-    if (value->kind == C_IR_CONSTANT_UNKNOWN)
+    else if (value->kind == C_IR_CONSTANT_UNKNOWN)
     {
-        return true;
+        success = true;
     }
-    if (operation == C_CONDITIONAL_DEREFERENCE)
+    else if (operation == C_CONDITIONAL_DEREFERENCE)
     {
         IrType* pointer = ir_type_from_id(&builder->program->types, value->type);
-        if (value->kind != C_IR_CONSTANT_POINTER || !pointer || pointer->kind != IR_TYPE_POINTER)
+        success = value->kind == C_IR_CONSTANT_POINTER && pointer && pointer->kind == IR_TYPE_POINTER;
+        if (success)
         {
-            return false;
+            value->type = pointer->element_type;
+            value->kind = C_IR_CONSTANT_LVALUE;
         }
-        value->type = pointer->element_type;
-        value->kind = C_IR_CONSTANT_LVALUE;
-        return true;
     }
-    if (c_ir_constant_normalize(builder, value))
+    else if (c_ir_constant_normalize(builder, value))
     {
         IrType* type = ir_type_from_id(&builder->program->types, value->type);
         if (operation == C_CONDITIONAL_LOGICAL_NOT)
         {
             *value = c_ir_constant_integer(builder->s32_type, !c_ir_constant_truth(builder, *value));
-            return true;
+            success = true;
         }
-        if (operation == C_CONDITIONAL_UNARY_PLUS || operation == C_CONDITIONAL_UNARY_MINUS)
+        else if (operation == C_CONDITIONAL_UNARY_PLUS || operation == C_CONDITIONAL_UNARY_MINUS || operation == C_CONDITIONAL_BITWISE_NOT)
         {
-            if (value->kind == C_IR_CONSTANT_FLOAT)
+            if (value->kind == C_IR_CONSTANT_FLOAT && operation != C_CONDITIONAL_BITWISE_NOT)
             {
                 if (operation == C_CONDITIONAL_UNARY_MINUS)
-                {
                     value->floating = -value->floating;
-                }
-                return true;
+                success = true;
             }
-            if (!c_ir_constant_type_is_integer(type))
+            else if (c_ir_constant_type_is_integer(type))
             {
-                return false;
-            }
-            if (type->kind == IR_TYPE_BOOLEAN || (type->kind == IR_TYPE_INTEGER && type->bit_width < 32))
-            {
-                value->type = builder->s32_type;
-                type = ir_type_from_id(&builder->program->types, value->type);
-            }
-            if (operation == C_CONDITIONAL_UNARY_MINUS)
-            {
-                if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+                // All three unary integer operators promote. Cast the value,
+                // not just its type, so signed char/short retain their sign.
+                IrTypeId promoted = c_ir_constant_common_type(builder, value->type, value->type);
+                success = c_ir_constant_cast(builder, *value, promoted, value);
+                if (success)
                 {
-                    CIrWideInteger negated = c_ir_wide_negate((CIrWideInteger){.low = value->integer, .high = value->integer_high});
-                    value->integer = negated.low;
-                    value->integer_high = negated.high;
+                    type = ir_type_from_id(&builder->program->types, value->type);
+                    if (operation == C_CONDITIONAL_UNARY_MINUS)
+                    {
+                        if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+                        {
+                            CIrWideInteger negated = c_ir_wide_negate((CIrWideInteger){.low = value->integer, .high = value->integer_high});
+                            value->integer = negated.low;
+                            value->integer_high = negated.high;
+                        }
+                        else
+                            value->integer = 0 - value->integer;
+                    }
+                    else if (operation == C_CONDITIONAL_BITWISE_NOT)
+                    {
+                        value->integer = ~value->integer;
+                        if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+                            value->integer_high = ~value->integer_high;
+                    }
+                    value->integer &= c_ir_integer_type_mask(type);
                 }
-                else
-                    value->integer = 0 - value->integer;
             }
-            value->integer &= c_ir_integer_type_mask(type);
-            return true;
-        }
-        if (operation == C_CONDITIONAL_BITWISE_NOT && c_ir_constant_type_is_integer(type))
-        {
-            value->integer = ~value->integer & c_ir_integer_type_mask(type);
-            if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
-            {
-                value->integer_high = ~value->integer_high;
-            }
-            return true;
         }
     }
-
-    return false;
+    return success;
 }
 
 BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CConditionalOperator operation, CIrConstantValue left,
@@ -39676,12 +39727,18 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
     {
         return false;
     }
-    IrTypeId common = c_ir_constant_common_type(builder, left.type, right.type);
-    if (common.value == IR_ID_UNDERLYING_INVALID)
+    // Shifts promote each operand independently; the RHS never changes the
+    // signedness or width of the promoted LHS (C 6.5.7).
+    bool shift = operation == C_CONDITIONAL_SHIFT_LEFT || operation == C_CONDITIONAL_SHIFT_RIGHT;
+    IrTypeId common = c_ir_constant_common_type(builder, left.type, shift ? left.type : right.type);
+    IrTypeId promoted_right_type = shift ? c_ir_constant_common_type(builder, right.type, right.type) : common;
+    if (common.value == IR_ID_UNDERLYING_INVALID || promoted_right_type.value == IR_ID_UNDERLYING_INVALID ||
+        (shift && (!c_ir_constant_type_is_integer(ir_type_from_id(&builder->program->types, common)) ||
+                   !c_ir_constant_type_is_integer(ir_type_from_id(&builder->program->types, promoted_right_type)))))
     {
         return false;
     }
-    if (!c_ir_constant_cast(builder, left, common, &left) || !c_ir_constant_cast(builder, right, common, &right))
+    if (!c_ir_constant_cast(builder, left, common, &left) || !c_ir_constant_cast(builder, right, promoted_right_type, &right))
     {
         return false;
     }
@@ -39730,6 +39787,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
             u64 quiet_nan = UINT64_C(0x7ff8000000000000);
             memcpy(&left.floating, &quiet_nan, sizeof(left.floating));
         }
+        // The carrier is f64, but an f32 expression rounds here, before
+        // another operation or conversion can observe excess precision.
+        if (type->bit_width == 32)
+            left.floating = (f64)(f32)left.floating;
         *result = left;
         return true;
     }
@@ -39915,7 +39976,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
     case C_CONDITIONAL_ADD: value = left.integer + right.integer; break;
     case C_CONDITIONAL_SUBTRACT: value = left.integer - right.integer; break;
     case C_CONDITIONAL_SHIFT_LEFT:
-        if (right.integer >= type->bit_width)
+        if (right.integer_high || right.integer >= type->bit_width)
         {
             *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
             return true;
@@ -39923,7 +39984,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
         value = left.integer << right.integer;
         break;
     case C_CONDITIONAL_SHIFT_RIGHT:
-        if (right.integer >= type->bit_width)
+        if (right.integer_high || right.integer >= type->bit_width)
         {
             *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
             return true;
