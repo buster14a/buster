@@ -44,6 +44,7 @@
 
 #include <buster/lib/string.c>
 #include <buster/lib/os.c>
+#define BUSTER_ARENA_CAPACITY_DIAGNOSTICS 1
 #include <buster/lib/arena.c>
 #include <buster/lib/file.c>
 #include <buster/lib/hash.c>
