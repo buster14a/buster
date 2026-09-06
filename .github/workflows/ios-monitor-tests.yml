@@ -33,12 +33,20 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Ensure GNU timeout is available
+      - name: Ensure mobile test prerequisites are available
         shell: bash
         run: |
           if ! command -v timeout >/dev/null && ! command -v gtimeout >/dev/null; then
             brew install coreutils
           fi
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            # Existing Android monitor tests use modern Bash features. The
+            # iOS regression still invokes its launcher with /bin/bash.
+            brew install bash
+            echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
+          fi
       - name: Exercise mobile script and attached monitor lifecycles
         shell: bash
-        run: /bin/bash tests/mobile_ci_scripts_test.sh
+        run: |
+          /bin/bash --version
+          bash tests/mobile_ci_scripts_test.sh
