@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [driver]
+        lane: [c]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -31,15 +31,17 @@ jobs:
           python3 - <<'PY'
           import base64, gzip, hashlib, os, pathlib, subprocess
           lanes = {
-              'driver': ('fix/2026-09-06-windows-include-capacity', 'a4227bd9f6cc689f522599d523ddaba0e386fe91853d3b328e64f97cabd1af54', 'driver: size Windows INCLUDE paths from their actual population', [
-                  'src/buster/lib/compiler/driver/driver.c',
-                  'src/buster/tests/compiler/driver/driver_test.c',
-                  'src/buster/tests/compiler/driver/driver_test.h',
+              'c': ('fix/2026-09-06-c-constant-semantics', 'c66c132b175bfbbcbc019576c9ee960fc44bcaf411fe8037437211152010906c', 'c: preserve constant conversion and operator semantics', [
+                  'src/buster/lib/compiler/frontend/c/c_gen.c',
+                  'src/buster/lib/compiler/frontend/c/c_source.c',
+                  'src/buster/tests/compiler/frontend/c/c_test.c',
+                  'tests/basic_c_constant_float_builtins.c',
+                  'tests/basic_c_negative_constant_widening.c',
               ]),
           }
           lane = os.environ['LANE']
           branch, digest, message, allowed = lanes[lane]
-          encoded = pathlib.Path('work/issue-batch/' + lane + '.patch.b64').read_text().strip()
+          encoded = ''.join(pathlib.Path('work/issue-batch/' + lane + '.' + str(i)).read_text().strip() for i in range(5))
           patch = gzip.decompress(base64.b64decode(encoded, validate=True))
           assert hashlib.sha256(patch).hexdigest() == digest, 'patch transport checksum mismatch'
           patch_path = pathlib.Path(os.environ['RUNNER_TEMP']) / (lane + '.patch')
