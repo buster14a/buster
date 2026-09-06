@@ -2323,6 +2323,16 @@ struct CIntegerIrBuilder
     CIrInitializerSlotCache* slot_cache;
     CIrOverAlignedArrayName* over_aligned_array_name;
     u32* prepared_call_indices;
+    // The prepared calls whose `token_index` is a given body token, as an
+    // index-linked list: `prepared_call_token_heads` is indexed by body token
+    // offset and `prepared_call_token_next` by prepared-call index, both
+    // UINT32_MAX terminated, and a new call is pushed onto its token's head.
+    // c_ir_prepared_call_chained asks exactly that question and used to answer
+    // it by scanning every prepared call of the function: 33.006 calls over
+    // 3,84 M rows of a 128-byte record on a self-compile, one cache line per
+    // row, for a chain that was never once non-empty.
+    u32* prepared_call_token_heads;
+    u32* prepared_call_token_next;
     // Type-name probe answers per body token, indexed like
     // prepared_call_indices by the `(` that opens the probed group: 0 is
     // unprobed, 1 is "not a type name", anything else the IrTypeId plus two.
@@ -2413,6 +2423,15 @@ struct CIntegerIrBuilder
     // scan touched one cache line per local to compare four bytes.  Sixteen
     // candidates share a line here.  Appended in lockstep with `locals`.
     u32* local_entities;
+    // The interned symbol of the token that named `locals[i]`, or 0 for a name
+    // the lowering respelled (see c_ir_find_local_by_name).  Appended in
+    // lockstep with `locals`, beside `local_entities` for the same reason.
+    u32* local_symbols;
+    // `local_entities` keyed by entity: see c_ir_local_entity_probe.  Null for
+    // a builder with no locals table (the test hooks), which falls back to the
+    // scan the map replaces.
+    u32* local_entity_slots;
+    u32 local_entity_slot_mask;
     u32 local_count;
     u32 local_capacity;
     IrBlockId* label_metadata_store_blocks;
@@ -3060,6 +3079,23 @@ BUSTER_C_INTERNAL void c_ir_lazy_operand_scan_advance(CIntegerIrBuilder* builder
             scan->lazy_depth = scan->depth;
         }
         break;
+    }
+}
+
+// Fold one token into the scan, when the token is one the scan reacts to at
+// all.  Every construct c_ir_lazy_operand_scan_advance answers to is one of
+// the punctuators c_ir_lazy_scan_classes names -- the statement-expression
+// probe needs a '(', which classifies as C_IR_LAZY_SCAN_OPEN, and the switch
+// does nothing at all for C_IR_LAZY_SCAN_OTHER -- so the class byte the table
+// already holds decides whether the call is worth making.  The two prepasses
+// hand this 2.580.381 tokens on a self-compile and roughly six in seven are
+// identifiers, literals and ordinary operators the scan loaded, copied and
+// switched on for no effect.
+BUSTER_C_INTERNAL BUSTER_INLINE void c_ir_lazy_operand_scan_step(CIntegerIrBuilder* builder, CIrLazyOperandScan* scan, u32 start, u32 end, u32 index)
+{
+    if (c_ir_lazy_scan_classes[builder->preprocess.tokens[index].punctuator] != C_IR_LAZY_SCAN_OTHER)
+    {
+        c_ir_lazy_operand_scan_advance(builder, scan, start, end, index);
     }
 }
 
@@ -4047,12 +4083,121 @@ BUSTER_C_INTERNAL bool c_ir_value_contains_label_provenance(CIntegerIrBuilder* b
     return false;
 }
 
+// Where an entity's row sits in the locals table.  The table is keyed by
+// entity, and c_ir_find_local_by_entity used to answer every identifier the
+// body resolves by scanning it backwards: 397.442 calls over 16,4 M rows on a
+// self-compile, a function averaging 78 locals and a third of the calls
+// walking more than sixteen.  This is the same rows in an open-addressed map
+// of local indices, power-of-two sized at twice the local capacity so the load
+// factor stays at or below a half, with no deletion because the table only
+// ever grows.  A repeated entity overwrites its slot, which is the row the
+// backward scan answered with.
+// No row recorded in this slot.  A local index can never be this: the table's
+// capacity is bounded by the declaration's own local count.
+#define C_IR_LOCAL_SLOT_EMPTY UINT32_MAX
+// Knuth's multiplicative constant and the shift that brings the mixed bits
+// down into the mask.
+#define C_IR_LOCAL_ENTITY_HASH_MULTIPLIER UINT32_C(2654435761)
+#define C_IR_LOCAL_ENTITY_HASH_SHIFT 12
+// The map is sized to this multiple of the locals capacity, rounded up to a
+// power of two, so the load factor stays at or below a half.
+#define C_IR_LOCAL_SLOT_LOAD_DIVISOR 2
+#define C_IR_LOCAL_SLOT_MINIMUM 16
+
+BUSTER_C_INTERNAL u32 c_ir_local_entity_probe(u32 entity, u32 mask)
+{
+    // The ids are dense and a function's own locals are near-consecutive, so
+    // the multiplicative mix is what stops one function's block of ids from
+    // clustering into one run of a small table.
+    return ((entity * C_IR_LOCAL_ENTITY_HASH_MULTIPLIER) >> C_IR_LOCAL_ENTITY_HASH_SHIFT) & mask;
+}
+
+// Record the row `local_index`, whose entity is already stored in
+// `local_entities`, in the map.  A no-op for a builder without one (the test
+// hooks), whose locals table is empty.
+BUSTER_C_INTERNAL void c_ir_local_entity_record(CIntegerIrBuilder* builder, u32 entity, u32 local_index)
+{
+    if (builder->local_entity_slots)
+    {
+        u32 slot = c_ir_local_entity_probe(entity, builder->local_entity_slot_mask);
+        while (builder->local_entity_slots[slot] != C_IR_LOCAL_SLOT_EMPTY && builder->local_entities[builder->local_entity_slots[slot]] != entity)
+        {
+            slot = (slot + 1) & builder->local_entity_slot_mask;
+        }
+        builder->local_entity_slots[slot] = local_index;
+    }
+}
+
 BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_entity(CIntegerIrBuilder* builder, CEntityId entity)
 {
     CIntegerIrLocal* result = 0;
+    if (builder->local_entity_slots)
+    {
+        u32 slot = c_ir_local_entity_probe(entity.value, builder->local_entity_slot_mask);
+        u32 candidate = builder->local_entity_slots[slot];
+        while (candidate != C_IR_LOCAL_SLOT_EMPTY && builder->local_entities[candidate] != entity.value)
+        {
+            slot = (slot + 1) & builder->local_entity_slot_mask;
+            candidate = builder->local_entity_slots[slot];
+        }
+        result = candidate == C_IR_LOCAL_SLOT_EMPTY ? 0 : builder->locals + candidate;
+    }
+    else
+    {
+        for (u32 index = builder->local_count; index != 0 && !result; index -= 1)
+        {
+            if (builder->local_entities[index - 1] == entity.value)
+            {
+                result = builder->locals + index - 1;
+            }
+        }
+    }
+#if !BUSTER_OPTIMIZE
+    // The scan stays in the tree as the reference and answers every lookup
+    // beside the map.  Unlike the initializer slot projection's check, which
+    // runs once per type when the table is built, this one is per lookup and
+    // so is a debug build's alone: the Release tree carries the tests
+    // (BUSTER_INCLUDE_TESTS=1) and running the scan there would put the whole
+    // cost this removes straight back.  c_test_ir_local_entity_map_equivalent
+    // is the Release-side check.  BUSTER_CHECK is an assumption in an
+    // optimized build, so the report is spelled out.
+    if (builder->local_entity_slots)
+    {
+        CIntegerIrLocal* reference = 0;
+        for (u32 index = builder->local_count; index != 0 && !reference; index -= 1)
+        {
+            if (builder->local_entities[index - 1] == entity.value)
+            {
+                reference = builder->locals + index - 1;
+            }
+        }
+        if (reference != result)
+        {
+            os_fail_message(S8("local entity map disagrees with the locals scan"));
+        }
+    }
+#endif
+    return result;
+}
+
+// The last local this token names, for the four sites that fall back to the
+// name when the entity lookup finds nothing.  All four ran a string_equal per
+// row: 24.940 fallbacks over 2,32 M rows on a self-compile, which is where the
+// lowering's 2,3 M memcmp calls came from, and string_equal is the worst
+// L1d-miss-per-cycle ratio of any ordinary symbol in the compile.  The intern
+// table is injective and both sides read the one spelling space, so two
+// nonzero symbols answer exactly what the two spellings answer; a row or token
+// the intern pass never saw still compares spellings, so a missed path costs
+// speed and never correctness.
+BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_name(CIntegerIrBuilder* builder, CToken token)
+{
+    CIntegerIrLocal* result = 0;
+    String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
     for (u32 index = builder->local_count; index != 0 && !result; index -= 1)
     {
-        if (builder->local_entities[index - 1] == entity.value)
+        u32 candidate_symbol = builder->local_symbols[index - 1];
+        bool same = token.symbol && candidate_symbol ? token.symbol == candidate_symbol : string_equal(builder->locals[index - 1].name, spelling);
+        if (same)
         {
             result = builder->locals + index - 1;
         }
@@ -4371,6 +4516,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken n
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[place.value].definition = id;
     builder->local_entities[builder->local_count] = entity.value;
+    builder->local_symbols[builder->local_count] = name.symbol;
     builder->locals[builder->local_count++] = (CIntegerIrLocal){
         .name = c_token_spelling(builder->preprocess.spelling_base, name),
         .source = c_ir_token_source_range(builder, name),
@@ -4380,6 +4526,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken n
         .c_type = entity.value < builder->parse.entity_count ? builder->parse.entities[entity.value].type : C_TYPE_ID_INVALID,
         .entity = entity,
     };
+    c_ir_local_entity_record(builder, entity.value, builder->local_count - 1);
     return place;
 }
 
@@ -11361,15 +11508,7 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
                 CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
                 if (!local)
                 {
-                    for (u32 local_index = builder->local_count; local_index != 0; local_index -= 1)
-                    {
-                        CIntegerIrLocal* candidate = builder->locals + local_index - 1;
-                        if (string_equal(candidate->name, c_token_spelling(builder->preprocess.spelling_base, base_token)))
-                        {
-                            local = candidate;
-                            break;
-                        }
-                    }
+                    local = c_ir_find_local_by_name(builder, base_token);
                 }
                 IrSourceRange source = c_ir_token_source_range(builder, base_token);
                 IrValueId place = local ? c_ir_emit_address_of_place(builder, local->place, local->type, source) : IR_VALUE_ID_INVALID;
@@ -11498,15 +11637,7 @@ c_ir_place_base_resolved:
         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
         if (!local)
         {
-            for (u32 local_index = builder->local_count; local_index != 0; local_index -= 1)
-            {
-                CIntegerIrLocal* candidate = builder->locals + local_index - 1;
-                if (string_equal(candidate->name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[base_index])))
-                {
-                    local = candidate;
-                    break;
-                }
-            }
+            local = c_ir_find_local_by_name(builder, builder->preprocess.tokens[base_index]);
         }
         IrSourceRange source =
             c_ir_token_source_range(builder, builder->preprocess.tokens[base_index]);
@@ -14050,6 +14181,8 @@ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains_range(CIntegerI
     return false;
 }
 
+BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* builder, CToken token);
+
 BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -14078,11 +14211,11 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
     while (frame->as.prepare_control.index < frame->as.prepare_control.end)
     {
         u32 index = frame->as.prepare_control.index++;
-        c_ir_lazy_operand_scan_advance(builder, &frame->as.prepare_control.lazy, frame->as.prepare_control.start,
-                                       frame->as.prepare_control.end, index);
-        if (index + 1 < frame->as.prepare_control.end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
-            string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), S8("_Generic")) &&
-            c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        c_ir_lazy_operand_scan_step(builder, &frame->as.prepare_control.lazy, frame->as.prepare_control.start,
+                                    frame->as.prepare_control.end, index);
+        if (index + 1 < frame->as.prepare_control.end &&
+            c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            c_ir_token_builtin_kind(builder, builder->preprocess.tokens[index]) == C_SYMBOL_BUILTIN_GENERIC)
         {
             u32 close = c_ir_matching_delimiter_cached(builder, index + 1, frame->as.prepare_control.end, C_PUNCTUATOR_LEFT_PARENTHESIS,
                                                        C_PUNCTUATOR_RIGHT_PARENTHESIS);
@@ -14098,7 +14231,20 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         }
         bool parentheses = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS);
         bool brackets = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET);
-        CIrPreparedControlExpression* recorded = parentheses || brackets ? c_ir_prepared_control_expression_find(builder, index) : 0;
+        // A token that opens no group leaves here. Every test below already
+        // stood inside a `parentheses || brackets` guard, and the group facts
+        // computed in between are pure, so this only moves the rejection ahead
+        // of the matching-delimiter query -- which for such a token asked for
+        // the close of a group its own token does not open, missed the stream
+        // index on the punctuator test, and answered with a linear scan of the
+        // whole remaining range. On a self-compile the loop steps over
+        // 1.659.024 tokens and 1.431.849 of those queries fell through to that
+        // scan.
+        if (!parentheses && !brackets)
+        {
+            continue;
+        }
+        CIrPreparedControlExpression* recorded = c_ir_prepared_control_expression_find(builder, index);
         if (recorded)
         {
             // A group an earlier prepass already prepared has run its whole
@@ -14114,7 +14260,7 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         u32 close = c_ir_matching_delimiter_cached(builder, index, frame->as.prepare_control.end,
                                                    parentheses ? C_PUNCTUATOR_LEFT_PARENTHESIS : C_PUNCTUATOR_LEFT_BRACKET,
                                                    parentheses ? C_PUNCTUATOR_RIGHT_PARENTHESIS : C_PUNCTUATOR_RIGHT_BRACKET);
-        if ((parentheses || brackets) && close == UINT32_MAX)
+        if (close == UINT32_MAX)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
@@ -14123,14 +14269,13 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         // is evaluated by that parent's expression walk.  Preparing it here
         // would emit its assignment before an earlier comma operand (for
         // example Lua's `save(...), (state = next(...))`).
-        if ((parentheses || brackets) && c_ir_prepared_control_expression_contains_range(builder, index, close))
+        if (c_ir_prepared_control_expression_contains_range(builder, index, close))
         {
             frame->as.prepare_control.index = close + 1;
             c_ir_lazy_operand_scan_skip_group(&frame->as.prepare_control.lazy);
             continue;
         }
-        if ((!parentheses && !brackets) ||
-            (parentheses && index > frame->as.prepare_control.start && builder->preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER))
+        if (parentheses && index > frame->as.prepare_control.start && builder->preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER)
         {
             continue;
         }
@@ -14207,26 +14352,83 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token
 // inner call by its first token follows that link outward before consuming.
 // A call still being emitted is its own callee's context and stays excluded,
 // which is what keeps the callee lowering consuming the inner value.
-BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_chained(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end)
+#if !BUSTER_OPTIMIZE
+// The scan the chain replaces, kept as the reference: a debug build checks
+// every step of every walk against it.  It is not compiled into the Release
+// tree because that tree carries the tests (BUSTER_INCLUDE_TESTS=1) and
+// running the scan there would put back exactly the cost the chain removes.
+BUSTER_C_INTERNAL void c_ir_prepared_call_chained_check(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end, u32 answer)
 {
-    for (;;)
+    u32 reference = UINT32_MAX;
+    for (u32 index = 0; index < builder->prepared_call_count && reference == UINT32_MAX; index += 1)
     {
-        CIrPreparedCall* chained = 0;
-        for (u32 index = 0; index < builder->prepared_call_count; index += 1)
+        CIrPreparedCall* candidate = builder->prepared_calls + index;
+        if (candidate != call && candidate->token_index == call->open_index && candidate->close_index < end && !candidate->emitting)
+        {
+            reference = index;
+        }
+    }
+    if (reference != answer)
+    {
+        os_fail_message(S8("prepared call chain disagrees with the prepared call scan"));
+    }
+}
+#endif
+
+BUSTER_C_INTERNAL u32 c_ir_prepared_call_chained_index(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end)
+{
+    u32 chained = UINT32_MAX;
+    u32 open = call->open_index;
+    u32 offset = open - builder->body_token_start;
+    if (open >= builder->body_token_start && offset < builder->body_token_count)
+    {
+        // The chain holds every prepared call whose token index is `open`, so
+        // the lowest of its members that passes is the row the scan over the
+        // whole table answered with.  A call is pushed onto its token's head,
+        // so the chain runs newest first and the minimum is taken rather than
+        // the first match.
+        u32 call_index = (u32)(call - builder->prepared_calls);
+        for (u32 index = builder->prepared_call_token_heads[offset]; index != UINT32_MAX; index = builder->prepared_call_token_next[index])
         {
             CIrPreparedCall* candidate = builder->prepared_calls + index;
-            if (candidate != call && candidate->token_index == call->open_index && candidate->close_index < end && !candidate->emitting)
+            if (index != call_index && index < chained && candidate->close_index < end && !candidate->emitting)
             {
-                chained = candidate;
-                break;
+                chained = index;
             }
         }
-        if (!chained)
-        {
-            return call;
-        }
-        call = chained;
     }
+    else
+    {
+        // A call discovered outside the body -- a variable-length array
+        // parameter's bound -- never entered the token-keyed chain, the same
+        // exception c_ir_prepared_call_find carries.
+        for (u32 index = 0; index < builder->prepared_call_count && chained == UINT32_MAX; index += 1)
+        {
+            CIrPreparedCall* candidate = builder->prepared_calls + index;
+            if (candidate != call && candidate->token_index == open && candidate->close_index < end && !candidate->emitting)
+            {
+                chained = index;
+            }
+        }
+    }
+    return chained;
+}
+
+BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_chained(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end)
+{
+    u32 chained = c_ir_prepared_call_chained_index(builder, call, end);
+    while (chained != UINT32_MAX)
+    {
+#if !BUSTER_OPTIMIZE
+        c_ir_prepared_call_chained_check(builder, call, end, chained);
+#endif
+        call = builder->prepared_calls + chained;
+        chained = c_ir_prepared_call_chained_index(builder, call, end);
+    }
+#if !BUSTER_OPTIMIZE
+    c_ir_prepared_call_chained_check(builder, call, end, UINT32_MAX);
+#endif
+    return call;
 }
 
 BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
@@ -14808,7 +15010,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // skipped outright: that still records calls in the body as deferred
         // children of an enclosing call, so the prepared-call emitter can
         // temporarily clear preparation while lowering that body.
-        c_ir_lazy_operand_scan_advance(builder, &lazy, start, end, index);
+        c_ir_lazy_operand_scan_step(builder, &lazy, start, end, index);
         // Every shape prepared below -- a named, builtin, indexed, member or
         // parenthesized callee -- is the token right before a `(`, and the
         // rejection at the bottom refuses anything else.  That one byte is
@@ -15140,7 +15342,10 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // out-of-body token with a linear scan over the prepared calls.
         if (callee_start >= builder->body_token_start && callee_start - builder->body_token_start < builder->body_token_count)
         {
-            builder->prepared_call_indices[callee_start - builder->body_token_start] = prepared_call_index;
+            u32 callee_offset = callee_start - builder->body_token_start;
+            builder->prepared_call_indices[callee_offset] = prepared_call_index;
+            builder->prepared_call_token_next[prepared_call_index] = builder->prepared_call_token_heads[callee_offset];
+            builder->prepared_call_token_heads[callee_offset] = prepared_call_index;
         }
         if (builtin_generic)
         {
@@ -19370,15 +19575,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
                 CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, operand_entity);
                 if (!local)
                 {
-                    for (u32 local_index = builder->local_count; local_index != 0; local_index -= 1)
-                    {
-                        CIntegerIrLocal* candidate = builder->locals + local_index - 1;
-                        if (string_equal(candidate->name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 2])))
-                        {
-                            local = candidate;
-                            break;
-                        }
-                    }
+                    local = c_ir_find_local_by_name(builder, builder->preprocess.tokens[index + 2]);
                 }
                 if (local)
                 {
@@ -23847,15 +24044,7 @@ c_ir_expression_core_loop:
                 CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
                 if (!local)
                 {
-                    for (u32 local_index = builder->local_count; local_index != 0; local_index -= 1)
-                    {
-                        CIntegerIrLocal* candidate = builder->locals + local_index - 1;
-                        if (string_equal(candidate->name, c_token_spelling(builder->preprocess.spelling_base, token)))
-                        {
-                            local = candidate;
-                            break;
-                        }
-                    }
+                    local = c_ir_find_local_by_name(builder, token);
                 }
                 u32 place_end = index + 1;
                 if (local && local->is_variable_length_array)
@@ -34040,6 +34229,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     }
                     place = c_ir_emit_global_place(builder, entity, local_source);
                     builder->local_entities[builder->local_count] = entity.value;
+                    builder->local_symbols[builder->local_count] = name.symbol;
                     builder->locals[builder->local_count++] = (CIntegerIrLocal){
                         .name = c_token_spelling(builder->preprocess.spelling_base, name),
                         .source = local_source,
@@ -34049,6 +34239,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         .c_type = local_c_type_id,
                         .entity = entity,
                     };
+                    c_ir_local_entity_record(builder, entity.value, builder->local_count - 1);
                 }
                 else
                 {
@@ -44043,6 +44234,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         }
         TemporalArena lowering_temporary = arena_begin_temporal(lowering_arena);
         u64 local_capacity = (u64)signatures[declaration_index].parameter_count + declaration_local_counts[declaration_index];
+        u64 local_slot_capacity = C_IR_LOCAL_SLOT_MINIMUM;
+        while (local_slot_capacity < local_capacity * C_IR_LOCAL_SLOT_LOAD_DIVISOR)
+        {
+            local_slot_capacity *= 2;
+        }
         u64 prepared_call_capacity = 0;
         u64 prepared_control_expression_capacity = 0;
         u32 body_end = declaration.body_start + declaration.body_token_count;
@@ -44078,8 +44274,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         // the body is long does not exhaust the stack.  The other consumers of
         // lowering_capacity are per-value arrays the bound does not widen.
         u64 lower_frame_capacity = lowering_capacity + (u64)(declaration.body_start - declaration_start) * 3;
-        if (lowering_capacity > UINT32_MAX || local_capacity > UINT32_MAX || prepared_call_capacity > UINT32_MAX ||
-            prepared_control_expression_capacity > UINT32_MAX || lower_frame_capacity > UINT32_MAX)
+        if (lowering_capacity > UINT32_MAX || local_capacity > UINT32_MAX || local_slot_capacity > UINT32_MAX ||
+            prepared_call_capacity > UINT32_MAX || prepared_control_expression_capacity > UINT32_MAX || lower_frame_capacity > UINT32_MAX)
         {
             scratch_end(lowering_temporary);
             result.diagnostics[result.diagnostic_count++] = (CDiagnostic){
@@ -44161,6 +44357,9 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .declaration_index = declaration_index,
             .locals = arena_allocate(lowering_temporary.arena, CIntegerIrLocal, local_capacity ? (u32)local_capacity : 1),
             .local_entities = arena_allocate(lowering_temporary.arena, u32, local_capacity ? (u32)local_capacity : 1),
+            .local_symbols = arena_allocate(lowering_temporary.arena, u32, local_capacity ? (u32)local_capacity : 1),
+            .local_entity_slots = arena_allocate(lowering_temporary.arena, u32, (u32)local_slot_capacity),
+            .local_entity_slot_mask = (u32)local_slot_capacity - 1,
             .local_capacity = local_capacity ? (u32)local_capacity : 1,
             .label_metadata_store_blocks = arena_allocate(lowering_temporary.arena, IrBlockId, (u32)lowering_capacity),
             .label_metadata_store_valid = arena_allocate(lowering_temporary.arena, bool, (u32)lowering_capacity),
@@ -44176,6 +44375,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .cleanup_flag_count = cleanup_offsets[declaration_index + 1] - cleanup_offsets[declaration_index],
             .prepared_calls = arena_allocate(lowering_temporary.arena, CIrPreparedCall, prepared_call_capacity ? (u32)prepared_call_capacity : 1),
             .prepared_call_indices = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
+            .prepared_call_token_heads = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
+            .prepared_call_token_next = arena_allocate(lowering_temporary.arena, u32, prepared_call_capacity ? (u32)prepared_call_capacity : 1),
             .group_type_names = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
             .matching_delimiters =
                 stream_matching_delimiters ? 0 : arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
@@ -44192,9 +44393,11 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .returns_void = signatures[declaration_index].returns_void,
             .returns_zero_at_end = signatures[declaration_index].returns_zero_at_end,
         };
+        memset(builder.local_entity_slots, 0xff, sizeof(*builder.local_entity_slots) * (u64)local_slot_capacity);
         for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)
         {
             builder.prepared_call_indices[token_offset] = UINT32_MAX;
+            builder.prepared_call_token_heads[token_offset] = UINT32_MAX;
             builder.group_type_names[token_offset] = 0;
         }
         if (!builder.stream_matching_delimiters)
