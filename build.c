@@ -42,6 +42,7 @@
 #include <sys/syscall.h>
 #endif
 
+#include <buster/lib/arena.h>
 BUSTER_GLOBAL_LOCAL void* arena_allocate_bytes_with_location(Arena* arena, u64 size, u64 alignment, const char* file, u32 line);
 #define arena_allocate_bytes(arena, size, alignment) arena_allocate_bytes_with_location((arena), (size), (alignment), __FILE__, __LINE__)
 #include <buster/lib/string.c>
