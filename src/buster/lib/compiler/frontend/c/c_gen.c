@@ -3082,6 +3082,23 @@ BUSTER_C_INTERNAL void c_ir_lazy_operand_scan_advance(CIntegerIrBuilder* builder
     }
 }
 
+// Fold one token into the scan, when the token is one the scan reacts to at
+// all.  Every construct c_ir_lazy_operand_scan_advance answers to is one of
+// the punctuators c_ir_lazy_scan_classes names -- the statement-expression
+// probe needs a '(', which classifies as C_IR_LAZY_SCAN_OPEN, and the switch
+// does nothing at all for C_IR_LAZY_SCAN_OTHER -- so the class byte the table
+// already holds decides whether the call is worth making.  The two prepasses
+// hand this 2.580.381 tokens on a self-compile and roughly six in seven are
+// identifiers, literals and ordinary operators the scan loaded, copied and
+// switched on for no effect.
+BUSTER_C_INTERNAL BUSTER_INLINE void c_ir_lazy_operand_scan_step(CIntegerIrBuilder* builder, CIrLazyOperandScan* scan, u32 start, u32 end, u32 index)
+{
+    if (c_ir_lazy_scan_classes[builder->preprocess.tokens[index].punctuator] != C_IR_LAZY_SCAN_OTHER)
+    {
+        c_ir_lazy_operand_scan_advance(builder, scan, start, end, index);
+    }
+}
+
 // A prepass that jumps from a group's opening delimiter straight past its
 // close has folded the open into the scan and will never see the matching
 // close; fold that close in here so the depth the scan carries stays the
@@ -14194,8 +14211,8 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
     while (frame->as.prepare_control.index < frame->as.prepare_control.end)
     {
         u32 index = frame->as.prepare_control.index++;
-        c_ir_lazy_operand_scan_advance(builder, &frame->as.prepare_control.lazy, frame->as.prepare_control.start,
-                                       frame->as.prepare_control.end, index);
+        c_ir_lazy_operand_scan_step(builder, &frame->as.prepare_control.lazy, frame->as.prepare_control.start,
+                                    frame->as.prepare_control.end, index);
         if (index + 1 < frame->as.prepare_control.end &&
             c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
             c_ir_token_builtin_kind(builder, builder->preprocess.tokens[index]) == C_SYMBOL_BUILTIN_GENERIC)
@@ -14993,7 +15010,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // skipped outright: that still records calls in the body as deferred
         // children of an enclosing call, so the prepared-call emitter can
         // temporarily clear preparation while lowering that body.
-        c_ir_lazy_operand_scan_advance(builder, &lazy, start, end, index);
+        c_ir_lazy_operand_scan_step(builder, &lazy, start, end, index);
         // Every shape prepared below -- a named, builtin, indexed, member or
         // parenthesized callee -- is the token right before a `(`, and the
         // rejection at the bottom refuses anything else.  That one byte is
