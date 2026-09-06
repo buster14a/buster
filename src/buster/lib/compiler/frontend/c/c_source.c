@@ -21,10 +21,17 @@
 //   c_source_metrics_add,                      the SOURCE table counters and
 //   c_source_metrics_file_row                  the per-file attribution rows
 //   c_lex_scan_one, c_lex_scalar               the scalar lexer
-//   c_lex_compact                              the SIMD lexer (Validark
-//                                              method, AGENTS.md); c_lex
-//                                              dispatches, c_lex_reference is
-//                                              the differential baseline
+//   c_lex_compact_tables_build,                the SIMD lexer (Validark
+//   c_lex_compact                              method, AGENTS.md): one
+//                                              window-wide class lookup
+//                                              (c_lex_byte_classes, authored
+//                                              from the scalar predicates
+//                                              above), the punctuator NFA and
+//                                              spelling tables, then the
+//                                              interleaved 16-row emitter;
+//                                              c_lex dispatches and
+//                                              c_lex_reference is the
+//                                              differential baseline
 //   CTokenStream, c_token_stream_reserve       final token rows plus the
 //                                              one-byte kind|punctuator
 //                                              sidecar consumed by parser
