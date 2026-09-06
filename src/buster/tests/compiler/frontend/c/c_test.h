@@ -13,6 +13,7 @@ BUSTER_F_DECL CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* resul
 BUSTER_F_DECL u64 c_parse_name_hash(u32 symbol, String8 name);
 BUSTER_F_DECL u32 c_parse_name_symbol(CParseResult* result, String8 name);
 BUSTER_F_DECL bool c_test_translate_plain_run_paths_agree(String8 source);
+BUSTER_F_DECL bool c_test_pp_class_masks_agree(Arena* arena, String8 source);
 BUSTER_F_DECL u64 c_test_ir_initializer_slot_count(IrType* type);
 BUSTER_F_DECL CEntityId c_test_ir_constant_entity_at(CParseResult* parse, CPreprocessResult preprocess,
                                                       CEntityId* token_entities, u32 token_index);
