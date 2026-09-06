@@ -1,0 +1,92 @@
+name: Apply PR 94 diagnostics arena repair
+
+on:
+  push:
+    branches:
+      - claude/unruffled-bhabha-f5d28a
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.repository == 'buster14a/buster' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Apply diagnostics arena repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("build.c")
+          text = path.read_text(encoding="utf-8")
+          old = '''BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
+          {
+              // The synthetic diagnostic fixtures intentionally exceed 100 MiB. Rewind
+              // each fixture before starting the matrix so the long-lived build-driver
+              // arena is not charged for test data for the rest of the invocation.
+              TemporalArena time_trace_self_test_memory = arena_begin_temporal(arena);
+              ProcessResult time_trace_self_test_result = time_trace_summary_self_test(arena);
+              scratch_end(time_trace_self_test_memory);
+              if (time_trace_self_test_result != PROCESS_RESULT_SUCCESS)
+              {
+                  return time_trace_self_test_result;
+              }
+              TemporalArena test_timing_self_test_memory = arena_begin_temporal(arena);
+              ProcessResult test_timing_self_test_result = test_timing_summary_self_test(arena);
+              scratch_end(test_timing_self_test_memory);
+              if (test_timing_self_test_result != PROCESS_RESULT_SUCCESS)
+              {
+                  return test_timing_self_test_result;
+              }
+          '''
+          new = '''BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
+          {
+              // These synthetic diagnostics deliberately build large in-memory fixtures.
+              // Give them a transient reservation instead of consuming the long-lived
+              // matrix arena, and do not retain that large reservation in the arena pool.
+              ArenaCreation diagnostics_creation = {.reserved_size = BUSTER_MB(1024)};
+              diagnostics_creation.flags.no_pool = 1;
+              Arena* diagnostics_arena = arena_create(diagnostics_creation);
+              if (!diagnostics_arena)
+              {
+                  string_print(S8("error: failed to reserve the diagnostics self-test arena\\n"));
+                  return PROCESS_RESULT_FAILED;
+              }
+
+              ProcessResult diagnostics_result = time_trace_summary_self_test(diagnostics_arena);
+              if (diagnostics_result == PROCESS_RESULT_SUCCESS)
+              {
+                  arena_reset_to_start(diagnostics_arena);
+                  diagnostics_result = test_timing_summary_self_test(diagnostics_arena);
+              }
+              bool diagnostics_destroyed = arena_destroy(diagnostics_arena, 1);
+              BUSTER_CHECK(diagnostics_destroyed);
+              if (diagnostics_result != PROCESS_RESULT_SUCCESS)
+              {
+                  return diagnostics_result;
+              }
+          '''
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f"build.c: expected one replacement site, found {count}")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
+      - name: Commit repair and remove this one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/apply-pr94-ci-fixes-2.yml
+          git config user.name "David"
+          git config user.email "davidgmbb@gmail.com"
+          git add build.c .github/workflows/apply-pr94-ci-fixes-2.yml
+          git diff --cached --check
+          git commit -m "ci: isolate large diagnostics fixtures"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
