@@ -18,9 +18,18 @@ $installBase = Join-Path $env:RUNNER_TEMP 'vulkan-sdk'
 $archive = Join-Path $env:RUNNER_TEMP $asset
 $versionRoot = Join-Path $installBase 'version'
 
-New-Item -ItemType Directory -Force -Path $installBase | Out-Null
-Invoke-WebRequest -Uri "$releaseBase/$asset" -OutFile $archive
-Expand-Archive -Path $archive -DestinationPath $versionRoot -Force
+if (Test-Path -LiteralPath $versionRoot) {
+    Remove-Item -LiteralPath $versionRoot -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $versionRoot | Out-Null
+
+# curl.exe and bsdtar are present on both hosted Windows images. They avoid
+# Invoke-WebRequest and Expand-Archive's very high overhead on the SDK's
+# 150-plus MiB package while preserving the same native package layout.
+curl.exe --fail --silent --show-error --location --retry 5 --retry-delay 2 --output $archive "$releaseBase/$asset"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+tar.exe -x -f $archive -C $versionRoot
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $versionDir = Get-ChildItem -LiteralPath $versionRoot -Directory -Filter 'vulkan-sdk-*' | Select-Object -First 1
 if ($null -eq $versionDir) { throw "Could not find the SDK version directory under $versionRoot" }

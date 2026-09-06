@@ -1138,15 +1138,6 @@ if (NOT WIN32)
         list(APPEND BUSTER_TEST_ENV "ASAN_OPTIONS=${BUSTER_ASAN_OPTIONS}")
         list(APPEND BUSTER_TEST_ENV "UBSAN_OPTIONS=${BUSTER_UBSAN_OPTIONS}")
 
-        if (UNIX AND NOT APPLE AND BUSTER_LINUX_ASAN_PRELOAD_RUNTIME)
-            set(BUSTER_LD_PRELOAD "${BUSTER_LINUX_ASAN_PRELOAD_RUNTIME}")
-            if (DEFINED ENV{LD_PRELOAD})
-                if (NOT "$ENV{LD_PRELOAD}" STREQUAL "")
-                    set(BUSTER_LD_PRELOAD "${BUSTER_LD_PRELOAD}:$ENV{LD_PRELOAD}")
-                endif()
-            endif()
-            list(APPEND BUSTER_TEST_ENV "LD_PRELOAD=${BUSTER_LD_PRELOAD}")
-        endif()
     endif()
 endif()
 
@@ -1614,6 +1605,12 @@ function(executable_add name is_buster_program main_file)
         target_compile_options(${name} PRIVATE -fsanitize=fuzzer-no-link)
         target_link_options(${name} PRIVATE -fsanitize=fuzzer-no-link)
         target_link_libraries(${name} PRIVATE "${BUSTER_FUZZ_NO_MAIN_RUNTIME}")
+        if (UNIX AND NOT APPLE)
+            # The no-main libFuzzer runtime is C++, but Buster executables use
+            # the C linker driver. Supply the runtime's standard library after
+            # its archive instead of relying on a C++ driver to add it.
+            target_link_libraries(${name} PRIVATE stdc++)
+        endif()
     endif()
 
     if (${BUSTER_TIME_TRACE})

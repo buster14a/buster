@@ -238,7 +238,7 @@ BUSTER_GLOBAL_LOCAL void os_error_print(String8 format, ...)
 {
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), format, variable_arguments);
+    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(2));
     va_end(variable_arguments);
 }
 
@@ -246,7 +246,7 @@ BUSTER_NORETURN BUSTER_COLD void os_fail_va(u32 line, String8 function, String8 
 {
     va_list variable_arguments;
     va_start(variable_arguments, context);
-    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), context, variable_arguments);
+    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), context, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(7));
     va_end(variable_arguments);
     os_error_print(S8(" at {S8}:{u32} in {S8}\n"), file, line, function);
     os_exit(1);

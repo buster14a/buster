@@ -6041,7 +6041,7 @@ BUSTER_GLOBAL_LOCAL void summary_output_print(SummaryOutput* output, String8 for
     va_start(variable_arguments, format);
     if (output->capture_arena)
     {
-        String8 text = string_format_va(output->capture_arena, format, variable_arguments);
+        String8 text = string_format_va(output->capture_arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(3));
         string8_list_push(output->capture_arena, &output->captured, text);
         if (output->file && text.length)
         {
@@ -6051,7 +6051,7 @@ BUSTER_GLOBAL_LOCAL void summary_output_print(SummaryOutput* output, String8 for
     else if (output->file)
     {
         TemporalArena scratch = scratch_begin(0, 0);
-        String8 text = string_format_va(scratch.arena, format, variable_arguments);
+        String8 text = string_format_va(scratch.arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(3));
         if (text.length)
         {
             os_file_write(output->file, BUSTER_SLICE_TO_BYTE_SLICE(text));
@@ -21731,12 +21731,35 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_generate_add(Arena* arena, BuildStep*
 
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
-    ProcessResult time_trace_self_test_result = time_trace_summary_self_test(arena);
+    // These synthetic diagnostics deliberately build large in-memory fixtures.
+    // Each gets a fresh mapping: arena allocations are not zero-initialized after
+    // a rewind, and the self-tests exercise code that must begin from clean pages.
+    ArenaCreation diagnostics_creation = {.reserved_size = BUSTER_GB(1)};
+    diagnostics_creation.flags.no_pool = 1;
+
+    Arena* time_trace_self_test_arena = arena_create(diagnostics_creation);
+    if (!time_trace_self_test_arena)
+    {
+        string_print(S8("error: failed to reserve the time-trace self-test arena\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ProcessResult time_trace_self_test_result = time_trace_summary_self_test(time_trace_self_test_arena);
+    bool time_trace_arena_destroyed = arena_destroy(time_trace_self_test_arena, 1);
+    BUSTER_CHECK(time_trace_arena_destroyed);
     if (time_trace_self_test_result != PROCESS_RESULT_SUCCESS)
     {
         return time_trace_self_test_result;
     }
-    ProcessResult test_timing_self_test_result = test_timing_summary_self_test(arena);
+
+    Arena* test_timing_self_test_arena = arena_create(diagnostics_creation);
+    if (!test_timing_self_test_arena)
+    {
+        string_print(S8("error: failed to reserve the test-timing self-test arena\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+    ProcessResult test_timing_self_test_result = test_timing_summary_self_test(test_timing_self_test_arena);
+    bool test_timing_arena_destroyed = arena_destroy(test_timing_self_test_arena, 1);
+    BUSTER_CHECK(test_timing_arena_destroyed);
     if (test_timing_self_test_result != PROCESS_RESULT_SUCCESS)
     {
         return test_timing_self_test_result;
@@ -21768,7 +21791,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         return superbuild_parallelism_test_result;
     }
 
-    bool direct_matrix = environment_flag_is_on(S8("BUSTER_MATRIX_DIRECT"));
+    // Intel macOS cannot yet self-host the compiler image; direct mode still
+    // executes every compiler/configuration test tree and omits only fan-out.
+    bool direct_matrix = environment_flag_is_on(S8("BUSTER_MATRIX_DIRECT")) ||
+                         (BUSTER_MACOS && BUSTER_CPU_ARCH_X86_64);
     MatrixTestCombination combinations[BUILD_COMPILER_COUNT * 4] = {0};
     u64 combination_count = 0;
     BuildStep* generate_step = step_add(arena);
@@ -21788,8 +21814,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     for (BuildCompiler compiler = !BUSTER_WINDOWS; compiler < BUILD_COMPILER_COUNT; compiler += 1)
     {
         bool is_clang = compiler == BUILD_COMPILER_CLANG;
-        bool fuzz_supported = is_clang && !BUSTER_APPLE;
-        bool support_sanitize = is_clang;
+        // LLVM's Windows ARM64 distribution does not ship the libFuzzer or
+        // sanitizer runtimes. Keep the native Clang Release test row and all
+        // compiler portability rows, but do not generate impossible trees.
+        bool fuzz_supported = is_clang && !BUSTER_APPLE && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64);
+        bool support_sanitize = is_clang && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64);
 
         for (u32 sanitize = 0; sanitize < 1 + support_sanitize; sanitize += 1)
         {

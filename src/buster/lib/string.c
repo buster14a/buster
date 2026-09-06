@@ -9,6 +9,56 @@
 #include <buster/lib/os.h>
 #include <buster/lib/integer.h>
 
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && BUSTER_COMPILER_CLANG
+// Clang's Windows ARM64 va_arg treats the homed register area and
+// caller stack as one packed stream. The ABI instead moves an argument
+// wholly to the stack when it cannot fit in the remaining registers,
+// and 16-byte stack arguments retain 16-byte alignment.
+typedef struct StringFormatVaReader StringFormatVaReader;
+struct StringFormatVaReader
+{
+    u8* pointer;
+    u32 gp_register_slots_remaining;
+};
+
+BUSTER_CT_CHECK(sizeof(va_list) == sizeof(void*));
+
+BUSTER_GLOBAL_LOCAL void string_format_va_reader_read(StringFormatVaReader* reader, void* destination, u64 size, u64 alignment)
+{
+    BUSTER_CHECK(reader->gp_register_slots_remaining <= STRING_FORMAT_VA_GP_REGISTER_COUNT);
+    BUSTER_CHECK(size != 0 && size <= 2 * sizeof(u64));
+    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(alignment) && alignment <= 2 * sizeof(u64));
+
+    u64 slot_count = (size + sizeof(u64) - 1) / sizeof(u64);
+    if (reader->gp_register_slots_remaining && alignment > sizeof(u64))
+    {
+        u32 register_index = STRING_FORMAT_VA_GP_REGISTER_COUNT - reader->gp_register_slots_remaining;
+        if (register_index & 1u)
+        {
+            reader->pointer += sizeof(u64);
+            reader->gp_register_slots_remaining -= 1;
+        }
+    }
+
+    if (slot_count > reader->gp_register_slots_remaining)
+    {
+        reader->pointer += (u64)reader->gp_register_slots_remaining * sizeof(u64);
+        reader->gp_register_slots_remaining = 0;
+    }
+
+    if (!reader->gp_register_slots_remaining && alignment > sizeof(u64))
+    {
+        reader->pointer = (u8*)align_forward((u64)reader->pointer, alignment);
+    }
+
+    memcpy(destination, reader->pointer, size);
+    reader->pointer += slot_count * sizeof(u64);
+    if (reader->gp_register_slots_remaining)
+    {
+        reader->gp_register_slots_remaining -= (u32)slot_count;
+    }
+}
+#endif
 BUSTER_GLOBAL_LOCAL bool code_unit_is_binary(char8 code_unit)
 {
     return (code_unit == '1') | (code_unit == '0');
@@ -937,8 +987,20 @@ BUSTER_GLOBAL_LOCAL Utf8Result utf8_from_code_point(u32 code_point)
     return result;
 }
 
-String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments)
+String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments, u32 gp_register_slots_remaining)
 {
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && BUSTER_COMPILER_CLANG
+    StringFormatVaReader variable_argument_reader = {
+        .pointer = (u8*)variable_arguments,
+        .gp_register_slots_remaining = gp_register_slots_remaining,
+    };
+#define STRING_FORMAT_VA_READ(type, name)                                                                                                            \
+    type name;                                                                                                                                       \
+    string_format_va_reader_read(&variable_argument_reader, &(name), sizeof(name), BUSTER_ALIGN_OF(type))
+#else
+    BUSTER_UNUSED(gp_register_slots_remaining);
+#define STRING_FORMAT_VA_READ(type, name) type name = va_arg(variable_arguments, type)
+#endif
     u64 original_position = arena->position;
     u64 format_index = 0;
 
@@ -978,7 +1040,6 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
             }
 
             String8 format_body = string_slice(format, format_index + 1, right_brace_index);
-
             typedef enum FormatTypeId
             {
                 FORMAT_TYPE_STRING_SLICE,
@@ -1233,7 +1294,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                 break;
             case FORMAT_TYPE_STRING_SLICE:
             {
-                SliceString8 strings = va_arg(variable_arguments, SliceString8);
+                STRING_FORMAT_VA_READ(SliceString8, strings);
                 for (u64 string_index = 0; string_index < strings.length; string_index += 1)
                 {
                     if (string_index != 0)
@@ -1246,7 +1307,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
             break;
             case FORMAT_TYPE_STRING_OS_LIST:
             {
-                StringOsList string_os_list = va_arg(variable_arguments, StringOsList);
+                STRING_FORMAT_VA_READ(StringOsList, string_os_list);
                 TemporalArena list_scratch = scratch_begin(&arena, 1);
 #if defined(_WIN32)
                 SliceString8 strings = slice_string_from_windows_string_list(list_scratch.arena, string_os_list);
@@ -1266,31 +1327,34 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
             break;
             case FORMAT_TYPE_STRING8:
             {
-                String8 string = va_arg(variable_arguments, String8);
+                STRING_FORMAT_VA_READ(String8, string);
                 arena_append_string(arena, string);
             }
             break;
             case FORMAT_TYPE_STRING16:
             {
-                String16 string16 = va_arg(variable_arguments, String16);
+                STRING_FORMAT_VA_READ(String16, string16);
                 string8_from_string16(arena, string16, false);
             }
             break;
             case FORMAT_TYPE_CHAR_OS:
             {
 #if defined(_WIN32)
-                u32 code_point = (u32)(u16)va_arg(variable_arguments, int);
+                STRING_FORMAT_VA_READ(int, promoted_character);
+                u32 code_point = (u32)(u16)promoted_character;
                 Utf8Result encoding = utf8_from_code_point(code_point);
                 arena_append_string(arena, (String8){.pointer = encoding.buffer, .length = encoding.count});
 #else
-                char8 character = (char8)va_arg(variable_arguments, int);
+                STRING_FORMAT_VA_READ(int, promoted_character);
+                char8 character = (char8)promoted_character;
                 *arena_allocate(arena, char8, 1) = character;
 #endif
             }
             break;
             case FORMAT_TYPE_CHAR8:
             {
-                char8 character = (char8)va_arg(variable_arguments, int);
+                STRING_FORMAT_VA_READ(int, promoted_character);
+                char8 character = (char8)promoted_character;
                 *arena_allocate(arena, char8, 1) = character;
             }
             break;
@@ -1314,31 +1378,44 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                 {
                     break;
                 case FORMAT_TYPE_UNSIGNED_INTEGER_8:
-                    value.low = (u8)va_arg(variable_arguments, int);
+                {
+                    STRING_FORMAT_VA_READ(int, argument);
+                    value.low = (u8)argument;
                     bit_width = 8;
-                    break;
+                }
+                break;
                 case FORMAT_TYPE_UNSIGNED_INTEGER_16:
-                    value.low = (u16)va_arg(variable_arguments, int);
+                {
+                    STRING_FORMAT_VA_READ(int, argument);
+                    value.low = (u16)argument;
                     bit_width = 16;
-                    break;
+                }
+                break;
                 case FORMAT_TYPE_UNSIGNED_INTEGER_32:
-                    value.low = va_arg(variable_arguments, u32);
+                {
+                    STRING_FORMAT_VA_READ(u32, argument);
+                    value.low = argument;
                     bit_width = 32;
-                    break;
+                }
+                break;
                 case FORMAT_TYPE_UNSIGNED_INTEGER_64:
-                    value.low = va_arg(variable_arguments, u64);
+                {
+                    STRING_FORMAT_VA_READ(u64, argument);
+                    value.low = argument;
                     bit_width = 64;
-                    break;
+                }
+                break;
                 case FORMAT_TYPE_UNSIGNED_INTEGER_128:
                 {
-                    u128 argument = va_arg(variable_arguments, u128);
+                    STRING_FORMAT_VA_READ(u128, argument);
                     value = string_format_u128_parts_from_u128(argument);
                     bit_width = 128;
                 }
                 break;
                 case FORMAT_TYPE_SIGNED_INTEGER_8:
                 {
-                    s8 argument = (s8)va_arg(variable_arguments, int);
+                    STRING_FORMAT_VA_READ(int, promoted_argument);
+                    s8 argument = (s8)promoted_argument;
                     signed_value = true;
                     negative = argument < 0;
                     value.low = (u64)(s64)argument;
@@ -1348,7 +1425,8 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                 break;
                 case FORMAT_TYPE_SIGNED_INTEGER_16:
                 {
-                    s16 argument = (s16)va_arg(variable_arguments, int);
+                    STRING_FORMAT_VA_READ(int, promoted_argument);
+                    s16 argument = (s16)promoted_argument;
                     signed_value = true;
                     negative = argument < 0;
                     value.low = (u64)(s64)argument;
@@ -1358,7 +1436,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                 break;
                 case FORMAT_TYPE_SIGNED_INTEGER_32:
                 {
-                    s32 argument = va_arg(variable_arguments, s32);
+                    STRING_FORMAT_VA_READ(s32, argument);
                     signed_value = true;
                     negative = argument < 0;
                     value.low = (u64)(s64)argument;
@@ -1368,7 +1446,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                 break;
                 case FORMAT_TYPE_SIGNED_INTEGER_64:
                 {
-                    s64 argument = va_arg(variable_arguments, s64);
+                    STRING_FORMAT_VA_READ(s64, argument);
                     signed_value = true;
                     negative = argument < 0;
                     value.low = (u64)argument;
@@ -1378,7 +1456,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                 break;
                 case FORMAT_TYPE_SIGNED_INTEGER_128:
                 {
-                    s128 argument = va_arg(variable_arguments, s128);
+                    STRING_FORMAT_VA_READ(s128, argument);
                     value = string_format_u128_parts_from_s128(argument);
                     signed_value = true;
                     negative = (value.high >> 63) != 0;
@@ -1402,7 +1480,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
             break;
             case FORMAT_TYPE_OS_ERROR:
             {
-                OsError os_error = va_arg(variable_arguments, OsError);
+                STRING_FORMAT_VA_READ(OsError, os_error);
                 string8_from_os_error(arena, os_error, false);
             }
             break;
@@ -1414,6 +1492,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
 
     return (String8){.pointer = (char8*)((u8*)arena + original_position), .length = (arena->position - original_position) / sizeof(char8)};
 }
+#undef STRING_FORMAT_VA_READ
 
 String8 string_duplicate_arena(Arena* arena, String8 string, bool zero_terminate)
 {
@@ -1459,7 +1538,7 @@ String8 string_format(Arena* arena, String8 format, ...)
 {
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    String8 result = string_format_va(arena, format, variable_arguments);
+    String8 result = string_format_va(arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(3));
     va_end(variable_arguments);
 
     return result;
@@ -1469,19 +1548,20 @@ String8 string_format_z(Arena* arena, String8 format, ...)
 {
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    String8 result = string_format_va(arena, format, variable_arguments);
+    String8 result = string_format_va(arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(3));
     va_end(variable_arguments);
     *arena_allocate(arena, char8, 1) = 0;
 
     return result;
 }
 
-void string_write_to_file_va(OsFileDescriptor* file_handle, String8 format, va_list variable_arguments)
+void string_write_to_file_va(OsFileDescriptor* file_handle, String8 format, va_list variable_arguments,
+                             u32 gp_register_slots_remaining)
 {
     if (file_handle)
     {
         TemporalArena scratch = scratch_begin(0, 0);
-        String8 string = string_format_va(scratch.arena, format, variable_arguments);
+        String8 string = string_format_va(scratch.arena, format, variable_arguments, gp_register_slots_remaining);
 
         if (string.length)
         {
@@ -1497,7 +1577,7 @@ void string_print(String8 format, ...)
 {
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    string_write_to_file_va(os_get_stdout(), format, variable_arguments);
+    string_write_to_file_va(os_get_stdout(), format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(2));
     va_end(variable_arguments);
 }
 
