@@ -1,0 +1,44 @@
+name: iOS monitor lifecycle
+
+on:
+  pull_request:
+    paths:
+      - 'ios/**'
+      - 'android/**'
+      - 'tests/*mobile*'
+      - 'tests/ios_launch_monitor_test.sh'
+      - '.github/workflows/ios-monitor-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'ios/**'
+      - 'android/**'
+      - 'tests/*mobile*'
+      - 'tests/ios_launch_monitor_test.sh'
+      - '.github/workflows/ios-monitor-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fake-tools:
+    if: github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Ensure GNU timeout is available
+        shell: bash
+        run: |
+          if ! command -v timeout >/dev/null && ! command -v gtimeout >/dev/null; then
+            brew install coreutils
+          fi
+      - name: Exercise mobile script and attached monitor lifecycles
+        shell: bash
+        run: /bin/bash tests/mobile_ci_scripts_test.sh
