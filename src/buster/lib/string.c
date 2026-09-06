@@ -805,7 +805,7 @@ BUSTER_GLOBAL_LOCAL void arena_append_string(Arena* arena, String8 string)
         return;
     }
 #if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)
-    if (BUSTER_UNLIKELY(string.length > ARENA_MAX_RESERVATION))
+    if (BUSTER_UNLIKELY(string.length > arena->reserved_size - arena->position))
     {
         fprintf(stderr,
                 "STRING_APPEND_BAD_LENGTH format=%.*s body=%.*s pointer=%p length=%llu\n",
@@ -1289,7 +1289,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
             {
                 String8 string = va_arg(variable_arguments, String8);
 #if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)
-                if (BUSTER_UNLIKELY(string.length > ARENA_MAX_RESERVATION))
+                if (BUSTER_UNLIKELY(string.length > arena->reserved_size - arena->position))
                 {
                     fprintf(stderr,
                             "STRING_FORMAT_BAD_S8 format=%.*s type=%.*s pointer=%p length=%llu format_index=%llu right_brace=%llu\\n",
