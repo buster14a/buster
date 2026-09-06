@@ -310,6 +310,18 @@ BUSTER_C_INTERNAL void c_parse_position_index_append(Arena* arena, u32** positio
     (C_SYMBOL_WELL_KNOWN_BIT(TYPEDEF) | C_SYMBOL_WELL_KNOWN_BIT(STATIC) | C_SYMBOL_WELL_KNOWN_BIT(REGISTER) | \
      C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(CONSTEXPR))
 
+// The two well-known questions c_analyze_semantics asks of a declaration's
+// whole token range rather than of one token: `overloadable`, which makes a
+// file-scope name admit several declarations, and the thread-storage words
+// an object declaration may carry.  Both name attributes almost no
+// translation unit spells, and both used to be answered by a walk of every
+// token of every declaration -- 4,6 M token visits per stage-1 compile of
+// this tree, and the largest mispredicting branch in the frontend.  The
+// token census marks the candidates for both in one bitmap instead, and
+// each question becomes an OR of the words its range covers.
+#define C_PARSE_DECLARATION_RANGE_KEYWORDS                                                                                  \
+    (C_SYMBOL_WELL_KNOWN_BIT(OVERLOADABLE) | C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23))
+
 // The words a type-only declaration may open with ahead of its tag keyword.
 #define C_PARSE_TYPE_ONLY_PREFIX_KEYWORDS                                                                        \
     (C_SYMBOL_WELL_KNOWN_BIT(CONST) | C_SYMBOL_WELL_KNOWN_BIT(VOLATILE) | C_SYMBOL_WELL_KNOWN_BIT(ATOMIC) | \
@@ -615,6 +627,54 @@ BUSTER_C_INTERNAL void c_type_parse_frame_complete(CTypeParseMachine* machine, C
     machine->result_valid = valid;
 }
 
+// A committed state is the byte 1 and an uncommitted one the byte 0, the two
+// representations a bool may hold, which is what lets c_parse_type_layout
+// seed its resolved column with a copy of the state column.
+BUSTER_CT_CHECK(sizeof(bool) == 1);
+
+// Puts `type_index` back on the pending list unless it already stands there.
+// The list holds distinct ids below `capacity`, so it cannot overflow the
+// allocation that capacity sized.
+BUSTER_C_INTERNAL void c_type_layout_cache_pending_push(CTypeLayoutCache* cache, u32 type_index)
+{
+    if (!cache->pending_mark[type_index])
+    {
+        cache->pending_mark[type_index] = 1;
+        cache->pending[cache->pending_count++] = type_index;
+    }
+}
+
+// Grows the persistent layout rows to cover `type_count` ids.  The rows past
+// the old capacity are uncommitted and unlisted; the caller lists them.
+BUSTER_C_INTERNAL void c_type_layout_cache_reserve(CTypeLayoutCache* cache, Arena* arena, u32 type_count)
+{
+    if (cache->capacity < type_count)
+    {
+        u32 new_capacity = BUSTER_MAX(type_count, cache->capacity ? cache->capacity * 2 : 4096);
+        u64* new_sizes = arena_allocate(arena, u64, new_capacity);
+        u32* new_alignments = arena_allocate(arena, u32, new_capacity);
+        u8* new_states = arena_allocate(arena, u8, new_capacity);
+        u32* new_pending = arena_allocate(arena, u32, new_capacity);
+        u8* new_pending_mark = arena_allocate(arena, u8, new_capacity);
+        memset(new_states, 0, new_capacity);
+        memset(new_pending_mark, 0, new_capacity);
+        if (cache->capacity)
+        {
+            memcpy(new_sizes, cache->sizes, sizeof(*new_sizes) * cache->capacity);
+            memcpy(new_alignments, cache->alignments, sizeof(*new_alignments) * cache->capacity);
+            memcpy(new_states, cache->states, cache->capacity);
+            memcpy(new_pending, cache->pending, sizeof(*new_pending) * cache->pending_count);
+            memcpy(new_pending_mark, cache->pending_mark, cache->capacity);
+        }
+        cache->sizes = new_sizes;
+        cache->alignments = new_alignments;
+        cache->states = new_states;
+        cache->pending = new_pending;
+        cache->pending_mark = new_pending_mark;
+        cache->capacity = new_capacity;
+    }
+}
+
 BUSTER_C_INTERNAL bool c_type_parse_record_mutation(CTypeParseMachine* machine, CParseResult* result, CTypeId id)
 {
     if (id.value >= result->type_count)
@@ -636,6 +696,7 @@ BUSTER_C_INTERNAL bool c_type_parse_record_mutation(CTypeParseMachine* machine, 
         if (id.value < machine->layout_cache.capacity)
         {
             machine->layout_cache.states[id.value] = 0;
+            c_type_layout_cache_pending_push(&machine->layout_cache, id.value);
         }
     }
 
@@ -665,8 +726,16 @@ BUSTER_C_INTERNAL bool c_type_parse_root_finish(CTypeParseMachine* machine, CPar
     if (!valid)
     {
         u32 diagnostic_count = result->diagnostic_count;
+        // The binding array's cursor is walk state, not parse state: the
+        // rollback restores the whole result by value and would rewind the
+        // undo stack and the scope the array stands for in the middle of a
+        // body walk, exactly as it would rewind the diagnostic count.
+        u32 binding_undo_count = result->binding_undo_count;
+        CScopeId binding_scope = result->binding_scope;
         c_type_parse_rollback(machine, result, checkpoint, mutation_mark);
         result->diagnostic_count = diagnostic_count;
+        result->binding_undo_count = binding_undo_count;
+        result->binding_scope = binding_scope;
     }
     else
     {
@@ -1267,12 +1336,51 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
     // The type table can grow while the solve parses alignof/sizeof operand
     // types; the scratch arrays cover the types that existed at entry and
     // later additions stay unresolved for this query.
+    //
+    // The committed rows seed the scratch by copy rather than by a walk that
+    // reads each of them through three tests, and the three passes below
+    // visit the ids the cache has not committed rather than the whole table.
+    // The list is snapshotted here because the solve reenters the parse --
+    // an alignment specifier or an array bound may name a type of its own --
+    // and a nested query may both extend the list and move it.
     u32 type_count = result->type_count;
-    u64* sizes = arena_allocate(arena, u64, type_count);
-    u32* alignments = arena_allocate(arena, u32, type_count);
-    bool* resolved = arena_allocate(arena, bool, type_count);
-    bool* provisional = arena_allocate(arena, bool, type_count);
-    memset(resolved, 0, sizeof(*resolved) * type_count);
+    u32* pending;
+    u32 pending_count;
+    if (cache)
+    {
+        c_type_layout_cache_reserve(cache, result->arena, type_count);
+        for (u32 type_index = cache->pending_seeded; type_index < type_count; type_index += 1)
+        {
+            c_type_layout_cache_pending_push(cache, type_index);
+        }
+        cache->pending_seeded = BUSTER_MAX(cache->pending_seeded, type_count);
+        pending_count = cache->pending_count;
+        pending = arena_allocate(arena, u32, pending_count + 1);
+        memcpy(pending, cache->pending, sizeof(*pending) * pending_count);
+    }
+    else
+    {
+        pending_count = type_count;
+        pending = arena_allocate(arena, u32, pending_count + 1);
+        for (u32 type_index = 0; type_index < type_count; type_index += 1)
+        {
+            pending[type_index] = type_index;
+        }
+    }
+    u64* sizes = arena_allocate(arena, u64, type_count + 1);
+    u32* alignments = arena_allocate(arena, u32, type_count + 1);
+    bool* resolved = arena_allocate(arena, bool, type_count + 1);
+    bool* provisional = arena_allocate(arena, bool, type_count + 1);
+    if (cache)
+    {
+        memcpy(sizes, cache->sizes, sizeof(*sizes) * type_count);
+        memcpy(alignments, cache->alignments, sizeof(*alignments) * type_count);
+        memcpy(resolved, cache->states, type_count);
+    }
+    else
+    {
+        memset(resolved, 0, sizeof(*resolved) * type_count);
+    }
     memset(provisional, 0, sizeof(*provisional) * type_count);
     CParseLayoutContext layout_context = {
         .machine = machine,
@@ -1284,13 +1392,11 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
         .provisional = provisional,
         .type_count = type_count,
     };
-    for (u32 type_index = 0; type_index < type_count; type_index += 1)
+    for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
     {
-        if (cache && type_index < cache->capacity && cache->states[type_index])
+        u32 type_index = pending[pending_index];
+        if (type_index >= type_count || resolved[type_index])
         {
-            sizes[type_index] = cache->sizes[type_index];
-            alignments[type_index] = cache->alignments[type_index];
-            resolved[type_index] = true;
             continue;
         }
         CTypeKind kind = result->types[type_index].kind;
@@ -1339,9 +1445,10 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
     for (u32 pass = 0; pass < type_count; pass += 1)
     {
         bool progress = false;
-        for (u32 type_index = 0; type_index < type_count; type_index += 1)
+        for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
         {
-            if (resolved[type_index])
+            u32 type_index = pending[pending_index];
+            if (type_index >= type_count || resolved[type_index])
             {
                 continue;
             }
@@ -1915,33 +2022,32 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
 requested_resolved:
     if (cache && !machine->frame_count && !machine->mutation_count)
     {
-        if (cache->capacity < type_count)
+        for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
         {
-            u32 new_capacity = BUSTER_MAX(type_count, cache->capacity ? cache->capacity * 2 : 4096);
-            u64* new_sizes = arena_allocate(result->arena, u64, new_capacity);
-            u32* new_alignments = arena_allocate(result->arena, u32, new_capacity);
-            u8* new_states = arena_allocate(result->arena, u8, new_capacity);
-            memset(new_states, 0, new_capacity);
-            if (cache->capacity)
-            {
-                memcpy(new_sizes, cache->sizes, sizeof(*new_sizes) * cache->capacity);
-                memcpy(new_alignments, cache->alignments, sizeof(*new_alignments) * cache->capacity);
-                memcpy(new_states, cache->states, cache->capacity);
-            }
-            cache->sizes = new_sizes;
-            cache->alignments = new_alignments;
-            cache->states = new_states;
-            cache->capacity = new_capacity;
-        }
-        for (u32 type_index = 0; type_index < type_count; type_index += 1)
-        {
-            if (resolved[type_index] && !provisional[type_index] && !cache->states[type_index])
+            u32 type_index = pending[pending_index];
+            if (type_index < type_count && resolved[type_index] && !provisional[type_index] && !cache->states[type_index])
             {
                 cache->sizes[type_index] = sizes[type_index];
                 cache->alignments[type_index] = alignments[type_index];
                 cache->states[type_index] = 1;
             }
         }
+        // Drop what this query committed off the live list, which a nested
+        // query may have extended past the snapshot above.
+        u32 kept_count = 0;
+        for (u32 pending_index = 0; pending_index < cache->pending_count; pending_index += 1)
+        {
+            u32 type_index = cache->pending[pending_index];
+            if (cache->states[type_index])
+            {
+                cache->pending_mark[type_index] = 0;
+            }
+            else
+            {
+                cache->pending[kept_count++] = type_index;
+            }
+        }
+        cache->pending_count = kept_count;
     }
     if (!resolved[requested.value])
     {
@@ -11138,6 +11244,63 @@ BUSTER_C_SHARED u64 c_parse_name_hash(u32 symbol, String8 name)
     return symbol ? (u64)symbol * UINT64_C(0x9E3779B97F4A7C15) : c_macro_name_hash(name);
 }
 
+// Records `entity` as the innermost binding of `symbol`.  A bind into the
+// file scope while the array already stands for it is never undone, so it
+// costs no record; every other bind pushes the binding it shadows.
+//
+// A bind into a scope the array does not stand for is a bind into an
+// enclosing one: C files a block-scope `extern int f(void);` in the file
+// scope while the walk is inside the block.  That entity is not the
+// innermost binding now, but it becomes one when the shadowing scopes
+// close, so it goes into the oldest record for the symbol -- the value the
+// outermost restore puts back -- or into the slot itself when nothing has
+// shadowed it.  The scan is over the bindings the function body has open,
+// which the reset at each definition keeps to that body's own.
+BUSTER_C_INTERNAL void c_parse_binding_bind(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol)
+{
+    if (result->binding_by_symbol && symbol && symbol < result->binding_capacity)
+    {
+        if (scope.value != result->binding_scope.value)
+        {
+            u32 oldest = UINT32_MAX;
+            for (u32 index = 0; index < result->binding_undo_count && oldest == UINT32_MAX; index += 1)
+            {
+                oldest = result->binding_undo[index].symbol == symbol ? index : UINT32_MAX;
+            }
+            if (oldest == UINT32_MAX)
+            {
+                result->binding_by_symbol[symbol] = entity;
+            }
+            else
+            {
+                result->binding_undo[oldest].previous = entity;
+            }
+        }
+        else
+        {
+            if (scope.value)
+            {
+                BUSTER_CHECK(result->binding_undo_count < result->binding_undo_capacity);
+                result->binding_undo[result->binding_undo_count++] = (CParseBindingUndo){
+                    .symbol = symbol,
+                    .previous = result->binding_by_symbol[symbol],
+                };
+            }
+            result->binding_by_symbol[symbol] = entity;
+        }
+    }
+}
+
+// Restores every binding shadowed since `mark`, newest first.
+BUSTER_C_INTERNAL void c_parse_binding_unwind(CParseResult* result, u32 mark)
+{
+    while (result->binding_undo_count > mark)
+    {
+        CParseBindingUndo record = result->binding_undo[--result->binding_undo_count];
+        result->binding_by_symbol[record.symbol] = record.previous;
+    }
+}
+
 BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol)
 {
     CScope* value = &result->scopes[scope.value];
@@ -11168,27 +11331,52 @@ BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId sco
         added->next_typedef_in_lookup = result->typedef_lookup_buckets[name_bucket];
         result->typedef_lookup_buckets[name_bucket] = entity;
     }
+    c_parse_binding_bind(result, scope, entity, added->symbol);
 }
 
-BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_symbol(CParseResult* result, CScopeId scope, u32 symbol, String8 name)
+// The scope-and-symbol chains, walked from `scope` outwards: the definition
+// of what a name resolves to, and what every lookup outside the scope the
+// binding array stands for still asks.
+BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CScopeId scope, u32 symbol, String8 name)
 {
-    while (scope.value != C_ID_UNDERLYING_INVALID)
+    CEntityId found = C_ENTITY_ID_INVALID;
+    while (scope.value != C_ID_UNDERLYING_INVALID && found.value == C_ID_UNDERLYING_INVALID)
     {
         u64 hash = c_parse_entity_lookup_hash(symbol, name, scope);
         u32 bucket = (u32)hash & (result->entity_lookup_bucket_count - 1);
         CEntityId entity = result->entity_lookup_buckets[bucket];
-        while (entity.value != C_ID_UNDERLYING_INVALID)
+        while (entity.value != C_ID_UNDERLYING_INVALID && found.value == C_ID_UNDERLYING_INVALID)
         {
             CEntity* candidate = &result->entities[entity.value];
-            if (candidate->scope.value == scope.value && candidate->symbol == symbol && (symbol || string_equal(candidate->name, name)))
-            {
-                return entity;
-            }
-            entity = candidate->next_in_lookup;
+            found = candidate->scope.value == scope.value && candidate->symbol == symbol && (symbol || string_equal(candidate->name, name))
+                        ? entity
+                        : C_ENTITY_ID_INVALID;
+            entity = found.value == C_ID_UNDERLYING_INVALID ? candidate->next_in_lookup : entity;
         }
         scope = result->scopes[scope.value].parent;
     }
-    return C_ENTITY_ID_INVALID;
+    return found;
+}
+
+// One indexed load when the array stands for `scope`, which is every lookup
+// the body binder and the file-scope declaration pass make: 396.059 of the
+// 595.210 lookups of a stage-1 compile of this tree, carrying 1,70 M of its
+// 1,94 M scope hops.  Everything else walks the chains.
+BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_symbol(CParseResult* result, CScopeId scope, u32 symbol, String8 name)
+{
+    CEntityId found;
+    if (result->binding_by_symbol && symbol && symbol < result->binding_capacity && scope.value == result->binding_scope.value)
+    {
+        found = result->binding_by_symbol[symbol];
+#if !BUSTER_OPTIMIZE
+        BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name).value);
+#endif
+    }
+    else
+    {
+        found = c_parse_lookup_entity_chain(result, scope, symbol, name);
+    }
+    return found;
 }
 
 CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name)
@@ -11200,7 +11388,7 @@ CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 na
 // walk in `scope` and no ascent, for the redefinition check, which asks only
 // whether the name is already bound in the scope being declared into and
 // discards whatever an enclosing scope would have answered.
-BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_in_scope(CParseResult* result, CScopeId scope, u32 symbol, String8 name)
+BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_in_scope_chain(CParseResult* result, CScopeId scope, u32 symbol, String8 name)
 {
     CEntityId found = C_ENTITY_ID_INVALID;
     if (scope.value != C_ID_UNDERLYING_INVALID)
@@ -11218,6 +11406,28 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_in_scope(CParseResult* result,
             }
             entity = candidate->next_in_lookup;
         }
+    }
+    return found;
+}
+
+// A binding in `scope` shadows every enclosing one, so the innermost binding
+// answers this question too: it is the one this scope declared when its own
+// scope matches, and otherwise this scope declared none.
+BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_in_scope(CParseResult* result, CScopeId scope, u32 symbol, String8 name)
+{
+    CEntityId found;
+    if (result->binding_by_symbol && symbol && symbol < result->binding_capacity && scope.value == result->binding_scope.value)
+    {
+        CEntityId innermost = result->binding_by_symbol[symbol];
+        found = innermost.value != C_ID_UNDERLYING_INVALID && result->entities[innermost.value].scope.value == scope.value ? innermost
+                                                                                                                          : C_ENTITY_ID_INVALID;
+#if !BUSTER_OPTIMIZE
+        BUSTER_CHECK(found.value == c_parse_lookup_entity_in_scope_chain(result, scope, symbol, name).value);
+#endif
+    }
+    else
+    {
+        found = c_parse_lookup_entity_in_scope_chain(result, scope, symbol, name);
     }
     return found;
 }
@@ -13488,10 +13698,16 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
     TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
     CScopeId* scope_stack = arena_allocate(temporary.arena, CScopeId, body_token_count + 1);
     u32* scope_end_stack = arena_allocate(temporary.arena, u32, body_token_count + 1);
+    // The binding-array undo mark standing when each scope of the stack
+    // opened; closing one restores every binding it shadowed.
+    u32* scope_binding_mark = arena_allocate(temporary.arena, u32, body_token_count + 1);
     u8* statement_suffix = arena_allocate(temporary.arena, u8, body_token_count + 1);
     u32 scope_count = 1;
     scope_stack[0] = scope;
     scope_end_stack[0] = UINT32_MAX;
+    scope_binding_mark[0] = result->binding_undo_count;
+    CScopeId entry_binding_scope = result->binding_scope;
+    result->binding_scope = scope;
     u32 body_end = body_start + body_token_count;
     u32 index = body_start;
     bool statement_start = true;
@@ -13513,7 +13729,9 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         }
         while (scope_count > 1 && scope_end_stack[scope_count - 1] == index)
         {
+            c_parse_binding_unwind(result, scope_binding_mark[scope_count - 1]);
             scope_count -= 1;
+            result->binding_scope = scope_stack[scope_count - 1];
         }
         CToken token = preprocess.tokens[index];
         CTokenShape shape = c_preprocess_token_shape_at(token_shapes, &preprocess, index);
@@ -13596,8 +13814,10 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                 .token_start = index + 1,
                 .token_end = UINT32_MAX,
             };
+            scope_binding_mark[scope_count] = result->binding_undo_count;
             scope_stack[scope_count++] = child;
             scope_end_stack[scope_count - 1] = UINT32_MAX;
+            result->binding_scope = child;
             statement_start = true;
             index += 1;
             continue;
@@ -13607,7 +13827,9 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
             if (scope_count > 1)
             {
                 result->scopes[scope_stack[scope_count - 1].value].token_end = index;
+                c_parse_binding_unwind(result, scope_binding_mark[scope_count - 1]);
                 scope_count -= 1;
+                result->binding_scope = scope_stack[scope_count - 1];
             }
             statement_start = true;
             index += 1;
@@ -13684,9 +13906,11 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                         .token_start = index + 2,
                         .token_end = loop_end,
                     };
+                    scope_binding_mark[scope_count] = result->binding_undo_count;
                     scope_stack[scope_count] = loop_scope;
                     scope_end_stack[scope_count] = loop_end;
                     scope_count += 1;
+                    result->binding_scope = loop_scope;
                     if (index + 2 < first_separator &&
                         c_parse_local_declarations(machine, result_arena, result, preprocess, loop_scope, declaration_index, index + 2,
                                                    first_separator))
@@ -13787,6 +14011,8 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         statement_start = punctuator == C_PUNCTUATOR_SEMICOLON;
         index += 1;
     }
+    c_parse_binding_unwind(result, scope_binding_mark[0]);
+    result->binding_scope = entry_binding_scope;
     scratch_end(temporary);
 }
 
@@ -13798,6 +14024,12 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
     {
         c_parse_bind_block_statements(machine, result_arena, result, preprocess, declaration_index, declaration->scope, declaration->body_start,
                                       declaration->body_token_count);
+        // The body's scopes are closed and their bindings unwound, but the
+        // bucket chains keep every entity they ever held, so the two passes
+        // below -- which re-enter a scope through c_parse_scope_for_token,
+        // the function scope included -- must ask the chains.  Retiring the
+        // array here is what makes the two answers agree.
+        result->binding_scope = C_SCOPE_ID_INVALID;
         c_parse_bind_function_static_asserts(machine, result_arena, result, preprocess, declaration);
         // After the walk above, because it needs the block scopes that walk creates.
         c_parse_bind_expression_aggregates(machine, result, preprocess, declaration->scope, declaration->body_start,
@@ -14667,6 +14899,52 @@ BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preproc
 // allocates: each counter below becomes one array's capacity, so all nine are
 // upper bounds that must come out exactly as c_parse_token_census_reference
 // computes them. The vector path is a throughput change and nothing else.
+// Could this token answer one of the C_PARSE_DECLARATION_RANGE_KEYWORDS
+// questions?  A token spelled one of those words is an identifier whose
+// interned id is that word's, and an identifier the intern pass never saw
+// carries symbol 0 and answers by spelling, so both are candidates.  The
+// test is on the low symbol byte alone, because that is what the census
+// projects out of the 12-byte rows and what its vector arm compares: the
+// candidate set is deliberately a superset that also admits the ids sharing
+// a low byte with one of the words, and the exact question is re-asked over
+// any range the bitmap admits.  Both arms answer this same predicate, which
+// is what the unoptimized gate below holds them to.
+BUSTER_C_INTERNAL bool c_parse_declaration_range_candidate(CToken token)
+{
+    u8 symbol_low = (u8)token.symbol;
+    return token.kind == C_TOKEN_IDENTIFIER &&
+           (!symbol_low || (symbol_low < 64 && ((C_PARSE_DECLARATION_RANGE_KEYWORDS >> symbol_low) & 1) != 0));
+}
+
+// Does any bit of `words` stand for a token index in [start, end)?  One word
+// covers 64 tokens, so a declaration whose range averages 294 tokens is five
+// loads and an or rather than 294 loads and a branch apiece.
+BUSTER_C_INTERNAL bool c_parse_token_bitmap_any(u64 const* words, u32 start, u32 end)
+{
+    bool any = false;
+    if (start < end)
+    {
+        u32 first_word = start >> 6;
+        u32 last_word = (end - 1) >> 6;
+        u64 head = UINT64_MAX << (start & 63);
+        u64 tail = ((end - 1) & 63) == 63 ? UINT64_MAX : (UINT64_C(1) << (end & 63)) - 1;
+        if (first_word == last_word)
+        {
+            any = (words[first_word] & head & tail) != 0;
+        }
+        else
+        {
+            u64 accumulated = words[first_word] & head;
+            for (u32 word_index = first_word + 1; word_index < last_word; word_index += 1)
+            {
+                accumulated |= words[word_index];
+            }
+            any = (accumulated | (words[last_word] & tail)) != 0;
+        }
+    }
+    return any;
+}
+
 typedef struct CTokenCensus CTokenCensus;
 struct CTokenCensus
 {
@@ -14687,13 +14965,16 @@ struct CTokenCensus
 // runs this whenever the 512-bit vocabulary is unavailable, and
 // c_parse_token_census_differential in the tests runs both and compares all
 // nine counters.
-BUSTER_C_INTERNAL BUSTER_UNUSED_DECL void c_parse_token_census_reference(CPreprocessResult preprocess, u32 token_count, CTokenCensus* census)
+BUSTER_C_INTERNAL BUSTER_UNUSED_DECL void c_parse_token_census_reference(CPreprocessResult preprocess, u32 token_count, CTokenCensus* census,
+                                                                        u64* declaration_range_words)
 {
     u32 brace_depth = 0;
     u32 delimiter_depth = 0;
+    memset(declaration_range_words, 0, sizeof(*declaration_range_words) * ((token_count + 63) / 64 + 1));
     for (u32 token_index = 0; token_index < token_count; token_index += 1)
     {
         CToken token = preprocess.tokens[token_index];
+        declaration_range_words[token_index >> 6] |= (u64)c_parse_declaration_range_candidate(token) << (token_index & 63);
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
             census->identifier_count += 1;
@@ -14788,7 +15069,7 @@ BUSTER_C_INTERNAL const u8 c_parse_census_symbol_high[64] = {[11] = 72, 84, 96, 
 // simd.h's fallback: without 512-bit lanes every simd512_load here would be a
 // 64-iteration byte loop, which is the case AGENTS.md means by a different
 // algorithm being worth writing.
-BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 token_count, CTokenCensus* census)
+BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 token_count, CTokenCensus* census, u64* declaration_range_words)
 {
 #if BUSTER_SIMD_512
     u8 symbol_bytes[C_PARSE_CENSUS_TILE_BYTES];
@@ -14808,6 +15089,10 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
         Simd512 close_brace = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_RIGHT_BRACE));
         Simd512 for_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_FOR);
         Simd512 uninterned_symbol = simd512_splat(0);
+        Simd512 overloadable_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_OVERLOADABLE);
+        Simd512 thread_local_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_THREAD_LOCAL);
+        Simd512 thread_gnu_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_THREAD_GNU);
+        Simd512 thread_local_c23_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_THREAD_LOCAL_C23);
         u32 brace_depth = 0;
         u32 delimiter_depth = 0;
         u32 maximum_depth = 0;
@@ -14871,8 +15156,17 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
                 // candidates in a million identifiers, each then answered by the
                 // predicate the reference calls.
                 Simd512 symbol_lanes = simd512_load(symbol_bytes + window);
-                Mask64 for_candidates =
-                    mask64_and(identifiers, mask64_or(simd512_equal_byte(symbol_lanes, for_symbol), simd512_equal_byte(symbol_lanes, uninterned_symbol)));
+                Mask64 uninterned = simd512_equal_byte(symbol_lanes, uninterned_symbol);
+                Mask64 for_candidates = mask64_and(identifiers, mask64_or(simd512_equal_byte(symbol_lanes, for_symbol), uninterned));
+                // A window is exactly one bitmap word, so the candidate mask
+                // is the word: the tile stride and the window stride are both
+                // multiples of 64, and the tail window's mask already carries
+                // the prefix that bounds the stream.
+                declaration_range_words[(tile_base + window) >> 6] = mask64_and(
+                    identifiers,
+                    mask64_or(mask64_or(uninterned, simd512_equal_byte(symbol_lanes, overloadable_symbol)),
+                              mask64_or(mask64_or(simd512_equal_byte(symbol_lanes, thread_local_symbol), simd512_equal_byte(symbol_lanes, thread_gnu_symbol)),
+                                        simd512_equal_byte(symbol_lanes, thread_local_c23_symbol))));
                 for (Mask64 remaining = for_candidates; remaining; remaining &= remaining - 1)
                 {
                     u32 lane = mask64_first_set(remaining);
@@ -14922,7 +15216,7 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
     }
     else
     {
-        c_parse_token_census_reference(preprocess, token_count, census);
+        c_parse_token_census_reference(preprocess, token_count, census, declaration_range_words);
     }
 #if !BUSTER_OPTIMIZE
     // The differential gate. Unoptimized builds recompute the census the
@@ -14930,13 +15224,20 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
     // check on every translation unit the suite compiles rather than on a
     // hand-written list of token streams -- every fixture, every header of
     // the include closure, and the whole unity unit when the Debug tree
-    // compiles it. Release pays nothing.
+    // compiles it. Release pays nothing.  The candidate bitmap is checked
+    // bit by bit against the same predicate rather than through a second
+    // array, because this function owns no arena to hold one.
     CTokenCensus reference_census = {0};
-    c_parse_token_census_reference(preprocess, token_count, &reference_census);
+    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        bool candidate = c_parse_declaration_range_candidate(preprocess.tokens[token_index]);
+        BUSTER_CHECK(((declaration_range_words[token_index >> 6] >> (token_index & 63)) & 1) == (u64)candidate);
+    }
+    c_parse_token_census_reference(preprocess, token_count, &reference_census, declaration_range_words);
     BUSTER_CHECK(memcmp(&reference_census, census, sizeof(reference_census)) == 0);
 #endif
 #else
-    c_parse_token_census_reference(preprocess, token_count, census);
+    c_parse_token_census_reference(preprocess, token_count, census, declaration_range_words);
 #endif
 }
 
@@ -14978,7 +15279,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     }
     u32 token_count = (u32)preprocess.token_count;
     CTokenCensus census = {0};
-    c_parse_token_census(preprocess, token_count, &census);
+    // One bit per token, plus the word a whole-window vector store may reach
+    // past the last partial window.
+    u64* declaration_range_words = arena_allocate(arena, u64, (token_count + 63) / 64 + 1);
+    declaration_range_words[(token_count + 63) / 64] = 0;
+    c_parse_token_census(preprocess, token_count, &census, declaration_range_words);
     u32 identifier_count = census.identifier_count;
     u32 semicolon_count = census.semicolon_count;
     u32 comma_count = census.comma_count;
@@ -15092,6 +15397,19 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     memset(result.typedef_lookup_buckets, 0xff, sizeof(*result.typedef_lookup_buckets) * result.entity_lookup_bucket_count);
     result.name_lookup_buckets = arena_allocate(arena, CEntityId, result.entity_lookup_bucket_count);
     memset(result.name_lookup_buckets, 0xff, sizeof(*result.name_lookup_buckets) * result.entity_lookup_bucket_count);
+    // One slot per interned symbol.  A parse without a symbol table keeps
+    // every symbol 0 and never reaches the array; a symbol interned during
+    // the parse lands past the end and falls back to the chains, which is
+    // the same answer.  The undo stack cannot overflow: one record per bind
+    // and one bind per entity.
+    if (result.symbols)
+    {
+        result.binding_capacity = result.symbols->count + 1;
+        result.binding_by_symbol = arena_allocate(arena, CEntityId, result.binding_capacity);
+        memset(result.binding_by_symbol, 0xff, sizeof(*result.binding_by_symbol) * result.binding_capacity);
+        result.binding_undo_capacity = result.entity_capacity + 1;
+        result.binding_undo = arena_allocate(arena, CParseBindingUndo, result.binding_undo_capacity);
+    }
     {
         u32 aggregate_slot_count = 16384;
         result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
@@ -15259,10 +15577,13 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         u32 existing_index = C_ID_UNDERLYING_INVALID;
         CEntity* conflicting = 0;
         bool overloadable = false;
-        for (u32 token_index = declaration->token_start; token_index < declaration->token_start + declaration->token_count; token_index += 1)
+        if (c_parse_token_bitmap_any(declaration_range_words, declaration->token_start, declaration->token_start + declaration->token_count))
         {
-            overloadable |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
-                            c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_OVERLOADABLE);
+            for (u32 token_index = declaration->token_start; token_index < declaration->token_start + declaration->token_count; token_index += 1)
+            {
+                overloadable |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
+                                c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_OVERLOADABLE);
+            }
         }
         CEntityKind entity_kind = kind == C_DECLARATION_FUNCTION ? C_ENTITY_FUNCTION : kind == C_DECLARATION_TYPEDEF ? C_ENTITY_TYPEDEF : C_ENTITY_OBJECT;
         bool declares_function_type = declaration->type.value < result.type_count && result.types[declaration->type.value].kind == C_TYPE_FUNCTION;
@@ -15388,7 +15709,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
                                          ? syntax_declaration->function_name_token
                                          : syntax_declaration->name_token;
         bool is_thread_local = false;
-        if (kind == C_DECLARATION_OBJECT)
+        if (kind == C_DECLARATION_OBJECT &&
+            c_parse_token_bitmap_any(declaration_range_words, declaration->token_start, declaration->token_start + declaration->token_count))
         {
             for (u32 token_index = declaration->token_start; token_index < declaration->token_start + declaration->token_count; token_index += 1)
             {
@@ -15559,6 +15881,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     }
     for (u32 declaration_index = 0; declaration_index < result.declaration_count; declaration_index += 1)
     {
+        // Every parameter and local the previous definition bound leaves the
+        // array here, whichever way that iteration ended.
+        c_parse_binding_unwind(&result, 0);
+        result.binding_scope = (CScopeId){
+            .value = 0,
+        };
         CDeclaration* declaration = &result.declarations[declaration_index];
         if (declaration->kind != C_DECLARATION_FUNCTION)
         {
@@ -15580,6 +15908,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
             .token_start = declaration->body_start,
             .token_end = declaration->body_start + declaration->body_token_count,
         };
+        result.binding_scope = scope;
         for (u32 parameter_index = 0; parameter_index < declaration->parameter_count; parameter_index += 1)
         {
             CParameter* parameter = &result.parameters[declaration->parameter_start + parameter_index];
@@ -15648,6 +15977,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         }
         c_parse_bind_function_body(&machine, arena, &result, preprocess, declaration_index);
     }
+    // The lowering re-enters scopes through c_parse_scope_for_token, so the
+    // array is left standing for the file scope alone, where it is right.
+    c_parse_binding_unwind(&result, 0);
+    result.binding_scope = (CScopeId){
+        .value = 0,
+    };
     c_parse_validate_unattached_cleanup_attributes(&result, preprocess);
     scratch_end(machine_temporary);
     BUSTER_CHECK(arena_destroy(machine_buffer_arena, 1));
