@@ -14050,6 +14050,8 @@ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains_range(CIntegerI
     return false;
 }
 
+BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* builder, CToken token);
+
 BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -14080,9 +14082,9 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         u32 index = frame->as.prepare_control.index++;
         c_ir_lazy_operand_scan_advance(builder, &frame->as.prepare_control.lazy, frame->as.prepare_control.start,
                                        frame->as.prepare_control.end, index);
-        if (index + 1 < frame->as.prepare_control.end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
-            string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), S8("_Generic")) &&
-            c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        if (index + 1 < frame->as.prepare_control.end &&
+            c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            c_ir_token_builtin_kind(builder, builder->preprocess.tokens[index]) == C_SYMBOL_BUILTIN_GENERIC)
         {
             u32 close = c_ir_matching_delimiter_cached(builder, index + 1, frame->as.prepare_control.end, C_PUNCTUATOR_LEFT_PARENTHESIS,
                                                        C_PUNCTUATOR_RIGHT_PARENTHESIS);
@@ -14098,7 +14100,20 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         }
         bool parentheses = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS);
         bool brackets = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET);
-        CIrPreparedControlExpression* recorded = parentheses || brackets ? c_ir_prepared_control_expression_find(builder, index) : 0;
+        // A token that opens no group leaves here. Every test below already
+        // stood inside a `parentheses || brackets` guard, and the group facts
+        // computed in between are pure, so this only moves the rejection ahead
+        // of the matching-delimiter query -- which for such a token asked for
+        // the close of a group its own token does not open, missed the stream
+        // index on the punctuator test, and answered with a linear scan of the
+        // whole remaining range. On a self-compile the loop steps over
+        // 1.659.024 tokens and 1.431.849 of those queries fell through to that
+        // scan.
+        if (!parentheses && !brackets)
+        {
+            continue;
+        }
+        CIrPreparedControlExpression* recorded = c_ir_prepared_control_expression_find(builder, index);
         if (recorded)
         {
             // A group an earlier prepass already prepared has run its whole
@@ -14114,7 +14129,7 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         u32 close = c_ir_matching_delimiter_cached(builder, index, frame->as.prepare_control.end,
                                                    parentheses ? C_PUNCTUATOR_LEFT_PARENTHESIS : C_PUNCTUATOR_LEFT_BRACKET,
                                                    parentheses ? C_PUNCTUATOR_RIGHT_PARENTHESIS : C_PUNCTUATOR_RIGHT_BRACKET);
-        if ((parentheses || brackets) && close == UINT32_MAX)
+        if (close == UINT32_MAX)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
@@ -14123,14 +14138,13 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
         // is evaluated by that parent's expression walk.  Preparing it here
         // would emit its assignment before an earlier comma operand (for
         // example Lua's `save(...), (state = next(...))`).
-        if ((parentheses || brackets) && c_ir_prepared_control_expression_contains_range(builder, index, close))
+        if (c_ir_prepared_control_expression_contains_range(builder, index, close))
         {
             frame->as.prepare_control.index = close + 1;
             c_ir_lazy_operand_scan_skip_group(&frame->as.prepare_control.lazy);
             continue;
         }
-        if ((!parentheses && !brackets) ||
-            (parentheses && index > frame->as.prepare_control.start && builder->preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER))
+        if (parentheses && index > frame->as.prepare_control.start && builder->preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER)
         {
             continue;
         }
