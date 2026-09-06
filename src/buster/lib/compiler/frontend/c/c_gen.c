@@ -2423,6 +2423,10 @@ struct CIntegerIrBuilder
     // scan touched one cache line per local to compare four bytes.  Sixteen
     // candidates share a line here.  Appended in lockstep with `locals`.
     u32* local_entities;
+    // The interned symbol of the token that named `locals[i]`, or 0 for a name
+    // the lowering respelled (see c_ir_find_local_by_name).  Appended in
+    // lockstep with `locals`, beside `local_entities` for the same reason.
+    u32* local_symbols;
     // `local_entities` keyed by entity: see c_ir_local_entity_probe.  Null for
     // a builder with no locals table (the test hooks), which falls back to the
     // scan the map replaces.
@@ -4159,6 +4163,31 @@ BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_entity(CIntegerIrBuilder* 
     return result;
 }
 
+// The last local this token names, for the four sites that fall back to the
+// name when the entity lookup finds nothing.  All four ran a string_equal per
+// row: 24.940 fallbacks over 2,32 M rows on a self-compile, which is where the
+// lowering's 2,3 M memcmp calls came from, and string_equal is the worst
+// L1d-miss-per-cycle ratio of any ordinary symbol in the compile.  The intern
+// table is injective and both sides read the one spelling space, so two
+// nonzero symbols answer exactly what the two spellings answer; a row or token
+// the intern pass never saw still compares spellings, so a missed path costs
+// speed and never correctness.
+BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_name(CIntegerIrBuilder* builder, CToken token)
+{
+    CIntegerIrLocal* result = 0;
+    String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
+    for (u32 index = builder->local_count; index != 0 && !result; index -= 1)
+    {
+        u32 candidate_symbol = builder->local_symbols[index - 1];
+        bool same = token.symbol && candidate_symbol ? token.symbol == candidate_symbol : string_equal(builder->locals[index - 1].name, spelling);
+        if (same)
+        {
+            result = builder->locals + index - 1;
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL CEntityId c_ir_identifier_entity(CIntegerIrBuilder* builder, u32 token_index)
 {
     CEntityId result;
@@ -4470,6 +4499,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken n
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[place.value].definition = id;
     builder->local_entities[builder->local_count] = entity.value;
+    builder->local_symbols[builder->local_count] = name.symbol;
     builder->locals[builder->local_count++] = (CIntegerIrLocal){
         .name = c_token_spelling(builder->preprocess.spelling_base, name),
         .source = c_ir_token_source_range(builder, name),
@@ -11461,15 +11491,7 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
                 CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
                 if (!local)
                 {
-                    for (u32 local_index = builder->local_count; local_index != 0; local_index -= 1)
-                    {
-                        CIntegerIrLocal* candidate = builder->locals + local_index - 1;
-                        if (string_equal(candidate->name, c_token_spelling(builder->preprocess.spelling_base, base_token)))
-                        {
-                            local = candidate;
-                            break;
-                        }
-                    }
+                    local = c_ir_find_local_by_name(builder, base_token);
                 }
                 IrSourceRange source = c_ir_token_source_range(builder, base_token);
                 IrValueId place = local ? c_ir_emit_address_of_place(builder, local->place, local->type, source) : IR_VALUE_ID_INVALID;
@@ -11598,15 +11620,7 @@ c_ir_place_base_resolved:
         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
         if (!local)
         {
-            for (u32 local_index = builder->local_count; local_index != 0; local_index -= 1)
-            {
-                CIntegerIrLocal* candidate = builder->locals + local_index - 1;
-                if (string_equal(candidate->name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[base_index])))
-                {
-                    local = candidate;
-                    break;
-                }
-            }
+            local = c_ir_find_local_by_name(builder, builder->preprocess.tokens[base_index]);
         }
         IrSourceRange source =
             c_ir_token_source_range(builder, builder->preprocess.tokens[base_index]);
@@ -19544,15 +19558,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
                 CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, operand_entity);
                 if (!local)
                 {
-                    for (u32 local_index = builder->local_count; local_index != 0; local_index -= 1)
-                    {
-                        CIntegerIrLocal* candidate = builder->locals + local_index - 1;
-                        if (string_equal(candidate->name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 2])))
-                        {
-                            local = candidate;
-                            break;
-                        }
-                    }
+                    local = c_ir_find_local_by_name(builder, builder->preprocess.tokens[index + 2]);
                 }
                 if (local)
                 {
@@ -24021,15 +24027,7 @@ c_ir_expression_core_loop:
                 CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
                 if (!local)
                 {
-                    for (u32 local_index = builder->local_count; local_index != 0; local_index -= 1)
-                    {
-                        CIntegerIrLocal* candidate = builder->locals + local_index - 1;
-                        if (string_equal(candidate->name, c_token_spelling(builder->preprocess.spelling_base, token)))
-                        {
-                            local = candidate;
-                            break;
-                        }
-                    }
+                    local = c_ir_find_local_by_name(builder, token);
                 }
                 u32 place_end = index + 1;
                 if (local && local->is_variable_length_array)
@@ -34214,6 +34212,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     }
                     place = c_ir_emit_global_place(builder, entity, local_source);
                     builder->local_entities[builder->local_count] = entity.value;
+                    builder->local_symbols[builder->local_count] = name.symbol;
                     builder->locals[builder->local_count++] = (CIntegerIrLocal){
                         .name = c_token_spelling(builder->preprocess.spelling_base, name),
                         .source = local_source,
@@ -44341,6 +44340,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .declaration_index = declaration_index,
             .locals = arena_allocate(lowering_temporary.arena, CIntegerIrLocal, local_capacity ? (u32)local_capacity : 1),
             .local_entities = arena_allocate(lowering_temporary.arena, u32, local_capacity ? (u32)local_capacity : 1),
+            .local_symbols = arena_allocate(lowering_temporary.arena, u32, local_capacity ? (u32)local_capacity : 1),
             .local_entity_slots = arena_allocate(lowering_temporary.arena, u32, (u32)local_slot_capacity),
             .local_entity_slot_mask = (u32)local_slot_capacity - 1,
             .local_capacity = local_capacity ? (u32)local_capacity : 1,
