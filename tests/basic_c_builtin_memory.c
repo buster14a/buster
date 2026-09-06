@@ -40,6 +40,16 @@ int main(int argc, char** argv)
     if (object_size_outer(__builtin_object_size(object_size_destination(), 0)) != (__SIZE_TYPE__)-1) return 21;
     if (object_size_calls != 10) return 22;
     object_size_calls = 0;
+    // Constant predicates also discard direct, nested and indirect calls.
+    char* (*constant_indirect)(void) = object_size_destination;
+    if (__builtin_constant_p(object_size_destination())) return 25;
+    if (__builtin_constant_p(object_size_outer((__SIZE_TYPE__)object_size_destination()))) return 26;
+    if (__builtin_constant_p(constant_indirect())) return 27;
+    if (__builtin_constant_p((object_size_destination(), 1))) return 28;
+    if (object_size_calls != 0) return 29;
+    if (object_size_outer(__builtin_constant_p(object_size_destination())) != 0) return 30;
+    if (object_size_calls != 10) return 31;
+    object_size_calls = 0;
     char source[16];
     char destination[16];
     __builtin_memset(source, 0x5a, sizeof(source));
