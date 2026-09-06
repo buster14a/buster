@@ -4336,6 +4336,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_intern_scan_by_shape(UnitTestArguments
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pp_class_masks(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 source_capacity = BUSTER_KB(256);
+    char8* source_bytes = arena_allocate(arguments->arena, char8, source_capacity);
+    u64 source_length = 0;
+    for (u32 item = 0; item < 300; item += 1)
+    {
+        // Lines of unequal token counts slide every class across the window
+        // lanes, and the unbalanced closer is the clamp the row scan applies.
+        c_test_append_source(source_bytes, source_capacity, &source_length,
+                             string_format(arguments->arena, S8("int value_{u32} = ((({u32}))) + f_{u32}(a, (b), c);\n"), item, item % 11, item));
+        if (item % 3 == 0)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length,
+                                 string_format(arguments->arena, S8("int spare_{u32}; /* c */ char const* text_{u32} = \"s{u32}\");\n"), item, item, item));
+        }
+        if (item % 5 == 0)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length, S8("\n"));
+        }
+    }
+    BUSTER_TEST(arguments, source_length > BUSTER_KB(8));
+    BUSTER_TEST(arguments, c_test_pp_class_masks_agree(arguments->arena, (String8){.pointer = source_bytes, .length = source_length}));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -13045,6 +13072,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
     c_test_result_add(&result, c_test_frontend_lex_differential(arguments));
     c_test_result_add(&result, c_test_intern_scan_by_shape(arguments));
+    c_test_result_add(&result, c_test_pp_class_masks(arguments));
     c_test_result_add(&result, c_test_string_literal_decode_differential(arguments));
     c_test_result_add(&result, c_test_position_index_tiles(arguments));
     c_test_result_add(&result, c_test_oversized_token_spellings(arguments));
