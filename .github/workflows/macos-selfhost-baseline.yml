@@ -1,0 +1,45 @@
+name: macOS self-host baseline
+on:
+  push:
+    branches: [work/2026-09-06-integration-gates]
+    paths: [.github/workflows/macos-selfhost-baseline.yml]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    if: github.server_url == 'https://github.com'
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 017b0381ed75d859043b60a92f2ec2e9f5872980
+          persist-credentials: false
+      - name: Install SDK
+        run: bash .github/scripts/install-vulkan-sdk.sh
+      - name: Build unchanged baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --ci --linker DEFAULT
+          "$driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/macos-baseline-suite.log"
+      - name: Reproduce unmodified self-host failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/macos-baseline-self-host.log"
+      - name: Independent execution-mode matrix
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/macos-baseline-modes.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: macos-unchanged-baseline
+          path: ${{ runner.temp }}/macos-baseline-*.log
+          retention-days: 7
+          if-no-files-found: error
