@@ -1771,6 +1771,10 @@ String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate
         pointer[result_length] = 0;
     }
 
+    // Builders append their next UTF-16 fragment at the arena cursor. The
+    // UTF-8 byte count is only an upper bound on the number of code units.
+    arena_set_position(arena, arena->position - (string.length - result_length) * sizeof(*pointer));
+
     String16 result = (String16){.pointer = pointer, .length = result_length};
     return result;
 }
@@ -1904,14 +1908,11 @@ void os_argument_builder_append(OsArgumentBuilder* builder, String8 string)
     *arena_allocate(builder->arena, String8, 1) = string;
 }
 
-SliceString8 os_argument_builder_flush(OsArgumentBuilder* const builder)
+SliceString8 os_argument_builder_end(OsArgumentBuilder* builder)
 {
-    u64 original_position = builder->position;
-    u64 current_position = builder->arena->position;
-    u64 byte_count = current_position - original_position;
-    BUSTER_CHECK(byte_count % sizeof(String8) == 0);
-    u64 argument_count = byte_count / sizeof(String8);
-    String8* pointer = arena_get_pointer_at_position_align(builder->arena, String8, builder->position);
-    SliceString8 result = {.pointer = pointer, .length = argument_count};
+    SliceString8 result = {
+        .pointer = arena_get_pointer_at_position(builder->arena, String8, builder->position),
+        .length = (builder->arena->position - builder->position) / sizeof(String8),
+    };
     return result;
 }
