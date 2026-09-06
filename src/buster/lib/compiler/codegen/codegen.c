@@ -40,6 +40,9 @@
 //                                                assembly_encode, relocations
 //                                                into the module
 //   a64_emit_*, codegen_canonical_a64_*          AArch64 emission helpers
+//   codegen_slot_costs_build,                    the attempt's per-type frame
+//   codegen_record_machine_line_marks            slot table and the line rows
+//                                                of a machine-emitted function
 
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 
@@ -1529,6 +1532,53 @@ struct CodegenX64MetadataCache
 };
 BUSTER_CT_CHECK((CODEGEN_X64_METADATA_CACHE_CAPACITY & (CODEGEN_X64_METADATA_CACHE_CAPACITY - 1u)) == 0);
 
+// The metadata cache and its template array, from `arena`, or null when the
+// arena cannot hold them: a caller may pass a deliberately small arena to
+// exercise a capacity-limited module, and emission treats an absent cache as
+// a miss on every query, so the bytes it emits do not depend on the answer.
+BUSTER_GLOBAL_LOCAL CodegenX64MetadataCache* codegen_canonical_x64_metadata_cache_allocate(Arena* arena, u64 function_count)
+{
+    CodegenX64MetadataCache* result = 0;
+    u32 template_capacity = codegen_canonical_x64_template_capacity(function_count);
+    u64 cache_size = sizeof(CodegenX64MetadataCache) + (u64)template_capacity * sizeof(CodegenX64TemplateCacheEntry);
+    if (function_count && cache_size <= arena->reserved_size - BUSTER_MIN(arena->position, arena->reserved_size))
+    {
+        u64 template_dirty_position = arena_dirty_position(arena);
+        result = arena_allocate(arena, CodegenX64MetadataCache, 1);
+        memset(result, 0, sizeof(*result));
+        result->templates = arena_allocate(arena, CodegenX64TemplateCacheEntry, template_capacity);
+        // `dirty_position` is the allocation high-water mark, not the
+        // logical position: a temporal rewind and a pooled arena can put
+        // old bytes ahead of the current cursor.  Only that overlap can
+        // carry a prior template; the suffix was never allocated in this
+        // arena generation and is therefore already zero from the OS.
+        // Clearing through the watermark also handles a boundary that
+        // falls inside an entry, leaving every field after it zero.
+        u64 template_bytes = (u64)template_capacity * sizeof(*result->templates);
+        u64 template_end = arena->position;
+        u64 template_start = template_end - template_bytes;
+        u64 clear_end = BUSTER_MIN(template_dirty_position, template_end);
+        if (clear_end > template_start)
+        {
+            memset(result->templates, 0, clear_end - template_start);
+        }
+        result->template_mask = template_capacity - 1u;
+    }
+    return result;
+}
+
+// The cache a module under a register allocator allocates on first need; see
+// codegen_generate_canonical_module. One try per attempt: an arena too small
+// for it stays too small.
+BUSTER_GLOBAL_LOCAL void codegen_buffer_ensure_x64_metadata_cache(CodegenBuffer* buffer, bool* tried, Arena* arena, u64 function_count)
+{
+    if (!*tried)
+    {
+        *tried = true;
+        buffer->x64_metadata_cache = codegen_canonical_x64_metadata_cache_allocate(arena, function_count);
+    }
+}
+
 // The cache key is built once as packed 64-bit words and then hashed word at a
 // time, rather than folding the query's raw struct bytes twice.  Two things
 // follow from that.  The hash loop is an order of magnitude shorter, which
@@ -2922,14 +2972,18 @@ BUSTER_GLOBAL_LOCAL bool x64_vector_comparison_condition(IrBinaryOperation opera
 }
 
 
+// `source_limit` is the first source id the record cannot name: at most
+// UINT16_MAX + 1, and the program's source count when the caller knows it, so
+// a stored source is always an index into the source table and the object
+// writer can hand the array to the DWARF and CodeView builders as it is.
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE void codegen_record_line_hot(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source,
-                                                               u32 line, u32 column)
+                                                               u32 source_limit, u32 line, u32 column)
 {
     if (entries && line && *count < capacity)
     {
         // The 12-byte record stores these as u16; saturate rather than truncate
         // so an overflowing source cannot alias an unrelated file.
-        u16 stored_source = source <= UINT16_MAX ? (u16)source : 0;
+        u16 stored_source = source < source_limit ? (u16)source : 0;
         u16 stored_column = column <= UINT16_MAX ? (u16)column : UINT16_MAX;
         if (*count)
         {
@@ -2951,7 +3005,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void codegen_record_line_hot(CodegenLineEntry*
 
 void codegen_record_line(CodegenLineEntry* entries, u32* count, u32 capacity, u32 code_offset, u32 source, u32 line, u32 column)
 {
-    codegen_record_line_hot(entries, count, capacity, code_offset, source, line, column);
+    codegen_record_line_hot(entries, count, capacity, code_offset, source, (u32)UINT16_MAX + 1, line, column);
 }
 
 
@@ -8384,16 +8438,106 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_is_read_only(IrGlobal* global)
     return global->is_read_only && !global->relocation_count && global->initializer_kind != IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS;
 }
 
+// What one canonical value of a type costs the frame, read by the capacity
+// estimate's walk over every value of every function in place of the type
+// record itself: the record is ~152 bytes and the walk wants 13 of them, so
+// a million random reads of it were the walk's whole cost. One row per
+// program type, built once per module beside the f80 cache -- it depends on
+// nothing an attempt produces, so it survives a retry -- and eight rows share
+// a cache line. `size` is the slot rounded up to eightbytes and never under
+// one; `alignment` is the type's, never under eight. A zero `size` marks a
+// type the walk cannot size, an unresolved layout or one past the u32 frame
+// the emitter addresses, which is an error for every value but a global place.
+typedef struct CodegenSlotCost CodegenSlotCost;
+struct CodegenSlotCost
+{
+    u32 size;
+    u32 alignment;
+};
+BUSTER_CT_CHECK(sizeof(CodegenSlotCost) == 8);
+
+BUSTER_GLOBAL_LOCAL CodegenSlotCost* codegen_slot_costs_build(Arena* arena, IrTypeTable const* types)
+{
+    CodegenSlotCost* result = arena_allocate(arena, CodegenSlotCost, types->count ? types->count : 1);
+    for (u32 type_index = 0; type_index < types->count; type_index += 1)
+    {
+        IrTypeLayout layout = types->types[type_index].layout;
+        bool sized = layout.resolved && layout.size <= UINT32_MAX - 7;
+        u64 slot_size = (layout.size + 7) & ~(u64)7;
+        result[type_index] = (CodegenSlotCost){
+            .size = sized ? (u32)BUSTER_MAX(slot_size, 8u) : 0,
+            .alignment = BUSTER_MAX(layout.alignment, 8u),
+        };
+    }
+    return result;
+}
+
+// The line rows of one machine-emitted function, from the selector's marks --
+// one per lowered instruction, in row order -- and the encoder's row offsets.
+// A position is recovered here rather than carried through selection, so a
+// row that never reaches the line table costs nothing to resolve, and which
+// rows those are is known before any position is: the record helper drops a
+// row at the last recorded offset (a row that emitted no bytes, or one behind
+// a row that did) and drops everything once the table is full, so those marks
+// are not resolved at all -- three marks in ten on the self-host stage. A mark
+// that repeats its predecessor's range, which every instruction of one
+// expression does, takes the position already in hand instead of the program
+// cursor's memo behind two calls. The rows appended, and their order, are
+// exactly those of resolving every mark: a position only ever decides whether
+// a row is appended, never where, and a mark skipped here would have been
+// dropped on its offset alone.
+BUSTER_GLOBAL_LOCAL void codegen_record_machine_line_marks(IrProgram* program, IrFunction* ir_function, CodegenModule* result,
+                                                            u32 line_entry_capacity, u32 line_source_limit, MachineFunction const* function,
+                                                            u32 const* row_offsets, u32 code_base)
+{
+    CodegenLineEntry* entries = result->line_entries;
+    if (entries)
+    {
+        // The mark names its IR row; its source range is recovered here
+        // rather than carried through selection, and a row without one is
+        // skipped before the last-entry test so the entry sequence is the
+        // one the ranged-only marks produced. A memo source of
+        // IR_ID_UNDERLYING_INVALID reads as "no position yet".
+        u32 memo_source = IR_ID_UNDERLYING_INVALID;
+        u32 memo_offset = 0;
+        IrSourcePosition memo_position = {0};
+        for (u32 mark_index = 0; mark_index < function->line_mark_count; mark_index += 1)
+        {
+            MachineLineMark mark = function->line_marks[mark_index];
+            IrSourceRange mark_source = ir_instruction_canonical_source(ir_function, (IrInstructionId){.value = mark.instruction});
+            if (mark.row < function->instruction_count && mark_source.source.value != IR_ID_UNDERLYING_INVALID)
+            {
+                u32 code_offset = code_base + row_offsets[mark.row];
+                u32 count = result->line_entry_count;
+                bool dropped = count >= line_entry_capacity || (count && entries[count - 1].code_offset == code_offset);
+                if (!dropped)
+                {
+                    if (mark_source.source.value != memo_source || mark_source.offset != memo_offset)
+                    {
+                        memo_position = ir_source_position(program, mark_source);
+                        memo_source = mark_source.source.value;
+                        memo_offset = mark_source.offset;
+                    }
+                    codegen_record_line_hot(entries, &result->line_entry_count, line_entry_capacity, code_offset, mark_source.source.value,
+                                            line_source_limit, memo_position.line, memo_position.column);
+                }
+            }
+        }
+    }
+}
+
 // One generation of the whole module -- globals, functions and global assembly
 // -- into a code buffer reserved at `capacity_scale` times the flat estimate
 // below. Everything it produces comes out of `arena`, so a caller that does not
 // like the answer can rewind and ask again; the target, the program ABI and the
 // IR validation are its caller's business and are not repeated per attempt.
 BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Arena* arena, IrProgram* program,
-                                                                           CodegenCanonicalX64F80Cache const* f80_cache, IrModule* module,
+                                                                           CodegenCanonicalX64F80Cache const* f80_cache,
+                                                                           CodegenSlotCost const* slot_costs, IrModule* module,
                                                                            Target target, CodegenModuleOptions options, u64 capacity_scale,
                                                                            bool* code_buffer_exhausted,
-                                                                           CodegenX64MetadataCache* x64_metadata_cache)
+                                                                           CodegenX64MetadataCache* x64_metadata_cache,
+                                                                           MachineSelectionModule* machine_module)
 {
     CodegenModule result = {
         .ir_module = module,
@@ -8583,6 +8727,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     // summary answers for every function that carries no template, which is
     // all but a handful in any module.
     u64 inline_assembly_capacity = 0;
+    u32 type_count = program->types.count;
+    u64 slot_before_align = target.cpu_arch == CPU_ARCH_X86_64 ? ~(u64)0 : 0;
+    u64 slot_after_align = ~slot_before_align;
     for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
@@ -8604,11 +8751,27 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             result.error = CODEGEN_ERROR_CAPACITY;
             return result;
         }
+        // The frame the function's canonical slots would take, walked from the
+        // per-type slot table (CodegenSlotCost) rather than the type records.
+        // The instruction row is read for a place -- a GLOBAL's result is one,
+        // which ir_validate_instruction_operation requires, and places are
+        // under a fifth of the values -- and for the rare over-aligned local,
+        // whose raw size the table does not carry. The two sums must be exactly
+        // what the record-walking form computed: the code buffer is reserved
+        // from them and an exhausted buffer regenerates the whole module.
         u64 function_value_bytes = 0;
+        IrValue const* values = function->values;
+        IrInstruction const* instructions = function->instructions;
+        u32 function_instruction_count = function->instruction_count;
         for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
         {
-            IrType* value_type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
-            bool global_place = codegen_canonical_value_is_global_place(function, value_index);
+            IrValue value = values[value_index];
+            if (value.canonical_type.value >= type_count)
+            {
+                result.error = CODEGEN_ERROR_INVALID_IR;
+                return result;
+            }
+            CodegenSlotCost cost = slot_costs[value.canonical_type.value];
             // A global place occupies an eightbyte holding the object's
             // address, so it needs no layout for the object itself. That is
             // what lets `extern struct opaque object;` be addressed without
@@ -8616,18 +8779,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // relies on -- it declares `__stderr_FILE` while suppressing the
             // definition of `struct _IO_FILE`, so every `stderr` in the tree
             // takes the address of an incomplete object.
-            if (!value_type || (!global_place && (!value_type->layout.resolved || value_type->layout.size > UINT32_MAX - 7)))
+            bool global_place = value.category == IR_VALUE_PLACE && value.definition.value < function_instruction_count &&
+                                instructions[value.definition.value].opcode == IR_OPCODE_GLOBAL;
+            u64 slot_size = global_place ? 8 : cost.size;
+            u64 slot_alignment = global_place ? 8 : BUSTER_MAX(cost.alignment, value.alignment);
+            if (!slot_size)
             {
                 result.error = CODEGEN_ERROR_INVALID_IR;
                 return result;
             }
-            u64 slot_size = global_place ? 8 : (value_type->layout.size + 7) & ~(u64)7;
-            slot_size = BUSTER_MAX(slot_size, 8u);
-            u64 slot_alignment = global_place ? 8 : BUSTER_MAX(BUSTER_MAX(value_type->layout.alignment, function->values[value_index].alignment), 8u);
-            if (target.cpu_arch == CPU_ARCH_X86_64)
-            {
-                function_value_bytes += slot_size;
-            }
+            // x86-64 places the slot before aligning, AArch64 after; the two
+            // masks are the target decided once outside the loop.
+            function_value_bytes += slot_size & slot_before_align;
             // slot_alignment is always a power of two: type layout alignments
             // bottom out in target_data_layout's 1..16 table (aggregates take
             // a max of member alignments, vectors a power-of-two byte size),
@@ -8637,22 +8800,19 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // hardware divide in a loop that visits every value of every
             // function.
             function_value_bytes = align_forward(function_value_bytes, slot_alignment);
-            if (target.cpu_arch == CPU_ARCH_AARCH64)
+            function_value_bytes += slot_size & slot_after_align;
+            if (value.alignment > 16 && value.definition.value < function_instruction_count &&
+                instructions[value.definition.value].opcode == IR_OPCODE_LOCAL)
             {
-                function_value_bytes += slot_size;
-            }
-            if (function->values[value_index].alignment > 16 && function->values[value_index].definition.value < function->instruction_count &&
-                function->instructions[function->values[value_index].definition.value].opcode == IR_OPCODE_LOCAL)
-            {
-                function_value_bytes += value_type->layout.size + function->values[value_index].alignment - 1;
+                function_value_bytes += ir_type_from_id(&program->types, value.canonical_type)->layout.size + value.alignment - 1;
             }
             // A value this wide can be handed to a call on the stack, and an
             // area aligned for it is filled an eightbyte at a time rather than
             // pushed. That is more code than the flat per-instruction reserve
             // below carries, so the value pays for the copy it can provoke.
-            if (target.cpu_arch == CPU_ARCH_X86_64 && slot_alignment > CODEGEN_X64_STACK_ALIGNMENT)
+            if (slot_alignment > CODEGEN_X64_STACK_ALIGNMENT)
             {
-                aligned_argument_capacity += (slot_size / 8) * 15 + 32;
+                aligned_argument_capacity += ((slot_size / 8) * 15 + 32) & slot_before_align;
             }
         }
         u64 probe_count = (function_value_bytes + A64_SP_ADJUST_CHUNK - 1) / A64_SP_ADJUST_CHUNK;
@@ -8746,9 +8906,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         .exhausted = code_buffer_exhausted,
         .x64_metadata_cache = x64_metadata_cache,
     };
+    // Whether this attempt has asked for the x86 cache it was not handed;
+    // see codegen_buffer_ensure_x64_metadata_cache.
+    bool x64_metadata_cache_tried = x64_metadata_cache != 0;
     // Every function contributes a row for its own declaration on top of the
     // per-instruction rows.
     u32 line_entry_capacity = instruction_count + module->function_count;
+    // A source the program's table does not hold is recorded as file 0, the
+    // clamp the object writer once applied to every row on its way to the
+    // DWARF builder; doing it here is what lets the writer alias the array.
+    u32 line_source_limit = BUSTER_MIN(program->sources.count, (u32)UINT16_MAX + 1);
     result.line_entries = options.debug_info ? arena_allocate(arena, CodegenLineEntry, line_entry_capacity) : 0;
     result.debug_locations = options.debug_info ? arena_allocate(arena, DebugLocationSeed, debug_location_capacity) : 0;
     result.debug_info = options.debug_info;
@@ -8762,23 +8929,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         {
             continue;
         }
+        // The bytes up to this function's aligned start, in one fill: 0x90 on
+        // x86-64, the one-byte `NOP` the metadata tables answered for when
+        // this went through the encoder a byte at a time, and zero on
+        // AArch64. The alignment is a power of two, so the mask is the
+        // distance to it.
         u64 alignment = target.cpu_arch == CPU_ARCH_AARCH64 ? 4 : 16;
-        // A full buffer stops accepting bytes without advancing its count, so
-        // padding to an alignment it can no longer reach never terminates.
-        while (buffer.error == CODEGEN_ERROR_NONE && buffer.count % alignment)
+        u64 entry_padding = (0 - buffer.count) & (alignment - 1);
+        u8* entry_padding_bytes = 0;
+        if (buffer.error == CODEGEN_ERROR_NONE && entry_padding && codegen_buffer_reserve(&buffer, entry_padding, &entry_padding_bytes))
         {
-            if (target.cpu_arch == CPU_ARCH_X86_64)
-            {
-                if (!codegen_canonical_x64_metadata_emit(&buffer, S8("NOP"), 0, 0))
-                {
-                    result.error = buffer.error;
-                    return result;
-                }
-            }
-            else
-            {
-                codegen_emit_u8(&buffer, 0);
-            }
+            memset(entry_padding_bytes, target.cpu_arch == CPU_ARCH_X86_64 ? 0x90 : 0, entry_padding);
         }
         if (buffer.error != CODEGEN_ERROR_NONE)
         {
@@ -8795,7 +8956,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // declaration line instead of falling outside the line table.
             IrSourcePosition declaration = ir_source_position(program, function->source);
             codegen_record_line_hot(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count,
-                                    function->source.source.value, declaration.line, declaration.column);
+                                    function->source.source.value, line_source_limit, declaration.line, declaration.column);
         }
         // The declaration row is not an instruction's; the next instruction
         // must still be able to record one.
@@ -8833,6 +8994,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
 
     canonical_prep:
         ;
+        if (target.cpu_arch == CPU_ARCH_X86_64)
+        {
+            codegen_buffer_ensure_x64_metadata_cache(&buffer, &x64_metadata_cache_tried, arena, module->function_count);
+        }
         // This state is reached only for NONE/PE-unwind paths or a machine
         // attempt that could not be kept. It owns all canonical emitter data.
         bool windows_aarch64 = target.cpu_arch == CPU_ARCH_AARCH64 && target_uses_pe_unwind(target);
@@ -9217,7 +9382,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         {
             TemporalArena machine_scratch = scratch_begin(&arena, 1);
             MachineSelectResult selected = {0};
-            selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target, position_independent);
+            selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target, position_independent,
+                                                                   machine_module);
             machine_simd_operation_count = selected.simd_operation_count;
             if (!selected.supported)
             {
@@ -9406,20 +9572,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (machine_unwind_valid)
                         {
                             memcpy(buffer.bytes + buffer.count, encoded.bytes, encoded.byte_count);
-                            for (u32 mark_index = 0; mark_index < selected.function.line_mark_count; mark_index += 1)
-                            {
-                                MachineLineMark* mark = selected.function.line_marks + mark_index;
-                                if (result.line_entries && mark->row < selected.function.instruction_count)
-                                {
-                                    IrSourcePosition position = ir_source_position(program, (IrSourceRange){
-                                                                                                .source = {.value = mark->source},
-                                                                                                .offset = mark->offset,
-                                                                                            });
-                                    codegen_record_line_hot(result.line_entries, &result.line_entry_count, line_entry_capacity,
-                                                            (u32)buffer.count + encoded.row_offsets[mark->row], mark->source, position.line,
-                                                            position.column);
-                                }
-                            }
+                            codegen_record_machine_line_marks(program, function, &result, line_entry_capacity, line_source_limit, &selected.function,
+                                                              encoded.row_offsets, (u32)buffer.count);
                             for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
                             {
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
@@ -9516,24 +9670,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (machine_unwind_valid)
                         {
                             memcpy(buffer.bytes + buffer.count, encoded.bytes, encoded.byte_count);
-                            for (u32 mark_index = 0; mark_index < selected.function.line_mark_count; mark_index += 1)
-                            {
-                                MachineLineMark* mark = selected.function.line_marks + mark_index;
-                                if (result.line_entries && mark->row < selected.function.instruction_count)
-                                {
-                                    // Positions are recovered here rather than
-                                    // carried through selection, so a row that
-                                    // never reaches the line table costs
-                                    // nothing to resolve.
-                                    IrSourcePosition position = ir_source_position(program, (IrSourceRange){
-                                                                                                .source = {.value = mark->source},
-                                                                                                .offset = mark->offset,
-                                                                                            });
-                                    codegen_record_line_hot(result.line_entries, &result.line_entry_count, line_entry_capacity,
-                                                            (u32)buffer.count + encoded.row_offsets[mark->row], mark->source, position.line,
-                                                            position.column);
-                                }
-                            }
+                            codegen_record_machine_line_marks(program, function, &result, line_entry_capacity, line_source_limit, &selected.function,
+                                                              encoded.row_offsets, (u32)buffer.count);
                             for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
                             {
                                 // The encoder says which field of which
@@ -9957,7 +10095,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     recorded_source = canonical_source;
                     IrSourcePosition position = ir_source_position(program, canonical_source);
                     codegen_record_line_hot(result.line_entries, &result.line_entry_count, line_entry_capacity, (u32)buffer.count,
-                                            canonical_source.source.value, position.line, position.column);
+                                            canonical_source.source.value, line_source_limit, position.line, position.column);
                 }
                 if (x64_upper_vector_dirty && !codegen_canonical_x64_instruction_preserves_wide_vector(program, instruction) &&
                     !codegen_canonical_x64_instruction_uses_wide_vector(program, function, instruction, target))
@@ -19834,6 +19972,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             return result;
         }
     }
+    if (target.cpu_arch == CPU_ARCH_X86_64 && module->assembly_count)
+    {
+        codegen_buffer_ensure_x64_metadata_cache(&buffer, &x64_metadata_cache_tried, arena, module->function_count);
+    }
     for (u32 assembly_index = 0; assembly_index < module->assembly_count; assembly_index += 1)
     {
         u32 failed_line = 0;
@@ -19903,37 +20045,23 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
             return result;
         }
         // Every row the cache holds is keyed on instruction shape alone, so it
-        // stays valid across a retry and is allocated before the temporal scope
-        // opens rather than being rebuilt by each attempt. A caller may pass a
-        // deliberately small arena to exercise a capacity-limited module, so a
-        // cache that does not fit is skipped instead of failing the module:
-        // emission treats an absent cache as a miss on every query.
-        u32 template_capacity = codegen_canonical_x64_template_capacity(module->function_count);
-        u64 cache_size = sizeof(CodegenX64MetadataCache) + (u64)template_capacity * sizeof(CodegenX64TemplateCacheEntry);
-        if (module->function_count && cache_size <= arena->reserved_size - BUSTER_MIN(arena->position, arena->reserved_size))
+        // stays valid across a retry and, when every function takes the
+        // canonical emitter, it is allocated before the temporal scope opens
+        // rather than being rebuilt by each attempt. Under a register
+        // allocator the machine encoder emits the code and the canonical
+        // emitter sees only the functions it refuses -- none, on the self-host
+        // stage -- so the attempt allocates the cache the first time one of
+        // those, or a module-level assembly block, asks for it: inside its own
+        // scope, which a retry rewinds, so every attempt starts without it.
+        if (options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_NONE)
         {
-            u64 template_dirty_position = arena_dirty_position(arena);
-            x64_metadata_cache = arena_allocate(arena, CodegenX64MetadataCache, 1);
-            memset(x64_metadata_cache, 0, sizeof(*x64_metadata_cache));
-            x64_metadata_cache->templates = arena_allocate(arena, CodegenX64TemplateCacheEntry, template_capacity);
-            // `dirty_position` is the allocation high-water mark, not the
-            // logical position: a temporal rewind and a pooled arena can put
-            // old bytes ahead of the current cursor.  Only that overlap can
-            // carry a prior template; the suffix was never allocated in this
-            // arena generation and is therefore already zero from the OS.
-            // Clearing through the watermark also handles a boundary that
-            // falls inside an entry, leaving every field after it zero.
-            u64 template_bytes = (u64)template_capacity * sizeof(*x64_metadata_cache->templates);
-            u64 template_end = arena->position;
-            u64 template_start = template_end - template_bytes;
-            u64 clear_end = BUSTER_MIN(template_dirty_position, template_end);
-            if (clear_end > template_start)
-            {
-                memset(x64_metadata_cache->templates, 0, clear_end - template_start);
-            }
-            x64_metadata_cache->template_mask = template_capacity - 1u;
+            x64_metadata_cache = codegen_canonical_x64_metadata_cache_allocate(arena, module->function_count);
         }
     }
+    // The capacity estimate's per-type slot table: like the f80 cache it
+    // depends on the program alone, so it is built once before the temporal
+    // scope opens and read by every attempt.
+    CodegenSlotCost* slot_costs = codegen_slot_costs_build(arena, &program->types);
     // The code buffer is reserved at a flat rate per IR instruction, which is
     // an estimate rather than a bound: an instruction that moves an aggregate
     // encodes a load and a store per eightbyte, so its size grows with the type
@@ -19944,12 +20072,21 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     // nothing until it is needed. The attempt owns nothing outside this arena
     // beyond the caches prepared above, so rewinding it is the whole undo, and
     // the reserve's own `UINT32_MAX` ceiling ends the doubling.
+    // The machine selectors' module context — the per-type projection and
+    // the x86-64 per-signature call plans: like the caches above it depends
+    // on the program and the target alone, so it is built once here, outside
+    // the attempt scope, rather than by every function or every attempt.
+    MachineSelectionModule* machine_module = 0;
+    if (target.cpu_arch == CPU_ARCH_X86_64 && options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE)
+    {
+        machine_module = machine_select_module_prepare(arena, program, target);
+    }
     TemporalArena attempt_scope = arena_begin_temporal(arena);
     for (u64 capacity_scale = 1;; capacity_scale *= 2)
     {
         bool code_buffer_exhausted = false;
-        result = codegen_generate_canonical_module_attempt(arena, program, &f80_cache, module, target, options, capacity_scale, &code_buffer_exhausted,
-                                                           x64_metadata_cache);
+        result = codegen_generate_canonical_module_attempt(arena, program, &f80_cache, slot_costs, module, target, options, capacity_scale,
+                                                           &code_buffer_exhausted, x64_metadata_cache, machine_module);
         // Every other capacity failure -- a frame displacement out of range, a
         // frame past `UINT32_MAX`, a reserve that cannot be addressed -- is one
         // more room cannot fix, and is reported as it stands.

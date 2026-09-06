@@ -2683,6 +2683,303 @@ BUSTER_GLOBAL_LOCAL CToken c_test_find_token_kind(CToken* tokens, u64 token_coun
     return (CToken){0};
 }
 
+// Wraps `body` in `delimiter`s behind `prefix` and runs the literal-decoder
+// gate on the spelling: the window decoder and the length-only counter must
+// agree with the scalar reference on acceptance, on every byte, and on the
+// count. `accepted_out` is the reference's verdict, so a case can also assert
+// which side of the grammar it fell on.
+BUSTER_GLOBAL_LOCAL bool c_test_quoted_paths_agree(Arena* arena, String8 prefix, String8 body, u8 delimiter, bool* accepted_out)
+{
+    u64 position = arena->position;
+    u64 length = prefix.length + body.length + 2;
+    char8* spelling = arena_allocate(arena, char8, length);
+    memcpy(spelling, prefix.pointer, prefix.length);
+    spelling[prefix.length] = (char8)delimiter;
+    if (body.length)
+    {
+        memcpy(spelling + prefix.length + 1, body.pointer, body.length);
+    }
+    spelling[length - 1] = (char8)delimiter;
+    bool result = c_test_decode_quoted_paths_agree(arena, (String8){spelling, length}, delimiter, accepted_out);
+    arena->position = position;
+    return result;
+}
+
+// `offset` filler bytes, then `escape`, then `tail` more filler: the shape
+// that slides one escape across a window boundary. The fillers are neither
+// hex nor octal digits, so a greedy escape stops where the case says it does.
+BUSTER_GLOBAL_LOCAL String8 c_test_quoted_body(Arena* arena, u64 offset, String8 escape, u64 tail)
+{
+    u64 length = offset + escape.length + tail;
+    char8* body = arena_allocate(arena, char8, length ? length : 1);
+    memset(body, 'z', offset);
+    memcpy(body + offset, escape.pointer, escape.length);
+    memset(body + offset + escape.length, 'y', tail);
+    return (String8){body, length};
+}
+
+BUSTER_GLOBAL_LOCAL String8 c_test_quoted_repeat(Arena* arena, String8 unit, u64 count)
+{
+    u64 length = unit.length * count;
+    char8* body = arena_allocate(arena, char8, length ? length : 1);
+    for (u64 index = 0; index < count; index += 1)
+    {
+        memcpy(body + index * unit.length, unit.pointer, unit.length);
+    }
+    return (String8){body, length};
+}
+
+// The window decoder and the length-only counter must produce exactly what
+// the scalar reference decoder produces for every narrow literal. Each escape
+// kind is slid across the 64-byte window boundaries with and without a tail,
+// bodies fill and straddle whole windows, escapes run back to back and
+// densely, multi-byte UTF-8 crosses the boundary untouched, both prefixes
+// and both delimiters are covered, and a fuzz over the grammar's own alphabet
+// reaches the rejected shapes the fixed corpus does not spell.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    bool accepted = false;
+
+    String8 accepted_escapes[] = {
+        S8("\\n"),      S8("\\t"),     S8("\\r"),     S8("\\a"),     S8("\\b"),     S8("\\f"),        S8("\\v"),    S8("\\e"),
+        S8("\\\\"),     S8("\\\""),    S8("\\'"),     S8("\\?"),     S8("\\0"),     S8("\\7"),        S8("\\12"),   S8("\\101"),
+        S8("\\377"),    S8("\\x0"),    S8("\\x41"),   S8("\\x7f"),   S8("\\xff"),   S8("\\x00ff"),    S8("\\u0041"), S8("\\u00e9"),
+        S8("\\u20ac"),  S8("\\uffff"), S8("\\U0001f600"), S8("\\U0010ffff"),
+    };
+    String8 rejected_escapes[] = {
+        S8("\\q"),  S8("\\8"),      S8("\\x"),     S8("\\xg"),    S8("\\x100"),      S8("\\x1000"),    S8("\\777"), S8("\\400"),
+        S8("\\u00"), S8("\\u00zz"), S8("\\ud800"), S8("\\udfff"), S8("\\U00110000"), S8("\\U0001f60"), S8("\\"),
+    };
+    u64 offsets[] = {0, 1, 2, 31, 60, 61, 62, 63, 64, 65, 66, 126, 127, 128, 129, 200};
+    u64 tails[] = {0, 1, 3, 64};
+    u8 delimiters[] = {'"', '\''};
+    for (u64 delimiter_index = 0; delimiter_index < BUSTER_ARRAY_LENGTH(delimiters); delimiter_index += 1)
+    {
+        u8 delimiter = delimiters[delimiter_index];
+        for (u64 offset_index = 0; offset_index < BUSTER_ARRAY_LENGTH(offsets); offset_index += 1)
+        {
+            for (u64 tail_index = 0; tail_index < BUSTER_ARRAY_LENGTH(tails); tail_index += 1)
+            {
+                for (u64 escape_index = 0; escape_index < BUSTER_ARRAY_LENGTH(accepted_escapes); escape_index += 1)
+                {
+                    String8 body = c_test_quoted_body(arena, offsets[offset_index], accepted_escapes[escape_index], tails[tail_index]);
+                    BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, delimiter, &accepted) && accepted);
+                    arena->position = position;
+                }
+                for (u64 escape_index = 0; escape_index < BUSTER_ARRAY_LENGTH(rejected_escapes); escape_index += 1)
+                {
+                    String8 body = c_test_quoted_body(arena, offsets[offset_index], rejected_escapes[escape_index], tails[tail_index]);
+                    BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, delimiter, &accepted) && !accepted);
+                    arena->position = position;
+                }
+            }
+        }
+    }
+
+    // Escapes back to back, slid across the boundaries.
+    String8 runs[] = {
+        S8("\\\\\\n\\t\\\""), S8("\\x41\\x42\\x43"), S8("\\1\\2\\3\\101\\102"), S8("\\u00e9\\u00e9\\U0001f600\\n"), S8("\\0\\0\\0\\0"),
+        S8("\\\\\\\\\\\\\\\\"),
+    };
+    u64 run_offsets[] = {0, 59, 60, 61, 62, 63, 64, 65, 120, 125, 126, 127, 128};
+    for (u64 run_index = 0; run_index < BUSTER_ARRAY_LENGTH(runs); run_index += 1)
+    {
+        for (u64 offset_index = 0; offset_index < BUSTER_ARRAY_LENGTH(run_offsets); offset_index += 1)
+        {
+            String8 body = c_test_quoted_body(arena, run_offsets[offset_index], runs[run_index], 3);
+            BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '"', &accepted) && accepted);
+            arena->position = position;
+        }
+    }
+
+    // Dense escapes over several windows, the shape of a binary blob spelled
+    // as a literal.
+    String8 units[] = {S8("\\x41"), S8("\\n"), S8("\\101"), S8("z\\x00")};
+    u64 unit_counts[] = {1, 16, 50, 100, 300};
+    for (u64 unit_index = 0; unit_index < BUSTER_ARRAY_LENGTH(units); unit_index += 1)
+    {
+        for (u64 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(unit_counts); count_index += 1)
+        {
+            String8 body = c_test_quoted_repeat(arena, units[unit_index], unit_counts[count_index]);
+            BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '"', &accepted) && accepted);
+            arena->position = position;
+        }
+    }
+
+    // Escape-free bodies that fill and straddle whole windows, the empty body
+    // included.
+    u64 plain_lengths[] = {0, 1, 63, 64, 65, 127, 128, 129, 1000, 4096, 4097};
+    for (u64 length_index = 0; length_index < BUSTER_ARRAY_LENGTH(plain_lengths); length_index += 1)
+    {
+        String8 body = c_test_quoted_body(arena, plain_lengths[length_index], S8(""), 0);
+        BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '"', &accepted) && accepted);
+        BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '\'', &accepted) && accepted);
+        arena->position = position;
+    }
+
+    // Multi-byte UTF-8 and bare high bytes pass through, across the boundary.
+    String8 utf8 = S8("caf\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x98\x80 \x80\xFF");
+    for (u64 offset = 56; offset < 68; offset += 1)
+    {
+        String8 body = c_test_quoted_body(arena, offset, utf8, 2);
+        BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '"', &accepted) && accepted);
+        arena->position = position;
+    }
+
+    // The u8 prefix is the one prefix the narrow decoder accepts; every other
+    // prefix is a wide literal or not a literal at all.
+    {
+        String8 prefixed_bodies[3];
+        prefixed_bodies[0] = S8("x");
+        prefixed_bodies[1] = c_test_quoted_body(arena, 63, S8("\\n"), 1);
+        prefixed_bodies[2] = c_test_quoted_body(arena, 64, S8("\\n"), 0);
+        for (u64 body_index = 0; body_index < BUSTER_ARRAY_LENGTH(prefixed_bodies); body_index += 1)
+        {
+            BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8("u8"), prefixed_bodies[body_index], '"', &accepted) && accepted);
+            BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8("u8"), prefixed_bodies[body_index], '\'', &accepted) && accepted);
+        }
+        String8 rejected_prefixes[] = {S8("L"), S8("u"), S8("U"), S8("x"), S8("uu"), S8("u8u8")};
+        for (u64 prefix_index = 0; prefix_index < BUSTER_ARRAY_LENGTH(rejected_prefixes); prefix_index += 1)
+        {
+            BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, rejected_prefixes[prefix_index], S8("x"), '"', &accepted) && !accepted);
+        }
+        arena->position = position;
+    }
+
+    // Spellings no lexer produces: the decoders must still agree on them.
+    {
+        String8 malformed[] = {S8("\"abc"), S8("\""), S8(""), S8("abc"), S8("\"abc'"), S8("\"\\\""), S8("'"), S8("z\"\"")};
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
+        {
+            BUSTER_TEST(arguments, c_test_decode_quoted_paths_agree(arena, malformed[index], '"', &accepted) && !accepted);
+            arena->position = position;
+        }
+        BUSTER_TEST(arguments, c_test_decode_quoted_paths_agree(arena, S8("\"\""), '"', &accepted) && accepted);
+        BUSTER_TEST(arguments, c_test_decode_quoted_paths_agree(arena, S8("''"), '\'', &accepted) && accepted);
+        arena->position = position;
+    }
+
+    // Agreement is not enough on its own: a few decodes are pinned to the
+    // bytes the grammar says they are.
+    {
+        struct
+        {
+            String8 spelling;
+            String8 expected;
+        } expectations[] = {
+            {S8("\"\\n\""), S8("\n")},
+            {S8("\"a\\x41z\""), S8("aAz")},
+            {S8("\"\\u00e9\""), S8("\xC3\xA9")},
+            {S8("\"\\U0001F600\""), S8("\xF0\x9F\x98\x80")},
+            {S8("\"\\101\\0\""), S8("A\0")},
+            {S8("u8\"x\""), S8("x")},
+            {S8("\"\""), S8("")},
+            {S8("'\\''"), S8("'")},
+            {S8("\"\\e\\a\\b\\f\\r\\t\\v\\?\""), S8("\x1b\x07\x08\x0c\r\t\x0b?")},
+            {S8("\"\\x00ff\\377\""), S8("\xff\xff")},
+        };
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(expectations); index += 1)
+        {
+            ByteSlice decoded = {0};
+            u8 delimiter = (u8)expectations[index].spelling.pointer[expectations[index].spelling.length - 1];
+            BUSTER_TEST(arguments, c_test_decode_quoted(arena, expectations[index].spelling, delimiter, &decoded) &&
+                                       decoded.length == expectations[index].expected.length &&
+                                       (decoded.length == 0 || memcmp(decoded.pointer, expectations[index].expected.pointer, decoded.length) == 0));
+            arena->position = position;
+        }
+        // An escaped delimiter in the second window: the prefix store, the
+        // escape, and the tail land where the reference puts them.
+        String8 long_body = c_test_quoted_body(arena, 65, S8("\\\""), 1);
+        char8* long_spelling = arena_allocate(arena, char8, long_body.length + 2);
+        long_spelling[0] = '"';
+        memcpy(long_spelling + 1, long_body.pointer, long_body.length);
+        long_spelling[long_body.length + 1] = '"';
+        ByteSlice long_decoded = {0};
+        BUSTER_TEST(arguments, c_test_decode_quoted(arena, (String8){long_spelling, long_body.length + 2}, '"', &long_decoded) && long_decoded.length == 67 &&
+                                   long_decoded.pointer[64] == 'z' && long_decoded.pointer[65] == '"' && long_decoded.pointer[66] == 'y');
+        arena->position = position;
+    }
+
+    // A literal longer than the u16 token length, with escapes strewn through
+    // it, against the bytes its generator says it decodes to.
+    {
+        String8 giant_expected = {0};
+        String8 giant = c_test_giant_literal(arena, 70000, '"', &giant_expected);
+        ByteSlice giant_decoded = {0};
+        BUSTER_TEST(arguments, c_test_decode_quoted_paths_agree(arena, giant, '"', &accepted) && accepted);
+        BUSTER_TEST(arguments, c_test_decode_quoted(arena, giant, '"', &giant_decoded) && giant_decoded.length == giant_expected.length &&
+                                   memcmp(giant_decoded.pointer, giant_expected.pointer, giant_expected.length) == 0);
+        arena->position = position;
+    }
+
+    // Fuzz over the grammar's alphabet: fillers, backslashes, every escape
+    // letter, hex and octal digits and the first non-digits past them, both
+    // delimiters, UTF-8 lead and continuation bytes, and NUL. Lengths cluster
+    // around the first two window boundaries.
+    {
+        u8 alphabet[] = {'z', 'z', 'z', 'z', '\\', '\\', '\\', 'n', 'x', '0', '1', '7', '8', 'a', 'f', 'g', 'u', 'U', '"', '\'', '?', 'e', 'd', 0xC3, 0xA9, 0xF0, 0x80, 0x00};
+        u64 state = UINT64_C(0x9e3779b97f4a7c15);
+        for (u64 iteration = 0; iteration < 3000; iteration += 1)
+        {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            u64 length = iteration % 3 == 0 ? 56 + (state >> 20) % 16 : iteration % 3 == 1 ? 120 + (state >> 20) % 16 : (state >> 20) % 300;
+            char8* body = arena_allocate(arena, char8, length ? length : 1);
+            for (u64 index = 0; index < length; index += 1)
+            {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                body[index] = (char8)alphabet[(state >> 24) % BUSTER_ARRAY_LENGTH(alphabet)];
+            }
+            BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), (String8){body, length}, '"', &accepted));
+            arena->position = position;
+        }
+    }
+
+    // The range entry points: over every token range of up to four tokens in
+    // a source that spells narrow, u8, UTF-16, UTF-32 and wide literals,
+    // adjacent concatenations, a parenthesized initializer, an empty literal,
+    // a narrow-plus-wide pair the decoder accepts, a u8-plus-UTF-16 pair it
+    // rejects, and the non-literal tokens between them, the count-only entry
+    // point must agree with the full decode.
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = c_preprocess(
+            temporary.arena,
+            S8("char a[] = \"ab\\n\" \"cd\\x41\"; char b[] = u8\"x\\u00e9\" \"y\"; unsigned short c[] = u\"\\u20ac\" \"z\";"
+               " unsigned d[] = U\"\\U0001f600\"; int e[] = L\"wide\" L\"\\n\"; char f[] = (\"paren\" \"wrapped\"); char g[] = \"\";"
+               " int h[] = \"a\" L\"b\"; char i[] = u8\"q\" u\"r\";\n"),
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+                .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        u32 accepted_ranges = 0;
+        u32 rejected_ranges = 0;
+        for (u32 start = 0; start < preprocess.token_count; start += 1)
+        {
+            for (u32 end = start + 1; end <= preprocess.token_count && end <= start + 4; end += 1)
+            {
+                bool range_accepted = false;
+                BUSTER_TEST(arguments, c_test_string_literal_range_paths_agree(temporary.arena, preprocess, start, end, &range_accepted));
+                accepted_ranges += range_accepted;
+                rejected_ranges += !range_accepted;
+            }
+        }
+        BUSTER_TEST(arguments, accepted_ranges >= 20 && rejected_ranges >= 20);
+        scratch_end(temporary);
+    }
+
+    arena->position = position;
+    return result;
+}
+
 // Tokens whose spellings reach and cross 0xFFFF bytes: the fixtures for the
 // CToken u16 length escape. Every length assertion goes through
 // c_token_spelling, never the raw field, so the same fixtures hold before
@@ -3968,6 +4265,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     return result;
 }
 
+// The intern pass selects identifiers by a 64-lane mask over the shape
+// sidecar (c_symbols_intern_tokens). This holds it to the scalar definition
+// — every identifier token interned, nothing else touched — on a corpus
+// whose identifiers land at every lane of the window: a lane the mask
+// dropped shows as an identifier with symbol 0, a non-identifier it admitted
+// as a nonzero symbol. Nearby tokens must share an id exactly when they
+// share a spelling, which is what makes the id the intern pass's own rather
+// than a stale or copied one. The corpus expands no macro, so no pasted or
+// synthesized identifier (symbol 0 by design) reaches the stream.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_intern_scan_by_shape(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 source_capacity = BUSTER_KB(256);
+    char8* source_bytes = arena_allocate(arguments->arena, char8, source_capacity);
+    u64 source_length = 0;
+    for (u32 item = 0; item < 300; item += 1)
+    {
+        // Lines of unequal token counts slide the identifiers across the
+        // window lanes; the strings, numbers and punctuators between them
+        // are the lanes the mask must leave alone.
+        c_test_append_source(source_bytes, source_capacity, &source_length,
+                             string_format(arguments->arena, S8("int value_{u32} = {u32} + (value_{u32} * 2); /* c */ char const* text_{u32} = \"s{u32}\";\n"),
+                                           item, item, item % 7, item, item));
+        if (item % 3 == 0)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length,
+                                 string_format(arguments->arena, S8("typedef struct tag_{u32} {{ int field; float other; }} alias_{u32};\n"), item, item));
+        }
+    }
+    CPreprocessResult preprocess = c_preprocess(arguments->arena, (String8){.pointer = source_bytes, .length = source_length}, (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, preprocess.token_count > UINT64_C(64) * 16);
+    u64 unlabeled_identifiers = 0;
+    u64 labeled_others = 0;
+    u64 spelling_symbol_disagreements = 0;
+    u64 identifier_count = 0;
+    for (u64 token_index = 0; token_index < preprocess.token_count; token_index += 1)
+    {
+        CToken token = preprocess.tokens[token_index];
+        if (token.kind != C_TOKEN_IDENTIFIER)
+        {
+            labeled_others += token.symbol != 0;
+            continue;
+        }
+        identifier_count += 1;
+        unlabeled_identifiers += token.symbol == 0;
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        u64 probe_end = BUSTER_MIN(preprocess.token_count, token_index + 256);
+        for (u64 probe_index = token_index + 1; probe_index < probe_end; probe_index += 1)
+        {
+            CToken probe = preprocess.tokens[probe_index];
+            if (probe.kind == C_TOKEN_IDENTIFIER)
+            {
+                bool same_spelling = string_equal(spelling, c_token_spelling(preprocess.spelling_base, probe));
+                spelling_symbol_disagreements += same_spelling != (probe.symbol == token.symbol);
+            }
+        }
+    }
+    BUSTER_TEST(arguments, identifier_count > 2000);
+    BUSTER_TEST(arguments, unlabeled_identifiers == 0);
+    BUSTER_TEST(arguments, labeled_others == 0);
+    BUSTER_TEST(arguments, spelling_symbol_disagreements == 0);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_position_index_tiles(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4327,9 +4689,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_semantic_basics(UnitTestArgum
         parsed_global_static_assert_count += syntax_declaration->kind == C_PARSER_DECLARATION_STATIC_ASSERT;
         if (syntax_declaration->kind == C_PARSER_DECLARATION_FUNCTION)
         {
-            for (CParserStatement* statement = syntax_declaration->first_statement; statement; statement = statement->next)
+            for (CParserStaticAssert* assertion = syntax_declaration->first_static_assert; assertion; assertion = assertion->next)
             {
-                parsed_local_static_assert_count += statement->kind == C_PARSER_STATEMENT_STATIC_ASSERT;
+                parsed_local_static_assert_count += 1;
             }
         }
     }
@@ -10080,6 +10442,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
     return result;
 }
 
+// A token the preprocessor pastes with `##` never passes the intern pass and
+// keeps symbol 0, so every well-known-id keyword test on the body walk has
+// to answer it from the spelling.  `for`, `goto` and the asm keyword with
+// its qualifiers are the ones the walk decides loop scopes, label binding
+// and asm operand ranges from; a missed fallback shows as an undeclared
+// identifier -- the loop variable, the label, or the asm goto target.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pasted_keyword_body_walk(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult preprocess = {0};
+    CParseResult parse = {0};
+    CIRLowerResult lowered = c_test_lower_source(
+        temporary.arena,
+        S8("#define PASTE(left, right) left ## right\n"
+           "int pasted_for(int count) { int total = 0; PASTE(f, or) (int index = 0; index < count; index += 1) { total += index; } return total; }\n"
+           "int pasted_goto(int value) { if (value) PASTE(go, to) done; value = 7; done: return value; }\n"
+           "int pasted_asm(int value) { PASTE(__as, m__) PASTE(vola, tile) (\"\" : \"+r\"(value)); return value; }\n"
+           "int pasted_asm_goto(int value) { PASTE(__as, m__) PASTE(go, to) (\"\" : : \"r\"(value) : : out); return value; out: return value + 1; }\n"),
+        S8("pasted-keywords.c"), target_native, &preprocess, &parse);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    // The fixture exercises the fallback only if the pasted keywords really
+    // reached the parser with symbol 0.
+    u32 uninterned_for = 0;
+    u32 uninterned_goto = 0;
+    u32 uninterned_asm = 0;
+    u32 uninterned_volatile = 0;
+    for (u32 token_index = 0; token_index < preprocess.token_count; token_index += 1)
+    {
+        CToken token = preprocess.tokens[token_index];
+        if (token.kind != C_TOKEN_IDENTIFIER || token.symbol)
+        {
+            continue;
+        }
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        uninterned_for += string_equal(spelling, S8("for"));
+        uninterned_goto += string_equal(spelling, S8("goto"));
+        uninterned_asm += string_equal(spelling, S8("__asm__"));
+        uninterned_volatile += string_equal(spelling, S8("volatile"));
+    }
+    BUSTER_TEST(arguments, uninterned_for == 1);
+    BUSTER_TEST(arguments, uninterned_goto == 2);
+    BUSTER_TEST(arguments, uninterned_asm == 2);
+    BUSTER_TEST(arguments, uninterned_volatile == 1);
+    if (lowered.program)
+    {
+        IrModule* module = &lowered.program->modules[0];
+        BUSTER_TEST(arguments, module->lowered_function_count == 4);
+        IrFunction* loop = c_test_find_ir_function(module, S8("pasted_for"));
+        BUSTER_TEST(arguments, loop && loop->block_count >= 3);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_volatile_ir(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -12618,6 +13038,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
     c_test_result_add(&result, c_test_frontend_lex_differential(arguments));
+    c_test_result_add(&result, c_test_intern_scan_by_shape(arguments));
+    c_test_result_add(&result, c_test_string_literal_decode_differential(arguments));
     c_test_result_add(&result, c_test_position_index_tiles(arguments));
     c_test_result_add(&result, c_test_oversized_token_spellings(arguments));
     c_test_result_add(&result, c_test_frontend_source_metrics(arguments));
@@ -12653,6 +13075,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_frontend_vectors(arguments));
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
     c_test_result_add(&result, c_test_inline_assembly_volatile_ir(arguments));
+    c_test_result_add(&result, c_test_pasted_keyword_body_walk(arguments));
     c_test_result_add(&result, c_test_frontend_vla_and_ir(arguments));
     c_test_result_add(&result, c_test_local_static_aggregates(arguments));
 

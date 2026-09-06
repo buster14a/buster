@@ -1771,6 +1771,10 @@ String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate
         pointer[result_length] = 0;
     }
 
+    // Builders append their next UTF-16 fragment at the arena cursor. The
+    // UTF-8 byte count is only an upper bound on the number of code units.
+    arena_set_position(arena, arena->position - (string.length - result_length) * sizeof(*pointer));
+
     String16 result = (String16){.pointer = pointer, .length = result_length};
     return result;
 }

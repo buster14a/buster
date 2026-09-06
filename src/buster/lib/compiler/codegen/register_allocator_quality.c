@@ -192,7 +192,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     // touched by an opcode whose encoder pins its operands cannot hold an
     // arbitrary register for its whole life), the raw backward-edge spans,
     // and everything the local scan derives that no pin set changes.
-    MachineFastPrepass prepass = machine_fast_prepass_build(scratch.arena, function);
+    MachineFastPrepass prepass = machine_fast_prepass_build(scratch.arena, function, true);
     if (!prepass.valid)
     {
         scratch_end(scratch);

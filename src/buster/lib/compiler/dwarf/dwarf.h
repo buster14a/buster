@@ -29,8 +29,11 @@ struct DwarfFunction
     u32 line;
 };
 
-// Mirrors CodegenLineEntry's 12-byte shape; file and column arrive already
-// saturated to u16 by codegen_record_line.
+// Mirrors CodegenLineEntry's 12-byte shape field for field -- the object
+// writer aliases the codegen array rather than copying it, and checks the
+// layouts against each other -- so file and column arrive already saturated
+// to u16, and file already an index into the program's source table, by
+// codegen_record_line.
 typedef struct DwarfLineEntry DwarfLineEntry;
 struct DwarfLineEntry
 {

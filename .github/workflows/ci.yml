@@ -55,6 +55,16 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install Vulkan SDK
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        run: bash .github/scripts/install-vulkan-sdk.sh
+
+      - name: Install Vulkan SDK (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: powershell
+        run: . .github/scripts/install-vulkan-sdk.ps1
+
       - name: Test (Linux, macOS)
         if: ${{ matrix.platform == 'unix' }}
         shell: bash
@@ -107,12 +117,21 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install Vulkan SDK
+        shell: bash
+        run: bash .github/scripts/install-vulkan-sdk.sh
+
       # The matrix cross-products every register-allocator mode with every
       # linkable target, running each leg natively or under an emulator the
       # host provides and oracle-checking the rest. It runs beside the suite
       # rather than after it, so wall time is the slower of the two.
       - name: Execution-mode matrix
         shell: bash
+        env:
+          # Ubuntu's hosted Granite Rapids CPUs report an AVX10 feature
+          # combination that Clang warns about when -march=native is used.
+          # The matrix validates execution modes, not host-specific tuning.
+          CFLAGS: -Wno-invalid-feature-combination
         run: |
           set -euo pipefail
           driver="$RUNNER_TEMP/buster-build"

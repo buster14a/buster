@@ -1348,6 +1348,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_map.memory_base_tables == 8);
     BUSTER_TEST(arguments, exact_map.displacement_patch_tables == 8);
     BUSTER_TEST(arguments, exact_map.variable_memory_encoding_tables == 9);
+    // Every fixed-shape template row prewarm allots must be one the
+    // metadata authority accepted; a refused row would silently keep the
+    // slower metadata lane for its shape.
+    BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1466,
+                    string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1466 (rows: {u32})"), exact_map.fixed_template_rows));
+    BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
+                    string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
     BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 171);

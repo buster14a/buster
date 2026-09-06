@@ -734,10 +734,10 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_lookup_stress(u32 reque
     // serial, so the lookups are pure reads. Without it the first lookup in
     // each thread would race the decode, and the module says so through
     // BUSTER_CHECK_SERIAL_INITIALIZATION rather than producing torn answers.
-    buster_x86_metadata_prewarm();
+    buster_x86_metadata_prewarm_all_forms();
     // Repeated prewarm entry is intentionally cheap and must not rewalk the
     // generated forms or mutate the caches after the first completion.
-    buster_x86_metadata_prewarm();
+    buster_x86_metadata_prewarm_all_forms();
     X86_64MetadataConcurrentLookupState state = {0};
     OsThreadHandle* threads[X86_64_METADATA_TEST_MAX_THREAD_COUNT] = {0};
     u32 thread_count = 0;
@@ -3135,6 +3135,10 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
 UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+
+    // The flat decode is what every other assertion here reads through, so
+    // it is checked against the generated accessors first.
+    BUSTER_TEST(arguments, buster_x86_metadata_test_flat_decode_matches_generated());
 
 #if BUSTER_CPU_ARCH_X86_64
     // SHA is a first-class canonical ISA set, with both register and memory
