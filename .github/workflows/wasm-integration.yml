@@ -1,0 +1,76 @@
+name: Wasm integration
+on:
+  push:
+    branches: [work/2026-09-06-integration-gates]
+    paths: [.github/workflows/wasm-integration.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.publish.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 70450cfe3737d9a1f934a4e0f630206614eacb7c
+      - name: Apply authenticated regression patch
+        id: publish
+        shell: bash
+        env:
+          PATCH_DATA: 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
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os,base64,gzip,hashlib,pathlib
+          patch=gzip.decompress(base64.b64decode(os.environ['PATCH_DATA']))
+          assert hashlib.sha256(patch).hexdigest() == '2a0fba83c407cbe63166116e9af66ff0a327242701444159fe73b2a251981c4a'
+          pathlib.Path('/tmp/integration.patch').write_bytes(patch)
+          PY
+          git apply --check /tmp/integration.patch
+          git apply --index /tmp/integration.patch
+          git diff --cached --check
+          test "$(git write-tree)" = 524b66ab93e8ad5c9affa55358d30815fe8acdf2
+          git config user.name 'David'
+          git config user.email 'davidgmbb@gmail.com'
+          git commit -m 'tests: execute frontend-produced over-aligned Wasm scalars'
+          git push --force-with-lease=refs/heads/work/2026-09-06-wasm-integration: origin HEAD:refs/heads/work/2026-09-06-wasm-integration
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  validate:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - name: Install platform prerequisites
+        run: bash .github/scripts/install-vulkan-sdk.sh
+      - name: Full Release suite and self-host fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --config Release --linker DEFAULT
+          "$driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/wasm-suite.log"
+          "$driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/wasm-self-host.log"
+      - name: Mandatory independent-engine execution and sanitizer probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/Release/ide cc -target wasm64-unknown-freestanding -nostdinc tests/basic_c_wasm64_alignment.c -o "$RUNNER_TEMP/alignment.wasm"
+          node --experimental-wasm-memory64 tests/wasm_memory_alignment_execution.js "$RUNNER_TEMP/alignment.wasm" | tee "$RUNNER_TEMP/wasm-engine.log"
+          CC=clang AUDIT_OPT=-O2 AUDIT_SANITIZE=1 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 python3 tests/wasm_memory_alignment_regression.py 2>&1 | tee "$RUNNER_TEMP/wasm-sanitizers.log"
+      - name: Preserve validation logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: wasm-integration-results
+          path: ${{ runner.temp }}/wasm-*.log
+          retention-days: 7
+          if-no-files-found: error
