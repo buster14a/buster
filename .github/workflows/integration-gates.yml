@@ -1,0 +1,60 @@
+name: Integration gates
+on:
+  push:
+    branches: [work/2026-09-06-integration-gates]
+    paths: [.github/workflows/integration-gates.yml]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 017b0381ed75d859043b60a92f2ec2e9f5872980
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact source and review history
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 017b0381ed75d859043b60a92f2ec2e9f5872980
+          git branch integration-baseline HEAD
+          for pr in 169 170 171; do
+            git fetch origin "refs/pull/$pr/head:refs/heads/review-$pr"
+          done
+          git bundle create "$RUNNER_TEMP/integration-source.bundle" integration-baseline review-169 review-170 review-171
+          git rev-parse integration-baseline integration-baseline^{tree} review-169 review-170 review-171 > "$RUNNER_TEMP/integration-identity.txt"
+          sha256sum "$RUNNER_TEMP/integration-source.bundle"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: integration-source
+          path: |
+            ${{ runner.temp }}/integration-source.bundle
+            ${{ runner.temp }}/integration-identity.txt
+          retention-days: 3
+          if-no-files-found: error
+      - name: Install build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y tcc mold
+          bash .github/scripts/install-vulkan-sdk.sh
+      - name: Reproduce unmodified Release fixed point and full tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh generate --cc clang --config Release --linker DEFAULT
+          ./build.sh test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/baseline-self-host.log"
+          ./build.sh build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/baseline-test-all.log"
+      - name: Preserve exact baseline results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: integration-baseline-results
+          path: ${{ runner.temp }}/baseline-*.log
+          retention-days: 7
+          if-no-files-found: warn
