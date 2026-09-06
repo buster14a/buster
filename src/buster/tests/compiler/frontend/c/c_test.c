@@ -16289,6 +16289,49 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             scratch_end(bound_register_temporary);
         }
     }
+    // Fortified block-memory builtins have a real fourth size_t argument,
+    // including when no libc declaration is present. Never lower these as
+    // three-argument unchecked calls merely to accept a hosted SDK header.
+    {
+        String8 names[] = {S8("__builtin___memcpy_chk"), S8("__builtin___memmove_chk"), S8("__builtin___memset_chk")};
+        String8 runtime_names[] = {S8("__memcpy_chk"), S8("__memmove_chk"), S8("__memset_chk")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            String8 second = index == 2 ? S8("0x7f") : S8("s");
+            String8 declaration = index == 0
+                ? S8("extern void* __memcpy_chk(void*, const void*, unsigned long long, unsigned long long);\n") : S8("");
+            String8 source = string_format_z(temporary.arena,
+                S8("#if !__has_builtin({S8})\n#error missing builtin\n#endif\n{S8}"
+                   "void* f(void* d, void* s, int n, int bound) {{ return {S8}(d, {S8}, n, bound); }\n"),
+                names[index], declaration, names[index], second);
+            CPreprocessResult tokens = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("checked-memory.c"), target_native, &tokens, &parse);
+            BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && !lowered.diagnostic_count && lowered.program);
+            if (lowered.program && !lowered.diagnostic_count)
+            {
+                bool found = false;
+                for (u32 symbol_index = 0; symbol_index < lowered.program->symbols.count; symbol_index += 1)
+                {
+                    IrSymbol* symbol = lowered.program->symbols.symbols + symbol_index;
+                    if (string_equal(symbol->link_name, runtime_names[index]))
+                    {
+                        IrType* type = ir_type_from_id(&lowered.program->types, symbol->type);
+                        found = type && type->kind == IR_TYPE_FUNCTION && type->parameter_count == 4;
+                        if (found) BUSTER_TEST(arguments, type->parameter_types[2].value == type->parameter_types[3].value);
+                    }
+                }
+                BUSTER_TEST(arguments, found);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            }
+            source = string_format_z(temporary.arena,
+                S8("void* f(void* d, void* s) {{ return {S8}(d, {S8}, 1); }\n"), names[index], second);
+            lowered = c_test_lower_source(temporary.arena, source, S8("checked-memory-arity.c"), target_native, &tokens, &parse);
+            BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
+            scratch_end(temporary);
+        }
+    }
     // A memory constraint is not a register class: the operand it carries is
     // the storage rather than the value, and the class it lowers to is what
     // tells the emitter to put an address in the register it assigns.

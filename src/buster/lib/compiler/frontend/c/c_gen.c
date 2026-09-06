@@ -1829,6 +1829,9 @@ typedef enum CIrMemoryBuiltin
     C_IR_MEMORY_BUILTIN_MEMMOVE,
     C_IR_MEMORY_BUILTIN_MEMSET,
     C_IR_MEMORY_BUILTIN_MEMCMP,
+    C_IR_MEMORY_BUILTIN_MEMCPY_CHECKED,
+    C_IR_MEMORY_BUILTIN_MEMMOVE_CHECKED,
+    C_IR_MEMORY_BUILTIN_MEMSET_CHECKED,
     C_IR_MEMORY_BUILTIN_COUNT,
 } CIrMemoryBuiltin;
 
@@ -1988,6 +1991,9 @@ BUSTER_C_INTERNAL String8 const c_ir_memory_builtin_spellings[C_IR_MEMORY_BUILTI
     S8_INITIALIZER("__builtin_memmove"),
     S8_INITIALIZER("__builtin_memset"),
     S8_INITIALIZER("__builtin_memcmp"),
+    S8_INITIALIZER("__builtin___memcpy_chk"),
+    S8_INITIALIZER("__builtin___memmove_chk"),
+    S8_INITIALIZER("__builtin___memset_chk"),
 };
 
 BUSTER_C_INTERNAL String8 const c_ir_memory_builtin_link_names[C_IR_MEMORY_BUILTIN_COUNT] = {
@@ -1995,6 +2001,9 @@ BUSTER_C_INTERNAL String8 const c_ir_memory_builtin_link_names[C_IR_MEMORY_BUILT
     S8_INITIALIZER("memmove"),
     S8_INITIALIZER("memset"),
     S8_INITIALIZER("memcmp"),
+    S8_INITIALIZER("__memcpy_chk"),
+    S8_INITIALIZER("__memmove_chk"),
+    S8_INITIALIZER("__memset_chk"),
 };
 
 BUSTER_C_INTERNAL CIrMemoryBuiltin c_ir_memory_builtin(String8 name)
@@ -12568,11 +12577,16 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_builtin_call(CIntegerIrBuilder* bui
     IrTypeId void_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
     // memset takes an int fill where the copies take a source pointer, and
     // memcmp answers an int where the others answer the destination.
-    bool fill = kind == C_IR_MEMORY_BUILTIN_MEMSET;
+    bool fill = kind == C_IR_MEMORY_BUILTIN_MEMSET || kind == C_IR_MEMORY_BUILTIN_MEMSET_CHECKED;
     bool compare = kind == C_IR_MEMORY_BUILTIN_MEMCMP;
-    IrTypeId parameter_types[3] = {void_pointer_type, fill ? builder->s32_type : void_pointer_type, builder->size_type};
+    // Fortified forms keep the destination bound as a fourth size_t argument
+    // to the checked runtime entry point. Do not erase the check, even when
+    // the ordinary copy's count is small or the bound is unknown.
+    bool checked = kind >= C_IR_MEMORY_BUILTIN_MEMCPY_CHECKED;
+    u32 parameter_count = checked ? 4u : 3u;
+    IrTypeId parameter_types[4] = {void_pointer_type, fill ? builder->s32_type : void_pointer_type, builder->size_type, builder->size_type};
     IrTypeId return_type = compare ? builder->s32_type : void_pointer_type;
-    if (argument_count == BUSTER_ARRAY_LENGTH(parameter_types) && void_pointer_type.value != IR_ID_UNDERLYING_INVALID)
+    if (argument_count == parameter_count && void_pointer_type.value != IR_ID_UNDERLYING_INVALID)
     {
         String8 link_name = c_ir_memory_builtin_link_names[kind];
         u32 declaration_index = c_ir_find_function(builder, link_name);
