@@ -1,0 +1,84 @@
+name: Wasm integration final
+on:
+  push:
+    branches: [work/2026-09-06-integration-gates]
+    paths: [.github/workflows/wasm-integration-retry.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.publish.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 9805ed00364f33e2723543d39ec8d2b1294f4d14
+          fetch-depth: 0
+      - name: Apply exact test integration and remove the fixture's trailing blank line
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64,gzip,hashlib,pathlib,re
+          workflow=pathlib.Path('.github/workflows/wasm-integration.yml').read_text()
+          encoded=re.search(r'^          PATCH_DATA: (\S+)$',workflow,re.M).group(1)
+          patch=gzip.decompress(base64.b64decode(encoded))
+          assert hashlib.sha256(patch).hexdigest() == '2a0fba83c407cbe63166116e9af66ff0a327242701444159fe73b2a251981c4a'
+          pathlib.Path('/tmp/integration.patch').write_bytes(patch)
+          PY
+          git checkout --detach 70450cfe3737d9a1f934a4e0f630206614eacb7c
+          git apply --check /tmp/integration.patch
+          git apply --index /tmp/integration.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tests/basic_c_wasm64_alignment.c')
+          p.write_text(p.read_text().rstrip()+'\n')
+          PY
+          git add tests/basic_c_wasm64_alignment.c
+          git diff --cached --check
+          test "$(git write-tree)" = 613d223981fcc0adc1e28ed42ef39d231a669909
+          git config user.name 'David'
+          git config user.email 'davidgmbb@gmail.com'
+          git commit -m 'tests: execute frontend-produced over-aligned Wasm scalars'
+          git push --force-with-lease=refs/heads/work/2026-09-06-wasm-integration: origin HEAD:refs/heads/work/2026-09-06-wasm-integration
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  validate:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - name: Install platform prerequisites
+        run: bash .github/scripts/install-vulkan-sdk.sh
+      - name: Full Release suite and self-host fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --config Release --linker DEFAULT
+          "$driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/wasm-suite.log"
+          "$driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/wasm-self-host.log"
+      - name: Mandatory independent-engine execution and sanitizer probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/Release/ide cc -target wasm64-unknown-freestanding -nostdinc tests/basic_c_wasm64_alignment.c -o "$RUNNER_TEMP/alignment.wasm"
+          node --experimental-wasm-memory64 tests/wasm_memory_alignment_execution.js "$RUNNER_TEMP/alignment.wasm" | tee "$RUNNER_TEMP/wasm-engine.log"
+          CC=clang AUDIT_OPT=-O2 AUDIT_SANITIZE=1 ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 python3 tests/wasm_memory_alignment_regression.py 2>&1 | tee "$RUNNER_TEMP/wasm-sanitizers.log"
+      - name: Preserve validation logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: wasm-integration-results
+          path: ${{ runner.temp }}/wasm-*.log
+          retention-days: 7
+          if-no-files-found: error
