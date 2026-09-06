@@ -2555,12 +2555,28 @@ struct CMacroDefinition
     // token's spelling against every parameter name on every expansion.
     // Null when the replacement list is empty.
     u32* parameter_index;
+    // One count per parameter: how many replacement tokens name it. The
+    // substituted list's exact capacity is a dot product of this with the
+    // arguments' token counts, which is a walk of the parameters (1,4 on
+    // this workload) where reading it off the replacement list is a third
+    // walk of the list (6,9 tokens). Null when there are no parameters.
+    u32* parameter_use_count;
     u32 replacement_count;
+    // The replacement tokens that name no parameter: the fixed half of that
+    // capacity.
+    u32 plain_count;
     u32 parameter_count;
     bool defined;
     bool function_like;
     bool variadic;
     bool pragma_like;
+    // Does the list hold a `##`, and a `#` that stringifies a parameter?
+    // 78,3% of the expansions of a unity build have neither and 99,97% have
+    // no `#` at all, and that is the whole difference between substituting
+    // the list in one pass into its final array and staging it in a wider
+    // row for a paste pass with nothing to do.
+    bool has_paste;
+    bool has_stringify;
 };
 
 #define C_MACRO_PARAMETER_NONE UINT32_MAX
@@ -3444,6 +3460,11 @@ BUSTER_C_INTERNAL u8* c_macro_replacement_spaces(Arena* arena, char8 const* spel
     return result;
 }
 
+BUSTER_C_INTERNAL bool c_macro_is_paste(CToken token)
+{
+    return c_token_is_punctuator(&token, C_PUNCTUATOR_HASH_HASH);
+}
+
 // The spelling ladder behind the definition-time parameter index: which
 // parameter, if any, `name` spells.
 BUSTER_C_INTERNAL s32 c_macro_parameter_index(CMacro* macro, String8 name)
@@ -3505,6 +3526,16 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
         .variadic = variadic,
         .defined = true,
     };
+    macro->definition.plain_count = replacement_count;
+    // Allocated for every parameter list, empty replacement included: a
+    // `#define F(x)` with no replacement tokens still reaches the capacity
+    // walk below over its parameters.
+    u32* parameter_use_count = parameter_count ? arena_allocate(arena, u32, parameter_count) : 0;
+    for (u32 index = 0; index < parameter_count; index += 1)
+    {
+        parameter_use_count[index] = 0;
+    }
+    macro->definition.parameter_use_count = parameter_use_count;
     if (replacement_count)
     {
         u32* parameter_index = arena_allocate(arena, u32, replacement_count);
@@ -3513,8 +3544,28 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
             CToken token = replacement[index];
             s32 found = token.kind == C_TOKEN_IDENTIFIER && function_like ? c_macro_parameter_index(macro, c_token_spelling(spelling_base, token)) : -1;
             parameter_index[index] = found >= 0 ? (u32)found : C_MACRO_PARAMETER_NONE;
+            if (found >= 0)
+            {
+                parameter_use_count[found] += 1;
+                macro->definition.plain_count -= 1;
+            }
         }
         macro->definition.parameter_index = parameter_index;
+        // Recorded here for the same reason the parameter index is: which
+        // operators a definition uses cannot change after it is written, and
+        // every expansion of it would otherwise re-derive the answer.
+        for (u32 index = 0; index < replacement_count; index += 1)
+        {
+            if (c_macro_is_paste(replacement[index]))
+            {
+                macro->definition.has_paste = true;
+            }
+            if (function_like && c_token_is_punctuator(&replacement[index], C_PUNCTUATOR_HASH) && index + 1 < replacement_count &&
+                parameter_index[index + 1] != C_MACRO_PARAMETER_NONE)
+            {
+                macro->definition.has_stringify = true;
+            }
+        }
     }
     return macro;
 }
@@ -3789,11 +3840,6 @@ BUSTER_C_INTERNAL CPpToken c_macro_stringify(CSpellingSpace* space, CMacroArgume
     };
 }
 
-BUSTER_C_INTERNAL bool c_macro_is_paste(CToken token)
-{
-    return c_token_is_punctuator(&token, C_PUNCTUATOR_HASH_HASH);
-}
-
 BUSTER_C_INTERNAL u32 c_preprocess_builtin_line(CMacro* first);
 BUSTER_C_INTERNAL CSourceLocation c_preprocess_recover_location(struct CPreprocessSourceFrame* frame, u32 file, CToken token);
 
@@ -3866,6 +3912,9 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
     char8 const* base = space->base;
     u32 stamp = invocation.stamp;
     CSourceLocation location = c_pp_stamp_location(stamps, stamp);
+    u8 const* definition_spaces = macro->definition.replacement_space;
+    u32 const* parameter_indices = macro->definition.parameter_index;
+    bool ok = true;
     if (macro->builtin)
     {
         CPpToken* builtin_token = arena_allocate(arena, CPpToken, 1);
@@ -3873,178 +3922,236 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
         builtin_token[0].preceded_by_space = invocation.preceded_by_space;
         *tokens_out = builtin_token;
         *token_count_out = 1;
-        return true;
     }
-    u8 const* definition_spaces = macro->definition.replacement_space;
-    u32 const* parameter_indices = macro->definition.parameter_index;
-    u64 capacity = macro->definition.replacement_count + 1;
-    for (u32 replacement_index = 0; replacement_index < macro->definition.replacement_count; replacement_index += 1)
+    else if (!macro->definition.has_paste && !macro->definition.has_stringify)
     {
-        u32 parameter_index = parameter_indices[replacement_index];
-        if (parameter_index != C_MACRO_PARAMETER_NONE)
+        // Neither operator is written in this definition, so every
+        // replacement token is either itself or one whole argument and the
+        // substituted list is its own final array: no staged
+        // CMacroReplacementToken row, no placemarker (an empty argument
+        // contributes nothing when no paste can consume it), and no second
+        // pass. The capacity is the dot product the definition already
+        // recorded, over the parameters rather than the replacement list.
+        u64 capacity = macro->definition.plain_count;
+        for (u32 parameter_index = 0; parameter_index < macro->definition.parameter_count; parameter_index += 1)
         {
-            CMacroArgument argument = arguments[parameter_index];
-            capacity += BUSTER_MAX(argument.token_count, argument.expanded_token_count);
+            capacity += (u64)macro->definition.parameter_use_count[parameter_index] * arguments[parameter_index].expanded_token_count;
         }
-    }
-    CMacroReplacementToken* materialized = arena_allocate(arena, CMacroReplacementToken, capacity);
-    u32 materialized_count = 0;
-    for (u32 replacement_index = 0; replacement_index < macro->definition.replacement_count; replacement_index += 1)
-    {
-        CToken replacement = macro->definition.replacement[replacement_index];
-        bool replacement_space = replacement_index ? !definition_spaces || definition_spaces[replacement_index] != 0 : invocation.preceded_by_space;
-        if (macro->definition.function_like && c_token_is_punctuator(&replacement, C_PUNCTUATOR_HASH) &&
-            replacement_index + 1 < macro->definition.replacement_count)
+        CPpToken* output = arena_allocate(arena, CPpToken, capacity);
+        u32 output_count = 0;
+        for (u32 replacement_index = 0; replacement_index < macro->definition.replacement_count; replacement_index += 1)
         {
-            u32 parameter_index = parameter_indices[replacement_index + 1];
+            bool replacement_space = replacement_index ? !definition_spaces || definition_spaces[replacement_index] != 0 : invocation.preceded_by_space;
+            u32 parameter_index = parameter_indices[replacement_index];
+            if (parameter_index == C_MACRO_PARAMETER_NONE)
+            {
+                output[output_count] = (CPpToken){
+                    .token = macro->definition.replacement[replacement_index],
+                    .stamp = stamp & C_PP_STAMP_MASK,
+                    .foreign = true,
+                    .preceded_by_space = replacement_space,
+                };
+                output_count += 1;
+            }
+            else
+            {
+                CMacroArgument argument = arguments[parameter_index];
+                for (u64 argument_index = 0; argument_index < argument.expanded_token_count; argument_index += 1)
+                {
+                    CPpToken argument_token = argument.expanded_tokens[argument_index];
+                    argument_token.stamp = stamp & C_PP_STAMP_MASK;
+                    argument_token.foreign = true;
+                    // The argument stands where the parameter was written, so
+                    // its first token takes the parameter's spacing; the rest
+                    // keep the spacing they were written or expanded with.
+                    if (!argument_index)
+                    {
+                        argument_token.preceded_by_space = replacement_space;
+                    }
+                    output[output_count] = argument_token;
+                    output_count += 1;
+                }
+            }
+        }
+        *tokens_out = output;
+        *token_count_out = output_count;
+    }
+    else
+    {
+        u64 capacity = macro->definition.replacement_count + 1;
+        for (u32 replacement_index = 0; replacement_index < macro->definition.replacement_count; replacement_index += 1)
+        {
+            u32 parameter_index = parameter_indices[replacement_index];
             if (parameter_index != C_MACRO_PARAMETER_NONE)
             {
-                CPpToken stringified = c_macro_stringify(space, arguments[parameter_index], stamp);
-                stringified.preceded_by_space = replacement_space;
+                CMacroArgument argument = arguments[parameter_index];
+                capacity += BUSTER_MAX(argument.token_count, argument.expanded_token_count);
+            }
+        }
+        CMacroReplacementToken* materialized = arena_allocate(arena, CMacroReplacementToken, capacity);
+        u32 materialized_count = 0;
+        for (u32 replacement_index = 0; replacement_index < macro->definition.replacement_count; replacement_index += 1)
+        {
+            CToken replacement = macro->definition.replacement[replacement_index];
+            bool replacement_space = replacement_index ? !definition_spaces || definition_spaces[replacement_index] != 0 : invocation.preceded_by_space;
+            if (macro->definition.function_like && c_token_is_punctuator(&replacement, C_PUNCTUATOR_HASH) &&
+                replacement_index + 1 < macro->definition.replacement_count)
+            {
+                u32 parameter_index = parameter_indices[replacement_index + 1];
+                if (parameter_index != C_MACRO_PARAMETER_NONE)
+                {
+                    CPpToken stringified = c_macro_stringify(space, arguments[parameter_index], stamp);
+                    stringified.preceded_by_space = replacement_space;
+                    materialized[materialized_count++] = (CMacroReplacementToken){
+                        .token = stringified,
+                    };
+                    replacement_index += 1;
+                    continue;
+                }
+            }
+            u32 parameter_index = parameter_indices[replacement_index];
+            if (parameter_index == C_MACRO_PARAMETER_NONE)
+            {
+                // GNU's comma-deletion idiom, recognized on the definition's own
+                // spelling: a `##` written between a literal comma and the
+                // variadic parameter.  The paste loop below reads the mark.
+                bool comma_paste = false;
+                if (macro->definition.variadic && c_macro_is_paste(replacement) && replacement_index &&
+                    replacement_index + 1 < macro->definition.replacement_count &&
+                    c_token_is_punctuator(&macro->definition.replacement[replacement_index - 1], C_PUNCTUATOR_COMMA))
+                {
+                    u32 next_parameter = parameter_indices[replacement_index + 1];
+                    comma_paste = next_parameter != C_MACRO_PARAMETER_NONE && next_parameter + 1 == macro->definition.parameter_count;
+                }
                 materialized[materialized_count++] = (CMacroReplacementToken){
-                    .token = stringified,
+                    .token = {.token = replacement, .stamp = stamp & C_PP_STAMP_MASK, .foreign = true, .preceded_by_space = replacement_space},
+                    .comma_paste = comma_paste,
                 };
-                replacement_index += 1;
                 continue;
             }
-        }
-        u32 parameter_index = parameter_indices[replacement_index];
-        if (parameter_index == C_MACRO_PARAMETER_NONE)
-        {
-            // GNU's comma-deletion idiom, recognized on the definition's own
-            // spelling: a `##` written between a literal comma and the
-            // variadic parameter.  The paste loop below reads the mark.
-            bool comma_paste = false;
-            if (macro->definition.variadic && c_macro_is_paste(replacement) && replacement_index &&
-                replacement_index + 1 < macro->definition.replacement_count &&
-                c_token_is_punctuator(&macro->definition.replacement[replacement_index - 1], C_PUNCTUATOR_COMMA))
+            CMacroArgument argument = arguments[parameter_index];
+            bool raw_argument = (replacement_index && c_macro_is_paste(macro->definition.replacement[replacement_index - 1])) ||
+                                (replacement_index + 1 < macro->definition.replacement_count && c_macro_is_paste(macro->definition.replacement[replacement_index + 1]));
+            CPpToken* argument_tokens = raw_argument ? argument.tokens : argument.expanded_tokens;
+            u64 argument_token_count = raw_argument ? argument.token_count : argument.expanded_token_count;
+            if (!argument_token_count)
             {
-                u32 next_parameter = parameter_indices[replacement_index + 1];
-                comma_paste = next_parameter != C_MACRO_PARAMETER_NONE && next_parameter + 1 == macro->definition.parameter_count;
+                materialized[materialized_count++] = (CMacroReplacementToken){
+                    .token = {.token = replacement, .stamp = stamp & C_PP_STAMP_MASK, .foreign = true, .preceded_by_space = replacement_space},
+                    .placemarker = true,
+                };
+                continue;
             }
-            materialized[materialized_count++] = (CMacroReplacementToken){
-                .token = {.token = replacement, .stamp = stamp & C_PP_STAMP_MASK, .foreign = true, .preceded_by_space = replacement_space},
-                .comma_paste = comma_paste,
-            };
-            continue;
-        }
-        CMacroArgument argument = arguments[parameter_index];
-        bool raw_argument = (replacement_index && c_macro_is_paste(macro->definition.replacement[replacement_index - 1])) ||
-                            (replacement_index + 1 < macro->definition.replacement_count && c_macro_is_paste(macro->definition.replacement[replacement_index + 1]));
-        CPpToken* argument_tokens = raw_argument ? argument.tokens : argument.expanded_tokens;
-        u64 argument_token_count = raw_argument ? argument.token_count : argument.expanded_token_count;
-        if (!argument_token_count)
-        {
-            materialized[materialized_count++] = (CMacroReplacementToken){
-                .token = {.token = replacement, .stamp = stamp & C_PP_STAMP_MASK, .foreign = true, .preceded_by_space = replacement_space},
-                .placemarker = true,
-            };
-            continue;
-        }
-        for (u64 argument_index = 0; argument_index < argument_token_count; argument_index += 1)
-        {
-            CPpToken argument_token = argument_tokens[argument_index];
-            argument_token.stamp = stamp & C_PP_STAMP_MASK;
-            argument_token.foreign = true;
-            // The argument stands where the parameter was written, so its
-            // first token takes the parameter's spacing; the rest keep the
-            // spacing they were written or expanded with.
-            if (!argument_index)
+            for (u64 argument_index = 0; argument_index < argument_token_count; argument_index += 1)
             {
-                argument_token.preceded_by_space = replacement_space;
-            }
-            materialized[materialized_count++] = (CMacroReplacementToken){
-                .token = argument_token,
-            };
-        }
-    }
-    CPpToken* output = arena_allocate(arena, CPpToken, materialized_count);
-    u32 output_count = 0;
-    for (u32 index = 0; index < materialized_count; index += 1)
-    {
-        CMacroReplacementToken item = materialized[index];
-        if (!c_macro_is_paste(item.token.token))
-        {
-            if (!item.placemarker)
-            {
-                output[output_count++] = item.token;
-            }
-            continue;
-        }
-        if (!output_count || index + 1 >= materialized_count)
-        {
-            c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_TOKEN_PASTE,
-                                         string_format(arena, S8("'##' appears at the edge of macro '{S8}'"), macro->name));
-            return false;
-        }
-        CMacroReplacementToken right = materialized[++index];
-        if (right.placemarker)
-        {
-            if (macro->definition.variadic && c_token_is_punctuator(&output[output_count - 1].token, C_PUNCTUATOR_COMMA))
-            {
-                output_count -= 1;
-            }
-            continue;
-        }
-        if (item.comma_paste)
-        {
-            // Varargs present: GNU performs no paste here at all.  The comma
-            // already stands in the output; the argument's first token
-            // follows it as itself, and the rest of the argument flows
-            // through the loop as ordinary tokens.
-            output[output_count++] = right.token;
-            continue;
-        }
-        CPpToken left = output[--output_count];
-        String8 left_spelling = c_token_spelling(base, left.token);
-        String8 right_spelling = c_token_spelling(base, right.token.token);
-        u64 joined_length = left_spelling.length + right_spelling.length;
-        // The joined text lives in the spelling space so the pasted token's
-        // offset resolves like any other; pasting never crosses a newline or
-        // splice, so relexing it cannot change its bytes and the relex is
-        // validation plus kind classification only.
-        char8* joined = c_space_allocate(space, joined_length + 1);
-        memcpy(joined, left_spelling.pointer, left_spelling.length);
-        memcpy(joined + left_spelling.length, right_spelling.pointer, right_spelling.length);
-        joined[joined_length] = 0;
-        TemporalArena paste_temporary = scratch_begin(&arena, 1);
-        CLexResult lex = c_lex(paste_temporary.arena, (String8){
-                                                          .pointer = joined,
-                                                          .length = joined_length,
-                                                      });
-        // The oversized-token diagnostics count here: a pasted identifier or
-        // number past the length field's reach fails as an invalid paste
-        // instead of storing a sentinel only literals may carry.
-        bool paste_valid = !lex.diagnostic_count && lex.token_count == 2 && lex.tokens[0].kind != C_TOKEN_END_OF_FILE &&
-                           c_token_length(lex.spelling_base, lex.tokens[0]) == joined_length;
-        CToken pasted_shape = paste_valid ? lex.tokens[0] : (CToken){0};
-        scratch_end(paste_temporary);
-        if (!paste_valid)
-        {
-            c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_TOKEN_PASTE,
-                                         string_format(arena, S8("token paste '{S8}##{S8}' in macro '{S8}' does not form one preprocessing token"),
-                                                       left_spelling, right_spelling, macro->name));
-            return false;
-        }
-        output[output_count++] = (CPpToken){
-            .token =
+                CPpToken argument_token = argument_tokens[argument_index];
+                argument_token.stamp = stamp & C_PP_STAMP_MASK;
+                argument_token.foreign = true;
+                // The argument stands where the parameter was written, so its
+                // first token takes the parameter's spacing; the rest keep the
+                // spacing they were written or expanded with.
+                if (!argument_index)
                 {
-                    .offset = c_space_offset(space, joined),
-                    .length = c_token_length_field(joined_length),
-                    .kind = pasted_shape.kind,
-                    .punctuator = pasted_shape.punctuator,
-                },
-            .stamp = stamp & C_PP_STAMP_MASK,
-            .foreign = true,
-            // The joined token starts where its left operand started, so it
-            // inherits that operand's spacing; the pasted spelling itself
-            // carries none.
-            .preceded_by_space = left.preceded_by_space,
-        };
+                    argument_token.preceded_by_space = replacement_space;
+                }
+                materialized[materialized_count++] = (CMacroReplacementToken){
+                    .token = argument_token,
+                };
+            }
+        }
+        CPpToken* output = arena_allocate(arena, CPpToken, materialized_count);
+        u32 output_count = 0;
+        for (u32 index = 0; index < materialized_count && ok; index += 1)
+        {
+            CMacroReplacementToken item = materialized[index];
+            if (!c_macro_is_paste(item.token.token))
+            {
+                if (!item.placemarker)
+                {
+                    output[output_count++] = item.token;
+                }
+                continue;
+            }
+            if (!output_count || index + 1 >= materialized_count)
+            {
+                c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_TOKEN_PASTE,
+                                             string_format(arena, S8("'##' appears at the edge of macro '{S8}'"), macro->name));
+                ok = false;
+                continue;
+            }
+            CMacroReplacementToken right = materialized[++index];
+            if (right.placemarker)
+            {
+                if (macro->definition.variadic && c_token_is_punctuator(&output[output_count - 1].token, C_PUNCTUATOR_COMMA))
+                {
+                    output_count -= 1;
+                }
+                continue;
+            }
+            if (item.comma_paste)
+            {
+                // Varargs present: GNU performs no paste here at all.  The comma
+                // already stands in the output; the argument's first token
+                // follows it as itself, and the rest of the argument flows
+                // through the loop as ordinary tokens.
+                output[output_count++] = right.token;
+                continue;
+            }
+            CPpToken left = output[--output_count];
+            String8 left_spelling = c_token_spelling(base, left.token);
+            String8 right_spelling = c_token_spelling(base, right.token.token);
+            u64 joined_length = left_spelling.length + right_spelling.length;
+            // The joined text lives in the spelling space so the pasted token's
+            // offset resolves like any other; pasting never crosses a newline or
+            // splice, so relexing it cannot change its bytes and the relex is
+            // validation plus kind classification only.
+            char8* joined = c_space_allocate(space, joined_length + 1);
+            memcpy(joined, left_spelling.pointer, left_spelling.length);
+            memcpy(joined + left_spelling.length, right_spelling.pointer, right_spelling.length);
+            joined[joined_length] = 0;
+            TemporalArena paste_temporary = scratch_begin(&arena, 1);
+            CLexResult lex = c_lex(paste_temporary.arena, (String8){
+                                                              .pointer = joined,
+                                                              .length = joined_length,
+                                                          });
+            // The oversized-token diagnostics count here: a pasted identifier or
+            // number past the length field's reach fails as an invalid paste
+            // instead of storing a sentinel only literals may carry.
+            bool paste_valid = !lex.diagnostic_count && lex.token_count == 2 && lex.tokens[0].kind != C_TOKEN_END_OF_FILE &&
+                               c_token_length(lex.spelling_base, lex.tokens[0]) == joined_length;
+            CToken pasted_shape = paste_valid ? lex.tokens[0] : (CToken){0};
+            scratch_end(paste_temporary);
+            if (!paste_valid)
+            {
+                c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_TOKEN_PASTE,
+                                             string_format(arena, S8("token paste '{S8}##{S8}' in macro '{S8}' does not form one preprocessing token"),
+                                                           left_spelling, right_spelling, macro->name));
+                ok = false;
+                continue;
+            }
+            output[output_count++] = (CPpToken){
+                .token =
+                    {
+                        .offset = c_space_offset(space, joined),
+                        .length = c_token_length_field(joined_length),
+                        .kind = pasted_shape.kind,
+                        .punctuator = pasted_shape.punctuator,
+                    },
+                .stamp = stamp & C_PP_STAMP_MASK,
+                .foreign = true,
+                // The joined token starts where its left operand started, so it
+                // inherits that operand's spacing; the pasted spelling itself
+                // carries none.
+                .preceded_by_space = left.preceded_by_space,
+            };
+        }
+        if (ok)
+        {
+            *tokens_out = output;
+            *token_count_out = output_count;
+        }
     }
-    *tokens_out = output;
-    *token_count_out = output_count;
-    return true;
+    return ok;
 }
 
 BUSTER_C_INTERNAL CPpToken c_macro_pragma_token(CSpellingSpace* space, CMacro* macro, CMacroArgument argument, CPpToken invocation)
@@ -5590,6 +5697,9 @@ BUSTER_C_INTERNAL void c_macro_push_definition(CPreprocessPragmaContext context,
         entry->definition.parameters = arena_allocate(context.arena, String8, macro->definition.parameter_count);
         memcpy(entry->definition.parameters, macro->definition.parameters,
                sizeof(*entry->definition.parameters) * macro->definition.parameter_count);
+        entry->definition.parameter_use_count = arena_allocate(context.arena, u32, macro->definition.parameter_count);
+        memcpy(entry->definition.parameter_use_count, macro->definition.parameter_use_count,
+               sizeof(*entry->definition.parameter_use_count) * macro->definition.parameter_count);
     }
     *context.macro_push_stack = entry;
 }
