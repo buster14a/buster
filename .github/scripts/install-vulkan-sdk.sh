@@ -19,10 +19,8 @@ case "$runner_os/$runner_arch" in
     arch='aarch64'
     ;;
   macOS/X64)
-    asset='vulkan-sdk-macos-x86_64.tar.gz'
-    install_base="$RUNNER_TEMP/vulkan-sdk"
-    platform='macos'
-    arch='x86_64'
+    echo 'No Vulkan SDK package is published for macOS x86-64; using the default non-Vulkan configuration.'
+    exit 0
     ;;
   macOS/ARM64)
     asset='vulkan-sdk-macos-aarch64.tar.gz'
