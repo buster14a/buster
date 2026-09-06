@@ -14683,13 +14683,17 @@ BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preproc
 // questions?  A token spelled one of those words is an identifier whose
 // interned id is that word's, and an identifier the intern pass never saw
 // carries symbol 0 and answers by spelling, so both are candidates.  The
-// vector arm below tests the low symbol byte alone, which admits the ids
-// that share it; this predicate is the definition the arm is a superset of,
-// and the exact question is re-asked over any range the bitmap admits.
+// test is on the low symbol byte alone, because that is what the census
+// projects out of the 12-byte rows and what its vector arm compares: the
+// candidate set is deliberately a superset that also admits the ids sharing
+// a low byte with one of the words, and the exact question is re-asked over
+// any range the bitmap admits.  Both arms answer this same predicate, which
+// is what the unoptimized gate below holds them to.
 BUSTER_C_INTERNAL bool c_parse_declaration_range_candidate(CToken token)
 {
+    u8 symbol_low = (u8)token.symbol;
     return token.kind == C_TOKEN_IDENTIFIER &&
-           (!token.symbol || (token.symbol < 64 && ((C_PARSE_DECLARATION_RANGE_KEYWORDS >> token.symbol) & 1) != 0));
+           (!symbol_low || (symbol_low < 64 && ((C_PARSE_DECLARATION_RANGE_KEYWORDS >> symbol_low) & 1) != 0));
 }
 
 // Does any bit of `words` stand for a token index in [start, end)?  One word
