@@ -127,6 +127,11 @@ jobs:
       # rather than after it, so wall time is the slower of the two.
       - name: Execution-mode matrix
         shell: bash
+        env:
+          # Ubuntu's hosted Granite Rapids CPUs report an AVX10 feature
+          # combination that Clang warns about when -march=native is used.
+          # The matrix validates execution modes, not host-specific tuning.
+          CFLAGS: -Wno-invalid-feature-combination
         run: |
           set -euo pipefail
           driver="$RUNNER_TEMP/buster-build"
