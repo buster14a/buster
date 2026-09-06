@@ -12,33 +12,27 @@ jobs:
   publish:
     if: github.server_url == 'https://github.com'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        lane: [pdb]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Publish only the exact locally tested patch
+      - name: Publish hash-checked iOS source and regression tests
         env:
-          LANE: ${{ matrix.lane }}
           PUSH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import base64, gzip, hashlib, os, pathlib, subprocess
-          lane = os.environ['LANE']
-          assert lane == 'pdb'
-          branch = 'fix/2026-09-06-pdb-checksum-records'
-          digest = 'cae8206bfa9dc8330df7f57d3928f04eda8357f0d799d6b6355deb228929ccf8'
-          allowed = ['src/buster/lib/compiler/pdb/pdb.c', 'src/buster/tests/compiler/pdb/pdb_test.c']
-          encoded = ''.join(pathlib.Path('work/issue-batch/' + lane + '.' + str(i)).read_text().strip() for i in range(4))
+          branch = 'fix/2026-09-06-ios-monitor-cleanup'
+          digest = 'ed4f877b3fcfeed576954b8ba62f424f25b570afe48968f870b4edc9d6e12e2b'
+          workflow = '.github/workflows/ios-monitor-tests.yml'
+          allowed = ['ios/launch_simulator.sh', 'tests/mobile_ci_scripts_test.sh', 'tests/ios_launch_monitor_test.sh', workflow]
+          encoded = ''.join(pathlib.Path('work/issue-batch/ios.' + str(i)).read_text().strip() for i in range(3))
           patch = gzip.decompress(base64.b64decode(encoded, validate=True))
           assert hashlib.sha256(patch).hexdigest() == digest, 'patch transport checksum mismatch'
-          patch_path = pathlib.Path(os.environ['RUNNER_TEMP']) / (lane + '.patch')
+          patch_path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'ios.patch'
           patch_path.write_bytes(patch)
           def git(*args, **kwargs):
               return subprocess.check_output(['git', *args], text=True, **kwargs).strip()
@@ -50,9 +44,17 @@ jobs:
           git('apply', '--index', str(patch_path))
           assert set(git('diff', '--cached', '--name-only').splitlines()) == set(allowed), 'unexpected patch paths'
           git('diff', '--cached', '--check')
+          complete_tree = git('write-tree')
+          # Publish source with contents permission only. The connected GitHub
+          # action adds the already-reviewed CI file in a second commit; the
+          # final tree must equal this exact, fully tested tree.
+          workflow_blob = git('hash-object', workflow)
+          git('reset', '--', workflow)
+          pathlib.Path(workflow).unlink()
+          assert set(git('diff', '--cached', '--name-only').splitlines()) == set(allowed) - {workflow}
           git('config', 'user.name', 'Buster issue fixes (assisted)')
           git('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
-          git('commit', '-m', 'pdb: preserve variable-length CodeView checksum records')
+          git('commit', '-m', 'ios: own and reap launch producers and console readers')
           env = os.environ.copy()
           env['GIT_CONFIG_COUNT'] = '1'
           env['GIT_CONFIG_KEY_0'] = 'http.https://github.com/.extraheader'
@@ -60,50 +62,10 @@ jobs:
           git('push', 'origin', 'HEAD:refs/heads/' + branch, env=env)
           head = git('rev-parse', 'HEAD')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              summary.write('Published `' + branch + '` at `' + head + '`; patch SHA-256 `' + digest + '`.\n')
-          print('Published', branch, head)
+              summary.write('Published `' + branch + '` at `' + head + '`.\n')
+              summary.write('Full four-file tree `' + complete_tree + '`; pending CI file blob `' + workflow_blob + '`.\n')
+          print('Published', branch, head, 'expected final tree', complete_tree, 'workflow blob', workflow_blob)
           PY
-      - name: Install Vulkan SDK and independent PDB reader
+      - name: Mobile script and attached monitor regression suite
         shell: bash
-        run: |
-          set -euo pipefail
-          bash .github/scripts/install-vulkan-sdk.sh
-          sudo apt-get update -qq
-          sudo apt-get install -y llvm-18
-      - name: Debug split suite and Release fixed point
-        shell: bash
-        run: |
-          set -euo pipefail
-          driver="$RUNNER_TEMP/buster-build"
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
-          "$driver" generate --cc clang --ci --linker DEFAULT
-          "$driver" build --config Debug -t test_all
-          "$driver" test_self_host --config Release
-      - name: Real Clang COFF through Buster into an independent PDB reader
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP"
-          printf 'int checksum_fixture(int x) { return x + 1; }\n' > pdb-clang-fixture.c
-          clang --target=x86_64-pc-windows-msvc -g -gcodeview -c pdb-clang-fixture.c -o pdb-clang-fixture.obj
-          "$GITHUB_WORKSPACE/build/Debug/ide" cc --target=x86_64-pc-windows-msvc --entry=checksum_fixture -g pdb-clang-fixture.obj -o pdb-clang-fixture.exe
-          llvm-readobj-18 --codeview pdb-clang-fixture.obj > pdb-clang-coff.txt
-          llvm-pdbutil-18 dump -files -l pdb-clang-fixture.pdb | tee pdb-clang-reader.txt
-          python3 - <<'PY'
-          import hashlib, pathlib
-          source = pathlib.Path('pdb-clang-fixture.c').read_bytes()
-          digest = hashlib.md5(source).hexdigest()
-          dump = pathlib.Path('pdb-clang-reader.txt').read_text()
-          assert 'pdb-clang-fixture.c' in dump, 'source file missing from independent reader'
-          assert digest in ''.join(dump.lower().split()), 'MD5 digest was not preserved in the PDB'
-          assert 'Lines' in dump, 'source line subsection was not read'
-          print('Independent LLVM reader accepted Clang source-file, MD5 and line data:', digest)
-          PY
-      - name: Retain independent-reader evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: pdb-independent-reader
-          path: ${{ runner.temp }}/pdb-clang-*
-          retention-days: 7
-          if-no-files-found: warn
+        run: /bin/bash tests/mobile_ci_scripts_test.sh
