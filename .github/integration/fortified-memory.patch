@@ -1,0 +1,178 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index df0fbffa..aa773543 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -1829,6 +1829,9 @@ typedef enum CIrMemoryBuiltin
+     C_IR_MEMORY_BUILTIN_MEMMOVE,
+     C_IR_MEMORY_BUILTIN_MEMSET,
+     C_IR_MEMORY_BUILTIN_MEMCMP,
++    C_IR_MEMORY_BUILTIN_MEMCPY_CHECKED,
++    C_IR_MEMORY_BUILTIN_MEMMOVE_CHECKED,
++    C_IR_MEMORY_BUILTIN_MEMSET_CHECKED,
+     C_IR_MEMORY_BUILTIN_COUNT,
+ } CIrMemoryBuiltin;
+ 
+@@ -1988,6 +1991,9 @@ BUSTER_C_INTERNAL String8 const c_ir_memory_builtin_spellings[C_IR_MEMORY_BUILTI
+     S8_INITIALIZER("__builtin_memmove"),
+     S8_INITIALIZER("__builtin_memset"),
+     S8_INITIALIZER("__builtin_memcmp"),
++    S8_INITIALIZER("__builtin___memcpy_chk"),
++    S8_INITIALIZER("__builtin___memmove_chk"),
++    S8_INITIALIZER("__builtin___memset_chk"),
+ };
+ 
+ BUSTER_C_INTERNAL String8 const c_ir_memory_builtin_link_names[C_IR_MEMORY_BUILTIN_COUNT] = {
+@@ -1995,6 +2001,9 @@ BUSTER_C_INTERNAL String8 const c_ir_memory_builtin_link_names[C_IR_MEMORY_BUILT
+     S8_INITIALIZER("memmove"),
+     S8_INITIALIZER("memset"),
+     S8_INITIALIZER("memcmp"),
++    S8_INITIALIZER("__memcpy_chk"),
++    S8_INITIALIZER("__memmove_chk"),
++    S8_INITIALIZER("__memset_chk"),
+ };
+ 
+ BUSTER_C_INTERNAL CIrMemoryBuiltin c_ir_memory_builtin(String8 name)
+@@ -12568,11 +12577,16 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_builtin_call(CIntegerIrBuilder* bui
+     IrTypeId void_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+     // memset takes an int fill where the copies take a source pointer, and
+     // memcmp answers an int where the others answer the destination.
+-    bool fill = kind == C_IR_MEMORY_BUILTIN_MEMSET;
++    bool fill = kind == C_IR_MEMORY_BUILTIN_MEMSET || kind == C_IR_MEMORY_BUILTIN_MEMSET_CHECKED;
+     bool compare = kind == C_IR_MEMORY_BUILTIN_MEMCMP;
+-    IrTypeId parameter_types[3] = {void_pointer_type, fill ? builder->s32_type : void_pointer_type, builder->size_type};
++    // Fortified forms keep the destination bound as a fourth size_t argument
++    // to the checked runtime entry point. Do not erase the check, even when
++    // the ordinary copy's count is small or the bound is unknown.
++    bool checked = kind >= C_IR_MEMORY_BUILTIN_MEMCPY_CHECKED;
++    u32 parameter_count = checked ? 4u : 3u;
++    IrTypeId parameter_types[4] = {void_pointer_type, fill ? builder->s32_type : void_pointer_type, builder->size_type, builder->size_type};
+     IrTypeId return_type = compare ? builder->s32_type : void_pointer_type;
+-    if (argument_count == BUSTER_ARRAY_LENGTH(parameter_types) && void_pointer_type.value != IR_ID_UNDERLYING_INVALID)
++    if (argument_count == parameter_count && void_pointer_type.value != IR_ID_UNDERLYING_INVALID)
+     {
+         String8 link_name = c_ir_memory_builtin_link_names[kind];
+         u32 declaration_index = c_ir_find_function(builder, link_name);
+diff --git a/src/buster/lib/compiler/frontend/c/c_source.c b/src/buster/lib/compiler/frontend/c/c_source.c
+index c5dfab93..3d79e764 100644
+--- a/src/buster/lib/compiler/frontend/c/c_source.c
++++ b/src/buster/lib/compiler/frontend/c/c_source.c
+@@ -2778,6 +2778,9 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
+     { S8_INITIALIZER("__builtin_memmove"), C_SYMBOL_BUILTIN_MEMORY },
+     { S8_INITIALIZER("__builtin_memset"), C_SYMBOL_BUILTIN_MEMORY },
+     { S8_INITIALIZER("__builtin_memcmp"), C_SYMBOL_BUILTIN_MEMORY },
++    { S8_INITIALIZER("__builtin___memcpy_chk"), C_SYMBOL_BUILTIN_MEMORY },
++    { S8_INITIALIZER("__builtin___memmove_chk"), C_SYMBOL_BUILTIN_MEMORY },
++    { S8_INITIALIZER("__builtin___memset_chk"), C_SYMBOL_BUILTIN_MEMORY },
+     { S8_INITIALIZER("__builtin_clz"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
+     // The `l` spellings sit between the int and long long ones and lower the
+     // same way -- the operand's own width decides the operation -- so their
+@@ -4866,6 +4869,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name)
+         "__builtin_signbit",       "__builtin_signbitf", "__builtin_signbitl",
+         "__builtin_memcpy",        "__builtin_memmove",
+         "__builtin_memset",        "__builtin_memcmp",
++        "__builtin___memcpy_chk", "__builtin___memmove_chk", "__builtin___memset_chk",
+         "__builtin_sqrt",          "__builtin_sqrtf",
+         "__builtin_strlen",        "__builtin_trap",
+         "__builtin_ia32_pause",
+diff --git a/src/buster/tests/compiler/frontend/c/c_test.c b/src/buster/tests/compiler/frontend/c/c_test.c
+index 7584ab1d..636640a6 100644
+--- a/src/buster/tests/compiler/frontend/c/c_test.c
++++ b/src/buster/tests/compiler/frontend/c/c_test.c
+@@ -16289,6 +16289,49 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+             scratch_end(bound_register_temporary);
+         }
+     }
++    // Fortified block-memory builtins have a real fourth size_t argument,
++    // including when no libc declaration is present. Never lower these as
++    // three-argument unchecked calls merely to accept a hosted SDK header.
++    {
++        String8 names[] = {S8("__builtin___memcpy_chk"), S8("__builtin___memmove_chk"), S8("__builtin___memset_chk")};
++        String8 runtime_names[] = {S8("__memcpy_chk"), S8("__memmove_chk"), S8("__memset_chk")};
++        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
++        {
++            TemporalArena temporary = scratch_begin(0, 0);
++            String8 second = index == 2 ? S8("0x7f") : S8("s");
++            String8 declaration = index == 0
++                ? S8("extern void* __memcpy_chk(void*, const void*, unsigned long long, unsigned long long);\n") : S8("");
++            String8 source = string_format_z(temporary.arena,
++                S8("#if !__has_builtin({S8})\n#error missing builtin\n#endif\n{S8}"
++                   "void* f(void* d, void* s, int n, int bound) {{ return {S8}(d, {S8}, n, bound); }\n"),
++                names[index], declaration, names[index], second);
++            CPreprocessResult tokens = {0};
++            CParseResult parse = {0};
++            CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("checked-memory.c"), target_native, &tokens, &parse);
++            BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && !lowered.diagnostic_count && lowered.program);
++            if (lowered.program && !lowered.diagnostic_count)
++            {
++                bool found = false;
++                for (u32 symbol_index = 0; symbol_index < lowered.program->symbols.count; symbol_index += 1)
++                {
++                    IrSymbol* symbol = lowered.program->symbols.symbols + symbol_index;
++                    if (string_equal(symbol->link_name, runtime_names[index]))
++                    {
++                        IrType* type = ir_type_from_id(&lowered.program->types, symbol->type);
++                        found = type && type->kind == IR_TYPE_FUNCTION && type->parameter_count == 4;
++                        if (found) BUSTER_TEST(arguments, type->parameter_types[2].value == type->parameter_types[3].value);
++                    }
++                }
++                BUSTER_TEST(arguments, found);
++                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
++            }
++            source = string_format_z(temporary.arena,
++                S8("void* f(void* d, void* s) {{ return {S8}(d, {S8}, 1); }\n"), names[index], second);
++            lowered = c_test_lower_source(temporary.arena, source, S8("checked-memory-arity.c"), target_native, &tokens, &parse);
++            BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
++            scratch_end(temporary);
++        }
++    }
+     // A memory constraint is not a register class: the operand it carries is
+     // the storage rather than the value, and the class it lowers to is what
+     // tells the emitter to put an address in the register it assigns.
+diff --git a/tests/basic_c_builtin_memory.c b/tests/basic_c_builtin_memory.c
+index 5cc350bc..d2130277 100644
+--- a/tests/basic_c_builtin_memory.c
++++ b/tests/basic_c_builtin_memory.c
+@@ -10,8 +10,10 @@ extern int memcmp(const void *left, const void *right, unsigned long count);
+ // __clang__ is defined, so the builtins have to lower to the library calls
+ // they name, with the prototype's argument conversions and the destination
+ // returned.
+-int main(void)
++int main(int argc, char** argv)
+ {
++    (void)argc;
++    (void)argv;
+     char source[16];
+     char destination[16];
+     __builtin_memset(source, 0x5a, sizeof(source));
+@@ -27,5 +29,31 @@ int main(void)
+     int count = 4;
+     __builtin_memset(destination, 7, count);
+     if (destination[0] != 7 || destination[3] != 7 || destination[4] == 7) return 6;
++#if defined(__APPLE__) || defined(__linux__)
++    // Hosted fortified entry points retain the fourth argument. Use runtime
++    // values to exercise the ABI rather than a folded constant-size copy.
++    volatile int bounded_count = 4;
++    volatile int bound = 16;
++    if (__builtin___memset_chk(destination, 0x27, bounded_count, bound) != destination) return 7;
++    if (destination[0] != 0x27 || destination[3] != 0x27) return 8;
++    if (__builtin___memcpy_chk(destination, source, bounded_count, bound) != destination) return 9;
++    if (destination[0] != 0x5a || destination[3] != 0x5a) return 10;
++    destination[0] = 3;
++    if (__builtin___memmove_chk(destination + 1, destination, bounded_count, bound - 1) != destination + 1) return 11;
++    if (destination[1] != 3) return 12;
++    if (__builtin___memcpy_chk(destination, source, bounded_count, (__SIZE_TYPE__)-1) != destination) return 13;
++    if (__builtin___memset_chk(destination, 0, 0, 0) != destination) return 14;
++    if (argc > 1)
++    {
++        // No physical overflow is possible: the array is sixteen bytes. The
++        // explicit bound is intentionally smaller, so the checked runtime
++        // must fail before writing. The supplemental gate expects failure.
++        bound = 1;
++        if (argv[1][0] == 'c') __builtin___memcpy_chk(destination, source, bounded_count, bound);
++        else if (argv[1][0] == 'm') __builtin___memmove_chk(destination, source, bounded_count, bound);
++        else __builtin___memset_chk(destination, 0, bounded_count, bound);
++        return *(volatile unsigned char*)destination;
++    }
++#endif
+     return 0;
+ }
