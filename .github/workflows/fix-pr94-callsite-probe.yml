@@ -1,0 +1,43 @@
+name: Fix PR 94 arena call-site probe
+
+on:
+  push:
+    branches:
+      - claude/unruffled-bhabha-f5d28a
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.repository == 'buster14a/buster' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Fix probe include order
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('build.c')
+          text = path.read_text(encoding='utf-8')
+          old = 'BUSTER_GLOBAL_LOCAL void* arena_allocate_bytes_with_location(Arena* arena, u64 size, u64 alignment, const char* file, u32 line);\n'
+          new = '#include <buster/lib/arena.h>\n' + old
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one probe declaration, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+      - name: Commit fix and remove this one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/fix-pr94-callsite-probe.yml
+          git config user.name "David"
+          git config user.email "davidgmbb@gmail.com"
+          git add build.c .github/workflows/fix-pr94-callsite-probe.yml
+          git diff --cached --check
+          git commit -m "ci: fix arena call-site probe include order"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
