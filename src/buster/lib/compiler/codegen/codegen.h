@@ -377,6 +377,9 @@ struct CodegenStatistics
     u64 exact_attempts;
     u64 exact_successes;
     u64 exact_failures;
+    // Explicit mutable machine virtual registers emitted by selected
+    // functions. Zero means the native machine path is fully SSA.
+    u64 mutable_virtual_register_count;
 };
 
 struct CodegenModule

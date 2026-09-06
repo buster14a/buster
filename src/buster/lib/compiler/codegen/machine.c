@@ -1564,6 +1564,69 @@ u32 machine_builder_virtual_register(MachineFunctionBuilder* builder, MachineVir
     return index;
 }
 
+BUSTER_GLOBAL_LOCAL MachineVirtualRegister* machine_builder_virtual_register_at(MachineFunctionBuilder* builder, u32 virtual_register)
+{
+    if (!builder || virtual_register >= builder->virtual_registers.total_count || !builder->virtual_registers.first)
+    {
+        return 0;
+    }
+    u32 chunk_capacity = builder->virtual_registers.chunk_capacity;
+    MachineBuilderChunk* chunk = builder->virtual_registers.first;
+    while (virtual_register >= chunk_capacity)
+    {
+        virtual_register -= chunk_capacity;
+        chunk = chunk->next;
+        if (!chunk)
+        {
+            return 0;
+        }
+    }
+    return (MachineVirtualRegister*)(chunk + 1) + virtual_register;
+}
+
+BUSTER_GLOBAL_LOCAL void machine_builder_mark_virtual_register_mutable(MachineFunctionBuilder* builder, u32 virtual_register)
+{
+    MachineVirtualRegister* row = machine_builder_virtual_register_at(builder, virtual_register);
+    if (row)
+    {
+        row->flags |= MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE;
+    }
+}
+
+// Legacy target rows that update one register in place make the exception
+// explicit in the published MIR. A pure DEFINE that happens to name the same
+// vreg in a USE slot is the three-address spelling of the same mutation. Pure
+// duplicate DEFINE rows remain unclassified so the verifier catches them.
+BUSTER_GLOBAL_LOCAL void machine_builder_classify_instruction_mutability(MachineFunctionBuilder* builder, MachineInstruction const* instruction)
+{
+    MachineOpcodeInfo const* info = instruction ? machine_opcode_info(instruction->opcode) : 0;
+    if (!info)
+    {
+        return;
+    }
+    for (u32 destination_slot = 0; destination_slot < info->operand_count; destination_slot += 1)
+    {
+        MachineRef destination = instruction->operands[destination_slot];
+        u32 destination_role = info->operand_info[destination_slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+        if (machine_ref_kind(destination) != MACHINE_REF_VIRTUAL_REGISTER ||
+            (destination_role != MACHINE_OPERAND_ROLE_DEFINE && destination_role != MACHINE_OPERAND_ROLE_USE_DEFINE))
+        {
+            continue;
+        }
+        bool mutable = destination_role == MACHINE_OPERAND_ROLE_USE_DEFINE;
+        for (u32 source_slot = 0; source_slot < info->operand_count && !mutable; source_slot += 1)
+        {
+            u32 source_role = info->operand_info[source_slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+            mutable = (source_role == MACHINE_OPERAND_ROLE_USE || source_role == MACHINE_OPERAND_ROLE_USE_DEFINE) &&
+                      instruction->operands[source_slot] == destination;
+        }
+        if (mutable)
+        {
+            machine_builder_mark_virtual_register_mutable(builder, machine_ref_payload(destination));
+        }
+    }
+}
+
 u32 machine_builder_block_begin(MachineFunctionBuilder* builder)
 {
     BUSTER_CHECK(!builder->block_is_open);
@@ -1660,6 +1723,117 @@ MachineFunction machine_function_builder_finish(Arena* arena, MachineFunctionBui
         .edge_copy_source_count = builder->edge_copy_sources.total_count,
     };
     return function;
+}
+
+// Selection deliberately over-reserves classification registers so load
+// aliasing and dead branch-fusion members can be decided without moving the
+// builder's hot rows. Remove those unreferenced reservations before MIR is
+// published: every remaining virtual-register row is then an actual value and
+// must satisfy the verifier's definition contract.
+BUSTER_GLOBAL_LOCAL u32 machine_function_compact_virtual_registers(Arena* arena, MachineFunction* function)
+{
+    u32 old_count = function->virtual_register_count;
+    if (!old_count)
+    {
+        return 0;
+    }
+
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    u8* referenced = arena_allocate(scratch.arena, u8, old_count);
+    u32* remap = arena_allocate(scratch.arena, u32, old_count);
+    memset(referenced, 0, old_count);
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        MachineInstruction* instruction = function->instructions + instruction_index;
+        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+        if (!info)
+        {
+            scratch_end(scratch);
+            return UINT32_MAX;
+        }
+        for (u32 operand_index = 0; operand_index < info->operand_count; operand_index += 1)
+        {
+            MachineRef ref = instruction->operands[operand_index];
+            if (machine_ref_kind(ref) == MACHINE_REF_VIRTUAL_REGISTER)
+            {
+                u32 virtual_register = machine_ref_payload(ref);
+                if (virtual_register >= old_count)
+                {
+                    scratch_end(scratch);
+                    return UINT32_MAX;
+                }
+                referenced[virtual_register] = 1;
+            }
+        }
+    }
+    for (u32 parameter_index = 0; parameter_index < function->block_parameter_count; parameter_index += 1)
+    {
+        u32 virtual_register = function->block_parameters[parameter_index].virtual_register;
+        if (virtual_register >= old_count)
+        {
+            scratch_end(scratch);
+            return UINT32_MAX;
+        }
+        referenced[virtual_register] = 1;
+    }
+    for (u32 source_index = 0; source_index < function->edge_copy_source_count; source_index += 1)
+    {
+        MachineRef source = function->edge_copy_sources[source_index];
+        if (machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER)
+        {
+            u32 virtual_register = machine_ref_payload(source);
+            if (virtual_register >= old_count)
+            {
+                scratch_end(scratch);
+                return UINT32_MAX;
+            }
+            referenced[virtual_register] = 1;
+        }
+    }
+
+    u32 new_count = 0;
+    u32 mutable_count = 0;
+    for (u32 old_index = 0; old_index < old_count; old_index += 1)
+    {
+        if (!referenced[old_index])
+        {
+            remap[old_index] = UINT32_MAX;
+            continue;
+        }
+        remap[old_index] = new_count;
+        function->virtual_registers[new_count] = function->virtual_registers[old_index];
+        mutable_count += (function->virtual_registers[new_count].flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) != 0;
+        new_count += 1;
+    }
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        MachineInstruction* instruction = function->instructions + instruction_index;
+        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+        for (u32 operand_index = 0; operand_index < info->operand_count; operand_index += 1)
+        {
+            MachineRef* ref = instruction->operands + operand_index;
+            if (machine_ref_kind(*ref) == MACHINE_REF_VIRTUAL_REGISTER)
+            {
+                *ref = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, remap[machine_ref_payload(*ref)]);
+            }
+        }
+    }
+    for (u32 parameter_index = 0; parameter_index < function->block_parameter_count; parameter_index += 1)
+    {
+        MachineBlockParameter* parameter = function->block_parameters + parameter_index;
+        parameter->virtual_register = remap[parameter->virtual_register];
+    }
+    for (u32 source_index = 0; source_index < function->edge_copy_source_count; source_index += 1)
+    {
+        MachineRef* source = function->edge_copy_sources + source_index;
+        if (machine_ref_kind(*source) == MACHINE_REF_VIRTUAL_REGISTER)
+        {
+            *source = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, remap[machine_ref_payload(*source)]);
+        }
+    }
+    function->virtual_register_count = new_count;
+    scratch_end(scratch);
+    return mutable_count;
 }
 
 // Loop-depth frequency classes from the finished block structure. A
@@ -1775,6 +1949,234 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_reference(MachineFunction* function, Mac
     return false;
 }
 
+typedef struct MachineVerifyDominance MachineVerifyDominance;
+struct MachineVerifyDominance
+{
+    u32* preorder;
+    u32* postorder;
+    u32* component;
+};
+
+BUSTER_GLOBAL_LOCAL u32 machine_verify_dominator_intersect(u32 left, u32 right, u32 const* immediate_dominators, u32 const* rpo_indices)
+{
+    while (left != right)
+    {
+        while (rpo_indices[left] > rpo_indices[right])
+        {
+            left = immediate_dominators[left];
+        }
+        while (rpo_indices[right] > rpo_indices[left])
+        {
+            right = immediate_dominators[right];
+        }
+    }
+    return left;
+}
+
+// Build immediate dominators with the Cooper-Harvey-Kennedy iteration, then
+// number the dominator forest so each query is two comparisons. Block zero is
+// the ordinary entry; disconnected malformed/replay components receive their
+// own conservative root instead of inheriting dominance from block zero.
+BUSTER_GLOBAL_LOCAL MachineVerifyDominance machine_verify_dominance_build(Arena* arena, MachineFunction* function)
+{
+    MachineVerifyDominance result = {0};
+    u32 block_count = function->block_count;
+    if (!block_count)
+    {
+        return result;
+    }
+    u32 edge_capacity = function->edge_count ? function->edge_count : 1;
+    u32* predecessor_offsets = arena_allocate(arena, u32, block_count + 1);
+    u32* successor_offsets = arena_allocate(arena, u32, block_count + 1);
+    memset(predecessor_offsets, 0, sizeof(*predecessor_offsets) * (block_count + 1));
+    memset(successor_offsets, 0, sizeof(*successor_offsets) * (block_count + 1));
+    for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+    {
+        MachineEdge const* edge = function->edges + edge_index;
+        predecessor_offsets[edge->destination_block + 1] += 1;
+        successor_offsets[edge->source_block + 1] += 1;
+    }
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        predecessor_offsets[block_index + 1] += predecessor_offsets[block_index];
+        successor_offsets[block_index + 1] += successor_offsets[block_index];
+    }
+    u32* predecessors = arena_allocate(arena, u32, edge_capacity);
+    u32* successors = arena_allocate(arena, u32, edge_capacity);
+    u32* predecessor_cursors = arena_allocate(arena, u32, block_count);
+    u32* successor_cursors = arena_allocate(arena, u32, block_count);
+    memcpy(predecessor_cursors, predecessor_offsets, sizeof(*predecessor_cursors) * block_count);
+    memcpy(successor_cursors, successor_offsets, sizeof(*successor_cursors) * block_count);
+    for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+    {
+        MachineEdge const* edge = function->edges + edge_index;
+        predecessors[predecessor_cursors[edge->destination_block]++] = edge->source_block;
+        successors[successor_cursors[edge->source_block]++] = edge->destination_block;
+    }
+
+    u8* visited = arena_allocate(arena, u8, block_count);
+    u8* is_root = arena_allocate(arena, u8, block_count);
+    memset(visited, 0, block_count);
+    memset(is_root, 0, block_count);
+    u32* component = arena_allocate(arena, u32, block_count);
+    u32* roots = arena_allocate(arena, u32, block_count);
+    u32* dfs_blocks = arena_allocate(arena, u32, block_count);
+    u32* dfs_next = arena_allocate(arena, u32, block_count);
+    u32* traversal_postorder = arena_allocate(arena, u32, block_count);
+    u32 root_count = 0;
+    u32 postorder_count = 0;
+    for (u32 start_ordinal = 0; start_ordinal < block_count; start_ordinal += 1)
+    {
+        u32 start = start_ordinal;
+        if (visited[start])
+        {
+            continue;
+        }
+        u32 component_index = root_count;
+        roots[root_count++] = start;
+        is_root[start] = 1;
+        u32 depth = 1;
+        dfs_blocks[0] = start;
+        dfs_next[0] = successor_offsets[start];
+        visited[start] = 1;
+        component[start] = component_index;
+        while (depth)
+        {
+            u32 block = dfs_blocks[depth - 1];
+            u32* next = dfs_next + depth - 1;
+            if (*next < successor_offsets[block + 1])
+            {
+                u32 successor = successors[*next];
+                *next += 1;
+                if (!visited[successor])
+                {
+                    visited[successor] = 1;
+                    component[successor] = component_index;
+                    dfs_blocks[depth] = successor;
+                    dfs_next[depth] = successor_offsets[successor];
+                    depth += 1;
+                }
+            }
+            else
+            {
+                traversal_postorder[postorder_count++] = block;
+                depth -= 1;
+            }
+        }
+    }
+
+    u32* rpo = arena_allocate(arena, u32, block_count);
+    u32* rpo_indices = arena_allocate(arena, u32, block_count);
+    for (u32 index = 0; index < block_count; index += 1)
+    {
+        rpo[index] = traversal_postorder[block_count - index - 1];
+        rpo_indices[rpo[index]] = index;
+    }
+    u32* immediate_dominators = arena_allocate(arena, u32, block_count);
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        immediate_dominators[block_index] = UINT32_MAX;
+    }
+    for (u32 root_index = 0; root_index < root_count; root_index += 1)
+    {
+        immediate_dominators[roots[root_index]] = roots[root_index];
+    }
+    bool changed;
+    do
+    {
+        changed = false;
+        for (u32 rpo_index = 0; rpo_index < block_count; rpo_index += 1)
+        {
+            u32 block = rpo[rpo_index];
+            if (is_root[block])
+            {
+                continue;
+            }
+            u32 new_dominator = UINT32_MAX;
+            for (u32 predecessor_index = predecessor_offsets[block]; predecessor_index < predecessor_offsets[block + 1]; predecessor_index += 1)
+            {
+                u32 predecessor = predecessors[predecessor_index];
+                if (component[predecessor] != component[block] || immediate_dominators[predecessor] == UINT32_MAX)
+                {
+                    continue;
+                }
+                new_dominator = new_dominator == UINT32_MAX
+                                    ? predecessor
+                                    : machine_verify_dominator_intersect(new_dominator, predecessor, immediate_dominators, rpo_indices);
+            }
+            if (new_dominator != UINT32_MAX && immediate_dominators[block] != new_dominator)
+            {
+                immediate_dominators[block] = new_dominator;
+                changed = true;
+            }
+        }
+    } while (changed);
+
+    u32* child_offsets = arena_allocate(arena, u32, block_count + 1);
+    memset(child_offsets, 0, sizeof(*child_offsets) * (block_count + 1));
+    for (u32 block = 0; block < block_count; block += 1)
+    {
+        if (immediate_dominators[block] != UINT32_MAX && immediate_dominators[block] != block)
+        {
+            child_offsets[immediate_dominators[block] + 1] += 1;
+        }
+    }
+    for (u32 block = 0; block < block_count; block += 1)
+    {
+        child_offsets[block + 1] += child_offsets[block];
+    }
+    u32* children = arena_allocate(arena, u32, block_count);
+    u32* child_cursors = arena_allocate(arena, u32, block_count);
+    memcpy(child_cursors, child_offsets, sizeof(*child_cursors) * block_count);
+    for (u32 block = 0; block < block_count; block += 1)
+    {
+        if (immediate_dominators[block] != UINT32_MAX && immediate_dominators[block] != block)
+        {
+            children[child_cursors[immediate_dominators[block]]++] = block;
+        }
+    }
+    u32* preorder = arena_allocate(arena, u32, block_count);
+    u32* postorder = arena_allocate(arena, u32, block_count);
+    u32 clock = 0;
+    for (u32 root_index = 0; root_index < root_count; root_index += 1)
+    {
+        u32 root = roots[root_index];
+        u32 depth = 1;
+        dfs_blocks[0] = root;
+        dfs_next[0] = child_offsets[root];
+        preorder[root] = clock++;
+        while (depth)
+        {
+            u32 block = dfs_blocks[depth - 1];
+            u32* next = dfs_next + depth - 1;
+            if (*next < child_offsets[block + 1])
+            {
+                u32 child = children[*next];
+                *next += 1;
+                preorder[child] = clock++;
+                dfs_blocks[depth] = child;
+                dfs_next[depth] = child_offsets[child];
+                depth += 1;
+            }
+            else
+            {
+                postorder[block] = clock++;
+                depth -= 1;
+            }
+        }
+    }
+    result.preorder = preorder;
+    result.postorder = postorder;
+    result.component = component;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_verify_block_dominates(MachineVerifyDominance dominance, u32 dominator, u32 block)
+{
+    return dominance.component && dominance.component[dominator] == dominance.component[block] &&
+           dominance.preorder[dominator] <= dominance.preorder[block] && dominance.postorder[block] <= dominance.postorder[dominator];
+}
+
 MachineVerifyResult machine_verify_function(MachineFunction* function)
 {
     MachineVerifyResult result = {0};
@@ -1797,6 +2199,37 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
         result.error = MACHINE_VERIFY_POINT_CAPACITY;
         return result;
     }
+
+    TemporalArena scratch = scratch_begin(0, 0);
+#define MACHINE_VERIFY_REJECT(error_value) \
+    do \
+    { \
+        result.error = (error_value); \
+        goto machine_verify_done; \
+    } while (0)
+
+    u32 register_capacity = function->virtual_register_count ? function->virtual_register_count : 1;
+    u32* definition_counts = arena_allocate(scratch.arena, u32, register_capacity);
+    u32* definition_blocks = arena_allocate(scratch.arena, u32, register_capacity);
+    u32* parameter_blocks = arena_allocate(scratch.arena, u32, register_capacity);
+    MachinePoint* definition_points = arena_allocate(scratch.arena, MachinePoint, register_capacity);
+    memset(definition_counts, 0, sizeof(*definition_counts) * register_capacity);
+    memset(definition_blocks, 0xff, sizeof(*definition_blocks) * register_capacity);
+    memset(parameter_blocks, 0xff, sizeof(*parameter_blocks) * register_capacity);
+    memset(definition_points, 0xff, sizeof(*definition_points) * register_capacity);
+
+    for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+    {
+        MachineVirtualRegister const* virtual_register = function->virtual_registers + register_index;
+        if ((virtual_register->flags & ~MACHINE_VIRTUAL_REGISTER_FLAG_MASK) != 0 ||
+            virtual_register->register_class == MACHINE_REGISTER_CLASS_NONE || virtual_register->register_class >= MACHINE_REGISTER_CLASS_COUNT)
+        {
+            result.operand = register_index;
+            MACHINE_VERIFY_REJECT(MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION);
+        }
+        result.mutable_virtual_register_count += (virtual_register->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) != 0;
+    }
+
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         MachineBlock* block = function->blocks + block_index;
@@ -1805,18 +2238,24 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
             block->successor_offset > function->edge_count || block->successor_count > function->edge_count - block->successor_offset ||
             block->parameter_offset > function->block_parameter_count || block->parameter_count > function->block_parameter_count - block->parameter_offset)
         {
-            result.error = MACHINE_VERIFY_EDGE_RANGE;
-            return result;
+            MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_RANGE);
         }
         for (u32 parameter_index = 0; parameter_index < block->parameter_count; parameter_index += 1)
         {
             MachineBlockParameter* parameter = function->block_parameters + block->parameter_offset + parameter_index;
-            if (parameter->virtual_register >= function->virtual_register_count)
+            result.operand = parameter_index;
+            if (parameter->virtual_register >= function->virtual_register_count || parameter_blocks[parameter->virtual_register] != UINT32_MAX)
             {
-                result.operand = parameter_index;
-                result.error = MACHINE_VERIFY_BLOCK_PARAMETER;
-                return result;
+                MACHINE_VERIFY_REJECT(MACHINE_VERIFY_BLOCK_PARAMETER);
             }
+            u32 virtual_register = parameter->virtual_register;
+            parameter_blocks[virtual_register] = block_index;
+            if (!definition_counts[virtual_register])
+            {
+                definition_blocks[virtual_register] = block_index;
+                definition_points[virtual_register] = MACHINE_POINT_INVALID;
+            }
+            definition_counts[virtual_register] += 1;
         }
     }
     for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
@@ -1826,37 +2265,43 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
         if (edge->source_block >= function->block_count || edge->destination_block >= function->block_count || edge->copy_offset > function->edge_copy_source_count ||
             edge->copy_count > function->edge_copy_source_count - edge->copy_offset)
         {
-            result.error = MACHINE_VERIFY_EDGE_RANGE;
-            return result;
+            MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_RANGE);
         }
         MachineBlock* destination = function->blocks + edge->destination_block;
         if (edge->copy_count != destination->parameter_count)
         {
-            result.error = MACHINE_VERIFY_EDGE_COPY;
-            return result;
+            MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_COPY);
         }
         for (u32 copy_index = 0; copy_index < edge->copy_count; copy_index += 1)
         {
             MachineRef source = function->edge_copy_sources[edge->copy_offset + copy_index];
-            if (!machine_verify_reference(function, source))
+            MachineRefKind source_kind = machine_ref_kind(source);
+            result.operand = copy_index;
+            if (!machine_verify_reference(function, source) ||
+                (source_kind != MACHINE_REF_VIRTUAL_REGISTER && source_kind != MACHINE_REF_PHYSICAL_REGISTER))
             {
-                result.operand = copy_index;
-                result.error = MACHINE_VERIFY_EDGE_COPY;
-                return result;
+                MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_COPY);
+            }
+            if (source_kind == MACHINE_REF_VIRTUAL_REGISTER)
+            {
+                u32 source_register = machine_ref_payload(source);
+                u32 destination_register = function->block_parameters[destination->parameter_offset + copy_index].virtual_register;
+                if (function->virtual_registers[source_register].register_class != function->virtual_registers[destination_register].register_class)
+                {
+                    MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_COPY);
+                }
             }
         }
     }
+
     u32 covered_instruction_count = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         MachineBlock* block = function->blocks + block_index;
         result.block = block_index;
-        // Blocks must partition the instruction stream contiguously in
-        // machine program order.
         if (block->first_instruction != covered_instruction_count || block->instruction_count > function->instruction_count - covered_instruction_count)
         {
-            result.error = MACHINE_VERIFY_BLOCK_RANGE;
-            return result;
+            MACHINE_VERIFY_REJECT(MACHINE_VERIFY_BLOCK_RANGE);
         }
         covered_instruction_count += block->instruction_count;
         for (u32 offset = 0; offset < block->instruction_count; offset += 1)
@@ -1867,19 +2312,13 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
             MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
             if (!info || instruction->opcode == MACHINE_OPCODE_INVALID)
             {
-                result.error = MACHINE_VERIFY_OPCODE;
-                return result;
+                MACHINE_VERIFY_REJECT(MACHINE_VERIFY_OPCODE);
             }
-            // Switch and computed-goto terminators share the compact target
-            // side table.  Block-address rows carry one block index directly;
-            // reject malformed ranges before placement/encoding can turn them
-            // into an out-of-function pointer or branch target.
             if (instruction->opcode == MACHINE_X64_LEA_BLOCK || instruction->opcode == MACHINE_A64_LEA_BLOCK)
             {
                 if (instruction->payload >= function->block_count)
                 {
-                    result.error = MACHINE_VERIFY_EDGE_RANGE;
-                    return result;
+                    MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_RANGE);
                 }
             }
             else if (instruction->opcode == MACHINE_X64_SWITCH || instruction->opcode == MACHINE_A64_SWITCH ||
@@ -1888,15 +2327,13 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
                 if (instruction->payload > function->switch_case_count || instruction->flags > function->switch_case_count - instruction->payload ||
                     ((instruction->opcode == MACHINE_X64_INDIRECT_BRANCH || instruction->opcode == MACHINE_A64_INDIRECT_BRANCH) && instruction->flags == 0))
                 {
-                    result.error = MACHINE_VERIFY_EDGE_RANGE;
-                    return result;
+                    MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_RANGE);
                 }
                 for (u32 case_index = 0; case_index < instruction->flags; case_index += 1)
                 {
                     if (function->switch_cases[instruction->payload + case_index].target_block >= function->block_count)
                     {
-                        result.error = MACHINE_VERIFY_EDGE_RANGE;
-                        return result;
+                        MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_RANGE);
                     }
                 }
             }
@@ -1904,8 +2341,7 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
             bool is_last = offset == block->instruction_count - 1;
             if (is_terminator != is_last)
             {
-                result.error = MACHINE_VERIFY_TERMINATOR;
-                return result;
+                MACHINE_VERIFY_REJECT(MACHINE_VERIFY_TERMINATOR);
             }
             for (u32 operand_index = 0; operand_index < BUSTER_ARRAY_LENGTH(instruction->operands); operand_index += 1)
             {
@@ -1913,25 +2349,34 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
                 MachineRef ref = instruction->operands[operand_index];
                 if (operand_index >= info->operand_count)
                 {
-                    // Unused inline slots must stay empty so scans can trust
-                    // the static operand count.
                     if (ref != MACHINE_REF_NONE_VALUE)
                     {
-                        result.error = MACHINE_VERIFY_OPERAND_SLOT;
-                        return result;
+                        MACHINE_VERIFY_REJECT(MACHINE_VERIFY_OPERAND_SLOT);
                     }
                     continue;
                 }
                 if (!machine_verify_reference(function, ref))
                 {
-                    result.error = MACHINE_VERIFY_OPERAND_REFERENCE;
-                    return result;
+                    MACHINE_VERIFY_REJECT(MACHINE_VERIFY_OPERAND_REFERENCE);
                 }
                 u32 fixed_register = machine_opcode_fixed_register(info, operand_index);
                 if (fixed_register != UINT32_MAX && machine_ref_kind(ref) == MACHINE_REF_PHYSICAL_REGISTER && machine_ref_payload(ref) != fixed_register)
                 {
-                    result.error = MACHINE_VERIFY_CONSTRAINT;
-                    return result;
+                    MACHINE_VERIFY_REJECT(MACHINE_VERIFY_CONSTRAINT);
+                }
+                if (machine_ref_kind(ref) == MACHINE_REF_VIRTUAL_REGISTER)
+                {
+                    u32 role = info->operand_info[operand_index] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                    if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+                    {
+                        u32 virtual_register = machine_ref_payload(ref);
+                        if (!definition_counts[virtual_register])
+                        {
+                            definition_blocks[virtual_register] = block_index;
+                            definition_points[virtual_register] = machine_point_make(instruction_index, MACHINE_POINT_AFTER);
+                        }
+                        definition_counts[virtual_register] += 1;
+                    }
                 }
             }
             u32 tied_destination = info->tied_pair & 0x0fu;
@@ -1943,8 +2388,7 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
                 if (machine_ref_kind(destination_ref) == MACHINE_REF_PHYSICAL_REGISTER && machine_ref_kind(source_ref) == MACHINE_REF_PHYSICAL_REGISTER &&
                     machine_ref_payload(destination_ref) != machine_ref_payload(source_ref))
                 {
-                    result.error = MACHINE_VERIFY_CONSTRAINT;
-                    return result;
+                    MACHINE_VERIFY_REJECT(MACHINE_VERIFY_CONSTRAINT);
                 }
             }
             result.operand = 0;
@@ -1954,20 +2398,101 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
     result.instruction = 0;
     if (covered_instruction_count != function->instruction_count)
     {
-        result.error = MACHINE_VERIFY_INSTRUCTION_COVERAGE;
-        return result;
+        MACHINE_VERIFY_REJECT(MACHINE_VERIFY_INSTRUCTION_COVERAGE);
     }
+
     for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
     {
         MachineVirtualRegister* virtual_register = function->virtual_registers + register_index;
+        result.operand = register_index;
         if (virtual_register->definition_point != MACHINE_POINT_INVALID &&
             machine_point_instruction(virtual_register->definition_point) >= function->instruction_count)
         {
-            result.operand = register_index;
-            result.error = MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION;
-            return result;
+            MACHINE_VERIFY_REJECT(MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION);
+        }
+        if (!definition_counts[register_index])
+        {
+            MACHINE_VERIFY_REJECT(MACHINE_VERIFY_VIRTUAL_REGISTER_MISSING_DEFINITION);
+        }
+        if (definition_counts[register_index] > 1 && !(virtual_register->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE))
+        {
+            MACHINE_VERIFY_REJECT(MACHINE_VERIFY_VIRTUAL_REGISTER_DUPLICATE_DEFINITION);
+        }
+        if (virtual_register->definition_point != definition_points[register_index])
+        {
+            MACHINE_VERIFY_REJECT(MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION_POINT);
         }
     }
+
+    MachineVerifyDominance dominance = machine_verify_dominance_build(scratch.arena, function);
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        MachineBlock* block = function->blocks + block_index;
+        result.block = block_index;
+        for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+        {
+            u32 instruction_index = block->first_instruction + offset;
+            result.instruction = instruction_index;
+            MachineInstruction* instruction = function->instructions + instruction_index;
+            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+            for (u32 operand_index = 0; operand_index < info->operand_count; operand_index += 1)
+            {
+                MachineRef ref = instruction->operands[operand_index];
+                u32 role = info->operand_info[operand_index] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                if (machine_ref_kind(ref) != MACHINE_REF_VIRTUAL_REGISTER ||
+                    (role != MACHINE_OPERAND_ROLE_USE && role != MACHINE_OPERAND_ROLE_USE_DEFINE))
+                {
+                    continue;
+                }
+                u32 virtual_register = machine_ref_payload(ref);
+                if (function->virtual_registers[virtual_register].flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE)
+                {
+                    continue;
+                }
+                result.operand = operand_index;
+                u32 definition_block = definition_blocks[virtual_register];
+                MachinePoint definition_point = definition_points[virtual_register];
+                bool dominates = definition_block == block_index
+                                     ? definition_point == MACHINE_POINT_INVALID || machine_point_instruction(definition_point) < instruction_index
+                                     : machine_verify_block_dominates(dominance, definition_block, block_index);
+                if (!dominates)
+                {
+                    MACHINE_VERIFY_REJECT(MACHINE_VERIFY_VIRTUAL_REGISTER_USE_BEFORE_DEFINITION);
+                }
+            }
+        }
+    }
+    for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+    {
+        MachineEdge const* edge = function->edges + edge_index;
+        result.block = edge->source_block;
+        result.instruction = function->blocks[edge->source_block].first_instruction + function->blocks[edge->source_block].instruction_count;
+        for (u32 copy_index = 0; copy_index < edge->copy_count; copy_index += 1)
+        {
+            MachineRef source = function->edge_copy_sources[edge->copy_offset + copy_index];
+            if (machine_ref_kind(source) != MACHINE_REF_VIRTUAL_REGISTER)
+            {
+                continue;
+            }
+            u32 virtual_register = machine_ref_payload(source);
+            if (function->virtual_registers[virtual_register].flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE)
+            {
+                continue;
+            }
+            result.operand = copy_index;
+            u32 definition_block = definition_blocks[virtual_register];
+            bool dominates = definition_block == edge->source_block ||
+                             machine_verify_block_dominates(dominance, definition_block, edge->source_block);
+            if (!dominates)
+            {
+                MACHINE_VERIFY_REJECT(MACHINE_VERIFY_VIRTUAL_REGISTER_USE_BEFORE_DEFINITION);
+            }
+        }
+    }
+
+machine_verify_done:
+#undef MACHINE_VERIFY_REJECT
+    scratch_end(scratch);
     return result;
 }
 

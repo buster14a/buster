@@ -83,9 +83,25 @@ typedef enum MachineRegisterClass
     MACHINE_REGISTER_CLASS_COUNT,
 } MachineRegisterClass;
 
+typedef enum MachineVirtualRegisterFlags
+{
+    MACHINE_VIRTUAL_REGISTER_FLAG_NONE = 0,
+    // Transitional non-SSA value. The verifier still requires at least one
+    // definition, but duplicate definitions and full dominance are handled
+    // conservatively by allocation and scheduling until local promotion is
+    // rewritten around block parameters and edge copies.
+    MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE = 1u << 0,
+} MachineVirtualRegisterFlags;
+
+#define MACHINE_VIRTUAL_REGISTER_FLAG_MASK MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE
+
 typedef struct MachineVirtualRegister MachineVirtualRegister;
 struct MachineVirtualRegister
 {
+    // Exactly one defining instruction point for an SSA value. Block
+    // parameters use MACHINE_POINT_INVALID because their definition is the
+    // destination block entry. Mutable values record their first instruction
+    // definition, or INVALID when the first definition is a block parameter.
     MachinePoint definition_point;
     u8 register_class;
     u8 flags;
@@ -1322,6 +1338,9 @@ struct MachineSelectResult
     u32 selected_typed_instructions;
     u32 machine_instructions;
     u32 simd_operation_count;
+    // Explicit non-SSA values retained by transitional lowering. This is the
+    // selector-side telemetry counterpart of MachineVerifyResult's count.
+    u32 mutable_virtual_register_count;
     // Reserved matcher telemetry storage. Target selectors no longer run the
     // declarative matcher on their hot path, but retaining this cold block
     // preserves the measured favorable layout of selection results.
@@ -1515,6 +1534,10 @@ typedef enum MachineVerifyError
     MACHINE_VERIFY_OPERAND_SLOT,
     MACHINE_VERIFY_TERMINATOR,
     MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION,
+    MACHINE_VERIFY_VIRTUAL_REGISTER_MISSING_DEFINITION,
+    MACHINE_VERIFY_VIRTUAL_REGISTER_DUPLICATE_DEFINITION,
+    MACHINE_VERIFY_VIRTUAL_REGISTER_USE_BEFORE_DEFINITION,
+    MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION_POINT,
     MACHINE_VERIFY_POINT_CAPACITY,
     MACHINE_VERIFY_EDGE_RANGE,
     MACHINE_VERIFY_EDGE_COPY,
@@ -1530,6 +1553,10 @@ struct MachineVerifyResult
     u32 block;
     u32 instruction;
     u32 operand;
+    // Explicit transitional debt in an otherwise single-definition MIR. This
+    // is populated on both success and definition-contract failures so tests
+    // and compiler telemetry can account for mutable values directly.
+    u32 mutable_virtual_register_count;
 };
 
 // Test-only replay serialization. Versioned; readers reject unknown versions
