@@ -1296,4 +1296,5 @@ u32 buster_x86_metadata_test_exact_plan_count(void);
 // base64 kernel.
 bool buster_x86_metadata_test_flat_decode_matches_generated(void);
 bool buster_x86_metadata_test_nul_distances_match_reference(void);
+u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void);
 #endif
