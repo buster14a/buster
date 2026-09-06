@@ -10,52 +10,49 @@
 #include <buster/lib/integer.h>
 
 #if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && BUSTER_COMPILER_CLANG
-// Clang's Windows ARM64 va_arg treats the homed register area and
-// caller stack as one packed stream. The ABI instead moves an argument
-// wholly to the stack when it cannot fit in the remaining registers,
-// and 16-byte stack arguments retain 16-byte alignment.
-typedef struct StringFormatVaReader StringFormatVaReader;
-struct StringFormatVaReader
-{
-    u8* pointer;
-    u32 gp_register_slots_remaining;
-};
-
+// A Windows ARM64 va_list is a pointer into the homed x-register area
+// followed by the caller's stack arguments. Clang advances that pointer
+// linearly, but the ABI moves a multi-slot argument wholly to the stack
+// when it cannot fit in the remaining x registers. Preserve Clang's
+// native va_arg lowering for every load; only move the list pointer over
+// the unused tail of the register area at that discontinuity.
 BUSTER_CT_CHECK(sizeof(va_list) == sizeof(void*));
 
-BUSTER_GLOBAL_LOCAL void string_format_va_reader_read(StringFormatVaReader* reader, void* destination, u64 size, u64 alignment)
+BUSTER_GLOBAL_LOCAL void string_format_va_prepare(va_list* variable_arguments, u32* gp_register_slots_remaining, u64 size,
+                                                  u64 alignment)
 {
-    BUSTER_CHECK(reader->gp_register_slots_remaining <= STRING_FORMAT_VA_GP_REGISTER_COUNT);
+    BUSTER_CHECK(*gp_register_slots_remaining <= STRING_FORMAT_VA_GP_REGISTER_COUNT);
     BUSTER_CHECK(size != 0 && size <= 2 * sizeof(u64));
     BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(alignment) && alignment <= 2 * sizeof(u64));
 
+    if (alignment < sizeof(u64))
+    {
+        alignment = sizeof(u64);
+    }
+
     u64 slot_count = (size + sizeof(u64) - 1) / sizeof(u64);
-    if (reader->gp_register_slots_remaining && alignment > sizeof(u64))
-    {
-        u32 register_index = STRING_FORMAT_VA_GP_REGISTER_COUNT - reader->gp_register_slots_remaining;
-        if (register_index & 1u)
-        {
-            reader->pointer += sizeof(u64);
-            reader->gp_register_slots_remaining -= 1;
-        }
-    }
+    u8* pointer = (u8*)*variable_arguments;
+    u8* aligned_pointer = (u8*)align_forward((u64)pointer, alignment);
+    u64 alignment_slots = (u64)(aligned_pointer - pointer) / sizeof(u64);
+    u32 available_slots = *gp_register_slots_remaining > alignment_slots
+                              ? *gp_register_slots_remaining - (u32)alignment_slots
+                              : 0;
 
-    if (slot_count > reader->gp_register_slots_remaining)
+    if (slot_count > available_slots && available_slots)
     {
-        reader->pointer += (u64)reader->gp_register_slots_remaining * sizeof(u64);
-        reader->gp_register_slots_remaining = 0;
+        // The caller left these registers unused and placed the complete
+        // value on the stack. Point native va_arg at that stack value.
+        pointer = aligned_pointer + (u64)available_slots * sizeof(u64);
+        pointer = (u8*)align_forward((u64)pointer, alignment);
+        *variable_arguments = (char8*)pointer;
+        *gp_register_slots_remaining = 0;
     }
-
-    if (!reader->gp_register_slots_remaining && alignment > sizeof(u64))
+    else if (*gp_register_slots_remaining)
     {
-        reader->pointer = (u8*)align_forward((u64)reader->pointer, alignment);
-    }
-
-    memcpy(destination, reader->pointer, size);
-    reader->pointer += slot_count * sizeof(u64);
-    if (reader->gp_register_slots_remaining)
-    {
-        reader->gp_register_slots_remaining -= (u32)slot_count;
+        u64 consumed_slots = alignment_slots + slot_count;
+        *gp_register_slots_remaining = consumed_slots <= *gp_register_slots_remaining
+                                           ? *gp_register_slots_remaining - (u32)consumed_slots
+                                           : 0;
     }
 }
 #endif
@@ -990,13 +987,9 @@ BUSTER_GLOBAL_LOCAL Utf8Result utf8_from_code_point(u32 code_point)
 String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments, u32 gp_register_slots_remaining)
 {
 #if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && BUSTER_COMPILER_CLANG
-    StringFormatVaReader variable_argument_reader = {
-        .pointer = (u8*)variable_arguments,
-        .gp_register_slots_remaining = gp_register_slots_remaining,
-    };
 #define STRING_FORMAT_VA_READ(type, name)                                                                                                            \
-    type name;                                                                                                                                       \
-    string_format_va_reader_read(&variable_argument_reader, &(name), sizeof(name), BUSTER_ALIGN_OF(type))
+    string_format_va_prepare(&variable_arguments, &gp_register_slots_remaining, sizeof(type), BUSTER_ALIGN_OF(type));                                \
+    type name = va_arg(variable_arguments, type)
 #else
     BUSTER_UNUSED(gp_register_slots_remaining);
 #define STRING_FORMAT_VA_READ(type, name) type name = va_arg(variable_arguments, type)
