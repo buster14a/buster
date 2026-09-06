@@ -310,6 +310,18 @@ BUSTER_C_INTERNAL void c_parse_position_index_append(Arena* arena, u32** positio
     (C_SYMBOL_WELL_KNOWN_BIT(TYPEDEF) | C_SYMBOL_WELL_KNOWN_BIT(STATIC) | C_SYMBOL_WELL_KNOWN_BIT(REGISTER) | \
      C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(CONSTEXPR))
 
+// The two well-known questions c_analyze_semantics asks of a declaration's
+// whole token range rather than of one token: `overloadable`, which makes a
+// file-scope name admit several declarations, and the thread-storage words
+// an object declaration may carry.  Both name attributes almost no
+// translation unit spells, and both used to be answered by a walk of every
+// token of every declaration -- 4,6 M token visits per stage-1 compile of
+// this tree, and the largest mispredicting branch in the frontend.  The
+// token census marks the candidates for both in one bitmap instead, and
+// each question becomes an OR of the words its range covers.
+#define C_PARSE_DECLARATION_RANGE_KEYWORDS                                                                                  \
+    (C_SYMBOL_WELL_KNOWN_BIT(OVERLOADABLE) | C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23))
+
 // The words a type-only declaration may open with ahead of its tag keyword.
 #define C_PARSE_TYPE_ONLY_PREFIX_KEYWORDS                                                                        \
     (C_SYMBOL_WELL_KNOWN_BIT(CONST) | C_SYMBOL_WELL_KNOWN_BIT(VOLATILE) | C_SYMBOL_WELL_KNOWN_BIT(ATOMIC) | \
@@ -14667,6 +14679,48 @@ BUSTER_C_SHARED String8 c_ir_unsupported_gnu_construct(CPreprocessResult preproc
 // allocates: each counter below becomes one array's capacity, so all nine are
 // upper bounds that must come out exactly as c_parse_token_census_reference
 // computes them. The vector path is a throughput change and nothing else.
+// Could this token answer one of the C_PARSE_DECLARATION_RANGE_KEYWORDS
+// questions?  A token spelled one of those words is an identifier whose
+// interned id is that word's, and an identifier the intern pass never saw
+// carries symbol 0 and answers by spelling, so both are candidates.  The
+// vector arm below tests the low symbol byte alone, which admits the ids
+// that share it; this predicate is the definition the arm is a superset of,
+// and the exact question is re-asked over any range the bitmap admits.
+BUSTER_C_INTERNAL bool c_parse_declaration_range_candidate(CToken token)
+{
+    return token.kind == C_TOKEN_IDENTIFIER &&
+           (!token.symbol || (token.symbol < 64 && ((C_PARSE_DECLARATION_RANGE_KEYWORDS >> token.symbol) & 1) != 0));
+}
+
+// Does any bit of `words` stand for a token index in [start, end)?  One word
+// covers 64 tokens, so a declaration whose range averages 294 tokens is five
+// loads and an or rather than 294 loads and a branch apiece.
+BUSTER_C_INTERNAL bool c_parse_token_bitmap_any(u64 const* words, u32 start, u32 end)
+{
+    bool any = false;
+    if (start < end)
+    {
+        u32 first_word = start >> 6;
+        u32 last_word = (end - 1) >> 6;
+        u64 head = UINT64_MAX << (start & 63);
+        u64 tail = ((end - 1) & 63) == 63 ? UINT64_MAX : (UINT64_C(1) << (end & 63)) - 1;
+        if (first_word == last_word)
+        {
+            any = (words[first_word] & head & tail) != 0;
+        }
+        else
+        {
+            u64 accumulated = words[first_word] & head;
+            for (u32 word_index = first_word + 1; word_index < last_word; word_index += 1)
+            {
+                accumulated |= words[word_index];
+            }
+            any = (accumulated | (words[last_word] & tail)) != 0;
+        }
+    }
+    return any;
+}
+
 typedef struct CTokenCensus CTokenCensus;
 struct CTokenCensus
 {
@@ -14687,13 +14741,16 @@ struct CTokenCensus
 // runs this whenever the 512-bit vocabulary is unavailable, and
 // c_parse_token_census_differential in the tests runs both and compares all
 // nine counters.
-BUSTER_C_INTERNAL BUSTER_UNUSED_DECL void c_parse_token_census_reference(CPreprocessResult preprocess, u32 token_count, CTokenCensus* census)
+BUSTER_C_INTERNAL BUSTER_UNUSED_DECL void c_parse_token_census_reference(CPreprocessResult preprocess, u32 token_count, CTokenCensus* census,
+                                                                        u64* declaration_range_words)
 {
     u32 brace_depth = 0;
     u32 delimiter_depth = 0;
+    memset(declaration_range_words, 0, sizeof(*declaration_range_words) * ((token_count + 63) / 64 + 1));
     for (u32 token_index = 0; token_index < token_count; token_index += 1)
     {
         CToken token = preprocess.tokens[token_index];
+        declaration_range_words[token_index >> 6] |= (u64)c_parse_declaration_range_candidate(token) << (token_index & 63);
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
             census->identifier_count += 1;
@@ -14788,7 +14845,7 @@ BUSTER_C_INTERNAL const u8 c_parse_census_symbol_high[64] = {[11] = 72, 84, 96, 
 // simd.h's fallback: without 512-bit lanes every simd512_load here would be a
 // 64-iteration byte loop, which is the case AGENTS.md means by a different
 // algorithm being worth writing.
-BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 token_count, CTokenCensus* census)
+BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 token_count, CTokenCensus* census, u64* declaration_range_words)
 {
 #if BUSTER_SIMD_512
     u8 symbol_bytes[C_PARSE_CENSUS_TILE_BYTES];
@@ -14808,6 +14865,10 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
         Simd512 close_brace = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_RIGHT_BRACE));
         Simd512 for_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_FOR);
         Simd512 uninterned_symbol = simd512_splat(0);
+        Simd512 overloadable_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_OVERLOADABLE);
+        Simd512 thread_local_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_THREAD_LOCAL);
+        Simd512 thread_gnu_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_THREAD_GNU);
+        Simd512 thread_local_c23_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_THREAD_LOCAL_C23);
         u32 brace_depth = 0;
         u32 delimiter_depth = 0;
         u32 maximum_depth = 0;
@@ -14871,8 +14932,17 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
                 // candidates in a million identifiers, each then answered by the
                 // predicate the reference calls.
                 Simd512 symbol_lanes = simd512_load(symbol_bytes + window);
-                Mask64 for_candidates =
-                    mask64_and(identifiers, mask64_or(simd512_equal_byte(symbol_lanes, for_symbol), simd512_equal_byte(symbol_lanes, uninterned_symbol)));
+                Mask64 uninterned = simd512_equal_byte(symbol_lanes, uninterned_symbol);
+                Mask64 for_candidates = mask64_and(identifiers, mask64_or(simd512_equal_byte(symbol_lanes, for_symbol), uninterned));
+                // A window is exactly one bitmap word, so the candidate mask
+                // is the word: the tile stride and the window stride are both
+                // multiples of 64, and the tail window's mask already carries
+                // the prefix that bounds the stream.
+                declaration_range_words[(tile_base + window) >> 6] = mask64_and(
+                    identifiers,
+                    mask64_or(mask64_or(uninterned, simd512_equal_byte(symbol_lanes, overloadable_symbol)),
+                              mask64_or(mask64_or(simd512_equal_byte(symbol_lanes, thread_local_symbol), simd512_equal_byte(symbol_lanes, thread_gnu_symbol)),
+                                        simd512_equal_byte(symbol_lanes, thread_local_c23_symbol))));
                 for (Mask64 remaining = for_candidates; remaining; remaining &= remaining - 1)
                 {
                     u32 lane = mask64_first_set(remaining);
@@ -14922,7 +14992,7 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
     }
     else
     {
-        c_parse_token_census_reference(preprocess, token_count, census);
+        c_parse_token_census_reference(preprocess, token_count, census, declaration_range_words);
     }
 #if !BUSTER_OPTIMIZE
     // The differential gate. Unoptimized builds recompute the census the
@@ -14930,13 +15000,20 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
     // check on every translation unit the suite compiles rather than on a
     // hand-written list of token streams -- every fixture, every header of
     // the include closure, and the whole unity unit when the Debug tree
-    // compiles it. Release pays nothing.
+    // compiles it. Release pays nothing.  The candidate bitmap is checked
+    // bit by bit against the same predicate rather than through a second
+    // array, because this function owns no arena to hold one.
     CTokenCensus reference_census = {0};
-    c_parse_token_census_reference(preprocess, token_count, &reference_census);
+    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    {
+        bool candidate = c_parse_declaration_range_candidate(preprocess.tokens[token_index]);
+        BUSTER_CHECK(((declaration_range_words[token_index >> 6] >> (token_index & 63)) & 1) == (u64)candidate);
+    }
+    c_parse_token_census_reference(preprocess, token_count, &reference_census, declaration_range_words);
     BUSTER_CHECK(memcmp(&reference_census, census, sizeof(reference_census)) == 0);
 #endif
 #else
-    c_parse_token_census_reference(preprocess, token_count, census);
+    c_parse_token_census_reference(preprocess, token_count, census, declaration_range_words);
 #endif
 }
 
@@ -14978,7 +15055,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     }
     u32 token_count = (u32)preprocess.token_count;
     CTokenCensus census = {0};
-    c_parse_token_census(preprocess, token_count, &census);
+    // One bit per token, plus the word a whole-window vector store may reach
+    // past the last partial window.
+    u64* declaration_range_words = arena_allocate(arena, u64, (token_count + 63) / 64 + 1);
+    declaration_range_words[(token_count + 63) / 64] = 0;
+    c_parse_token_census(preprocess, token_count, &census, declaration_range_words);
     u32 identifier_count = census.identifier_count;
     u32 semicolon_count = census.semicolon_count;
     u32 comma_count = census.comma_count;
@@ -15259,10 +15340,13 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         u32 existing_index = C_ID_UNDERLYING_INVALID;
         CEntity* conflicting = 0;
         bool overloadable = false;
-        for (u32 token_index = declaration->token_start; token_index < declaration->token_start + declaration->token_count; token_index += 1)
+        if (c_parse_token_bitmap_any(declaration_range_words, declaration->token_start, declaration->token_start + declaration->token_count))
         {
-            overloadable |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
-                            c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_OVERLOADABLE);
+            for (u32 token_index = declaration->token_start; token_index < declaration->token_start + declaration->token_count; token_index += 1)
+            {
+                overloadable |= preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
+                                c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_OVERLOADABLE);
+            }
         }
         CEntityKind entity_kind = kind == C_DECLARATION_FUNCTION ? C_ENTITY_FUNCTION : kind == C_DECLARATION_TYPEDEF ? C_ENTITY_TYPEDEF : C_ENTITY_OBJECT;
         bool declares_function_type = declaration->type.value < result.type_count && result.types[declaration->type.value].kind == C_TYPE_FUNCTION;
@@ -15388,7 +15472,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
                                          ? syntax_declaration->function_name_token
                                          : syntax_declaration->name_token;
         bool is_thread_local = false;
-        if (kind == C_DECLARATION_OBJECT)
+        if (kind == C_DECLARATION_OBJECT &&
+            c_parse_token_bitmap_any(declaration_range_words, declaration->token_start, declaration->token_start + declaration->token_count))
         {
             for (u32 token_index = declaration->token_start; token_index < declaration->token_start + declaration->token_count; token_index += 1)
             {
