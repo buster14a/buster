@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [c]
+        lane: [pdb]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -30,18 +30,12 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import base64, gzip, hashlib, os, pathlib, subprocess
-          lanes = {
-              'c': ('fix/2026-09-06-c-constant-semantics', 'c66c132b175bfbbcbc019576c9ee960fc44bcaf411fe8037437211152010906c', 'c: preserve constant conversion and operator semantics', [
-                  'src/buster/lib/compiler/frontend/c/c_gen.c',
-                  'src/buster/lib/compiler/frontend/c/c_source.c',
-                  'src/buster/tests/compiler/frontend/c/c_test.c',
-                  'tests/basic_c_constant_float_builtins.c',
-                  'tests/basic_c_negative_constant_widening.c',
-              ]),
-          }
           lane = os.environ['LANE']
-          branch, digest, message, allowed = lanes[lane]
-          encoded = ''.join(pathlib.Path('work/issue-batch/' + lane + '.' + str(i)).read_text().strip() for i in range(5))
+          assert lane == 'pdb'
+          branch = 'fix/2026-09-06-pdb-checksum-records'
+          digest = 'cae8206bfa9dc8330df7f57d3928f04eda8357f0d799d6b6355deb228929ccf8'
+          allowed = ['src/buster/lib/compiler/pdb/pdb.c', 'src/buster/tests/compiler/pdb/pdb_test.c']
+          encoded = ''.join(pathlib.Path('work/issue-batch/' + lane + '.' + str(i)).read_text().strip() for i in range(4))
           patch = gzip.decompress(base64.b64decode(encoded, validate=True))
           assert hashlib.sha256(patch).hexdigest() == digest, 'patch transport checksum mismatch'
           patch_path = pathlib.Path(os.environ['RUNNER_TEMP']) / (lane + '.patch')
@@ -58,7 +52,7 @@ jobs:
           git('diff', '--cached', '--check')
           git('config', 'user.name', 'Buster issue fixes (assisted)')
           git('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
-          git('commit', '-m', message)
+          git('commit', '-m', 'pdb: preserve variable-length CodeView checksum records')
           env = os.environ.copy()
           env['GIT_CONFIG_COUNT'] = '1'
           env['GIT_CONFIG_KEY_0'] = 'http.https://github.com/.extraheader'
@@ -69,9 +63,13 @@ jobs:
               summary.write('Published `' + branch + '` at `' + head + '`; patch SHA-256 `' + digest + '`.\n')
           print('Published', branch, head)
           PY
-      - name: Install Vulkan SDK
+      - name: Install Vulkan SDK and independent PDB reader
         shell: bash
-        run: bash .github/scripts/install-vulkan-sdk.sh
+        run: |
+          set -euo pipefail
+          bash .github/scripts/install-vulkan-sdk.sh
+          sudo apt-get update -qq
+          sudo apt-get install -y llvm-18
       - name: Debug split suite and Release fixed point
         shell: bash
         run: |
@@ -81,3 +79,31 @@ jobs:
           "$driver" generate --cc clang --ci --linker DEFAULT
           "$driver" build --config Debug -t test_all
           "$driver" test_self_host --config Release
+      - name: Real Clang COFF through Buster into an independent PDB reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          printf 'int checksum_fixture(int x) { return x + 1; }\n' > pdb-clang-fixture.c
+          clang --target=x86_64-pc-windows-msvc -g -gcodeview -c pdb-clang-fixture.c -o pdb-clang-fixture.obj
+          "$GITHUB_WORKSPACE/build/Debug/ide" cc --target=x86_64-pc-windows-msvc --entry=checksum_fixture -g pdb-clang-fixture.obj -o pdb-clang-fixture.exe
+          llvm-readobj-18 --codeview pdb-clang-fixture.obj > pdb-clang-coff.txt
+          llvm-pdbutil-18 dump -files -l pdb-clang-fixture.pdb | tee pdb-clang-reader.txt
+          python3 - <<'PY'
+          import hashlib, pathlib
+          source = pathlib.Path('pdb-clang-fixture.c').read_bytes()
+          digest = hashlib.md5(source).hexdigest()
+          dump = pathlib.Path('pdb-clang-reader.txt').read_text()
+          assert 'pdb-clang-fixture.c' in dump, 'source file missing from independent reader'
+          assert digest in ''.join(dump.lower().split()), 'MD5 digest was not preserved in the PDB'
+          assert 'Lines' in dump, 'source line subsection was not read'
+          print('Independent LLVM reader accepted Clang source-file, MD5 and line data:', digest)
+          PY
+      - name: Retain independent-reader evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pdb-independent-reader
+          path: ${{ runner.temp }}/pdb-clang-*
+          retention-days: 7
+          if-no-files-found: warn
