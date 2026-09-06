@@ -2865,9 +2865,31 @@ BUSTER_C_INTERNAL CSymbolKey c_symbol_key(String8 name)
     }
     else
     {
-        for (u64 index = 0; index < name.length; index += 1)
+        // The bytes of a name shorter than the low word, gathered by the set
+        // bits of its own length. Every read stays inside [pointer, pointer +
+        // length), so no padding is assumed of the spelling space or of the
+        // string literals the table is seeded from, and the byte loop's
+        // one-to-seven trip count — half of every intern on a unity build is
+        // a name this short — becomes three tests whose outcomes the length
+        // already decides.
+        u64 offset = 0;
+        if (name.length & 4)
         {
-            key.low |= (u64)(u8)name.pointer[index] << (8 * index);
+            u32 quarter;
+            memcpy(&quarter, name.pointer, sizeof(quarter));
+            key.low = quarter;
+            offset = 4;
+        }
+        if (name.length & 2)
+        {
+            u16 half;
+            memcpy(&half, name.pointer + offset, sizeof(half));
+            key.low |= (u64)half << (8 * offset);
+            offset += 2;
+        }
+        if (name.length & 1)
+        {
+            key.low |= (u64)(u8)name.pointer[offset] << (8 * offset);
         }
     }
     return key;
