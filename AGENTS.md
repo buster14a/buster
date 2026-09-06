@@ -2732,12 +2732,21 @@ on a commit you already know is incomplete tells nobody anything.
   `c_prewarm`, `codegen_prewarm`, `font_provider_prewarm`,
   `buster_x86_metadata_prewarm`, and `compiler_prewarm` for the compile
   pipeline as a whole. **Call the prewarm
-  before `lane_run`** — x86 metadata separately, since no part of the compile
-  path queries it and its prewarm costs a full table decode. A new lazily
-  built global adds both the check and a line in its module's prewarm.
+  before `lane_run`** — x86 metadata separately, since its prewarm costs a
+  full table decode. That decode is on the compile path:
+  `codegen_prewarm_for_target` runs it for every x86-64 module, and the
+  encoder's fallback rows still query forms per row, so the cost is the
+  per-invocation floor of every `ide cc`, not an optional extra. Its per-form
+  caches — the normalized row, the parsed pattern, the operand views, the
+  derived facts and each record's validity — fill on the first *serial* touch
+  of each form, so a caller about to hand the tables to a gang must call
+  `buster_x86_metadata_prewarm_all_forms()` first, which fills every one of
+  them. A new lazily built global adds both the check and a line in its
+  module's prewarm.
   Publish the flag *after* the state, never before: the x86 metadata decode
-  needs two flags for this, one guarding re-entry from the validation it runs
-  and one, set last, that every accessor tests. Spelling the character-class
+  needs two flags for this, one guarding re-entry from the reads its own
+  layout checks make through the accessors and one, set last, that every
+  accessor tests. Spelling the character-class
   tables as constant initializers over a predicate macro would remove four of
   these outright, and was measured at **+178.8 M stage-1 instructions
   (+3.5%)** for 112 k extra preprocessed tokens — one predicate expansion per
