@@ -5032,6 +5032,18 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_return(MachineX64Selector* selector,
     (IR_OPCODE_BIT(IR_OPCODE_LOAD) | IR_OPCODE_BIT(IR_OPCODE_STORE) | IR_OPCODE_BIT(IR_OPCODE_DEREFERENCE) |                           \
      IR_OPCODE_BIT(IR_OPCODE_BRANCH_IF))
 
+// A candidate's absolute row and the ordinal the walk gave it. Recording the
+// block-relative offset instead made each of the 1,28 M candidate visits
+// below rebuild both numbers: a `layout_rows ?` select, a load or a block-base
+// add for the row, and a block-base add for the ordinal, all from state the
+// walk was holding when it wrote the entry.
+typedef struct MachineX64CandidateRow MachineX64CandidateRow;
+struct MachineX64CandidateRow
+{
+    u32 row;
+    u32 ordinal;
+};
+
 MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                               bool position_independent, bool assume_validated, MachineSelectionModule* module)
 {
@@ -5245,7 +5257,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .block_row_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1),
     };
     u32* block_candidate_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1);
-    u32* candidate_rows = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
+    MachineX64CandidateRow* candidate_rows =
+        arena_allocate(arena, MachineX64CandidateRow, function->instruction_count ? function->instruction_count : 1);
     u32 candidate_count = 0;
     bool dense_rows = true;
     u32 walk_ordinal = 0;
@@ -5260,7 +5273,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             dense_rows &= id.value == block->first_instruction.value + block_row_count;
             if ((MACHINE_X64_CANDIDATE_OPCODES >> instruction->opcode) & 1)
             {
-                candidate_rows[candidate_count] = block_row_count;
+                // `walk_ordinal` is still this row's predecessor count here,
+                // so the row's own ordinal is one past it -- the same number
+                // the offset form rebuilt as `block base + offset + 1`.
+                candidate_rows[candidate_count] = (MachineX64CandidateRow){.row = id.value, .ordinal = walk_ordinal + 1};
                 candidate_count += 1;
                 block_candidate_count += 1;
             }
@@ -5372,24 +5388,20 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // index base folds its offset into a real lea and stops the chain.
     for (u32 alias_sweep = 0; alias_sweep < 2; alias_sweep += 1)
     {
-        u32 walked_ordinals = 0;
         u32 candidate_base = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
-            IrBlock* block = function->blocks + block_index;
             u32 epoch = alias_sweep * function->block_count + block_index + 1;
             u32 block_candidate_count = block_candidate_counts[block_index];
-            u32 const* block_rows = layout_rows ? layout_rows + walked_ordinals : 0;
-            u32 block_first_row = block->first_instruction.value;
             // Only the candidate rows can move this sweep: every other opcode
             // leaves the root unrooted and falls straight through, and the
             // candidates are a subsequence, so reversing them is reversing
             // the block.
             for (u32 remaining = block_candidate_count; remaining > 0; remaining -= 1)
             {
-                u32 row_offset = candidate_rows[candidate_base + remaining - 1];
-                IrInstruction* instruction = function->instructions + (block_rows ? block_rows[row_offset] : block_first_row + row_offset);
-                u32 instruction_ordinal = walked_ordinals + row_offset + 1;
+                MachineX64CandidateRow candidate_row = candidate_rows[candidate_base + remaining - 1];
+                IrInstruction* instruction = function->instructions + candidate_row.row;
+                u32 instruction_ordinal = candidate_row.ordinal;
                 if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
                     value_uses[instruction->operands[0].value].promotable_width)
                 {
@@ -5439,7 +5451,6 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     load_aliases[candidate] = root;
                 }
             }
-            walked_ordinals += row_layout.block_row_counts[block_index];
             candidate_base += block_candidate_count;
         }
     }
@@ -5634,22 +5645,17 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     u32* local_store_ordinals = local_store_counts;
     memset(local_store_ordinals, 0, sizeof(*local_store_ordinals) * function->value_count);
     // The stores this stamps and the branches it fuses are both candidate
-    // rows, so this pass reads the same compact list the sweeps did.  The
-    // ordinals stay the walk's own: candidate `row_offset` in a block that
-    // starts at `fused_rows` is the row the full walk numbered next.
-    u32 fused_rows = 0;
+    // rows, so this pass reads the same compact list the sweeps did, and each
+    // entry already carries the ordinal the full walk gave that row.
     u32 fusion_candidate_base = 0;
     for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
     {
-        IrBlock* block = function->blocks + block_index;
         u32 block_candidate_count = block_candidate_counts[block_index];
-        u32 const* block_rows = layout_rows ? layout_rows + fused_rows : 0;
-        u32 block_first_row = block->first_instruction.value;
         for (u32 candidate_index = 0; candidate_index < block_candidate_count; candidate_index += 1)
         {
-            u32 row_offset = candidate_rows[fusion_candidate_base + candidate_index];
-            IrInstruction* instruction = function->instructions + (block_rows ? block_rows[row_offset] : block_first_row + row_offset);
-            u32 fusion_ordinal = fused_rows + row_offset + 1;
+            MachineX64CandidateRow candidate_row = candidate_rows[fusion_candidate_base + candidate_index];
+            IrInstruction* instruction = function->instructions + candidate_row.row;
+            u32 fusion_ordinal = candidate_row.ordinal;
             if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
                 value_uses[instruction->operands[0].value].promotable_width)
             {
@@ -5830,7 +5836,6 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 selector.fused_dead[dead_zeros[zero_index]] = 1;
             }
         }
-        fused_rows += row_layout.block_row_counts[block_index];
         fusion_candidate_base += block_candidate_count;
     }
     selector.virtual_register_count = selector.builder.virtual_registers.total_count;
@@ -8775,6 +8780,58 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
     }
 }
 
+// The dense variable-memory table a chunk emits through, by direction and by
+// chunk width. Both chunk emitters used to name their pointer opcode with a
+// ternary ladder, index the 1.064-byte prepared row with it, and read
+// `plan_valid`, `variant_count` and `variable_memory_encoding_tables[0]` from
+// three different lines of that row -- for a closed population of eight
+// opcodes whose answer stops changing at prewarm. Eight bytes published there
+// answer it instead, and zero at rest is the same refusal an unprepared row
+// gave, because machine_x64_emit_variable_memory_encoding refuses table zero
+// before it touches the encoder.
+#define MACHINE_X64_CHUNK_WIDTH_COUNT 4u
+#define MACHINE_X64_CHUNK_DIRECTION_LOAD 0u
+#define MACHINE_X64_CHUNK_DIRECTION_STORE 1u
+BUSTER_GLOBAL_LOCAL u8 machine_x64_chunk_memory_tables[2][MACHINE_X64_CHUNK_WIDTH_COUNT];
+// Chunk byte counts are 1, 2, 4 and 8 (machine_x64_copy_chunk); every other
+// value took the ladder's 64-bit arm, so it maps to the last width here.
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_chunk_width_index[9] = {3, 0, 1, 3, 2, 3, 3, 3, 3};
+
+BUSTER_GLOBAL_LOCAL u32 machine_x64_chunk_width_slot(u32 chunk)
+{
+    u32 result = chunk < BUSTER_ARRAY_LENGTH(machine_x64_chunk_width_index)
+                     ? machine_x64_chunk_width_index[chunk]
+                     : MACHINE_X64_CHUNK_WIDTH_COUNT - 1u;
+
+    return result;
+}
+
+// The chunk emitters' dense-table projection, published from the prepared
+// rows the map preparation has just resolved.
+BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_chunk_memory_tables(void)
+{
+    static u16 const load_opcodes[MACHINE_X64_CHUNK_WIDTH_COUNT] = {MACHINE_X64_LOAD_PTR8, MACHINE_X64_LOAD_PTR16,
+                                                                    MACHINE_X64_LOAD_PTR32, MACHINE_X64_LOAD_PTR64};
+    static u16 const store_opcodes[MACHINE_X64_CHUNK_WIDTH_COUNT] = {MACHINE_X64_STORE_PTR8, MACHINE_X64_STORE_PTR16,
+                                                                     MACHINE_X64_STORE_PTR32, MACHINE_X64_STORE_PTR64};
+    for (u32 width_slot = 0; width_slot < MACHINE_X64_CHUNK_WIDTH_COUNT; width_slot += 1)
+    {
+        // Indexed rather than looked up: the eight opcodes above are registry
+        // rows by construction, and the accessor that proves that for an
+        // arbitrary opcode is defined further down the file.
+        u32 load_ordinal = (u32)(load_opcodes[width_slot] - MACHINE_X64_MOV_RI);
+        u32 store_ordinal = (u32)(store_opcodes[width_slot] - MACHINE_X64_MOV_RI);
+        MachineX64PreparedExactOpcode const* load_entry =
+            load_ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT ? machine_x64_exact_opcode_map + load_ordinal : 0;
+        MachineX64PreparedExactOpcode const* store_entry =
+            store_ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT ? machine_x64_exact_opcode_map + store_ordinal : 0;
+        machine_x64_chunk_memory_tables[MACHINE_X64_CHUNK_DIRECTION_LOAD][width_slot] =
+            load_entry && load_entry->plan_valid && load_entry->variant_count ? load_entry->variable_memory_encoding_tables[0] : 0;
+        machine_x64_chunk_memory_tables[MACHINE_X64_CHUNK_DIRECTION_STORE][width_slot] =
+            store_entry && store_entry->plan_valid && store_entry->variant_count ? store_entry->variable_memory_encoding_tables[0] : 0;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_opcode_map(BusterX86MetadataExactPlan const* prepared, bool const* plan_valid)
 {
     for (u32 ordinal = 0; ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT; ordinal += 1)
@@ -8820,6 +8877,7 @@ void machine_x86_64_exact_prewarm(void)
     machine_x64_exact_prepare_plans(keys, key_found, prepared, plan_valid);
     machine_x64_exact_prepare_fcmp_alternate_tokens();
     machine_x64_exact_prepare_opcode_map(prepared, plan_valid);
+    machine_x64_exact_prepare_chunk_memory_tables();
     machine_x64_metadata_shape_cache_prewarm();
     // Templates are encoded through the shape cache and the staged tokens,
     // so they are published last.
@@ -10396,16 +10454,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* e
     // Spill/reload and expansion chunks are the same MOV/MOVZX population as
     // pointer memory.  Preserve their canonical frame shape by selecting the
     // already-proven disp32 lane rather than rebuilding physical operands.
-    u16 pointer_opcode = load ? (chunk == 1 ? MACHINE_X64_LOAD_PTR8 : chunk == 2 ? MACHINE_X64_LOAD_PTR16 : chunk == 4 ? MACHINE_X64_LOAD_PTR32
-                                                                                                                       : MACHINE_X64_LOAD_PTR64)
-                              : (chunk == 1 ? MACHINE_X64_STORE_PTR8 : chunk == 2 ? MACHINE_X64_STORE_PTR16
-                                                            : chunk == 4       ? MACHINE_X64_STORE_PTR32
-                                                                               : MACHINE_X64_STORE_PTR64);
-    MachineX64PreparedExactOpcode const* pointer_entry = machine_x64_exact_opcode_for_opcode(pointer_opcode);
-    if (pointer_entry && pointer_entry->plan_valid && pointer_entry->variant_count &&
-        machine_x64_emit_variable_memory_encoding(
-            encoder, pointer_entry->variable_memory_encoding_tables[0], reg, MACHINE_X64_RBP,
-            (s32)(0u - offset), true, counters))
+    if (machine_x64_emit_variable_memory_encoding(
+            encoder,
+            machine_x64_chunk_memory_tables[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
+                                           [machine_x64_chunk_width_slot(chunk)],
+            reg, MACHINE_X64_RBP, (s32)(0u - offset), true, counters))
         return true;
     if (encoder->overflow) return false;
 
@@ -10516,13 +10569,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_literal_bytes(MachineX64Encoder* encod
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_pointer_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 base, u32 offset, u32 chunk,
                                                                   MachineX64ExactEmitCounters* counters)
 {
-    u16 opcode = load ? (chunk == 1 ? MACHINE_X64_LOAD_PTR8 : chunk == 2 ? MACHINE_X64_LOAD_PTR16 : chunk == 4 ? MACHINE_X64_LOAD_PTR32
-                                                                                                               : MACHINE_X64_LOAD_PTR64)
-                      : (chunk == 1 ? MACHINE_X64_STORE_PTR8 : chunk == 2 ? MACHINE_X64_STORE_PTR16 : chunk == 4 ? MACHINE_X64_STORE_PTR32
-                                                                                                                 : MACHINE_X64_STORE_PTR64);
-    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(opcode);
-    if (offset <= INT32_MAX && entry && entry->plan_valid && entry->variant_count &&
-        machine_x64_emit_variable_memory_encoding(encoder, entry->variable_memory_encoding_tables[0], reg, base, (s32)offset, false, counters))
+    if (offset <= INT32_MAX &&
+        machine_x64_emit_variable_memory_encoding(
+            encoder,
+            machine_x64_chunk_memory_tables[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
+                                           [machine_x64_chunk_width_slot(chunk)],
+            reg, base, (s32)offset, false, counters))
         return true;
     if (encoder->overflow) return false;
 
