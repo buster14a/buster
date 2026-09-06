@@ -1,0 +1,15 @@
+scratch=0 before=128 after=128 returned=/bin/sh
+output survives next allocation: NO
+scratch=1 before=64 after=72 returned=/bin/sh
+output survives next allocation: yes
+Traceback (most recent call last):
+  File "/tmp/buster-independent-vgil1498/tree/tests/runtime_boundary_regression.py", line 35, in <module>
+    main()
+    ~~~~^^
+  File "/tmp/buster-independent-vgil1498/tree/tests/runtime_boundary_regression.py", line 31, in main
+    subprocess.run([str(binary)] + args, check=True)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['/tmp/buster-runtime_boundary_regression-k05azm7n/probe', 'scratch']' returned non-zero exit status 1.

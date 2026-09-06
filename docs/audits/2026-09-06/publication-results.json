@@ -1,0 +1,65 @@
+{
+  "repository": "buster14a/buster",
+  "base_sha": "31cff20271188e6429d7d40a5c5fe89dd8fb540a",
+  "workflow_url": "https://github.com/buster14a/buster/actions/runs/34038019940",
+  "package_sha256": "7fd937f5158b1f97f3121961fcbad249123ba5da449768fe4c28da8a4595cc6e",
+  "issues": {
+    "ebpf-boolean": 165,
+    "ebpf-signed-not": 166,
+    "wasm-alignment": 167,
+    "ebpf-symbol-growth": 168
+  },
+  "patches": [
+    {
+      "key": "ebpf-scalar",
+      "branch": "audit/2026-09-06-ebpf-scalar",
+      "observed_preimages": {
+        "src/buster/lib/compiler/ebpf/ebpf.c": "1b384582dc8ce38d171efd5bc765c46c6ce9c15d"
+      },
+      "original_audit_preimages": {
+        "src/buster/lib/compiler/ebpf/ebpf.c": "1b384582dc8ce38d171efd5bc765c46c6ce9c15d"
+      },
+      "already_present_upstream": [],
+      "baseline_exit_code": 1,
+      "patched_exit_code": 0,
+      "validation": "focused Clang -O2 ASan/UBSan; leak checking disabled for process-lifetime arenas",
+      "commit_sha": "b57c8a5f382d22f58d96c2e46832a315991c8c18"
+    },
+    {
+      "key": "wasm-alignment",
+      "branch": "audit/2026-09-06-wasm-alignment",
+      "observed_preimages": {
+        "src/buster/lib/compiler/wasm/wasm.c": "2efa251bbfccf090d3407e82efb19760d87e235f"
+      },
+      "original_audit_preimages": {
+        "src/buster/lib/compiler/wasm/wasm.c": "2efa251bbfccf090d3407e82efb19760d87e235f"
+      },
+      "already_present_upstream": [],
+      "baseline_exit_code": 1,
+      "patched_exit_code": 0,
+      "validation": "focused Clang -O2 ASan/UBSan; leak checking disabled for process-lifetime arenas",
+      "commit_sha": "91f54819a19d027d2e150a59b544171ecf328c72"
+    },
+    {
+      "key": "runtime-boundaries",
+      "branch": "audit/2026-09-06-runtime-boundaries",
+      "observed_preimages": {
+        "src/buster/lib/os.c": "2af79fa8ddc6cd0ac9148a4d1cd931ec87f14e54",
+        "src/buster/lib/file.c": "a036e23a7abf55df010a8aefcb892e015b10598b",
+        "src/buster/lib/string.c": "71f4922c8a6fb9edcae8902f12327816c7b992f1"
+      },
+      "original_audit_preimages": {
+        "src/buster/lib/os.c": "2af79fa8ddc6cd0ac9148a4d1cd931ec87f14e54",
+        "src/buster/lib/file.c": "77da7223b4cf602484a09167b93df3742e30dbfa",
+        "src/buster/lib/string.c": "2015b26554163e541ab0cf49a4ea04f691027da8"
+      },
+      "already_present_upstream": [
+        "src/buster/lib/file.c"
+      ],
+      "baseline_exit_code": 1,
+      "patched_exit_code": 0,
+      "validation": "focused Clang -O2 ASan/UBSan; leak checking disabled for process-lifetime arenas",
+      "commit_sha": "06a95cea89ec36d12b6f679a15b40a1ecdf99c09"
+    }
+  ]
+}

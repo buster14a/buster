@@ -1,0 +1,26 @@
+In file included from /mnt/data/buster-audit/buster-copy-pro/tests/ebpf_scalar_regression.c:30:
+In file included from /mnt/data/buster-audit/buster-copy-pro/src/buster/lib/compiler/ir/ir.c:16:
+In file included from /mnt/data/buster-audit/buster-copy-pro/src/buster/lib/compiler/ir/ir.h:10:
+/mnt/data/buster-audit/buster-copy-pro/src/buster/lib/target.h:525:32: warning: function 'target_data_layout' has internal linkage but is not defined [-Wundefined-internal]
+  525 | BUSTER_F_DECL TargetDataLayout target_data_layout(Target target);
+      |                                ^
+/mnt/data/buster-audit/buster-copy-pro/src/buster/lib/compiler/ir/ir.c:2637:31: note: used here
+ 2637 |         program.data_layout = target_data_layout(target_native);
+      |                               ^
+1 warning generated.
+comparison op=19 left=0 right=0: got=0 expected=1
+comparison op=19 left=1 right=1: got=0 expected=1
+comparison op=19 left=2 right=2: got=0 expected=1
+logical-not input=0: got=0 expected=1
+244/474 passed; 230 failures; emitter_error=0
+Traceback (most recent call last):
+  File "/mnt/data/buster-audit/buster-copy-pro/tests/ebpf_scalar_regression.py", line 34, in <module>
+    main()
+    ~~~~^^
+  File "/mnt/data/buster-audit/buster-copy-pro/tests/ebpf_scalar_regression.py", line 30, in main
+    subprocess.run([str(binary)] + args, check=True)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['/tmp/buster-ebpf_scalar_regression-_fni7sta/probe']' returned non-zero exit status 1.

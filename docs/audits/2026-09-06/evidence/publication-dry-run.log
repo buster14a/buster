@@ -1,0 +1,12 @@
+OFFLINE PLAN ONLY — no GitHub reads or writes. Repository: buster14a/buster
+ISSUE: ebpf: comparison and logical-not branches skip the true result
+ISSUE: ebpf: signed narrow bitwise-not results are zero-extended
+ISSUE: wasm: over-aligned scalar loads and stores emit invalid memory alignment
+ISSUE: ebpf: symbol insertion performs a quadratic duplicate-key scan
+DRAFT PR: ebpf: fix comparison branches and signed bitwise-not normalization
+  branch=audit/2026-09-06-ebpf-scalar  test=tests/ebpf_scalar_regression.py
+DRAFT PR: wasm: cap scalar memory alignment hints at access width
+  branch=audit/2026-09-06-wasm-alignment  test=tests/wasm_memory_alignment_regression.py
+DRAFT PR: runtime: preserve scratch output and handle relative maps and null empties
+  branch=audit/2026-09-06-runtime-boundaries  test=tests/runtime_boundary_regression.py
+Explicit --publish --checkout /path/to/buster is required for any remote action.
