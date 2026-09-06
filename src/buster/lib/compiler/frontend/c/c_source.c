@@ -1183,15 +1183,45 @@ struct CLexState
 
 #if BUSTER_C_LEX_COMPACT
 
-BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_mask_below(u64 bit_index)
+// The reference spelling of "the lanes below `bit_index`", saturating at the
+// window width: one compare, one shift and one conditional move.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE u64 c_lex_mask_below_reference(u64 bit_index)
 {
     return bit_index >= 64 ? ~(u64)0 : (((u64)1 << bit_index) - 1);
 }
 
+// The same mask in one instruction.  BMI2's BZHI reads its lane count from the
+// low eight bits of the index operand and clears nothing when that count is 64
+// or more, which is exactly the reference's saturation, so the whole helper is
+// `bzhi $-1, index` for every index this lexer forms.  The bound is what makes
+// the low-eight-bits reading safe, so it is stated: every index here is a
+// window position (0..64) or a window position plus a punctuator spelling
+// (at most 67), and the check compiles to an optimizer assumption under
+// BUSTER_OPTIMIZE rather than to code.  c_lex_lane_mask keeps the reference
+// form because its callers pass whole-file byte counts.
+#define C_LEX_MASK_BELOW_LIMIT 68
+
+BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_mask_below(u64 bit_index)
+{
+    BUSTER_CHECK(bit_index < C_LEX_MASK_BELOW_LIMIT);
+#if defined(__BMI2__)
+    u64 result = _bzhi_u64(~(u64)0, (u32)bit_index);
+#else
+    u64 result = c_lex_mask_below_reference(bit_index);
+#endif
+    return result;
+}
+
 BUSTER_C_INLINE BUSTER_INLINE __mmask64 c_lex_lane_mask(u64 count)
 {
-    return count >= 64 ? ~(__mmask64)0 : (__mmask64)((((u64)1) << count) - 1);
+    return (__mmask64)c_lex_mask_below_reference(count);
 }
+
+// The bytes one window of the compact emitter reads: its own 64 lanes plus the
+// two the punctuator NFA's second and third lookups and the comment delimiters
+// see past the last of them.  A window with that many bytes left needs no lane
+// mask on any of its three loads.
+#define C_LEX_WINDOW_LOADED_BYTES 66
 
 // Lanes of a lookahead load that hold a real byte.  The window bounds do not
 // serve: a punctuator or comment delimiter near the window's end is classified
@@ -1705,12 +1735,31 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
         u64 remaining = source.length - offset;
         u64 window_length = remaining < 64 ? remaining : 64;
         bool at_end_of_file = window_length == remaining;
-        __mmask64 valid_lanes = c_lex_lane_mask(window_length);
-        u64 valid = (u64)valid_lanes;
-
-        __m512i chunk0 = _mm512_maskz_loadu_epi8(valid_lanes, it);
-        __m512i chunk1 = _mm512_maskz_loadu_epi8(c_lex_lookahead_mask(remaining, 1), it + 1);
-        __m512i chunk2 = _mm512_maskz_loadu_epi8(c_lex_lookahead_mask(remaining, 2), it + 2);
+        u64 valid;
+        __m512i chunk0;
+        __m512i chunk1;
+        __m512i chunk2;
+        if (remaining >= C_LEX_WINDOW_LOADED_BYTES)
+        {
+            // Every lane of the window and of both lookaheads holds a byte the
+            // file owns, so the three loads need no mask and the three lane
+            // masks no arithmetic at all — nine instructions of shift and
+            // conditional move that 92% of windows were paying to reconstruct
+            // an all-ones mask.  The bound is the window plus the two bytes
+            // the punctuator NFA and the comment delimiters look ahead by.
+            valid = ~(u64)0;
+            chunk0 = _mm512_loadu_si512((const void*)it);
+            chunk1 = _mm512_loadu_si512((const void*)(it + 1));
+            chunk2 = _mm512_loadu_si512((const void*)(it + 2));
+        }
+        else
+        {
+            __mmask64 valid_lanes = c_lex_lane_mask(window_length);
+            valid = (u64)valid_lanes;
+            chunk0 = _mm512_maskz_loadu_epi8(valid_lanes, it);
+            chunk1 = _mm512_maskz_loadu_epi8(c_lex_lookahead_mask(remaining, 1), it + 1);
+            chunk2 = _mm512_maskz_loadu_epi8(c_lex_lookahead_mask(remaining, 2), it + 2);
+        }
 
         // One masked load, every byte class in lockstep.
         __m512i lowered = _mm512_or_si512(chunk0, _mm512_set1_epi8(0x20));
@@ -2220,6 +2269,22 @@ bool c_test_lex_compact_tables_ready(void)
 #else
     return true;
 #endif
+}
+
+// Test seam: the one-instruction lane-prefix mask against its portable
+// reference, over the whole domain the emitter forms indices in — every window
+// position and every position a punctuator spelling carries past the last of
+// them. Counting mismatches keeps the sweep to one test assertion.
+u64 c_test_lex_mask_below_mismatches(void)
+{
+    u64 result = 0;
+#if BUSTER_C_LEX_COMPACT
+    for (u64 bit_index = 0; bit_index < C_LEX_MASK_BELOW_LIMIT; bit_index += 1)
+    {
+        result += c_lex_mask_below(bit_index) != c_lex_mask_below_reference(bit_index);
+    }
+#endif
+    return result;
 }
 
 // Test seam: reconcile the emitter's hand-assigned NFA channels with the

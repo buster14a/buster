@@ -333,6 +333,67 @@ struct CParseDelimiterStackEntry
     CPunctuator opening;
 };
 
+// The three bracket pairs the index matches, as one closer-to-opener rule
+// rather than a ladder: each closing spelling sits immediately above its own
+// opener in CPunctuator, so a closer's expected opener is its id less one.
+// The build check keeps that true if the enum is ever reordered.
+BUSTER_CT_CHECK(C_PUNCTUATOR_RIGHT_PARENTHESIS == C_PUNCTUATOR_LEFT_PARENTHESIS + 1);
+BUSTER_CT_CHECK(C_PUNCTUATOR_RIGHT_BRACKET == C_PUNCTUATOR_LEFT_BRACKET + 1);
+BUSTER_CT_CHECK(C_PUNCTUATOR_RIGHT_BRACE == C_PUNCTUATOR_LEFT_BRACE + 1);
+
+// The identifier populations of the index, for a token the caller has already
+// proved is an identifier. The label rule is not here: the window pass answers
+// it for sixty-four tokens at once out of the shape sidecar, and the scalar
+// fallback asks for it separately, so this walk never reads a second shape.
+BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit_identifier(CParseResult* result, CPreprocessResult preprocess,
+                                                                            CTokenPositionIndex* index, u32* vector_size_capacity,
+                                                                            u32* alignas_capacity, u32* attribute_capacity, u32 token_index)
+{
+    CToken token = preprocess.tokens[token_index];
+    u8 token_class = c_parse_token_class(result, preprocess, token_index);
+    if (token_class & C_TOKEN_CLASS_VECTOR_SIZE)
+    {
+        c_parse_position_index_append(result->arena, &index->vector_size_positions, &index->vector_size_count, vector_size_capacity, token_index);
+    }
+    if (token_class & C_TOKEN_CLASS_ALIGNAS)
+    {
+        c_parse_position_index_append(result->arena, &index->alignas_positions, &index->alignas_count, alignas_capacity, token_index);
+    }
+    if (c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ATTRIBUTE_KEYWORDS))
+    {
+        c_parse_position_index_append(result->arena, &index->attribute_positions, &index->attribute_count, attribute_capacity, token_index);
+    }
+}
+
+// One delimiter, for a token the caller has already proved is one of the six
+// bracket spellings and has already separated into opener and closer. Neither
+// the punctuator ladder nor the shape test survives that: the opener's id is
+// the shape's low bits and the closer's expectation is one below its own.
+BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit_delimiter(CTokenPositionIndex* index, CParseDelimiterStackEntry* stack,
+                                                                           u32* stack_count, u32 token_index, CTokenShape shape, bool opening)
+{
+    CPunctuator punctuator = (CPunctuator)(shape & C_TOKEN_SHAPE_PUNCTUATOR_MASK);
+    if (opening)
+    {
+        stack[(*stack_count)++] = (CParseDelimiterStackEntry){
+            .position = token_index,
+            .opening = punctuator,
+        };
+    }
+    else if (!*stack_count || stack[*stack_count - 1].opening != (CPunctuator)(punctuator - 1))
+    {
+        index->delimiter_mismatch_count += 1;
+        *stack_count = 0;
+    }
+    else
+    {
+        index->matching_delimiters[stack[--*stack_count].position] = token_index;
+    }
+}
+
+// The whole classification for one token, as the shape-driven fallback the
+// pass takes when the preprocessor kept no sidecar. The window pass below
+// answers the same three questions from masks instead.
 BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit(CParseResult* result, CPreprocessResult preprocess,
                                                                    CTokenPositionIndex* index, CTokenShape const* token_shapes,
                                                                    CParseDelimiterStackEntry* stack, u32* stack_count,
@@ -342,16 +403,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit(CParseResult* 
 {
     if (shape == C_TOKEN_IDENTIFIER)
     {
-        CToken token = preprocess.tokens[token_index];
-        u8 token_class = c_parse_token_class(result, preprocess, token_index);
-        if (token_class & C_TOKEN_CLASS_VECTOR_SIZE)
-        {
-            c_parse_position_index_append(result->arena, &index->vector_size_positions, &index->vector_size_count, vector_size_capacity, token_index);
-        }
-        if (token_class & C_TOKEN_CLASS_ALIGNAS)
-        {
-            c_parse_position_index_append(result->arena, &index->alignas_positions, &index->alignas_count, alignas_capacity, token_index);
-        }
+        c_parse_position_index_visit_identifier(result, preprocess, index, vector_size_capacity, alignas_capacity, attribute_capacity, token_index);
         // The next token is one line of this cache at most, and reading
         // its punctuator here spares the body-lowering loops a re-scan of
         // every token for the same identifier-then-colon shape.
@@ -361,39 +413,17 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit(CParseResult* 
             c_parse_position_index_append(result->arena, &index->label_candidate_positions, &index->label_candidate_count, label_candidate_capacity,
                                           token_index);
         }
-        if (c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ATTRIBUTE_KEYWORDS))
+    }
+    else if (c_token_shape_is_punctuator(shape))
+    {
+        CPunctuator punctuator = c_token_shape_punctuator(shape);
+        bool opening = punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || punctuator == C_PUNCTUATOR_LEFT_BRACKET || punctuator == C_PUNCTUATOR_LEFT_BRACE;
+        bool closing = punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || punctuator == C_PUNCTUATOR_RIGHT_BRACKET || punctuator == C_PUNCTUATOR_RIGHT_BRACE;
+        if (opening || closing)
         {
-            c_parse_position_index_append(result->arena, &index->attribute_positions, &index->attribute_count, attribute_capacity, token_index);
+            c_parse_position_index_visit_delimiter(index, stack, stack_count, token_index, shape, opening);
         }
-        return;
     }
-    if (!c_token_shape_is_punctuator(shape))
-    {
-        return;
-    }
-    CPunctuator punctuator = c_token_shape_punctuator(shape);
-    if (punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || punctuator == C_PUNCTUATOR_LEFT_BRACKET || punctuator == C_PUNCTUATOR_LEFT_BRACE)
-    {
-        stack[(*stack_count)++] = (CParseDelimiterStackEntry){
-            .position = token_index,
-            .opening = punctuator,
-        };
-        return;
-    }
-    CPunctuator expected = punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS ? C_PUNCTUATOR_LEFT_PARENTHESIS
-                           : punctuator == C_PUNCTUATOR_RIGHT_BRACKET   ? C_PUNCTUATOR_LEFT_BRACKET
-                                                                         : punctuator == C_PUNCTUATOR_RIGHT_BRACE ? C_PUNCTUATOR_LEFT_BRACE : C_PUNCTUATOR_NONE;
-    if (expected == C_PUNCTUATOR_NONE)
-    {
-        return;
-    }
-    if (!*stack_count || stack[*stack_count - 1].opening != expected)
-    {
-        index->delimiter_mismatch_count += 1;
-        *stack_count = 0;
-        return;
-    }
-    index->matching_delimiters[stack[--*stack_count].position] = token_index;
 }
 
 BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPreprocessResult preprocess)
@@ -413,6 +443,7 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
     if (token_shapes)
     {
         Simd512 identifier_shape = simd512_splat((u8)C_TOKEN_IDENTIFIER);
+        Simd512 colon_shape = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_COLON));
         Simd512 open_parenthesis = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_LEFT_PARENTHESIS));
         Simd512 open_bracket = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_LEFT_BRACKET));
         Simd512 open_brace = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | C_PUNCTUATOR_LEFT_BRACE));
@@ -424,20 +455,45 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
             u64 tile_tokens = BUSTER_MIN((u64)C_PARSE_TOKEN_TILE_TOKENS, preprocess.token_count - tile_base);
             for (u32 window = 0; window < tile_tokens; window += 64)
             {
+                u64 window_base = tile_base + window;
                 u32 window_tokens = (u32)BUSTER_MIN(UINT64_C(64), tile_tokens - window);
                 Mask64 window_mask = window_tokens == 64 ? UINT64_MAX : (Mask64)(((Mask64)1 << window_tokens) - 1);
-                Simd512 shape_lanes = simd512_load_masked(token_shapes + tile_base + window, window_mask);
+                Simd512 shape_lanes = simd512_load_masked(token_shapes + window_base, window_mask);
                 Mask64 identifiers = simd512_equal_byte(shape_lanes, identifier_shape);
                 Mask64 opens = mask64_or(mask64_or(simd512_equal_byte(shape_lanes, open_parenthesis), simd512_equal_byte(shape_lanes, open_bracket)),
                                          simd512_equal_byte(shape_lanes, open_brace));
                 Mask64 closes = mask64_or(mask64_or(simd512_equal_byte(shape_lanes, close_parenthesis), simd512_equal_byte(shape_lanes, close_bracket)),
                                           simd512_equal_byte(shape_lanes, close_brace));
-                for (Mask64 remaining = mask64_or(identifiers, mask64_or(opens, closes)); remaining; remaining &= remaining - 1)
+                // The label rule is a mask, not a per-identifier lookahead: the
+                // successor shapes are the same sidecar bytes read one token
+                // along, so lane 63 sees the next window's first token instead
+                // of a shifted-in zero, and the lanes past the last token load
+                // as zero, which no punctuator shape can equal.
+                u64 successor_tokens = preprocess.token_count - (window_base + 1);
+                Mask64 successor_mask = successor_tokens >= 64 ? UINT64_MAX : (Mask64)(((Mask64)1 << successor_tokens) - 1);
+                Simd512 successor_lanes = simd512_load_masked(token_shapes + window_base + 1, successor_mask);
+                Mask64 labels = mask64_and(identifiers, simd512_equal_byte(successor_lanes, colon_shape));
+                for (Mask64 remaining = identifiers; remaining; remaining &= remaining - 1)
+                {
+                    u32 token_index = (u32)(window_base + mask64_first_set(remaining));
+                    c_parse_position_index_visit_identifier(result, preprocess, index, &vector_size_capacity, &alignas_capacity, &attribute_capacity,
+                                                            token_index);
+                }
+                for (Mask64 remaining = labels; remaining; remaining &= remaining - 1)
+                {
+                    u32 token_index = (u32)(window_base + mask64_first_set(remaining));
+                    c_parse_position_index_append(result->arena, &index->label_candidate_positions, &index->label_candidate_count,
+                                                  &label_candidate_capacity, token_index);
+                }
+                // Openers and closers stay in one walk: the stack discipline is
+                // what makes the pass a matching, so their order relative to
+                // each other is the answer and cannot be split apart.
+                for (Mask64 remaining = mask64_or(opens, closes); remaining; remaining &= remaining - 1)
                 {
                     u32 lane = mask64_first_set(remaining);
-                    u32 token_index = (u32)(tile_base + window + lane);
-                    c_parse_position_index_visit(result, preprocess, index, token_shapes, stack, &stack_count, &vector_size_capacity, &alignas_capacity,
-                                                 &label_candidate_capacity, &attribute_capacity, token_index, token_shapes[token_index]);
+                    u32 token_index = (u32)(window_base + lane);
+                    c_parse_position_index_visit_delimiter(index, stack, &stack_count, token_index, token_shapes[token_index],
+                                                           ((opens >> lane) & 1) != 0);
                 }
             }
         }
