@@ -8780,6 +8780,58 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
     }
 }
 
+// The dense variable-memory table a chunk emits through, by direction and by
+// chunk width. Both chunk emitters used to name their pointer opcode with a
+// ternary ladder, index the 1.064-byte prepared row with it, and read
+// `plan_valid`, `variant_count` and `variable_memory_encoding_tables[0]` from
+// three different lines of that row -- for a closed population of eight
+// opcodes whose answer stops changing at prewarm. Eight bytes published there
+// answer it instead, and zero at rest is the same refusal an unprepared row
+// gave, because machine_x64_emit_variable_memory_encoding refuses table zero
+// before it touches the encoder.
+#define MACHINE_X64_CHUNK_WIDTH_COUNT 4u
+#define MACHINE_X64_CHUNK_DIRECTION_LOAD 0u
+#define MACHINE_X64_CHUNK_DIRECTION_STORE 1u
+BUSTER_GLOBAL_LOCAL u8 machine_x64_chunk_memory_tables[2][MACHINE_X64_CHUNK_WIDTH_COUNT];
+// Chunk byte counts are 1, 2, 4 and 8 (machine_x64_copy_chunk); every other
+// value took the ladder's 64-bit arm, so it maps to the last width here.
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_chunk_width_index[9] = {3, 0, 1, 3, 2, 3, 3, 3, 3};
+
+BUSTER_GLOBAL_LOCAL u32 machine_x64_chunk_width_slot(u32 chunk)
+{
+    u32 result = chunk < BUSTER_ARRAY_LENGTH(machine_x64_chunk_width_index)
+                     ? machine_x64_chunk_width_index[chunk]
+                     : MACHINE_X64_CHUNK_WIDTH_COUNT - 1u;
+
+    return result;
+}
+
+// The chunk emitters' dense-table projection, published from the prepared
+// rows the map preparation has just resolved.
+BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_chunk_memory_tables(void)
+{
+    static u16 const load_opcodes[MACHINE_X64_CHUNK_WIDTH_COUNT] = {MACHINE_X64_LOAD_PTR8, MACHINE_X64_LOAD_PTR16,
+                                                                    MACHINE_X64_LOAD_PTR32, MACHINE_X64_LOAD_PTR64};
+    static u16 const store_opcodes[MACHINE_X64_CHUNK_WIDTH_COUNT] = {MACHINE_X64_STORE_PTR8, MACHINE_X64_STORE_PTR16,
+                                                                     MACHINE_X64_STORE_PTR32, MACHINE_X64_STORE_PTR64};
+    for (u32 width_slot = 0; width_slot < MACHINE_X64_CHUNK_WIDTH_COUNT; width_slot += 1)
+    {
+        // Indexed rather than looked up: the eight opcodes above are registry
+        // rows by construction, and the accessor that proves that for an
+        // arbitrary opcode is defined further down the file.
+        u32 load_ordinal = (u32)(load_opcodes[width_slot] - MACHINE_X64_MOV_RI);
+        u32 store_ordinal = (u32)(store_opcodes[width_slot] - MACHINE_X64_MOV_RI);
+        MachineX64PreparedExactOpcode const* load_entry =
+            load_ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT ? machine_x64_exact_opcode_map + load_ordinal : 0;
+        MachineX64PreparedExactOpcode const* store_entry =
+            store_ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT ? machine_x64_exact_opcode_map + store_ordinal : 0;
+        machine_x64_chunk_memory_tables[MACHINE_X64_CHUNK_DIRECTION_LOAD][width_slot] =
+            load_entry && load_entry->plan_valid && load_entry->variant_count ? load_entry->variable_memory_encoding_tables[0] : 0;
+        machine_x64_chunk_memory_tables[MACHINE_X64_CHUNK_DIRECTION_STORE][width_slot] =
+            store_entry && store_entry->plan_valid && store_entry->variant_count ? store_entry->variable_memory_encoding_tables[0] : 0;
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_opcode_map(BusterX86MetadataExactPlan const* prepared, bool const* plan_valid)
 {
     for (u32 ordinal = 0; ordinal < MACHINE_X86_64_EMIT_REGISTRY_COUNT; ordinal += 1)
@@ -8825,6 +8877,7 @@ void machine_x86_64_exact_prewarm(void)
     machine_x64_exact_prepare_plans(keys, key_found, prepared, plan_valid);
     machine_x64_exact_prepare_fcmp_alternate_tokens();
     machine_x64_exact_prepare_opcode_map(prepared, plan_valid);
+    machine_x64_exact_prepare_chunk_memory_tables();
     machine_x64_metadata_shape_cache_prewarm();
     // Templates are encoded through the shape cache and the staged tokens,
     // so they are published last.
@@ -10401,16 +10454,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* e
     // Spill/reload and expansion chunks are the same MOV/MOVZX population as
     // pointer memory.  Preserve their canonical frame shape by selecting the
     // already-proven disp32 lane rather than rebuilding physical operands.
-    u16 pointer_opcode = load ? (chunk == 1 ? MACHINE_X64_LOAD_PTR8 : chunk == 2 ? MACHINE_X64_LOAD_PTR16 : chunk == 4 ? MACHINE_X64_LOAD_PTR32
-                                                                                                                       : MACHINE_X64_LOAD_PTR64)
-                              : (chunk == 1 ? MACHINE_X64_STORE_PTR8 : chunk == 2 ? MACHINE_X64_STORE_PTR16
-                                                            : chunk == 4       ? MACHINE_X64_STORE_PTR32
-                                                                               : MACHINE_X64_STORE_PTR64);
-    MachineX64PreparedExactOpcode const* pointer_entry = machine_x64_exact_opcode_for_opcode(pointer_opcode);
-    if (pointer_entry && pointer_entry->plan_valid && pointer_entry->variant_count &&
-        machine_x64_emit_variable_memory_encoding(
-            encoder, pointer_entry->variable_memory_encoding_tables[0], reg, MACHINE_X64_RBP,
-            (s32)(0u - offset), true, counters))
+    if (machine_x64_emit_variable_memory_encoding(
+            encoder,
+            machine_x64_chunk_memory_tables[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
+                                           [machine_x64_chunk_width_slot(chunk)],
+            reg, MACHINE_X64_RBP, (s32)(0u - offset), true, counters))
         return true;
     if (encoder->overflow) return false;
 
@@ -10521,13 +10569,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_literal_bytes(MachineX64Encoder* encod
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_pointer_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 base, u32 offset, u32 chunk,
                                                                   MachineX64ExactEmitCounters* counters)
 {
-    u16 opcode = load ? (chunk == 1 ? MACHINE_X64_LOAD_PTR8 : chunk == 2 ? MACHINE_X64_LOAD_PTR16 : chunk == 4 ? MACHINE_X64_LOAD_PTR32
-                                                                                                               : MACHINE_X64_LOAD_PTR64)
-                      : (chunk == 1 ? MACHINE_X64_STORE_PTR8 : chunk == 2 ? MACHINE_X64_STORE_PTR16 : chunk == 4 ? MACHINE_X64_STORE_PTR32
-                                                                                                                 : MACHINE_X64_STORE_PTR64);
-    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(opcode);
-    if (offset <= INT32_MAX && entry && entry->plan_valid && entry->variant_count &&
-        machine_x64_emit_variable_memory_encoding(encoder, entry->variable_memory_encoding_tables[0], reg, base, (s32)offset, false, counters))
+    if (offset <= INT32_MAX &&
+        machine_x64_emit_variable_memory_encoding(
+            encoder,
+            machine_x64_chunk_memory_tables[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
+                                           [machine_x64_chunk_width_slot(chunk)],
+            reg, base, (s32)offset, false, counters))
         return true;
     if (encoder->overflow) return false;
 
