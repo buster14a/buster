@@ -16289,6 +16289,35 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             scratch_end(bound_register_temporary);
         }
     }
+    // Call discovery must leave object-size pointer operands unevaluated,
+    // even for nested calls and a query embedded in another call's argument.
+    for (u32 mode = 0; mode < 4; mode += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        String8 source = string_format_z(temporary.arena,
+            S8("extern void* effect(void); extern void* nested(void*); "
+               "unsigned long long query(void) {{ return __builtin_object_size(nested(effect()), {u32}); }"), mode);
+        CPreprocessResult tokens = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("object-size-unevaluated.c"), target_native, &tokens, &parse);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && !lowered.diagnostic_count && lowered.program);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            u32 calls = 0;
+            IrModule* module = lowered.program->modules;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    calls += function->instructions[instruction_index].opcode == IR_OPCODE_CALL;
+                }
+            }
+            BUSTER_TEST(arguments, calls == 0);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
     // Fortified block-memory builtins have a real fourth size_t argument,
     // including when no libc declaration is present. Never lower these as
     // three-argument unchecked calls merely to accept a hosted SDK header.
