@@ -42,10 +42,27 @@
 #include <sys/syscall.h>
 #endif
 
+BUSTER_GLOBAL_LOCAL void* arena_allocate_bytes_with_location(Arena* arena, u64 size, u64 alignment, const char* file, u32 line);
+#define arena_allocate_bytes(arena, size, alignment) arena_allocate_bytes_with_location((arena), (size), (alignment), __FILE__, __LINE__)
 #include <buster/lib/string.c>
 #include <buster/lib/os.c>
+#undef arena_allocate_bytes
 #define BUSTER_ARENA_CAPACITY_DIAGNOSTICS 1
 #include <buster/lib/arena.c>
+
+BUSTER_GLOBAL_LOCAL void* arena_allocate_bytes_with_location(Arena* arena, u64 size, u64 alignment, const char* file, u32 line)
+{
+    if (BUSTER_UNLIKELY(arena && (arena->position > arena->reserved_size || size > arena->reserved_size - arena->position)))
+    {
+        fprintf(stderr, "ARENA_CALLSITE file=%s line=%u position=%llu size=%llu alignment=%llu reserved=%llu\n", file, line,
+                (unsigned long long)arena->position, (unsigned long long)size, (unsigned long long)alignment,
+                (unsigned long long)arena->reserved_size);
+        fflush(stderr);
+    }
+    return arena_allocate_bytes(arena, size, alignment);
+}
+
+#define arena_allocate_bytes(arena, size, alignment) arena_allocate_bytes_with_location((arena), (size), (alignment), __FILE__, __LINE__)
 #include <buster/lib/file.c>
 #include <buster/lib/hash.c>
 #include <buster/lib/integer.c>
