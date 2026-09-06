@@ -206,7 +206,10 @@ String8 string_join_arena(Arena* arena, SliceString8 strings, bool zero_terminat
     for (u64 index = 0; index < strings.length; index += 1)
     {
         String8 string = strings.pointer[index];
-        memcpy(pointer + i, string.pointer, BUSTER_SLICE_SIZE(string));
+        if (string.length)
+        {
+            memcpy(pointer + i, string.pointer, BUSTER_SLICE_SIZE(string));
+        }
         i += string.length;
     }
 
@@ -1418,7 +1421,10 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
 String8 string_duplicate_arena(Arena* arena, String8 string, bool zero_terminate)
 {
     String8 result = {.pointer = arena_allocate(arena, char8, string.length + zero_terminate), .length = string.length};
-    memcpy(result.pointer, string.pointer, sizeof(char8) * string.length);
+    if (string.length)
+    {
+        memcpy(result.pointer, string.pointer, sizeof(char8) * string.length);
+    }
 
     if (zero_terminate)
     {
