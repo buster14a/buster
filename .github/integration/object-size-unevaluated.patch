@@ -1,0 +1,113 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index aa773543..830cd3e3 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -15361,7 +15361,11 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
+             builder->prepared_call_token_next[prepared_call_index] = builder->prepared_call_token_heads[callee_offset];
+             builder->prepared_call_token_heads[callee_offset] = prepared_call_index;
+         }
+-        if (builtin_generic)
++        // The object-size operand is unevaluated. Preparing its nested calls
++        // here would run them before the builtin emits its constant result,
++        // duplicating a destination expression in fortified memory macros.
++        // _Generic likewise owns the lowering of its selected expression.
++        if (builtin_generic || builtin_object_size)
+         {
+             index = close;
+         }
+diff --git a/src/buster/tests/compiler/frontend/c/c_test.c b/src/buster/tests/compiler/frontend/c/c_test.c
+index 636640a6..52834948 100644
+--- a/src/buster/tests/compiler/frontend/c/c_test.c
++++ b/src/buster/tests/compiler/frontend/c/c_test.c
+@@ -16289,6 +16289,35 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+             scratch_end(bound_register_temporary);
+         }
+     }
++    // Call discovery must leave object-size pointer operands unevaluated,
++    // even for nested calls and a query embedded in another call's argument.
++    for (u32 mode = 0; mode < 4; mode += 1)
++    {
++        TemporalArena temporary = scratch_begin(0, 0);
++        String8 source = string_format_z(temporary.arena,
++            S8("extern void* effect(void); extern void* nested(void*); "
++               "unsigned long long query(void) {{ return __builtin_object_size(nested(effect()), {u32}); }"), mode);
++        CPreprocessResult tokens = {0};
++        CParseResult parse = {0};
++        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("object-size-unevaluated.c"), target_native, &tokens, &parse);
++        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && !lowered.diagnostic_count && lowered.program);
++        if (lowered.program && !lowered.diagnostic_count)
++        {
++            u32 calls = 0;
++            IrModule* module = lowered.program->modules;
++            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
++            {
++                IrFunction* function = module->functions + function_index;
++                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
++                {
++                    calls += function->instructions[instruction_index].opcode == IR_OPCODE_CALL;
++                }
++            }
++            BUSTER_TEST(arguments, calls == 0);
++            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
++        }
++        scratch_end(temporary);
++    }
+     // Fortified block-memory builtins have a real fourth size_t argument,
+     // including when no libc declaration is present. Never lower these as
+     // three-argument unchecked calls merely to accept a hosted SDK header.
+diff --git a/tests/basic_c_builtin_memory.c b/tests/basic_c_builtin_memory.c
+index d2130277..0f60c21d 100644
+--- a/tests/basic_c_builtin_memory.c
++++ b/tests/basic_c_builtin_memory.c
+@@ -6,6 +6,21 @@
+ extern void *memcpy(void *destination, const void *source, unsigned long count);
+ extern int memcmp(const void *left, const void *right, unsigned long count);
+ 
++// Object-size queries must never run a side-effecting pointer operand.
++// The same expression occurs twice in the SDK's fortified-memory macros.
++static char object_size_storage[16];
++static int object_size_calls;
++static char* object_size_destination(void)
++{
++    object_size_calls += 1;
++    return object_size_storage;
++}
++static __SIZE_TYPE__ object_size_outer(__SIZE_TYPE__ size)
++{
++    object_size_calls += 10;
++    return size;
++}
++
+ // LZ4 spells its block copies __builtin_memcpy/__builtin_memmove once
+ // __clang__ is defined, so the builtins have to lower to the library calls
+ // they name, with the prototype's argument conversions and the destination
+@@ -14,6 +29,17 @@ int main(int argc, char** argv)
+ {
+     (void)argc;
+     (void)argv;
++    if (__builtin_object_size(object_size_destination(), 0) != (__SIZE_TYPE__)-1) return 15;
++    if (__builtin_object_size(object_size_destination(), 1) != (__SIZE_TYPE__)-1) return 16;
++    if (__builtin_object_size(object_size_destination(), 2) != 0) return 17;
++    if (__builtin_object_size(object_size_destination(), 3) != 0) return 18;
++    char* object_pointer = object_size_storage;
++    if (__builtin_object_size(object_pointer++, 0) != (__SIZE_TYPE__)-1) return 19;
++    (void)__builtin_object_size((object_size_destination(), object_pointer), 0);
++    if (object_pointer != object_size_storage || object_size_calls != 0) return 20;
++    if (object_size_outer(__builtin_object_size(object_size_destination(), 0)) != (__SIZE_TYPE__)-1) return 21;
++    if (object_size_calls != 10) return 22;
++    object_size_calls = 0;
+     char source[16];
+     char destination[16];
+     __builtin_memset(source, 0x5a, sizeof(source));
+@@ -43,6 +69,11 @@ int main(int argc, char** argv)
+     if (destination[1] != 3) return 12;
+     if (__builtin___memcpy_chk(destination, source, bounded_count, (__SIZE_TYPE__)-1) != destination) return 13;
+     if (__builtin___memset_chk(destination, 0, 0, 0) != destination) return 14;
++    // The call used as the actual destination executes once; its second
++    // appearance in the size query does not execute at all.
++    if (__builtin___memcpy_chk(object_size_destination(), source, bounded_count,
++            __builtin_object_size(object_size_destination(), 0)) != object_size_storage) return 23;
++    if (object_size_calls != 1 || object_size_storage[3] != 0x5a) return 24;
+     if (argc > 1)
+     {
+         // No physical overflow is possible: the array is sixteen bytes. The
