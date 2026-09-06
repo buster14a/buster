@@ -97,6 +97,27 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !string16_equal(invalid16, invalid16));
     }
 
+    // Null-empty strings are valid slices, not valid memcpy arguments. Both
+    // termination policies and mixed joins must avoid zero-count null copies.
+    for (u32 terminated = 0; terminated < 2; terminated += 1)
+    {
+        String8 empty = {0};
+        String8 copy = string_duplicate_arena(arena, empty, terminated != 0);
+        BUSTER_TEST(arguments, copy.length == 0);
+        BUSTER_TEST(arguments, !terminated || (copy.pointer && copy.pointer[0] == 0));
+        String8 pieces[] = {empty, S8("ab"), empty, S8("cd"), empty};
+        String8 joined = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pieces), terminated != 0);
+        BUSTER_STRING_TEST(arguments, joined, S8("abcd"));
+        BUSTER_TEST(arguments, !terminated || (joined.pointer && joined.pointer[joined.length] == 0));
+        String8 empties[] = {empty, empty, empty};
+        joined = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(empties), terminated != 0);
+        BUSTER_TEST(arguments, joined.length == 0);
+        BUSTER_TEST(arguments, !terminated || (joined.pointer && joined.pointer[0] == 0));
+        joined = string_join_arena(arena, (SliceString8){0}, terminated != 0);
+        BUSTER_TEST(arguments, joined.length == 0);
+        BUSTER_TEST(arguments, !terminated || (joined.pointer && joined.pointer[0] == 0));
+    }
+
     // The formatter deliberately terminates the process for malformed input.
     // A child-mode hook lets the parent test that behavior without terminating
     // the main test process.
