@@ -7128,7 +7128,12 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
             bool is_line_marker = token_index < lex.token_count && lex.tokens[token_index].kind == C_TOKEN_PREPROCESSING_NUMBER;
             if (token_index >= lex.token_count || (lex.tokens[token_index].kind != C_TOKEN_IDENTIFIER && !is_line_marker))
             {
-                if (!options.assembly_comment_lines)
+                // A null directive is valid even in an inactive group and
+                // at EOF. It emits nothing; punctuation such as '#+' remains
+                // an invalid directive rather than an assembly comment.
+                bool null_directive = token_index < lex.token_count &&
+                                      (lex.tokens[token_index].kind == C_TOKEN_NEWLINE || lex.tokens[token_index].kind == C_TOKEN_END_OF_FILE);
+                if (!null_directive && !options.assembly_comment_lines)
                 {
                     c_preprocess_diagnostic_push(arena, &result, c_lex_token_location(&source_frame->lex, token), C_DIAGNOSTIC_EXPECTED_DIRECTIVE,
                                                  S8("expected preprocessing directive after '#'"));

@@ -35,8 +35,36 @@ static const long long *observed_scalar = &scalar;
 static const struct fields *observed_grouped = &grouped;
 static const __int128 *observed_wide_pair = &wide_pair;
 
+// Constant operators must perform the same integer promotions as runtime
+// operators. Inspect stored images so this is not merely re-folding a const.
+static const long long promoted[] = {
+    +(signed char)-1, -(signed char)-1, ~(unsigned char)0,
+    +(short)-2, -(short)-2, ~(unsigned short)0,
+    (-4 >> 1U), ((signed char)-4 >> 1ULL), ((short)-8 >> 2U),
+    (1U << 31ULL),
+};
+static const long long *observed_promoted = promoted;
+static const _Bool truth[] = {
+    (_Bool)2, (_Bool)256, (_Bool)-2, (_Bool)0.5, (_Bool)-0.5,
+    (_Bool)((unsigned __int128)1 << 100), (_Bool)&scalar,
+    (_Bool)0, (_Bool)0.0, (_Bool)-0.0, (_Bool)(void *)0,
+};
+static const _Bool *observed_truth = truth;
+
+static int check_constant_promotions(void)
+{
+    int failures = 0;
+    const long long expected[] = {-1, 1, -1, -2, 2, -1, -2, -2, -2, 2147483648LL};
+    for (unsigned i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i)
+        failures += observed_promoted[i] != expected[i];
+    for (unsigned i = 0; i < sizeof(truth) / sizeof(truth[0]); ++i)
+        failures += observed_truth[i] != (i < 7);
+    return failures;
+}
+
 int main(void)
 {
+    if (check_constant_promotions()) return 10;
     if (plain[0] != -1 || converted[0] != -1 || suffixed[0] != -1 || writable[0] != -1) return 1;
     if (scalar != -1 || unsigned_scalar != 0xffffffffffffffffull) return 2;
     if (from_unsigned != 4294967295LL || narrowed != -1) return 3;
