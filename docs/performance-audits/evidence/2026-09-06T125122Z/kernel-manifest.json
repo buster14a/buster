@@ -1,0 +1,1294 @@
+{
+  "source_commit": "a8454d842687419ff5023755fc0dd20243119088",
+  "clang": "Ubuntu clang version 21.1.8 (++20251221032922+2078da43e25a-1~exp1~20251221153059.70)",
+  "lexer": "Buster c_lex",
+  "files": [
+    {
+      "file": "src/buster/lib/aarch64.c",
+      "bytes": 16523,
+      "tokens": 2094,
+      "identifiers": 676,
+      "literals": 10,
+      "sha256": "063a21b3ddf3aa13b443619ae031d13262a6c60f54d2244a91dc36efb7cfe465"
+    },
+    {
+      "file": "src/buster/lib/aarch64.h",
+      "bytes": 177,
+      "tokens": 39,
+      "identifiers": 18,
+      "literals": 0,
+      "sha256": "23cb823747178b033393dfb85478797e9bc33e901c6679864075e0fa06ab976d"
+    },
+    {
+      "file": "src/buster/lib/apple_runtime.h",
+      "bytes": 606,
+      "tokens": 146,
+      "identifiers": 64,
+      "literals": 0,
+      "sha256": "3593e5495ec5df5d81280e761cb2c91134fab9d214f85d17ac4375a1a8a8c019"
+    },
+    {
+      "file": "src/buster/lib/arena.c",
+      "bytes": 14339,
+      "tokens": 2067,
+      "identifiers": 724,
+      "literals": 1,
+      "sha256": "f07f90f2146d63f0ccf06c30bb61f4e19c424de89a9529bc8e41ad2167a9a5b4"
+    },
+    {
+      "file": "src/buster/lib/arena.h",
+      "bytes": 5448,
+      "tokens": 736,
+      "identifiers": 291,
+      "literals": 0,
+      "sha256": "75ab19144578a17061cd384551f59c749c963d786ba62d399b1fc804b5c0c608"
+    },
+    {
+      "file": "src/buster/lib/base.h",
+      "bytes": 41507,
+      "tokens": 5058,
+      "identifiers": 1896,
+      "literals": 5,
+      "sha256": "da385245dfda212a3073f6e0859e2e121b88ba713cd2ebf1ee50a387d068e30f"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_alias_projection.c",
+      "bytes": 38816,
+      "tokens": 6891,
+      "identifiers": 2363,
+      "literals": 15,
+      "sha256": "213ad9d133cfac7bc32cbfa42232eee0f1fdafa7b45c2e6b4105a3823156553e"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_alias_projection.h",
+      "bytes": 3859,
+      "tokens": 462,
+      "identifiers": 205,
+      "literals": 0,
+      "sha256": "3bd266f42f5520f094311af92ea5f1cd5e123d37332e6353099d749cc2fa2f07"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c",
+      "bytes": 77549,
+      "tokens": 11873,
+      "identifiers": 4197,
+      "literals": 22,
+      "sha256": "8acaaee71a8798f5dadead9b600c4ce342653c91618ab62528df75f6d0bbd2ea"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.h",
+      "bytes": 7298,
+      "tokens": 647,
+      "identifiers": 292,
+      "literals": 0,
+      "sha256": "d14eacfea49326c3739ebd7fb6b6f2894ad63cbde4b49102c285859b6004ee9d"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_control_semantics.c",
+      "bytes": 28835,
+      "tokens": 4885,
+      "identifiers": 1754,
+      "literals": 0,
+      "sha256": "f74792abec989b15e1ef467534ef909e3642cb5a27d2757e5a5e9d363ed72a7d"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_control_semantics.h",
+      "bytes": 9874,
+      "tokens": 1003,
+      "identifiers": 418,
+      "literals": 5,
+      "sha256": "874870583f36efea5af52b7d177b12b3b2fef9bdb8879adf750912b77f53407a"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c",
+      "bytes": 67324,
+      "tokens": 10641,
+      "identifiers": 3665,
+      "literals": 24,
+      "sha256": "dfc60eeb2e9b1b0c31ab21316b2244ecdebca4f81a7a6ad6d601187bf1c03d2a"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h",
+      "bytes": 8878,
+      "tokens": 737,
+      "identifiers": 324,
+      "literals": 0,
+      "sha256": "1edcb9feb8cff2f8cc825725ef494e379623b6a62e97b9fc245bf89f5c00ca88"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_encoding.c",
+      "bytes": 146500,
+      "tokens": 24983,
+      "identifiers": 8537,
+      "literals": 29,
+      "sha256": "4c6c6483ae37552d83fc59211afa9d681f95f61eb00772d80a2d2d98134b14a2"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_encoding.h",
+      "bytes": 29839,
+      "tokens": 3178,
+      "identifiers": 1457,
+      "literals": 0,
+      "sha256": "42b5abc10e4ef3c61ff7ec0ee6ad5d511351cd765b80e70efd99072e298de416"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_exact_bridge.c",
+      "bytes": 7325,
+      "tokens": 1419,
+      "identifiers": 487,
+      "literals": 0,
+      "sha256": "8c10355a86e5036ed11c662116d150c062491375b26647df61e1fa54d0fe8c34"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_exact_bridge.h",
+      "bytes": 2625,
+      "tokens": 289,
+      "identifiers": 139,
+      "literals": 0,
+      "sha256": "ae76bbd7937bd260479cb2b309610dc5dd31dc3cdb9f6252ef2c9abb9d58ffd0"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_memory_semantics.c",
+      "bytes": 84134,
+      "tokens": 14469,
+      "identifiers": 5257,
+      "literals": 56,
+      "sha256": "f2547829fb4944df4d4e333585304f589f7dd89797e392dfac57185bc6c5440e"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_memory_semantics.h",
+      "bytes": 7328,
+      "tokens": 786,
+      "identifiers": 347,
+      "literals": 0,
+      "sha256": "f780fb797641c693e330aa88e652a7cb4a5686a50e764d75525cce5eaf9766ee"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_semantic_vm.c",
+      "bytes": 79724,
+      "tokens": 12127,
+      "identifiers": 4578,
+      "literals": 4,
+      "sha256": "9907346153d0561784d884ead084b76533f8a16de051a1edd232f406adb057f7"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_semantic_vm.h",
+      "bytes": 8058,
+      "tokens": 807,
+      "identifiers": 334,
+      "literals": 0,
+      "sha256": "a9a8f613fa7e1ad25b67eef2b7a98d3129a090adada876955c9a315481c08467"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_semantics.c",
+      "bytes": 64995,
+      "tokens": 9573,
+      "identifiers": 3749,
+      "literals": 2,
+      "sha256": "2e71aa6dee85dd24bbbe5c9f18902d2711b799ebfb367b9aee2ae8ad2e23c70d"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_semantics.h",
+      "bytes": 17565,
+      "tokens": 2267,
+      "identifiers": 933,
+      "literals": 0,
+      "sha256": "601215addf49aafabea1f2bfe3db582762742ab41ac2837180e3971e04d84599"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_syntax.c",
+      "bytes": 67598,
+      "tokens": 11221,
+      "identifiers": 4180,
+      "literals": 15,
+      "sha256": "65014fbec89bcede72b47fdf65d2ba7c090f784bb16113144ccb2391792542bf"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_syntax.h",
+      "bytes": 9292,
+      "tokens": 1087,
+      "identifiers": 472,
+      "literals": 0,
+      "sha256": "f26b26b058e9d018791682d3e8aa372b2d6aa1bdd9302877d087b9890e540f33"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_system_registers.c",
+      "bytes": 23547,
+      "tokens": 5134,
+      "identifiers": 1856,
+      "literals": 5,
+      "sha256": "6031cf088354e51e372615a15d442811f734415d2a00aa2c984af6ea39ea0dc6"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_system_registers.h",
+      "bytes": 5140,
+      "tokens": 600,
+      "identifiers": 269,
+      "literals": 0,
+      "sha256": "0ce48e50abc6c2c840ee5783c3e40b259e1df5e604f5c5d2030119010a426952"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_system_semantics.c",
+      "bytes": 19274,
+      "tokens": 3692,
+      "identifiers": 1338,
+      "literals": 0,
+      "sha256": "dbab0c3680eed84bf8b0fa6d7e74d2b186cf8c39d7c3eb0d02363add9e7cd0e8"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/aarch64_system_semantics.h",
+      "bytes": 6651,
+      "tokens": 641,
+      "identifiers": 268,
+      "literals": 1,
+      "sha256": "a94053b9c4e10e6264f52052535818a3e208e2cd4826311c290a122572199ee2"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/arm_a64_canonical_import.c",
+      "bytes": 200829,
+      "tokens": 36896,
+      "identifiers": 12207,
+      "literals": 1009,
+      "sha256": "1e7ae541f9ddb92c96d601c4e0353ad5a651d2b76a2d33016233edb8bc045929"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/arm_a64_sysreg_import.c",
+      "bytes": 11494,
+      "tokens": 1707,
+      "identifiers": 600,
+      "literals": 26,
+      "sha256": "4dcece8b55e30865a42185ebf6306229fe9032ee66a53c2a32c1274cd12e0f10"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/assembly.c",
+      "bytes": 726772,
+      "tokens": 109571,
+      "identifiers": 34805,
+      "literals": 1901,
+      "sha256": "4218f825692131bde1e14a963135ff6b9babaa1e33791596407d88f84707c2e2"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/assembly.h",
+      "bytes": 4428,
+      "tokens": 462,
+      "identifiers": 187,
+      "literals": 0,
+      "sha256": "24cf97580d8a68301c2eedc436256ca18a34fa759c00b089aa3c70b35a9e1c4a"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/assembly_unit.c",
+      "bytes": 55443,
+      "tokens": 9957,
+      "identifiers": 3348,
+      "literals": 82,
+      "sha256": "d1c824b490af90fc3e8fe304b2018fd4f0b0995654303ba5a60adcd93ecec1ec"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/assembly_unit.h",
+      "bytes": 2478,
+      "tokens": 267,
+      "identifiers": 110,
+      "literals": 0,
+      "sha256": "b9fafbe88084324b39d12d36d736018833206454ff3f61e8dc41f6dfac4c0495"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-alias-projection.generated.h",
+      "bytes": 100578,
+      "tokens": 31758,
+      "identifiers": 771,
+      "literals": 2,
+      "sha256": "b8a2944e06b80b203a2778c5e58699b1960763f2dce897afc13b2e23d6363dc7"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h",
+      "bytes": 3952180,
+      "tokens": 32734,
+      "identifiers": 10637,
+      "literals": 895,
+      "sha256": "2714f8265fd8e55f8e47f8a360eada5882e1ffc28d5ad005c028589b3fe8a601"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-canonical-decoder.generated.h",
+      "bytes": 1034723,
+      "tokens": 458077,
+      "identifiers": 13164,
+      "literals": 0,
+      "sha256": "0f23ec4913a1fa7742d5e8b8f7f9731a2e05e8cf946f58bd76f3d6d74a327f7a"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-complex-simd.generated.h",
+      "bytes": 195227,
+      "tokens": 68999,
+      "identifiers": 435,
+      "literals": 2,
+      "sha256": "2483251c687caa080d138e97132820f8949f8c279446293ca9b8c19b6808b696"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-control-semantics.generated.h",
+      "bytes": 28917,
+      "tokens": 5057,
+      "identifiers": 1261,
+      "literals": 23,
+      "sha256": "b1747fc020a990c0e6483ac7f49b71ef4887c0e2f55533d62352f3f5b20bef9e"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-direct-simd.generated.h",
+      "bytes": 214311,
+      "tokens": 76155,
+      "identifiers": 476,
+      "literals": 2,
+      "sha256": "2cac5091949d9281f7a8f9820d3998bddf28d50c55019ce80588c4491d59f758"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-exact-crosswalk.generated.h",
+      "bytes": 8833,
+      "tokens": 1725,
+      "identifiers": 319,
+      "literals": 44,
+      "sha256": "88517ef87e518153994449053651fecfb45e672dd0db6a40ec3b57d7d27b0e5f"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h",
+      "bytes": 2892,
+      "tokens": 380,
+      "identifiers": 142,
+      "literals": 0,
+      "sha256": "3adc270d69816f5ed3b4bd0569da9f5757711a25f71e538d0c7c873347eb30f7"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-memory-semantics.generated.h",
+      "bytes": 161538,
+      "tokens": 67867,
+      "identifiers": 644,
+      "literals": 2,
+      "sha256": "1676278e9cf0942e3d528694870f8821cd1afb9c8452f6abcb1f3575d68c3974"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-production-plan.generated.h",
+      "bytes": 104303,
+      "tokens": 20231,
+      "identifiers": 7585,
+      "literals": 0,
+      "sha256": "f185383a76a7834577a51c7426f9d498f845a6d0d9221028404f7c943589bf71"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-semantic-vm.generated.h",
+      "bytes": 403167,
+      "tokens": 224511,
+      "identifiers": 168,
+      "literals": 0,
+      "sha256": "465d96b796cd4a856be0a79171132b6ff9ed3e67b42a408f2cb426203ed9da64"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-syntax.generated.h",
+      "bytes": 1429352,
+      "tokens": 17954,
+      "identifiers": 124,
+      "literals": 8825,
+      "sha256": "3d37e0767a1f1d3c5072963997610e740e5b49adbb3dbbb82cf98d5e96c1f9c9"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-system-registers.generated.h",
+      "bytes": 141102,
+      "tokens": 44750,
+      "identifiers": 1315,
+      "literals": 0,
+      "sha256": "34a424078dc590689b022b155c53103d5b11485e218414a00d8f9800abad3a97"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/aarch64-system-semantics.generated.h",
+      "bytes": 10090,
+      "tokens": 2726,
+      "identifiers": 408,
+      "literals": 2,
+      "sha256": "a1b71097c40dded9c376cbd98e260659fde083b8df3bc49d2153aff4047e68ac"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/arm-a64-m1-fixed.generated.h",
+      "bytes": 6515,
+      "tokens": 1069,
+      "identifiers": 266,
+      "literals": 68,
+      "sha256": "77fabccb575a5f45229c139eded90c4869f683465d2fd610ddcc68859e7a64f1"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/arm-a64-m1-gpr.generated.h",
+      "bytes": 46362,
+      "tokens": 8420,
+      "identifiers": 1805,
+      "literals": 160,
+      "sha256": "ca7f687c1a0586345de6ab68d0c460952b58e2546b8dbb513115851821c20452"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/arm-a64-m1-scalar-integer.generated.h",
+      "bytes": 65524,
+      "tokens": 9418,
+      "identifiers": 2339,
+      "literals": 145,
+      "sha256": "edeccc21704dc0dbbecd71c18e642b9f9d7a60357801a252d7bfbcf216593937"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/arm-a64-semantic.generated.h",
+      "bytes": 2482466,
+      "tokens": 355358,
+      "identifiers": 5559,
+      "literals": 390,
+      "sha256": "eca5b5313223d9b81a603fc877c919895edf666c2b759da7e15644b219ccb732"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h",
+      "bytes": 6052285,
+      "tokens": 48117,
+      "identifiers": 14917,
+      "literals": 1380,
+      "sha256": "442f2b1e99122b5e41c693116bfb4efdad93332e8de1c1b52c8caccf03c34419"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/x86_64_completion_census.c",
+      "bytes": 111212,
+      "tokens": 16627,
+      "identifiers": 5929,
+      "literals": 208,
+      "sha256": "e46c755342f6d6995e840c98d43275b22ada44f99de99bb7a6575918e05cf7d5"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/x86_64_completion_census.h",
+      "bytes": 10461,
+      "tokens": 812,
+      "identifiers": 335,
+      "literals": 0,
+      "sha256": "67608b41bbf5c3e65a32012632e5cbee4eaafb07e6efae29015f1303c3314367"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/x86_64_metadata.c",
+      "bytes": 748641,
+      "tokens": 99524,
+      "identifiers": 35646,
+      "literals": 1012,
+      "sha256": "bd477e3c9f3d7a6d1dda1f0b7d0f5086b076a077caa69ffc3d2226c85e1f6e5a"
+    },
+    {
+      "file": "src/buster/lib/compiler/assembly/x86_64_metadata.h",
+      "bytes": 56773,
+      "tokens": 4442,
+      "identifiers": 1698,
+      "literals": 0,
+      "sha256": "57e401ff0923433e7831e4582c6d05394e4d4498fe501df7c5326e8bbaab661a"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/codegen.c",
+      "bytes": 1213992,
+      "tokens": 141586,
+      "identifiers": 45875,
+      "literals": 1165,
+      "sha256": "bded43a4337b9fe341440c01a0c2520f773dbe2eeb16e1afaeb2f7e82863f25a"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/codegen.h",
+      "bytes": 21460,
+      "tokens": 1773,
+      "identifiers": 682,
+      "literals": 0,
+      "sha256": "6a12a2d798918d99f40e0a2de779f07963884c4d2f23b99e715ae3b729552b79"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/codegen_internal.h",
+      "bytes": 9326,
+      "tokens": 1057,
+      "identifiers": 516,
+      "literals": 0,
+      "sha256": "38bd32a2a60ea058a6a483ec96717695683a1677f454932501fa3ccceb312630"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/machine.c",
+      "bytes": 131993,
+      "tokens": 17539,
+      "identifiers": 5250,
+      "literals": 276,
+      "sha256": "13871d00a7e0afc085f76d8700c2524c29c7a4db1d8273aa4b4205e957d3a9a6"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/machine.h",
+      "bytes": 85702,
+      "tokens": 6060,
+      "identifiers": 2239,
+      "literals": 0,
+      "sha256": "6fa9ca34e29ae190df95c0946d72ca69a2edb68d53abd9657cfec0a3f81911e2"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/machine_aarch64.c",
+      "bytes": 426244,
+      "tokens": 52308,
+      "identifiers": 17871,
+      "literals": 0,
+      "sha256": "d8aa44afe7f440808addfc2c2892549950a0c2580ce9fc455699ed77698a6330"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/machine_schedule.c",
+      "bytes": 54007,
+      "tokens": 6028,
+      "identifiers": 2103,
+      "literals": 0,
+      "sha256": "f40b4eb26f2902b2a409cf301331c509891ecdd8b5a8a020696d59fb902e3cfe"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/machine_select.c",
+      "bytes": 28971,
+      "tokens": 4405,
+      "identifiers": 1678,
+      "literals": 0,
+      "sha256": "c0384c772839cf877d58c06bc97e30dc6475cd43d67f99136adcf0889fe30ca3"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/machine_select.h",
+      "bytes": 12617,
+      "tokens": 1224,
+      "identifiers": 449,
+      "literals": 0,
+      "sha256": "347695e14210bd600d6b489a8b46fd14e88b28459a1454fde8056ec3caffcd0c"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/machine_select_generated.c",
+      "bytes": 9276,
+      "tokens": 1409,
+      "identifiers": 496,
+      "literals": 10,
+      "sha256": "89ca679eb785d3617008099fd909456b523effcc5d1ee8a7fcbd6cbe2914d67c"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/machine_select_rules.h",
+      "bytes": 808,
+      "tokens": 53,
+      "identifiers": 17,
+      "literals": 0,
+      "sha256": "27588a083dcd5f0593e2c03d8ce61593cd38ea2a8b87afcf07f45c9e3faaedb3"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/machine_x86_64.c",
+      "bytes": 715372,
+      "tokens": 91840,
+      "identifiers": 29031,
+      "literals": 296,
+      "sha256": "70c4f0657365b7536f909e81832ad772a25e6afa413f346cab30bffa64db4a00"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/machine_x86_64_emit_registry.h",
+      "bytes": 7734,
+      "tokens": 1280,
+      "identifiers": 509,
+      "literals": 0,
+      "sha256": "74ee2f446138c78a35f06b88fb59aeb770d58948f374765e221df126f01ac9f8"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/register_allocator_fast.c",
+      "bytes": 123998,
+      "tokens": 14808,
+      "identifiers": 5250,
+      "literals": 0,
+      "sha256": "1d6ce6b68ee069dece48a7857de6552e16233e2e9ffbf16ebce7a8401ad2f9b1"
+    },
+    {
+      "file": "src/buster/lib/compiler/codegen/register_allocator_quality.c",
+      "bytes": 62772,
+      "tokens": 7368,
+      "identifiers": 2454,
+      "literals": 0,
+      "sha256": "e6451e8e71c4b2992fba194199bf97511122b580d72ff3530dccecd5927ea1b3"
+    },
+    {
+      "file": "src/buster/lib/compiler/codeview/codeview.c",
+      "bytes": 36311,
+      "tokens": 6482,
+      "identifiers": 2290,
+      "literals": 1,
+      "sha256": "cf12a4ded2875d2f8a92fad240d1a0fcd3c844e3f36be1d293e2b0e31272d4bd"
+    },
+    {
+      "file": "src/buster/lib/compiler/codeview/codeview.h",
+      "bytes": 1555,
+      "tokens": 255,
+      "identifiers": 101,
+      "literals": 0,
+      "sha256": "ab90e18bb24837cb0be14ef7a189abe2110378eba96d7598b94c27d5087ac32c"
+    },
+    {
+      "file": "src/buster/lib/compiler/debug/debug.c",
+      "bytes": 27068,
+      "tokens": 5010,
+      "identifiers": 1880,
+      "literals": 0,
+      "sha256": "0c964cdb201044901e4f15979df71c27ebe56c780d5cc9f8968d82ef41848a64"
+    },
+    {
+      "file": "src/buster/lib/compiler/debug/debug.h",
+      "bytes": 10798,
+      "tokens": 1468,
+      "identifiers": 608,
+      "literals": 0,
+      "sha256": "70e39c7e9ed6418ceaa2cc2304c240d7d588dbe02b6f6203a147c5224ab94cea"
+    },
+    {
+      "file": "src/buster/lib/compiler/driver/driver.c",
+      "bytes": 192312,
+      "tokens": 29115,
+      "identifiers": 10241,
+      "literals": 438,
+      "sha256": "1e448ff6b40d8ec163860bff3035f70f6f9f4bbdcdbab47a0c5afa71cddc6cb6"
+    },
+    {
+      "file": "src/buster/lib/compiler/driver/driver.h",
+      "bytes": 6734,
+      "tokens": 733,
+      "identifiers": 308,
+      "literals": 0,
+      "sha256": "f586c232472cbdf91ccea862d5e345f254ad0bfcee8db5fda9a060573c4ff4f5"
+    },
+    {
+      "file": "src/buster/lib/compiler/dwarf/dwarf.c",
+      "bytes": 77222,
+      "tokens": 13972,
+      "identifiers": 4875,
+      "literals": 7,
+      "sha256": "68cf0140ed728cea3143c3c1886f1dea74462a8d4ffd4cb31b8b36147e53d127"
+    },
+    {
+      "file": "src/buster/lib/compiler/dwarf/dwarf.h",
+      "bytes": 2938,
+      "tokens": 485,
+      "identifiers": 205,
+      "literals": 0,
+      "sha256": "26eabd8379fa6167b3e445b6a3c205d67e5bf7cbeb7b745a2b80b25676587d5f"
+    },
+    {
+      "file": "src/buster/lib/compiler/ebpf/ebpf.c",
+      "bytes": 120950,
+      "tokens": 23252,
+      "identifiers": 8362,
+      "literals": 164,
+      "sha256": "a4af76f63b3b4658f8d492c0af8f332702263e3a8d45b289f463ef39c1ec3212"
+    },
+    {
+      "file": "src/buster/lib/compiler/ebpf/ebpf.h",
+      "bytes": 2884,
+      "tokens": 430,
+      "identifiers": 184,
+      "literals": 0,
+      "sha256": "bd31cf0045e05b2d9766750498bd4a12abe06206716b2417bd5321a4c60003b8"
+    },
+    {
+      "file": "src/buster/lib/compiler/frontend/c/c.c",
+      "bytes": 2029,
+      "tokens": 308,
+      "identifiers": 106,
+      "literals": 14,
+      "sha256": "f2803dcb4297d12ab9cdcb1bf6ddaefb0593c19abcaa7aea1cb2d044ed5627a7"
+    },
+    {
+      "file": "src/buster/lib/compiler/frontend/c/c.h",
+      "bytes": 51465,
+      "tokens": 4380,
+      "identifiers": 1706,
+      "literals": 1,
+      "sha256": "c9d5e927bae24f0c19ef087b2d76b33f1a44bacadaa74605c52b090b8ca78d20"
+    },
+    {
+      "file": "src/buster/lib/compiler/frontend/c/c_gen.c",
+      "bytes": 2154162,
+      "tokens": 308466,
+      "identifiers": 112869,
+      "literals": 807,
+      "sha256": "e7311dc430aaea57c84019b4cb7170f73de7a32a3ac5bfb37458f5131f09bd4c"
+    },
+    {
+      "file": "src/buster/lib/compiler/frontend/c/c_internal.h",
+      "bytes": 32331,
+      "tokens": 3533,
+      "identifiers": 1601,
+      "literals": 0,
+      "sha256": "69add06693cdb671aecc1ee0e162f6722abfc2fc627381eedd5e0a2e29976e26"
+    },
+    {
+      "file": "src/buster/lib/compiler/frontend/c/c_parse.c",
+      "bytes": 744518,
+      "tokens": 102763,
+      "identifiers": 36886,
+      "literals": 334,
+      "sha256": "c48a2336fd7fe9b34e3de471832def9f0c33176b7c5f4c347bca900e18fdc46a"
+    },
+    {
+      "file": "src/buster/lib/compiler/frontend/c/c_source.c",
+      "bytes": 363708,
+      "tokens": 53210,
+      "identifiers": 17508,
+      "literals": 1029,
+      "sha256": "f2f256f71652fc07e407d555de84eca64d930c2d38a98d40a91b429043c73acd"
+    },
+    {
+      "file": "src/buster/lib/compiler/gpu/gpu.c",
+      "bytes": 92682,
+      "tokens": 17231,
+      "identifiers": 6001,
+      "literals": 379,
+      "sha256": "a8a9bf5057feba993199662ead849ef0278dbf166a0db0b915ceada8d3ada37d"
+    },
+    {
+      "file": "src/buster/lib/compiler/gpu/gpu.h",
+      "bytes": 6592,
+      "tokens": 890,
+      "identifiers": 376,
+      "literals": 0,
+      "sha256": "6873e2ebb13699cb4f8452c3d694e650d1eb7c44263d5a20375f2cbcbad380da"
+    },
+    {
+      "file": "src/buster/lib/compiler/ir/ir.c",
+      "bytes": 237857,
+      "tokens": 37003,
+      "identifiers": 13551,
+      "literals": 20,
+      "sha256": "185f34f5476f586cf67dde07c3a391d596db87282952564d1d4d1552a24ddc90"
+    },
+    {
+      "file": "src/buster/lib/compiler/ir/ir.h",
+      "bytes": 34804,
+      "tokens": 3402,
+      "identifiers": 1361,
+      "literals": 0,
+      "sha256": "3a6514771f8a9dd22d0f9dcd47c4b4bc071e084e95aedf9b5f083fd173b7da88"
+    },
+    {
+      "file": "src/buster/lib/compiler/ir/model.h",
+      "bytes": 19263,
+      "tokens": 1660,
+      "identifiers": 627,
+      "literals": 0,
+      "sha256": "5641b22c6cf16359021fca2e241c3f8a984cf1c75f3c1880364f25fc390cff95"
+    },
+    {
+      "file": "src/buster/lib/compiler/jit/jit.c",
+      "bytes": 43696,
+      "tokens": 7506,
+      "identifiers": 2685,
+      "literals": 16,
+      "sha256": "18fa5d60439610d2d4b8b91c90d348b02a76f0a4a04667850657250c11598d67"
+    },
+    {
+      "file": "src/buster/lib/compiler/jit/jit.h",
+      "bytes": 3658,
+      "tokens": 300,
+      "identifiers": 120,
+      "literals": 0,
+      "sha256": "746a16eaf0bfbe2e4f3270708c5829855269f189dbc2eb7966d72dc8d9b121e9"
+    },
+    {
+      "file": "src/buster/lib/compiler/link/link.c",
+      "bytes": 501122,
+      "tokens": 76706,
+      "identifiers": 25921,
+      "literals": 220,
+      "sha256": "06502f9a67792efa7155c415879735f6d6a5e0b9e0b88148c02b61942da69248"
+    },
+    {
+      "file": "src/buster/lib/compiler/link/link.h",
+      "bytes": 6738,
+      "tokens": 564,
+      "identifiers": 229,
+      "literals": 0,
+      "sha256": "21bf708c89f5b7417e07cf04e79cb8b74c895f4187f5f8fa4dd5aa9d06a6fd40"
+    },
+    {
+      "file": "src/buster/lib/compiler/llvm/bitcode.c",
+      "bytes": 138276,
+      "tokens": 23917,
+      "identifiers": 8731,
+      "literals": 116,
+      "sha256": "9f9162d423c222d4aa94620cda454e8eae8c6a565308fb9d54256fb494f14643"
+    },
+    {
+      "file": "src/buster/lib/compiler/llvm/bitcode.h",
+      "bytes": 2810,
+      "tokens": 382,
+      "identifiers": 165,
+      "literals": 0,
+      "sha256": "c2250c78265f7e1777821d4989669a6354ba40d066181f38a6b322e4111c79f6"
+    },
+    {
+      "file": "src/buster/lib/compiler/object/object.c",
+      "bytes": 494081,
+      "tokens": 78569,
+      "identifiers": 25539,
+      "literals": 710,
+      "sha256": "2b8bd3a11162ce872cb3f82d9eaedb5cc5296b256d9fa054064c342acc71e8aa"
+    },
+    {
+      "file": "src/buster/lib/compiler/object/object.h",
+      "bytes": 9955,
+      "tokens": 897,
+      "identifiers": 363,
+      "literals": 0,
+      "sha256": "54b7efc75a2f0425599af58056b1fb84affaedd4673ec5bb7720dbd3123d0703"
+    },
+    {
+      "file": "src/buster/lib/compiler/pdb/pdb.c",
+      "bytes": 47436,
+      "tokens": 9016,
+      "identifiers": 3048,
+      "literals": 5,
+      "sha256": "0eb47e5b4aa22c8bdaf0e444cf82e093eb41a92f43ed1ea04f0be81b7af2ffdc"
+    },
+    {
+      "file": "src/buster/lib/compiler/pdb/pdb.h",
+      "bytes": 1286,
+      "tokens": 235,
+      "identifiers": 99,
+      "literals": 0,
+      "sha256": "2103ece82a333734e219165fc6333934a97d2511c05e699153f26903fa1cac8d"
+    },
+    {
+      "file": "src/buster/lib/compiler/wasm/wasm.c",
+      "bytes": 111605,
+      "tokens": 20345,
+      "identifiers": 7189,
+      "literals": 87,
+      "sha256": "e04761b8e0be2df29eb191f9f218aed5db10b7abfc19496ac26a7ab95cf8218e"
+    },
+    {
+      "file": "src/buster/lib/compiler/wasm/wasm.h",
+      "bytes": 3239,
+      "tokens": 435,
+      "identifiers": 186,
+      "literals": 0,
+      "sha256": "892f79f462b4b16332121e5f4ef967fd33d8e943df11e5c5851c4a078ed839e4"
+    },
+    {
+      "file": "src/buster/lib/entry_point.c",
+      "bytes": 24050,
+      "tokens": 4983,
+      "identifiers": 1676,
+      "literals": 32,
+      "sha256": "c941c261c838c46b7580c4dfe3ed881670c75f5a36b612d8c36fcec2cab6ceb3"
+    },
+    {
+      "file": "src/buster/lib/entry_point.h",
+      "bytes": 610,
+      "tokens": 125,
+      "identifiers": 61,
+      "literals": 0,
+      "sha256": "1b91b3633b889980ec69463c36dcd152a70fa64ac02e40ffba9083f66a409a96"
+    },
+    {
+      "file": "src/buster/lib/file.c",
+      "bytes": 10026,
+      "tokens": 2021,
+      "identifiers": 678,
+      "literals": 4,
+      "sha256": "dfc5c3605a8b5b610d555794fd50424935e0b4e346557c2fa7bc6532fb858e94"
+    },
+    {
+      "file": "src/buster/lib/file.h",
+      "bytes": 1117,
+      "tokens": 196,
+      "identifiers": 94,
+      "literals": 0,
+      "sha256": "c69d967c43fb145aa918408f9ca585daacd4e83d3189d4593d77d58f6f6768f7"
+    },
+    {
+      "file": "src/buster/lib/float.c",
+      "bytes": 2813,
+      "tokens": 890,
+      "identifiers": 369,
+      "literals": 0,
+      "sha256": "360c9f56b0799f76974cf7404efebc10ed565e43621300c4bda341c6f90b166e"
+    },
+    {
+      "file": "src/buster/lib/float.h",
+      "bytes": 702,
+      "tokens": 193,
+      "identifiers": 105,
+      "literals": 0,
+      "sha256": "941aff32b252022893dc7698934c059eadd37953a5af5e644b0756719e63a5a4"
+    },
+    {
+      "file": "src/buster/lib/font_provider.c",
+      "bytes": 21662,
+      "tokens": 4100,
+      "identifiers": 1489,
+      "literals": 40,
+      "sha256": "f50945279d3dcc559ed36492f842277e31a94b3995732e0b61f3f32e5482d112"
+    },
+    {
+      "file": "src/buster/lib/font_provider.h",
+      "bytes": 668,
+      "tokens": 83,
+      "identifiers": 37,
+      "literals": 0,
+      "sha256": "642f213fc6f54f863b058c8f027dc2f33a182b9c0df232331937c069ba307b35"
+    },
+    {
+      "file": "src/buster/lib/hash.c",
+      "bytes": 4039,
+      "tokens": 789,
+      "identifiers": 262,
+      "literals": 0,
+      "sha256": "cfc9f419668a1e94f07079c7f73041ce1caccc72df3e708e7d5bfaec113c4224"
+    },
+    {
+      "file": "src/buster/lib/hash.h",
+      "bytes": 103,
+      "tokens": 32,
+      "identifiers": 14,
+      "literals": 0,
+      "sha256": "ed3c7147780c387dfe652e20a64c3b8f2ea48a9000f49bd6bccf139f406252e1"
+    },
+    {
+      "file": "src/buster/lib/integer.c",
+      "bytes": 1785,
+      "tokens": 549,
+      "identifiers": 164,
+      "literals": 0,
+      "sha256": "870974c903e447ccfe3d381654cbc2e48c783131bf03a0cb35162ba4ff47534b"
+    },
+    {
+      "file": "src/buster/lib/integer.h",
+      "bytes": 366,
+      "tokens": 88,
+      "identifiers": 46,
+      "literals": 0,
+      "sha256": "e1de75d4a3c36c3ebb9328a9bce912a9c917f647c5cd20f05fcaabfebe62bd0e"
+    },
+    {
+      "file": "src/buster/lib/os.c",
+      "bytes": 103638,
+      "tokens": 19105,
+      "identifiers": 6556,
+      "literals": 42,
+      "sha256": "b5478cd04db921dd981bbe0dd4cb9def857f01addd46a7fb64e3adb5dd49d79b"
+    },
+    {
+      "file": "src/buster/lib/os.h",
+      "bytes": 16942,
+      "tokens": 2145,
+      "identifiers": 872,
+      "literals": 5,
+      "sha256": "942d8e69534cf1eb281f2f4fc976fe6556a13cfc52efe3b54a4cfc726e0e8e04"
+    },
+    {
+      "file": "src/buster/lib/rendering/d3d12.c",
+      "bytes": 96238,
+      "tokens": 13617,
+      "identifiers": 4615,
+      "literals": 106,
+      "sha256": "d599f1c93f5addbff300888249e619a1425719e8e4bcb83ce976f2fa923ce3aa"
+    },
+    {
+      "file": "src/buster/lib/rendering/internal.h",
+      "bytes": 16182,
+      "tokens": 2299,
+      "identifiers": 1053,
+      "literals": 0,
+      "sha256": "c433c633e26d50c971ae721e08b26b6cdcbdae4a21a720479267e7b570e43601"
+    },
+    {
+      "file": "src/buster/lib/rendering/metal.c",
+      "bytes": 65595,
+      "tokens": 10452,
+      "identifiers": 3478,
+      "literals": 276,
+      "sha256": "cc1059078bc262dd083ec099530e04a0205870bcc38cd5c9064a8198fe9c29fa"
+    },
+    {
+      "file": "src/buster/lib/rendering/null.c",
+      "bytes": 6931,
+      "tokens": 1322,
+      "identifiers": 467,
+      "literals": 0,
+      "sha256": "59ace42d2a62cffad6042556526f760cc3827776d94f5bc1ba5c20c347ec3aee"
+    },
+    {
+      "file": "src/buster/lib/rendering/vulkan.c",
+      "bytes": 214169,
+      "tokens": 30231,
+      "identifiers": 10341,
+      "literals": 153,
+      "sha256": "2e1d72f01b9de6fdd628990dd754fc209bf218fbf98f1ffb945b95454b3b5298"
+    },
+    {
+      "file": "src/buster/lib/rendering.c",
+      "bytes": 76781,
+      "tokens": 13382,
+      "identifiers": 4890,
+      "literals": 0,
+      "sha256": "25ffcb6e4a6750b9f1b505c2f77ef3b254dac5005f9700e00b73f897ba3b1276"
+    },
+    {
+      "file": "src/buster/lib/rendering.h",
+      "bytes": 5226,
+      "tokens": 770,
+      "identifiers": 380,
+      "literals": 0,
+      "sha256": "7ccf95057a514753d6a673a53fe65244e382a37d9422c6fb810f1dc0d40b1ba9"
+    },
+    {
+      "file": "src/buster/lib/sanitizer_coe_win.c",
+      "bytes": 1876,
+      "tokens": 310,
+      "identifiers": 119,
+      "literals": 2,
+      "sha256": "615731edc8bf7688095bdf561b41d9ceadd8d763ff3dd811f772d677d81bf50d"
+    },
+    {
+      "file": "src/buster/lib/shaders/blur_shared.h",
+      "bytes": 633,
+      "tokens": 78,
+      "identifiers": 31,
+      "literals": 0,
+      "sha256": "2d8c397a11105a10722a3e771282953d86882c754ac32ba0e1e20477da2383eb"
+    },
+    {
+      "file": "src/buster/lib/shaders/rect_shared.h",
+      "bytes": 302,
+      "tokens": 64,
+      "identifiers": 25,
+      "literals": 0,
+      "sha256": "56831ac582fbdf8a5863177fb50814feef91948006e392d6f73eab7779742332"
+    },
+    {
+      "file": "src/buster/lib/simd.c",
+      "bytes": 30,
+      "tokens": 14,
+      "identifiers": 5,
+      "literals": 0,
+      "sha256": "19b164f216453c17926dbac3354dfa89d95314fd85072adf0f670a2169008511"
+    },
+    {
+      "file": "src/buster/lib/simd.h",
+      "bytes": 28983,
+      "tokens": 4696,
+      "identifiers": 1520,
+      "literals": 0,
+      "sha256": "6f52dd206deb7f307aef5a7b87748a0ba671e49038572199f2437c48e8295b76"
+    },
+    {
+      "file": "src/buster/lib/string.c",
+      "bytes": 60677,
+      "tokens": 11224,
+      "identifiers": 3673,
+      "literals": 26,
+      "sha256": "f18fb2e1a989425677cab45a65ee64f178afe0b44967702fa178142fae2711c9"
+    },
+    {
+      "file": "src/buster/lib/string.h",
+      "bytes": 4472,
+      "tokens": 582,
+      "identifiers": 302,
+      "literals": 0,
+      "sha256": "ea10c96366bfc8d7195fa60a8bc9277c1e6be7098a2fae544d123de5c0e25479"
+    },
+    {
+      "file": "src/buster/lib/system_headers.h",
+      "bytes": 3553,
+      "tokens": 701,
+      "identifiers": 278,
+      "literals": 0,
+      "sha256": "98ab81319a21510f8c6ebd986f32b7dc37780b6f6bd60c5cb7ec8abe648684fc"
+    },
+    {
+      "file": "src/buster/lib/target.c",
+      "bytes": 111125,
+      "tokens": 16295,
+      "identifiers": 5552,
+      "literals": 330,
+      "sha256": "2b5a884018887cc8c7793a286988cb30cf39a4a7660f4d1fbb7f9d11fa678dd5"
+    },
+    {
+      "file": "src/buster/lib/target.h",
+      "bytes": 19876,
+      "tokens": 1942,
+      "identifiers": 748,
+      "literals": 0,
+      "sha256": "cb930640b189d9885f605fbcb1d178fa7592285d099d5b9f50e48ad8f7b99c04"
+    },
+    {
+      "file": "src/buster/lib/time.c",
+      "bytes": 1541,
+      "tokens": 360,
+      "identifiers": 140,
+      "literals": 0,
+      "sha256": "2024638434a998c86e0d4465eb618311150e2d471305b965041390b3c1a1b20a"
+    },
+    {
+      "file": "src/buster/lib/time.h",
+      "bytes": 197,
+      "tokens": 50,
+      "identifiers": 23,
+      "literals": 0,
+      "sha256": "17a01099eeedd7854742179eb3b2007a78d74baac8a35d9e4af94d814826c439"
+    },
+    {
+      "file": "src/buster/lib/tls.h",
+      "bytes": 0,
+      "tokens": 1,
+      "identifiers": 0,
+      "literals": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "file": "src/buster/lib/truetype.c",
+      "bytes": 43215,
+      "tokens": 9427,
+      "identifiers": 3369,
+      "literals": 4,
+      "sha256": "b02f65fa73593f3553266fb891d35413b91edba185b0fccf6e44e1fd5bc148e7"
+    },
+    {
+      "file": "src/buster/lib/truetype.h",
+      "bytes": 2491,
+      "tokens": 410,
+      "identifiers": 197,
+      "literals": 0,
+      "sha256": "080e8412b3f0efda2453b6613822ac808b0be79b6cc402b8141ce363b98b3cde"
+    },
+    {
+      "file": "src/buster/lib/ui_builder.c",
+      "bytes": 20791,
+      "tokens": 3909,
+      "identifiers": 1381,
+      "literals": 26,
+      "sha256": "ed7c3297d6b5c3a569ec5073e38fae04e2a8d0cfdad88c844fd47840d7aa17f4"
+    },
+    {
+      "file": "src/buster/lib/ui_builder.h",
+      "bytes": 1816,
+      "tokens": 357,
+      "identifiers": 181,
+      "literals": 0,
+      "sha256": "11866177409206ffe94f5c2e8222ba21bbf9c9097648226808691de9dddac90c"
+    },
+    {
+      "file": "src/buster/lib/ui_core.c",
+      "bytes": 133592,
+      "tokens": 24785,
+      "identifiers": 8825,
+      "literals": 6,
+      "sha256": "2aaa404f4a836b19f9fe7104bd2b826aa120c9755c2d2255b233a5a6e74a9c87"
+    },
+    {
+      "file": "src/buster/lib/ui_core.h",
+      "bytes": 30027,
+      "tokens": 4918,
+      "identifiers": 1846,
+      "literals": 0,
+      "sha256": "2d024ee46f550a22c827ec95e817a0814d84f3b49092bc87bd54717936495964"
+    },
+    {
+      "file": "src/buster/lib/wasm64_gfx.h",
+      "bytes": 2541,
+      "tokens": 276,
+      "identifiers": 120,
+      "literals": 5,
+      "sha256": "0dfe1b6a8c2aea40115abc04b6ef79ffd3bef3b72d39418dec574fc370a3a551"
+    },
+    {
+      "file": "src/buster/lib/window/android.c",
+      "bytes": 7295,
+      "tokens": 1339,
+      "identifiers": 454,
+      "literals": 0,
+      "sha256": "eb0b49a1a581fddcace1332f3d37f7bd095bb97e61e8c73d101d7886311bdd4e"
+    },
+    {
+      "file": "src/buster/lib/window/apple.c",
+      "bytes": 15707,
+      "tokens": 2872,
+      "identifiers": 950,
+      "literals": 72,
+      "sha256": "42e1ded68baf72a0c6822999c35e3cceb3d85bd467488dd87bac19c0642635b0"
+    },
+    {
+      "file": "src/buster/lib/window/apple_helpers.h",
+      "bytes": 2200,
+      "tokens": 545,
+      "identifiers": 206,
+      "literals": 4,
+      "sha256": "490c044d817387c706a7b6c55a6672e7d0b588502a07eefb667006b3754f5b6b"
+    },
+    {
+      "file": "src/buster/lib/window/internal.h",
+      "bytes": 4467,
+      "tokens": 908,
+      "identifiers": 394,
+      "literals": 1,
+      "sha256": "85171e183329ca7377f4a4df150bf4f1dd27fbb0b284c4c8856da997e8caabf2"
+    },
+    {
+      "file": "src/buster/lib/window/ios.c",
+      "bytes": 13027,
+      "tokens": 2258,
+      "identifiers": 739,
+      "literals": 46,
+      "sha256": "6daae072061ed749f25e196c4b5b36a55ed7c9c705f6bac33bc002875aab87d1"
+    },
+    {
+      "file": "src/buster/lib/window/null.c",
+      "bytes": 1556,
+      "tokens": 348,
+      "identifiers": 120,
+      "literals": 0,
+      "sha256": "1bd966aac6a5af34c828dd5161cdc32a629f3f24bdccbb40f40fab14484dcdae"
+    },
+    {
+      "file": "src/buster/lib/window/win32.c",
+      "bytes": 31127,
+      "tokens": 5168,
+      "identifiers": 1776,
+      "literals": 5,
+      "sha256": "3af471e1c2f127e5202d43419f051806ec1e1ee79d7f229d925ed8b1ff7c380d"
+    },
+    {
+      "file": "src/buster/lib/window/xcb.c",
+      "bytes": 197915,
+      "tokens": 20017,
+      "identifiers": 6601,
+      "literals": 155,
+      "sha256": "9ab82416d34b95076500d537d4475d2c3d544b52d696343283810ce2f73610c2"
+    },
+    {
+      "file": "src/buster/lib/window.c",
+      "bytes": 8990,
+      "tokens": 1881,
+      "identifiers": 634,
+      "literals": 0,
+      "sha256": "7d3984ac79c60d026e039c815907c3918a1c07b8f2b544a9532e6c018210fdc5"
+    },
+    {
+      "file": "src/buster/lib/window.h",
+      "bytes": 6823,
+      "tokens": 1179,
+      "identifiers": 438,
+      "literals": 0,
+      "sha256": "fae3661b4b05496fadba38c646dbe3469628a5fdedaeb1d42fee285d29d6f431"
+    },
+    {
+      "file": "src/buster/lib/x86_64.c",
+      "bytes": 40054,
+      "tokens": 7043,
+      "identifiers": 2019,
+      "literals": 21,
+      "sha256": "e48f9ee0352229195a54c96733c69e64dc3988c0059ef99a61cb282012b7d9c3"
+    },
+    {
+      "file": "src/buster/lib/x86_64.h",
+      "bytes": 1723,
+      "tokens": 255,
+      "identifiers": 114,
+      "literals": 0,
+      "sha256": "55d25c14542c8e4a436c9a7a2dd31fac5f4075747776c44917c714ff7e8adedf"
+    }
+  ],
+  "blob_chunks": 957,
+  "blob_encoded_bytes": 3892388,
+  "literals": 23828,
+  "literal_spelling_bytes": 12568044,
+  "runs": 160,
+  "tokens": 3308365,
+  "max_literal_length": 5538
+}

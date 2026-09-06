@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-06T125122Z`](docs/performance-audits/2026-09-06T125122Z.md) — PR #139 follow-up: repair measurement gates, validate the three SIMD kernels on Zen 4, and reject a workload-cold literal candidate
 - [`2026-09-05T122006Z`](docs/performance-audits/2026-09-05T122006Z.md) — AVX-512/Zen 5 throughput audit of the whole pipeline: eleven changes take stage 1 from 11.230,4 M to 8.682,4 M instructions (-22,69%) byte-identically, the per-invocation metadata floor from 562 M to 165 M, and rank what is left
 - [`2026-08-30T182357Z`](docs/performance-audits/2026-08-30T182357Z.md) — the translation phase takes the chunk kernel and the window emitter's line metrics become one subtraction; the cursor residue and checkpoint-row stores are measured negative and closed
 - [`2026-08-24T174159Z`](docs/performance-audits/2026-08-24T174159Z.md) — #539 position-index tile classification A/B and fixed-point audit
