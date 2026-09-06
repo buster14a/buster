@@ -1,0 +1,2 @@
+Perf runs in non-root PID namespace but it tries to gather process info from its parent PID namespace.
+Please mount the proc file system properly, e.g. add the option '--mount-proc' for unshare command.

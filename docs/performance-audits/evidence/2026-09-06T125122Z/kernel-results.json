@@ -1,0 +1,222 @@
+[
+  {
+    "corpus": "timing",
+    "kernel": "base64",
+    "scalar_ns_per_unit": 0.40862146756053097,
+    "vector_ns_per_unit": 0.03347274378864594,
+    "scalar_over_vector": 12.207588064505686,
+    "scalar_min": 0.40127516995993207,
+    "scalar_max": 0.4266212508876299,
+    "vector_min": 0.03321050518987316,
+    "vector_max": 0.033806179040989745
+  },
+  {
+    "corpus": "timing",
+    "kernel": "quoted",
+    "scalar_ns_per_unit": 0.6589651947828954,
+    "vector_ns_per_unit": 0.21931479303780285,
+    "scalar_over_vector": 3.0046545682365844,
+    "scalar_min": 0.6521046042944312,
+    "scalar_max": 0.7225252344358438,
+    "vector_min": 0.21699321434783328,
+    "vector_max": 0.22561823139503648
+  },
+  {
+    "corpus": "timing",
+    "kernel": "identifier",
+    "scalar_ns_per_unit": 1.3155405171814476,
+    "vector_ns_per_unit": 0.37733834820976525,
+    "scalar_over_vector": 3.4863684632713996,
+    "scalar_min": 1.2876268045167325,
+    "scalar_max": 1.3679794484964627,
+    "vector_min": 0.37242554573784936,
+    "vector_max": 0.40572620463582465
+  },
+  {
+    "corpus": "base64-128",
+    "kernel": "base64",
+    "scalar_ns_per_unit": 0.4312955141067505,
+    "vector_ns_per_unit": 0.0726974606513977,
+    "scalar_over_vector": 5.932745246425031,
+    "scalar_min": 0.42806075513362885,
+    "scalar_max": 0.4495624005794525,
+    "vector_min": 0.0698297917842865,
+    "vector_max": 0.07533903419971466
+  },
+  {
+    "corpus": "base64-16",
+    "kernel": "base64",
+    "scalar_ns_per_unit": 0.5117862224578857,
+    "vector_ns_per_unit": 0.49408841133117676,
+    "scalar_over_vector": 1.03581911803806,
+    "scalar_min": 0.5007166862487793,
+    "scalar_max": 0.5319386720657349,
+    "vector_min": 0.4831286668777466,
+    "vector_max": 0.5140879154205322
+  },
+  {
+    "corpus": "base64-32",
+    "kernel": "base64",
+    "scalar_ns_per_unit": 0.38664644956588745,
+    "vector_ns_per_unit": 0.23752427101135254,
+    "scalar_over_vector": 1.6278186979359577,
+    "scalar_min": 0.3782780170440674,
+    "scalar_max": 0.4059392809867859,
+    "vector_min": 0.23620444536209106,
+    "vector_max": 0.2607814073562622
+  },
+  {
+    "corpus": "base64-4",
+    "kernel": "base64",
+    "scalar_ns_per_unit": 1.039111614227295,
+    "vector_ns_per_unit": 1.9480061531066895,
+    "scalar_over_vector": 0.5334231683868733,
+    "scalar_min": 1.0293269157409668,
+    "scalar_max": 1.0704436302185059,
+    "vector_min": 1.921445369720459,
+    "vector_max": 2.717825412750244
+  },
+  {
+    "corpus": "base64-64",
+    "kernel": "base64",
+    "scalar_ns_per_unit": 0.3841196298599243,
+    "vector_ns_per_unit": 0.27247172594070435,
+    "scalar_over_vector": 1.409759594445102,
+    "scalar_min": 0.3759377896785736,
+    "scalar_max": 0.391007661819458,
+    "vector_min": 0.2625614404678345,
+    "vector_max": 0.27997130155563354
+  },
+  {
+    "corpus": "base64-8",
+    "kernel": "base64",
+    "scalar_ns_per_unit": 0.692413330078125,
+    "vector_ns_per_unit": 0.9665272235870361,
+    "scalar_over_vector": 0.7163929925412731,
+    "scalar_min": 0.6894118785858154,
+    "scalar_max": 0.7161304950714111,
+    "vector_min": 0.9645357131958008,
+    "vector_max": 0.9896547794342041
+  },
+  {
+    "corpus": "identifier-0",
+    "kernel": "identifier",
+    "scalar_ns_per_unit": 0.2288496494293213,
+    "vector_ns_per_unit": 0.015192508697509766,
+    "scalar_over_vector": 15.063321929631838,
+    "scalar_min": 0.22589129209518433,
+    "scalar_max": 0.24166345596313477,
+    "vector_min": 0.015102982521057129,
+    "vector_max": 0.016995251178741455
+  },
+  {
+    "corpus": "identifier-1",
+    "kernel": "identifier",
+    "scalar_ns_per_unit": 0.23359763622283936,
+    "vector_ns_per_unit": 0.029968976974487305,
+    "scalar_over_vector": 7.794648326557888,
+    "scalar_min": 0.23127442598342896,
+    "scalar_max": 0.24372464418411255,
+    "vector_min": 0.029696226119995117,
+    "vector_max": 0.031885743141174316
+  },
+  {
+    "corpus": "identifier-100",
+    "kernel": "identifier",
+    "scalar_ns_per_unit": 0.8755122423171997,
+    "vector_ns_per_unit": 0.9069145321846008,
+    "scalar_over_vector": 0.9653745874026757,
+    "scalar_min": 0.8574818968772888,
+    "scalar_max": 0.9424654245376587,
+    "vector_min": 0.8890166282653809,
+    "vector_max": 0.9313862919807434
+  },
+  {
+    "corpus": "identifier-20",
+    "kernel": "identifier",
+    "scalar_ns_per_unit": 0.3447185158729553,
+    "vector_ns_per_unit": 0.2590210437774658,
+    "scalar_over_vector": 1.3308513889285198,
+    "scalar_min": 0.33363646268844604,
+    "scalar_max": 0.355474054813385,
+    "vector_min": 0.2549589276313782,
+    "vector_max": 0.2700476050376892
+  },
+  {
+    "corpus": "quoted-dense-128",
+    "kernel": "quoted",
+    "scalar_ns_per_unit": 0.5748968124389648,
+    "vector_ns_per_unit": 3.8898120439969577,
+    "scalar_over_vector": 0.14779552480593186,
+    "scalar_min": 0.5685364796565129,
+    "scalar_max": 0.5987645662747897,
+    "vector_min": 3.8778504591721754,
+    "vector_max": 4.003368260310246
+  },
+  {
+    "corpus": "quoted-plain-0",
+    "kernel": "quoted",
+    "scalar_ns_per_unit": 1.5234489440917969,
+    "vector_ns_per_unit": 1.685708999633789,
+    "scalar_over_vector": 0.9037437330065614,
+    "scalar_min": 1.5070686340332031,
+    "scalar_max": 1.6329889297485352,
+    "vector_min": 1.5642595291137695,
+    "vector_max": 1.743062973022461
+  },
+  {
+    "corpus": "quoted-plain-128",
+    "kernel": "quoted",
+    "scalar_ns_per_unit": 0.5763517966637245,
+    "vector_ns_per_unit": 0.0675241470336914,
+    "scalar_over_vector": 8.535491701600492,
+    "scalar_min": 0.5713205044086163,
+    "scalar_max": 0.613391010577862,
+    "vector_min": 0.06678989116962139,
+    "vector_max": 0.06965047396146334
+  },
+  {
+    "corpus": "quoted-plain-16",
+    "kernel": "quoted",
+    "scalar_ns_per_unit": 0.663222524854872,
+    "vector_ns_per_unit": 0.41714297400580513,
+    "scalar_over_vector": 1.5899165662218304,
+    "scalar_min": 0.6580426957872179,
+    "scalar_max": 0.6960808436075846,
+    "vector_min": 0.41552988688151044,
+    "vector_max": 0.4232183032565647
+  },
+  {
+    "corpus": "quoted-plain-32",
+    "kernel": "quoted",
+    "scalar_ns_per_unit": 0.6128490111407112,
+    "vector_ns_per_unit": 0.223694969626034,
+    "scalar_over_vector": 2.739663802745553,
+    "scalar_min": 0.6079342786003562,
+    "scalar_max": 0.6787582846248851,
+    "vector_min": 0.21902965096866384,
+    "vector_max": 0.22913960849537568
+  },
+  {
+    "corpus": "quoted-plain-4",
+    "kernel": "quoted",
+    "scalar_ns_per_unit": 0.8759692509969076,
+    "vector_ns_per_unit": 1.2713677088419597,
+    "scalar_over_vector": 0.6889975613701834,
+    "scalar_min": 0.8659216562906901,
+    "scalar_max": 0.9968999226888021,
+    "vector_min": 1.2508621215820312,
+    "vector_max": 1.2988872528076172
+  },
+  {
+    "corpus": "quoted-plain-64",
+    "kernel": "quoted",
+    "scalar_ns_per_unit": 0.5904574538722183,
+    "vector_ns_per_unit": 0.11856977867357658,
+    "scalar_over_vector": 4.979830952520808,
+    "scalar_min": 0.5818214127511689,
+    "scalar_max": 0.6056350650209369,
+    "vector_min": 0.11835679140957919,
+    "vector_max": 0.151131196455522
+  }
+]
