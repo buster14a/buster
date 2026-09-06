@@ -20,53 +20,26 @@ jobs:
           ref: claude/unruffled-bhabha-f5d28a
           fetch-depth: 0
 
-      - name: Apply code and test-runner fixes
+      - name: Apply macOS Intel matrix capability fix
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
-          def replace_exact(path, old, new, expected=1):
-              file = Path(path)
-              text = file.read_text()
-              count = text.count(old)
-              if count != expected:
-                  raise SystemExit(f"{path}: expected {expected} occurrence(s), found {count}")
-              file.write_text(text.replace(old, new))
-
-          cmake = Path("CMakeLists.txt")
-          text = cmake.read_text()
-          pattern = re.compile(
-              r"\n        if \(UNIX AND NOT APPLE AND BUSTER_LINUX_ASAN_PRELOAD_RUNTIME\)\n"
-              r"            set\(BUSTER_LD_PRELOAD .*?\n"
-              r"        endif\(\)\n",
-              re.DOTALL,
+          path = Path("build.c")
+          text = path.read_text()
+          old = '    bool direct_matrix = environment_flag_is_on(S8("BUSTER_MATRIX_DIRECT"));'
+          new = (
+              '    // Intel macOS cannot yet self-host the compiler image; direct mode still\n'
+              '    // executes every compiler/configuration test tree and omits only fan-out.\n'
+              '    bool direct_matrix = environment_flag_is_on(S8("BUSTER_MATRIX_DIRECT")) ||\n'
+              '                         (BUSTER_MACOS && BUSTER_CPU_ARCH_X86_64);'
           )
-          text, count = pattern.subn("\n", text)
+          count = text.count(old)
           if count != 1:
-              raise SystemExit(f"CMakeLists.txt: expected one test LD_PRELOAD block, found {count}")
-          cmake.write_text(text)
-
-          replace_exact(
-              "build.c",
-              "        bool fuzz_supported = is_clang && !BUSTER_APPLE;\n"
-              "        bool support_sanitize = is_clang;",
-              "        // LLVM's Windows ARM64 distribution does not ship the libFuzzer or\n"
-              "        // sanitizer runtimes. Keep the native Clang Release test row and all\n"
-              "        // compiler portability rows, but do not generate impossible trees.\n"
-              "        bool fuzz_supported = is_clang && !BUSTER_APPLE && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64);\n"
-              "        bool support_sanitize = is_clang && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64);",
-          )
-
-          host_gate = "#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS"
-          replace_exact(
-              "src/buster/tests/compiler/driver/driver_test.c",
-              host_gate,
-              host_gate + " && !BUSTER_MACOS",
-              expected=4,
-          )
+              raise SystemExit(f"build.c: expected one direct-matrix definition, found {count}")
+          path.write_text(text.replace(old, new))
           PY
           git diff --check
           git status --short
@@ -77,6 +50,6 @@ jobs:
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add CMakeLists.txt build.c src/buster/tests/compiler/driver/driver_test.c
-          git commit -m "ci: repair cross-platform matrix prerequisites"
+          git add build.c
+          git commit -m "ci: use direct matrix on Intel macOS"
           git push origin HEAD:claude/unruffled-bhabha-f5d28a
