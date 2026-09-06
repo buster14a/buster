@@ -16291,12 +16291,22 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     }
     // Call discovery must leave object-size pointer operands unevaluated,
     // even for nested calls and a query embedded in another call's argument.
-    for (u32 mode = 0; mode < 4; mode += 1)
+    String8 unevaluated_predicates[] = {
+        S8("__builtin_object_size(nested(effect()), 0)"),
+        S8("__builtin_object_size(nested(effect()), 1)"),
+        S8("__builtin_object_size(nested(effect()), 2)"),
+        S8("__builtin_object_size(nested(effect()), 3)"),
+        S8("__builtin_constant_p(effect())"),
+        S8("__builtin_constant_p(nested(effect()))"),
+        S8("__builtin_constant_p(indirect())"),
+        S8("__builtin_constant_p((effect(), 1))"),
+    };
+    for (u32 query_index = 0; query_index < BUSTER_ARRAY_LENGTH(unevaluated_predicates); query_index += 1)
     {
         TemporalArena temporary = scratch_begin(0, 0);
         String8 source = string_format_z(temporary.arena,
-            S8("extern void* effect(void); extern void* nested(void*); "
-               "unsigned long long query(void) {{ return __builtin_object_size(nested(effect()), {u32}); }"), mode);
+            S8("extern void* effect(void); extern void* nested(void*); extern void* (*indirect)(void); "
+               "unsigned long long query(void) {{ return {S8}; }"), unevaluated_predicates[query_index]);
         CPreprocessResult tokens = {0};
         CParseResult parse = {0};
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("object-size-unevaluated.c"), target_native, &tokens, &parse);

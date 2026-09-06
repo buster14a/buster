@@ -15365,7 +15365,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // here would run them before the builtin emits its constant result,
         // duplicating a destination expression in fortified memory macros.
         // _Generic likewise owns the lowering of its selected expression.
-        if (builtin_generic || builtin_object_size)
+        // __builtin_constant_p also discards side effects in its operand.
+        if (builtin_generic || builtin_object_size || builtin_constant_p)
         {
             index = close;
         }
@@ -39553,7 +39554,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
 {
     if (operation == C_CONDITIONAL_COMMA)
     {
-        *result = right;
+        // A known right value does not make the evaluated left operand
+        // constant. In particular, a call must not disappear from a probe.
+        if (!c_ir_constant_normalize(builder, &left)) return false;
+        *result = left.kind == C_IR_CONSTANT_UNKNOWN ? (CIrConstantValue){.type = right.type, .kind = C_IR_CONSTANT_UNKNOWN} : right;
         return true;
     }
     if (operation == C_CONDITIONAL_LOGICAL_AND || operation == C_CONDITIONAL_LOGICAL_OR)
