@@ -2323,6 +2323,16 @@ struct CIntegerIrBuilder
     CIrInitializerSlotCache* slot_cache;
     CIrOverAlignedArrayName* over_aligned_array_name;
     u32* prepared_call_indices;
+    // The prepared calls whose `token_index` is a given body token, as an
+    // index-linked list: `prepared_call_token_heads` is indexed by body token
+    // offset and `prepared_call_token_next` by prepared-call index, both
+    // UINT32_MAX terminated, and a new call is pushed onto its token's head.
+    // c_ir_prepared_call_chained asks exactly that question and used to answer
+    // it by scanning every prepared call of the function: 33.006 calls over
+    // 3,84 M rows of a 128-byte record on a self-compile, one cache line per
+    // row, for a chain that was never once non-empty.
+    u32* prepared_call_token_heads;
+    u32* prepared_call_token_next;
     // Type-name probe answers per body token, indexed like
     // prepared_call_indices by the `(` that opens the probed group: 0 is
     // unprobed, 1 is "not a type name", anything else the IrTypeId plus two.
@@ -14311,26 +14321,83 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call(CIntegerIrBuilder* builder, u32 token
 // inner call by its first token follows that link outward before consuming.
 // A call still being emitted is its own callee's context and stays excluded,
 // which is what keeps the callee lowering consuming the inner value.
-BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_chained(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end)
+#if !BUSTER_OPTIMIZE
+// The scan the chain replaces, kept as the reference: a debug build checks
+// every step of every walk against it.  It is not compiled into the Release
+// tree because that tree carries the tests (BUSTER_INCLUDE_TESTS=1) and
+// running the scan there would put back exactly the cost the chain removes.
+BUSTER_C_INTERNAL void c_ir_prepared_call_chained_check(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end, u32 answer)
 {
-    for (;;)
+    u32 reference = UINT32_MAX;
+    for (u32 index = 0; index < builder->prepared_call_count && reference == UINT32_MAX; index += 1)
     {
-        CIrPreparedCall* chained = 0;
-        for (u32 index = 0; index < builder->prepared_call_count; index += 1)
+        CIrPreparedCall* candidate = builder->prepared_calls + index;
+        if (candidate != call && candidate->token_index == call->open_index && candidate->close_index < end && !candidate->emitting)
+        {
+            reference = index;
+        }
+    }
+    if (reference != answer)
+    {
+        os_fail_message(S8("prepared call chain disagrees with the prepared call scan"));
+    }
+}
+#endif
+
+BUSTER_C_INTERNAL u32 c_ir_prepared_call_chained_index(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end)
+{
+    u32 chained = UINT32_MAX;
+    u32 open = call->open_index;
+    u32 offset = open - builder->body_token_start;
+    if (open >= builder->body_token_start && offset < builder->body_token_count)
+    {
+        // The chain holds every prepared call whose token index is `open`, so
+        // the lowest of its members that passes is the row the scan over the
+        // whole table answered with.  A call is pushed onto its token's head,
+        // so the chain runs newest first and the minimum is taken rather than
+        // the first match.
+        u32 call_index = (u32)(call - builder->prepared_calls);
+        for (u32 index = builder->prepared_call_token_heads[offset]; index != UINT32_MAX; index = builder->prepared_call_token_next[index])
         {
             CIrPreparedCall* candidate = builder->prepared_calls + index;
-            if (candidate != call && candidate->token_index == call->open_index && candidate->close_index < end && !candidate->emitting)
+            if (index != call_index && index < chained && candidate->close_index < end && !candidate->emitting)
             {
-                chained = candidate;
-                break;
+                chained = index;
             }
         }
-        if (!chained)
-        {
-            return call;
-        }
-        call = chained;
     }
+    else
+    {
+        // A call discovered outside the body -- a variable-length array
+        // parameter's bound -- never entered the token-keyed chain, the same
+        // exception c_ir_prepared_call_find carries.
+        for (u32 index = 0; index < builder->prepared_call_count && chained == UINT32_MAX; index += 1)
+        {
+            CIrPreparedCall* candidate = builder->prepared_calls + index;
+            if (candidate != call && candidate->token_index == open && candidate->close_index < end && !candidate->emitting)
+            {
+                chained = index;
+            }
+        }
+    }
+    return chained;
+}
+
+BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_chained(CIntegerIrBuilder* builder, CIrPreparedCall* call, u32 end)
+{
+    u32 chained = c_ir_prepared_call_chained_index(builder, call, end);
+    while (chained != UINT32_MAX)
+    {
+#if !BUSTER_OPTIMIZE
+        c_ir_prepared_call_chained_check(builder, call, end, chained);
+#endif
+        call = builder->prepared_calls + chained;
+        chained = c_ir_prepared_call_chained_index(builder, call, end);
+    }
+#if !BUSTER_OPTIMIZE
+    c_ir_prepared_call_chained_check(builder, call, end, UINT32_MAX);
+#endif
+    return call;
 }
 
 BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
@@ -15244,7 +15311,10 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // out-of-body token with a linear scan over the prepared calls.
         if (callee_start >= builder->body_token_start && callee_start - builder->body_token_start < builder->body_token_count)
         {
-            builder->prepared_call_indices[callee_start - builder->body_token_start] = prepared_call_index;
+            u32 callee_offset = callee_start - builder->body_token_start;
+            builder->prepared_call_indices[callee_offset] = prepared_call_index;
+            builder->prepared_call_token_next[prepared_call_index] = builder->prepared_call_token_heads[callee_offset];
+            builder->prepared_call_token_heads[callee_offset] = prepared_call_index;
         }
         if (builtin_generic)
         {
@@ -44288,6 +44358,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             .cleanup_flag_count = cleanup_offsets[declaration_index + 1] - cleanup_offsets[declaration_index],
             .prepared_calls = arena_allocate(lowering_temporary.arena, CIrPreparedCall, prepared_call_capacity ? (u32)prepared_call_capacity : 1),
             .prepared_call_indices = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
+            .prepared_call_token_heads = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
+            .prepared_call_token_next = arena_allocate(lowering_temporary.arena, u32, prepared_call_capacity ? (u32)prepared_call_capacity : 1),
             .group_type_names = arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
             .matching_delimiters =
                 stream_matching_delimiters ? 0 : arena_allocate(lowering_temporary.arena, u32, declaration.body_token_count ? declaration.body_token_count : 1),
@@ -44308,6 +44380,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         for (u32 token_offset = 0; token_offset < builder.body_token_count; token_offset += 1)
         {
             builder.prepared_call_indices[token_offset] = UINT32_MAX;
+            builder.prepared_call_token_heads[token_offset] = UINT32_MAX;
             builder.group_type_names[token_offset] = 0;
         }
         if (!builder.stream_matching_delimiters)
