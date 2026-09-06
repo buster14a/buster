@@ -118,6 +118,16 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install Vulkan SDK
+        if: ${{ matrix.platform == 'unix' }}
+        shell: bash
+        run: bash .github/scripts/install-vulkan-sdk.sh
+
+      - name: Install Vulkan SDK (Windows)
+        if: ${{ matrix.platform == 'windows' }}
+        shell: powershell
+        run: . .github/scripts/install-vulkan-sdk.ps1
+
       # Linux defaults to mold for every non-Zig compiler, and the images do
       # not carry it. This is the distribution's own package, so the version
       # is the one that image already pins.
@@ -267,6 +277,11 @@ jobs:
       - name: Execution-mode matrix
         if: ${{ matrix.platform == 'unix' }}
         shell: bash
+        env:
+          # Ubuntu's hosted Granite Rapids CPUs report an AVX10 feature
+          # combination that Clang warns about when -march=native is used.
+          # The matrix validates execution modes, not host-specific tuning.
+          CFLAGS: -Wno-invalid-feature-combination
         run: |
           set -euo pipefail
           # This driver deliberately lives outside build/: the generate below
