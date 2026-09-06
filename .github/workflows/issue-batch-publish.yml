@@ -1,0 +1,81 @@
+name: Issue batch publish and fixed point
+
+on:
+  push:
+    branches: [work/2026-09-06-issue-batch-validation]
+    paths: [.github/workflows/issue-batch-publish.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [driver]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Publish only the exact locally tested patch
+        env:
+          LANE: ${{ matrix.lane }}
+          PUSH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, gzip, hashlib, os, pathlib, subprocess
+          lanes = {
+              'driver': ('fix/2026-09-06-windows-include-capacity', 'a4227bd9f6cc689f522599d523ddaba0e386fe91853d3b328e64f97cabd1af54', 'driver: size Windows INCLUDE paths from their actual population', [
+                  'src/buster/lib/compiler/driver/driver.c',
+                  'src/buster/tests/compiler/driver/driver_test.c',
+                  'src/buster/tests/compiler/driver/driver_test.h',
+              ]),
+          }
+          lane = os.environ['LANE']
+          branch, digest, message, allowed = lanes[lane]
+          encoded = pathlib.Path('work/issue-batch/' + lane + '.patch.b64').read_text().strip()
+          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == digest, 'patch transport checksum mismatch'
+          patch_path = pathlib.Path(os.environ['RUNNER_TEMP']) / (lane + '.patch')
+          patch_path.write_bytes(patch)
+          def git(*args, **kwargs):
+              return subprocess.check_output(['git', *args], text=True, **kwargs).strip()
+          probe = subprocess.run(['git', 'ls-remote', '--exit-code', '--heads', 'origin', 'refs/heads/' + branch], capture_output=True)
+          assert probe.returncode == 2, 'ref exists or remote could not be checked; refusing to overwrite'
+          base = '3b7eefbc2048e8751e5d097dc3d52271b38385c0'
+          git('fetch', '--depth=1', 'origin', base)
+          git('checkout', '-b', branch, base)
+          git('apply', '--index', str(patch_path))
+          assert set(git('diff', '--cached', '--name-only').splitlines()) == set(allowed), 'unexpected patch paths'
+          git('diff', '--cached', '--check')
+          git('config', 'user.name', 'Buster issue fixes (assisted)')
+          git('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
+          git('commit', '-m', message)
+          env = os.environ.copy()
+          env['GIT_CONFIG_COUNT'] = '1'
+          env['GIT_CONFIG_KEY_0'] = 'http.https://github.com/.extraheader'
+          env['GIT_CONFIG_VALUE_0'] = 'AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + env.pop('PUSH_TOKEN')).encode()).decode()
+          git('push', 'origin', 'HEAD:refs/heads/' + branch, env=env)
+          head = git('rev-parse', 'HEAD')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('Published `' + branch + '` at `' + head + '`; patch SHA-256 `' + digest + '`.\n')
+          print('Published', branch, head)
+          PY
+      - name: Install Vulkan SDK
+        shell: bash
+        run: bash .github/scripts/install-vulkan-sdk.sh
+      - name: Debug split suite and Release fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --ci --linker DEFAULT
+          "$driver" build --config Debug -t test_all
+          "$driver" test_self_host --config Release
