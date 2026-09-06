@@ -1,6 +1,7 @@
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/os.h>
+#include <buster/lib/simd.h>
 
 #if BUSTER_COMPILER_CLANG
 #pragma clang diagnostic push
@@ -67,10 +68,12 @@
 // nothing: the lookup indexes yield string-pool offsets and form ids, so a
 // consumer that reaches any table reaches most of them.
 //
-// Record validity is computed here too. The tables are immutable, so a record
+// Record validity is cached beside the tables. They are immutable, so a record
 // that validates once validates forever, and the public accessors would
 // otherwise re-run `validate_form_record` on every single lookup -- the top
-// cost of a Release test run once the raw decode was cached.
+// cost of a Release test run once the raw decode was cached.  The cache fills
+// per record on its first serial query rather than for all 11.013 forms and
+// coverage rows during the decode, because a compile asks about a few hundred.
 // `buster_x86_metadata_validate_table` still validates with diagnostics, and
 // `buster_x86_metadata_validate_patch` still validates the mutated copy it
 // builds, so neither loses coverage.
@@ -80,17 +83,31 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_validate_coverage_record(const Bust
                                                                      BusterX86MetadataValidationResult* result);
 
 BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_pool_bytes[BUSTER_X86_GENERATED_STRING_POOL_SIZE];
-// Distance from each pool byte to its terminating NUL (UINT16_MAX when none
-// follows), so asking a string's length is one read instead of a byte scan --
-// consumers ask per record and per literal comparison, which rescanned the
-// same strings constantly.  The checked-in pool's longest string is 276
-// bytes.  A future oversized string saturates to the invalid sentinel during
-// decode, making validation fail closed instead of truncating its length.
+// Distance from each pool byte to its terminating NUL
+// (BUSTER_X86_METADATA_NUL_DISTANCE_NONE when none follows), so asking a
+// string's length is one read instead of a byte scan -- consumers ask per
+// record and per literal comparison, which rescanned the same strings
+// constantly.  The checked-in pool's longest string is 276 bytes.  A future
+// oversized string saturates to the invalid sentinel during decode, making
+// validation fail closed instead of truncating its length.
+#define BUSTER_X86_METADATA_NUL_DISTANCE_NONE UINT16_MAX
 BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_pool_nul_distances[BUSTER_X86_GENERATED_STRING_POOL_SIZE];
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_form_records[BUSTER_X86_GENERATED_FORM_COUNT];
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_records_valid[BUSTER_X86_GENERATED_FORM_COUNT];
+// Validity is a per-record answer that never changes, so it is cached rather
+// than recomputed per lookup -- but it is asked for a few hundred of the
+// 11.013 forms per compile, so the walk that used to validate all of them
+// during the decode became the largest remaining part of the per-invocation
+// floor: twenty string hashes and twenty-three offset checks per form,
+// 11.013 times, for the handful the encoder reaches.  Each record now
+// validates on its first serial query, the same lazy contract as the per-form
+// facts below; buster_x86_metadata_prewarm_all_forms validates the whole
+// table for a caller about to hand it to a gang.
+#define BUSTER_X86_METADATA_RECORD_UNKNOWN 0u
+#define BUSTER_X86_METADATA_RECORD_VALID 1u
+#define BUSTER_X86_METADATA_RECORD_INVALID 2u
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_form_record_validity[BUSTER_X86_GENERATED_FORM_COUNT];
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedOperand buster_x86_metadata_operand_records[BUSTER_X86_GENERATED_OPERAND_COUNT];
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_records_valid[BUSTER_X86_GENERATED_COVERAGE_COUNT];
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_coverage_record_validity[BUSTER_X86_GENERATED_COVERAGE_COUNT];
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_mnemonic_ranges[BUSTER_X86_GENERATED_MNEMONIC_RANGE_COUNT];
 BUSTER_GLOBAL_LOCAL u32 buster_x86_metadata_mnemonic_candidates[BUSTER_X86_GENERATED_MNEMONIC_CANDIDATE_COUNT];
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_iclass_ranges[BUSTER_X86_GENERATED_ICLASS_RANGE_COUNT];
@@ -621,6 +638,79 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tables_decoded;
 // write below.
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prewarmed;
 
+// The NUL-distance table is one descending ramp per string: inside a run that
+// ends at a NUL every position holds its own distance to that NUL, so the
+// table is an arithmetic sequence per run rather than a carry propagated one
+// byte at a time.  The backward carry loop this replaces ran a compare, a
+// saturating select and a 2-byte store for each of the pool's 1.726.254 bytes
+// -- about ten instructions a byte, and the compare mispredicted at every
+// string boundary.  Here the run boundaries come out of a 64-byte compare
+// (64 lanes per instruction, every lane useful) and the fill writes four u16
+// lanes per store, stepping the packed lanes by one constant subtraction:
+// half a store per position and no data-dependent branch inside a run.
+#define BUSTER_X86_METADATA_NUL_RAMP_LANES 4u
+// Four u16 lanes of 1, of {0,1,2,3} and of 4: the multiply splats a run's
+// distance across the lanes, the ramp biases each lane by its index, and the
+// step advances the packed group.
+#define BUSTER_X86_METADATA_NUL_RAMP_ONES UINT64_C(0x0001000100010001)
+#define BUSTER_X86_METADATA_NUL_RAMP_BIAS UINT64_C(0x0003000200010000)
+#define BUSTER_X86_METADATA_NUL_RAMP_STEP UINT64_C(0x0004000400040004)
+
+// Fills [start, nul] with nul - position, saturating the head of a run longer
+// than the sentinel exactly as the carry loop did: once the distance no longer
+// fits it stays at the sentinel until a NUL resets it.
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_fill_nul_distance_run(u16* distances, u64 start, u64 nul)
+{
+    u64 position = start;
+    while (nul - position >= BUSTER_X86_METADATA_NUL_DISTANCE_NONE)
+    {
+        distances[position] = BUSTER_X86_METADATA_NUL_DISTANCE_NONE;
+        position += 1;
+    }
+    if (position + BUSTER_X86_METADATA_NUL_RAMP_LANES <= nul + 1u)
+    {
+        u64 lanes = (nul - position) * BUSTER_X86_METADATA_NUL_RAMP_ONES - BUSTER_X86_METADATA_NUL_RAMP_BIAS;
+        while (position + BUSTER_X86_METADATA_NUL_RAMP_LANES <= nul + 1u)
+        {
+            memcpy(distances + position, &lanes, sizeof lanes);
+            lanes -= BUSTER_X86_METADATA_NUL_RAMP_STEP;
+            position += BUSTER_X86_METADATA_NUL_RAMP_LANES;
+        }
+    }
+    while (position <= nul)
+    {
+        distances[position] = (u16)(nul - position);
+        position += 1;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_fill_nul_distances(char8 const* pool, u16* distances, u64 size)
+{
+    u64 run_start = 0;
+    Simd512 terminator = simd512_zero();
+    for (u64 window_base = 0; window_base < size; window_base += 64)
+    {
+        // The masked load zero-fills the lanes past the window and those read
+        // as terminators, so the window mask gates the compare result too.
+        Mask64 window_mask = mask64_prefix(size - window_base);
+        Simd512 bytes = simd512_load_masked(pool + window_base, window_mask);
+        Mask64 terminators = mask64_and(simd512_equal_byte(bytes, terminator), window_mask);
+        while (terminators)
+        {
+            u64 nul = window_base + mask64_first_set(terminators);
+            buster_x86_metadata_fill_nul_distance_run(distances, run_start, nul);
+            run_start = nul + 1u;
+            terminators = mask64_and(terminators, terminators - 1);
+        }
+    }
+    // Nothing terminates the bytes past the last NUL, which is the sentinel
+    // the carry loop started from and never left.
+    if (run_start < size)
+    {
+        memset(distances + run_start, 0xff, (size - run_start) * sizeof(u16));
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
 {
     if (buster_x86_metadata_tables_decoding)
@@ -630,20 +720,8 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
     BUSTER_CHECK_SERIAL_INITIALIZATION();
     buster_x86_metadata_tables_decoding = true;
     buster_x86_metadata_decode_string_pool();
-    u16 nul_distance = UINT16_MAX;
-    for (u64 index = BUSTER_X86_GENERATED_STRING_POOL_SIZE; index; index -= 1)
-    {
-        u64 position = index - 1;
-        if (buster_x86_metadata_pool_bytes[position] == 0)
-        {
-            nul_distance = 0;
-        }
-        else if (nul_distance != UINT16_MAX)
-        {
-            nul_distance = nul_distance == UINT16_MAX - 1 ? UINT16_MAX : (u16)(nul_distance + 1);
-        }
-        buster_x86_metadata_pool_nul_distances[position] = nul_distance;
-    }
+    buster_x86_metadata_fill_nul_distances(buster_x86_metadata_pool_bytes, buster_x86_metadata_pool_nul_distances,
+                                           BUSTER_X86_GENERATED_STRING_POOL_SIZE);
     // Each blob is decoded whole into the scratch array, copied out into its
     // typed cache, and three of its records are then re-read through the
     // generated reader as the layout check described at the flat readers.
@@ -702,18 +780,9 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_tables_once(void)
     }
     BUSTER_X86_METADATA_FLAT_CHECK(buster_x86_metadata_coverage_records, BUSTER_X86_GENERATED_COVERAGE_COUNT, buster_x86_generated_coverage_at,
                                    buster_x86_metadata_coverages_equal);
-    // The re-entrant reads validation is about to make are already served by
-    // the `decoding` flag set on entry, so the tables it needs are complete
-    // without publishing `decoded` yet.
-    for (u32 index = 0; index < BUSTER_X86_GENERATED_FORM_COUNT; index += 1)
-    {
-        buster_x86_metadata_form_records_valid[index] = buster_x86_metadata_validate_form_record(&buster_x86_metadata_form_records[index], index, 0);
-    }
-    for (u32 index = 0; index < BUSTER_X86_GENERATED_COVERAGE_COUNT; index += 1)
-    {
-        buster_x86_metadata_coverage_records_valid[index] =
-            buster_x86_metadata_validate_coverage_record(&buster_x86_metadata_coverage_records[index], index, 0);
-    }
+    // Validation moved to the per-record accessors, which run after this
+    // publishes: it reads records and strings back through the accessors, and
+    // once `decoded` is set those reads no longer re-enter the decode at all.
     buster_x86_metadata_tables_decoded = true;
 }
 
@@ -765,6 +834,119 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_test_decode_blob_scalar(u8* decoded
             ok = buster_x86_metadata_blob_scratch[offset] == expected && buster_x86_metadata_test_blob_scratch[offset] == expected;                            \
         }                                                                                                                                                      \
     } while (0)
+
+// The carry loop the ramp fill replaces, kept verbatim as the reference the
+// differential below holds the kernel to.
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_test_nul_distances_reference(char8 const* pool, u16* distances, u64 size)
+{
+    u16 nul_distance = BUSTER_X86_METADATA_NUL_DISTANCE_NONE;
+    for (u64 index = size; index; index -= 1)
+    {
+        u64 position = index - 1;
+        if (pool[position] == 0)
+        {
+            nul_distance = 0;
+        }
+        else if (nul_distance != BUSTER_X86_METADATA_NUL_DISTANCE_NONE)
+        {
+            nul_distance = nul_distance == BUSTER_X86_METADATA_NUL_DISTANCE_NONE - 1 ? BUSTER_X86_METADATA_NUL_DISTANCE_NONE
+                                                                                     : (u16)(nul_distance + 1);
+        }
+        distances[position] = nul_distance;
+    }
+}
+
+// Long enough for a run past the u16 sentinel, which the checked-in pool never
+// reaches: the saturating head only runs when a string exceeds 65.534 bytes.
+#define BUSTER_X86_METADATA_TEST_NUL_CAPACITY 70000u
+BUSTER_GLOBAL_LOCAL char8 buster_x86_metadata_test_nul_pool[BUSTER_X86_METADATA_TEST_NUL_CAPACITY];
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_test_nul_kernel[BUSTER_X86_METADATA_TEST_NUL_CAPACITY];
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_test_nul_reference[BUSTER_X86_METADATA_TEST_NUL_CAPACITY];
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_test_nul_case(u64 size)
+{
+    memset(buster_x86_metadata_test_nul_kernel, 0xa5, size * sizeof(u16));
+    memset(buster_x86_metadata_test_nul_reference, 0x5a, size * sizeof(u16));
+    buster_x86_metadata_fill_nul_distances(buster_x86_metadata_test_nul_pool, buster_x86_metadata_test_nul_kernel, size);
+    buster_x86_metadata_test_nul_distances_reference(buster_x86_metadata_test_nul_pool, buster_x86_metadata_test_nul_reference, size);
+    bool ok = true;
+    for (u64 index = 0; ok && index < size; index += 1)
+    {
+        ok = buster_x86_metadata_test_nul_kernel[index] == buster_x86_metadata_test_nul_reference[index];
+    }
+    return ok;
+}
+
+// Every window-boundary length, a terminator slid across every offset of a
+// short body, adjacent terminators, an unterminated tail and one run past the
+// sentinel -- the shapes a 64-byte window and a four-lane ramp can get wrong.
+bool buster_x86_metadata_test_nul_distances_match_reference(void)
+{
+    static const u64 sizes[] = {0,  1,  2,  3,  4,  5,   7,   8,   15,  16,  17,  31,  32,  33,   63,  64,
+                                65, 66, 67, 96, 127, 128, 129, 191, 192, 255, 256, 257, 4095, 4096, 4097};
+    bool ok = true;
+    for (u64 size_index = 0; ok && size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
+    {
+        u64 size = sizes[size_index];
+        // A body of ordinary bytes with one terminator walked across it, plus
+        // the fully unterminated body at offset == size.
+        for (u64 offset = 0; ok && offset <= size; offset += 1)
+        {
+            memset(buster_x86_metadata_test_nul_pool, 'a', size);
+            if (offset < size)
+            {
+                buster_x86_metadata_test_nul_pool[offset] = 0;
+            }
+            ok = buster_x86_metadata_test_nul_case(size);
+        }
+        // Two adjacent terminators, which make a zero-length run.
+        if (ok && size >= 2)
+        {
+            for (u64 offset = 0; ok && offset + 1 < size; offset += 1)
+            {
+                memset(buster_x86_metadata_test_nul_pool, 'a', size);
+                buster_x86_metadata_test_nul_pool[offset] = 0;
+                buster_x86_metadata_test_nul_pool[offset + 1] = 0;
+                ok = buster_x86_metadata_test_nul_case(size);
+            }
+        }
+        // All terminators, so every run is empty.
+        if (ok)
+        {
+            memset(buster_x86_metadata_test_nul_pool, 0, size);
+            ok = buster_x86_metadata_test_nul_case(size);
+        }
+    }
+    // One run longer than the sentinel: the head saturates and the tail ramps.
+    if (ok)
+    {
+        memset(buster_x86_metadata_test_nul_pool, 'a', BUSTER_X86_METADATA_TEST_NUL_CAPACITY);
+        buster_x86_metadata_test_nul_pool[BUSTER_X86_METADATA_TEST_NUL_CAPACITY - 1] = 0;
+        ok = buster_x86_metadata_test_nul_case(BUSTER_X86_METADATA_TEST_NUL_CAPACITY);
+    }
+    // And the decoded pool itself, against the same reference.
+    if (ok)
+    {
+        buster_x86_metadata_decode_tables();
+        u16 nul_distance = BUSTER_X86_METADATA_NUL_DISTANCE_NONE;
+        for (u64 index = BUSTER_X86_GENERATED_STRING_POOL_SIZE; ok && index; index -= 1)
+        {
+            u64 position = index - 1;
+            if (buster_x86_metadata_pool_bytes[position] == 0)
+            {
+                nul_distance = 0;
+            }
+            else if (nul_distance != BUSTER_X86_METADATA_NUL_DISTANCE_NONE)
+            {
+                nul_distance = nul_distance == BUSTER_X86_METADATA_NUL_DISTANCE_NONE - 1
+                                   ? BUSTER_X86_METADATA_NUL_DISTANCE_NONE
+                                   : (u16)(nul_distance + 1);
+            }
+            ok = buster_x86_metadata_pool_nul_distances[position] == nul_distance;
+        }
+    }
+    return ok;
+}
 
 bool buster_x86_metadata_test_flat_decode_matches_generated(void)
 {
@@ -833,7 +1015,21 @@ BUSTER_GLOBAL_LOCAL BusterX86GeneratedForm buster_x86_metadata_form_record(u32 i
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_record_valid(u32 index)
 {
     buster_x86_metadata_decode_tables();
-    return index < BUSTER_X86_GENERATED_FORM_COUNT && buster_x86_metadata_form_records_valid[index];
+    bool result = false;
+    if (index < BUSTER_X86_GENERATED_FORM_COUNT)
+    {
+        u8 cached = buster_x86_metadata_form_record_validity[index];
+        if (cached == BUSTER_X86_METADATA_RECORD_UNKNOWN)
+        {
+            BUSTER_CHECK_SERIAL_INITIALIZATION();
+            cached = buster_x86_metadata_validate_form_record(&buster_x86_metadata_form_records[index], index, 0)
+                         ? (u8)BUSTER_X86_METADATA_RECORD_VALID
+                         : (u8)BUSTER_X86_METADATA_RECORD_INVALID;
+            buster_x86_metadata_form_record_validity[index] = cached;
+        }
+        result = cached == BUSTER_X86_METADATA_RECORD_VALID;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedOperand buster_x86_metadata_operand_record(u32 index)
@@ -853,7 +1049,21 @@ BUSTER_GLOBAL_LOCAL BusterX86GeneratedCoverage buster_x86_metadata_coverage_reco
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_coverage_record_valid(u32 index)
 {
     buster_x86_metadata_decode_tables();
-    return index < BUSTER_X86_GENERATED_COVERAGE_COUNT && buster_x86_metadata_coverage_records_valid[index];
+    bool result = false;
+    if (index < BUSTER_X86_GENERATED_COVERAGE_COUNT)
+    {
+        u8 cached = buster_x86_metadata_coverage_record_validity[index];
+        if (cached == BUSTER_X86_METADATA_RECORD_UNKNOWN)
+        {
+            BUSTER_CHECK_SERIAL_INITIALIZATION();
+            cached = buster_x86_metadata_validate_coverage_record(&buster_x86_metadata_coverage_records[index], index, 0)
+                         ? (u8)BUSTER_X86_METADATA_RECORD_VALID
+                         : (u8)BUSTER_X86_METADATA_RECORD_INVALID;
+            buster_x86_metadata_coverage_record_validity[index] = cached;
+        }
+        result = cached == BUSTER_X86_METADATA_RECORD_VALID;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL BusterX86GeneratedTextRange buster_x86_metadata_mnemonic_range(u32 index)
@@ -11392,7 +11602,12 @@ void buster_x86_metadata_prewarm_all_forms(void)
         for (u32 form_id = 0; form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
         {
             BusterX86MetadataForm form;
+            buster_x86_metadata_form_record_valid(form_id);
             buster_x86_metadata_normalized_form(form_id, &form);
+        }
+        for (u32 coverage_id = 0; coverage_id < BUSTER_X86_GENERATED_COVERAGE_COUNT; coverage_id += 1)
+        {
+            buster_x86_metadata_coverage_record_valid(coverage_id);
         }
         buster_x86_metadata_all_forms_prepared = true;
     }

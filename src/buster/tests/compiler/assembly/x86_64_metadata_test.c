@@ -3139,6 +3139,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     // The flat decode is what every other assertion here reads through, so
     // it is checked against the generated accessors first.
     BUSTER_TEST(arguments, buster_x86_metadata_test_flat_decode_matches_generated());
+    BUSTER_TEST(arguments, buster_x86_metadata_test_nul_distances_match_reference());
 
 #if BUSTER_CPU_ARCH_X86_64
     // SHA is a first-class canonical ISA set, with both register and memory

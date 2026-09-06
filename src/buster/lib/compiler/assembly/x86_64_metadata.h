@@ -1295,4 +1295,5 @@ u32 buster_x86_metadata_test_exact_plan_count(void);
 // generated per-byte accessors, through both the vector and the scalar
 // base64 kernel.
 bool buster_x86_metadata_test_flat_decode_matches_generated(void);
+bool buster_x86_metadata_test_nul_distances_match_reference(void);
 #endif
