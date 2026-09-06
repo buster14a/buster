@@ -1,0 +1,37 @@
+name: Integration candidate source
+on:
+  push:
+    branches: [work/2026-09-06-integration-gates]
+    paths: [.github/workflows/integration-recovery-source.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export authenticated candidate history
+        shell: bash
+        run: |
+          set -euo pipefail
+          git branch candidate-main d0ecad0ddd6ecc676e20fda5694d33176880a90b
+          git branch candidate-169 bb9a5d74288e6ada1d23492004974de7f75f5110
+          git branch candidate-170 120da7753d6419a54618abbc4c827e1123a863cc
+          git branch candidate-180 c640feaf5d5de15ba5f6192c7cc8c90c45340b89
+          git branch candidate-work HEAD
+          git bundle create "$RUNNER_TEMP/candidates.bundle" candidate-main candidate-169 candidate-170 candidate-180 candidate-work
+          git show-ref --heads > "$RUNNER_TEMP/candidates-refs.txt"
+          sha256sum "$RUNNER_TEMP/candidates.bundle"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: current-integration-candidates
+          path: |
+            ${{ runner.temp }}/candidates.bundle
+            ${{ runner.temp }}/candidates-refs.txt
+          retention-days: 3
+          if-no-files-found: error
