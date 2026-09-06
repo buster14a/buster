@@ -1,0 +1,185 @@
+name: Apply PR 94 Windows ARM64 varargs boundary fix
+
+on:
+  push:
+    branches:
+      - claude/unruffled-bhabha-f5d28a
+    paths:
+      - .github/workflows/apply-pr94-va-boundary-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: claude/unruffled-bhabha-f5d28a
+          fetch-depth: 0
+
+      - name: Replace the broad decoder with a boundary-only fix
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("src/buster/lib/string.c")
+          text = path.read_text()
+
+          top_pattern = re.compile(
+              r"#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && BUSTER_COMPILER_CLANG\n"
+              r"// Clang's Windows ARM64 va_arg treats the homed register area and\n"
+              r".*?"
+              r"#endif\n"
+              r"(?=BUSTER_GLOBAL_LOCAL bool code_unit_is_binary)",
+              re.S,
+          )
+          top_replacement = r'''#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && BUSTER_COMPILER_CLANG
+          // A Windows ARM64 va_list is a pointer into the homed x-register area
+          // followed by the caller's stack arguments. Clang advances that pointer
+          // linearly, but the ABI moves a multi-slot argument wholly to the stack
+          // when it cannot fit in the remaining x registers. Preserve Clang's
+          // native va_arg lowering for every load; only move the list pointer over
+          // the unused tail of the register area at that discontinuity.
+          BUSTER_CT_CHECK(sizeof(va_list) == sizeof(void*));
+
+          BUSTER_GLOBAL_LOCAL void string_format_va_prepare(va_list* variable_arguments, u32* gp_register_slots_remaining, u64 size,
+                                                            u64 alignment)
+          {
+              BUSTER_CHECK(*gp_register_slots_remaining <= STRING_FORMAT_VA_GP_REGISTER_COUNT);
+              BUSTER_CHECK(size != 0 && size <= 2 * sizeof(u64));
+              BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(alignment) && alignment <= 2 * sizeof(u64));
+
+              if (alignment < sizeof(u64))
+              {
+                  alignment = sizeof(u64);
+              }
+
+              u64 slot_count = (size + sizeof(u64) - 1) / sizeof(u64);
+              u8* pointer = (u8*)*variable_arguments;
+              u8* aligned_pointer = (u8*)align_forward((u64)pointer, alignment);
+              u64 alignment_slots = (u64)(aligned_pointer - pointer) / sizeof(u64);
+              u32 available_slots = *gp_register_slots_remaining > alignment_slots
+                                        ? *gp_register_slots_remaining - (u32)alignment_slots
+                                        : 0;
+
+              if (slot_count > available_slots && available_slots)
+              {
+                  // The caller left these registers unused and placed the complete
+                  // value on the stack. Point native va_arg at that stack value.
+                  pointer = aligned_pointer + (u64)available_slots * sizeof(u64);
+                  pointer = (u8*)align_forward((u64)pointer, alignment);
+                  *variable_arguments = (char8*)pointer;
+                  *gp_register_slots_remaining = 0;
+              }
+              else if (*gp_register_slots_remaining)
+              {
+                  u64 consumed_slots = alignment_slots + slot_count;
+                  *gp_register_slots_remaining = consumed_slots <= *gp_register_slots_remaining
+                                                     ? *gp_register_slots_remaining - (u32)consumed_slots
+                                                     : 0;
+              }
+          }
+          #endif
+          '''
+          text, count = top_pattern.subn(top_replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f"expected one broad reader block, replaced {count}")
+
+          old_entry = '''String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments, u32 gp_register_slots_remaining)
+          {
+          #if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && BUSTER_COMPILER_CLANG
+              StringFormatVaReader variable_argument_reader = {
+                  .pointer = (u8*)variable_arguments,
+                  .gp_register_slots_remaining = gp_register_slots_remaining,
+              };
+          #define STRING_FORMAT_VA_READ(type, name)                                                                                                            \\
+              type name;                                                                                                                                       \\
+              string_format_va_reader_read(&variable_argument_reader, &(name), sizeof(name), BUSTER_ALIGN_OF(type))
+          #else
+              BUSTER_UNUSED(gp_register_slots_remaining);
+          #define STRING_FORMAT_VA_READ(type, name) type name = va_arg(variable_arguments, type)
+          #endif
+          '''
+          new_entry = '''String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments, u32 gp_register_slots_remaining)
+          {
+          #if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && BUSTER_COMPILER_CLANG
+          #define STRING_FORMAT_VA_READ(type, name)                                                                                                            \\
+              string_format_va_prepare(&variable_arguments, &gp_register_slots_remaining, sizeof(type), BUSTER_ALIGN_OF(type));                                \\
+              type name = va_arg(variable_arguments, type)
+          #else
+              BUSTER_UNUSED(gp_register_slots_remaining);
+          #define STRING_FORMAT_VA_READ(type, name) type name = va_arg(variable_arguments, type)
+          #endif
+          '''
+          if text.count(old_entry) != 1:
+              raise SystemExit(f"formatter entry anchor count is {text.count(old_entry)}")
+          text = text.replace(old_entry, new_entry, 1)
+
+          forbidden = ("StringFormatVaReader", "string_format_va_reader_read", "variable_argument_reader")
+          for token in forbidden:
+              if token in text:
+                  raise SystemExit(f"broad decoder token remains: {token}")
+          path.write_text(text)
+          PY
+
+      - name: Validate native and cross-target compilation
+        shell: bash
+        run: |
+          mkdir -p /tmp/pr94-va-fix build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o /tmp/pr94-va-fix/build
+          /tmp/pr94-va-fix/build time_trace_summary_self_test
+          /tmp/pr94-va-fix/build test_timing_summary_self_test
+          cat >/tmp/pr94-va-fix/arm64-va.c <<'EOF'
+          typedef unsigned long long u64;
+          typedef unsigned int u32;
+          typedef unsigned char u8;
+          typedef char* va_list_windows_arm64;
+          typedef struct Pair { void* pointer; u64 length; } Pair;
+          static void prepare(va_list_windows_arm64* arguments, u32* remaining, u64 size, u64 alignment)
+          {
+              if (alignment < sizeof(u64)) alignment = sizeof(u64);
+              u64 slots = (size + sizeof(u64) - 1) / sizeof(u64);
+              u8* pointer = (u8*)*arguments;
+              u8* aligned = (u8*)(((u64)pointer + alignment - 1) & ~(alignment - 1));
+              u64 padding = (u64)(aligned - pointer) / sizeof(u64);
+              u32 available = *remaining > padding ? *remaining - (u32)padding : 0;
+              if (slots > available && available)
+              {
+                  pointer = aligned + (u64)available * sizeof(u64);
+                  pointer = (u8*)(((u64)pointer + alignment - 1) & ~(alignment - 1));
+                  *arguments = (char*)pointer;
+                  *remaining = 0;
+              }
+              else if (*remaining)
+              {
+                  u64 consumed = padding + slots;
+                  *remaining = consumed <= *remaining ? *remaining - (u32)consumed : 0;
+              }
+          }
+          __declspec(noinline) u64 read_boundary(void* a0, void* a1, void* a2, void* a3, void* a4, void* a5, void* a6, ...)
+          {
+              __builtin_va_list arguments;
+              __builtin_va_start(arguments, a6);
+              u32 remaining = 1;
+              prepare(&arguments, &remaining, sizeof(Pair), __alignof(Pair));
+              Pair value = __builtin_va_arg(arguments, Pair);
+              __builtin_va_end(arguments);
+              return value.length;
+          }
+          EOF
+          clang -target aarch64-pc-windows-msvc -O2 -Wall -Werror -S /tmp/pr94-va-fix/arm64-va.c -o /tmp/pr94-va-fix/arm64-va.s
+          grep -q 'read_boundary' /tmp/pr94-va-fix/arm64-va.s
+
+      - name: Commit the repair and remove this one-shot workflow
+        shell: bash
+        run: |
+          git config user.name David
+          git config user.email davidgmbb@gmail.com
+          git rm .github/workflows/apply-pr94-va-boundary-fix.yml
+          git add src/buster/lib/string.c
+          git commit -m "fix: preserve native Windows ARM64 va_arg decoding"
+          git push origin HEAD:claude/unruffled-bhabha-f5d28a
