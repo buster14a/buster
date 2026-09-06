@@ -42,7 +42,7 @@ curl --fail --silent --show-error --location --retry 5 --retry-delay 2 --retry-a
   --output "$archive" "$release_base/$asset"
 
 tar -tzf "$archive" > "$listing"
-version_name=$(awk -F/ '/^vulkan-sdk-[^/]+\// { print $1; exit }' "$listing")
+version_name=$(awk -F/ '$1 ~ /^vulkan-sdk-/ { print $1; exit }' "$listing")
 if [[ -z "$version_name" ]]; then
   echo "Could not determine the SDK version directory in $archive" >&2
   exit 1

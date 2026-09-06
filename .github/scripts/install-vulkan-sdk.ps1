@@ -28,7 +28,8 @@ if ($null -eq $versionDir) { throw "Could not find the SDK version directory und
 $sdkRoot = $versionDir.FullName
 $sdkDir = Join-Path $sdkRoot "windows-$sdkArch"
 $setup = Join-Path $sdkRoot 'setup-env.ps1'
-if (-not (Test-Path -LiteralPath $setup) -or -not (Test-Path -LiteralPath (Join-Path $sdkDir 'includeulkanulkan.h'))) {
+$header = Join-Path (Join-Path (Join-Path $sdkDir 'include') 'vulkan') 'vulkan.h'
+if (-not (Test-Path -LiteralPath $setup) -or -not (Test-Path -LiteralPath $header)) {
     throw "SDK installation is incomplete under $sdkRoot"
 }
 
