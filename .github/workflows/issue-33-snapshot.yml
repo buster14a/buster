@@ -1,0 +1,29 @@
+name: Issue 33 snapshot
+
+on:
+  push:
+    branches:
+      - compiler/issue-33-canonical-local-promotion
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Pack source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --exclude=.git --exclude=.github/workflows/issue-33-snapshot.yml -czf "$RUNNER_TEMP/buster-source.tar.gz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-33-source
+          path: ${{ runner.temp }}/buster-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
