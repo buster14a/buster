@@ -23,50 +23,33 @@ void arena_allocation_overflow(void)
     os_fail_message(S8("arena allocation size overflowed"));
 }
 
-void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
+// Arenas created with count > 1 share one reservation, so committing past
+// reserved_size would land on the next arena's pages and corrupt it silently;
+// fail loudly instead. Callers never check for null, so allocation must not
+// return one.
+//
+// Bounding the operand in the inline bump is what makes that bound hold for
+// every `size` rather than only for the ones that happen not to wrap: with
+// `size` and `position` both under ARENA_MAX_RESERVATION (the second enforced
+// in arena_create), the sum cannot carry past 2^64, so the comparison against
+// `reserved_size` is exact instead of bypassable by a large enough `size`.
+// The remaining-space form `size <= reserved_size - aligned_offset` needs one
+// compare fewer, but only if reservations are alignment-granular, and they are
+// not — the rendering boundary tests reserve 256 bytes on purpose. Rounding up
+// to the commit granularity lives here, in the branch that needs it, which
+// pays for the operand bound: the bump never loads `granularity` at all.
+void arena_allocate_commit(Arena* arena, u64 aligned_size_after)
 {
-    // Arenas created with count > 1 share one reservation, so committing past
-    // reserved_size would land on the next arena's pages and corrupt it
-    // silently; fail loudly instead. Callers never check for null, so this
-    // must not return one.
-    //
-    // Bounding the operand is what makes that bound hold for every `size`
-    // rather than only for the ones that happen not to wrap: with `size` and
-    // `position` both under ARENA_MAX_RESERVATION (the second enforced in
-    // arena_create), the sum cannot carry past 2^64, so the comparison against
-    // `reserved_size` is exact instead of bypassable by a large enough `size`.
-    // The remaining-space form `size <= reserved_size - aligned_offset` needs
-    // one compare fewer, but only if reservations are alignment-granular, and
-    // they are not — the rendering boundary tests reserve 256 bytes on
-    // purpose. Rounding up to the commit granularity moved into the branch
-    // that needs it, which pays for the operand bound: the fast path no longer
-    // loads `granularity` at all.
-    BUSTER_CHECK(size <= ARENA_MAX_RESERVATION);
-    u64 aligned_offset = align_forward(arena->position, alignment);
-    u64 aligned_size_after = aligned_offset + size;
-    BUSTER_CHECK(aligned_size_after <= arena->reserved_size);
-
-    u8* arena_byte_pointer = (u8*)arena;
     u64 os_position = arena->os_position;
+    u64 target_committed_size = align_forward(aligned_size_after, arena->granularity);
+    BUSTER_CHECK(target_committed_size <= arena->reserved_size);
+    u64 size_to_commit = target_committed_size - os_position;
+    u8* commit_pointer = (u8*)arena + os_position;
 
-    if (BUSTER_UNLIKELY(aligned_size_after > os_position))
+    if (os_commit(commit_pointer, size_to_commit, (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena->flags.lock_pages))
     {
-        u64 target_committed_size = align_forward(aligned_size_after, arena->granularity);
-        BUSTER_CHECK(target_committed_size <= arena->reserved_size);
-        u64 size_to_commit = target_committed_size - os_position;
-        u8* commit_pointer = arena_byte_pointer + os_position;
-
-        if (os_commit(commit_pointer, size_to_commit, (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena->flags.lock_pages))
-        {
-            arena->os_position = arena_os_position_after_commit(target_committed_size, arena->reserved_size);
-        }
+        arena->os_position = arena_os_position_after_commit(target_committed_size, arena->reserved_size);
     }
-
-    u8* result = arena_byte_pointer + aligned_offset;
-    arena->position = aligned_size_after;
-    BUSTER_CHECK(arena->position <= arena->os_position);
-
-    return result;
 }
 
 u8* arena_get_byte_pointer_at_position(Arena* arena, u64 position)
