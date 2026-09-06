@@ -8454,7 +8454,14 @@ enum
 
 // Returns the local text-section symbol it adds, which the unwind records
 // share when they need one, or UINT32_MAX when there was no DWARF to append.
-BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult built)
+// `name_index` is the module writer's own symbol-name index, still live and
+// still exact: the symbols this function appends are added to it in symbol
+// order, which is the order a fresh build would have inserted them in, so a
+// lookup lands on the same slot with the same first-defined/first-undefined
+// resolution. Building a second table here cost a 2 MB zero fill and a
+// byte-serial FNV hash of every symbol name in the module to answer the
+// 13.790 named relocations a self-host stage brings.
+BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult built, ObjectSymbolNameIndex name_index)
 {
     if (!built.valid)
     {
@@ -8470,6 +8477,7 @@ BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult buil
         .section = OBJECT_SECTION_TEXT,
         .kind = OBJECT_SYMBOL_FUNCTION,
     };
+    object_symbol_name_index_add(name_index, object->symbols + text_symbol, text_symbol);
     u32 debug_symbols[DWARF_SECTION_COUNT];
     for (u32 kind = 0; kind < DWARF_SECTION_COUNT; kind += 1)
     {
@@ -8480,9 +8488,8 @@ BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult buil
             .section = (u32)section_kind,
             .kind = OBJECT_SYMBOL_DATA,
         };
+        object_symbol_name_index_add(name_index, object->symbols + debug_symbols[kind], debug_symbols[kind]);
     }
-    TemporalArena name_temporary = scratch_begin(0, 0);
-    ObjectSymbolNameIndex name_index = object_symbol_name_index_build(name_temporary.arena, object->symbols, object->symbol_count, object->symbol_count);
     for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
     {
         DwarfRelocation relocation = built.relocations[relocation_index];
@@ -8503,7 +8510,6 @@ BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult buil
             .kind = relocation.address ? OBJECT_RELOCATION_ABSOLUTE64 : OBJECT_RELOCATION_ABSOLUTE32,
         };
     }
-    scratch_end(name_temporary);
     return text_symbol;
 }
 
@@ -9613,8 +9619,18 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             entry_by_symbol[symbol_value] = entry_index;
         }
     }
-    ObjectSymbolNameIndex name_index = object_symbol_name_index_build(name_temporary.arena, result.symbols, result.symbol_count,
-                                                                      (u64)result.symbol_count + module->relocation_count);
+    // Every add after the build comes from one of three places: the
+    // relocation loop below, which appends at most one symbol per distinct
+    // name it resolves and so at most one per program symbol plus the
+    // substituted `__tls_get_addr`; and the .text and per-section symbols
+    // object_append_dwarf appends. Bounding it by the relocation count
+    // instead -- a self-host stage has 100 k relocations against 18 k
+    // symbols -- sized the table at 262.144 slots and paid an 8 MB zero fill
+    // to hold 18 k names.
+    u64 name_index_capacity =
+        (u64)result.symbol_count + program->symbols.count + 1 + (dwarf.valid ? (u64)OBJECT_DWARF_EXTRA_SYMBOLS : 0);
+    ObjectSymbolNameIndex name_index =
+        object_symbol_name_index_build(name_temporary.arena, result.symbols, result.symbol_count, name_index_capacity);
     for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
     {
         CodegenModuleRelocation source = module->relocations[relocation_index];
@@ -9720,10 +9736,9 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         result.initializer_priorities[slot][initializer_offsets[slot] / OBJECT_INITIALIZER_ENTRY_SIZE] = initializer.priority;
         initializer_offsets[slot] += OBJECT_INITIALIZER_ENTRY_SIZE;
     }
-    scratch_end(name_temporary);
     if (result.error == OBJECT_ERROR_NONE)
     {
-        u32 dwarf_text_symbol = object_append_dwarf(&result, dwarf);
+        u32 dwarf_text_symbol = object_append_dwarf(&result, dwarf, name_index);
         object_append_codeview(&result, codeview);
         // One local symbol over the text section, added only for the code
         // model that needs it and only when the debug sections did not
@@ -9746,15 +9761,17 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         if (cfi.valid && !object_append_dwarf_cfi(&result, cfi, cfi_text_symbol))
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
-            return result;
         }
-        if (windows_unwind.valid && !object_append_windows_unwind(arena, &result, windows_unwind))
+        else if (windows_unwind.valid && !object_append_windows_unwind(arena, &result, windows_unwind))
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
-            return result;
         }
-        object_debug_module_set(arena, &result, program->sources.count ? program->sources.sources[0].path : S8("buster.obj"), module->code.length);
+        else
+        {
+            object_debug_module_set(arena, &result, program->sources.count ? program->sources.sources[0].path : S8("buster.obj"), module->code.length);
+        }
     }
+    scratch_end(name_temporary);
 
     return result;
 }
