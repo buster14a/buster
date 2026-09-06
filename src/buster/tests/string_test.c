@@ -122,6 +122,25 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
 
     // string8_format
     {
+        // A two-slot aggregate must move wholly to the stack when
+        // only x7 remains; it cannot be split across the boundary.
+        {
+            String8 formatted = string_format(arena, S8("{S8}{S8}{S8}"), S8("a"), S8("b"), S8("c"));
+            BUSTER_STRING_TEST(arguments, formatted, S8("abc"));
+        }
+        {
+            String8 formatted =
+                string_format(arena, S8("{u64}{u64}{u64}{u64}{S8}"), (u64)1, (u64)2, (u64)3, (u64)4, S8("x"));
+            BUSTER_STRING_TEST(arguments, formatted, S8("1234x"));
+        }
+        // After arguments spill, u128 still starts at a 16-byte
+        // stack boundary even when one u64 immediately precedes it.
+        {
+            u128 seven = string_test_u128(7, 0);
+            String8 formatted = string_format(arena, S8("{u64}{u64}{u64}{u64}{u64}{u64}{u128}"), (u64)1, (u64)2,
+                                              (u64)3, (u64)4, (u64)5, (u64)6, seven);
+            BUSTER_STRING_TEST(arguments, formatted, S8("1234567"));
+        }
         {
             String8 formatted = string_format(arena, S8("{{ {S8} }}"), S8("value"));
             BUSTER_STRING_TEST(arguments, formatted, S8("{ value }"));

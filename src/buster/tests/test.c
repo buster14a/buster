@@ -377,7 +377,7 @@ BUSTER_GLOBAL_LOCAL void test_parallel_show(UnitTestArguments* arguments, String
     }
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    String8 text = string_format_va(parallel_arguments->output_arena, format, variable_arguments);
+    String8 text = string_format_va(parallel_arguments->output_arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(3));
     va_end(variable_arguments);
     BUSTER_UNUSED(text);
 }
@@ -455,7 +455,7 @@ void buster_test_error(u32 line, String8 function, String8 file_path, String8 fo
     TemporalArena scratch = scratch_begin(0, 0);
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    String8 message = string_format_va(scratch.arena, format, variable_arguments);
+    String8 message = string_format_va(scratch.arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(7));
     va_end(variable_arguments);
 
     string_print(S8("{S8} failed at {S8}:{S8}:{u32}\n"), message, file_path, function, line);
@@ -472,7 +472,7 @@ void buster_test_error_arguments(UnitTestArguments* arguments, u32 line, String8
     TemporalArena scratch = scratch_begin(0, 0);
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    String8 message = string_format_va(scratch.arena, format, variable_arguments);
+    String8 message = string_format_va(scratch.arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(8));
     va_end(variable_arguments);
 
     arguments->show(arguments, S8("{S8} failed at {S8}:{S8}:{u32}\n"), message, file_path, function, line);
@@ -665,7 +665,7 @@ void default_show(UnitTestArguments* arguments, String8 format, ...)
     TemporalArena scratch = scratch_begin(0, 0);
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    String8 string = string_format_va(scratch.arena, format, variable_arguments);
+    String8 string = string_format_va(scratch.arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(3));
     va_end(variable_arguments);
 
     if (string.length)

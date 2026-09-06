@@ -44,17 +44,6 @@ void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
     BUSTER_CHECK(size <= ARENA_MAX_RESERVATION);
     u64 aligned_offset = align_forward(arena->position, alignment);
     u64 aligned_size_after = aligned_offset + size;
-#if defined(BUSTER_ARENA_CAPACITY_DIAGNOSTICS) && BUSTER_ARENA_CAPACITY_DIAGNOSTICS
-    if (BUSTER_UNLIKELY(aligned_size_after > arena->reserved_size))
-    {
-        fprintf(stderr,
-                "ARENA_CAPACITY position=%llu aligned_offset=%llu size=%llu alignment=%llu aligned_after=%llu reserved=%llu os_position=%llu dirty_position=%llu\n",
-                (unsigned long long)arena->position, (unsigned long long)aligned_offset, (unsigned long long)size,
-                (unsigned long long)alignment, (unsigned long long)aligned_size_after, (unsigned long long)arena->reserved_size,
-                (unsigned long long)arena->os_position, (unsigned long long)arena->dirty_position);
-        fflush(stderr);
-    }
-#endif
     BUSTER_CHECK(aligned_size_after <= arena->reserved_size);
 
     u8* arena_byte_pointer = (u8*)arena;
