@@ -1,0 +1,75 @@
+name: Run final PR 94 Windows ARM64 varargs repair
+
+on:
+  push:
+    branches:
+      - claude/unruffled-bhabha-f5d28a
+    paths:
+      - .github/workflows/run-pr94-varargs-repair-v4.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: claude/unruffled-bhabha-f5d28a
+          fetch-depth: 0
+
+      - name: Execute audited production patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path('.github/workflows/run-pr94-varargs-repair-v3.yml').read_text()
+          start_marker = "          python - <<'PY'\n"
+          end_marker = "\n          PY\n\n      - name: Validate repaired build driver"
+          start = workflow.find(start_marker)
+          end = workflow.find(end_marker, start + len(start_marker))
+          if start < 0 or end < 0:
+              raise SystemExit('could not extract audited repair script')
+          script = textwrap.dedent(workflow[start + len(start_marker):end])
+
+          old = '''test_file.write_text(test_text)
+
+          # Make omissions obvious before committing.'''
+          new = '''test_file.write_text(test_text)
+
+          # default_show has one pointer plus the two-slot format String8.
+          default_pattern = r"(void default_show\\([^)]*\\)\\n\\{.*?String8 string = )string_format_va\\(scratch\\.arena, format, variable_arguments\\);"
+          default_replacement = lambda match: match.group(1) + "string_format_va(scratch.arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(3));"
+          test_text = test_file.read_text()
+          test_text, count = re.subn(default_pattern, default_replacement, test_text, count=1, flags=re.S)
+          if count != 1:
+              raise SystemExit("src/buster/tests/test.c: failed to patch default_show")
+          test_file.write_text(test_text)
+
+          # Make omissions obvious before committing.'''
+          if script.count(old) != 1:
+              raise SystemExit('default_show insertion anchor not found')
+          script = script.replace(old, new, 1)
+          exec(compile(script, '<pr94-varargs-repair-v3>', 'exec'), {'__name__': '__main__'})
+          PY
+
+      - name: Validate repaired build driver
+        shell: bash
+        run: |
+          mkdir -p /tmp/buster-pr94
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o /tmp/buster-pr94/build
+          /tmp/buster-pr94/build time_trace_summary_self_test
+          /tmp/buster-pr94/build test_timing_summary_self_test
+
+      - name: Commit repair and remove staging workflows
+        shell: bash
+        run: |
+          git config user.name David
+          git config user.email davidgmbb@gmail.com
+          git rm .github/workflows/apply-pr94-windows-arm64-varargs.yml .github/workflows/run-pr94-varargs-repair-v3.yml .github/workflows/run-pr94-varargs-repair-v4.yml
+          git add build.c src/buster/lib/arena.c src/buster/lib/string.h src/buster/lib/string.c src/buster/lib/os.c src/buster/lib/ui_core.c src/buster/tests/test.c src/buster/tests/string_test.c
+          git commit -m "fix: decode Windows ARM64 formatter varargs by ABI slots"
+          git push origin HEAD:claude/unruffled-bhabha-f5d28a
