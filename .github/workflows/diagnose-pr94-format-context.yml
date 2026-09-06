@@ -1,0 +1,106 @@
+name: Diagnose PR 94 formatter context
+
+on:
+  push:
+    branches:
+      - claude/unruffled-bhabha-f5d28a
+    paths:
+      - .github/workflows/diagnose-pr94-format-context.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: claude/unruffled-bhabha-f5d28a
+          fetch-depth: 0
+      - name: Add formatter context diagnostics
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("src/buster/lib/string.c")
+          text = source.read_text()
+
+          include_anchor = "#include <buster/lib/integer.h>\n\n"
+          include_replacement = "\n".join([
+              "#include <buster/lib/integer.h>",
+              "",
+              "#if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)",
+              "BUSTER_GLOBAL_LOCAL String8 string_format_diagnostic_format;",
+              "BUSTER_GLOBAL_LOCAL String8 string_format_diagnostic_body;",
+              "#endif",
+              "",
+          ])
+          if include_anchor not in text:
+              raise SystemExit("string.c include anchor not found")
+          text = text.replace(include_anchor, include_replacement, 1)
+
+          function_anchor = """String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments)
+{
+    u64 original_position = arena->position;
+"""
+          function_replacement = "\n".join([
+              "String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments)",
+              "{",
+              "#if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)",
+              "    string_format_diagnostic_format = format;",
+              "    string_format_diagnostic_body = (String8){0};",
+              "#endif",
+              "    u64 original_position = arena->position;",
+              "",
+          ])
+          if function_anchor not in text:
+              raise SystemExit("string_format_va anchor not found")
+          text = text.replace(function_anchor, function_replacement, 1)
+
+          body_anchor = "            String8 format_body = string_slice(format, format_index + 1, right_brace_index);\n\n"
+          body_replacement = "\n".join([
+              "            String8 format_body = string_slice(format, format_index + 1, right_brace_index);",
+              "#if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)",
+              "            string_format_diagnostic_body = format_body;",
+              "#endif",
+              "",
+          ])
+          if body_anchor not in text:
+              raise SystemExit("format body anchor not found")
+          text = text.replace(body_anchor, body_replacement, 1)
+
+          append_anchor = """    char8* destination = arena_allocate(arena, char8, string.length);
+    memcpy(destination, string.pointer, sizeof(char8) * string.length);
+"""
+          append_replacement = "\n".join([
+              "#if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)",
+              "    if (BUSTER_UNLIKELY(string.length > ARENA_MAX_RESERVATION))",
+              "    {",
+              "        fprintf(stderr,",
+              "                \"STRING_APPEND_BAD_LENGTH format=%.*s body=%.*s pointer=%p length=%llu\\n\",",
+              "                (int)string_format_diagnostic_format.length, string_format_diagnostic_format.pointer,",
+              "                (int)string_format_diagnostic_body.length, string_format_diagnostic_body.pointer, (void*)string.pointer,",
+              "                (unsigned long long)string.length);",
+              "        fflush(stderr);",
+              "    }",
+              "#endif",
+              "    char8* destination = arena_allocate(arena, char8, string.length);",
+              "    memcpy(destination, string.pointer, sizeof(char8) * string.length);",
+              "",
+          ])
+          if append_anchor not in text:
+              raise SystemExit("arena_append_string anchor not found")
+          text = text.replace(append_anchor, append_replacement, 1)
+          source.write_text(text)
+          PY
+      - name: Commit diagnostics and remove this workflow
+        shell: bash
+        run: |
+          git config user.name David
+          git config user.email davidgmbb@gmail.com
+          git rm .github/workflows/diagnose-pr94-format-context.yml
+          git add src/buster/lib/string.c
+          git commit -m "ci: report formatter context for malformed strings"
+          git push origin HEAD:claude/unruffled-bhabha-f5d28a
