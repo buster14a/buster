@@ -15,6 +15,9 @@
 // probe into the ninety-six-byte descriptor table.
 #define MACHINE_FAST_OPERAND_CALL_ROW (1u << 25)
 #define MACHINE_FAST_OPERAND_LANE_MASK 0x0fu
+// Contract-held, contract-dirty, out-held and out-dirty: the four per-block
+// register-file masks, allocated and cleared as one block.
+#define MACHINE_FAST_BLOCK_MASK_COUNT 4u
 
 BUSTER_GLOBAL_LOCAL u32 machine_fast_operand_mask(u32 operand_masks, u32 shift)
 {
@@ -413,7 +416,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
     {
         u32 contract_register = machine_fast_first_set(remaining);
         u32 contract_value = contract_owner[contract_register];
-        if (owner[contract_register] == contract_value)
+        if (machine_fast_lane_held(*held, contract_register) && owner[contract_register] == contract_value)
         {
             continue;
         }
@@ -432,7 +435,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
         {
             u32 contract_register = machine_fast_first_set(remaining);
             u32 value = contract_owner[contract_register];
-            u32 resident = owner[contract_register];
+            u32 resident = machine_fast_lane_held(*held, contract_register) ? owner[contract_register] : UINT32_MAX;
             if (resident != UINT32_MAX && resident != value && machine_fast_lane_held(*dirty, contract_register))
             {
                 // The occupant blocks the claim only while it is another
@@ -532,7 +535,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
     {
         u32 contract_register = machine_fast_first_set(remaining);
         u32 value = contract_owner[contract_register];
-        if (owner[contract_register] == value)
+        if (machine_fast_lane_held(*held, contract_register) && owner[contract_register] == value)
         {
             machine_fast_conform_append(state, stream, point, MACHINE_EDIT_SPILL, value, contract_register);
             state->placement->spill_count += 1;
@@ -588,7 +591,12 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
     u32* mapped_owner = arena_allocate(state->arena, u32, register_count);
     u64 mapped_held = *held;
     u64 mapped_dirty = *dirty;
-    memcpy(mapped_owner, owner, sizeof(u32) * register_count);
+    memset(mapped_owner, 0xff, sizeof(u32) * register_count);
+    for (u64 remaining = mapped_held; remaining; remaining &= remaining - 1u)
+    {
+        u32 physical_register = machine_fast_first_set(remaining);
+        mapped_owner[physical_register] = owner[physical_register];
+    }
     u32* mapped_locations = 0;
     if (locations)
     {
@@ -1379,24 +1387,22 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // walks read masks and the owner rows are touched only on the held
         // lanes. The mask arrays are also the whole of the per-function
         // commit that still has to be cleared.
+        // The masks are the whole of the per-function commit that has to be
+        // cleared. The owner rows carry no sentinel and are never filled: a
+        // row is readable only where its block's held mask says so, which is
+        // 2,75 lanes of sixteen at a block's exit and 0,60 in its contract, so
+        // the fill was writing sixteen megabytes of a stage-1 compile that
+        // nothing reads. Four masks per block in one allocation is one clear.
         u32 register_count = state.active_register_count;
         u32 mask_count = function->block_count ? function->block_count : 1u;
         u32* contract_owner = arena_allocate(arena, u32, (u64)function->block_count * register_count);
-        u64* contract_held = arena_allocate(arena, u64, mask_count);
-        u64* contract_dirty = arena_allocate(arena, u64, mask_count);
         u32* out_owner = arena_allocate(arena, u32, (u64)function->block_count * register_count);
-        u64* out_held = arena_allocate(arena, u64, mask_count);
-        u64* out_dirty = arena_allocate(arena, u64, mask_count);
-        u64 entry_count = (u64)function->block_count * register_count;
-        if (entry_count)
-        {
-            memset(contract_owner, 0xff, entry_count * sizeof(*contract_owner));
-            memset(out_owner, 0xff, entry_count * sizeof(*out_owner));
-        }
-        memset(contract_held, 0, (u64)mask_count * sizeof(*contract_held));
-        memset(contract_dirty, 0, (u64)mask_count * sizeof(*contract_dirty));
-        memset(out_held, 0, (u64)mask_count * sizeof(*out_held));
-        memset(out_dirty, 0, (u64)mask_count * sizeof(*out_dirty));
+        u64* block_masks = arena_allocate(arena, u64, (u64)mask_count * MACHINE_FAST_BLOCK_MASK_COUNT);
+        u64* contract_held = block_masks;
+        u64* contract_dirty = block_masks + mask_count;
+        u64* out_held = block_masks + (u64)mask_count * 2u;
+        u64* out_dirty = block_masks + (u64)mask_count * 3u;
+        memset(block_masks, 0, (u64)mask_count * MACHINE_FAST_BLOCK_MASK_COUNT * sizeof(*block_masks));
         MachineBuilderStream retro_edits;
         machine_stream_initialize(&retro_edits, sizeof(MachineEdit));
         for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
@@ -2117,9 +2123,20 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     }
                     // A return keeps its dirty values: the frame dies with it
                     // and there is no successor to see the slots.
-                    memcpy(out_owner + (u64)block_index * register_count, state.owner, sizeof(*state.owner) * register_count);
-                    out_held[block_index] = machine_fast_occupied(&state);
-                    out_dirty[block_index] = state.dirty_mask;
+                    u64 recorded = machine_fast_occupied(&state);
+                    u32* recorded_owner = out_owner + (u64)block_index * register_count;
+                    for (u64 remaining = recorded; remaining; remaining &= remaining - 1u)
+                    {
+                        u32 physical_register = machine_fast_first_set(remaining);
+                        recorded_owner[physical_register] = state.owner[physical_register];
+                    }
+                    out_held[block_index] = recorded;
+                    // Clamped to the recorded lanes, which is what the
+                    // byte-array snapshot copied when it ran to the active
+                    // count: a fixed-register owner past that count — the
+                    // float bridge in an all-scalar function — must not put a
+                    // dirty bit on a lane the snapshot never recorded.
+                    out_dirty[block_index] = state.dirty_mask & recorded;
                 }
             }
         }
