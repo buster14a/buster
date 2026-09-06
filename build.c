@@ -21813,6 +21813,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
 
     for (BuildCompiler compiler = !BUSTER_WINDOWS; compiler < BUILD_COMPILER_COUNT; compiler += 1)
     {
+        // The Windows ARM64 image exposes x86-64 MinGW as `gcc`, while Zig
+        // 0.16's native ARM64 frontend currently crashes before producing an
+        // object. Neither row tests this target. Keep the two genuine native
+        // toolchains: MSVC and standalone LLVM Clang.
+        if (BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && compiler > BUILD_COMPILER_CLANG)
+        {
+            continue;
+        }
         bool is_clang = compiler == BUILD_COMPILER_CLANG;
         // LLVM's Windows ARM64 distribution does not ship the libFuzzer or
         // sanitizer runtimes. Keep the native Clang Release test row and all
