@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 5d4cd562ad97235a5841f95195b07fcd2ce4698a
+          ref: 57bffcfe01a490f2467e74e3eafbb0d2c6014918
           fetch-depth: 0
           persist-credentials: false
       - name: Construct and identify the exact cumulative candidate
@@ -32,16 +32,16 @@ jobs:
           git config user.email 'noreply@localhost'
           git config core.autocrlf false
           base=017b0381ed75d859043b60a92f2ec2e9f5872980
-          expected=1efd670b08fd0bb9f626a4bc45a82263b8cdec4f
+          expected=9f5573090a9f78966f2856fb47e0d527e5e6e687
           if [[ "$PREFIX" != fortify ]]; then
             git fetch origin 120da7753d6419a54618abbc4c827e1123a863cc
             while IFS= read -r commit; do git cherry-pick "$commit"; done < <(git rev-list --reverse "$base..120da7753d6419a54618abbc4c827e1123a863cc")
-            expected=f4d7398b30df714c6cdbccc439de0097a862a0a9
+            expected=ffd278ca36b3f72dcff781d173a322ed8a0f5cfa
           fi
           if [[ "$PREFIX" == fortify-wasm-ebpf ]]; then
             git fetch origin bb9a5d74288e6ada1d23492004974de7f75f5110
             while IFS= read -r commit; do git cherry-pick "$commit"; done < <(git rev-list --reverse "$base..bb9a5d74288e6ada1d23492004974de7f75f5110")
-            expected=e33d14bce33b7be1226e2bec8c66d1d904b153d0
+            expected=0e52609352ac8ef8515c3fc6c941555e7bd55d1f
           fi
           test "$(git rev-parse HEAD^{tree})" = "$expected"
           printf 'tree=%s\n' "$expected" | tee "$RUNNER_TEMP/final-identity.log"
