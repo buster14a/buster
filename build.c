@@ -21811,8 +21811,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     for (BuildCompiler compiler = !BUSTER_WINDOWS; compiler < BUILD_COMPILER_COUNT; compiler += 1)
     {
         bool is_clang = compiler == BUILD_COMPILER_CLANG;
-        bool fuzz_supported = is_clang && !BUSTER_APPLE;
-        bool support_sanitize = is_clang;
+        // LLVM's Windows ARM64 distribution does not ship the libFuzzer or
+        // sanitizer runtimes. Keep the native Clang Release test row and all
+        // compiler portability rows, but do not generate impossible trees.
+        bool fuzz_supported = is_clang && !BUSTER_APPLE && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64);
+        bool support_sanitize = is_clang && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64);
 
         for (u32 sanitize = 0; sanitize < 1 + support_sanitize; sanitize += 1)
         {

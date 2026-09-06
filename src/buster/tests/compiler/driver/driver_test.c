@@ -2341,7 +2341,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(pic_model_temporary);
         }
     }
-#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_MACOS
     {
         // Keep one real external-compiler fixture in the driver suite.  The
         // non-PIC form exercises clang's R_X86_64_32S; the -fPIC form is the
@@ -7105,7 +7105,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(va_arg_temporary);
     }
-#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_MACOS
     // The single translation unit above cannot see an ABI disagreement: a
     // caller and a callee this compiler produced agree with each other
     // whatever they agree on.  Pair the halves with the host compiler in both
@@ -7234,7 +7234,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(complex_temporary);
     }
-#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_MACOS
     // The COMPLEX_X87 result: System V x86-64 hands a `long double _Complex`
     // back on the x87 stack, ST(0) real over ST(1) imaginary, where the
     // identically laid out `struct { long double a, b; }` is returned in
@@ -7737,7 +7737,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(packed_temporary);
     }
-#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_MACOS
     // The single translation unit above cannot see a layout divergence: a
     // program that ignores both attributes agrees with itself.  Pair the
     // halves with the host compiler in both directions, which is the only
