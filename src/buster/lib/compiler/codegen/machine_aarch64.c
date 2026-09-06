@@ -5212,16 +5212,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 IrInstruction* instruction = function->instructions + id.value;
                 typed_instruction_count += 1;
                 simd_operation_count += instruction->opcode == IR_OPCODE_SIMD;
-                IrSourceRange mark_source = ir_instruction_canonical_source(function, id);
-                if (mark_source.source.value != IR_ID_UNDERLYING_INVALID)
-                {
-                    MachineLineMark* mark = (MachineLineMark*)machine_stream_append(arena, &line_marks);
-                    *mark = (MachineLineMark){
-                        .row = selector.builder.instructions.total_count,
-                        .source = mark_source.source.value,
-                        .offset = mark_source.offset,
-                    };
-                }
+                MachineLineMark* mark = (MachineLineMark*)machine_stream_append(arena, &line_marks);
+                *mark = (MachineLineMark){.row = selector.builder.instructions.total_count, .instruction = id.value};
                 if (!machine_a64_select_instruction(&selector, instruction))
                 {
                     machine_a64_reject(&selector, instruction->opcode);

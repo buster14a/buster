@@ -1424,30 +1424,54 @@ void machine_stream_initialize(MachineBuilderStream* stream, u64 element_size)
     stream->reserved = 0;
 }
 
+BUSTER_GLOBAL_LOCAL MachineBuilderChunk* machine_stream_chunk_push(Arena* arena, MachineBuilderStream* stream)
+{
+    MachineBuilderChunk* chunk = (MachineBuilderChunk*)arena_allocate_bytes(
+        arena, sizeof(MachineBuilderChunk) + (u64)stream->chunk_capacity * stream->element_size, BUSTER_ALIGN_OF(MachineBuilderChunk));
+    chunk->next = 0;
+    chunk->count = 0;
+    chunk->reserved = 0;
+    if (stream->last)
+    {
+        stream->last->next = chunk;
+    }
+    else
+    {
+        stream->first = chunk;
+    }
+    stream->last = chunk;
+    return chunk;
+}
+
 void* machine_stream_append(Arena* arena, MachineBuilderStream* stream)
 {
     MachineBuilderChunk* chunk = stream->last;
     if (!chunk || chunk->count == stream->chunk_capacity)
     {
-        chunk = (MachineBuilderChunk*)arena_allocate_bytes(arena, sizeof(MachineBuilderChunk) + (u64)stream->chunk_capacity * stream->element_size,
-                                                           BUSTER_ALIGN_OF(MachineBuilderChunk));
-        chunk->next = 0;
-        chunk->count = 0;
-        chunk->reserved = 0;
-        if (stream->last)
-        {
-            stream->last->next = chunk;
-        }
-        else
-        {
-            stream->first = chunk;
-        }
-        stream->last = chunk;
+        chunk = machine_stream_chunk_push(arena, stream);
     }
     void* row = (u8*)(chunk + 1) + (u64)chunk->count * stream->element_size;
     chunk->count += 1;
     stream->total_count += 1;
     return row;
+}
+
+void* machine_stream_cursor_refill(Arena* arena, MachineBuilderStream* stream)
+{
+    // The cursor only reaches the end of a chunk by writing every row of it.
+    if (stream->last)
+    {
+        stream->last->count = stream->chunk_capacity;
+    }
+    return machine_stream_chunk_push(arena, stream) + 1;
+}
+
+void machine_stream_cursor_close(MachineBuilderStream* stream, void const* cursor)
+{
+    if (stream->last)
+    {
+        stream->last->count = (u32)(((u8 const*)cursor - (u8 const*)(stream->last + 1)) / stream->element_size);
+    }
 }
 
 void machine_stream_flatten(MachineBuilderStream* stream, void* destination)
@@ -1500,7 +1524,14 @@ MachineFunctionBuilder machine_function_builder_begin(Arena* arena)
 u32 machine_builder_virtual_register(MachineFunctionBuilder* builder, MachineVirtualRegister virtual_register)
 {
     u32 index = builder->virtual_registers.total_count;
-    MachineVirtualRegister* row = (MachineVirtualRegister*)machine_stream_append(builder->arena, &builder->virtual_registers);
+    MachineVirtualRegister* row = builder->virtual_register_cursor;
+    if (row == builder->virtual_register_end)
+    {
+        row = (MachineVirtualRegister*)machine_stream_cursor_refill(builder->arena, &builder->virtual_registers);
+        builder->virtual_register_end = row + builder->virtual_registers.chunk_capacity;
+    }
+    builder->virtual_register_cursor = row + 1;
+    builder->virtual_registers.total_count = index + 1;
     *row = virtual_register;
     return index;
 }
@@ -1518,23 +1549,14 @@ u32 machine_builder_instruction(MachineFunctionBuilder* builder, MachineInstruct
 {
     BUSTER_CHECK(builder->block_is_open);
     u32 index = builder->instructions.total_count;
-    if (index >= MACHINE_POINT_INSTRUCTION_LIMIT)
-    {
-        builder->point_capacity_exceeded = true;
-    }
     MachineInstruction* row = builder->instruction_cursor;
     if (row == builder->instruction_end)
     {
-        row = (MachineInstruction*)machine_stream_append(builder->arena, &builder->instructions);
-        builder->instruction_cursor = row + 1;
-        builder->instruction_end = (MachineInstruction*)(builder->instructions.last + 1) + builder->instructions.chunk_capacity;
+        row = (MachineInstruction*)machine_stream_cursor_refill(builder->arena, &builder->instructions);
+        builder->instruction_end = row + builder->instructions.chunk_capacity;
     }
-    else
-    {
-        builder->instruction_cursor = row + 1;
-        builder->instructions.last->count += 1;
-        builder->instructions.total_count += 1;
-    }
+    builder->instruction_cursor = row + 1;
+    builder->instructions.total_count = index + 1;
     *row = instruction;
     return index;
 }
@@ -1544,7 +1566,14 @@ void machine_builder_block_end(MachineFunctionBuilder* builder, MachineBlock blo
     BUSTER_CHECK(builder->block_is_open);
     block.first_instruction = builder->open_block_first_instruction;
     block.instruction_count = builder->instructions.total_count - builder->open_block_first_instruction;
-    MachineBlock* row = (MachineBlock*)machine_stream_append(builder->arena, &builder->blocks);
+    MachineBlock* row = builder->block_cursor;
+    if (row == builder->block_end)
+    {
+        row = (MachineBlock*)machine_stream_cursor_refill(builder->arena, &builder->blocks);
+        builder->block_end = row + builder->blocks.chunk_capacity;
+    }
+    builder->block_cursor = row + 1;
+    builder->blocks.total_count += 1;
     *row = block;
     builder->block_is_open = false;
     builder->open_block = UINT32_MAX;
@@ -1580,6 +1609,12 @@ MachineFunction machine_function_builder_finish(Arena* arena, MachineFunctionBui
     BUSTER_CHECK(builder->edges.total_count == 0 || builder->edges.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
     BUSTER_CHECK(builder->block_parameters.total_count == 0 || builder->block_parameters.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
     BUSTER_CHECK(builder->edge_copy_sources.total_count == 0 || builder->edge_copy_sources.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
+    machine_stream_cursor_close(&builder->instructions, builder->instruction_cursor);
+    machine_stream_cursor_close(&builder->virtual_registers, builder->virtual_register_cursor);
+    machine_stream_cursor_close(&builder->blocks, builder->block_cursor);
+    // A row index at or past the point limit existed exactly when the count
+    // passed it, so the flag is one compare here rather than one per row.
+    builder->point_capacity_exceeded = builder->instructions.total_count > MACHINE_POINT_INSTRUCTION_LIMIT;
     MachineFunction function = {
         .instructions = (MachineInstruction*)machine_stream_materialize(arena, builder->arena, &builder->instructions, BUSTER_ALIGN_OF(MachineInstruction)),
         .virtual_registers = (MachineVirtualRegister*)machine_stream_materialize(arena, builder->arena, &builder->virtual_registers,
@@ -2291,13 +2326,14 @@ bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* 
 #include <buster/lib/compiler/codegen/register_allocator_quality.c>
 
 BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_internal(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                                    bool assume_validated, bool position_independent)
+                                                                                    bool assume_validated, bool position_independent,
+                                                                                    MachineSelectionModule* module)
 {
     MachineSelectResult result;
 
     switch (target.cpu_arch)
     {
-        break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, position_independent, assume_validated);
+        break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, position_independent, assume_validated, module);
         break; case CPU_ARCH_AARCH64: result = machine_select_canonical_function_aarch64(arena, program, function, target, assume_validated);
         break; default: BUSTER_TODO();
     }
@@ -2307,13 +2343,27 @@ BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_intern
 
 MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
 {
-    return machine_select_canonical_function_internal(arena, program, function, target, false, false);
+    return machine_select_canonical_function_internal(arena, program, function, target, false, false, 0);
 }
 
 MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                bool position_independent)
+                                                                bool position_independent, MachineSelectionModule* module)
 {
-    return machine_select_canonical_function_internal(arena, program, function, target, true, position_independent);
+    return machine_select_canonical_function_internal(arena, program, function, target, true, position_independent, module);
+}
+
+MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* program, Target target)
+{
+    MachineSelectionModule* module = arena_allocate(arena, MachineSelectionModule, 1);
+    *module = (MachineSelectionModule){
+        .type_classes = machine_type_classes_build(arena, &program->types),
+        .type_count = program->types.count,
+    };
+    if (target.cpu_arch == CPU_ARCH_X86_64)
+    {
+        machine_x64_signature_plans_prepare(arena, program, module);
+    }
+    return module;
 }
 
 #if BUSTER_INCLUDE_TESTS
