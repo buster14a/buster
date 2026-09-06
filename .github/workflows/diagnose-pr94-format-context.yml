@@ -41,10 +41,12 @@ jobs:
               raise SystemExit("string.c include anchor not found")
           text = text.replace(include_anchor, include_replacement, 1)
 
-          function_anchor = """String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments)
-{
-    u64 original_position = arena->position;
-"""
+          function_anchor = "\n".join([
+              "String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments)",
+              "{",
+              "    u64 original_position = arena->position;",
+              "",
+          ])
           function_replacement = "\n".join([
               "String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments)",
               "{",
@@ -71,9 +73,11 @@ jobs:
               raise SystemExit("format body anchor not found")
           text = text.replace(body_anchor, body_replacement, 1)
 
-          append_anchor = """    char8* destination = arena_allocate(arena, char8, string.length);
-    memcpy(destination, string.pointer, sizeof(char8) * string.length);
-"""
+          append_anchor = "\n".join([
+              "    char8* destination = arena_allocate(arena, char8, string.length);",
+              "    memcpy(destination, string.pointer, sizeof(char8) * string.length);",
+              "",
+          ])
           append_replacement = "\n".join([
               "#if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)",
               "    if (BUSTER_UNLIKELY(string.length > ARENA_MAX_RESERVATION))",
