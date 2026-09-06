@@ -1142,6 +1142,39 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, file_read(arguments->arena, wasm64_output, (FileReadOptions){0}).length == wasm64_compile.wasm64.bytes.length);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(wasm64_target));
 
+    // Keep over-aligned C types in the ordinary driver suite. When Node is
+    // available, validate AND execute the emitted memory64 module; a header
+    // check alone cannot detect an illegal memory-argument alignment hint.
+    String8 wasm64_alignment_output = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-alignment"), S8(".wasm"));
+    String8 wasm64_alignment_command[] = {
+        S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), S8("-o"), wasm64_alignment_output,
+        S8("tests/basic_c_wasm64_alignment.c"),
+    };
+    CompilerDriverResult wasm64_alignment = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wasm64_alignment_command)));
+    BUSTER_TEST(arguments, wasm64_alignment.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, wasm64_alignment.has_wasm64 && wasm64_alignment.wasm64.stats.memory64);
+    if (wasm64_alignment.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+        if (node.length)
+        {
+            String8 node_arguments[] = {node, S8("--experimental-wasm-memory64"), S8("tests/wasm_memory_alignment_execution.js"), wasm64_alignment_output};
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
+                                                       (ProcessSpawnOptions){.use_process_environment = 1});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        else
+        {
+            arguments->show(arguments, S8("Wasm64 alignment engine execution skipped: Node is not installed\n"));
+        }
+    }
+
     String8 wasm64_assembly_command_line[] = {
         S8("-S"), S8("-target"), S8("wasm64-unknown-freestanding"), S8("tests/basic_c_wasm64.c"),
     };
