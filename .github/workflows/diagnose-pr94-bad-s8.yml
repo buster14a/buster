@@ -19,8 +19,9 @@ jobs:
           ref: claude/unruffled-bhabha-f5d28a
           fetch-depth: 0
       - name: Add active-format diagnostics
-        shell: python
+        shell: bash
         run: |
+          python - <<'PY'
           from pathlib import Path
 
           build = Path("build.c")
@@ -33,32 +34,38 @@ jobs:
 
           source = Path("src/buster/lib/string.c")
           text = source.read_text()
-          old = """            case FORMAT_TYPE_STRING8:
-            {
-                String8 string = va_arg(variable_arguments, String8);
-                arena_append_string(arena, string);
-            }
-"""
-          new = """            case FORMAT_TYPE_STRING8:
-            {
-                String8 string = va_arg(variable_arguments, String8);
-#if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)
-                if (BUSTER_UNLIKELY(string.length > ARENA_MAX_RESERVATION))
-                {
-                    fprintf(stderr,
-                            "STRING_FORMAT_BAD_S8 format=%.*s type=%.*s pointer=%p length=%llu format_index=%llu right_brace=%llu\\n",
-                            (int)format.length, format.pointer, (int)type_name.length, type_name.pointer, (void*)string.pointer,
-                            (unsigned long long)string.length, (unsigned long long)format_index, (unsigned long long)right_brace_index);
-                    fflush(stderr);
-                }
-#endif
-                arena_append_string(arena, string);
-            }
-"""
+          old_lines = [
+              "            case FORMAT_TYPE_STRING8:",
+              "            {",
+              "                String8 string = va_arg(variable_arguments, String8);",
+              "                arena_append_string(arena, string);",
+              "            }",
+          ]
+          new_lines = [
+              "            case FORMAT_TYPE_STRING8:",
+              "            {",
+              "                String8 string = va_arg(variable_arguments, String8);",
+              "#if defined(BUSTER_STRING_FORMAT_DIAGNOSTICS)",
+              "                if (BUSTER_UNLIKELY(string.length > ARENA_MAX_RESERVATION))",
+              "                {",
+              "                    fprintf(stderr,",
+              "                            \"STRING_FORMAT_BAD_S8 format=%.*s type=%.*s pointer=%p length=%llu format_index=%llu right_brace=%llu\\\\n\",",
+              "                            (int)format.length, format.pointer, (int)type_name.length, type_name.pointer, (void*)string.pointer,",
+              "                            (unsigned long long)string.length, (unsigned long long)format_index, (unsigned long long)right_brace_index);",
+              "                    fflush(stderr);",
+              "                }",
+              "#endif",
+              "                arena_append_string(arena, string);",
+              "            }",
+          ]
+          old = "\n".join(old_lines) + "\n"
+          new = "\n".join(new_lines) + "\n"
           if old not in text:
               raise SystemExit("string.c formatter anchor not found")
           source.write_text(text.replace(old, new, 1))
+          PY
       - name: Commit diagnostics and remove this workflow
+        shell: bash
         run: |
           git config user.name David
           git config user.email davidgmbb@gmail.com
