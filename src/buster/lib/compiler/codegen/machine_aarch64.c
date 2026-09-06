@@ -516,6 +516,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_operand_register(MachineA64Selector* select
 
 BUSTER_GLOBAL_LOCAL u32 machine_a64_select_row(MachineA64Selector* selector, MachineInstruction instruction)
 {
+    machine_builder_classify_instruction_mutability(&selector->builder, &instruction);
     return machine_builder_instruction(&selector->builder, instruction);
 }
 
@@ -4577,6 +4578,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                             machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
                                                                                     .definition_point = MACHINE_POINT_INVALID,
                                                                                     .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                                    .flags = MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE,
                                                                                     .typed_origin = instruction->result.value,
                                                                                 });
                         continue;
@@ -5302,6 +5304,11 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         for (u32 register_index = 0; register_index < selector.virtual_register_count; register_index += 1)
         {
             result.function.virtual_registers[register_index].definition_point = selector.virtual_register_definitions[register_index];
+        }
+        result.mutable_virtual_register_count = machine_function_compact_virtual_registers(arena, &result.function);
+        if (result.mutable_virtual_register_count == UINT32_MAX)
+        {
+            return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }
         result.supported = true;
         result.selector_certified = true;
