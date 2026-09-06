@@ -1614,6 +1614,12 @@ function(executable_add name is_buster_program main_file)
         target_compile_options(${name} PRIVATE -fsanitize=fuzzer-no-link)
         target_link_options(${name} PRIVATE -fsanitize=fuzzer-no-link)
         target_link_libraries(${name} PRIVATE "${BUSTER_FUZZ_NO_MAIN_RUNTIME}")
+        if (UNIX AND NOT APPLE)
+            # The no-main libFuzzer runtime is C++, but Buster executables use
+            # the C linker driver. Supply the runtime's standard library after
+            # its archive instead of relying on a C++ driver to add it.
+            target_link_libraries(${name} PRIVATE stdc++)
+        endif()
     endif()
 
     if (${BUSTER_TIME_TRACE})

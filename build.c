@@ -21731,12 +21731,19 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_generate_add(Arena* arena, BuildStep*
 
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
+    // The synthetic diagnostic fixtures intentionally exceed 100 MiB. Rewind
+    // each fixture before starting the matrix so the long-lived build-driver
+    // arena is not charged for test data for the rest of the invocation.
+    TemporalArena time_trace_self_test_memory = arena_begin_temporal(arena);
     ProcessResult time_trace_self_test_result = time_trace_summary_self_test(arena);
+    scratch_end(time_trace_self_test_memory);
     if (time_trace_self_test_result != PROCESS_RESULT_SUCCESS)
     {
         return time_trace_self_test_result;
     }
+    TemporalArena test_timing_self_test_memory = arena_begin_temporal(arena);
     ProcessResult test_timing_self_test_result = test_timing_summary_self_test(arena);
+    scratch_end(test_timing_self_test_memory);
     if (test_timing_self_test_result != PROCESS_RESULT_SUCCESS)
     {
         return test_timing_self_test_result;
