@@ -2412,7 +2412,6 @@ BUSTER_GLOBAL_LOCAL void machine_fast_picker_test_state_reset(MachineFastState* 
     {
         state->owner[register_index] = UINT32_MAX;
         state->age[register_index] = register_index;
-        state->dirty[register_index] = false;
         locations[register_index] = UINT32_MAX;
         last_use[register_index] = UINT32_MAX;
         escapes[register_index] = 0;
@@ -2427,6 +2426,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_picker_test_occupy(MachineFastState* state
         if (mask & (1ull << register_index))
         {
             state->owner[register_index] = register_index;
+            state->held_mask |= 1ull << register_index;
             state->virtual_register_locations[register_index] = register_index;
         }
     }
