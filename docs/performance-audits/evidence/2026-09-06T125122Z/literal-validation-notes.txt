@@ -1,0 +1,22 @@
+Experimental three-site reuse of decoded compound-literal strings
+Base: a8454d842687419ff5023755fc0dd20243119088
+No PMU performance acceptance: instructions:u unavailable on this host.
+Unlanded; no commit, integration, or push.
+
+Release clang build: passed through ./build.sh generate --linker LLD then ./build.sh build --config Release -t ide.
+Frozen stage1: three alternating pairs, identical inputs and output path, -lm, -g, -v and metrics; every cmp identical.
+Frozen stage1 output: 36191896 bytes; SHA256 46f528d4ff55351847bdbbc20629bd40d9caede3e133373491759c62cb69dabb.
+Expanded existing tests/basic_c_string_concat.c fixture: pristine Buster, candidate Buster and Clang reference all exit 0.
+Clang fixture reference flags: -std=gnu23 -Wall -Wextra -Werror -Wno-unterminated-string-initialization; the last warning is intentionally suppressed for standard-permitted exact-size array omission of the final NUL.
+Release ide test --verbose=1 --ci=1: 322433/322433 unit assertions, 39/39 modules.
+./build.sh test_self_host --config Release: passed, deterministic bytes=36191960.
+Debug non-unity clang build: passed with CMAKE_BUILD_PARALLEL_LEVEL=2; compile_commands.json confirms -DBUSTER_UNITY_BUILD=0 for c_gen.c.
+Debug ide test --verbose=1 --ci=1: rerun completed 322433/322433 unit assertions, 39/39 modules, exit 0. The first invocation exited 0 but its log stopped in the driver module with no summary, so that invocation is recorded as incomplete and not counted as a gate pass.
+Separate census: instrumented compiler built through ./build.sh, saved as ide-census; source restored byte-identically to the clean candidate afterwards. Worktree build/Release/ide restored from saved clean ide-candidate.
+Site0: c_ir_lower_nested_compound_literal_step, braced array subobject.
+Site1: c_ir_lower_compound_literal_step, whole braced array.
+Site2: c_ir_lower_compound_literal_step, bare array member/element.
+Frozen stage1 census: site0=0, site1=0, site2=0 hits; all decoded-byte/fragment/wide-hit counts are zero. Instrumented output cmp matches pristine frozen baseline.
+Focused fixture census: each site hits=4, decoded_bytes=20, fragments=8, wide_hits=2; run exits0 and output cmp matches pristine fixture binary.
+Conclusion: correctness-gated but stage1-cold experiment. No stage1 performance benefit can be attributed to removing these duplicate decodes. Do not land as a stage1 speedup. Hardware instruction performance acceptance is additionally unavailable.
+Patch: literal-reuse-experimental.patch; includes only three substitutions and expanded existing driver-covered fixture. No memo, no conversion of count-only callers, no source return refactoring, no census instrumentation included.

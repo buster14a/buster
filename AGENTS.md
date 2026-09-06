@@ -139,8 +139,8 @@ expanded equivalent is:
 
 ```sh
 ./build.sh build --config Release -t ide
-build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -fsource-metrics=build/ide-self.metrics src/buster/apps/ide/ide.c -o build/ide-self
-build/ide-self cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -fsource-metrics=build/ide-self-stage2.metrics src/buster/apps/ide/ide.c -o build/ide-self-stage2
+build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -fsource-metrics=build/ide-self.metrics src/buster/apps/ide/ide.c -lm -o build/ide-self
+build/ide-self cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -fsource-metrics=build/ide-self-stage2.metrics src/buster/apps/ide/ide.c -lm -o build/ide-self-stage2
 cmp build/ide-self build/ide-self-stage2
 build/ide-self-stage2 bench
 ```
@@ -2732,8 +2732,12 @@ on a commit you already know is incomplete tells nobody anything.
   `c_prewarm`, `codegen_prewarm`, `font_provider_prewarm`,
   `buster_x86_metadata_prewarm`, and `compiler_prewarm` for the compile
   pipeline as a whole. **Call the prewarm
-  before `lane_run`** — x86 metadata separately, since no part of the compile
-  path queries it and its prewarm costs a full table decode. A new lazily
+  before `lane_run`**. The x86 compile path does query metadata:
+  `codegen_prewarm_for_target` prepares the decode and exact-machine caches,
+  but leaves individual metadata forms lazy for serial compilation. A gang
+  querying those forms must call `buster_x86_metadata_prewarm_all_forms()`
+  serially first. Global prewarm alone does not freeze module-local lazy
+  state such as `MachineSelectionModule.x64_signature_plans`. A new lazily
   built global adds both the check and a line in its module's prewarm.
   Publish the flag *after* the state, never before: the x86 metadata decode
   needs two flags for this, one guarding re-entry from the validation it runs

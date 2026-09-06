@@ -1,0 +1,189 @@
+Validation excerpts; full captured log SHA-256 and byte size accompany each excerpt.
+
+scratch-root/baseline-release-tests.log
+log_bytes=155983 sha256=f72f9e1b54d75ee230421f69c614f8e9ed01b9630e52996797fd7b4f5472c0e4
+TEST_MODULE_TIMING index=0 module=arena_tests duration_ns=54181 passed=39 failed=0 assertions=39 status=pass
+TEST_MODULE_TIMING index=1 module=hash_tests duration_ns=1022 passed=5 failed=0 assertions=5 status=pass
+TEST_MODULE_TIMING index=2 module=simd_tests duration_ns=30036 passed=141 failed=0 assertions=141 status=pass
+TEST_MODULE_TIMING index=3 module=string_tests duration_ns=4260947 passed=3872 failed=0 assertions=3872 status=pass
+TEST_MODULE_TIMING index=4 module=os_tests duration_ns=226430691 passed=101 failed=0 assertions=101 status=pass
+TEST_MODULE_TIMING index=5 module=file_tests duration_ns=130896 passed=14 failed=0 assertions=14 status=pass
+TEST_MODULE_TIMING index=6 module=target_tests duration_ns=1980648 passed=6442 failed=0 assertions=6442 status=pass
+TEST_MODULE_TIMING index=7 module=c_frontend_tests duration_ns=626937679 passed=21374 failed=0 assertions=21374 status=pass
+TEST_MODULE_TIMING index=8 module=aarch64_encoding_tests duration_ns=523987478 passed=236593 failed=0 assertions=236593 status=pass
+TEST_MODULE_TIMING index=9 module=aarch64_exact_bridge_tests duration_ns=13440 passed=102 failed=0 assertions=102 status=pass
+TEST_MODULE_TIMING index=10 module=aarch64_control_semantics_tests duration_ns=85478 passed=3377 failed=0 assertions=3377 status=pass
+TEST_MODULE_TIMING index=11 module=aarch64_system_registers_tests duration_ns=926583 passed=108 failed=0 assertions=108 status=pass
+TEST_MODULE_TIMING index=12 module=aarch64_semantics_tests duration_ns=7369489 passed=215 failed=0 assertions=215 status=pass
+TEST_MODULE_TIMING index=13 module=aarch64_system_semantics_tests duration_ns=6201273 passed=694 failed=0 assertions=694 status=pass
+TEST_MODULE_TIMING index=14 module=aarch64_syntax_tests duration_ns=87352005 passed=112 failed=0 assertions=112 status=pass
+TEST_MODULE_TIMING index=15 module=aarch64_semantic_vm_tests duration_ns=47361414 passed=90 failed=0 assertions=90 status=pass
+TEST_MODULE_TIMING index=16 module=aarch64_direct_simd_tests duration_ns=70855194 passed=152 failed=0 assertions=152 status=pass
+TEST_MODULE_TIMING index=17 module=aarch64_complex_simd_tests duration_ns=121020767 passed=32 failed=0 assertions=32 status=pass
+TEST_MODULE_TIMING index=18 module=aarch64_memory_semantics_tests duration_ns=478952975 passed=18 failed=0 assertions=18 status=pass
+TEST_MODULE_TIMING index=19 module=aarch64_alias_projection_tests duration_ns=119910 passed=28 failed=0 assertions=28 status=pass
+TEST_MODULE_TIMING index=20 module=assembly_tests duration_ns=94360611 passed=5800 failed=0 assertions=5800 status=pass
+TEST_MODULE_TIMING index=21 module=x86_64_metadata_tests duration_ns=356229703 passed=878 failed=0 assertions=878 status=pass
+TEST_MODULE_TIMING index=22 module=x86_64_completion_census_tests duration_ns=779947898 passed=34043 failed=0 assertions=34043 status=pass
+TEST_MODULE_TIMING index=23 module=ir_tests duration_ns=269425 passed=116 failed=0 assertions=116 status=pass
+TEST_MODULE_TIMING index=24 module=llvm_bitcode_tests duration_ns=34462 passed=19 failed=0 assertions=19 status=pass
+TEST_MODULE_TIMING index=25 module=machine_selection_tests duration_ns=324698 passed=121 failed=0 assertions=121 status=pass
+TEST_MODULE_TIMING index=26 module=machine_tests duration_ns=1762548488 passed=2292 failed=0 assertions=2292 status=pass
+TEST_MODULE_TIMING index=27 module=codegen_tests duration_ns=10920027 passed=343 failed=0 assertions=343 status=pass
+TEST_MODULE_TIMING index=28 module=aarch64_stride_tests duration_ns=946593 passed=98 failed=0 assertions=98 status=pass
+TEST_MODULE_TIMING index=29 module=debug_model_tests duration_ns=4016 passed=25 failed=0 assertions=25 status=pass
+TEST_MODULE_TIMING index=30 module=dwarf_tests duration_ns=64747 passed=84 failed=0 assertions=84 status=pass
+TEST_MODULE_TIMING index=31 module=codeview_tests duration_ns=6399 passed=49 failed=0 assertions=49 status=pass
+TEST_MODULE_TIMING index=32 module=pdb_tests duration_ns=176014 passed=49 failed=0 assertions=49 status=pass
+TEST_MODULE_TIMING index=33 module=object_tests duration_ns=449796 passed=636 failed=0 assertions=636 status=pass
+TEST_MODULE_TIMING index=34 module=jit_tests duration_ns=131378 passed=149 failed=0 assertions=149 status=pass
+TEST_MODULE_TIMING index=35 module=link_tests duration_ns=30709608 passed=638 failed=0 assertions=638 status=pass
+TEST_MODULE_TIMING index=36 module=gpu_pipeline_tests duration_ns=84967 passed=124 failed=0 assertions=124 status=pass
+TEST_MODULE_TIMING index=37 module=compiler_driver_tests duration_ns=1388535668 passed=3442 failed=0 assertions=3442 status=pass
+TEST_MODULE_TIMING index=38 module=x86_64_tests duration_ns=104818 passed=18 failed=0 assertions=18 status=pass
+[322433/322433] Unit tests
+[39/39] Module tests
+[0/0] External tests
+
+scratch-root/baseline-debug-tests.log
+log_bytes=158135 sha256=f1279c46dd929f23cb5d651be05d262bf512c3061220e524bd901621b0994821
+TEST_MODULE_TIMING index=0 module=arena_tests duration_ns=50196 passed=39 failed=0 assertions=39 status=pass
+TEST_MODULE_TIMING index=1 module=hash_tests duration_ns=861 passed=5 failed=0 assertions=5 status=pass
+TEST_MODULE_TIMING index=2 module=simd_tests duration_ns=15373 passed=141 failed=0 assertions=141 status=pass
+TEST_MODULE_TIMING index=3 module=string_tests duration_ns=5569230 passed=3872 failed=0 assertions=3872 status=pass
+TEST_MODULE_TIMING index=4 module=os_tests duration_ns=234457413 passed=101 failed=0 assertions=101 status=pass
+TEST_MODULE_TIMING index=5 module=file_tests duration_ns=199079 passed=14 failed=0 assertions=14 status=pass
+TEST_MODULE_TIMING index=6 module=target_tests duration_ns=5524042 passed=6442 failed=0 assertions=6442 status=pass
+TEST_MODULE_TIMING index=7 module=c_frontend_tests duration_ns=2584723778 passed=21374 failed=0 assertions=21374 status=pass
+TEST_MODULE_TIMING index=8 module=aarch64_encoding_tests duration_ns=2736563873 passed=236593 failed=0 assertions=236593 status=pass
+TEST_MODULE_TIMING index=9 module=aarch64_exact_bridge_tests duration_ns=31437 passed=102 failed=0 assertions=102 status=pass
+TEST_MODULE_TIMING index=10 module=aarch64_control_semantics_tests duration_ns=444439 passed=3377 failed=0 assertions=3377 status=pass
+TEST_MODULE_TIMING index=11 module=aarch64_system_registers_tests duration_ns=2857917 passed=108 failed=0 assertions=108 status=pass
+TEST_MODULE_TIMING index=12 module=aarch64_semantics_tests duration_ns=29831753 passed=215 failed=0 assertions=215 status=pass
+TEST_MODULE_TIMING index=13 module=aarch64_system_semantics_tests duration_ns=29381095 passed=694 failed=0 assertions=694 status=pass
+TEST_MODULE_TIMING index=14 module=aarch64_syntax_tests duration_ns=359737608 passed=112 failed=0 assertions=112 status=pass
+TEST_MODULE_TIMING index=15 module=aarch64_semantic_vm_tests duration_ns=199439875 passed=90 failed=0 assertions=90 status=pass
+TEST_MODULE_TIMING index=16 module=aarch64_direct_simd_tests duration_ns=304053645 passed=152 failed=0 assertions=152 status=pass
+TEST_MODULE_TIMING index=17 module=aarch64_complex_simd_tests duration_ns=392892497 passed=32 failed=0 assertions=32 status=pass
+TEST_MODULE_TIMING index=18 module=aarch64_memory_semantics_tests duration_ns=2070184497 passed=18 failed=0 assertions=18 status=pass
+TEST_MODULE_TIMING index=19 module=aarch64_alias_projection_tests duration_ns=733582 passed=28 failed=0 assertions=28 status=pass
+TEST_MODULE_TIMING index=20 module=assembly_tests duration_ns=373214927 passed=5800 failed=0 assertions=5800 status=pass
+TEST_MODULE_TIMING index=21 module=x86_64_metadata_tests duration_ns=919713823 passed=878 failed=0 assertions=878 status=pass
+TEST_MODULE_TIMING index=22 module=x86_64_completion_census_tests duration_ns=3180052053 passed=34043 failed=0 assertions=34043 status=pass
+TEST_MODULE_TIMING index=23 module=ir_tests duration_ns=581865 passed=116 failed=0 assertions=116 status=pass
+TEST_MODULE_TIMING index=24 module=llvm_bitcode_tests duration_ns=71297 passed=19 failed=0 assertions=19 status=pass
+TEST_MODULE_TIMING index=25 module=machine_selection_tests duration_ns=801865 passed=121 failed=0 assertions=121 status=pass
+TEST_MODULE_TIMING index=26 module=machine_tests duration_ns=1995980239 passed=2292 failed=0 assertions=2292 status=pass
+TEST_MODULE_TIMING index=27 module=codegen_tests duration_ns=33446236 passed=343 failed=0 assertions=343 status=pass
+TEST_MODULE_TIMING index=28 module=aarch64_stride_tests duration_ns=2455251 passed=98 failed=0 assertions=98 status=pass
+TEST_MODULE_TIMING index=29 module=debug_model_tests duration_ns=6009 passed=25 failed=0 assertions=25 status=pass
+TEST_MODULE_TIMING index=30 module=dwarf_tests duration_ns=86390 passed=84 failed=0 assertions=84 status=pass
+TEST_MODULE_TIMING index=31 module=codeview_tests duration_ns=8773 passed=49 failed=0 assertions=49 status=pass
+TEST_MODULE_TIMING index=32 module=pdb_tests duration_ns=303626 passed=49 failed=0 assertions=49 status=pass
+TEST_MODULE_TIMING index=33 module=object_tests duration_ns=897540 passed=636 failed=0 assertions=636 status=pass
+TEST_MODULE_TIMING index=34 module=jit_tests duration_ns=200892 passed=149 failed=0 assertions=149 status=pass
+TEST_MODULE_TIMING index=35 module=link_tests duration_ns=63919531 passed=638 failed=0 assertions=638 status=pass
+TEST_MODULE_TIMING index=36 module=gpu_pipeline_tests duration_ns=105769 passed=124 failed=0 assertions=124 status=pass
+TEST_MODULE_TIMING index=37 module=compiler_driver_tests duration_ns=2969084354 passed=3442 failed=0 assertions=3442 status=pass
+TEST_MODULE_TIMING index=38 module=x86_64_tests duration_ns=342885 passed=18 failed=0 assertions=18 status=pass
+[322433/322433] Unit tests
+[39/39] Module tests
+[0/0] External tests
+
+scratch-root/baseline-self-host.log
+log_bytes=12963 sha256=8fb421bdf1d71703fb1fcc7ed81b472fb8b9115dcb524acd34090b5e4b1a7289
+SELF_HOST deterministic bytes=36191896 stage1=build/self-host/Release/ide-stage1 stage2=build/self-host/Release/ide-stage2
+
+scratch-literals/candidate-release-tests.log
+log_bytes=154950 sha256=803e5e0cdba2a8b2ebaf2516a83befc1a9f6c5ef9d70725b1555d9e0e6b41ff4
+TEST_MODULE_TIMING index=0 module=arena_tests duration_ns=57026 passed=39 failed=0 assertions=39 status=pass
+TEST_MODULE_TIMING index=1 module=hash_tests duration_ns=80221 passed=5 failed=0 assertions=5 status=pass
+TEST_MODULE_TIMING index=2 module=simd_tests duration_ns=9104 passed=141 failed=0 assertions=141 status=pass
+TEST_MODULE_TIMING index=3 module=string_tests duration_ns=4507367 passed=3872 failed=0 assertions=3872 status=pass
+TEST_MODULE_TIMING index=4 module=os_tests duration_ns=226089681 passed=101 failed=0 assertions=101 status=pass
+TEST_MODULE_TIMING index=5 module=file_tests duration_ns=230096 passed=14 failed=0 assertions=14 status=pass
+TEST_MODULE_TIMING index=6 module=target_tests duration_ns=2429352 passed=6442 failed=0 assertions=6442 status=pass
+TEST_MODULE_TIMING index=7 module=c_frontend_tests duration_ns=608638444 passed=21374 failed=0 assertions=21374 status=pass
+TEST_MODULE_TIMING index=8 module=aarch64_encoding_tests duration_ns=521601043 passed=236593 failed=0 assertions=236593 status=pass
+TEST_MODULE_TIMING index=9 module=aarch64_exact_bridge_tests duration_ns=30266 passed=102 failed=0 assertions=102 status=pass
+TEST_MODULE_TIMING index=10 module=aarch64_control_semantics_tests duration_ns=86169 passed=3377 failed=0 assertions=3377 status=pass
+TEST_MODULE_TIMING index=11 module=aarch64_system_registers_tests duration_ns=1554358 passed=108 failed=0 assertions=108 status=pass
+TEST_MODULE_TIMING index=12 module=aarch64_semantics_tests duration_ns=7490342 passed=215 failed=0 assertions=215 status=pass
+TEST_MODULE_TIMING index=13 module=aarch64_system_semantics_tests duration_ns=6381084 passed=694 failed=0 assertions=694 status=pass
+TEST_MODULE_TIMING index=14 module=aarch64_syntax_tests duration_ns=89460403 passed=112 failed=0 assertions=112 status=pass
+TEST_MODULE_TIMING index=15 module=aarch64_semantic_vm_tests duration_ns=42464460 passed=90 failed=0 assertions=90 status=pass
+TEST_MODULE_TIMING index=16 module=aarch64_direct_simd_tests duration_ns=70198301 passed=152 failed=0 assertions=152 status=pass
+TEST_MODULE_TIMING index=17 module=aarch64_complex_simd_tests duration_ns=91771378 passed=32 failed=0 assertions=32 status=pass
+TEST_MODULE_TIMING index=18 module=aarch64_memory_semantics_tests duration_ns=481289069 passed=18 failed=0 assertions=18 status=pass
+TEST_MODULE_TIMING index=19 module=aarch64_alias_projection_tests duration_ns=144437 passed=28 failed=0 assertions=28 status=pass
+TEST_MODULE_TIMING index=20 module=assembly_tests duration_ns=102610385 passed=5800 failed=0 assertions=5800 status=pass
+TEST_MODULE_TIMING index=21 module=x86_64_metadata_tests duration_ns=365806048 passed=878 failed=0 assertions=878 status=pass
+TEST_MODULE_TIMING index=22 module=x86_64_completion_census_tests duration_ns=781105476 passed=34043 failed=0 assertions=34043 status=pass
+TEST_MODULE_TIMING index=23 module=ir_tests duration_ns=299069 passed=116 failed=0 assertions=116 status=pass
+TEST_MODULE_TIMING index=24 module=llvm_bitcode_tests duration_ns=43155 passed=19 failed=0 assertions=19 status=pass
+TEST_MODULE_TIMING index=25 module=machine_selection_tests duration_ns=300442 passed=121 failed=0 assertions=121 status=pass
+TEST_MODULE_TIMING index=26 module=machine_tests duration_ns=1622140724 passed=2292 failed=0 assertions=2292 status=pass
+TEST_MODULE_TIMING index=27 module=codegen_tests duration_ns=14810569 passed=343 failed=0 assertions=343 status=pass
+TEST_MODULE_TIMING index=28 module=aarch64_stride_tests duration_ns=998912 passed=98 failed=0 assertions=98 status=pass
+TEST_MODULE_TIMING index=29 module=debug_model_tests duration_ns=4327 passed=25 failed=0 assertions=25 status=pass
+TEST_MODULE_TIMING index=30 module=dwarf_tests duration_ns=33210 passed=84 failed=0 assertions=84 status=pass
+TEST_MODULE_TIMING index=31 module=codeview_tests duration_ns=6310 passed=49 failed=0 assertions=49 status=pass
+TEST_MODULE_TIMING index=32 module=pdb_tests duration_ns=180742 passed=49 failed=0 assertions=49 status=pass
+TEST_MODULE_TIMING index=33 module=object_tests duration_ns=454022 passed=636 failed=0 assertions=636 status=pass
+TEST_MODULE_TIMING index=34 module=jit_tests duration_ns=126891 passed=149 failed=0 assertions=149 status=pass
+TEST_MODULE_TIMING index=35 module=link_tests duration_ns=30498378 passed=638 failed=0 assertions=638 status=pass
+TEST_MODULE_TIMING index=36 module=gpu_pipeline_tests duration_ns=45389 passed=124 failed=0 assertions=124 status=pass
+TEST_MODULE_TIMING index=37 module=compiler_driver_tests duration_ns=1304174994 passed=3442 failed=0 assertions=3442 status=pass
+TEST_MODULE_TIMING index=38 module=x86_64_tests duration_ns=104137 passed=18 failed=0 assertions=18 status=pass
+[322433/322433] Unit tests
+[39/39] Module tests
+[0/0] External tests
+
+scratch-literals/candidate-debug-tests-repeat.log
+log_bytes=155009 sha256=d0bb90fd671e83e18c89223692efe77111b74967c53eb783dd163104861009d9
+TEST_MODULE_TIMING index=0 module=arena_tests duration_ns=44627 passed=39 failed=0 assertions=39 status=pass
+TEST_MODULE_TIMING index=1 module=hash_tests duration_ns=831 passed=5 failed=0 assertions=5 status=pass
+TEST_MODULE_TIMING index=2 module=simd_tests duration_ns=15673 passed=141 failed=0 assertions=141 status=pass
+TEST_MODULE_TIMING index=3 module=string_tests duration_ns=5971205 passed=3872 failed=0 assertions=3872 status=pass
+TEST_MODULE_TIMING index=4 module=os_tests duration_ns=233662115 passed=101 failed=0 assertions=101 status=pass
+TEST_MODULE_TIMING index=5 module=file_tests duration_ns=167562 passed=14 failed=0 assertions=14 status=pass
+TEST_MODULE_TIMING index=6 module=target_tests duration_ns=5155780 passed=6442 failed=0 assertions=6442 status=pass
+TEST_MODULE_TIMING index=7 module=c_frontend_tests duration_ns=2622947304 passed=21374 failed=0 assertions=21374 status=pass
+TEST_MODULE_TIMING index=8 module=aarch64_encoding_tests duration_ns=2625635165 passed=236593 failed=0 assertions=236593 status=pass
+TEST_MODULE_TIMING index=9 module=aarch64_exact_bridge_tests duration_ns=45018 passed=102 failed=0 assertions=102 status=pass
+TEST_MODULE_TIMING index=10 module=aarch64_control_semantics_tests duration_ns=413211 passed=3377 failed=0 assertions=3377 status=pass
+TEST_MODULE_TIMING index=11 module=aarch64_system_registers_tests duration_ns=2498666 passed=108 failed=0 assertions=108 status=pass
+TEST_MODULE_TIMING index=12 module=aarch64_semantics_tests duration_ns=29885954 passed=215 failed=0 assertions=215 status=pass
+TEST_MODULE_TIMING index=13 module=aarch64_system_semantics_tests duration_ns=29520435 passed=694 failed=0 assertions=694 status=pass
+TEST_MODULE_TIMING index=14 module=aarch64_syntax_tests duration_ns=353201755 passed=112 failed=0 assertions=112 status=pass
+TEST_MODULE_TIMING index=15 module=aarch64_semantic_vm_tests duration_ns=196642269 passed=90 failed=0 assertions=90 status=pass
+TEST_MODULE_TIMING index=16 module=aarch64_direct_simd_tests duration_ns=358016040 passed=152 failed=0 assertions=152 status=pass
+TEST_MODULE_TIMING index=17 module=aarch64_complex_simd_tests duration_ns=397624584 passed=32 failed=0 assertions=32 status=pass
+TEST_MODULE_TIMING index=18 module=aarch64_memory_semantics_tests duration_ns=2127223181 passed=18 failed=0 assertions=18 status=pass
+TEST_MODULE_TIMING index=19 module=aarch64_alias_projection_tests duration_ns=759121 passed=28 failed=0 assertions=28 status=pass
+TEST_MODULE_TIMING index=20 module=assembly_tests duration_ns=356319159 passed=5800 failed=0 assertions=5800 status=pass
+TEST_MODULE_TIMING index=21 module=x86_64_metadata_tests duration_ns=882208345 passed=878 failed=0 assertions=878 status=pass
+TEST_MODULE_TIMING index=22 module=x86_64_completion_census_tests duration_ns=3189937142 passed=34043 failed=0 assertions=34043 status=pass
+TEST_MODULE_TIMING index=23 module=ir_tests duration_ns=551600 passed=116 failed=0 assertions=116 status=pass
+TEST_MODULE_TIMING index=24 module=llvm_bitcode_tests duration_ns=77217 passed=19 failed=0 assertions=19 status=pass
+TEST_MODULE_TIMING index=25 module=machine_selection_tests duration_ns=815677 passed=121 failed=0 assertions=121 status=pass
+TEST_MODULE_TIMING index=26 module=machine_tests duration_ns=1972726059 passed=2292 failed=0 assertions=2292 status=pass
+TEST_MODULE_TIMING index=27 module=codegen_tests duration_ns=33986814 passed=343 failed=0 assertions=343 status=pass
+TEST_MODULE_TIMING index=28 module=aarch64_stride_tests duration_ns=2560098 passed=98 failed=0 assertions=98 status=pass
+TEST_MODULE_TIMING index=29 module=debug_model_tests duration_ns=6089 passed=25 failed=0 assertions=25 status=pass
+TEST_MODULE_TIMING index=30 module=dwarf_tests duration_ns=81302 passed=84 failed=0 assertions=84 status=pass
+TEST_MODULE_TIMING index=31 module=codeview_tests duration_ns=17416 passed=49 failed=0 assertions=49 status=pass
+TEST_MODULE_TIMING index=32 module=pdb_tests duration_ns=343086 passed=49 failed=0 assertions=49 status=pass
+TEST_MODULE_TIMING index=33 module=object_tests duration_ns=913383 passed=636 failed=0 assertions=636 status=pass
+TEST_MODULE_TIMING index=34 module=jit_tests duration_ns=210296 passed=149 failed=0 assertions=149 status=pass
+TEST_MODULE_TIMING index=35 module=link_tests duration_ns=63808838 passed=638 failed=0 assertions=638 status=pass
+TEST_MODULE_TIMING index=36 module=gpu_pipeline_tests duration_ns=109765 passed=124 failed=0 assertions=124 status=pass
+TEST_MODULE_TIMING index=37 module=compiler_driver_tests duration_ns=3097415473 passed=3442 failed=0 assertions=3442 status=pass
+TEST_MODULE_TIMING index=38 module=x86_64_tests duration_ns=323236 passed=18 failed=0 assertions=18 status=pass
+[322433/322433] Unit tests
+[39/39] Module tests
+[0/0] External tests
+
+scratch-literals/candidate-self-host.log
+log_bytes=12963 sha256=58893b498079dd0f59073329e414e6ab825197020ebc513d582fa02fe49ae79e
+SELF_HOST deterministic bytes=36191960 stage1=build/self-host/Release/ide-stage1 stage2=build/self-host/Release/ide-stage2

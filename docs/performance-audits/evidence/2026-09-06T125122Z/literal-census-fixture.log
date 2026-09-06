@@ -1,0 +1,3 @@
+LITERAL_REUSE_CENSUS site=0 hits=4 decoded_bytes=20 fragments=8 wide_hits=2
+LITERAL_REUSE_CENSUS site=1 hits=4 decoded_bytes=20 fragments=8 wide_hits=2
+LITERAL_REUSE_CENSUS site=2 hits=4 decoded_bytes=20 fragments=8 wide_hits=2

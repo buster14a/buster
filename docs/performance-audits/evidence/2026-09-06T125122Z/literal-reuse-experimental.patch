@@ -1,0 +1,105 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index 946961f9..16ce8b57 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -20414,7 +20414,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
+                 c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, index, string_end, &decoded) &&
+                 c_ir_string_array_element_compatible(builder, type->element_type, decoded))
+             {
+-                IrValueId string_value = c_ir_emit_string_range_typed(builder, index, string_end, task.type);
++                IrValueId string_value = c_ir_emit_string_contents_typed(builder, builder->preprocess.tokens[index], decoded, task.type);
+                 if (string_value.value == IR_ID_UNDERLYING_INVALID ||
+                     !c_ir_emit_store_place(builder, task.place, task.type, string_value,
+                                            c_ir_token_source_range(builder, builder->preprocess.tokens[index])))
+@@ -20859,7 +20859,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
+                 c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, string_start, string_end, &decoded) &&
+                 c_ir_string_array_element_compatible(builder, type->element_type, decoded))
+             {
+-                IrValueId value = c_ir_emit_string_range_typed(builder, string_start, string_end, type_id);
++                IrValueId value = c_ir_emit_string_contents_typed(builder, builder->preprocess.tokens[string_start], decoded, type_id);
+                 c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+                 return;
+             }
+@@ -21124,7 +21124,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
+                 c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, index, end, &decoded) &&
+                 c_ir_string_array_element_compatible(builder, field_type_value->element_type, decoded))
+             {
+-                IrValueId string_value = c_ir_emit_string_range_typed(builder, index, end, field_type);
++                IrValueId string_value = c_ir_emit_string_contents_typed(builder, builder->preprocess.tokens[index], decoded, field_type);
+                 if (string_value.value == IR_ID_UNDERLYING_INVALID)
+                 {
+                     goto c_ir_compound_literal_failed;
+diff --git a/tests/basic_c_string_concat.c b/tests/basic_c_string_concat.c
+index b1c2b9ad..dc712198 100644
+--- a/tests/basic_c_string_concat.c
++++ b/tests/basic_c_string_concat.c
+@@ -38,6 +38,62 @@ static test_char16 first_utf16(test_char16 const* text)
+     return text[0];
+ }
+ 
++// Exercise the three local aggregate paths that already decode a string
++// while checking its element type: braced arrays, bare array members, and
++// nested braced array subobjects. Exact-size arrays omit only the final NUL;
++// padded arrays retain embedded NULs and zero the remaining elements.
++static int check_braced_string_arrays(void)
++{
++    char exact[3] = {"a" "bc"};
++    char padded[6] = {"a\0" "b",};
++    test_char16 wide_exact[3] = {u"A" u"\U0001f642"};
++    test_char16 wide_padded[6] = {u"A\0" u"\U0001f642",};
++    int valid = exact[0] == 'a' && exact[1] == 'b' && exact[2] == 'c' &&
++                padded[0] == 'a' && padded[1] == 0 && padded[2] == 'b' && padded[3] == 0 && padded[4] == 0 && padded[5] == 0 &&
++                wide_exact[0] == 'A' && wide_exact[1] == 0xd83d && wide_exact[2] == 0xde42 &&
++                wide_padded[0] == 'A' && wide_padded[1] == 0 && wide_padded[2] == 0xd83d && wide_padded[3] == 0xde42 &&
++                wide_padded[4] == 0 && wide_padded[5] == 0;
++    return !valid;
++}
++
++struct LiteralMembers
++{
++    char exact[3];
++    char padded[6];
++    test_char16 wide_exact[3];
++    test_char16 wide_padded[6];
++};
++
++static int check_string_array_members(void)
++{
++    struct LiteralMembers value = {"a" "bc", "a\0" "b", u"A" u"\U0001f642", u"A\0" u"\U0001f642"};
++    int valid = value.exact[0] == 'a' && value.exact[1] == 'b' && value.exact[2] == 'c' &&
++                value.padded[0] == 'a' && value.padded[1] == 0 && value.padded[2] == 'b' && value.padded[3] == 0 &&
++                value.padded[4] == 0 && value.padded[5] == 0 &&
++                value.wide_exact[0] == 'A' && value.wide_exact[1] == 0xd83d && value.wide_exact[2] == 0xde42 &&
++                value.wide_padded[0] == 'A' && value.wide_padded[1] == 0 && value.wide_padded[2] == 0xd83d &&
++                value.wide_padded[3] == 0xde42 && value.wide_padded[4] == 0 && value.wide_padded[5] == 0;
++    return !valid;
++}
++
++struct NestedLiteralMembers
++{
++    struct LiteralMembers inner;
++    int following;
++};
++
++static int check_nested_string_array_members(void)
++{
++    struct NestedLiteralMembers value = {{{"a" "bc"}, {"a\0" "b",}, {u"A" u"\U0001f642"}, {u"A\0" u"\U0001f642",}}, 7};
++    int valid = value.inner.exact[0] == 'a' && value.inner.exact[1] == 'b' && value.inner.exact[2] == 'c' &&
++                value.inner.padded[0] == 'a' && value.inner.padded[1] == 0 && value.inner.padded[2] == 'b' && value.inner.padded[3] == 0 &&
++                value.inner.padded[4] == 0 && value.inner.padded[5] == 0 &&
++                value.inner.wide_exact[0] == 'A' && value.inner.wide_exact[1] == 0xd83d && value.inner.wide_exact[2] == 0xde42 &&
++                value.inner.wide_padded[0] == 'A' && value.inner.wide_padded[1] == 0 && value.inner.wide_padded[2] == 0xd83d &&
++                value.inner.wide_padded[3] == 0xde42 && value.inner.wide_padded[4] == 0 && value.inner.wide_padded[5] == 0 && value.following == 7;
++    return !valid;
++}
++
+ int main(void)
+ {
+     char local[] = "lo"
+@@ -121,5 +177,5 @@ int main(void)
+         return 19;
+     if (local[5] != 0)
+         return 20;
+-    return 0;
++    return check_braced_string_arrays() + check_string_array_members() + check_nested_string_array_members();
+ }
