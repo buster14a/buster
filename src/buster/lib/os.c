@@ -851,7 +851,7 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
 
     arena->position = position + result.length + null_terminate;
 #elif defined(_WIN32)
-    TemporalArena temp = scratch_begin(0, 0);
+    TemporalArena temp = scratch_begin(&arena, 1);
     String16 relative_file_path_w = string16_from_string8(temp.arena, relative_file_path, true);
     DWORD length_plus_null_termination = GetFullPathNameW(relative_file_path_w.pointer, 0, 0, 0);
 
@@ -2945,7 +2945,7 @@ bool program_flag_get(ProgramFlag flag)
 
 String8 executable_resolve_in_path(Arena* arena, String8 file)
 {
-    TemporalArena temp = scratch_begin(0, 0);
+    TemporalArena temp = scratch_begin(&arena, 1);
 
     String8 result = {0};
     String8 path_value = {0};
