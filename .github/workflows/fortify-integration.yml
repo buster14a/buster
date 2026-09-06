@@ -1,0 +1,151 @@
+name: Fortified memory integration
+on:
+  push:
+    branches: [work/2026-09-06-integration-gates]
+    paths: [.github/workflows/fortify-integration.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.publish.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 10c894ce638153b97ca9166de91b51f0f47cf41e
+          fetch-depth: 0
+      - name: Publish only the exact locally tested four-file change
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '702ea30fdad1be66ad8fed3872f7be660bbe7f64be55832b98dc1282d6c6aeef  .github/integration/fortified-memory.patch' | sha256sum --check
+          cp .github/integration/fortified-memory.patch /tmp/fortified-memory.patch
+          git fetch origin d0ecad0ddd6ecc676e20fda5694d33176880a90b
+          git checkout --detach d0ecad0ddd6ecc676e20fda5694d33176880a90b
+          git apply --check /tmp/fortified-memory.patch
+          git apply --index /tmp/fortified-memory.patch
+          git diff --cached --check
+          test "$(git write-tree)" = 186a3e471a9a530caf79c224074e89d6d785c0ea
+          git config user.name 'David'
+          git config user.email 'davidgmbb@gmail.com'
+          git commit -m 'c: lower fortified memory builtins without discarding destination bounds'
+          git push --force-with-lease=refs/heads/work/2026-09-06-fortified-memory: origin HEAD:refs/heads/work/2026-09-06-fortified-memory
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  validate:
+    needs: prepare
+    name: ${{ matrix.prefix }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        prefix: [fortify, fortify-wasm, fortify-wasm-ebpf]
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Construct and identify the exact cumulative candidate
+        shell: bash
+        env:
+          PREFIX: ${{ matrix.prefix }}
+        run: |
+          set -euo pipefail
+          git config user.name 'Integration validation'
+          git config user.email 'noreply@localhost'
+          git config core.autocrlf false
+          base=017b0381ed75d859043b60a92f2ec2e9f5872980
+          expected=186a3e471a9a530caf79c224074e89d6d785c0ea
+          if [[ "$PREFIX" != fortify ]]; then
+            git fetch origin 120da7753d6419a54618abbc4c827e1123a863cc
+            while IFS= read -r commit; do git cherry-pick "$commit"; done < <(git rev-list --reverse "$base..120da7753d6419a54618abbc4c827e1123a863cc")
+            expected=4307594af039b698fac5fd55530f9db30a0eeb6d
+          fi
+          if [[ "$PREFIX" == fortify-wasm-ebpf ]]; then
+            git fetch origin bb9a5d74288e6ada1d23492004974de7f75f5110
+            while IFS= read -r commit; do git cherry-pick "$commit"; done < <(git rev-list --reverse "$base..bb9a5d74288e6ada1d23492004974de7f75f5110")
+            expected=8ca289f662d6decda8c661141d8ba57f5db8057c
+          fi
+          test "$(git rev-parse HEAD^{tree})" = "$expected"
+          printf 'tree=%s\n' "$expected" | tee "$RUNNER_TEMP/fortify-identity.log"
+      - name: Install Vulkan SDK
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash .github/scripts/install-vulkan-sdk.sh
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: . .github/scripts/install-vulkan-sdk.ps1
+      - name: Full Release suite, fixed point and mode matrix (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          CFLAGS: -Wno-invalid-feature-combination
+        run: |
+          set -euo pipefail
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --ci --linker DEFAULT
+          "$driver" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/fortify-suite.log"
+          "$driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/fortify-self-host.log"
+          "$driver" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/fortify-modes.log"
+      - name: Compare explicit-bound failure with the native Clang oracle
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python3 - <<'PY' 2>&1 | tee "$RUNNER_TEMP/fortify-runtime.log"
+          import os,pathlib,subprocess
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])
+          reference=root/'fortify-clang'
+          source='tests/basic_c_builtin_memory.c'
+          subprocess.run(['clang','-O2',source,'-o',str(reference)],check=True)
+          subprocess.run([str(reference)],check=True)
+          expected={}
+          for operation in ('copy','move','set'):
+              result=subprocess.run([str(reference),operation],capture_output=True)
+              assert result.returncode in (-6,-4), (operation,result.returncode,result.stderr)
+              expected[operation]=result.returncode
+          for allocator in ('fast','none','mir-stack','quality'):
+              executable=root/('fortify-'+allocator)
+              subprocess.run(['build/Release/ide','cc','-fregister-allocator='+allocator,source,'-o',str(executable)],check=True)
+              subprocess.run([str(executable)],check=True)
+              for operation in expected:
+                  result=subprocess.run([str(executable),operation],capture_output=True)
+                  assert result.returncode==expected[operation], (allocator,operation,result.returncode,expected[operation])
+                  print(allocator,operation,'checked failure preserved:',result.returncode)
+          PY
+      - name: Full Release suite and fixed point (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPath = (& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1).Trim()
+          if (-not $VsPath) { throw 'Visual Studio with VC tools was not found' }
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" generate --cc clang --ci"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" build --config Release -t test_all"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" test_self_host --config Release"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve exact-candidate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fortified-${{ matrix.prefix }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/fortify-*.log
+          retention-days: 7
+          if-no-files-found: error
