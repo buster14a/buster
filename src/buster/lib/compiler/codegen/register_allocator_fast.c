@@ -1,20 +1,5 @@
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/os.h>
-#include <buster/lib/simd.h>
-
-#define MACHINE_FAST_OPERAND_PHYSICAL_SHIFT 0u
-#define MACHINE_FAST_OPERAND_VIRTUAL_SHIFT 4u
-#define MACHINE_FAST_OPERAND_BLOCK_SHIFT 8u
-#define MACHINE_FAST_OPERAND_USE_SHIFT 12u
-#define MACHINE_FAST_OPERAND_DEFINE_SHIFT 16u
-#define MACHINE_FAST_OPERAND_USE_DEFINE_SHIFT 20u
-#define MACHINE_FAST_OPERAND_SIMPLE_ROW (1u << 24)
-#define MACHINE_FAST_OPERAND_LANE_MASK 0x0fu
-
-BUSTER_GLOBAL_LOCAL u32 machine_fast_operand_mask(u32 operand_masks, u32 shift)
-{
-    return (operand_masks >> shift) & MACHINE_FAST_OPERAND_LANE_MASK;
-}
 
 // FRA stage 4: local fast register allocation over the compact machine IR.
 // Included by machine.c in the backend-implementation-file pattern. A
@@ -25,6 +10,52 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_operand_mask(u32 operand_masks, u32 shift)
 // placement contract the MIR_STACK builder produces, so the encoder is
 // untouched: per-slot operand registers plus a point-sorted reload/spill
 // edit stream.
+
+// A physical register index is a bit lane, and every per-register predicate
+// the pass carries is a mask: the scan's occupancy and dirtiness, the
+// contract each block promises its predecessors, and the state each edge
+// delivers. Nothing walks the register file to its fixed maximum — the walks
+// iterate the lanes that can matter, which a stage-1 census puts at 2,75 of
+// sixteen held at a block's exit and 0,60 promised by its contract. The
+// per-block owner rows carry no free sentinel at all: a row is readable only
+// where its block's held mask says so.
+
+#define MACHINE_FAST_OPERAND_PHYSICAL_SHIFT 0u
+#define MACHINE_FAST_OPERAND_VIRTUAL_SHIFT 4u
+#define MACHINE_FAST_OPERAND_BLOCK_SHIFT 8u
+#define MACHINE_FAST_OPERAND_USE_SHIFT 12u
+#define MACHINE_FAST_OPERAND_DEFINE_SHIFT 16u
+#define MACHINE_FAST_OPERAND_USE_DEFINE_SHIFT 20u
+#define MACHINE_FAST_OPERAND_SIMPLE_ROW (1u << 24)
+// The one opcode attribute the prepass's own second walk asks about. Recording
+// it here while the row's descriptor is already in hand turns the next-call
+// walk into a sequential read of this array: no opcode reload, no strided
+// probe into the ninety-six-byte descriptor table.
+#define MACHINE_FAST_OPERAND_CALL_ROW (1u << 25)
+#define MACHINE_FAST_OPERAND_LANE_MASK 0x0fu
+// Contract-held, contract-dirty, out-held and out-dirty: the four per-block
+// register-file masks, allocated and cleared as one block.
+#define MACHINE_FAST_BLOCK_MASK_COUNT 4u
+
+BUSTER_GLOBAL_LOCAL u32 machine_fast_operand_mask(u32 operand_masks, u32 shift)
+{
+    return (operand_masks >> shift) & MACHINE_FAST_OPERAND_LANE_MASK;
+}
+
+// The register-file bit vocabulary. A physical register index is a lane, so
+// every per-register predicate the scan carries — occupancy, dirtiness, the
+// contract's promises — is one bit and every walk over it is a
+// `remaining &= remaining - 1` loop over the set lanes instead of a scan to
+// the file's fixed maximum.
+BUSTER_GLOBAL_LOCAL u64 machine_fast_lane(u32 index)
+{
+    return 1ull << index;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_fast_lane_held(u64 mask, u32 index)
+{
+    return ((mask >> index) & 1u) != 0;
+}
 
 typedef struct MachineFastState MachineFastState;
 struct MachineFastState
@@ -40,7 +71,14 @@ struct MachineFastState
     // eviction, and whether the register is newer than the vreg's slot.
     u32 owner[MACHINE_TARGET_REGISTER_LIMIT];
     u32 age[MACHINE_TARGET_REGISTER_LIMIT];
-    bool dirty[MACHINE_TARGET_REGISTER_LIMIT];
+    // Occupancy and dirtiness are one bit per physical register, not byte
+    // arrays: every consumer either tests a single lane or walks the held (or
+    // held-and-dirty) lanes, and a mask does both without a fixed-maximum
+    // scan. `held_mask` is exactly the lanes whose `owner` is not the free
+    // sentinel, maintained by every site that binds or releases a register,
+    // and `dirty_mask` is a subset of it.
+    u64 held_mask;
+    u64 dirty_mask;
     // Current register per vreg, or UINT32_MAX when the slot is the home.
     u32* virtual_register_locations;
     // Stage-5 liveness: the instruction index of each vreg's last textual
@@ -180,7 +218,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_materialize_tied(MachineFastState* state, 
             };
             state->placement->reload_count += 1;
         }
-        state->dirty[target] = false;
+        state->held_mask &= ~machine_fast_lane(target);
+        state->dirty_mask &= ~machine_fast_lane(target);
         return;
     }
     if (current != UINT32_MAX)
@@ -197,11 +236,13 @@ BUSTER_GLOBAL_LOCAL void machine_fast_materialize_tied(MachineFastState* state, 
         if (source_dies)
         {
             state->owner[current] = UINT32_MAX;
-            state->dirty[current] = false;
+            state->held_mask &= ~machine_fast_lane(current);
+            state->dirty_mask &= ~machine_fast_lane(current);
             state->virtual_register_locations[source] = UINT32_MAX;
         }
         state->owner[target] = UINT32_MAX;
-        state->dirty[target] = false;
+        state->held_mask &= ~machine_fast_lane(target);
+        state->dirty_mask &= ~machine_fast_lane(target);
         return;
     }
     machine_fast_spill(state, target);
@@ -227,7 +268,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_materialize_tied(MachineFastState* state, 
         state->placement->reload_count += 1;
     }
     state->owner[target] = UINT32_MAX;
-    state->dirty[target] = false;
+    state->held_mask &= ~machine_fast_lane(target);
+    state->dirty_mask &= ~machine_fast_lane(target);
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_fast_owner_is_dead(MachineFastState* state, u32 physical_register)
@@ -258,7 +300,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physica
     {
         return;
     }
-    if (state->dirty[physical_register] && state->rematerialize_immediates[owner] == UINT32_MAX && !machine_fast_owner_is_dead(state, physical_register))
+    if (machine_fast_lane_held(state->dirty_mask, physical_register) && state->rematerialize_immediates[owner] == UINT32_MAX &&
+        !machine_fast_owner_is_dead(state, physical_register))
     {
         MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
         *edit = (MachineEdit){
@@ -270,7 +313,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physica
         state->placement->spill_count += 1;
     }
     state->owner[physical_register] = UINT32_MAX;
-    state->dirty[physical_register] = false;
+    state->held_mask &= ~machine_fast_lane(physical_register);
+    state->dirty_mask &= ~machine_fast_lane(physical_register);
     state->virtual_register_locations[owner] = UINT32_MAX;
 }
 
@@ -300,8 +344,6 @@ BUSTER_GLOBAL_LOCAL u32 const machine_fast_empty_contract_owner[MACHINE_TARGET_R
     UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
     UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
 };
-BUSTER_GLOBAL_LOCAL bool const machine_fast_empty_contract_dirty[MACHINE_TARGET_REGISTER_LIMIT] = {0};
-
 BUSTER_GLOBAL_LOCAL void machine_fast_conform_append(MachineFastState* state, MachineBuilderStream* stream, MachinePoint point, u16 kind, u32 subject,
                                                      u32 location)
 {
@@ -321,36 +363,42 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_append(MachineFastState* state, Ma
 // the value is already in a register, a rematerialization or reload when it
 // is not, and a spill through memory as the cycle breaker when every
 // remaining contract register still holds another pending value's only
-// dirty copy. `owner`/`dirty` are either the live scan state at a
+// dirty copy. `owner`/`held`/`dirty` are either the live scan state at a
 // terminator whose successor contract is already fixed (`locations`
 // alongside) or a recorded edge snapshot (locations null, conforming
-// retroactively while a later block chooses its contract). `allow_moves`
-// is false for a snapshot edge whose source has other successors: a copy
-// or reload there would also execute on paths that already consumed the
-// snapshot state, so such an edge is only ever asked for the universally
-// safe spills — the contract construction drops any entry the edge does
-// not already satisfy.
-BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, MachineBuilderStream* stream, MachinePoint point, u32* owner, bool* dirty,
-                                                   u32* locations, u32 const* contract_owner, bool const* contract_dirty, bool allow_moves)
+// retroactively while a later block chooses its contract); the two masks
+// travel by pointer because a snapshot's mutations must persist for the
+// source's other successors. `contract_held` names the registers the
+// contract promises and is the only thing that makes `contract_owner`
+// readable. `allow_moves` is false for a snapshot edge whose source has
+// other successors: a copy or reload there would also execute on paths
+// that already consumed the snapshot state, so such an edge is only ever
+// asked for the universally safe spills — the contract construction drops
+// any entry the edge does not already satisfy.
+//
+// Every walk here is over a mask of the lanes that can matter, not over the
+// register file: a stage-1 census put the three fixed-maximum scans this
+// replaced at 9,4 M iterations of which 0,4 M did work, and the quadratic
+// retention probe at 4,5 M more.
+BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, MachineBuilderStream* stream, MachinePoint point, u32* owner, u64* held,
+                                                   u64* dirty, u32* locations, u32 const* contract_owner, u64 contract_held, u64 contract_dirty,
+                                                   bool allow_moves)
 {
-    u32 register_count = state->active_register_count;
     // Pass 1: write back what the contract sends home. Mappings survive —
     // the successor ignores them, a layout successor that designates this
     // edge still reuses the clean copies, and any register a contract value
     // needs is reclaimed by the placement pass below. Values that never
     // escape their block are dead at a boundary and rematerializable
-    // constants never store, exactly as the eviction path treats them.
-    for (u32 physical_register = 0; physical_register < register_count; physical_register += 1)
+    // constants never store, exactly as the eviction path treats them. Only
+    // the dirty lanes can owe a store, and dirty implies held.
+    for (u64 remaining = *dirty; remaining; remaining &= remaining - 1u)
     {
+        u32 physical_register = machine_fast_first_set(remaining);
         u32 resident = owner[physical_register];
-        if (resident == UINT32_MAX || !dirty[physical_register])
-        {
-            continue;
-        }
         bool kept = false;
-        for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+        for (u64 contract_remaining = contract_held; contract_remaining; contract_remaining &= contract_remaining - 1u)
         {
-            kept |= contract_owner[contract_register] == resident;
+            kept |= contract_owner[machine_fast_first_set(contract_remaining)] == resident;
         }
         if (kept)
         {
@@ -362,7 +410,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
             state->placement->spill_count += 1;
             state->placement->boundary_spill_count += 1;
         }
-        dirty[physical_register] = false;
+        *dirty &= ~machine_fast_lane(physical_register);
     }
     // Pass 2: place every contract value not already in its register. An
     // entry whose value's own pinned span covers this edge's source is
@@ -372,10 +420,11 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
     // edge, which is exactly the traffic a split span exists to remove.
     u32 source_instruction = machine_point_instruction(point);
     u64 pending = 0;
-    for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+    for (u64 remaining = contract_held; remaining; remaining &= remaining - 1u)
     {
+        u32 contract_register = machine_fast_first_set(remaining);
         u32 contract_value = contract_owner[contract_register];
-        if (contract_value == UINT32_MAX || owner[contract_register] == contract_value)
+        if (machine_fast_lane_held(*held, contract_register) && owner[contract_register] == contract_value)
         {
             continue;
         }
@@ -384,30 +433,27 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
         {
             continue;
         }
-        pending |= 1ull << contract_register;
+        pending |= machine_fast_lane(contract_register);
     }
     while (pending)
     {
         BUSTER_CHECK(allow_moves);
         bool progressed = false;
-        for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+        for (u64 remaining = pending; remaining; remaining &= remaining - 1u)
         {
-            if (!((pending >> contract_register) & 1u))
-            {
-                continue;
-            }
+            u32 contract_register = machine_fast_first_set(remaining);
             u32 value = contract_owner[contract_register];
-            u32 resident = owner[contract_register];
-            if (resident != UINT32_MAX && resident != value && dirty[contract_register])
+            u32 resident = machine_fast_lane_held(*held, contract_register) ? owner[contract_register] : UINT32_MAX;
+            if (resident != UINT32_MAX && resident != value && machine_fast_lane_held(*dirty, contract_register))
             {
                 // The occupant blocks the claim only while it is another
                 // pending value's single dirty copy; a clean occupant
                 // reloads at its own turn, its slot current by the
                 // clean-implies-stored invariant.
                 bool resident_pending = false;
-                for (u32 other = 0; other < register_count; other += 1)
+                for (u64 other_remaining = pending; other_remaining; other_remaining &= other_remaining - 1u)
                 {
-                    resident_pending |= contract_owner[other] == resident && ((pending >> other) & 1u);
+                    resident_pending |= contract_owner[machine_fast_first_set(other_remaining)] == resident;
                 }
                 if (resident_pending)
                 {
@@ -421,7 +467,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
                 {
                     locations[resident] = UINT32_MAX;
                 }
-                dirty[contract_register] = false;
+                *held &= ~machine_fast_lane(contract_register);
+                *dirty &= ~machine_fast_lane(contract_register);
             }
             u32 source = UINT32_MAX;
             if (locations)
@@ -430,8 +477,9 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
             }
             else
             {
-                for (u32 other = 0; other < register_count; other += 1)
+                for (u64 other_remaining = *held; other_remaining; other_remaining &= other_remaining - 1u)
                 {
+                    u32 other = machine_fast_first_set(other_remaining);
                     source = owner[other] == value ? other : source;
                 }
             }
@@ -440,29 +488,32 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
                 machine_fast_conform_append(state, stream, point, MACHINE_EDIT_COPY, source, contract_register);
                 state->placement->copy_count += 1;
                 state->placement->boundary_copy_count += 1;
-                dirty[contract_register] = dirty[source];
+                *dirty = machine_fast_lane_held(*dirty, source) ? *dirty | machine_fast_lane(contract_register)
+                                                                : *dirty & ~machine_fast_lane(contract_register);
                 owner[source] = UINT32_MAX;
-                dirty[source] = false;
+                *held &= ~machine_fast_lane(source);
+                *dirty &= ~machine_fast_lane(source);
             }
             else if (state->rematerialize_immediates[value] != UINT32_MAX)
             {
                 machine_fast_conform_append(state, stream, point, MACHINE_EDIT_REMATERIALIZE, state->rematerialize_immediates[value], contract_register);
                 state->placement->rematerialize_count += 1;
-                dirty[contract_register] = false;
+                *dirty &= ~machine_fast_lane(contract_register);
             }
             else
             {
                 machine_fast_conform_append(state, stream, point, MACHINE_EDIT_RELOAD, value, contract_register);
                 state->placement->reload_count += 1;
                 state->placement->boundary_reload_count += 1;
-                dirty[contract_register] = false;
+                *dirty &= ~machine_fast_lane(contract_register);
             }
             owner[contract_register] = value;
+            *held |= machine_fast_lane(contract_register);
             if (locations)
             {
                 locations[value] = contract_register;
             }
-            pending &= ~(1ull << contract_register);
+            pending &= ~machine_fast_lane(contract_register);
             progressed = true;
         }
         if (!progressed)
@@ -470,17 +521,14 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
             // Every remaining target holds another pending value's only
             // dirty copy: a cycle. Break it through memory — write one
             // occupant back and release it, and its own claim reloads it.
-            u32 broken = 0;
-            while (!((pending >> broken) & 1u))
-            {
-                broken += 1;
-            }
+            u32 broken = machine_fast_first_set(pending);
             u32 resident = owner[broken];
             machine_fast_conform_append(state, stream, point, MACHINE_EDIT_SPILL, resident, broken);
             state->placement->spill_count += 1;
             state->placement->boundary_spill_count += 1;
-            dirty[broken] = false;
+            *dirty &= ~machine_fast_lane(broken);
             owner[broken] = UINT32_MAX;
+            *held &= ~machine_fast_lane(broken);
             if (locations)
             {
                 locations[resident] = UINT32_MAX;
@@ -489,16 +537,18 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
     }
     // Pass 3: a delivery dirtier than the contract admits stores now — the
     // successor believes the slot is current and would evict silently. A
-    // cleaner delivery than promised is free.
-    for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+    // cleaner delivery than promised is free, so only the lanes the contract
+    // promises clean and this edge leaves dirty can owe anything.
+    for (u64 remaining = contract_held & *dirty & ~contract_dirty; remaining; remaining &= remaining - 1u)
     {
+        u32 contract_register = machine_fast_first_set(remaining);
         u32 value = contract_owner[contract_register];
-        if (value != UINT32_MAX && owner[contract_register] == value && dirty[contract_register] && !contract_dirty[contract_register])
+        if (machine_fast_lane_held(*held, contract_register) && owner[contract_register] == value)
         {
             machine_fast_conform_append(state, stream, point, MACHINE_EDIT_SPILL, value, contract_register);
             state->placement->spill_count += 1;
             state->placement->boundary_spill_count += 1;
-            dirty[contract_register] = false;
+            *dirty &= ~machine_fast_lane(contract_register);
         }
     }
 }
@@ -536,20 +586,25 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_edge_can_move(MachineFunction* function, M
 }
 
 BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* state, MachineBuilderStream* stream, MachinePoint point,
-                                                              MachineEdge const* edge, u32* owner, bool* dirty, u32* locations,
-                                                              u32 const* contract_owner, bool const* contract_dirty, bool allow_moves)
+                                                              MachineEdge const* edge, u32* owner, u64* held, u64* dirty, u32* locations,
+                                                              u32 const* contract_owner, u64 contract_held, u64 contract_dirty, bool allow_moves)
 {
     if (!edge || !edge->copy_count || !state->function->edge_copy_sources || !state->function->block_parameters ||
         !machine_fast_edge_can_move(state->function, edge))
     {
-        machine_fast_conform_edge(state, stream, point, owner, dirty, locations, contract_owner, contract_dirty, allow_moves);
+        machine_fast_conform_edge(state, stream, point, owner, held, dirty, locations, contract_owner, contract_held, contract_dirty, allow_moves);
         return;
     }
     u32 register_count = state->active_register_count;
     u32* mapped_owner = arena_allocate(state->arena, u32, register_count);
-    bool* mapped_dirty = arena_allocate(state->arena, bool, register_count);
-    memcpy(mapped_owner, owner, sizeof(u32) * register_count);
-    memcpy(mapped_dirty, dirty, sizeof(bool) * register_count);
+    u64 mapped_held = *held;
+    u64 mapped_dirty = *dirty;
+    memset(mapped_owner, 0xff, sizeof(u32) * register_count);
+    for (u64 remaining = mapped_held; remaining; remaining &= remaining - 1u)
+    {
+        u32 physical_register = machine_fast_first_set(remaining);
+        mapped_owner[physical_register] = owner[physical_register];
+    }
     u32* mapped_locations = 0;
     if (locations)
     {
@@ -567,12 +622,14 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         }
         MachineRef source = state->function->edge_copy_sources[source_index];
         u32 destination_value = state->function->block_parameters[destination->parameter_offset + copy_index].virtual_register;
-        for (u32 physical_register = 0; physical_register < register_count; physical_register += 1)
+        for (u64 remaining = mapped_held; remaining; remaining &= remaining - 1u)
         {
+            u32 physical_register = machine_fast_first_set(remaining);
             if (mapped_owner[physical_register] == destination_value)
             {
                 mapped_owner[physical_register] = UINT32_MAX;
-                mapped_dirty[physical_register] = false;
+                mapped_held &= ~machine_fast_lane(physical_register);
+                mapped_dirty &= ~machine_fast_lane(physical_register);
             }
         }
         u32 source_value = UINT32_MAX;
@@ -583,13 +640,10 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
             source_register = mapped_locations ? mapped_locations[source_value] : UINT32_MAX;
             if (!mapped_locations)
             {
-                for (u32 physical_register = 0; physical_register < register_count; physical_register += 1)
+                for (u64 remaining = mapped_held; remaining && source_register == UINT32_MAX; remaining &= remaining - 1u)
                 {
-                    if (mapped_owner[physical_register] == source_value)
-                    {
-                        source_register = physical_register;
-                        break;
-                    }
+                    u32 physical_register = machine_fast_first_set(remaining);
+                    source_register = mapped_owner[physical_register] == source_value ? physical_register : source_register;
                 }
             }
         }
@@ -601,6 +655,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         if (source_register != UINT32_MAX)
         {
             mapped_owner[source_register] = destination_value;
+            mapped_held |= machine_fast_lane(source_register);
             if (mapped_locations)
             {
                 mapped_locations[destination_value] = source_register;
@@ -611,7 +666,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
             }
         }
     }
-    machine_fast_conform_edge(state, stream, point, mapped_owner, mapped_dirty, mapped_locations, contract_owner, contract_dirty, allow_moves);
+    machine_fast_conform_edge(state, stream, point, mapped_owner, &mapped_held, &mapped_dirty, mapped_locations, contract_owner, contract_held,
+                              contract_dirty, allow_moves);
 }
 
 BUSTER_GLOBAL_LOCAL u32 machine_fast_edge_mapped_owner(MachineFunction* function, MachineEdge const* edge, u32 value, u32 const* owner,
@@ -722,69 +778,28 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_first_set(u64 mask)
 #endif
 }
 
-// The allocator's common scalar file is exactly sixteen u32 owner lanes.  A
-// free-register query is therefore one contiguous 512-bit dword equality
-// whose mask arrives one bit per lane — no byte-mask collapse.  The all-ones
-// free sentinel is the same bit pattern at any lane width, so the byte splat
-// builds the comparand.  Wider vector files consume the same kernel in
-// sixteen-register chunks, while non-AVX-512 targets retain the bounded
-// scalar walk.
+// The free members of a candidate set, and the held lanes of the file. Both
+// are one bit-mask operation against `held_mask`, which the scan maintains at
+// every site that binds or releases a register: the picker asks this question
+// about a million times in a stage-1 compile and the file it would otherwise
+// re-derive is 192 bytes of owner rows.
 //
-// The chunk count is the register-file limit and not `active_register_count`,
-// so the whole query is three straight-line compares with no loop and no
-// data-dependent branch at all.  Two facts license reading past the active
-// count.  `owner` is declared MACHINE_TARGET_REGISTER_LIMIT lanes wide, so
-// every chunk is a whole in-bounds vector.  And `candidates` never carries a
-// bit at or above `active_register_count`: that count is either the target's
-// full file, or — for a function with no vector virtual register — one past
-// the highest bit of `allocatable_mask | callee_saved_mask`, which is a
-// superset of the only class mask such a function can ask about.  The lanes
-// above it therefore contribute nothing whatever they hold, which matters
-// because the reduced-count case leaves them at the free sentinel.
-//
-// The loop was previously bounded by `active_register_count` with an
-// `if (!active) continue;` skipping empty chunks.  That saved a
-// memory-folded VPCMPEQD and bought two data-dependent branches; a stage-1
-// profile put the skip alone at ~1% of all branch misses.  Removing only the
-// skip is not the fix — the misses relocate onto the loop's exit branch,
-// unchanged in weight — so the loop goes too.
+// This replaces a `vpcmpeqd` kernel that compared the whole owner file against
+// the all-ones free sentinel in three fixed 512-bit chunks. The kernel was the
+// right shape while occupancy had no other keeper; once the block snapshots
+// became masks the scan already had to carry one, and re-deriving it was pure
+// duplication. `machine_fast_occupied` still clamps to the active count so a
+// fixed-register owner past the file a function uses cannot widen the walks
+// the reduced count exists to shorten.
 BUSTER_GLOBAL_LOCAL u64 machine_fast_free_candidates(MachineFastState* state, u64 candidates)
 {
-#if BUSTER_SIMD_512
-    BUSTER_CT_CHECK(MACHINE_TARGET_REGISTER_LIMIT % 16u == 0u);
-    Simd512 sentinel = simd512_splat(UINT8_MAX);
-    u64 free = 0;
-    for (u32 base = 0; base < MACHINE_TARGET_REGISTER_LIMIT; base += 16)
-    {
-        u32 active = (u32)((candidates >> base) & UINT64_C(0xffff));
-        Mask64 free_words = simd512_equal_word(simd512_load(state->owner + base), sentinel);
-        free |= (u64)((u32)free_words & active) << base;
-    }
-    return free;
-#else
-    u64 free = 0;
-    for (u64 remaining = candidates; remaining; remaining &= remaining - 1)
-    {
-        u32 physical_register = machine_fast_first_set(remaining);
-        u64 bit = 1ull << physical_register;
-        u64 is_free = (u64)(state->owner[physical_register] == UINT32_MAX);
-        free |= bit & (0u - is_free);
-    }
-    return free;
-#endif
+    return candidates & ~state->held_mask;
 }
 
-// The held lanes of the scan's file, as a mask over the active registers:
-// the free-lane kernel over the whole active file, inverted. The walks that
-// visited every lane of the file to find the few held ones — the block-entry
-// reset, the call flush — iterate this mask instead, in the same ascending
-// order. Nothing keeps it beside `owner`: the kernel is three compares, and
-// the file is rewritten by the edge conforms through plain array pointers.
 BUSTER_GLOBAL_LOCAL u64 machine_fast_occupied(MachineFastState* state)
 {
     BUSTER_CT_CHECK(MACHINE_TARGET_REGISTER_LIMIT < 64u);
-    u64 active = (1ull << state->active_register_count) - 1u;
-    return active & ~machine_fast_free_candidates(state, active);
+    return state->held_mask & ((1ull << state->active_register_count) - 1u);
 }
 
 // Picks a free allocatable register, else evicts the least recently used
@@ -875,9 +890,11 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual
             .location = target,
         };
         state->placement->copy_count += 1;
-        state->dirty[target] = state->dirty[current];
+        state->dirty_mask = (state->dirty_mask & ~machine_fast_lane(target)) |
+                            ((state->dirty_mask >> current) & 1u ? machine_fast_lane(target) : 0u);
         state->owner[current] = UINT32_MAX;
-        state->dirty[current] = false;
+        state->held_mask &= ~machine_fast_lane(current);
+        state->dirty_mask &= ~machine_fast_lane(current);
     }
     else if (state->rematerialize_immediates[virtual_register] != UINT32_MAX)
     {
@@ -888,7 +905,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual
             .location = target,
         };
         state->placement->rematerialize_count += 1;
-        state->dirty[target] = false;
+        state->dirty_mask &= ~machine_fast_lane(target);
     }
     else
     {
@@ -899,9 +916,10 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual
             .location = target,
         };
         state->placement->reload_count += 1;
-        state->dirty[target] = false;
+        state->dirty_mask &= ~machine_fast_lane(target);
     }
     state->owner[target] = virtual_register;
+    state->held_mask |= machine_fast_lane(target);
     state->virtual_register_locations[virtual_register] = target;
     state->age[target] = ++state->clock;
     state->placement->callee_saved_mask |= (1ull << target) & state->description->callee_saved_mask;
@@ -915,10 +933,12 @@ BUSTER_GLOBAL_LOCAL void machine_fast_bind(MachineFastState* state, u32 virtual_
     if (current != UINT32_MAX && current != target)
     {
         state->owner[current] = UINT32_MAX;
-        state->dirty[current] = false;
+        state->held_mask &= ~machine_fast_lane(current);
+        state->dirty_mask &= ~machine_fast_lane(current);
     }
     state->owner[target] = virtual_register;
-    state->dirty[target] = true;
+    state->held_mask |= machine_fast_lane(target);
+    state->dirty_mask |= machine_fast_lane(target);
     state->virtual_register_locations[virtual_register] = target;
     state->age[target] = ++state->clock;
     state->placement->callee_saved_mask |= (1ull << target) & state->description->callee_saved_mask;
@@ -940,10 +960,16 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
     MachineFastPrepass prepass = {0};
     MachineTargetDescription const* description = function->target;
     u32 register_count = function->virtual_register_count;
-    prepass.rematerialize_immediates = arena_allocate(arena, u32, register_count ? register_count : 1);
-    prepass.definition_blocks = arena_allocate(arena, u32, register_count ? register_count : 1);
-    prepass.last_use = arena_allocate(arena, u32, register_count ? register_count : 1);
-    prepass.escapes = arena_allocate(arena, u8, register_count ? register_count : 1);
+    // The two all-ones per-value arrays share one allocation so a single fill
+    // covers both, and the zero arrays fill by region beside them. A scalar
+    // loop over five side arrays wrote 1,17 M values five ways per stage-1
+    // compile; two regions and a memset each do the same work.
+    u32 value_count = register_count ? register_count : 1;
+    u32* sentinel_values = arena_allocate(arena, u32, (u64)value_count * 2u);
+    prepass.rematerialize_immediates = sentinel_values;
+    prepass.definition_blocks = sentinel_values + value_count;
+    prepass.last_use = arena_allocate(arena, u32, value_count);
+    prepass.escapes = arena_allocate(arena, u8, value_count);
     prepass.next_call = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
     prepass.operand_masks = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
     if (wants_quality_facts)
@@ -956,7 +982,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
     prepass.cold_blocks = arena_allocate(arena, u8, function->block_count ? function->block_count : 1);
     if (description)
     {
-        u8* definition_seen = arena_allocate(arena, u8, register_count ? register_count : 1);
+        u8* definition_seen = arena_allocate(arena, u8, value_count);
         // Most functions fit a defining/use block identity in sixteen bits. Keep
         // that transient classification dense; pathological block counts retain
         // the original all-row escape scan instead of widening every common row.
@@ -965,14 +991,10 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         {
             memset(use_blocks, 0xff, (u64)register_count * sizeof(*use_blocks));
         }
-        for (u32 register_index = 0; register_index < register_count; register_index += 1)
-        {
-            prepass.rematerialize_immediates[register_index] = UINT32_MAX;
-            prepass.definition_blocks[register_index] = UINT32_MAX;
-            prepass.last_use[register_index] = 0;
-            prepass.escapes[register_index] = 0;
-            definition_seen[register_index] = 0;
-        }
+        memset(sentinel_values, 0xff, (u64)value_count * 2u * sizeof(*sentinel_values));
+        memset(prepass.last_use, 0, (u64)value_count * sizeof(*prepass.last_use));
+        memset(prepass.escapes, 0, value_count);
+        memset(definition_seen, 0, value_count);
         for (u32 register_index = 0; wants_quality_facts && register_index < register_count; register_index += 1)
         {
             prepass.interval_starts[register_index] = UINT32_MAX;
@@ -1031,10 +1053,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 }
             }
         }
-        for (u32 block_index = 0; block_index <= function->block_count; block_index += 1)
-        {
-            prepass.predecessor_offsets[block_index] = 0;
-        }
+        memset(prepass.predecessor_offsets, 0, ((u64)function->block_count + 1u) * sizeof(*prepass.predecessor_offsets));
         u32 backward_edge_count = 0;
         bool block_references_only_in_terminators = true;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
@@ -1137,6 +1156,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 {
                     operand_masks |= MACHINE_FAST_OPERAND_SIMPLE_ROW;
                 }
+                operand_masks |= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL) ? MACHINE_FAST_OPERAND_CALL_ROW : 0u;
                 prepass.operand_masks[instruction_index] = operand_masks;
             }
         }
@@ -1152,11 +1172,10 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         u32 predecessor_total = prepass.predecessor_offsets[function->block_count];
         prepass.predecessor_list = arena_allocate(arena, u32, predecessor_total ? predecessor_total : 1);
         u32* predecessor_cursors = arena_allocate(arena, u32, function->block_count ? function->block_count : 1);
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-        {
-            predecessor_cursors[block_index] = prepass.predecessor_offsets[block_index];
-            prepass.cold_blocks[block_index] = 0;
-        }
+        // The cursors start as the offsets themselves, so the prefix sum above
+        // is the whole of their initialization.
+        memcpy(predecessor_cursors, prepass.predecessor_offsets, (u64)function->block_count * sizeof(*predecessor_cursors));
+        memset(prepass.cold_blocks, 0, function->block_count);
         for (u32 case_index = 0; case_index < function->switch_case_count; case_index += 1)
         {
             prepass.cold_blocks[function->switch_cases[case_index].target_block] = 1;
@@ -1238,6 +1257,12 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 }
             }
         }
+        // Every row above published a classification word and a valid
+        // descriptor — the walk returns early otherwise — so the backward
+        // next-call pass reads the call bit out of that word instead of
+        // reloading the opcode and probing the descriptor table again. The
+        // test is a select on a sequentially streamed u32, which leaves the
+        // loop with no data-dependent branch of its own.
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             MachineBlock* block = function->blocks + block_index;
@@ -1245,11 +1270,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
             for (u32 offset = block->instruction_count; offset > 0; offset -= 1)
             {
                 u32 instruction_index = block->first_instruction + offset - 1;
-                MachineOpcodeInfo const* call_info = machine_opcode_info(function->instructions[instruction_index].opcode);
-                if (call_info && (call_info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL))
-                {
-                    upcoming_call = instruction_index;
-                }
+                upcoming_call = (prepass.operand_masks[instruction_index] & MACHINE_FAST_OPERAND_CALL_ROW) ? instruction_index : upcoming_call;
                 prepass.next_call[instruction_index] = upcoming_call;
             }
         }
@@ -1366,34 +1387,38 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // later contract construction conforms the snapshot retroactively and
         // its mutations persist, so two successors of one conditional never
         // write the same value back twice.
+        // Occupancy and dirtiness are one mask per block, not a byte per
+        // register: a stage-1 census found 2,75 of sixteen lanes held at a
+        // block's exit and 0,6 promised by its contract, so the per-register
+        // walks read masks and the owner rows are touched only on the held
+        // lanes. The mask arrays are also the whole of the per-function
+        // commit that still has to be cleared.
+        // The masks are the whole of the per-function commit that has to be
+        // cleared. The owner rows carry no sentinel and are never filled: a
+        // row is readable only where its block's held mask says so, which is
+        // 2,75 lanes of sixteen at a block's exit and 0,60 in its contract, so
+        // the fill was writing sixteen megabytes of a stage-1 compile that
+        // nothing reads. Four masks per block in one allocation is one clear.
         u32 register_count = state.active_register_count;
+        u32 mask_count = function->block_count ? function->block_count : 1u;
         u32* contract_owner = arena_allocate(arena, u32, (u64)function->block_count * register_count);
-        bool* contract_dirty = arena_allocate(arena, bool, (u64)function->block_count * register_count);
         u32* out_owner = arena_allocate(arena, u32, (u64)function->block_count * register_count);
-        bool* out_dirty = arena_allocate(arena, bool, (u64)function->block_count * register_count);
-        u64 entry_count = (u64)function->block_count * register_count;
-        if (entry_count)
-        {
-            memset(contract_owner, 0xff, entry_count * sizeof(*contract_owner));
-            memset(contract_dirty, 0, entry_count * sizeof(*contract_dirty));
-            memset(out_owner, 0xff, entry_count * sizeof(*out_owner));
-            memset(out_dirty, 0, entry_count * sizeof(*out_dirty));
-        }
+        u64* block_masks = arena_allocate(arena, u64, (u64)mask_count * MACHINE_FAST_BLOCK_MASK_COUNT);
+        u64* contract_held = block_masks;
+        u64* contract_dirty = block_masks + mask_count;
+        u64* out_held = block_masks + (u64)mask_count * 2u;
+        u64* out_dirty = block_masks + (u64)mask_count * 3u;
+        memset(block_masks, 0, (u64)mask_count * MACHINE_FAST_BLOCK_MASK_COUNT * sizeof(*block_masks));
         MachineBuilderStream retro_edits;
         machine_stream_initialize(&retro_edits, sizeof(MachineEdit));
-        for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
-        {
-            state.virtual_register_locations[register_index] = UINT32_MAX;
-        }
-        for (u32 physical_register = 0; physical_register < description->register_count; physical_register += 1)
-        {
-            state.owner[physical_register] = UINT32_MAX;
-        }
+        memset(state.virtual_register_locations, 0xff, (u64)function->virtual_register_count * sizeof(*state.virtual_register_locations));
+        memset(state.owner, 0xff, (u64)description->register_count * sizeof(*state.owner));
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             MachineBlock* block = function->blocks + block_index;
             u32* entry_owner = contract_owner + (u64)block_index * register_count;
-            bool* entry_dirty = contract_dirty + (u64)block_index * register_count;
+            u64 entry_held = 0;
+            u64 entry_dirty = 0;
             // Contract construction. The designated predecessor — the layout
             // neighbor when it is a real edge, else the first already-scanned
             // one — donates its out state, filtered to values worth carrying: a
@@ -1421,7 +1446,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 if (designated != UINT32_MAX)
                 {
                     u32 const* donor_owner = out_owner + (u64)designated * register_count;
-                    bool const* donor_dirty = out_dirty + (u64)designated * register_count;
+                    u64 donor_held = out_held[designated];
+                    u64 donor_dirty = out_dirty[designated];
                     MachineEdge const* designated_edge = 0;
                     for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
                     {
@@ -1436,10 +1462,11 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     // belongs to the pinned value here, whatever any edge
                     // delivers, so the contract cannot promise it.
                     u64 entry_pin_active = block->instruction_count ? machine_fast_pin_active(&state, block->first_instruction) : 0;
-                    for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+                    for (u64 remaining = donor_held; remaining; remaining &= remaining - 1u)
                     {
+                        u32 contract_register = machine_fast_first_set(remaining);
                         u32 value = donor_owner[contract_register];
-                        if (value == UINT32_MAX || ((entry_pin_active >> contract_register) & 1u) || !state.escapes[value] ||
+                        if (((entry_pin_active >> contract_register) & 1u) || !state.escapes[value] ||
                             state.rematerialize_immediates[value] != UINT32_MAX || state.last_use[value] < block->first_instruction)
                         {
                             continue;
@@ -1453,12 +1480,14 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         // carrying clean values everywhere. Dirty values are
                         // always worth carrying: the entry is the write-back
                         // its edge would otherwise pay.
-                        if (has_unscanned_predecessor && !donor_dirty[contract_register] && predecessor_limit - first_predecessor > 1)
+                        if (has_unscanned_predecessor && !machine_fast_lane_held(donor_dirty, contract_register) &&
+                            predecessor_limit - first_predecessor > 1)
                         {
                             continue;
                         }
                         entry_owner[contract_register] = machine_fast_edge_mapped_owner(function, designated_edge, value, donor_owner, register_count);
-                        entry_dirty[contract_register] = donor_dirty[contract_register];
+                        entry_held |= machine_fast_lane(contract_register);
+                        entry_dirty |= donor_dirty & machine_fast_lane(contract_register);
                     }
                     // Intersection with the other scanned predecessors. An
                     // edge from a single-successor jump repairs retroactively,
@@ -1475,7 +1504,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                             continue;
                         }
                         u32 const* edge_owner = out_owner + (u64)predecessor * register_count;
-                        bool const* edge_dirty = out_dirty + (u64)predecessor * register_count;
+                        u64 edge_held = out_held[predecessor];
+                        u64 edge_dirty = out_dirty[predecessor];
                         MachineEdge const* predecessor_edge = 0;
                         for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
                         {
@@ -1507,30 +1537,31 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                             // never in the scan's own file while it is held.
                             repair_pin_active = machine_fast_pin_active(&state, terminator_index);
                         }
-                        for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+                        for (u64 remaining = entry_held; remaining; remaining &= remaining - 1u)
                         {
+                            u32 contract_register = machine_fast_first_set(remaining);
                             u32 value = entry_owner[contract_register];
-                            if (value == UINT32_MAX)
-                            {
-                                continue;
-                            }
-                            u32 delivered_value = machine_fast_edge_mapped_owner(function, predecessor_edge, edge_owner[contract_register], edge_owner,
-                                                                                 register_count);
+                            u32 delivered = machine_fast_lane_held(edge_held, contract_register) ? edge_owner[contract_register] : UINT32_MAX;
+                            u32 delivered_value = machine_fast_edge_mapped_owner(function, predecessor_edge, delivered, edge_owner, register_count);
                             if (delivered_value == value)
                             {
-                                entry_dirty[contract_register] |= edge_dirty[contract_register];
+                                entry_dirty |= edge_dirty & machine_fast_lane(contract_register);
                             }
                             else if (repairs_fully && !((repair_pin_active >> contract_register) & 1u))
                             {
-                                for (u32 other = 0; other < register_count; other += 1)
+                                // Only a dirty lane of the edge can dirty the
+                                // entry, so the retention probe walks the
+                                // edge's dirty mask rather than its file.
+                                for (u64 other_remaining = edge_dirty; other_remaining; other_remaining &= other_remaining - 1u)
                                 {
-                                    entry_dirty[contract_register] |= edge_owner[other] == value && edge_dirty[other];
+                                    entry_dirty |= edge_owner[machine_fast_first_set(other_remaining)] == value ? machine_fast_lane(contract_register) : 0u;
                                 }
                             }
                             else
                             {
                                 entry_owner[contract_register] = UINT32_MAX;
-                                entry_dirty[contract_register] = false;
+                                entry_held &= ~machine_fast_lane(contract_register);
+                                entry_dirty &= ~machine_fast_lane(contract_register);
                             }
                         }
                     }
@@ -1555,17 +1586,22 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 }
                 u32 split_value = state.split_entries[split_index].virtual_register;
                 u32 split_register = state.pinned_registers[split_value];
-                for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+                for (u64 remaining = entry_held; remaining; remaining &= remaining - 1u)
                 {
+                    u32 contract_register = machine_fast_first_set(remaining);
                     if (entry_owner[contract_register] == split_value)
                     {
                         entry_owner[contract_register] = UINT32_MAX;
-                        entry_dirty[contract_register] = false;
+                        entry_held &= ~machine_fast_lane(contract_register);
+                        entry_dirty &= ~machine_fast_lane(contract_register);
                     }
                 }
                 entry_owner[split_register] = split_value;
-                entry_dirty[split_register] = true;
+                entry_held |= machine_fast_lane(split_register);
+                entry_dirty |= machine_fast_lane(split_register);
             }
+            contract_held[block_index] = entry_held;
+            contract_dirty[block_index] = entry_dirty;
             // Conform every scanned predecessor edge to the contract just
             // fixed (the empty one for cold blocks and for blocks no scanned
             // edge reaches). The edits land retroactively at each source
@@ -1601,8 +1637,9 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         }
                     }
                     machine_fast_conform_edge_parameters(&state, &retro_edits, machine_point_make(terminator_index, MACHINE_POINT_BEFORE), predecessor_edge,
-                                                         out_owner + (u64)predecessor * register_count, out_dirty + (u64)predecessor * register_count, 0,
-                                                         entry_owner, entry_dirty, terminator_targets == 1 && predecessor_terminator->opcode != description->switch_opcode);
+                                                         out_owner + (u64)predecessor * register_count, out_held + predecessor, out_dirty + predecessor, 0,
+                                                         entry_owner, entry_held, entry_dirty,
+                                                         terminator_targets == 1 && predecessor_terminator->opcode != description->switch_opcode);
                 }
             }
             // The scan state becomes exactly the contract: the register file of
@@ -1613,7 +1650,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 u32 physical_register = machine_fast_first_set(remaining);
                 state.virtual_register_locations[state.owner[physical_register]] = UINT32_MAX;
                 state.owner[physical_register] = UINT32_MAX;
-                state.dirty[physical_register] = false;
+                state.held_mask &= ~machine_fast_lane(physical_register);
+                state.dirty_mask &= ~machine_fast_lane(physical_register);
             }
             // Carried values enter fresh: in a loop the contract is the
             // working set, and making it the preferred eviction victim would
@@ -1626,16 +1664,15 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             // local owner would have the opening eviction store it back
             // spuriously at a point every iteration passes.
             u64 head_pin_active = state.pinned_registers && block->instruction_count ? machine_fast_pin_active(&state, block->first_instruction) : 0;
-            for (u32 contract_register = 0; contract_register < register_count; contract_register += 1)
+            for (u64 remaining = entry_held & ~head_pin_active; remaining; remaining &= remaining - 1u)
             {
+                u32 contract_register = machine_fast_first_set(remaining);
                 u32 value = entry_owner[contract_register];
-                if (value != UINT32_MAX && !((head_pin_active >> contract_register) & 1u))
-                {
-                    state.owner[contract_register] = value;
-                    state.dirty[contract_register] = entry_dirty[contract_register];
-                    state.virtual_register_locations[value] = contract_register;
-                    state.age[contract_register] = ++state.clock;
-                }
+                state.owner[contract_register] = value;
+                state.held_mask |= machine_fast_lane(contract_register);
+                state.dirty_mask |= entry_dirty & machine_fast_lane(contract_register);
+                state.virtual_register_locations[value] = contract_register;
+                state.age[contract_register] = ++state.clock;
             }
             for (u32 offset = 0; offset < block->instruction_count; offset += 1)
             {
@@ -1706,10 +1743,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         }
                         u32 used = machine_fast_ensure(&state, virtual_register, UINT32_MAX, 0);
                         operand_registers[slot] = (u8)used;
-                        if (use_define_slots & (1u << slot))
-                        {
-                            state.dirty[used] = true;
-                        }
+                        state.dirty_mask |= (use_define_slots & (1u << slot)) ? machine_fast_lane(used) : 0u;
                     }
                     for (u32 remaining = virtual_slots & define_slots; remaining; remaining &= remaining - 1u)
                     {
@@ -1731,7 +1765,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                             target = operand_registers[1];
                             u32 dying = machine_ref_payload(instruction->operands[1]);
                             state.owner[target] = UINT32_MAX;
-                            state.dirty[target] = false;
+                            state.held_mask &= ~machine_fast_lane(target);
+                            state.dirty_mask &= ~machine_fast_lane(target);
                             state.virtual_register_locations[dying] = UINT32_MAX;
                         }
                         else
@@ -1892,10 +1927,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     u32 used = machine_fast_ensure(&state, machine_ref_payload(ref), target,
                                                    target == UINT32_MAX ? reserved_mask : 0);
                     operand_registers[slot] = (u8)used;
-                    if (use_define_slots & (1u << slot))
-                    {
-                        state.dirty[used] = true;
-                    }
+                    state.dirty_mask |= (use_define_slots & (1u << slot)) ? machine_fast_lane(used) : 0u;
                 }
                 // Fixed physical destinations and encoder-internal clobbers
                 // evict their owners before the instruction writes them.
@@ -2020,7 +2052,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         target = operand_registers[1];
                         u32 dying = machine_ref_payload(instruction->operands[1]);
                         state.owner[target] = UINT32_MAX;
-                        state.dirty[target] = false;
+                        state.held_mask &= ~machine_fast_lane(target);
+                        state.dirty_mask &= ~machine_fast_lane(target);
                         state.virtual_register_locations[dying] = UINT32_MAX;
                     }
                     else
@@ -2055,8 +2088,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         // Case targets and the default are all cold, so one
                         // conform to the empty contract serves every edge the
                         // dispatch fans out to.
-                        machine_fast_conform_edge(&state, &edits, state.current_point, state.owner, state.dirty, state.virtual_register_locations,
-                                                  machine_fast_empty_contract_owner, machine_fast_empty_contract_dirty, true);
+                        machine_fast_conform_edge(&state, &edits, state.current_point, state.owner, &state.held_mask, &state.dirty_mask,
+                                                  state.virtual_register_locations, machine_fast_empty_contract_owner, 0, 0, true);
                     }
                     else
                     {
@@ -2076,21 +2109,34 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                             }
                             if (successor <= block_index)
                             {
-                                machine_fast_conform_edge_parameters(&state, &edits, state.current_point, successor_edge, state.owner, state.dirty,
-                                                                     state.virtual_register_locations, contract_owner + (u64)successor * register_count,
-                                                                     contract_dirty + (u64)successor * register_count, true);
+                                machine_fast_conform_edge_parameters(&state, &edits, state.current_point, successor_edge, state.owner, &state.held_mask,
+                                                                     &state.dirty_mask, state.virtual_register_locations,
+                                                                     contract_owner + (u64)successor * register_count, contract_held[successor],
+                                                                     contract_dirty[successor], true);
                             }
                             else if (cold_blocks[successor])
                             {
-                                machine_fast_conform_edge(&state, &edits, state.current_point, state.owner, state.dirty, state.virtual_register_locations,
-                                                          machine_fast_empty_contract_owner, machine_fast_empty_contract_dirty, true);
+                                machine_fast_conform_edge(&state, &edits, state.current_point, state.owner, &state.held_mask, &state.dirty_mask,
+                                                          state.virtual_register_locations, machine_fast_empty_contract_owner, 0, 0, true);
                             }
                         }
                     }
                     // A return keeps its dirty values: the frame dies with it
                     // and there is no successor to see the slots.
-                    memcpy(out_owner + (u64)block_index * register_count, state.owner, sizeof(*state.owner) * register_count);
-                    memcpy(out_dirty + (u64)block_index * register_count, state.dirty, sizeof(*state.dirty) * register_count);
+                    u64 recorded = machine_fast_occupied(&state);
+                    u32* recorded_owner = out_owner + (u64)block_index * register_count;
+                    for (u64 remaining = recorded; remaining; remaining &= remaining - 1u)
+                    {
+                        u32 physical_register = machine_fast_first_set(remaining);
+                        recorded_owner[physical_register] = state.owner[physical_register];
+                    }
+                    out_held[block_index] = recorded;
+                    // Clamped to the recorded lanes, which is what the
+                    // byte-array snapshot copied when it ran to the active
+                    // count: a fixed-register owner past that count — the
+                    // float bridge in an all-scalar function — must not put a
+                    // dirty bit on a lane the snapshot never recorded.
+                    out_dirty[block_index] = state.dirty_mask & recorded;
                 }
             }
         }
@@ -2125,10 +2171,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // through the edit stream, so only edit subjects get backing slots.
         // Values that never left their registers cost no frame bytes.
         u8* slot_needed = arena_allocate(arena, u8, function->virtual_register_count);
-        for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
-        {
-            slot_needed[register_index] = 0;
-        }
+        memset(slot_needed, 0, function->virtual_register_count);
         for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
         {
             // Only the memory edits name a virtual register: a copy's subject
