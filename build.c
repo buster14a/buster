@@ -21791,7 +21791,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         return superbuild_parallelism_test_result;
     }
 
-    bool direct_matrix = environment_flag_is_on(S8("BUSTER_MATRIX_DIRECT"));
+    // Intel macOS cannot yet self-host the compiler image; direct mode still
+    // executes every compiler/configuration test tree and omits only fan-out.
+    bool direct_matrix = environment_flag_is_on(S8("BUSTER_MATRIX_DIRECT")) ||
+                         (BUSTER_MACOS && BUSTER_CPU_ARCH_X86_64);
     MatrixTestCombination combinations[BUILD_COMPILER_COUNT * 4] = {0};
     u64 combination_count = 0;
     BuildStep* generate_step = step_add(arena);
