@@ -1698,11 +1698,6 @@ struct MachineFastPrepass
     u32* operand_masks;
     u32* predecessor_offsets;
     u32* predecessor_list;
-    // CSR over function->edges, keyed by destination block. Placement uses
-    // this to recover the exact MachineEdge for a predecessor without
-    // rescanning the whole edge table at every contract join.
-    u32* incoming_edge_offsets;
-    u32* incoming_edge_indices;
     u8* cold_blocks;
     u32* interval_starts;
     u32* interval_ends;
