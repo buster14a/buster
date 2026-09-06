@@ -1022,9 +1022,58 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_prewarm_gang(void* argument)
     compiler_prewarm_observe(state, &state->observations[lane_index()]);
 }
 
-UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_include_population(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    // Exactly sized prefix with a neighboring sentinel: the old fixed-array
+    // append would overwrite unrelated invocation state after enough entries.
+    String8 prefix[] = {S8("explicit"), S8("resource"), S8("sentinel")};
+    CompilerDriverInvocation invocation = {.system_include_paths = prefix, .system_include_path_count = 2};
+    char8 environment[4096] = {0};
+    u64 length = 0;
+    String8 expected[128];
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(expected); ++i)
+    {
+        expected[i] = string_format(arguments->arena, S8("C:/sdk/{u32}/include"), i);
+        environment[length++] = ';';
+        environment[length++] = ';';
+        memcpy(environment + length, expected[i].pointer, expected[i].length);
+        length += expected[i].length;
+    }
+    environment[length++] = ';';
+    compiler_driver_test_append_environment_includes(arguments->arena, &invocation, (String8){.pointer = environment, .length = length});
+    BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, invocation.system_include_path_count == 130);
+    BUSTER_STRING_TEST(arguments, invocation.system_include_paths[0], S8("explicit"));
+    BUSTER_STRING_TEST(arguments, invocation.system_include_paths[1], S8("resource"));
+    BUSTER_STRING_TEST(arguments, prefix[2], S8("sentinel"));
+    memset(environment, '?', sizeof(environment));
+    if (invocation.system_include_path_count == 130)
+        for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(expected); ++i)
+            BUSTER_STRING_TEST(arguments, invocation.system_include_paths[2 + i], expected[i]);
+    // Empty entries disappear, but nonempty duplicates and order are retained.
+    compiler_driver_test_append_environment_includes(arguments->arena, &invocation, S8(";;repeat;;repeat;"));
+    BUSTER_TEST(arguments, invocation.system_include_path_count == 132);
+    if (invocation.system_include_path_count == 132)
+    {
+        BUSTER_STRING_TEST(arguments, invocation.system_include_paths[130], S8("repeat"));
+        BUSTER_STRING_TEST(arguments, invocation.system_include_paths[131], S8("repeat"));
+    }
+    String8* before = invocation.system_include_paths;
+    compiler_driver_test_append_environment_includes(arguments->arena, &invocation, (String8){0});
+    compiler_driver_test_append_environment_includes(arguments->arena, &invocation, S8(";;;"));
+    BUSTER_TEST(arguments, invocation.system_include_path_count == 132 && invocation.system_include_paths == before);
+    CompilerDriverInvocation overflow = {.system_include_path_count = UINT32_MAX};
+    compiler_driver_test_append_environment_includes(arguments->arena, &overflow, S8("one"));
+    BUSTER_TEST(arguments, overflow.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_TEST(arguments, overflow.system_include_path_count == UINT32_MAX && !overflow.system_include_paths);
+    return result;
+}
+
+UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = compiler_driver_test_include_population(arguments);
 
     // compiler_prewarm() is the contract that lets a gang compile at all: the
     // frontends' remaining first-use tables are written once and read
