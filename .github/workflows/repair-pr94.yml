@@ -29,22 +29,24 @@ jobs:
 
           path = Path("build.c")
           text = path.read_text()
-          old = """    for (BuildCompiler compiler = !BUSTER_WINDOWS; compiler < BUILD_COMPILER_COUNT; compiler += 1)
-    {
-        bool is_clang = compiler == BUILD_COMPILER_CLANG;
-"""
-          new = """    for (BuildCompiler compiler = !BUSTER_WINDOWS; compiler < BUILD_COMPILER_COUNT; compiler += 1)
-    {
-        // The Windows ARM64 image exposes x86-64 MinGW as `gcc`, while Zig
-        // 0.16's native ARM64 frontend currently crashes before producing an
-        // object. Neither row tests this target. Keep the two genuine native
-        // toolchains: MSVC and standalone LLVM Clang.
-        if (BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && compiler > BUILD_COMPILER_CLANG)
-        {
-            continue;
-        }
-        bool is_clang = compiler == BUILD_COMPILER_CLANG;
-"""
+          old = (
+              "    for (BuildCompiler compiler = !BUSTER_WINDOWS; compiler < BUILD_COMPILER_COUNT; compiler += 1)\n"
+              "    {\n"
+              "        bool is_clang = compiler == BUILD_COMPILER_CLANG;\n"
+          )
+          new = (
+              "    for (BuildCompiler compiler = !BUSTER_WINDOWS; compiler < BUILD_COMPILER_COUNT; compiler += 1)\n"
+              "    {\n"
+              "        // The Windows ARM64 image exposes x86-64 MinGW as `gcc`, while Zig\n"
+              "        // 0.16's native ARM64 frontend currently crashes before producing an\n"
+              "        // object. Neither row tests this target. Keep the two genuine native\n"
+              "        // toolchains: MSVC and standalone LLVM Clang.\n"
+              "        if (BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64 && compiler > BUILD_COMPILER_CLANG)\n"
+              "        {\n"
+              "            continue;\n"
+              "        }\n"
+              "        bool is_clang = compiler == BUILD_COMPILER_CLANG;\n"
+          )
           count = text.count(old)
           if count != 1:
               raise SystemExit(f"build.c: expected one compiler loop, found {count}")
