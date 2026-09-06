@@ -1,0 +1,101 @@
+name: Apply PR 94 CI fixes
+
+on:
+  push:
+    branches:
+      - claude/unruffled-bhabha-f5d28a
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.repository == 'buster14a/buster' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Apply source fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file_path = Path(path)
+              text = file_path.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one replacement site, found {count}")
+              file_path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          replace_once(
+              "build.c",
+              """BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
+          {
+              ProcessResult time_trace_self_test_result = time_trace_summary_self_test(arena);
+              if (time_trace_self_test_result != PROCESS_RESULT_SUCCESS)
+              {
+                  return time_trace_self_test_result;
+              }
+              ProcessResult test_timing_self_test_result = test_timing_summary_self_test(arena);
+              if (test_timing_self_test_result != PROCESS_RESULT_SUCCESS)
+              {
+                  return test_timing_self_test_result;
+              }
+          """,
+              """BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
+          {
+              // The synthetic diagnostic fixtures intentionally exceed 100 MiB. Rewind
+              // each fixture before starting the matrix so the long-lived build-driver
+              // arena is not charged for test data for the rest of the invocation.
+              TemporalArena time_trace_self_test_memory = arena_begin_temporal(arena);
+              ProcessResult time_trace_self_test_result = time_trace_summary_self_test(arena);
+              scratch_end(time_trace_self_test_memory);
+              if (time_trace_self_test_result != PROCESS_RESULT_SUCCESS)
+              {
+                  return time_trace_self_test_result;
+              }
+              TemporalArena test_timing_self_test_memory = arena_begin_temporal(arena);
+              ProcessResult test_timing_self_test_result = test_timing_summary_self_test(arena);
+              scratch_end(test_timing_self_test_memory);
+              if (test_timing_self_test_result != PROCESS_RESULT_SUCCESS)
+              {
+                  return test_timing_self_test_result;
+              }
+          """,
+          )
+
+          replace_once(
+              "CMakeLists.txt",
+              """        target_compile_options(${name} PRIVATE -fsanitize=fuzzer-no-link)
+                  target_link_options(${name} PRIVATE -fsanitize=fuzzer-no-link)
+                  target_link_libraries(${name} PRIVATE \"${BUSTER_FUZZ_NO_MAIN_RUNTIME}\")
+          """,
+              """        target_compile_options(${name} PRIVATE -fsanitize=fuzzer-no-link)
+                  target_link_options(${name} PRIVATE -fsanitize=fuzzer-no-link)
+                  target_link_libraries(${name} PRIVATE \"${BUSTER_FUZZ_NO_MAIN_RUNTIME}\")
+                  if (UNIX AND NOT APPLE)
+                      # The no-main libFuzzer runtime is C++, but Buster executables use
+                      # the C linker driver. Supply the runtime's standard library after
+                      # its archive instead of relying on a C++ driver to add it.
+                      target_link_libraries(${name} PRIVATE stdc++)
+                  endif()
+          """,
+          )
+          PY
+
+      - name: Commit repairs and remove this one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/apply-pr94-ci-fixes.yml
+          git config user.name "David"
+          git config user.email "davidgmbb@gmail.com"
+          git add build.c CMakeLists.txt .github/workflows/apply-pr94-ci-fixes.yml
+          git diff --cached --check
+          git commit -m "ci: fix expanded matrix failures"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
