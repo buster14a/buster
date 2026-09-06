@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/codegen/codegen_test.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/tests/compiler/codegen/ebpf_test_internal.h>
 
 typedef u64 CodegenTestFunction2(u64 left, u64 right);
 typedef u64 CodegenTestFunction1(u64 value);
@@ -734,7 +735,7 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_x64_vector_frame_lea_count(ByteSlice code, 
 
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
-    UnitTestResult result = {0};
+    UnitTestResult result = codegen_test_ebpf_scalars(arguments);
     u8 negative_rsp_store_bytes[] = {0x48, 0x89, 0x44, 0x24, 0xf8, 0x5d, 0xc3};
     CodegenTestX64BodyScan negative_rsp_store_scan =
         codegen_test_x64_scan_body((ByteSlice){.pointer = negative_rsp_store_bytes, .length = sizeof(negative_rsp_store_bytes)}, 0,
