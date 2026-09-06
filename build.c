@@ -21731,22 +21731,29 @@ BUSTER_GLOBAL_LOCAL void matrix_superbuild_generate_add(Arena* arena, BuildStep*
 
 BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOptions base_options)
 {
-    // The synthetic diagnostic fixtures intentionally exceed 100 MiB. Rewind
-    // each fixture before starting the matrix so the long-lived build-driver
-    // arena is not charged for test data for the rest of the invocation.
-    TemporalArena time_trace_self_test_memory = arena_begin_temporal(arena);
-    ProcessResult time_trace_self_test_result = time_trace_summary_self_test(arena);
-    scratch_end(time_trace_self_test_memory);
-    if (time_trace_self_test_result != PROCESS_RESULT_SUCCESS)
+    // These synthetic diagnostics deliberately build large in-memory fixtures.
+    // Give them a transient reservation instead of consuming the long-lived
+    // matrix arena, and do not retain that large reservation in the arena pool.
+    ArenaCreation diagnostics_creation = {.reserved_size = BUSTER_MB(1024)};
+    diagnostics_creation.flags.no_pool = 1;
+    Arena* diagnostics_arena = arena_create(diagnostics_creation);
+    if (!diagnostics_arena)
     {
-        return time_trace_self_test_result;
+        string_print(S8("error: failed to reserve the diagnostics self-test arena\n"));
+        return PROCESS_RESULT_FAILED;
     }
-    TemporalArena test_timing_self_test_memory = arena_begin_temporal(arena);
-    ProcessResult test_timing_self_test_result = test_timing_summary_self_test(arena);
-    scratch_end(test_timing_self_test_memory);
-    if (test_timing_self_test_result != PROCESS_RESULT_SUCCESS)
+
+    ProcessResult diagnostics_result = time_trace_summary_self_test(diagnostics_arena);
+    if (diagnostics_result == PROCESS_RESULT_SUCCESS)
     {
-        return test_timing_self_test_result;
+        arena_reset_to_start(diagnostics_arena);
+        diagnostics_result = test_timing_summary_self_test(diagnostics_arena);
+    }
+    bool diagnostics_destroyed = arena_destroy(diagnostics_arena, 1);
+    BUSTER_CHECK(diagnostics_destroyed);
+    if (diagnostics_result != PROCESS_RESULT_SUCCESS)
+    {
+        return diagnostics_result;
     }
 
     bool fanout_forced = environment_flag_is_on(S8("BUSTER_TEST_FORCE_ARTIFACT_FANOUT"));
