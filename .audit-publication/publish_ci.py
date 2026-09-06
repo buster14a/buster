@@ -134,10 +134,17 @@ def main():
             git("worktree", "add", "--detach", str(worktree), BASE)
             observed = {path: git("rev-parse", BASE + ":" + path).stdout.strip()
                         for path in item["production_preimages"]}
-            git("apply", "--check", "--whitespace=error", str(patch), cwd=worktree)
-            git("apply", "--index", "--whitespace=error", str(patch), cwd=worktree)
+            # #101 already landed: the complete file equals this patch's
+            # postimage. Exclude only that proven-identical upstream change.
+            upstream = set()
+            mapping_path = "src/buster/lib/file.c"
+            if key == "runtime-boundaries" and observed.get(mapping_path) == "a036e23a7abf55df010a8aefcb892e015b10598b":
+                upstream.add(mapping_path)
+            exclusions = ["--exclude=" + path for path in sorted(upstream)]
+            git("apply", "--check", "--whitespace=error", *exclusions, str(patch), cwd=worktree)
+            git("apply", "--index", "--whitespace=error", *exclusions, str(patch), cwd=worktree)
             changed = git("diff", "--cached", "--name-only", cwd=worktree).stdout.splitlines()
-            expected = set(item["production_preimages"]) | {item["test"], item["test"].replace(".py", ".c")}
+            expected = (set(item["production_preimages"]) - upstream) | {item["test"], item["test"].replace(".py", ".c")}
             if set(changed) != expected:
                 raise RuntimeError("unexpected patched file set")
             # Keep the committed index pristine while running before/after against
@@ -151,13 +158,14 @@ def main():
             after = probe(["python3", item["test"]], worktree, env)
             record = {"key": key, "branch": branch, "observed_preimages": observed,
                       "original_audit_preimages": item["production_preimages"],
+                      "already_present_upstream": sorted(upstream),
                       "baseline_exit_code": before["exit_code"], "patched_exit_code": after["exit_code"],
                       "validation": "focused Clang -O2 ASan/UBSan; leak checking disabled for process-lifetime arenas"}
             for label, result in [("baseline", before), ("patched", after)]:
                 evidence[f"publication-{key}-{label}.log"] = result["output"]
                 print(f"{key} {label} exit={result['exit_code']}\n{result['output'][-2500:]}", flush=True)
             git("diff", "--exit-code", cwd=worktree)
-            record["commit_sha"] = publish(worktree, branch, item["title"] + "\n\nPublish the exact September 6 audit patch and opt-in regression.\nFull integration and platform gates remain outstanding.")
+            record["commit_sha"] = publish(worktree, branch, item["title"] + "\n\nPublish the September 6 audit patch and opt-in regression, preserving identical changes already on main.\nFull integration and platform gates remain outstanding.")
             results["patches"].append(record)
             print("PUBLISHED " + json.dumps(record), flush=True)
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
@@ -182,6 +190,8 @@ def main():
                 "| Patch | Public branch | Commit | Focused before / after exit |\n|---|---|---|---|\n"]
         for record in results["patches"]:
             note.append(f"| {record['key']} | [{record['branch']}](https://github.com/{REPO}/tree/{record['branch']}) | `{record['commit_sha']}` | {record['baseline_exit_code']} / {record['patched_exit_code']} |\n")
+        note.append("\nThe #101 relative-file-mapping fix already exists in the publication base (file.c is exactly the original patch's postimage). The runtime branch therefore changes only os.c and string.c, while keeping all three original runtime regression scenarios. The existing Unicode conversion fix in string.c is preserved.\n")
+        note.append("\nPublic code PRs already opened: [#169](https://github.com/buster14a/buster/pull/169) for eBPF and [#170](https://github.com/buster14a/buster/pull/170) for Wasm. The runtime PR and this evidence PR are linked in their public discussions after branch verification.\n")
         note += [f"\n[Publication workflow and full logs]({run_url}). Exact outcomes and preimage comparisons are in [publication-results.json](publication-results.json).\n",
                  "\nThe regression scripts remain opt-in. A zero patched exit is not a full test_all, Release self-host, native Windows/macOS, or kernel-eBPF result. Baseline failures must be read alongside the logs to distinguish semantic failures from host build problems. Full integration/platform gates remain outstanding, so code PRs should be drafts.\n",
                  "\nRead [AUDIT_REPORT.md](AUDIT_REPORT.md) for findings and original validation, [evidence/PROVENANCE.md](evidence/PROVENANCE.md) for provenance, and patches/ for exact standalone patchsets. The original SHA256SUMS applies to the delivered package files, not the newly added publication records.\n"]
