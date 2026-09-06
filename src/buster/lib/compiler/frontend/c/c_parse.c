@@ -627,6 +627,54 @@ BUSTER_C_INTERNAL void c_type_parse_frame_complete(CTypeParseMachine* machine, C
     machine->result_valid = valid;
 }
 
+// A committed state is the byte 1 and an uncommitted one the byte 0, the two
+// representations a bool may hold, which is what lets c_parse_type_layout
+// seed its resolved column with a copy of the state column.
+BUSTER_CT_CHECK(sizeof(bool) == 1);
+
+// Puts `type_index` back on the pending list unless it already stands there.
+// The list holds distinct ids below `capacity`, so it cannot overflow the
+// allocation that capacity sized.
+BUSTER_C_INTERNAL void c_type_layout_cache_pending_push(CTypeLayoutCache* cache, u32 type_index)
+{
+    if (!cache->pending_mark[type_index])
+    {
+        cache->pending_mark[type_index] = 1;
+        cache->pending[cache->pending_count++] = type_index;
+    }
+}
+
+// Grows the persistent layout rows to cover `type_count` ids.  The rows past
+// the old capacity are uncommitted and unlisted; the caller lists them.
+BUSTER_C_INTERNAL void c_type_layout_cache_reserve(CTypeLayoutCache* cache, Arena* arena, u32 type_count)
+{
+    if (cache->capacity < type_count)
+    {
+        u32 new_capacity = BUSTER_MAX(type_count, cache->capacity ? cache->capacity * 2 : 4096);
+        u64* new_sizes = arena_allocate(arena, u64, new_capacity);
+        u32* new_alignments = arena_allocate(arena, u32, new_capacity);
+        u8* new_states = arena_allocate(arena, u8, new_capacity);
+        u32* new_pending = arena_allocate(arena, u32, new_capacity);
+        u8* new_pending_mark = arena_allocate(arena, u8, new_capacity);
+        memset(new_states, 0, new_capacity);
+        memset(new_pending_mark, 0, new_capacity);
+        if (cache->capacity)
+        {
+            memcpy(new_sizes, cache->sizes, sizeof(*new_sizes) * cache->capacity);
+            memcpy(new_alignments, cache->alignments, sizeof(*new_alignments) * cache->capacity);
+            memcpy(new_states, cache->states, cache->capacity);
+            memcpy(new_pending, cache->pending, sizeof(*new_pending) * cache->pending_count);
+            memcpy(new_pending_mark, cache->pending_mark, cache->capacity);
+        }
+        cache->sizes = new_sizes;
+        cache->alignments = new_alignments;
+        cache->states = new_states;
+        cache->pending = new_pending;
+        cache->pending_mark = new_pending_mark;
+        cache->capacity = new_capacity;
+    }
+}
+
 BUSTER_C_INTERNAL bool c_type_parse_record_mutation(CTypeParseMachine* machine, CParseResult* result, CTypeId id)
 {
     if (id.value >= result->type_count)
@@ -648,6 +696,7 @@ BUSTER_C_INTERNAL bool c_type_parse_record_mutation(CTypeParseMachine* machine, 
         if (id.value < machine->layout_cache.capacity)
         {
             machine->layout_cache.states[id.value] = 0;
+            c_type_layout_cache_pending_push(&machine->layout_cache, id.value);
         }
     }
 
@@ -1279,12 +1328,51 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
     // The type table can grow while the solve parses alignof/sizeof operand
     // types; the scratch arrays cover the types that existed at entry and
     // later additions stay unresolved for this query.
+    //
+    // The committed rows seed the scratch by copy rather than by a walk that
+    // reads each of them through three tests, and the three passes below
+    // visit the ids the cache has not committed rather than the whole table.
+    // The list is snapshotted here because the solve reenters the parse --
+    // an alignment specifier or an array bound may name a type of its own --
+    // and a nested query may both extend the list and move it.
     u32 type_count = result->type_count;
-    u64* sizes = arena_allocate(arena, u64, type_count);
-    u32* alignments = arena_allocate(arena, u32, type_count);
-    bool* resolved = arena_allocate(arena, bool, type_count);
-    bool* provisional = arena_allocate(arena, bool, type_count);
-    memset(resolved, 0, sizeof(*resolved) * type_count);
+    u32* pending;
+    u32 pending_count;
+    if (cache)
+    {
+        c_type_layout_cache_reserve(cache, result->arena, type_count);
+        for (u32 type_index = cache->pending_seeded; type_index < type_count; type_index += 1)
+        {
+            c_type_layout_cache_pending_push(cache, type_index);
+        }
+        cache->pending_seeded = BUSTER_MAX(cache->pending_seeded, type_count);
+        pending_count = cache->pending_count;
+        pending = arena_allocate(arena, u32, pending_count + 1);
+        memcpy(pending, cache->pending, sizeof(*pending) * pending_count);
+    }
+    else
+    {
+        pending_count = type_count;
+        pending = arena_allocate(arena, u32, pending_count + 1);
+        for (u32 type_index = 0; type_index < type_count; type_index += 1)
+        {
+            pending[type_index] = type_index;
+        }
+    }
+    u64* sizes = arena_allocate(arena, u64, type_count + 1);
+    u32* alignments = arena_allocate(arena, u32, type_count + 1);
+    bool* resolved = arena_allocate(arena, bool, type_count + 1);
+    bool* provisional = arena_allocate(arena, bool, type_count + 1);
+    if (cache)
+    {
+        memcpy(sizes, cache->sizes, sizeof(*sizes) * type_count);
+        memcpy(alignments, cache->alignments, sizeof(*alignments) * type_count);
+        memcpy(resolved, cache->states, type_count);
+    }
+    else
+    {
+        memset(resolved, 0, sizeof(*resolved) * type_count);
+    }
     memset(provisional, 0, sizeof(*provisional) * type_count);
     CParseLayoutContext layout_context = {
         .machine = machine,
@@ -1296,13 +1384,11 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
         .provisional = provisional,
         .type_count = type_count,
     };
-    for (u32 type_index = 0; type_index < type_count; type_index += 1)
+    for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
     {
-        if (cache && type_index < cache->capacity && cache->states[type_index])
+        u32 type_index = pending[pending_index];
+        if (type_index >= type_count || resolved[type_index])
         {
-            sizes[type_index] = cache->sizes[type_index];
-            alignments[type_index] = cache->alignments[type_index];
-            resolved[type_index] = true;
             continue;
         }
         CTypeKind kind = result->types[type_index].kind;
@@ -1351,9 +1437,10 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
     for (u32 pass = 0; pass < type_count; pass += 1)
     {
         bool progress = false;
-        for (u32 type_index = 0; type_index < type_count; type_index += 1)
+        for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
         {
-            if (resolved[type_index])
+            u32 type_index = pending[pending_index];
+            if (type_index >= type_count || resolved[type_index])
             {
                 continue;
             }
@@ -1927,33 +2014,32 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
 requested_resolved:
     if (cache && !machine->frame_count && !machine->mutation_count)
     {
-        if (cache->capacity < type_count)
+        for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
         {
-            u32 new_capacity = BUSTER_MAX(type_count, cache->capacity ? cache->capacity * 2 : 4096);
-            u64* new_sizes = arena_allocate(result->arena, u64, new_capacity);
-            u32* new_alignments = arena_allocate(result->arena, u32, new_capacity);
-            u8* new_states = arena_allocate(result->arena, u8, new_capacity);
-            memset(new_states, 0, new_capacity);
-            if (cache->capacity)
-            {
-                memcpy(new_sizes, cache->sizes, sizeof(*new_sizes) * cache->capacity);
-                memcpy(new_alignments, cache->alignments, sizeof(*new_alignments) * cache->capacity);
-                memcpy(new_states, cache->states, cache->capacity);
-            }
-            cache->sizes = new_sizes;
-            cache->alignments = new_alignments;
-            cache->states = new_states;
-            cache->capacity = new_capacity;
-        }
-        for (u32 type_index = 0; type_index < type_count; type_index += 1)
-        {
-            if (resolved[type_index] && !provisional[type_index] && !cache->states[type_index])
+            u32 type_index = pending[pending_index];
+            if (type_index < type_count && resolved[type_index] && !provisional[type_index] && !cache->states[type_index])
             {
                 cache->sizes[type_index] = sizes[type_index];
                 cache->alignments[type_index] = alignments[type_index];
                 cache->states[type_index] = 1;
             }
         }
+        // Drop what this query committed off the live list, which a nested
+        // query may have extended past the snapshot above.
+        u32 kept_count = 0;
+        for (u32 pending_index = 0; pending_index < cache->pending_count; pending_index += 1)
+        {
+            u32 type_index = cache->pending[pending_index];
+            if (cache->states[type_index])
+            {
+                cache->pending_mark[type_index] = 0;
+            }
+            else
+            {
+                cache->pending[kept_count++] = type_index;
+            }
+        }
+        cache->pending_count = kept_count;
     }
     if (!resolved[requested.value])
     {
