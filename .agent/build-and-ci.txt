@@ -4332,6 +4332,179 @@
    127:           git -C "$worktree" commit -m 'assembly: fix APX and EVEX operand encoding'
    128:           git -C "$worktree" push --force origin HEAD:agent/fix-assembly-190-193
 
+===== .github/workflows/agent-patch-assembly-isolated.yml =====
+     1: name: Temporary isolated assembly issue fixes
+     2: 
+     3: on:
+     4:   push:
+     5:     branches:
+     6:       - agent/inspect-190-195
+     7:     paths:
+     8:       - .github/agent_patch_assembly_one.py
+     9:       - .github/workflows/agent-patch-assembly-isolated.yml
+    10: 
+    11: permissions:
+    12:   contents: write
+    13: 
+    14: jobs:
+    15:   patch-test-publish:
+    16:     strategy:
+    17:       fail-fast: false
+    18:       matrix:
+    19:         issue: [190, 191, 192, 193]
+    20:     runs-on: ubuntu-24.04
+    21:     timeout-minutes: 90
+    22:     steps:
+    23:       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+    24:         with:
+    25:           fetch-depth: 0
+    26:       - name: Prepare clean main worktree and apply isolated fix
+    27:         shell: bash
+    28:         run: |
+    29:           set -euo pipefail
+    30:           git fetch origin main
+    31:           worktree="$RUNNER_TEMP/assembly-${{ matrix.issue }}"
+    32:           rm -rf "$worktree"
+    33:           git worktree add --detach "$worktree" origin/main
+    34:           python3 .github/agent_patch_assembly_one.py "$worktree" "${{ matrix.issue }}"
+    35:           git -C "$worktree" diff --check
+    36:           git -C "$worktree" diff --stat
+    37:       - name: Install Vulkan SDK
+    38:         shell: bash
+    39:         run: bash "$RUNNER_TEMP/assembly-${{ matrix.issue }}/.github/scripts/install-vulkan-sdk.sh"
+    40:       - name: Build compiler
+    41:         shell: bash
+    42:         run: |
+    43:           set -euo pipefail
+    44:           cd "$RUNNER_TEMP/assembly-${{ matrix.issue }}"
+    45:           driver="$RUNNER_TEMP/buster-build-${{ matrix.issue }}"
+    46:           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+    47:           "$driver" generate --cc clang --ci --linker DEFAULT
+    48:           "$driver" build --config Release -t ide --verbose
+    49:       - name: Verify reported reproducer
+    50:         shell: bash
+    51:         run: |
+    52:           set -euo pipefail
+    53:           worktree="$RUNNER_TEMP/assembly-${{ matrix.issue }}"
+    54:           cd "$worktree"
+    55:           ide=build/Release/ide
+    56:           issue="${{ matrix.issue }}"
+    57:           extract_text() {
+    58:             objcopy --dump-section ".text=$2" "$1"
+    59:           }
+    60:           compare_source() {
+    61:             local name="$1"
+    62:             local source="$2"
+    63:             printf '%s\n' "$source" > "$RUNNER_TEMP/$name.s"
+    64:             "$ide" cc -c -march=diamondrapids "$RUNNER_TEMP/$name.s" -o "$RUNNER_TEMP/$name-buster.o"
+    65:             clang -c -march=diamondrapids "$RUNNER_TEMP/$name.s" -o "$RUNNER_TEMP/$name-clang.o"
+    66:             extract_text "$RUNNER_TEMP/$name-buster.o" "$RUNNER_TEMP/$name-buster.bin"
+    67:             extract_text "$RUNNER_TEMP/$name-clang.o" "$RUNNER_TEMP/$name-clang.bin"
+    68:             echo "$name buster: $(od -An -tx1 -v "$RUNNER_TEMP/$name-buster.bin")"
+    69:             echo "$name clang : $(od -An -tx1 -v "$RUNNER_TEMP/$name-clang.bin")"
+    70:             cmp "$RUNNER_TEMP/$name-buster.bin" "$RUNNER_TEMP/$name-clang.bin"
+    71:           }
+    72:           case "$issue" in
+    73:             190)
+    74:               printf '%s\n' '.text
+    75:               .globl f
+    76:               f:
+    77:                 adcx %rax, %rcx
+    78:                 adox %rax, %rcx
+    79:                 ret' > "$RUNNER_TEMP/apx_pp.s"
+    80:               "$ide" cc -c -march=diamondrapids "$RUNNER_TEMP/apx_pp.s" -o "$RUNNER_TEMP/apx_pp.o"
+    81:               extract_text "$RUNNER_TEMP/apx_pp.o" "$RUNNER_TEMP/apx_pp.bin"
+    82:               python3 - "$RUNNER_TEMP/apx_pp.bin" <<'PY'
+    83:           from pathlib import Path
+    84:           import sys
+    85:           data = Path(sys.argv[1]).read_bytes()
+    86:           expected = bytes.fromhex('62 f4 fd 08 66 c8 62 f4 fe 08 66 c8 c3')
+    87:           if data != expected:
+    88:               raise SystemExit(f'APX mandatory-prefix bytes differ: got {data.hex(" ")}, expected {expected.hex(" ")}')
+    89:           PY
+    90:               compare_source apx_vvvv '.text
+    91:               .globl f
+    92:               f:
+    93:                 shlx %r17, %r18, %r19
+    94:                 sarx %r20, %r21, %r22
+    95:                 shrx %r24, %r25, %r26
+    96:                 pdep %r17, %r18, %r19
+    97:                 pext %r20, %r21, %r22
+    98:                 andn %r24, %r25, %r26
+    99:                 blsi %r17, %r18
+   100:                 mulx %r20, %r21, %r22
+   101:                 rorx $7, %r24, %r25
+   102:                 ret'
+   103:               ;;
+   104:             191)
+   105:               compare_source evex_broadcast '.text
+   106:               .globl f
+   107:               f:
+   108:                 vaddps 64(%rax){1to16}, %zmm1, %zmm2
+   109:                 vaddpd 512(%rax){1to8}, %zmm1, %zmm2
+   110:                 vpaddd -128(%rax){1to16}, %zmm1, %zmm2
+   111:                 ret'
+   112:               ;;
+   113:             192)
+   114:               compare_source rex2_memory_width '.text
+   115:               .globl f
+   116:               f:
+   117:                 addq $1, (%r16)
+   118:                 adcq $2, 16(%r17)
+   119:                 btsq $3, (%r18)
+   120:                 lock addq $1, %fs:(%r19)
+   121:                 ret'
+   122:               ;;
+   123:             193)
+   124:               printf '%s\n' '.text
+   125:               .globl f
+   126:               f:
+   127:                 bts $3, (%r23)
+   128:                 ret' > "$RUNNER_TEMP/bts_unsized.s"
+   129:               if "$ide" cc -c -march=diamondrapids "$RUNNER_TEMP/bts_unsized.s" -o "$RUNNER_TEMP/bts_unsized-buster.o"; then
+   130:                 clang -c -march=diamondrapids "$RUNNER_TEMP/bts_unsized.s" -o "$RUNNER_TEMP/bts_unsized-clang.o"
+   131:                 extract_text "$RUNNER_TEMP/bts_unsized-buster.o" "$RUNNER_TEMP/bts_unsized-buster.bin"
+   132:                 extract_text "$RUNNER_TEMP/bts_unsized-clang.o" "$RUNNER_TEMP/bts_unsized-clang.bin"
+   133:                 cmp "$RUNNER_TEMP/bts_unsized-buster.bin" "$RUNNER_TEMP/bts_unsized-clang.bin"
+   134:               else
+   135:                 echo 'bts with unsized memory is diagnosed instead of being reinterpreted as bt'
+   136:               fi
+   137:               for mnemonic in adds cmps movs; do
+   138:                 printf '.text\n.globl f\nf:\n  %s $3, (%%rax)\n  ret\n' "$mnemonic" > "$RUNNER_TEMP/$mnemonic.s"
+   139:                 if "$ide" cc -c -march=diamondrapids "$RUNNER_TEMP/$mnemonic.s" -o "$RUNNER_TEMP/$mnemonic.o"; then
+   140:                   echo "$mnemonic unexpectedly assembled" >&2
+   141:                   exit 1
+   142:                 fi
+   143:               done
+   144:               compare_source x87_typed_suffix '.text
+   145:               .globl f
+   146:               f:
+   147:                 fiadds (%rax)
+   148:                 ret'
+   149:               ;;
+   150:           esac
+   151:       - name: Run full Release suite
+   152:         shell: bash
+   153:         run: |
+   154:           set -euo pipefail
+   155:           cd "$RUNNER_TEMP/assembly-${{ matrix.issue }}"
+   156:           "$RUNNER_TEMP/buster-build-${{ matrix.issue }}" build --config Release -t test_all --verbose
+   157:       - name: Publish clean fix branch
+   158:         shell: bash
+   159:         run: |
+   160:           set -euo pipefail
+   161:           issue="${{ matrix.issue }}"
+   162:           worktree="$RUNNER_TEMP/assembly-$issue"
+   163:           git -C "$worktree" config user.name "github-actions[bot]"
+   164:           git -C "$worktree" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+   165:           if [[ "$issue" == 193 ]]; then
+   166:             git -C "$worktree" add src/buster/lib/compiler/assembly/assembly.c
+   167:           else
+   168:             git -C "$worktree" add src/buster/lib/compiler/assembly/x86_64_metadata.c
+   169:           fi
+   170:           git -C "$worktree" commit -m "assembly: fix issue #$issue"
+   171:           git -C "$worktree" push --force origin "HEAD:agent/fix-assembly-$issue"
+
 ===== .github/workflows/agent-patch-codegen-195.yml =====
      1: name: Temporary patch codegen issue 195
      2: 
