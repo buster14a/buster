@@ -1,0 +1,37 @@
+name: UB audit source snapshot
+
+on:
+  push:
+    branches: [audit/ub-source-20260907]
+    paths: [.github/workflows/ub-audit-source.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Capture the audited baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = 9834a4253c61934a8a253641a84741a25d3717e3
+          git archive --format=tar.gz -o "$RUNNER_TEMP/buster-ub-baseline.tar.gz" HEAD^
+          git bundle create "$RUNNER_TEMP/buster-ub-baseline.bundle" --all
+          sha256sum "$RUNNER_TEMP/buster-ub-baseline.tar.gz" "$RUNNER_TEMP/buster-ub-baseline.bundle" > "$RUNNER_TEMP/buster-ub-baseline.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buster-ub-baseline-9834a42
+          path: |
+            ${{ runner.temp }}/buster-ub-baseline.tar.gz
+            ${{ runner.temp }}/buster-ub-baseline.bundle
+            ${{ runner.temp }}/buster-ub-baseline.sha256
+          if-no-files-found: error
+          retention-days: 3
