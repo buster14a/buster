@@ -81,6 +81,68 @@ jobs:
               }
               '''
           gen_text = gen_text.replace(switch_line, probe + switch_line, 1)
+
+          switch_enter = '''if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_SWITCH))
+            {
+                if (index + 1 >= task.end || !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))'''
+          switch_enter_probe = '''if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_SWITCH))
+            {
+                fprintf(stderr, "PR94_SWITCH_STAGE entered index=%u end=%u next_punctuator=%u\\n", index, task.end,
+                        index + 1 < task.end ? (u32)builder->preprocess.tokens[index + 1].punctuator : UINT32_MAX);
+                fflush(stderr);
+                if (index + 1 >= task.end || !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))'''
+          if gen_text.count(switch_enter) != 1:
+              raise SystemExit(f"switch entry anchor count is {gen_text.count(switch_enter)}")
+          gen_text = gen_text.replace(switch_enter, switch_enter_probe, 1)
+
+          condition_gate = '''if (expression_close == UINT32_MAX || expression_close == index + 2 || expression_close + 1 >= task.end ||
+                    !c_token_is_punctuator(&builder->preprocess.tokens[expression_close + 1], C_PUNCTUATOR_LEFT_BRACE))'''
+          condition_probe = '''fprintf(stderr, "PR94_SWITCH_STAGE condition_close=%u after_kind=%u after_punctuator=%u\\n", expression_close,
+                        expression_close + 1 < task.end ? (u32)builder->preprocess.tokens[expression_close + 1].kind : UINT32_MAX,
+                        expression_close + 1 < task.end ? (u32)builder->preprocess.tokens[expression_close + 1].punctuator : UINT32_MAX);
+                fflush(stderr);
+                if (expression_close == UINT32_MAX || expression_close == index + 2 || expression_close + 1 >= task.end ||
+                    !c_token_is_punctuator(&builder->preprocess.tokens[expression_close + 1], C_PUNCTUATOR_LEFT_BRACE))'''
+          if gen_text.count(condition_gate) != 1:
+              raise SystemExit(f"switch condition anchor count is {gen_text.count(condition_gate)}")
+          gen_text = gen_text.replace(condition_gate, condition_probe, 1)
+
+          body_gate = '''if (body_close == UINT32_MAX)
+                {
+                    return false;
+                }
+                CIrSwitchCase* cases = switch_cases;'''
+          body_probe = '''fprintf(stderr, "PR94_SWITCH_STAGE body_open=%u body_close=%u\\n", body_open, body_close);
+                fflush(stderr);
+                if (body_close == UINT32_MAX)
+                {
+                    return false;
+                }
+                CIrSwitchCase* cases = switch_cases;'''
+          if gen_text.count(body_gate) != 1:
+              raise SystemExit(f"switch body anchor count is {gen_text.count(body_gate)}")
+          gen_text = gen_text.replace(body_gate, body_probe, 1)
+
+          case_constant_gate = '''if (!c_ir_constant_evaluate(builder, scan + 1, colon, &switch_case.low_constant) ||
+                                switch_case.low_constant.kind != C_IR_CONSTANT_INTEGER)'''
+          case_constant_probe = '''bool pr94_constant_success = c_ir_constant_evaluate(builder, scan + 1, colon, &switch_case.low_constant);
+                            fprintf(stderr, "PR94_SWITCH_STAGE case scan=%u colon=%u constant_success=%u constant_kind=%u\\n", scan, colon,
+                                    (u32)pr94_constant_success, (u32)switch_case.low_constant.kind);
+                            fflush(stderr);
+                            if (!pr94_constant_success || switch_case.low_constant.kind != C_IR_CONSTANT_INTEGER)'''
+          if gen_text.count(case_constant_gate) != 1:
+              raise SystemExit(f"switch case constant anchor count is {gen_text.count(case_constant_gate)}")
+          gen_text = gen_text.replace(case_constant_gate, case_constant_probe, 1)
+
+          switch_yield = '''state->switch_case_count = case_count;
+                state->switch_body_start = body_open + 1;'''
+          switch_yield_probe = '''fprintf(stderr, "PR94_SWITCH_STAGE cases_complete count=%u\\n", case_count);
+                fflush(stderr);
+                state->switch_case_count = case_count;
+                state->switch_body_start = body_open + 1;'''
+          if gen_text.count(switch_yield) != 1:
+              raise SystemExit(f"switch yield anchor count is {gen_text.count(switch_yield)}")
+          gen_text = gen_text.replace(switch_yield, switch_yield_probe, 1)
           gen_path.write_text(gen_text, encoding="utf-8")
           '@ | python -
 

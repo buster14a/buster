@@ -21765,9 +21765,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         return test_timing_self_test_result;
     }
 
+    // Intel macOS cannot yet self-host the compiler image; direct mode still
+    // executes every compiler/configuration test tree and omits only fan-out.
+    bool direct_matrix = environment_flag_is_on(S8("BUSTER_MATRIX_DIRECT")) ||
+                         (BUSTER_MACOS && BUSTER_CPU_ARCH_X86_64);
     bool fanout_forced = environment_flag_is_on(S8("BUSTER_TEST_FORCE_ARTIFACT_FANOUT"));
-    bool fanout_requested = build_artifact_fanout_requested_for_platform(ci, fanout_forced, BUSTER_LINUX != 0, BUSTER_MACOS != 0,
-                                                                          BUSTER_WINDOWS != 0, BUSTER_CPU_ARCH_X86_64 != 0);
+    bool fanout_requested = matrix_superbuild_self_host_enabled(
+        direct_matrix,
+        build_artifact_fanout_requested_for_platform(ci, fanout_forced, BUSTER_LINUX != 0, BUSTER_MACOS != 0,
+                                                      BUSTER_WINDOWS != 0, BUSTER_CPU_ARCH_X86_64 != 0));
     bool fanout_supported = build_artifact_fanout_consumer_supported_for_platform(BUSTER_LINUX != 0, BUSTER_MACOS != 0, BUSTER_WINDOWS != 0,
                                                                                      BUSTER_CPU_ARCH_X86_64 != 0);
     if (fanout_requested && !fanout_supported)
@@ -21791,10 +21797,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         return superbuild_parallelism_test_result;
     }
 
-    // Intel macOS cannot yet self-host the compiler image; direct mode still
-    // executes every compiler/configuration test tree and omits only fan-out.
-    bool direct_matrix = environment_flag_is_on(S8("BUSTER_MATRIX_DIRECT")) ||
-                         (BUSTER_MACOS && BUSTER_CPU_ARCH_X86_64);
     MatrixTestCombination combinations[BUILD_COMPILER_COUNT * 4] = {0};
     u64 combination_count = 0;
     BuildStep* generate_step = step_add(arena);
