@@ -323,7 +323,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
                                           TEST_DESCRIPTOR_PARALLEL_NONE, true},
 #endif
     [TEST_ID_IR] = {S8_INITIALIZER("ir_tests"), &ir_tests},
-    [TEST_ID_LLVM_BITCODE] = {S8_INITIALIZER("llvm_bitcode_tests"), &llvm_bitcode_tests},
+    [TEST_ID_LLVM_BITCODE] = {S8_INITIALIZER("llvm_bitcode_tests"), &llvm_bitcode_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     [TEST_ID_MACHINE_SELECTION] = {S8_INITIALIZER("machine_selection_tests"), &machine_selection_tests},
     [TEST_ID_MACHINE] = {S8_INITIALIZER("machine_tests"), &machine_tests},
     [TEST_ID_CODEGEN] = {S8_INITIALIZER("codegen_tests"), &codegen_tests},

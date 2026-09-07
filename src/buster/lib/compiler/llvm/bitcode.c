@@ -1,4 +1,7 @@
 #include <buster/lib/compiler/llvm/bitcode.h>
+#if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/llvm/bitcode_internal.h>
+#endif
 
 // LLVM's bitstream is LSB-first. The writer intentionally emits
 // unabbreviated records: this keeps the implementation small and auditable,
@@ -1177,29 +1180,39 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
     return !llvm_bc_failed(context);
 }
 
-static u64 llvm_bc_encode_integer_bits(u64 bits, u32 width)
+BUSTER_GLOBAL_LOCAL u64 llvm_bc_encode_integer_bits(u64 bits, u32 width)
 {
+    u64 result;
     if (!width || width > 64)
     {
-        return bits << 1;
+        result = bits << 1;
     }
-    if (width < 64)
+    else
     {
-        bits &= (UINT64_C(1) << width) - 1;
+        u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+        bits &= mask;
+        u64 sign = UINT64_C(1) << (width - 1);
+        if (bits & sign)
+        {
+            u64 magnitude = (0 - bits) & mask;
+            // Unsigned wraparound gives INT64_MIN the special wire value 1.
+            // Narrow signed minima must retain their ordinary magnitude.
+            result = (magnitude << 1) | 1;
+        }
+        else
+        {
+            result = bits << 1;
+        }
     }
-    u64 sign = UINT64_C(1) << (width - 1);
-    if (!(bits & sign))
-    {
-        return bits << 1;
-    }
-    if (bits == sign)
-    {
-        return 1;
-    }
-    u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
-    u64 magnitude = ((~bits) + 1) & mask;
-    return (magnitude << 1) | 1;
+    return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+u64 llvm_bitcode_test_encode_integer_bits(u64 bits, u32 width)
+{
+    return llvm_bc_encode_integer_bits(bits, width);
+}
+#endif
 
 static u32 llvm_bc_add_constant(LlvmBcContext* context, u32 type_id, u32 code, u64 const* operands, u32 operand_count)
 {
