@@ -2599,14 +2599,26 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     u32 a64_pdata_rva = 0;
     u32 a64_pdata_raw = 0;
     u32 a64_xdata_rva = 0;
+    u32 a64_xdata_raw = 0;
     BUSTER_TEST(arguments, link_test_pe_section_find(a64_pe_executable.executable, S8(".pdata"), &a64_pdata_rva, &a64_pdata_raw));
-    BUSTER_TEST(arguments, link_test_pe_section_find(a64_pe_executable.executable, S8(".xdata"), &a64_xdata_rva, 0));
+    BUSTER_TEST(arguments, link_test_pe_section_find(a64_pe_executable.executable, S8(".xdata"), &a64_xdata_rva, &a64_xdata_raw));
     BUSTER_TEST(arguments, a64_pe_executable.executable.length > 0x128 && link_read_u32(a64_pe_executable.executable.pointer, 0x120) == a64_pdata_rva &&
                                link_read_u32(a64_pe_executable.executable.pointer, 0x124) == 16);
+    BUSTER_TEST(arguments, link_test_pe_import_matches(a64_pe_executable.executable, S8("ucrtbase.dll"), S8("_configure_narrow_argv")));
+    BUSTER_TEST(arguments, link_test_pe_import_matches(a64_pe_executable.executable, S8("ucrtbase.dll"), S8("__p___argc")));
+    BUSTER_TEST(arguments, link_test_pe_import_matches(a64_pe_executable.executable, S8("ucrtbase.dll"), S8("__p___argv")));
     if (a64_pdata_raw <= a64_pe_executable.executable.length && 16 <= a64_pe_executable.executable.length - a64_pdata_raw)
     {
         BUSTER_TEST(arguments, link_read_u32(a64_pe_executable.executable.pointer, a64_pdata_raw + 4) == a64_xdata_rva);
         BUSTER_TEST(arguments, link_read_u32(a64_pe_executable.executable.pointer, a64_pdata_raw + 12) == a64_xdata_rva + 8);
+    }
+    if (a64_xdata_raw <= a64_pe_executable.executable.length && 8 <= a64_pe_executable.executable.length - a64_xdata_raw)
+    {
+        BUSTER_TEST(arguments, link_read_u32(a64_pe_executable.executable.pointer, a64_xdata_raw) == (12u | (1u << 27)));
+        BUSTER_TEST(arguments, a64_pe_executable.executable.pointer[a64_xdata_raw + 4] == 0x81 &&
+                                   a64_pe_executable.executable.pointer[a64_xdata_raw + 5] == 0xcc &&
+                                   a64_pe_executable.executable.pointer[a64_xdata_raw + 6] == 0x01 &&
+                                   a64_pe_executable.executable.pointer[a64_xdata_raw + 7] == 0xe4);
     }
 #endif
     LinkObjectResult linked = link_objects(arguments->arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
@@ -3842,7 +3854,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                       .dynamic_library_count = 1,
                                                                                   });
     BUSTER_TEST(arguments, aarch64_data_executable.error == LINK_ERROR_NONE);
-    u64 aarch64_data_text_offset = 0x400 + align_forward(20, 16);
+    // The hosted ARM64 stub is twelve words: its two-pair frame, three UCRT
+    // argv queries, main/exit and the terminating trap.
+    u64 aarch64_data_text_offset = 0x400 + align_forward(12 * sizeof(u32), 16);
     BUSTER_TEST(arguments, aarch64_data_executable.executable.length > aarch64_data_text_offset + 12 &&
                            link_read_u32(aarch64_data_executable.executable.pointer, aarch64_data_text_offset + 8) == UINT32_C(0x14000002));
     // An undefined weak symbol is worth address zero, not a dynamic import.

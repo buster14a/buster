@@ -9252,8 +9252,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         bool aarch64_darwin = target.cpu_arch == CPU_ARCH_AARCH64 &&
                               (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS);
         bool aarch64_darwin_variadic = canonical_variadic && aarch64_darwin;
+        bool aarch64_windows_variadic = canonical_variadic && windows_aarch64;
         if (target.cpu_arch == CPU_ARCH_AARCH64 && canonical_variadic && !aarch64_darwin_variadic)
         {
+            // Windows exposes va_list as one pointer. Keep the register-save
+            // image sixteen-byte aligned so an INTEGER pair can round its
+            // cursor exactly as the argument classifier rounded the X index.
+            if (aarch64_windows_variadic)
+            {
+                frame_size_64 = align_forward(frame_size_64, 16);
+            }
             aarch64_va_save_offset = (u32)frame_size_64;
             frame_size_64 += 64;
         }
@@ -17021,7 +17029,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 prior_hfa &= codegen_canonical_abi_part_is_float(prior_abi.parts[part].abi_class);
                             }
-                            if (prior_hfa)
+                            if (prior_hfa && !aarch64_windows_variadic)
                             {
                                 if (float_register_index + prior_abi.part_count <= 8)
                                 {
@@ -17034,7 +17042,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 continue;
                             }
-                            if (prior_type && prior_type->kind == IR_TYPE_FLOAT)
+                            if (prior_type && prior_type->kind == IR_TYPE_FLOAT && !aarch64_windows_variadic)
                             {
                                 if (float_register_index < 8)
                                 {
@@ -17098,7 +17106,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                             return result;
                         }
-                        if (argument_type->kind == IR_TYPE_FLOAT)
+                        if (argument_type->kind == IR_TYPE_FLOAT && !aarch64_windows_variadic)
                         {
                             if (argument_type->bit_width != 32 && argument_type->bit_width != 64)
                             {
@@ -17126,7 +17134,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             instruction_id = instruction->next;
                             continue;
                         }
-                        if (argument_hfa)
+                        if (argument_hfa && !aarch64_windows_variadic)
                         {
                             if (float_register_index + argument_abi.part_count <= 8)
                             {
@@ -18326,6 +18334,24 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             instruction_id = instruction->next;
                             continue;
                         }
+                        if (aarch64_windows_variadic)
+                        {
+                            if (gp_count < 8)
+                            {
+                                codegen_canonical_a64_base_address(&buffer, 9, 28, aarch64_va_save_offset + gp_count * 8);
+                            }
+                            else
+                            {
+                                codegen_canonical_a64_base_address(&buffer, 9, 29, 16 + stack_parts * 8);
+                            }
+                            if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset, 8, true, false))
+                            {
+                                result.error = CODEGEN_ERROR_CAPACITY;
+                                return result;
+                            }
+                            instruction_id = instruction->next;
+                            continue;
+                        }
                         a64_emit_constant(&buffer, 9, gp_count * 8);
                         if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset, 8, true, false))
                         {
@@ -18355,7 +18381,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     else if (instruction->opcode == IR_OPCODE_VA_COPY)
                     {
                         c_a64_load(&emitter, 10, instruction->operands[0]);
-                        if (aarch64_darwin)
+                        if (aarch64_darwin || aarch64_windows_variadic)
                         {
                             codegen_emit_u32(&buffer, 0xf9400149);
                             if (!codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset, 8, true, false))
@@ -18378,7 +18404,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     }
                     else if (instruction->opcode == IR_OPCODE_VA_END)
                     {
-                        if (aarch64_darwin)
+                        if (aarch64_darwin || aarch64_windows_variadic)
                         {
                             instruction_id = instruction->next;
                             continue;
@@ -18427,6 +18453,41 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             a64_emit_constant(&buffer, 9, part_count * 8);
                             codegen_emit_u32(&buffer, 0x8b09016b);
+                            codegen_emit_u32(&buffer, 0xf900014b);
+                            instruction_id = instruction->next;
+                            continue;
+                        }
+                        if (aarch64_windows_variadic)
+                        {
+                            codegen_emit_u32(&buffer, 0xf940014b);
+                            if (even_integer_pair)
+                            {
+                                codegen_emit_u32(&buffer, 0x91003d6b);
+                                a64_emit_constant(&buffer, 9, ~UINT64_C(15));
+                                codegen_emit_u32(&buffer, 0x8a09016b);
+                            }
+                            // Our ordinary frame keeps FP/LR between the
+                            // saved X image and the caller's overflow area.
+                            // Translate the one-past-save cursor to incoming
+                            // SP before and after each read, preserving the
+                            // public one-pointer Windows va_list shape.
+                            codegen_canonical_a64_base_address(&buffer, 12, 28, aarch64_va_save_offset + 64);
+                            codegen_canonical_a64_base_address(&buffer, 13, 29, 16);
+                            codegen_emit_u32(&buffer, 0xeb0c017f);
+                            codegen_emit_u32(&buffer, 0x9a8b01abu);
+                            for (u32 part_index = 0; part_index < part_count; part_index += 1)
+                            {
+                                if (!codegen_canonical_a64_memory_operation_base(&buffer, 9, part_index * 8, 8, false, false, 11) ||
+                                    !codegen_canonical_a64_frame_memory_operation(&buffer, 9, result_offset + part_index * 8, 8, true, false))
+                                {
+                                    result.error = CODEGEN_ERROR_CAPACITY;
+                                    return result;
+                                }
+                            }
+                            u32 increment = part_count * 8;
+                            codegen_emit_u32(&buffer, 0x9100016b | (increment << 10));
+                            codegen_emit_u32(&buffer, 0xeb0c017f);
+                            codegen_emit_u32(&buffer, 0x9a8b01abu);
                             codegen_emit_u32(&buffer, 0xf900014b);
                             instruction_id = instruction->next;
                             continue;
@@ -18495,6 +18556,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                            : callee_type;
                         bool darwin_variadic_call = result.abi == CODEGEN_ABI_AARCH64_DARWIN && callee_function_type &&
                                                     callee_function_type->kind == IR_TYPE_FUNCTION && callee_function_type->is_variadic;
+                        bool windows_variadic_call = windows_aarch64 && callee_function_type &&
+                                                     callee_function_type->kind == IR_TYPE_FUNCTION && callee_function_type->is_variadic;
                         bool* argument_on_stack = arena_allocate(arena, bool, argument_count);
                         u32* argument_stack_offset = arena_allocate(arena, u32, argument_count);
                         bool* argument_indirect = arena_allocate(arena, bool, argument_count);
@@ -18518,13 +18581,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 argument_hfa &= codegen_canonical_abi_part_is_float(argument_abi.parts[part].abi_class);
                             }
+                            argument_hfa &= !windows_variadic_call;
                             if (!type || ((type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) && !aggregate))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                 return result;
                             }
                             bool unnamed_variadic = darwin_variadic_call && argument_array_index >= callee_function_type->parameter_count;
-                            if (type->kind == IR_TYPE_FLOAT)
+                            if (type->kind == IR_TYPE_FLOAT && !windows_variadic_call)
                             {
                                 if (!unnamed_variadic && simulated_float_registers < 8)
                                 {
@@ -18641,6 +18705,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 argument_hfa &= codegen_canonical_abi_part_is_float(argument_abi.parts[part].abi_class);
                             }
+                            argument_hfa &= !windows_variadic_call;
                             bool indirect = aggregate && argument_type && argument_type->layout.size > 16;
                             if (indirect)
                             {
@@ -18662,17 +18727,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 register_index = (register_index + 1u) & ~1u;
                             }
-                            // The integer-file bound only guards integer parts:
-                            // a float or HFA argument rides the V file, whose
-                            // own placement counter already bounded it, so an
-                            // exhausted X file must not veto it here.
+                            // The integer-file bound only exempts arguments
+                            // that really ride the V file. Windows variadic
+                            // calls carry float and HFA bits in X registers.
+                            bool vector_register_argument =
+                                !windows_variadic_call && ((argument_type && argument_type->kind == IR_TYPE_FLOAT) || argument_hfa);
                             if (!argument_type || ((argument_type->kind == IR_TYPE_STRUCT || argument_type->kind == IR_TYPE_UNION) && !aggregate) ||
-                                (argument_type->kind != IR_TYPE_FLOAT && !argument_hfa && register_index + part_count > 8))
+                                (!vector_register_argument && register_index + part_count > 8))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                 return result;
                             }
-                            if (argument_type->kind == IR_TYPE_FLOAT)
+                            if (argument_type->kind == IR_TYPE_FLOAT && !windows_variadic_call)
                             {
                                 u8 float_register = argument_float_register[argument_index - 1];
                                 if (float_register >= 8 || (argument_type->bit_width != 32 && argument_type->bit_width != 64))
