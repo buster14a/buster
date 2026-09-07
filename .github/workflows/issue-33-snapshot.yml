@@ -17,11 +17,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Pack source and history
+      - name: Pack current main and history
         shell: bash
         run: |
           set -euo pipefail
-          git bundle create "$RUNNER_TEMP/buster-source.bundle" HEAD
+          git bundle create "$RUNNER_TEMP/buster-source.bundle" refs/remotes/origin/main
       - uses: actions/upload-artifact@v4
         with:
           name: differential-harness-source
