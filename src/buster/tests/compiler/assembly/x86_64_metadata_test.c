@@ -3132,6 +3132,8 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
                class_counts[3] + class_counts[4] + class_counts[5] == register_only;
 }
 
+#include <buster/tests/compiler/assembly/x86_64_rex2_test.c>
+
 UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4246,6 +4248,9 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_64_metadata_test_source_decorator_reachability(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_memory_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_immediate_skeleton(arguments));
+    UnitTestResult rex2_regressions = x86_64_metadata_rex2_tests(arguments);
+    result.succeeded_test_count += rex2_regressions.succeeded_test_count;
+    result.test_count += rex2_regressions.test_count;
     BUSTER_TEST(arguments, x86_64_metadata_test_source_relative_absolute_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_att_memory_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_register_only_census(arguments));
