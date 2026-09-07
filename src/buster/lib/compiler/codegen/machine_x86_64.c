@@ -298,6 +298,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_description = 
     // only through vector virtual registers, which the selector produces
     // only under the AVX512F gate — the same gate that makes ZMM16-31
     // architectural.
+    .vector_register_mask = 0xffffffffull << MACHINE_X64_ZMM0,
     .vector_allocatable_mask = 0xffffffffull << MACHINE_X64_ZMM0,
     .vector_copy_opcode = MACHINE_X64_VMOV_RR,
     .vector_slot_scratch = {MACHINE_X64_ZMM0, MACHINE_X64_ZMM1, MACHINE_X64_ZMM2, MACHINE_X64_ZMM3},
@@ -343,6 +344,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_windows_descri
     .float_bridge_register = MACHINE_X64_RAX,
     .quality_pin_registers = {MACHINE_X64_R15, MACHINE_X64_R14, MACHINE_X64_R13, MACHINE_X64_R12, MACHINE_X64_RDI, MACHINE_X64_RSI, MACHINE_X64_RBX},
     .quality_pin_register_count = 7,
+    .vector_register_mask = 0xffffffffull << MACHINE_X64_ZMM0,
     .vector_allocatable_mask = (0x3full << MACHINE_X64_ZMM0) | (0xffffull << MACHINE_X64_ZMM16),
     .vector_copy_opcode = MACHINE_X64_VMOV_RR,
     .saves_precede_frame_pointer = 1,
