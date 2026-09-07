@@ -15,19 +15,21 @@ permissions:
 jobs:
   source:
     if: ${{ github.server_url == 'https://github.com' }}
-    runs-on: macos-26
+    runs-on: ubuntu-slim
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      - name: Publish the locally validated implementation tree
+      - name: Publish the integrated bootstrap PR without dropping main changes
         env:
-          IMPLEMENTATION_BRANCH: fix/self-host-deterministic-fixed-point
+          IMPLEMENTATION_BRANCH: work/self-host-implementation-transfer-20260907
+          EXPECTED_HEAD: 5fc20fed8685b2d399897d554168cb55ea32e3a4
+          MAIN_HEAD: 88ecc49c1a5c5fef614c388c730babe7686a689a
         run: |
           cp .audit-transfer/integration-driver.patch "$RUNNER_TEMP/integration-driver.patch"
           openssl base64 -d -A < .audit-transfer/self-host-harden.b64 | gzip -dc > "$RUNNER_TEMP/harden.patch"
-          echo "0a5d0d97c08a24a7c91fcb0ac37e510b6f00c076ae6f60a8381b586fbeeaaad9  $RUNNER_TEMP/harden.patch" | shasum -a 256 -c
+          echo "0a5d0d97c08a24a7c91fcb0ac37e510b6f00c076ae6f60a8381b586fbeeaaad9  $RUNNER_TEMP/harden.patch" | sha256sum -c
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git switch --detach acde6e0c7cbc582dd65ab8c7b1cda368e386965f
@@ -43,9 +45,21 @@ jobs:
           git diff --check --cached
           test "$(git write-tree)" = 4182045dd548770193faceb0004d46b709375625
           git commit -m 'bootstrap: stop at invalid MIR before diagnostic dereference or allocation'
+          git cherry-pick "$EXPECTED_HEAD"
+          git merge --no-edit "$MAIN_HEAD"
+          git diff --check "$MAIN_HEAD"
+          test "$(git ls-remote origin refs/heads/$IMPLEMENTATION_BRANCH | cut -f1)" = "$EXPECTED_HEAD"
+          tree=$(git write-tree)
+          commit=$(git commit-tree "$tree" -p "$EXPECTED_HEAD" -p "$MAIN_HEAD" -m 'bootstrap: integrate current canonical preparation and stop at invalid MIR')
+          git switch --detach "$commit"
           git push origin "HEAD:refs/heads/$IMPLEMENTATION_BRANCH"
           git rev-parse HEAD > "$RUNNER_TEMP/implementation-sha.txt"
-          git bundle create "$RUNNER_TEMP/buster-source.bundle" HEAD
+      - name: Export exact source even when integration needs resolution
+        if: ${{ always() }}
+        run: |
+          git bundle create "$RUNNER_TEMP/buster-source.bundle" --all HEAD
+          git diff > "$RUNNER_TEMP/integration.diff"
+          git status --short > "$RUNNER_TEMP/integration-status.txt"
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
@@ -53,5 +67,7 @@ jobs:
           path: |
             ${{ runner.temp }}/buster-source.bundle
             ${{ runner.temp }}/implementation-sha.txt
+            ${{ runner.temp }}/integration.diff
+            ${{ runner.temp }}/integration-status.txt
           retention-days: 1
           if-no-files-found: error
