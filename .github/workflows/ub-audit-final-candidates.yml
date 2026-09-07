@@ -1,0 +1,85 @@
+name: UB audit integrated candidates
+
+on:
+  push:
+    branches: [audit/ub-source-20260907]
+    paths: [.github/workflows/ub-audit-final-candidates.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  candidates:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ebfdd11705bc470564e726857e498f1c82aa746c
+          fetch-depth: 64
+      - name: Apply checksummed local fixes to independent branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          export OUT="$RUNNER_TEMP/ub-final-candidates"
+          mkdir -p "$OUT"
+          python3 - <<'PY'
+          import base64, gzip, hashlib, os
+          from pathlib import Path
+          patches = {
+              'ir': ('5a6f36d7cfacd9b90787a0d85b793a96b2ab286fed7697690ee796e7e25a1694', 'H4sIAAAAAAAC/91a63PaOhb/zl+hfOmYYKhtXoE06aUtt8vcNHQo6W6nk2GMLVLfAmZs0zabm/99jx62JflF0tzdzmY6BSSdh46OfjrnSK63WqFm88aLkP08DJzny30Y4eD52ls+d/zNzlvDD4/8azloWTWi5m1d/AMtbaPrGifmcjBYrsyBZXRW7Y5lnxi9VcdetQ2nby+XuOO0Wu6y21/hlWV2XMex7K7b7VtL13ScQdsaYMvurXDf7Q1OkGkYvU6n1mw2q/WsNRqNA3T97TfU7BgDQ2+bqEG/dDoIGl9dfZiPZ4u3F9NXo4vF9NXo4vF'),
+          }
+          # The actual payloads below replace the short declaration above.
+          patches['ir'] = ('5a6f36d7cfacd9b90787a0d85b793a96b2ab286fed7697690ee796e7e25a1694', 'H4sIAAAAAAAC/91a63PaOhb/zl+hfOmYYKhtXoE06aUtt8vcNHQo6W6nk2GMLVLfAmZs0zabm/99jx62JflF0tzdzmY6BSSdh46OfjrnSK63WqFm88aLkP08DJzny30Y4eD52ls+d/zNzlvDD4/8azloWTWi5m1d/AMtbaPrGifmcjBYrsyBZXRW7Y5lnxi9VcdetQ2nby+XuOO0Wu6y21/hlWV2XMex7K7b7VtL13ScQdsaYMvurXDf7Q1OkGkYvU6n1mw2q/WsNRqNA3T97TfU7BgDQ2+bqEG/dDoIGl9dfZiPZ4u3F9NXo4vFxfT16AJNgo/22nPtyPO3Mxzu1xHygsU31oYXG9/dr/HC/77FQfjF22mT4B1tOkYbv4biv5a3DaNg7xAu6AxNZovJ5Yf57Or1fDK9XEzewM+Po4vJG52R3J+yz33bQo69sx0vugUy47TWJM0rP0Aa6Vvtt5TlglmfjFDbXiCmYvM86XD8/TbKDGycIbNeazwVf/TsGQqovVo4CIDhGZ02neWIzvpyejku0IJO/i413yT4nQ87TghAG1VyiBoKv9OUh7dCWtzZPA8jWD2u0+9Xl2wdLqb/HM/Gb+op0R0zePwnrAX3lXejf2lxq45S/sJ6M3vUT5ltRXUEfZZr3/maWu5I6Qnr6K+/RP0z/BUqoZ/SysLJn8AMvHmPc9nQnmoGa3uJ14sNjmzYFHbKSTsqGkOmU9i54GIr5eIfUVAgjnaFihg2XrJNvS5LuMsKZG4Ma55ufGJ26taa7NN8G8OOTp1BJz72CtDkD3GjF2OA6in38k+8DnGlyk/oqPc19es92xRzvNn5gb0eBXhro9AJ7Mj5AgL5t8US33hbzdCRUee4NQleEWeeuMeIASaMtgn1wl5DB+xIjRO3aLOeUujJlOr/JRAkG7QawBKsaj4BVjXLsOqoAKuaRVjlbyNvu8cC23tRy0m68NP49ELJOca8XVAw9RI2RkvdmzXUFf0TVtx8R/nmS3ztQe7USOfxNC6VMPw1zr6c9SxFIcXYIvikXfQkERuEVRVXj/wtA2x/VZDgJzw7c/Qd6t2VQJd4eRlm/i3enpnTQz3+McfNUyx0RmLeYkuwn/TEmxFv3Xhf1U+lU6FkRICjfbDl84M2EMFC8V63r5snEIr3+oZuWYeE4mNqYTESlxZthwM6DMLx94F/E9hiLDm/3UF4Hno3WxsUwosIfhNzb10vwE6EXhK+pHGxCvzNwnO1ZzvKZNM8J80hQY71GjNKiCrWeIO3Ef1VR0Ox87SW74PHYIUVBkByQHJNOboJNYEQ9q157uKVt/UIWYsGRoA7ZYHgy/xesi0LOQ6T3CJ25iPFPhBIyS3N869gMe7k80/vx8nuJVGbBCYqM9ArhIULPNv1HDJTQc3mOV28rctnA/xV4p0NS4Ehu+NDGgCbWZmPF/niYIkN1amYi8cepZjwAL9SBQv86myREpHPn6MpUxv9Gwc+8kIUfcF8iVto5Lre9gb5W4wiH9lbBHoHJCd2UTIbiRmbmQMjvwf2Tkcb+ythYMOXNRyKGyBM7Jeoida+/xXRPdhKuZHj0w5u9nRXML5nZQZ/WdbZRKYy8593T3QkLpSaZGhVy09ypOIxdCmzqUvlJlAsVu349WrNy0W8OEiChE4lDsqh5EhZavAof+uBW4qD2BLECKgK0Y4SLCZZXTKQuIbju3G0MH3/evpGXldhaHi7WfrrAqXEznp2lpoov5CQqwGZ29Xlm/Hs4tPk8m2SxGUBSfup3c/9+Sz1549TIuboTBZDdBf05WEo0/esRF81D9Y0QXqx8J8QJ8RA0gR4yKzEThAAXCw+TN5ejuZXs/GpGJ00M7F74udC7K60VYM8LH1p9K4wFFLHSl1K+Erb9EBVC3QpMrAcf7Nay+c8BA4/q3yRec0W97qVu6+PlGAmDzIUpFRkcP51Ghl2zZOO3keNrmWYumk8NjCESAd+wCmZhIObY8Q3X62qwpvOkyU6OTxIUplWfcknGJ8bPYd7QYDvf9XiLIyecJw5xcqYa6Okl1YIE0jhhen0wFJ6lBNKk7GolUPHOpLTTSBhoJhLFHfxT0Vocfp8lMkqmcy4+WbtL2FJsuNZR5EgsLYd5lDRdqzIEBwnh0ToDevZkrWc/6OiMmGSPFF3t0yTuXvb1AfE25/aN7O7M02gUUH6l5s0Me8tP85SjJGxQq01yPGcFMqVR3FCYReC21uOQednKLeuXs9m7I+RmlOQFghLQ8UDokTyd3R4oKBkCI+wCZKrEeh/X/xW/NAtuKeMcBiFyt3egjSq15UlA/mtZRc7uDsw+52O6Sy7A6Pv9l2322/32j3DWS5PBr2V0bHa3VZrZa56bWfgdDpOd7nClm2fdK2BOegNeqbh4q4z6C5xu98pvLUsUyZzeVk2mOCF2emSU7FBP63uw64wCR8BQFZr344WDD01WoM9JoXU4spNA3LGPzDeIfwNB7doaTs0X/SXf5K4mdRe14gkp5B/3NI0lMUX+wDaVzZRwoZ/KPI2uEWZzTChJDXFDUwf8AtWBWL9ne9twRigjBd9gb0DmQxhm24BF+8wLCNsNi/iZR9gmGeIK4DsOUy70AgkeRa8XIsJRjxECY+TSCsEOOHFO4VtsmPujHuetWYDFPxjB5PF7udrMlAoJGQCQr2oU46I9fLeX5+JiB6FPb8e8fT9eEa/6YUdf7fS/2cWPWAI3ReHtv0qXhuDQZIZ0soMrY1BShj/eBFD+Gg2G31aXIwv387/ocVwUU8HCvnmnVqInLgxbMalyLs4J0fm/ak6HLFETIEiyrnluRK1ca+jFisGSLUAaF3bt/6e4l4LwO5mS1CSyIMugER//Q0TIjgE8P29XiHGzBHzfjq5BMNAh1hwl8jaKmNJqxBidfhyAhxEBU8eo6CVo2AcJFJ+Yh1YMp+qoBISwqBn4trp4oi4lmpW6td+rH4iZ9FT9r1OXilDdKWPhAm4XlI9oA4l+44kKkuN4t47pb6Q9Y70DiProOTe98YPbpPE62rM/pdFChcyYpWvYCfw2qNYehzN3l69G1/OqchyddOooMwZvM0Gux5oT/1AtrcudKeeAK1b/CNSBGb9I0d7AnHlmhuS5okpxfdqygRYns8Gf/j07tX0Qor7W7FvwIj4a9paPivrsFnNxgDYl089L65NYd5StG34awNEcy6qQx6grrwgjBbyG0FlyNouGWFlPEleFGyvE2wDXgAlGw+i5xTvJI3jW37xkr90P1Iw5C/q8q7xCWSTZLTC+3M0Z4/fyF7gd9ot8aEccxTpjlOq84dyb0LVPkAyK4sSyfSbzlsECJZsxkosvPpH55k+hwAeaTrcUmpdGU68gBPXbygvXrIjnNhX4CMV+IglKubUio+Xu+Qbrya0Yh55kQerU0hYHX73yNMcjUciQl1FwUzHDjEyhrnvC2ifOeShh3mtHurxoZVusdNiPlYBn9TZSojbQxn8gYeKR2XknWHW8EyZ9nXe0Z3z/qJKvHXgmw2qT/dh+lxBUNW2yPPA04PocoOUMlLxCpKhzUNm0xumnOSg5UEO0h/yrSlty7JlPRnGO7AlFL4riAbDBDNT6CojMA2BQgGyUjpToEugqpQi2SNW3nKWkhbvkErSjkJqXMsxTilxd5jGksZ1/kldRt8TjBQfQDnlyDIW/az+JBRIgCVv8eJLuWKugnOl0F5qikFKId+2EEQpAUYjcXzpxqSCykyoxAuTCiIrIcpenFSQtoWFyn1LXkHfERdaeBNeQdYdlsJUCWVvmNfaz209+fkD4ulxOKk9wOnSf8SRJNKfoJf0jc6Djilr8GucU8VhgZG3mm0zP5yBbJTUtIdxDDWfvplq4lvLeyXXlevxac1ZumnJueETDN82wPAGGP5Zctcn9ppxL788FpSJlRx/mGtJQVsXtEjfLSeFas76OubDJ6RcDTSguVZQaA8r6unx9VNpPR3l1tyVwj2/nSwv7qeST+Op0CvbcO84GLvY5QzYi78zVUbuOJlTOb1EVVOif3vpLdIMACbDfwivGdIJNM/523ZDR22LfhjxRVpSECQcV21L5ma7Lt0Y2jNBoI40RlUX7gMzxaSL6Wiu1/4D2wS9V0Y4AAA=')
+          patches['executable'] = ('ecf4f27e68c44847ced1b9ff3d6609d47b1461f8b5e04c4990333ad8207913fb', 'H4sIAAAAAAAC/71WWW+jSBB+51fUKFJkgg/AnOv17uTwjkaybMmJpZFWI9Q0jYMGg0VDNtnI+9u3m8NgjDPJy/BAH3xVXVVd9RVe4PswGGyCFNCIJnjkZjQlySgM3BGOt7sgZAsce2RDomocYnDfjxWCyCPP4OmGYduWrmq257syUnRDHVuqIWvYVG2k6YaCVF/XhkPZdg2iyhbWTNVHlmaYimcqRDFNw5IN0/Z0nZiypYEiy4amCYPB4CO2C5Ikfcj+z59hoMqKZfVNkIqJIgPbvS0gs2eCsxS5IYFSyNmiH8Qhh/1eifwri3AaxBH45UQUoHoSkmZJxAaahemk2N8Xw5Zs8e6lhzyPfaX9g/SQHzfcxUHEvGhvhyTapI/iRBg0VPQy60os9YAEHkqRE/s+JWlDPCHIc+IofHH49w79LcDhJImfFPjQ+wmyAL4Ww6+1royoHydQXcodQ61IGGPExa/YDVRzmNZa/SChaa7RqQET6J4zwXox+CMiz2l506/1hTNnYYdS/MjQLc+bwvwyyyhMBO9MtaaEpvRsDjv8c7to3yVS1q6LXU+3TM0giqu6mBCCXYM9sqzJFlF0ZGrqmBj6cIjGY9s0dVNTZN12xwaxDEPxLOwTS2OF7iq+bboess7W7vvMOinh94nxSjbH474NEh80g1fxzfr+YbZyvsyXN9dzZ768vZ5DNlahKes8G5rzRHAaJ46foC1xQoIcHGdR2rt5Scl9GOCi+vtCZzWzvBOk0QgYVyQ4oARqchgEW7ThwhFNk6zgh4yFPQGKoiAN/iUJhX+C9DHOUgiip/hHEG1yZVkU5DJbwkrAA2YsSRCf5QQA1xEgl7JvhW7EJrs4DiGg8LpYz+d9kPdDQeryf80OfmB+r3L7j0NRW16UA45Z6VYC18kmN4deAaqmrN7LWm+pLaLD0v9V3rP6vGDUURoz/7pYf4PLS/hUblwv7lbLr3eFmszKLfr7ey76bMvMk9Z7P2lAC+dphVdUjhlr/K0bFTKnBH7vTygJeKymIE8Oi99BrRfSFJRTEqvzgIeFiVfwP6HOEfG1YiwGOFjWh5Km2CZlFx77vcM3cQ+/HSk4+Maf0xZUX09+Qnc/ajckseEHf/IWwqN1ZC3L7i5DPSLu+y35YxJmaD40QHux4UR5xw+z+4feIWv6DU+GJEnY9UyncLu8m32ZLZzZarVcOYvlYvYxRRXHfmK325TkXesUJtaAVoDOnMQb2XbXoalfhq8ZNJE7dGRFZclpszxjRp7ihtZslbybNE9h7UTRRbiE/3oMKSr65FTF297kzakjhq0OfdyOmy50+rlvJEM9rRKWdUCC6FHO1tO6mUsXJKSkWJVOrBfr+9ld7QYHX5CIdc4C1mJmiSkR3uI7+hNuq1r6OW475k535zsUoxAl9NjEDhUtoj3R1cXDJzoLO4Y0w6xte8QrZPPOxXmspaQTd6zpbfmmVPmXAxHZsH+ZJ+IkdOdQ1kKJ4zI6O/CxZnEmtmz+1nJWVvO3n+/rHn/j8b5UWDIXj9M3Q7uJvZd7jKKuQyjfn9Y/XCcNnQMcl2nonSHoc5Z30OA5KKNGkPvC/1+eMaNnDQAA')
+          for name, (digest, encoded) in patches.items():
+              data = gzip.decompress(base64.b64decode(encoded))
+              assert hashlib.sha256(data).hexdigest() == digest, name
+              (Path(os.environ['OUT']) / (name + '.patch')).write_bytes(data)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          base=ebfdd11705bc470564e726857e498f1c82aa746c
+          git fetch --depth=16 origin 6f96c2ba5297bd46892f6c49333b4c811f2dc8f9
+          git switch --detach "$base"
+          git cherry-pick 6f96c2ba5297bd46892f6c49333b4c811f2dc8f9
+          git diff "$base" HEAD --check
+          git branch audit/ub-integrated-rewind-235
+          git switch --detach "$base"
+          git apply --3way "$OUT/ir.patch"
+          git diff --cached --check
+          git commit -m 'ir: reject malformed call and storage graphs before dereferencing'
+          git branch audit/ub-ir-candidate-62
+          git switch --detach "$base"
+          git apply --3way "$OUT/executable.patch"
+          git diff --cached --check
+          git commit -m 'codegen: avoid null zero-length executable data copies'
+          git branch audit/ub-executable-candidate
+          git switch --detach audit/ub-integrated-rewind-235
+          git cherry-pick audit/ub-ir-candidate-62 audit/ub-executable-candidate
+          git branch audit/ub-combined-candidate
+          git diff "$base" HEAD --check
+          git push origin audit/ub-integrated-rewind-235 audit/ub-ir-candidate-62 audit/ub-executable-candidate audit/ub-combined-candidate
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          names = ['audit/ub-integrated-rewind-235', 'audit/ub-ir-candidate-62', 'audit/ub-executable-candidate', 'audit/ub-combined-candidate']
+          records = {'base': 'ebfdd11705bc470564e726857e498f1c82aa746c', 'candidates': {}}
+          for name in names:
+              sha = subprocess.check_output(['git', 'rev-parse', name], text=True).strip()
+              tree = subprocess.check_output(['git', 'rev-parse', name + '^{tree}'], text=True).strip()
+              records['candidates'][name] = {'sha': sha, 'tree': tree}
+          (Path(os.environ['OUT']) / 'heads.json').write_text(json.dumps(records, indent=2) + '\n')
+          PY
+          git bundle create "$OUT/source.bundle" audit/ub-integrated-rewind-235 audit/ub-ir-candidate-62 audit/ub-executable-candidate audit/ub-combined-candidate
+          if test -f .git/shallow; then cp .git/shallow "$OUT/shallow.txt"; fi
+          git archive --format=tar.gz -o "$OUT/source.tar.gz" HEAD
+          cd "$OUT"
+          sha256sum source.bundle source.tar.gz ir.patch executable.patch > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ub-final-candidates
+          path: ${{ runner.temp }}/ub-final-candidates/
+          if-no-files-found: error
+          retention-days: 3
