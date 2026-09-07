@@ -34926,39 +34926,74 @@ struct CIrConstantInitializerTask
     u8 access_size;
 };
 
-BUSTER_C_INTERNAL bool c_ir_constant_initializer_clear_subobject(CIntegerIrBuilder* builder, u8* bytes, u64 byte_count, u64 offset, u64 size,
-                                                                    u64 relocation_base, IrGlobalRelocation* relocations, u32* relocation_count)
+typedef struct CIrInitializerRelocationExtent CIrInitializerRelocationExtent;
+struct CIrInitializerRelocationExtent
 {
-    if (offset > byte_count || size > byte_count - offset || (u64)(size_t)size != size || offset > UINT64_MAX - size ||
-        relocation_base > UINT64_MAX - offset)
+    u64 begin;
+    u64 end;
+    u32 indexed_count;
+};
+
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_clear_subobject(CIntegerIrBuilder* builder, u8* bytes, u64 byte_count, u64 offset, u64 size,
+                                                                    u64 relocation_base, IrGlobalRelocation* relocations, u32* relocation_count,
+                                                                    CIrInitializerRelocationExtent* extent)
+{
+    bool valid = offset <= byte_count && size <= byte_count - offset && (u64)(size_t)size == size &&
+                 offset <= UINT64_MAX - size && relocation_base <= UINT64_MAX - offset;
+    if (valid)
     {
-        return false;
-    }
-    memset(bytes + offset, 0, (size_t)size);
-    if (relocations && relocation_count)
-    {
-        u64 relocation_start = relocation_base + offset;
-        u64 end = relocation_start + size;
-        if (end < relocation_start)
+        memset(bytes + offset, 0, (size_t)size);
+        if (relocations && relocation_count && *relocation_count)
         {
-            end = UINT64_MAX;
-        }
-        u64 relocation_size = builder->program->data_layout.pointer.size;
-        u32 write_index = 0;
-        for (u32 read_index = 0; read_index < *relocation_count; read_index += 1)
-        {
-            IrGlobalRelocation relocation = relocations[read_index];
-            u64 relocation_end = relocation.offset > UINT64_MAX - relocation_size ? UINT64_MAX : relocation.offset + relocation_size;
-            bool overlaps = relocation_size != 0 && relocation.offset < end && relocation_start < relocation_end;
-            if (!overlaps)
+            u64 relocation_start = relocation_base + offset;
+            u64 end = relocation_start > UINT64_MAX - size ? UINT64_MAX : relocation_start + size;
+            u64 relocation_size = builder->program->data_layout.pointer.size;
+            bool may_overlap = true;
+            if (extent)
             {
-                relocations[write_index++] = relocation;
+                // Scalar folding and range copies append records directly.
+                // Index just that new suffix before the next clear, not the
+                // entire growing prefix. Compaction below refreshes the bounds.
+                if (!extent->indexed_count || extent->indexed_count > *relocation_count)
+                {
+                    *extent = (CIrInitializerRelocationExtent){.begin = UINT64_MAX};
+                }
+                for (u32 index = extent->indexed_count; index < *relocation_count; index += 1)
+                {
+                    u64 relocation_offset = relocations[index].offset;
+                    u64 relocation_end = relocation_offset > UINT64_MAX - relocation_size ? UINT64_MAX : relocation_offset + relocation_size;
+                    extent->begin = BUSTER_MIN(extent->begin, relocation_offset);
+                    extent->end = BUSTER_MAX(extent->end, relocation_end);
+                }
+                extent->indexed_count = *relocation_count;
+                may_overlap = relocation_size && extent->indexed_count && extent->begin < end && relocation_start < extent->end;
+            }
+            if (may_overlap)
+            {
+                CIrInitializerRelocationExtent kept = {.begin = UINT64_MAX};
+                u32 write_index = 0;
+                for (u32 read_index = 0; read_index < *relocation_count; read_index += 1)
+                {
+                    IrGlobalRelocation relocation = relocations[read_index];
+                    u64 relocation_end = relocation.offset > UINT64_MAX - relocation_size ? UINT64_MAX : relocation.offset + relocation_size;
+                    bool overlaps = relocation_size != 0 && relocation.offset < end && relocation_start < relocation_end;
+                    if (!overlaps)
+                    {
+                        relocations[write_index++] = relocation;
+                        kept.begin = BUSTER_MIN(kept.begin, relocation.offset);
+                        kept.end = BUSTER_MAX(kept.end, relocation_end);
+                    }
+                }
+                *relocation_count = write_index;
+                if (extent)
+                {
+                    kept.indexed_count = write_index;
+                    *extent = kept;
+                }
             }
         }
-        *relocation_count = write_index;
     }
-
-    return true;
+    return valid;
 }
 
 BUSTER_C_INTERNAL bool c_ir_string_array_element_compatible(CIntegerIrBuilder* builder, IrTypeId element_type, CIrDecodedString decoded)
@@ -35254,7 +35289,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
         }
         if (task.clear_subobject && !task.is_bit_field &&
             !c_ir_constant_initializer_clear_subobject(builder, bytes, byte_count, task.offset, type->layout.size, relocation_base, relocations,
-                                                       relocation_count))
+                                                       relocation_count, 0))
         {
             return false;
         }
@@ -37497,6 +37532,7 @@ struct CIrConstantInitializerContext
     IrGlobalRelocation* relocations;
     u32* relocation_count;
     u32 relocation_capacity;
+    CIrInitializerRelocationExtent relocation_extent;
     CIrConstantInitializerFrame* frames;
     CIrConstantInitializerContinuation* continuation_work;
     CIrConstantInitializerRange* range_work;
@@ -37559,7 +37595,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_apply_materialized_range(CInteg
                                                                               u8* value_bytes, IrGlobalRelocation* value_relocations,
                                                                               u32 value_relocation_count, u8* bytes, u64 byte_count,
                                                                               IrGlobalRelocation* relocations, u32* relocation_count,
-                                                                              u32 relocation_capacity)
+                                                                              u32 relocation_capacity, CIrInitializerRelocationExtent* extent)
 {
     IrType* child = ir_type_from_id(&builder->program->types, designator->value_type);
     if (!child || !child->layout.resolved || !value_bytes)
@@ -37603,7 +37639,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_apply_materialized_range(CInteg
             clear_size = designator->clear_size;
         }
         if (clear_value &&
-            !c_ir_constant_initializer_clear_subobject(builder, bytes, byte_count, clear_offset, clear_size, 0, relocations, relocation_count))
+            !c_ir_constant_initializer_clear_subobject(builder, bytes, byte_count, clear_offset, clear_size, 0, relocations, relocation_count, extent))
         {
             return false;
         }
@@ -38295,7 +38331,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
         u64 clear_size = clear_whole_union ? designator.clear_size : child->layout.size;
         bool clear_value = designator.has_designator && (clear_whole_union || !designator.value_field || !designator.value_field->is_bit_field);
         if (clear_value &&
-            !c_ir_constant_initializer_clear_subobject(builder, bytes, byte_count, clear_offset, clear_size, 0, relocations, relocation_count))
+            !c_ir_constant_initializer_clear_subobject(builder, bytes, byte_count, clear_offset, clear_size, 0, relocations, relocation_count, &context->relocation_extent))
         {
             return c_ir_constant_initializer_fail(builder, S8("designated initializer exceeds the target object"), value_start);
         }
@@ -38671,7 +38707,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* b
             if (!c_ir_constant_initializer_apply_materialized_range(builder, task_arena, &pending->designator, pending->value_bytes,
                                                                       pending->value_relocations, pending->value_relocation_count, parent->bytes,
                                                                       parent->byte_count, parent->relocations, parent->relocation_count,
-                                                                      parent->relocation_capacity))
+                                                                      parent->relocation_capacity, &parent->relocation_extent))
             {
                 return c_ir_constant_initializer_fail(builder, S8("range initializer exceeds the target object"), pending->value_start);
             }

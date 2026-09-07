@@ -14208,67 +14208,117 @@ BUSTER_C_SHARED void c_parse_index_scope_children(CParseResult* result, Arena* a
             cursors[parent.value] += 1;
         }
     }
+    // Parser allocation normally follows source order. Keep that linear path,
+    // but establish interval ordering explicitly for synthesized scope rows.
+    for (u32 scope_index = 0; scope_index < scope_count; scope_index += 1)
+    {
+        u32 begin = offsets[scope_index];
+        u32 count = offsets[scope_index + 1] - begin;
+        bool ordered = true;
+        for (u32 index = 1; index < count && ordered; index += 1)
+        {
+            CScope* left = &result->scopes[children[begin + index - 1]];
+            CScope* right = &result->scopes[children[begin + index]];
+            ordered = left->token_start < right->token_start ||
+                      (left->token_start == right->token_start && left->token_end <= right->token_end);
+        }
+        // Reuse the finished CSR cursors as merge scratch. Equal starts put
+        // empty siblings first, so an upper-bound query finds a nonempty one.
+        for (u64 width = 1; !ordered && width < count; width *= 2)
+        {
+            for (u64 first = 0; first < count; first += width * 2)
+            {
+                u32 middle = (u32)BUSTER_MIN(first + width, count);
+                u32 end = (u32)BUSTER_MIN(first + width * 2, count);
+                u32 left_index = (u32)first;
+                u32 right_index = middle;
+                for (u32 write_index = (u32)first; write_index < end; write_index += 1)
+                {
+                    bool take_left = right_index == end;
+                    if (left_index < middle && right_index < end)
+                    {
+                        CScope* left = &result->scopes[children[begin + left_index]];
+                        CScope* right = &result->scopes[children[begin + right_index]];
+                        take_left = left->token_start < right->token_start ||
+                                    (left->token_start == right->token_start && left->token_end <= right->token_end);
+                    }
+                    cursors[write_index] = children[begin + (take_left ? left_index++ : right_index++)];
+                }
+            }
+            memcpy(children + begin, cursors, sizeof(*children) * count);
+        }
+    }
     result->scope_children_offsets = offsets;
     result->scope_children = children;
 }
 
 BUSTER_C_SHARED CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index)
 {
-    if (!result || root.value >= result->scope_count)
+    CScopeId best = root;
+    if (result && root.value < result->scope_count && result->scope_children_offsets)
     {
-        return root;
-    }
-    if (result->scope_children_offsets)
-    {
-        // Sibling scopes never overlap, so at most one child of the current
-        // scope contains the token (equal-range parent/child pairs resolve to
-        // the child, matching the full scan's index tie-break), and the
-        // deepest containing scope under the root is the scan's answer.
-        CScopeId best = root;
+        // Siblings do not overlap. Find the last child starting at or before
+        // the token, then descend only if its half-open interval contains it.
+        // Equal-range parent/child pairs still resolve to the deepest child.
         bool descended = true;
         while (descended)
         {
             descended = false;
-            u32 child_end = result->scope_children_offsets[best.value + 1];
-            for (u32 child_index = result->scope_children_offsets[best.value]; child_index < child_end; child_index += 1)
+            u32 child_begin = result->scope_children_offsets[best.value];
+            u32 low = child_begin;
+            u32 high = result->scope_children_offsets[best.value + 1];
+            while (low < high)
             {
-                u32 candidate = result->scope_children[child_index];
-                CScope* scope = &result->scopes[candidate];
-                if (scope->token_start <= token_index && token_index < scope->token_end)
+                u32 middle = low + (high - low) / 2;
+                u32 candidate = result->scope_children[middle];
+                if (result->scopes[candidate].token_start <= token_index)
+                {
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+            if (low > child_begin)
+            {
+                u32 candidate = result->scope_children[low - 1];
+                if (token_index < result->scopes[candidate].token_end)
                 {
                     best.value = candidate;
                     descended = true;
                 }
             }
         }
-        return best;
     }
-    CScopeId best = root;
-    u32 best_start = result->scopes[root.value].token_start;
-    for (u32 scope_index = 0; scope_index < result->scope_count; scope_index += 1)
+    else if (result && root.value < result->scope_count)
     {
-        CScope* candidate = &result->scopes[scope_index];
-        if (candidate->token_start > token_index || candidate->token_end <= token_index)
+        u32 best_start = result->scopes[root.value].token_start;
+        for (u32 scope_index = 0; scope_index < result->scope_count; scope_index += 1)
         {
-            continue;
-        }
-        CScopeId ancestor = {
-            .value = scope_index,
-        };
-        bool under_root = false;
-        while (ancestor.value != C_ID_UNDERLYING_INVALID && ancestor.value < result->scope_count)
-        {
-            if (ancestor.value == root.value)
+            CScope* candidate = &result->scopes[scope_index];
+            if (candidate->token_start > token_index || candidate->token_end <= token_index)
             {
-                under_root = true;
-                break;
+                continue;
             }
-            ancestor = result->scopes[ancestor.value].parent;
-        }
-        if (under_root && (candidate->token_start > best_start || (candidate->token_start == best_start && scope_index > best.value)))
-        {
-            best.value = scope_index;
-            best_start = candidate->token_start;
+            CScopeId ancestor = {
+                .value = scope_index,
+            };
+            bool under_root = false;
+            while (ancestor.value != C_ID_UNDERLYING_INVALID && ancestor.value < result->scope_count)
+            {
+                if (ancestor.value == root.value)
+                {
+                    under_root = true;
+                    break;
+                }
+                ancestor = result->scopes[ancestor.value].parent;
+            }
+            if (under_root && (candidate->token_start > best_start || (candidate->token_start == best_start && scope_index > best.value)))
+            {
+                best.value = scope_index;
+                best_start = candidate->token_start;
+            }
         }
     }
     return best;

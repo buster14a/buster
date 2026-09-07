@@ -1160,7 +1160,7 @@ struct CParseResult
     // Lazily computed per-token spelling-predicate bits, indexed like
     // identifier_use_by_token; see C_TOKEN_CLASS_* in c.c.
     u8* token_classes;
-    // Children of each scope in ascending scope order, built by
+    // Children of each scope in ascending token-interval order, built by
     // c_parse_index_scope_children once scopes are final; zero when absent.
     // c_parse_scope_for_token descends this index instead of scanning every
     // scope when it is present.
