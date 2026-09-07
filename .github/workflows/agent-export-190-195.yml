@@ -1,0 +1,33 @@
+name: Temporary export for issues 190-195
+
+on:
+  push:
+    branches:
+      - agent/tackle-190-195-control
+    paths:
+      - .github/workflows/agent-export-190-195.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out reviewed main revision
+        uses: actions/checkout@v4
+        with:
+          ref: 66bf321936ccb2b4f0df42cb6f65ed197f8652b5
+          fetch-depth: 1
+
+      - name: Archive working tree
+        shell: bash
+        run: tar --exclude=.git -czf /tmp/buster-main-66bf321.tar.gz .
+
+      - name: Upload checkout
+        uses: actions/upload-artifact@v4
+        with:
+          name: buster-main-66bf321
+          path: /tmp/buster-main-66bf321.tar.gz
+          compression-level: 0
+          retention-days: 1
