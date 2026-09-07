@@ -132,6 +132,10 @@ struct ProcessWaitResult
 {
     ByteSlice streams[(size_t)STANDARD_STREAM_COUNT];
     ProcessResult result;
+    // Native child status retained for diagnostics. On Windows this is the
+    // DWORD returned by GetExitCodeProcess; on POSIX it is the status word
+    // returned by waitpid. `result` remains the portable contract.
+    u32 platform_status;
     // Set when the deadline passed and the child was killed rather than having
     // exited on its own. `result` is a plain failure in that case: a killed
     // child's exit status describes the kill, not what it was doing.

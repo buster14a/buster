@@ -107,7 +107,11 @@ cmake --version
 ninja --version
 
 configure_started=$SECONDS
-cmake --warn-uninitialized -Werror=dev \
+# CMake 4.4 promotes the NDK r27 toolchain's own pre-3.10 compatibility
+# declarations to developer errors under -Werror=dev. Keep every other
+# developer diagnostic fatal while leaving third-party deprecation policy to
+# the pinned NDK instead of patching its installed files.
+cmake --warn-uninitialized -Werror=dev -Wno-error=deprecated \
     -B "$build_directory" \
     -G "Ninja Multi-Config" \
     -DCMAKE_TOOLCHAIN_FILE="${android_ndk}/build/cmake/android.toolchain.cmake" \

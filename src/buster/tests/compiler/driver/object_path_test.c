@@ -7,6 +7,7 @@
 #include <buster/lib/string.h>
 #include <buster/lib/system_headers.h>
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL bool compiler_driver_object_path_test_change_directory(String8 path)
 {
 #if BUSTER_WINDOWS
@@ -15,9 +16,6 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_object_path_test_change_directory(Strin
     bool result = SetCurrentDirectoryW(wide_path.pointer) != 0;
     scratch_end(scratch);
     return result;
-#elif BUSTER_ANDROID || BUSTER_IOS
-    BUSTER_UNUSED(path);
-    return false;
 #else
     BUSTER_CHECK(path.pointer != 0 && path.pointer[path.length] == 0);
     return chdir((const char*)path.pointer) == 0;
@@ -52,6 +50,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverError compiler_driver_object_path_test_compile
     BUSTER_CHECK(arena_destroy(arena, 1));
     return result;
 }
+#endif
 
 UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
 {

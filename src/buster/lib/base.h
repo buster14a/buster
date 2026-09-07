@@ -900,9 +900,12 @@ typedef ThreadReturnType ThreadCallback(void*);
 
 // Cold helpers called from hot inlined code: preserve_most keeps the caller's
 // register allocation intact, so adding the call does not degrade the hot
-// path. Optimization only; expands to nothing where unsupported.
+// path. Optimization only; expands to nothing where unsupported. Clang 20's
+// native Windows AArch64 build faults on the label-colon helper's first call
+// with this convention, despite advertising the attribute, so keep the
+// platform ABI there.
 #if !BUSTER_COMPILER_MSVC && defined(__has_attribute)
-#if __has_attribute(preserve_most)
+#if __has_attribute(preserve_most) && !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64)
 #define BUSTER_PRESERVE_MOST __attribute__((preserve_most))
 #endif
 #endif

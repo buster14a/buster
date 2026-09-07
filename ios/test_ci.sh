@@ -106,6 +106,44 @@ for build_config in "${build_configs[@]}"; do
     echo "TIMING_IOS build_seconds config=$build_config value=$((SECONDS - build_started))"
 done
 
+# Xcode 26 deliberately stopped shipping Intel support in simulator runtimes by
+# default. GitHub's macos-26-intel image currently exposes iOS runtimes that
+# boot, install an x86-64 bundle, report a launch PID, and then terminate that
+# process before user code runs. Keep the hosted Intel leg useful and
+# deterministic by making it an x86-64 iOS compile/link/bundle gate. The
+# Apple-Silicon macOS leg still boots the simulator and executes both
+# configurations end to end, while local Intel runners with a universal
+# simulator runtime continue through the normal launch path because this
+# exception is GitHub-only.
+if [[ $arch == x86_64 && ${GITHUB_ACTIONS:-false} == true ]]; then
+    for index in "${!build_configs[@]}"; do
+        build_config=${build_configs[$index]}
+        app_bundle=${app_paths[$index]}
+        executable="$app_bundle/ide"
+        if [[ ! -f $executable ]]; then
+            echo "error: expected iOS ${build_config} executable not found at '$executable'" >&2
+            exit 1
+        fi
+        if ! lipo "$executable" -verify_arch x86_64; then
+            echo "error: iOS ${build_config} bundle does not contain an x86-64 simulator executable" >&2
+            exit 1
+        fi
+        echo "iOS ${build_config} x86-64 simulator bundle built and linked successfully."
+    done
+    echo "iOS x86-64 execution skipped on GitHub macos-26-intel: Xcode 26 simulator runtimes do not provide reliable Intel execution coverage."
+    exit 0
+fi
+
+# The hosted 3-core Apple-Silicon runner executes the unoptimized Debug binary
+# substantially more slowly than Release. Main has repeatedly reached the
+# fixed 180-second deadline while the Debug process was still alive and
+# streaming test progress, then completed the same Release suite in seconds.
+# Give hosted arm64 Debug enough headroom without weakening local/Forgejo
+# timeout policy or overriding an explicit caller-provided timeout.
+if [[ $arch == arm64 && ${GITHUB_ACTIONS:-false} == true && -z ${BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS:-} ]]; then
+    export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=300
+fi
+
 launch_args=(--batch)
 for index in "${!build_configs[@]}"; do
     launch_args+=("${build_configs[$index]}" "${app_paths[$index]}")
