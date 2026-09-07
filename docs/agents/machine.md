@@ -13,6 +13,22 @@
   `i`; keep these copies parallel through allocation so cycles are resolved as
   copies rather than serialized selector moves. Replay files include all three
   arrays and use the current replay version.
+- `machine_verify_function` checks required side-table storage before reading
+  rows, then reference bounds, operand kinds/classes, and payload-indexed tables.
+  `operand_info` uses two role bits, three register-class bits, and three
+  `MachineOperandShape` bits; give every active operand a shape. This preserves
+  both the 24-byte row and the opcode record size. `VA_ARG` result operands
+  admit registers or frame slots, with the side row selecting the valid kind.
+  Physical references must fit `MACHINE_TARGET_REGISTER_LIMIT` and the active
+  target's file; `vector_register_mask` describes class membership including
+  nonallocatable registers. Target-less synthetic functions still accept
+  bounded physical references without imposing a target class map.
+- Stack alignments and call-target reference forms remain optional, defaulting
+  to eight and DIRECT. Line marks permit duplicate rows and a final row equal
+  to `instruction_count`; zero-row lowering can produce both. Validate every
+  switch-case target, even an unused row, because FAST consumes the whole table.
+  Keep these checks at the existing verification boundary; selector-certified
+  fresh functions continue directly to placement without another verifier pass.
 - An ordinary machine virtual register has exactly one definition and every
   use, including an edge-copy source, is dominated by it. The temporary
   `MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE` exception is explicit and counted;
