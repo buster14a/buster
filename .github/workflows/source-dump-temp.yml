@@ -1,0 +1,30 @@
+name: Temporary frontend source dump
+
+on:
+  push:
+    branches:
+      - claude/unruffled-bhabha-f5d28a
+
+permissions:
+  contents: read
+
+jobs:
+  dump:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: claude/unruffled-bhabha-f5d28a
+      - name: Dump failing tests and frontend symbols
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== diagnostic helper ==='
+          nl -ba src/buster/tests/compiler/frontend/c/c_test.c | sed -n '250,310p'
+          echo '=== sizeof tests ==='
+          nl -ba src/buster/tests/compiler/frontend/c/c_test.c | sed -n '6840,6960p'
+          echo '=== control-flow tests ==='
+          nl -ba src/buster/tests/compiler/frontend/c/c_test.c | sed -n '7480,8005p'
+          echo '=== related frontend definitions ==='
+          grep -RInE 'case[_ ]range|CASE_RANGE|constant_expression|constant expression|wide_immediate|narrow_immediate|CConstant|ConstantValue|constant_value' src/buster/lib/compiler/frontend/c src/buster/lib/compiler/ir | head -n 500 || true
+          exit 1
