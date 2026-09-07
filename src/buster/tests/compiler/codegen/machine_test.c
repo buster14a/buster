@@ -1258,9 +1258,200 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
     return result;
 }
 
+// The linear oracle is intentionally test-only. Raw edge order need not agree
+// with block order, and duplicate pairs must keep the first edge, not the last.
+BUSTER_GLOBAL_LOCAL u32 machine_test_first_edge(MachineFunction const* function, u32 source, u32 destination)
+{
+    u32 result = UINT32_MAX;
+    for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+    {
+        MachineEdge const* edge = function->edges + edge_index;
+        if (edge->source_block == source && edge->destination_block == destination)
+        {
+            result = edge_index;
+            break;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_fast_edge_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 start = arena->position;
+    for (u32 target_index = 0; target_index < 2; target_index += 1)
+    {
+        for (u32 variant = 0; variant < 6; variant += 1)
+        {
+            u32 block_count = 37;
+            MachineFunction function = {0};
+            function.target = target_index ? machine_target_aarch64() : machine_target_x86_64();
+            function.block_count = block_count;
+            function.instruction_count = block_count;
+            function.blocks = arena_allocate(arena, MachineBlock, block_count);
+            function.instructions = arena_allocate(arena, MachineInstruction, block_count);
+            function.edges = arena_allocate(arena, MachineEdge, (u64)block_count * 3u);
+            for (u32 block_index = 0; block_index < block_count; block_index += 1)
+            {
+                function.blocks[block_index] = (MachineBlock){.first_instruction = block_index, .instruction_count = 1};
+                u32 targets[2] = {(block_index + 1u) % block_count, (block_index * 7u + 3u) % block_count};
+                // Includes duplicate branch targets, self loops, joins, forward
+                // and backward edges, and conditional sources of critical edges.
+                targets[1] = variant == 1 ? targets[0] : targets[1];
+                function.instructions[block_index] = (MachineInstruction){
+                    .opcode = (u16)(target_index ? MACHINE_A64_BCC : MACHINE_X64_JCC),
+                    .operands = {machine_ref_make(MACHINE_REF_BLOCK, targets[0]), machine_ref_make(MACHINE_REF_BLOCK, targets[1])},
+                };
+                for (u32 slot = 0; slot < 2; slot += 1)
+                {
+                    function.edges[function.edge_count++] = (MachineEdge){.source_block = block_index, .destination_block = targets[slot]};
+                }
+                // Distinct payloads expose accidental last-match semantics even
+                // though this indexing-only fixture needs no parameter copies.
+                function.edges[function.edge_count++] = (MachineEdge){.source_block = block_index, .destination_block = targets[0], .copy_offset = 1};
+            }
+            u32 random = 0x31974adbu + variant;
+            for (u32 count = function.edge_count; count > 1; count -= 1)
+            {
+                random = random * 1664525u + 1013904223u;
+                u32 other = random % count;
+                MachineEdge temporary = function.edges[count - 1u];
+                function.edges[count - 1u] = function.edges[other];
+                function.edges[other] = temporary;
+            }
+            if (variant == 2)
+            {
+                // A nonempty raw table can still lack a queried pair.
+                function.edge_count /= 3u;
+            }
+            else if (variant == 3)
+            {
+                function.edge_count = 0;
+                function.edges = 0;
+            }
+            else if (variant == 4)
+            {
+                function.edges[0].source_block = block_count;
+            }
+            else if (variant == 5)
+            {
+                function.edges[0].destination_block = block_count;
+            }
+            u64 prepass_start = arena->position;
+            for (u32 quality = 0; quality < 2; quality += 1)
+            {
+                MachineFastPrepass prepass = machine_fast_prepass_build(arena, &function, quality != 0);
+                BUSTER_TEST(arguments, prepass.valid == (variant < 4));
+                if (prepass.valid)
+                {
+                    BUSTER_TEST(arguments, (prepass.predecessor_edges != 0) == (function.edge_count != 0));
+                    BUSTER_TEST(arguments, (prepass.terminator_edges != 0) == (function.edge_count != 0));
+                    BUSTER_TEST(arguments, prepass.predecessor_offsets[block_count] == 2u * block_count);
+                    if (function.edge_count)
+                    {
+                        // Overwrite reclaimed CSR scratch before reading the
+                        // persistent query results: no result may alias scratch.
+                        u32* overwrite = arena_allocate(arena, u32, block_count * 8u);
+                        memset(overwrite, 0xa5, (u64)block_count * 8u * sizeof(u32));
+                        for (u32 destination = 0; destination < block_count; destination += 1)
+                        {
+                            for (u32 predecessor_index = prepass.predecessor_offsets[destination];
+                                 predecessor_index < prepass.predecessor_offsets[destination + 1u]; predecessor_index += 1)
+                            {
+                                u32 source = prepass.predecessor_list[predecessor_index];
+                                BUSTER_TEST(arguments, prepass.predecessor_edges[predecessor_index] == machine_test_first_edge(&function, source, destination));
+                            }
+                        }
+                        for (u32 source = 0; source < block_count; source += 1)
+                        {
+                            for (u32 slot = 0; slot < 2; slot += 1)
+                            {
+                                u32 destination = machine_ref_payload(function.instructions[source].operands[slot]);
+                                BUSTER_TEST(arguments, prepass.terminator_edges[(u64)source * MACHINE_INSTRUCTION_OPERAND_COUNT + slot] ==
+                                                          machine_test_first_edge(&function, source, destination));
+                            }
+                        }
+                    }
+                    MachineStackPlacement placement = machine_fast_placement_build_prepassed(arena, &function, &prepass, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+                    BUSTER_TEST(arguments, placement.valid && !placement.edit_count && !placement.frame_size);
+                }
+                arena_set_position(arena, prepass_start);
+            }
+            arena_set_position(arena, start);
+        }
+    }
+    // Four times as many blocks must retain only four times the prepass
+    // storage. Reverse-ordered raw edges were quadratic at the four old call
+    // sites. Check every result directly rather than making this test's oracle
+    // quadratic too. No noisy wall-clock threshold belongs in this gate.
+    for (u32 fanout = 0; fanout < 2; fanout += 1)
+    {
+        u64 previous_bytes = 0;
+        for (u32 block_count = 256; block_count <= 1024; block_count *= 4u)
+        {
+            MachineFunction function = {0};
+            function.target = machine_target_x86_64();
+            function.block_count = function.instruction_count = block_count;
+            function.edge_count = block_count - 1u;
+            function.blocks = arena_allocate(arena, MachineBlock, block_count);
+            function.instructions = arena_allocate(arena, MachineInstruction, block_count);
+            function.edges = arena_allocate(arena, MachineEdge, function.edge_count);
+            for (u32 block_index = 0; block_index < block_count; block_index += 1)
+            {
+                function.blocks[block_index] = (MachineBlock){.first_instruction = block_index, .instruction_count = 1};
+                function.instructions[block_index] = (MachineInstruction){.opcode = MACHINE_X64_RET};
+                if (block_index + 1u < block_count)
+                {
+                    function.instructions[block_index].opcode = MACHINE_X64_JMP;
+                    function.instructions[block_index].operands[0] = machine_ref_make(MACHINE_REF_BLOCK, block_index + 1u);
+                    function.edges[block_count - 2u - block_index] = (MachineEdge){.source_block = block_index, .destination_block = block_index + 1u};
+                }
+            }
+            if (fanout)
+            {
+                function.switch_case_count = block_count - 1u;
+                function.switch_cases = arena_allocate(arena, MachineSwitchCase, function.switch_case_count);
+                function.instructions[0] = (MachineInstruction){
+                    .opcode = MACHINE_X64_INDIRECT_BRANCH,
+                    .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX)},
+                    .flags = (u16)(block_count - 1u),
+                };
+                for (u32 destination = 1; destination < block_count; destination += 1)
+                {
+                    function.instructions[destination] = (MachineInstruction){.opcode = MACHINE_X64_RET};
+                    function.switch_cases[destination - 1u] = (MachineSwitchCase){.target_block = destination};
+                    function.edges[block_count - 1u - destination] = (MachineEdge){.source_block = 0, .destination_block = destination};
+                }
+            }
+            u64 before = arena->position;
+            MachineFastPrepass prepass = machine_fast_prepass_build(arena, &function, false);
+            u64 bytes = arena->position - before;
+            BUSTER_TEST(arguments, prepass.valid && bytes <= (u64)block_count * 48u + 256u);
+            BUSTER_TEST(arguments, !previous_bytes || bytes <= previous_bytes * 4u + 256u);
+            for (u32 source = 0; source + 1u < block_count; source += 1)
+            {
+                BUSTER_TEST(arguments, prepass.predecessor_edges[prepass.predecessor_offsets[source + 1u]] == block_count - 2u - source);
+                if (!fanout)
+                {
+                    BUSTER_TEST(arguments, prepass.terminator_edges[(u64)source * MACHINE_INSTRUCTION_OPERAND_COUNT] == block_count - 2u - source);
+                }
+            }
+            MachineStackPlacement placement = machine_fast_placement_build_prepassed(arena, &function, &prepass, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+            BUSTER_TEST(arguments, placement.valid && !placement.edit_count && !placement.frame_size);
+            previous_bytes = bytes;
+            arena_set_position(arena, start);
+        }
+    }
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult edge_index_result = machine_test_fast_edge_index(arguments);
+    result.test_count += edge_index_result.test_count;
+    result.succeeded_test_count += edge_index_result.succeeded_test_count;
 
     // Malformed publication inputs must fail before placement or encoding.
     MachineInstruction storage_rows[2] = {{.opcode = MACHINE_X64_MOV_RI}, {.opcode = MACHINE_X64_RET}};
