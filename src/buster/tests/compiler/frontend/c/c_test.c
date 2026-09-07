@@ -2606,6 +2606,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
     // can classify, the maximal munch its channels take must be the one
     // c_punctuator_length takes. One assertion, half a million comparisons.
     BUSTER_TEST(arguments, c_test_lex_punctuator_nfa_mismatches() == 0);
+
+    // The window loop's lane-prefix mask is one BMI2 instruction whose
+    // saturation reads only the low eight bits of its index; the portable
+    // expression it replaces stays in the tree as its reference and the two
+    // are compared over the whole index domain the emitter can form.
+    BUSTER_TEST(arguments, c_test_lex_mask_below_mismatches() == 0);
     return result;
 }
 
@@ -4327,6 +4333,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_intern_scan_by_shape(UnitTestArguments
     BUSTER_TEST(arguments, unlabeled_identifiers == 0);
     BUSTER_TEST(arguments, labeled_others == 0);
     BUSTER_TEST(arguments, spelling_symbol_disagreements == 0);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pp_class_masks(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 source_capacity = BUSTER_KB(256);
+    char8* source_bytes = arena_allocate(arguments->arena, char8, source_capacity);
+    u64 source_length = 0;
+    for (u32 item = 0; item < 300; item += 1)
+    {
+        // Lines of unequal token counts slide every class across the window
+        // lanes, and the unbalanced closer is the clamp the row scan applies.
+        c_test_append_source(source_bytes, source_capacity, &source_length,
+                             string_format(arguments->arena, S8("int value_{u32} = ((({u32}))) + f_{u32}(a, (b), c);\n"), item, item % 11, item));
+        if (item % 3 == 0)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length,
+                                 string_format(arguments->arena, S8("int spare_{u32}; /* c */ char const* text_{u32} = \"s{u32}\");\n"), item, item, item));
+        }
+        if (item % 5 == 0)
+        {
+            c_test_append_source(source_bytes, source_capacity, &source_length, S8("\n"));
+        }
+    }
+    BUSTER_TEST(arguments, source_length > BUSTER_KB(8));
+    BUSTER_TEST(arguments, c_test_pp_class_masks_agree(arguments->arena, (String8){.pointer = source_bytes, .length = source_length}));
     return result;
 }
 
@@ -13033,12 +13066,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArgumen
 #if BUSTER_COMPILER_CLANG
 __attribute__((optnone))
 #endif
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_null_preprocessing_directives(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 sources[] = {
+        S8("#\nint value;\n"),
+        S8("# /* comment */\nint value;\n"),
+        S8("#if 0\n#\n#endif\nint value;\n"),
+        S8("#if 1\n#\n#endif\nint value;\n#"),
+        S8("#"),
+        S8("# /* comment */"),
+    };
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(sources); ++i)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocessed = c_preprocess(temporary.arena, sources[i], (CPreprocessOptions){0});
+        BUSTER_TEST(arguments, preprocessed.diagnostic_count == 0);
+        scratch_end(temporary);
+    }
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult invalid = c_preprocess(temporary.arena, S8("#+\nint value;\n"), (CPreprocessOptions){0});
+    BUSTER_TEST(arguments, invalid.diagnostic_count != 0);
+    if (invalid.diagnostic_count)
+        BUSTER_TEST(arguments, invalid.diagnostics[0].kind == C_DIAGNOSTIC_EXPECTED_DIRECTIVE);
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
+    c_test_result_add(&result, c_test_null_preprocessing_directives(arguments));
     c_test_result_add(&result, c_test_frontend_lex_differential(arguments));
     c_test_result_add(&result, c_test_intern_scan_by_shape(arguments));
+    c_test_result_add(&result, c_test_pp_class_masks(arguments));
     c_test_result_add(&result, c_test_string_literal_decode_differential(arguments));
     c_test_result_add(&result, c_test_position_index_tiles(arguments));
     c_test_result_add(&result, c_test_oversized_token_spellings(arguments));
@@ -16224,6 +16287,88 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, ir_validate_canonical_module(bound_register_lowered.program, module).error == IR_VALIDATION_NONE);
             }
             scratch_end(bound_register_temporary);
+        }
+    }
+    // Call discovery must leave object-size pointer operands unevaluated,
+    // even for nested calls and a query embedded in another call's argument.
+    String8 unevaluated_predicates[] = {
+        S8("__builtin_object_size(nested(effect()), 0)"),
+        S8("__builtin_object_size(nested(effect()), 1)"),
+        S8("__builtin_object_size(nested(effect()), 2)"),
+        S8("__builtin_object_size(nested(effect()), 3)"),
+        S8("__builtin_constant_p(effect())"),
+        S8("__builtin_constant_p(nested(effect()))"),
+        S8("__builtin_constant_p(indirect())"),
+        S8("__builtin_constant_p((effect(), 1))"),
+    };
+    for (u32 query_index = 0; query_index < BUSTER_ARRAY_LENGTH(unevaluated_predicates); query_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        String8 source = string_format_z(temporary.arena,
+            S8("extern void* effect(void); extern void* nested(void*); extern void* (*indirect)(void); "
+               "unsigned long long query(void) {{ return {S8}; }"), unevaluated_predicates[query_index]);
+        CPreprocessResult tokens = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("object-size-unevaluated.c"), target_native, &tokens, &parse);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && !lowered.diagnostic_count && lowered.program);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            u32 calls = 0;
+            IrModule* module = lowered.program->modules;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    calls += function->instructions[instruction_index].opcode == IR_OPCODE_CALL;
+                }
+            }
+            BUSTER_TEST(arguments, calls == 0);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+    // Fortified block-memory builtins have a real fourth size_t argument,
+    // including when no libc declaration is present. Never lower these as
+    // three-argument unchecked calls merely to accept a hosted SDK header.
+    {
+        String8 names[] = {S8("__builtin___memcpy_chk"), S8("__builtin___memmove_chk"), S8("__builtin___memset_chk")};
+        String8 runtime_names[] = {S8("__memcpy_chk"), S8("__memmove_chk"), S8("__memset_chk")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            String8 second = index == 2 ? S8("0x7f") : S8("s");
+            String8 declaration = index == 0
+                ? S8("extern void* __memcpy_chk(void*, const void*, unsigned long long, unsigned long long);\n") : S8("");
+            String8 source = string_format_z(temporary.arena,
+                S8("#if !__has_builtin({S8})\n#error missing builtin\n#endif\n{S8}"
+                   "void* f(void* d, void* s, int n, int bound) {{ return {S8}(d, {S8}, n, bound); }\n"),
+                names[index], declaration, names[index], second);
+            CPreprocessResult tokens = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("checked-memory.c"), target_native, &tokens, &parse);
+            BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && !lowered.diagnostic_count && lowered.program);
+            if (lowered.program && !lowered.diagnostic_count)
+            {
+                bool found = false;
+                for (u32 symbol_index = 0; symbol_index < lowered.program->symbols.count; symbol_index += 1)
+                {
+                    IrSymbol* symbol = lowered.program->symbols.symbols + symbol_index;
+                    if (string_equal(symbol->link_name, runtime_names[index]))
+                    {
+                        IrType* type = ir_type_from_id(&lowered.program->types, symbol->type);
+                        found = type && type->kind == IR_TYPE_FUNCTION && type->parameter_count == 4;
+                        if (found) BUSTER_TEST(arguments, type->parameter_types[2].value == type->parameter_types[3].value);
+                    }
+                }
+                BUSTER_TEST(arguments, found);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            }
+            source = string_format_z(temporary.arena,
+                S8("void* f(void* d, void* s) {{ return {S8}(d, {S8}, 1); }\n"), names[index], second);
+            lowered = c_test_lower_source(temporary.arena, source, S8("checked-memory-arity.c"), target_native, &tokens, &parse);
+            BUSTER_TEST(arguments, lowered.diagnostic_count != 0);
+            scratch_end(temporary);
         }
     }
     // A memory constraint is not a register class: the operand it carries is

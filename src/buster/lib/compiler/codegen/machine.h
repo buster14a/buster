@@ -1691,18 +1691,14 @@ struct MachineFastPrepass
     u32* next_call;
     // One compact SoA word per instruction. Six four-bit lane masks record
     // physical, virtual, block, use, define, and use-define operands after
-    // the prepass has classified the row once. A high state bit separates
-    // unconstrained virtual-only dataflow from irregular rows; FAST and
+    // the prepass has classified the row once. Two high state bits separate
+    // unconstrained virtual-only dataflow from irregular rows and mark the
+    // call rows the prepass's own backward next-call walk looks for; FAST and
     // QUALITY consume the compact homogeneous facts instead of repeatedly
     // decoding tagged refs and opcode policy.
     u32* operand_masks;
     u32* predecessor_offsets;
     u32* predecessor_list;
-    // CSR over function->edges, keyed by destination block. Placement uses
-    // this to recover the exact MachineEdge for a predecessor without
-    // rescanning the whole edge table at every contract join.
-    u32* incoming_edge_offsets;
-    u32* incoming_edge_indices;
     u8* cold_blocks;
     u32* interval_starts;
     u32* interval_ends;

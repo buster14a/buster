@@ -901,6 +901,14 @@ struct CEntity
     u64 constant_value;
 };
 
+// One shadowed binding, restored when the scope that shadowed it closes.
+typedef struct CParseBindingUndo CParseBindingUndo;
+struct CParseBindingUndo
+{
+    u32 symbol;
+    CEntityId previous;
+};
+
 typedef struct CScope CScope;
 struct CScope
 {
@@ -1140,6 +1148,9 @@ struct CParseResult
     CEntity* entities;
     CScope* scopes;
     CEntityId* entity_lookup_buckets;
+    CEntityId* binding_by_symbol;
+    CParseBindingUndo* binding_undo;
+    CScopeId binding_scope;
     CEntityId* typedef_lookup_buckets;
     CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
@@ -1192,6 +1203,20 @@ struct CParseResult
     u32 entity_capacity;
     u32 scope_capacity;
     u32 entity_lookup_bucket_count;
+    // The innermost visible binding of every interned symbol, and the LIFO
+    // record that restores the shadowed one when a scope closes.  The
+    // scope-and-symbol bucket chain stays authoritative -- it is what every
+    // lookup outside the binder's own scope stack still asks, and what the
+    // unoptimized gate holds this array to -- but a lookup in the scope the
+    // array stands for is one indexed load instead of a hash, a masked probe
+    // into a table far larger than L2 and a dependent walk of the chain.
+    // `binding_scope` is the scope the array currently describes; a lookup in
+    // any other scope falls back, which is how the passes that re-enter a
+    // scope out of stack order (the static-assert and aggregate binders, and
+    // the lowering through c_parse_scope_for_token) stay correct.
+    u32 binding_capacity;
+    u32 binding_undo_count;
+    u32 binding_undo_capacity;
     u32 identifier_use_capacity;
     u32 identifier_use_by_token_capacity;
     u32 diagnostic_capacity;

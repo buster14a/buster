@@ -320,4 +320,8 @@ test_android_timeout_and_cleanup_fallback
 test_ios_batch_and_cleanup
 test_ios_failure_and_cleanup_failure
 test_ios_true_timeout_after_early_launcher_exit
+
+# Attached launchers must not survive a result marker, timeout, or interruption.
+/bin/bash "$repo_root/tests/ios_launch_monitor_test.sh"
+
 echo "mobile CI script tests passed"

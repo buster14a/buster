@@ -37,8 +37,39 @@ static int is_nan(double value)
     return value != value;
 }
 
+// Distinct rounding points: unsigned and wide integer conversion, integer
+// ties/sticky bits, f32 arithmetic, and a subsequent widening conversion.
+static const double rounded[] = {
+    (double)0x8000000000000000ULL,
+    (double)0xffffffffffffffffULL,
+    (double)((unsigned __int128)1 << 100),
+    (double)(-((__int128)1 << 100)),
+    (double)(((unsigned __int128)1 << 100) | 0xffffffffffffffffULL),
+    (double)(float)0x8000008000000001ULL,
+    (double)(float)(((unsigned __int128)1 << 100) + ((unsigned __int128)1 << 76) + 1),
+    (double)(16777216.0f + 1.0f),
+    (double)((16777216.0f + 1.0f) - 16777216.0f),
+    (double)(1.0f / 3.0f),
+    (double)((1.0f + 0x1p-24f) * 2.0f),
+    (double)((1.0f + 0x1p-23f) * (1.0f + 0x1p-23f)),
+};
+static const double *observed_rounded = rounded;
+static int check_constant_rounding(void)
+{
+    int failures = 0;
+    const double expected[] = {
+        0x1p63, 0x1p64, 0x1p100, -0x1p100,
+        0x1.000000001p100, 0x1.000002p63, 0x1.000002p100,
+        16777216.0, 0.0, 0x1.555556p-2, 2.0, 0x1.000004p0,
+    };
+    for (unsigned i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i)
+        failures += observed_rounded[i] != expected[i];
+    return failures;
+}
+
 int main(void)
 {
+    if (check_constant_rounding()) return 14;
     if (!is_nan(constants[0])) return 1;
     if (constants[1] <= 1.0e308 || is_nan(constants[1])) return 2;
     if (constants[2] >= -1.0e308 || is_nan(constants[2])) return 3;

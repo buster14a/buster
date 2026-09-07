@@ -1,0 +1,16 @@
+test_closed_issue_rejected (__main__.PublishOfflineTests.test_closed_issue_rejected) ... ok
+test_default_does_not_invoke_commands (__main__.PublishOfflineTests.test_default_does_not_invoke_commands) ... ok
+test_duplicate_issue_rejected (__main__.PublishOfflineTests.test_duplicate_issue_rejected) ... ok
+test_foreign_url_rejected (__main__.PublishOfflineTests.test_foreign_url_rejected) ... ok
+test_issue_url (__main__.PublishOfflineTests.test_issue_url) ... ok
+test_no_issue (__main__.PublishOfflineTests.test_no_issue) ... ok
+test_patch_hashes (__main__.PublishOfflineTests.test_patch_hashes) ... ok
+test_pr_url (__main__.PublishOfflineTests.test_pr_url) ... ok
+test_reuse_open_issue (__main__.PublishOfflineTests.test_reuse_open_issue) ... ok
+test_reuse_open_pr (__main__.PublishOfflineTests.test_reuse_open_pr) ... ok
+test_unrelated_pr_rejected (__main__.PublishOfflineTests.test_unrelated_pr_rejected) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 0.002s
+
+OK

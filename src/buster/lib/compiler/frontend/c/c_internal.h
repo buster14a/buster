@@ -634,6 +634,19 @@ struct CTypeLayoutCache
     u64* sizes;
     u32* alignments;
     u8* states;
+    // Every type id whose layout is not committed in `states`, which is the
+    // set c_parse_type_layout's seed, solve and commit passes have anything
+    // to do for.  Without it each of those three passes walked the whole
+    // type table -- 32.141 ids on average for the 39 uncached queries of a
+    // stage-1 compile of this tree, for the ~6.200 that were still open.
+    // `pending_mark` keeps the list free of duplicates when a record
+    // mutation drops an id back onto it, and `pending_seeded` is the
+    // high-water mark of ids ever listed, so a query only has to list the
+    // types added since the last one.
+    u32* pending;
+    u8* pending_mark;
+    u32 pending_count;
+    u32 pending_seeded;
     u32 capacity;
     CToken const* tokens;
 };

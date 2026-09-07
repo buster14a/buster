@@ -1,0 +1,212 @@
+From 2f9f8404ddd398dae4efefb614117578d313731c Mon Sep 17 00:00:00 2001
+From: Audit Assistant <audit@localhost>
+Date: Sun, 6 Sep 2026 13:13:43 +0000
+Subject: [PATCH] runtime: preserve scratch output and handle relative maps and
+ null empty strings
+
+---
+ src/buster/lib/file.c                |  1 -
+ src/buster/lib/os.c                  |  4 +-
+ src/buster/lib/string.c              | 10 +++-
+ tests/runtime_boundary_regression.c  | 84 ++++++++++++++++++++++++++++
+ tests/runtime_boundary_regression.py | 35 ++++++++++++
+ 5 files changed, 129 insertions(+), 5 deletions(-)
+ create mode 100644 tests/runtime_boundary_regression.c
+ create mode 100644 tests/runtime_boundary_regression.py
+
+diff --git a/src/buster/lib/file.c b/src/buster/lib/file.c
+index 77da7223..a036e23a 100644
+--- a/src/buster/lib/file.c
++++ b/src/buster/lib/file.c
+@@ -95,7 +95,6 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
+         }
+     }
+ #elif BUSTER_LINUX || BUSTER_MACOS
+-    if (path.pointer[0] == '/')
+     {
+         char* path_buffer = (char*)arena_allocate_bytes(arena, path.length + 1, 1);
+         if (path_buffer)
+diff --git a/src/buster/lib/os.c b/src/buster/lib/os.c
+index 2af79fa8..83b07e44 100644
+--- a/src/buster/lib/os.c
++++ b/src/buster/lib/os.c
+@@ -851,7 +851,7 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
+ 
+     arena->position = position + result.length + null_terminate;
+ #elif defined(_WIN32)
+-    TemporalArena temp = scratch_begin(0, 0);
++    TemporalArena temp = scratch_begin(&arena, 1);
+     String16 relative_file_path_w = string16_from_string8(temp.arena, relative_file_path, true);
+     DWORD length_plus_null_termination = GetFullPathNameW(relative_file_path_w.pointer, 0, 0, 0);
+ 
+@@ -2945,7 +2945,7 @@ bool program_flag_get(ProgramFlag flag)
+ 
+ String8 executable_resolve_in_path(Arena* arena, String8 file)
+ {
+-    TemporalArena temp = scratch_begin(0, 0);
++    TemporalArena temp = scratch_begin(&arena, 1);
+ 
+     String8 result = {0};
+     String8 path_value = {0};
+diff --git a/src/buster/lib/string.c b/src/buster/lib/string.c
+index 2015b265..edfc1494 100644
+--- a/src/buster/lib/string.c
++++ b/src/buster/lib/string.c
+@@ -206,7 +206,10 @@ String8 string_join_arena(Arena* arena, SliceString8 strings, bool zero_terminat
+     for (u64 index = 0; index < strings.length; index += 1)
+     {
+         String8 string = strings.pointer[index];
+-        memcpy(pointer + i, string.pointer, BUSTER_SLICE_SIZE(string));
++        if (string.length)
++        {
++            memcpy(pointer + i, string.pointer, BUSTER_SLICE_SIZE(string));
++        }
+         i += string.length;
+     }
+ 
+@@ -1418,7 +1421,10 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
+ String8 string_duplicate_arena(Arena* arena, String8 string, bool zero_terminate)
+ {
+     String8 result = {.pointer = arena_allocate(arena, char8, string.length + zero_terminate), .length = string.length};
+-    memcpy(result.pointer, string.pointer, sizeof(char8) * string.length);
++    if (string.length)
++    {
++        memcpy(result.pointer, string.pointer, sizeof(char8) * string.length);
++    }
+ 
+     if (zero_terminate)
+     {
+diff --git a/tests/runtime_boundary_regression.c b/tests/runtime_boundary_regression.c
+new file mode 100644
+index 00000000..60f89a6e
+--- /dev/null
++++ b/tests/runtime_boundary_regression.c
+@@ -0,0 +1,84 @@
++#define BUSTER_UNITY_BUILD 1
++#define BUSTER_SINGLE_THREADED 1
++#include <buster/lib/base.h>
++#include <buster/lib/os.h>
++#include <buster/lib/arena.h>
++#include <buster/lib/string.h>
++#include <buster/lib/file.h>
++#include <buster/lib/integer.h>
++#include <buster/lib/string.c>
++#include <buster/lib/os.c>
++#include <buster/lib/arena.c>
++#include <buster/lib/file.c>
++#include <buster/lib/integer.c>
++#include <stdio.h>
++BUSTER_GLOBAL_LOCAL void audit_initialize(void)
++{
++    static ProgramState state;
++    program_state = &state;
++    os_state.page_size = (u64)sysconf(_SC_PAGESIZE);
++    os_state.allocation_granularity = os_state.page_size;
++    os_state.logical_thread_count = 1;
++    pthread_mutex_init(&os_state.entity_mutex, 0);
++    os_state.entity_arena = arena_create((ArenaCreation){0});
++    state.arena = arena_create((ArenaCreation){0});
++    thread_context_select(thread_context_allocate());
++}
++
++int main(int argc, char** argv)
++{
++    audit_initialize();
++    bool ok = true;
++    if(argc==2 && strcmp(argv[1],"scratch")==0)
++    {
++        String8 keys[]={S8("PATH")}, vals[]={S8("/bin:/usr/bin")};
++        program_state->input.environment_keys=(SliceString8){keys,1};
++        program_state->input.environment_values=(SliceString8){vals,1};
++        for (u32 index = 0; index < 2; index += 1)
++        {
++            Arena* output = thread_context_selected()->arenas[index];
++            u64 before = output->position;
++            String8 name = executable_resolve_in_path(output, S8("sh"));
++            char expected[64] = {0};
++            bool valid = name.length && name.length < sizeof(expected);
++            if (valid)
++            {
++                memcpy(expected, name.pointer, name.length);
++            }
++            printf("scratch=%u before=%llu after=%llu returned=%.*s\n", index,
++                   (unsigned long long)before, (unsigned long long)output->position,
++                   (int)name.length, name.pointer);
++            memset(arena_allocate(output, char8, 128), 'X', 128);
++            valid = valid && memcmp(name.pointer, expected, name.length) == 0;
++            printf("output survives next allocation: %s\n", valid ? "yes" : "NO");
++            ok = ok && valid;
++        }
++    }
++    else if(argc==2 && strcmp(argv[1],"map")==0)
++    {
++        char dir[]="/tmp/buster-audit-XXXXXX";
++        ok=mkdtemp(dir)!=0;
++        char old[4096]; ok=ok && getcwd(old,sizeof(old))!=0;
++        if(ok)
++        {
++            ok=chdir(dir)==0;
++            String8 path=S8("relative.bin");
++            ok=ok && file_write(path,(ByteSlice){(u8*)"hello",5});
++            FileMapRead map=file_map_read(program_state->arena,path,(FileReadOptions){.map_required=1});
++            ok=ok && map.mapped_pointer && map.bytes.length==5;
++            if(map.bytes.pointer)ok=ok && memcmp(map.bytes.pointer,"hello",5)==0;
++            printf("relative required mapping: %s\n",ok?"success":"FAILED");
++            file_map_unmap(map); unlink("relative.bin"); chdir(old);rmdir(dir);
++        }
++    }
++    else if(argc==2 && strcmp(argv[1],"empty")==0)
++    {
++        String8 copy=string_duplicate_arena(program_state->arena,(String8){0},true);
++        String8 pieces[]={(String8){0},S8("ok"),(String8){0}};
++        String8 join=string_join_arena(program_state->arena,(SliceString8){pieces,3},true);
++        ok=copy.length==0 && copy.pointer[0]==0 && join.length==2 && memcmp(join.pointer,"ok\0",3)==0;
++        puts("empty string operations completed");
++    }
++    else ok=false;
++    return !ok;
++}
+diff --git a/tests/runtime_boundary_regression.py b/tests/runtime_boundary_regression.py
+new file mode 100644
+index 00000000..295d33f7
+--- /dev/null
++++ b/tests/runtime_boundary_regression.py
+@@ -0,0 +1,35 @@
++#!/usr/bin/env python3
++"""Focused Linux-host regression against the repository's real C implementation.
++
++Requires a host C compiler. This does not replace test_all or Release self-host.
++Set CC=gcc, AUDIT_OPT=-O0, or AUDIT_SANITIZE=1 to vary the host configuration.
++"""
++import os
++from pathlib import Path
++import shlex
++import subprocess
++import tempfile
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def build(source: str, out: Path) -> None:
++    compiler = shlex.split(os.environ.get("CC", "clang"))
++    flags = [os.environ.get("AUDIT_OPT", "-O2"), "-g", "-fwrapv", "-funsigned-char",
++             "-Wno-unused-function", "-ffunction-sections", "-fdata-sections", "-I", str(ROOT / "src")]
++    if os.environ.get("AUDIT_SANITIZE") == "1":
++        flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer"]
++    subprocess.run(compiler + flags + [str(ROOT / "tests" / source), "-Wl,--gc-sections",
++                                      "-pthread", "-lm", "-o", str(out)], check=True)
++
++
++def main() -> None:
++    with tempfile.TemporaryDirectory(prefix="buster-runtime_boundary_regression-") as directory:
++        binary = Path(directory) / "probe"
++        build("runtime_boundary_regression.c", binary)
++        for args in [['scratch'], ['map'], ['empty']]:
++            subprocess.run([str(binary)] + args, check=True)
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.47.3
+

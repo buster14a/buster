@@ -1386,7 +1386,8 @@ static void ebpf_fe_emit_comparison(EbpfFunctionEmitter* emitter, IrBinaryOperat
         return;
     }
     ebpf_fe_mov_imm(emitter, result, 0);
-    ebpf_fe_insn(emitter, EBPF_CLASS_JMP | jump_operation | EBPF_SRC_X, left, right, 2, 0);
+    // Offsets are relative to the next instruction: skip JA, not MOV 1.
+    ebpf_fe_insn(emitter, EBPF_CLASS_JMP | jump_operation | EBPF_SRC_X, left, right, 1, 0);
     ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JA, 0, 0, 1, 0);
     ebpf_fe_mov_imm(emitter, result, 1);
 }
@@ -1461,11 +1462,11 @@ static void ebpf_fe_emit_unary(EbpfFunctionEmitter* emitter, IrInstruction* inst
         break;
     case IR_UNARY_INTEGER_BITWISE_NOT:
         ebpf_fe_alu_imm(emitter, EBPF_OP_XOR, EBPF_REG_0, -1);
-        ebpf_fe_store_result(emitter, instruction, EBPF_REG_0, true, false);
+        ebpf_fe_store_result(emitter, instruction, EBPF_REG_0, true, type && type->kind == IR_TYPE_INTEGER && type->is_signed);
         break;
     case IR_UNARY_BOOLEAN_NOT:
         ebpf_fe_mov_imm(emitter, EBPF_REG_8, 0);
-        ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JEQ | EBPF_SRC_K, EBPF_REG_0, 0, 2, 0);
+        ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JEQ | EBPF_SRC_K, EBPF_REG_0, 0, 1, 0);
         ebpf_fe_insn(emitter, EBPF_CLASS_JMP | EBPF_JA, 0, 0, 1, 0);
         ebpf_fe_mov_imm(emitter, EBPF_REG_8, 1);
         ebpf_fe_store_result(emitter, instruction, EBPF_REG_8, false, false);

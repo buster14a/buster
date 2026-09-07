@@ -1,0 +1,11 @@
+In file included from /tmp/buster-publication-bimqqy18/wasm-alignment/tests/wasm_memory_alignment_regression.c:29:
+In file included from /tmp/buster-publication-bimqqy18/wasm-alignment/src/buster/lib/compiler/ir/ir.c:16:
+In file included from /tmp/buster-publication-bimqqy18/wasm-alignment/src/buster/lib/compiler/ir/ir.h:10:
+/tmp/buster-publication-bimqqy18/wasm-alignment/src/buster/lib/target.h:525:32: warning: function 'target_data_layout' has internal linkage but is not defined [-Wundefined-internal]
+  525 | BUSTER_F_DECL TargetDataLayout target_data_layout(Target target);
+      |                                ^
+/tmp/buster-publication-bimqqy18/wasm-alignment/src/buster/lib/compiler/ir/ir.c:2637:31: note: used here
+ 2637 |         program.data_layout = target_data_layout(target_native);
+      |                               ^
+1 warning generated.
+112/112 Wasm modules valid

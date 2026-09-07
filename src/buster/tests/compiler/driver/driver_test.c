@@ -1022,9 +1022,58 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_prewarm_gang(void* argument)
     compiler_prewarm_observe(state, &state->observations[lane_index()]);
 }
 
-UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_include_population(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    // Exactly sized prefix with a neighboring sentinel: the old fixed-array
+    // append would overwrite unrelated invocation state after enough entries.
+    String8 prefix[] = {S8("explicit"), S8("resource"), S8("sentinel")};
+    CompilerDriverInvocation invocation = {.system_include_paths = prefix, .system_include_path_count = 2};
+    char8 environment[4096] = {0};
+    u64 length = 0;
+    String8 expected[128];
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(expected); ++i)
+    {
+        expected[i] = string_format(arguments->arena, S8("C:/sdk/{u32}/include"), i);
+        environment[length++] = ';';
+        environment[length++] = ';';
+        memcpy(environment + length, expected[i].pointer, expected[i].length);
+        length += expected[i].length;
+    }
+    environment[length++] = ';';
+    compiler_driver_test_append_environment_includes(arguments->arena, &invocation, (String8){.pointer = environment, .length = length});
+    BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, invocation.system_include_path_count == 130);
+    BUSTER_STRING_TEST(arguments, invocation.system_include_paths[0], S8("explicit"));
+    BUSTER_STRING_TEST(arguments, invocation.system_include_paths[1], S8("resource"));
+    BUSTER_STRING_TEST(arguments, prefix[2], S8("sentinel"));
+    memset(environment, '?', sizeof(environment));
+    if (invocation.system_include_path_count == 130)
+        for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(expected); ++i)
+            BUSTER_STRING_TEST(arguments, invocation.system_include_paths[2 + i], expected[i]);
+    // Empty entries disappear, but nonempty duplicates and order are retained.
+    compiler_driver_test_append_environment_includes(arguments->arena, &invocation, S8(";;repeat;;repeat;"));
+    BUSTER_TEST(arguments, invocation.system_include_path_count == 132);
+    if (invocation.system_include_path_count == 132)
+    {
+        BUSTER_STRING_TEST(arguments, invocation.system_include_paths[130], S8("repeat"));
+        BUSTER_STRING_TEST(arguments, invocation.system_include_paths[131], S8("repeat"));
+    }
+    String8* before = invocation.system_include_paths;
+    compiler_driver_test_append_environment_includes(arguments->arena, &invocation, (String8){0});
+    compiler_driver_test_append_environment_includes(arguments->arena, &invocation, S8(";;;"));
+    BUSTER_TEST(arguments, invocation.system_include_path_count == 132 && invocation.system_include_paths == before);
+    CompilerDriverInvocation overflow = {.system_include_path_count = UINT32_MAX};
+    compiler_driver_test_append_environment_includes(arguments->arena, &overflow, S8("one"));
+    BUSTER_TEST(arguments, overflow.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_TEST(arguments, overflow.system_include_path_count == UINT32_MAX && !overflow.system_include_paths);
+    return result;
+}
+
+UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = compiler_driver_test_include_population(arguments);
 
     // compiler_prewarm() is the contract that lets a gang compile at all: the
     // frontends' remaining first-use tables are written once and read
@@ -1092,6 +1141,39 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                memcmp(wasm64_compile.wasm64.bytes.pointer, "\0asm\1\0\0\0", 8) == 0);
     BUSTER_TEST(arguments, file_read(arguments->arena, wasm64_output, (FileReadOptions){0}).length == wasm64_compile.wasm64.bytes.length);
     BUSTER_TEST(arguments, target_cpu_features_are_valid(wasm64_target));
+
+    // Keep over-aligned C types in the ordinary driver suite. When Node is
+    // available, validate AND execute the emitted memory64 module; a header
+    // check alone cannot detect an illegal memory-argument alignment hint.
+    String8 wasm64_alignment_output = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-alignment"), S8(".wasm"));
+    String8 wasm64_alignment_command[] = {
+        S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), S8("-o"), wasm64_alignment_output,
+        S8("tests/basic_c_wasm64_alignment.c"),
+    };
+    CompilerDriverResult wasm64_alignment = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wasm64_alignment_command)));
+    BUSTER_TEST(arguments, wasm64_alignment.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, wasm64_alignment.has_wasm64 && wasm64_alignment.wasm64.stats.memory64);
+    if (wasm64_alignment.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+        if (node.length)
+        {
+            String8 node_arguments[] = {node, S8("--experimental-wasm-memory64"), S8("tests/wasm_memory_alignment_execution.js"), wasm64_alignment_output};
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
+                                                       (ProcessSpawnOptions){.use_process_environment = 1});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        else
+        {
+            arguments->show(arguments, S8("Wasm64 alignment engine execution skipped: Node is not installed\n"));
+        }
+    }
 
     String8 wasm64_assembly_command_line[] = {
         S8("-S"), S8("-target"), S8("wasm64-unknown-freestanding"), S8("tests/basic_c_wasm64.c"),

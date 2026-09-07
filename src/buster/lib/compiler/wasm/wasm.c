@@ -1483,7 +1483,8 @@ static void wasm64_fe_emit_result_set(Wasm64FunctionEmitter* emitter, IrInstruct
 static void wasm64_fe_load(Wasm64FunctionEmitter* emitter, IrType* type)
 {
     u32 size = wasm64_type_size(type);
-    u32 alignment = type && type->layout.alignment ? wasm64_log2_alignment(type->layout.alignment) : 0;
+    // A stronger object alignment is not a legal memory-op alignment immediate.
+    u32 alignment = type && type->layout.alignment ? wasm64_log2_alignment(BUSTER_MIN(type->layout.alignment, BUSTER_MIN(size, 8u))) : 0;
     if (type && (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION))
     {
         wasm64_fe_u8(emitter, 0x29); // i64.load
@@ -1522,7 +1523,8 @@ static void wasm64_fe_load(Wasm64FunctionEmitter* emitter, IrType* type)
 static void wasm64_fe_store(Wasm64FunctionEmitter* emitter, IrType* type)
 {
     u32 size = wasm64_type_size(type);
-    u32 alignment = type && type->layout.alignment ? wasm64_log2_alignment(type->layout.alignment) : 0;
+    // A stronger object alignment is not a legal memory-op alignment immediate.
+    u32 alignment = type && type->layout.alignment ? wasm64_log2_alignment(BUSTER_MIN(type->layout.alignment, BUSTER_MIN(size, 8u))) : 0;
     if (type && (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION))
     {
         wasm64_fe_u8(emitter, 0x37); // i64.store

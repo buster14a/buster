@@ -4,7 +4,9 @@
 // .debug_abbrev/.debug_info/.debug_line and friends through the dwarf_model_*
 // family, while dwarf_build_legacy remains for the callers that still
 // produce the older flat function records. The dwarf_emit_* primitives at
-// the top are the shared byte/LEB128 writers, and dwarf_cfi_* translates
+// the top are the shared byte/LEB128 writers -- with dwarf_dense_uleb128 and
+// dwarf_dense_sleb128 beside them for the one loop that writes through a raw
+// cursor, the line program's rows -- and dwarf_cfi_* translates
 // codegen unwind actions into CFI. Relocations against code addresses are
 // recorded through dwarf_model_relocation rather than patched, so the
 // object writer and linker place the final values.
@@ -198,6 +200,48 @@ BUSTER_GLOBAL_LOCAL void dwarf_emit_sleb128(DwarfBuffer* buffer, s64 value)
             break;
         }
     }
+}
+
+// The line program's rows are written through a raw cursor rather than the
+// checked dwarf_emit_* writers. A self-host stage emits 507 k rows at 4,31
+// bytes each, and every one of those bytes paid dwarf_emit_bytes' error test,
+// three capacity compares and a one-byte memcpy -- about nine instructions to
+// store one byte. The row loop below reserves 32 bytes per row up front, no
+// row can spell more than DWARF_LINE_ROW_MAX_BYTES, so one compare per row
+// replaces the per-byte check and the stores go straight to the cursor.
+enum
+{
+    // DW_LNS_SET_FILE (1) + uleb(u16 file + 1) (3) + DW_LNS_SET_COLUMN (1) +
+    // uleb(u16 column) (3) + DW_LNS_ADVANCE_LINE (1) + sleb(the difference of
+    // two u32 lines, 33 bits and a sign) (5) + DW_LNS_ADVANCE_PC (1) +
+    // uleb(u32 advance) (5) + DW_LNS_COPY (1) = 21, rounded up.
+    DWARF_LINE_ROW_MAX_BYTES = 24,
+};
+
+BUSTER_GLOBAL_LOCAL u8* dwarf_dense_uleb128(u8* out, u64 value)
+{
+    while (value >= 0x80)
+    {
+        *out = (u8)(value | 0x80);
+        out += 1;
+        value >>= 7;
+    }
+    *out = (u8)value;
+    return out + 1;
+}
+
+BUSTER_GLOBAL_LOCAL u8* dwarf_dense_sleb128(u8* out, s64 value)
+{
+    bool done = false;
+    while (!done)
+    {
+        u8 byte = (u8)(value & 0x7f);
+        value >>= 7;
+        done = (value == 0 && !(byte & 0x40)) || (value == -1 && (byte & 0x40));
+        *out = done ? byte : (u8)(byte | 0x80);
+        out += 1;
+    }
+    return out;
 }
 
 BUSTER_GLOBAL_LOCAL void dwarf_write_u32_at(DwarfBuffer* buffer, u64 offset, u32 value)
@@ -620,7 +664,7 @@ DwarfResult dwarf_build_legacy(Arena* arena, DwarfInput input)
             .bytes = arena_allocate(arena, u8, info_capacity),
             .capacity = info_capacity,
         };
-        u64 line_capacity = 64 + file_path_bytes + (u64)input.file_count * 4 + (u64)input.line_count * 32;
+        u64 line_capacity = 64 + DWARF_LINE_ROW_MAX_BYTES + file_path_bytes + (u64)input.file_count * 4 + (u64)input.line_count * 32;
         DwarfBuffer line = {
             .bytes = arena_allocate(arena, u8, line_capacity),
             .capacity = line_capacity,
@@ -765,7 +809,9 @@ DwarfResult dwarf_build_legacy(Arena* arena, DwarfInput input)
                 u32 current_line = 1;
                 u32 current_column = 0;
                 u32 emitted_line_count = 0;
-                for (u32 line_index = 0; line_index < input.line_count; line_index += 1)
+                u8* out = line.bytes + line.count;
+                u8* out_limit = line.bytes + line.capacity;
+                for (u32 line_index = 0; line_index < input.line_count && !line.error; line_index += 1)
                 {
                     DwarfLineEntry* entry = input.lines + line_index;
                     if (!entry->line)
@@ -780,17 +826,22 @@ DwarfResult dwarf_build_legacy(Arena* arena, DwarfInput input)
                     {
                         continue;
                     }
+                    if ((u64)(out_limit - out) < DWARF_LINE_ROW_MAX_BYTES)
+                    {
+                        line.error = true;
+                        continue;
+                    }
                     if ((u32)(entry->file + 1) != current_file)
                     {
                         current_file = (u32)(entry->file + 1);
-                        dwarf_emit_u8(&line, DW_LNS_SET_FILE);
-                        dwarf_emit_uleb128(&line, current_file);
+                        *out = DW_LNS_SET_FILE;
+                        out = dwarf_dense_uleb128(out + 1, current_file);
                     }
                     if (entry->column != current_column)
                     {
                         current_column = entry->column;
-                        dwarf_emit_u8(&line, DW_LNS_SET_COLUMN);
-                        dwarf_emit_uleb128(&line, current_column);
+                        *out = DW_LNS_SET_COLUMN;
+                        out = dwarf_dense_uleb128(out + 1, current_column);
                     }
                     u32 address_advance = entry->code_offset - current_address;
                     s64 line_delta = (s64)entry->line - (s64)current_line;
@@ -804,26 +855,29 @@ DwarfResult dwarf_build_legacy(Arena* arena, DwarfInput input)
                     }
                     if (special_valid)
                     {
-                        dwarf_emit_u8(&line, (u8)special);
+                        *out = (u8)special;
+                        out += 1;
                     }
                     else
                     {
                         if (line_delta)
                         {
-                            dwarf_emit_u8(&line, DW_LNS_ADVANCE_LINE);
-                            dwarf_emit_sleb128(&line, line_delta);
+                            *out = DW_LNS_ADVANCE_LINE;
+                            out = dwarf_dense_sleb128(out + 1, line_delta);
                         }
                         if (address_advance)
                         {
-                            dwarf_emit_u8(&line, DW_LNS_ADVANCE_PC);
-                            dwarf_emit_uleb128(&line, address_advance);
+                            *out = DW_LNS_ADVANCE_PC;
+                            out = dwarf_dense_uleb128(out + 1, address_advance);
                         }
-                        dwarf_emit_u8(&line, DW_LNS_COPY);
+                        *out = DW_LNS_COPY;
+                        out += 1;
                     }
                     current_address = entry->code_offset;
                     current_line = entry->line;
                     emitted_line_count += 1;
                 }
+                line.count = (u64)(out - line.bytes);
                 if (input.code_size > current_address)
                 {
                     dwarf_emit_u8(&line, DW_LNS_ADVANCE_PC);

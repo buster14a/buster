@@ -49,7 +49,7 @@ enum
     PDB_GSI_HASH_HEADER_SIZE = 16,
     PDB_PUBLICS_HEADER_SIZE = 28,
     PDB_NAMED_STREAM_CAPACITY = 8,
-    PDB_CHECKSUM_ENTRY_SIZE = 8,
+    PDB_CHECKSUM_HEADER_SIZE = 6,
     // A merge round can only expose new matches one level up the type graph,
     // so rounds are capped rather than run to a fixed point. The cap bounds
     // how much merging happens, never whether the result is correct.
@@ -203,8 +203,10 @@ struct PdbCodeviewSplit
     ByteSlice c13;
     ByteSlice string_table;
     ByteSlice checksums;
+    u32* checksum_offsets;
+    u32 checksum_count;
     bool valid;
-    u8 reserved[7];
+    u8 reserved[3];
 };
 
 typedef struct PdbTypeModule PdbTypeModule;
@@ -225,7 +227,7 @@ struct PdbTypeRecord
 BUSTER_GLOBAL_LOCAL PdbCodeviewSplit pdb_split_codeview(Arena* arena, ByteSlice blob)
 {
     PdbCodeviewSplit result = {0};
-    if (blob.length >= 4)
+    if (blob.pointer && blob.length >= 4)
     {
         u8* symbol_bytes = arena_allocate(arena, u8, blob.length);
         u8* c13_bytes = arena_allocate(arena, u8, blob.length);
@@ -237,7 +239,13 @@ BUSTER_GLOBAL_LOCAL PdbCodeviewSplit pdb_split_codeview(Arena* arena, ByteSlice 
             u32 kind = pdb_read_u32(blob, offset);
             u32 length = pdb_read_u32(blob, offset + 4);
             u64 payload = offset + 8;
-            if (length > blob.length - payload)
+            // The remap index belongs to one checksum/string table pair.
+            // Reject duplicate tables instead of applying the last table's
+            // offsets to an earlier, differently sized subsection.
+            u64 padded_length = ((u64)length + 3) & ~(u64)3;
+            if (padded_length > blob.length - payload ||
+                (kind == PDB_DEBUG_S_STRINGTABLE && result.string_table.pointer) ||
+                (kind == PDB_DEBUG_S_FILECHKSMS && result.checksums.pointer))
             {
                 return result;
             }
@@ -269,7 +277,7 @@ BUSTER_GLOBAL_LOCAL PdbCodeviewSplit pdb_split_codeview(Arena* arena, ByteSlice 
                     };
                 }
             }
-            offset = payload + ((length + 3u) & ~3u);
+            offset = payload + padded_length;
         }
         result.symbols = (ByteSlice){
             .pointer = symbol_bytes,
@@ -279,17 +287,57 @@ BUSTER_GLOBAL_LOCAL PdbCodeviewSplit pdb_split_codeview(Arena* arena, ByteSlice 
             .pointer = c13_bytes,
             .length = c13_count,
         };
-        result.valid = true;
+        result.valid = offset == blob.length;
     }
 
     return result;
 }
 
 
+// CodeView records are {u32 filename, u8 size, u8 kind, digest[size]},
+// padded to four bytes. Validate once and retain the exact record offsets;
+// line records refer to these offsets, so neither digest nor padding may move.
+BUSTER_GLOBAL_LOCAL bool pdb_index_checksums(Arena* arena, PdbCodeviewSplit* split)
+{
+    ByteSlice bytes = split->checksums;
+    bool valid = bytes.length <= UINT32_MAX && (!bytes.length || bytes.pointer);
+    if (valid)
+    {
+        // Eight is the minimum aligned record size, not a record stride.
+        u64 capacity = bytes.length / ((PDB_CHECKSUM_HEADER_SIZE + 3u) & ~3u);
+        u32* offsets = arena_allocate(arena, u32, capacity ? capacity : 1);
+        u32 count = 0;
+        u64 offset = 0;
+        while (valid && offset < bytes.length)
+        {
+            u64 remaining = bytes.length - offset;
+            if (remaining < PDB_CHECKSUM_HEADER_SIZE)
+                valid = false;
+            else
+            {
+                u32 stride = (PDB_CHECKSUM_HEADER_SIZE + (u32)bytes.pointer[offset + 4] + 3u) & ~3u;
+                if (stride > remaining)
+                    valid = false;
+                else
+                {
+                    offsets[count++] = (u32)offset;
+                    offset += stride;
+                }
+            }
+        }
+        if (valid)
+        {
+            split->checksum_offsets = offsets;
+            split->checksum_count = count;
+        }
+    }
+    return valid;
+}
+
 // A PDB's checksum entries index the global /names stream rather than the
 // object-local string table, so the C13 region is rebuilt with remapped
 // offsets and the now-redundant string table dropped.
-BUSTER_GLOBAL_LOCAL ByteSlice pdb_rebuild_c13(Arena* arena, ByteSlice blob, u32 const* names_offsets, u32 file_count)
+BUSTER_GLOBAL_LOCAL ByteSlice pdb_rebuild_c13(Arena* arena, ByteSlice blob, u32 const* names_offsets, u32 const* checksum_offsets, u32 file_count)
 {
     ByteSlice result = {0};
     u8* bytes = arena_allocate(arena, u8, blob.length + 8);
@@ -311,10 +359,10 @@ BUSTER_GLOBAL_LOCAL ByteSlice pdb_rebuild_c13(Arena* arena, ByteSlice blob, u32 
             count += 8 + (u64)length;
             if (kind == PDB_DEBUG_S_FILECHKSMS)
             {
-                for (u32 file_index = 0; file_index < length / PDB_CHECKSUM_ENTRY_SIZE; file_index += 1)
+                for (u32 file_index = 0; file_index < file_count; file_index += 1)
                 {
-                    u32 mapped = file_index < file_count ? names_offsets[file_index] : 0;
-                    memcpy(bytes + start + 8 + (u64)file_index * PDB_CHECKSUM_ENTRY_SIZE, &mapped, sizeof(mapped));
+                    u32 mapped = names_offsets[file_index];
+                    memcpy(bytes + start + 8 + checksum_offsets[file_index], &mapped, sizeof(mapped));
                 }
             }
             while (count & 3)
@@ -322,7 +370,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice pdb_rebuild_c13(Arena* arena, ByteSlice blob, u32 
                 bytes[count++] = 0;
             }
         }
-        offset = payload + ((length + 3u) & ~3u);
+        offset = payload + (((u64)length + 3) & ~(u64)3);
     }
     result = (ByteSlice){
         .pointer = bytes,
@@ -669,11 +717,11 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         {
             return result;
         }
-        if (splits[module_index].checksums.length / PDB_CHECKSUM_ENTRY_SIZE > UINT32_MAX)
+        if (!pdb_index_checksums(arena, splits + module_index))
         {
             return result;
         }
-        source_counts[module_index] = (u32)(splits[module_index].checksums.length / PDB_CHECKSUM_ENTRY_SIZE);
+        source_counts[module_index] = splits[module_index].checksum_count;
         if (total_source_file_count > UINT32_MAX - source_counts[module_index])
         {
             return result;
@@ -692,7 +740,7 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         u32* names_offsets = arena_allocate(arena, u32, source_count ? source_count : 1);
         for (u32 file_index = 0; file_index < source_count; file_index += 1)
         {
-            u32 string_offset = pdb_read_u32(split->checksums, (u64)file_index * PDB_CHECKSUM_ENTRY_SIZE);
+            u32 string_offset = pdb_read_u32(split->checksums, split->checksum_offsets[file_index]);
             if (string_offset >= split->string_table.length)
             {
                 return result;
@@ -701,6 +749,11 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
             while (string_offset + length < split->string_table.length && split->string_table.pointer[string_offset + length])
             {
                 length += 1;
+            }
+            if (string_offset + length == split->string_table.length || names_buffer_size > UINT32_MAX ||
+                length + 1 > UINT32_MAX - names_buffer_size)
+            {
+                return result;
             }
             source_names[source_cursor] = (String8){
                 .pointer = (char8*)(split->string_table.pointer + string_offset),
@@ -712,7 +765,7 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
             names_buffer_size += length + 1;
             source_names_size += length + 1;
         }
-        split->c13 = pdb_rebuild_c13(arena, modules[module_index].codeview_symbols, names_offsets, source_count);
+        split->c13 = pdb_rebuild_c13(arena, modules[module_index].codeview_symbols, names_offsets, split->checksum_offsets, source_count);
         if (!split->c13.pointer)
         {
             return result;
