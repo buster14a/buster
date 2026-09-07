@@ -1,24 +1,47 @@
-name: Fast allocator source snapshot
+name: Publish isolated fast allocator implementation
 on:
   push:
     branches: [audit/fast-ra-source-9834a42]
     paths: [.github/workflows/fast-ra-source.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  source:
+  publish:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ebfdd11705bc470564e726857e498f1c82aa746c
           persist-credentials: false
-      - name: Archive exact baseline
-        run: git archive --format=tar.gz --output=baseline-ebfdd11.tar.gz HEAD
-      - uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          name: fast-ra-baseline-ebfdd11
-          path: baseline-ebfdd11.tar.gz
-          retention-days: 3
-          if-no-files-found: error
+          ref: ebfdd11705bc470564e726857e498f1c82aa746c
+          path: implementation
+      - name: Apply only reviewed source and test changes
+        working-directory: implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = ebfdd11705bc470564e726857e498f1c82aa746c
+          git apply --check ../.github/fast-ra-core.patch ../.github/fast-ra-tests.patch
+          git apply ../.github/fast-ra-core.patch ../.github/fast-ra-tests.patch
+          cp ../.github/fast-ra-cfg-fixture.c tests/basic_c_fast_ra_cfg.c
+          sha256sum --check <<'HASHES'
+          37c54a3f970776f2fbae0666c215c751a4621b22463c6015fb448c521b4992b0  build.c
+          345f759b8165608915c1b41f3730cd20c800c1098065333c75261dd884e195bb  src/buster/lib/compiler/codegen/machine.h
+          8827e8b4d9dfd63cba8427f896414b53129f71913bd6188d0de11662e943fc89  src/buster/lib/compiler/codegen/register_allocator_fast.c
+          3334232b8ea5ef9a4e890e46199698de41a4611c43d17fc00a486aa40029566a  src/buster/tests/compiler/codegen/machine_test.c
+          8884591a2aecaf88deb5ec3b11341194105310f7c10156bf20ebfe650e48c3bb  tests/basic_c_fast_ra_cfg.c
+          HASHES
+          git diff --check
+          git add build.c src/buster/lib/compiler/codegen/machine.h src/buster/lib/compiler/codegen/register_allocator_fast.c src/buster/tests/compiler/codegen/machine_test.c tests/basic_c_fast_ra_cfg.c
+          test "$(git diff --cached --name-only | wc -l)" = 5
+          git diff --cached --stat
+          git -c user.name=OpenAI -c user.email=noreply@openai.com commit -m 'fast-ra: index CFG edge lookups without changing allocation decisions'
+          branch=perf/fast-ra-indexed-edges
+          if test -n "$(git ls-remote --heads origin refs/heads/$branch)"; then
+            echo 'Refusing to overwrite an existing branch'
+            exit 1
+          fi
+          git push origin HEAD:refs/heads/$branch
+          git rev-parse HEAD
