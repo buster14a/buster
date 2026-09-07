@@ -68,6 +68,21 @@ fi
 cmake --version
 xcrun --sdk iphonesimulator --show-sdk-path
 
+# Xcode 26 has a documented first-run simulator failure mode after the host
+# macOS image changes. Apple recommends rebuilding the simulator dyld shared
+# caches before booting. GitHub's Intel macOS image is ephemeral and exercised
+# exactly this path: boot eventually completed, but freshly launched x86-64
+# simulator apps immediately disappeared before they could emit the CI result
+# marker. Keep the workaround narrowly scoped to GitHub's Intel simulator leg;
+# Apple Silicon is unaffected and local/Forgejo runs retain their normal state.
+if [[ $arch == x86_64 && ${GITHUB_ACTIONS:-false} == true ]]; then
+    echo "Refreshing Intel iOS simulator dyld shared caches"
+    if ! xcrun simctl runtime dyld_shared_cache update --all; then
+        echo "error: failed to refresh iOS simulator dyld shared caches" >&2
+        exit 1
+    fi
+fi
+
 configure_started=$SECONDS
 cmake --warn-uninitialized -Werror=dev \
     -B "$build_directory" \
