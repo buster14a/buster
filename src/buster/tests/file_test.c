@@ -21,7 +21,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
     ByteSlice copied_bytes = file_read(arguments->arena, destination_path, (FileReadOptions){0});
     String8 copied = {(char8*)copied_bytes.pointer, copied_bytes.length};
     BUSTER_STRING_TEST(arguments, copied, content);
-    arguments->arena->position = arena_position;
+    arena_set_position(arguments->arena, arena_position);
 
     FileMapRead required_map = file_map_read(arguments->arena, destination_path, (FileReadOptions){.map_required = 1});
 #if BUSTER_WINDOWS || BUSTER_LINUX || BUSTER_MACOS
@@ -49,7 +49,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, fallback_map.mapped_pointer == 0);
 #endif
     file_map_unmap(fallback_map);
-    arguments->arena->position = arena_position;
+    arena_set_position(arguments->arena, arena_position);
 
     // Exercise relative paths without changing the process-wide working directory:
     // like the compiler fixtures, these paths are relative to the checkout root.
@@ -67,7 +67,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
                 BUSTER_STRING_TEST(arguments, ((String8){(char8*)relative_map.bytes.pointer, relative_map.bytes.length}), mapped_content);
             }
             file_map_unmap(relative_map);
-            arguments->arena->position = arena_position;
+            arena_set_position(arguments->arena, arena_position);
         }
     }
 
@@ -87,7 +87,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, padding_zero);
     }
     file_map_unmap(padded_fallback);
-    arguments->arena->position = arena_position;
+    arena_set_position(arguments->arena, arena_position);
 
     BUSTER_TEST(arguments, file_write(source_path, (ByteSlice){0}));
     ByteSlice empty = file_read(arguments->arena, source_path,
@@ -104,7 +104,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
         padding_is_zero = empty.pointer[0] == 0 && empty.pointer[1] == 0 && empty.pointer[2] == 0 && empty.pointer[3] == 0;
     }
     BUSTER_TEST(arguments, padding_is_zero);
-    arguments->arena->position = arena_position;
+    arena_set_position(arguments->arena, arena_position);
 #else
     BUSTER_UNUSED(arguments);
 #endif

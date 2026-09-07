@@ -163,6 +163,23 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
     UnitTestResult result = {0};
 
+#if defined(__linux__) || defined(__APPLE__)
+    // realpath receives a PATH_MAX-sized span, but the returned string keeps
+    // only its prefix. Shrinking that span must retain the dirty watermark,
+    // including bytes a failing syscall is permitted to have written.
+    {
+        Arena* path_arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+        BUSTER_TEST(arguments, path_arena != 0);
+        if (path_arena)
+        {
+            String8 path = os_path_absolute(path_arena, S8("."), false);
+            BUSTER_TEST(arguments, path.length != 0);
+            BUSTER_TEST(arguments, arena_dirty_position(path_arena) > path_arena->position);
+            BUSTER_TEST(arguments, arena_destroy(path_arena, 1));
+        }
+    }
+#endif
+
     // Releasing the selected context must clear TLS before its arenas go
     // away. No scratch-backed operation is valid while TLS is empty, so
     // restore the process's main context immediately after observing it.
@@ -365,7 +382,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_ERROR].length == 262144);
         }
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Regression: a captured stdin used to leave the parent's write end open
@@ -393,7 +410,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_OUTPUT].length == 2);
         }
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Exit codes past the ProcessResult range must not alias enum values, and
@@ -434,7 +451,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             }
         }
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // A run that stops making progress is killed at its deadline rather than
@@ -487,7 +504,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             }
         }
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Regression: executable_resolve_in_path must treat empty PATH components
@@ -524,7 +541,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             *path_value = saved_path;
         }
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 #endif
 
@@ -565,7 +582,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 bool retained = output->position > start;
                 memset(arena_allocate(output, u8, 1024), 0xa5, 1024);
                 bool intact = string_equal(resolved, path) && resolved.pointer[resolved.length] == 0;
-                output->position = start;
+                arena_set_position(output, start);
                 BUSTER_TEST(arguments, retained);
                 BUSTER_TEST(arguments, intact);
 
@@ -573,7 +590,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 retained = output->position > start;
                 memset(arena_allocate(output, u8, 1024), 0x5a, 1024);
                 intact = absolute.length && string_equal(canonical, absolute) && canonical.pointer[canonical.length] == 0;
-                output->position = start;
+                arena_set_position(output, start);
                 BUSTER_TEST(arguments, retained);
                 BUSTER_TEST(arguments, intact);
             }
@@ -646,7 +663,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, file_write(deep_leaf, BUSTER_SLICE_TO_BYTE_SLICE(S8("leaf"))));
         BUSTER_TEST(arguments, os_directory_delete(deep_root));
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
 #if defined(__linux__) || defined(__APPLE__)
@@ -695,7 +712,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
         os_directory_delete(outside_directory);
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 #endif
 
@@ -939,7 +956,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
         thread_context_release(lane_owner_context);
         thread_context_select(main_context);
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     return result;

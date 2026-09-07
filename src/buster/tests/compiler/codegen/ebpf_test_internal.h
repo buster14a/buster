@@ -206,7 +206,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_scalars(UnitTestArguments* 
                 }
             }
         }
-        arguments->arena->position = mark;
+        arena_set_position(arguments->arena, mark);
     }
     return result;
 }

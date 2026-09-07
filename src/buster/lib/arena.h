@@ -72,6 +72,8 @@ BUSTER_F_DECL u64 arena_pool_release_thread(void);
 BUSTER_F_DECL u8* arena_get_byte_pointer_at_position(Arena* arena, u64 position);
 BUSTER_F_DECL u8* arena_get_byte_pointer_at_position_check_aligned(Arena* arena, u64 position, u64 alignment);
 BUSTER_F_DECL u64 arena_dirty_position(Arena* arena);
+// Callers must move the cursor through this function, not assign position:
+// even shrinking a syscall buffer must retain dirtiness for zeroed reuse.
 BUSTER_F_DECL void arena_set_position(Arena* arena, u64 position);
 // Resets the logical position and releases only complete native pages beyond
 // it. This remains safe for legal arenas whose granularity is sub-page.
