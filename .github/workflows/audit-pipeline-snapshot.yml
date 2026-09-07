@@ -1,0 +1,29 @@
+name: Pipeline audit source snapshot
+
+on:
+  push:
+    branches:
+      - audit/pipeline-correctness-ebfdd117
+    paths:
+      - .github/workflows/audit-pipeline-snapshot.yml
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Pack repository snapshot
+        shell: bash
+        run: git bundle create "$RUNNER_TEMP/buster-audit.bundle" HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-audit-source
+          path: ${{ runner.temp }}/buster-audit.bundle
+          if-no-files-found: error
+          retention-days: 1
