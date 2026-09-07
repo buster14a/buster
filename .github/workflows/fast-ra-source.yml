@@ -7,7 +7,7 @@ permissions:
   contents: write
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -37,11 +37,14 @@ jobs:
           git add build.c src/buster/lib/compiler/codegen/machine.h src/buster/lib/compiler/codegen/register_allocator_fast.c src/buster/tests/compiler/codegen/machine_test.c tests/basic_c_fast_ra_cfg.c
           test "$(git diff --cached --name-only | wc -l)" = 5
           git diff --cached --stat
-          git -c user.name=OpenAI -c user.email=noreply@openai.com commit -m 'fast-ra: index CFG edge lookups without changing allocation decisions'
           branch=perf/fast-ra-indexed-edges
-          if test -n "$(git ls-remote --heads origin refs/heads/$branch)"; then
-            echo 'Refusing to overwrite an existing branch'
-            exit 1
+          existing=$(git ls-remote --heads origin refs/heads/$branch)
+          if test -n "$existing"; then
+            git fetch origin "$branch"
+            test "$(git rev-parse FETCH_HEAD^{tree})" = "$(git write-tree)"
+            echo 'Identical checked implementation already published'
+          else
+            git -c user.name=OpenAI -c user.email=noreply@openai.com commit -m 'fast-ra: index CFG edge lookups without changing allocation decisions'
+            git push origin HEAD:refs/heads/$branch
           fi
-          git push origin HEAD:refs/heads/$branch
           git rev-parse HEAD
