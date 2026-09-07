@@ -1,0 +1,142 @@
+{
+  "repository": "buster14a/buster",
+  "audited_revision": "44a936a8b19901bee0ed9f9062d310eede0066af",
+  "issues": {
+    "c-enum-underlying-type": {
+      "number": 183,
+      "url": "https://github.com/buster14a/buster/issues/183",
+      "priority": "P1"
+    },
+    "x64-i128-signed-divide": {
+      "number": 184,
+      "url": "https://github.com/buster14a/buster/issues/184",
+      "priority": "P1"
+    },
+    "c-float-to-integer-constant-fold": {
+      "number": 185,
+      "url": "https://github.com/buster14a/buster/issues/185",
+      "priority": "P1"
+    },
+    "c-bool-aggregate-initializer": {
+      "number": 186,
+      "url": "https://github.com/buster14a/buster/issues/186",
+      "priority": "P1"
+    },
+    "c-unsigned-to-float-constant-fold": {
+      "number": 187,
+      "url": "https://github.com/buster14a/buster/issues/187",
+      "priority": "P1"
+    },
+    "c-nested-initializer-string": {
+      "number": 188,
+      "url": "https://github.com/buster14a/buster/issues/188",
+      "priority": "P1"
+    },
+    "c-i128-aggregate-initializer": {
+      "number": 189,
+      "url": "https://github.com/buster14a/buster/issues/189",
+      "priority": "P1"
+    },
+    "x86-apx-evex-prefix-fields": {
+      "number": 190,
+      "url": "https://github.com/buster14a/buster/issues/190",
+      "priority": "P1"
+    },
+    "x86-evex-broadcast-disp8-scale": {
+      "number": 191,
+      "url": "https://github.com/buster14a/buster/issues/191",
+      "priority": "P1"
+    },
+    "x86-rex2-memory-width-w": {
+      "number": 192,
+      "url": "https://github.com/buster14a/buster/issues/192",
+      "priority": "P1"
+    },
+    "x86-att-s-suffix-alias": {
+      "number": 193,
+      "url": "https://github.com/buster14a/buster/issues/193",
+      "priority": "P1"
+    },
+    "x64-i128-float-cast-unsupported": {
+      "number": 194,
+      "url": "https://github.com/buster14a/buster/issues/194",
+      "priority": "P2"
+    },
+    "x64-atomic-16-byte-aggregate": {
+      "number": 195,
+      "url": "https://github.com/buster14a/buster/issues/195",
+      "priority": "P2"
+    },
+    "release-check-macro-is-unreachable": {
+      "number": 196,
+      "url": "https://github.com/buster14a/buster/issues/196",
+      "priority": "P2"
+    },
+    "c-parse-initializer-infinite-loop": {
+      "number": 197,
+      "url": "https://github.com/buster14a/buster/issues/197",
+      "priority": "P1"
+    },
+    "c-parse-identifier-use-overflow": {
+      "number": 198,
+      "url": "https://github.com/buster14a/buster/issues/198",
+      "priority": "P1"
+    },
+    "arena-commit-failure-and-granularity": {
+      "number": 199,
+      "url": "https://github.com/buster14a/buster/issues/199",
+      "priority": "P1"
+    },
+    "file-read-unsized-source": {
+      "number": 200,
+      "url": "https://github.com/buster14a/buster/issues/200",
+      "priority": "P1"
+    },
+    "dwarf-ranges-double-count-base": {
+      "number": 201,
+      "url": "https://github.com/buster14a/buster/issues/201",
+      "priority": "P1"
+    },
+    "codeview-fieldlist-length-overflow": {
+      "number": 202,
+      "url": "https://github.com/buster14a/buster/issues/202",
+      "priority": "P1"
+    },
+    "codeview-gproc32-pend-offsets": {
+      "number": 203,
+      "url": "https://github.com/buster14a/buster/issues/203",
+      "priority": "P1"
+    },
+    "codeview-scope-stack-quadratic": {
+      "number": 204,
+      "url": "https://github.com/buster14a/buster/issues/204",
+      "priority": "P2"
+    },
+    "driver-default-object-path": {
+      "number": 205,
+      "url": "https://github.com/buster14a/buster/issues/205",
+      "priority": "P1"
+    },
+    "c-import-once-path-unchecked": {
+      "number": 81,
+      "url": "https://github.com/buster14a/buster/issues/81",
+      "reused": true,
+      "routed_as_comment": "https://github.com/buster14a/buster/issues/81#issuecomment-5570719960",
+      "note": "Semantic duplicate of an already-open issue; not filed separately. The report's evidence was posted as a comment on that issue instead."
+    },
+    "os-write-error-counted-as-success": {
+      "number": 82,
+      "url": "https://github.com/buster14a/buster/issues/82",
+      "reused": true,
+      "routed_as_comment": "https://github.com/buster14a/buster/issues/82#issuecomment-5570720165",
+      "note": "Semantic duplicate of an already-open issue; not filed separately. The report's evidence was posted as a comment on that issue instead."
+    },
+    "os-read-error-indistinguishable-from-eof": {
+      "number": 109,
+      "url": "https://github.com/buster14a/buster/issues/109",
+      "reused": true,
+      "routed_as_comment": "https://github.com/buster14a/buster/issues/109#issuecomment-5570720365",
+      "note": "Semantic duplicate of an already-open issue; not filed separately. The report's evidence was posted as a comment on that issue instead."
+    }
+  }
+}
