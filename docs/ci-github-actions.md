@@ -1,177 +1,199 @@
 # GitHub Actions CI
 
-`.github/workflows/ci.yml` runs the Forgejo matrix's coverage on GitHub's
-**standard** hosted runners. It exists for the migration to GitHub and runs
-beside the Forgejo matrix rather than replacing it while Forgejo is still the
-source of truth.
+The GitHub workflows run beside Forgejo during the migration. Forgejo remains
+separate and unchanged. This guide concerns the public source repository's CI,
+**not** the source-free private broker in `.forgejo/github-bridge/`; do not add
+source archives, caches, credentials, verbose logs or untrusted-PR triggers to
+that broker. See [the broker guide](ci-github-hosted-runners.md).
 
-Where Forgejo owns four fixed machines, GitHub hands out the newest image of
-every operating system in both architectures, so this workflow spends that on
-the axis the native runners cannot cover: **every desktop platform is tested on
-x86-64 and on AArch64.**
+## Coverage and gates
 
-| Runner | Architecture |
-|---|---|
-| `ubuntu-26.04` / `ubuntu-26.04-arm` | x86-64 / AArch64 |
-| `macos-26-intel` / `macos-26` | x86-64 / AArch64 |
-| `windows-2025` / `windows-11-arm` | x86-64 / AArch64 |
+Every job checks both `github.server_url == 'https://github.com'` and
+`vars.GH_ACTIONS_CI_ENABLED == 'true'`. Keep those gates: Forgejo also reads
+`.github/workflows` but does not have these hosted runner labels.
 
-These are the newest label of each pair. `ubuntu-26.04` and `ubuntu-26.04-arm`
-are still labelled *public preview* by GitHub; the rest are production-ready.
-`.github/actionlint.yaml` has to name every one of them, because actionlint
-validates `runs-on` against a list baked into its own release.
+The main workflow preserves the existing six check names and runner labels:
 
-## Two gates
+| Check | Runner | Zig target | Additional suites after the combination matrix |
+|---|---|---|---|
+| Linux x86-64 | ubuntu-26.04 | x86_64-linux | Execution modes, Android Debug/Release |
+| Linux AArch64 | ubuntu-26.04-arm | aarch64-linux | Execution modes |
+| macOS x86-64 | macos-26-intel | x86_64-macos | Execution modes, iOS Debug/Release |
+| macOS AArch64 | macos-26 | aarch64-macos | Execution modes, iOS Debug/Release |
+| Windows x86-64 | windows-2025 | x86_64-windows | None |
+| Windows AArch64 | windows-11-arm | aarch64-windows | None |
 
-The job carries:
+`build.c` owns `test_all_combinations_ci`, including compiler/configuration
+selection, resource-bounded longest-first shards, Debug/Release, unity/split,
+supported sanitizer/fuzz configurations, static analysis and the established
+self-host fan-out. CI does not replace that matrix with shell loops or smaller
+standalone samples. The four Unix jobs also run `test_mode_matrix --config
+Release`; both architectures execute ELF/Mach-O natively where supported. The
+original Android/iOS commands retain `--all`.
 
-```yaml
-if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-```
+All six names remain complete platform gates. Splitting mobile work into new,
+potentially non-required checks would change that contract. Instead, independent
+later suites use explicit prerequisite conditions and `!cancelled()`: a failed
+combination does not suppress execution modes or mobile tests. Missing tools
+skip only their dependants and still fail the job. Matrix `fail-fast` is false.
+No `continue-on-error`, disabled tests or sanitizer suppressions make CI green.
 
-The first half exists because **Forgejo also reads `.github/workflows`**.
-Without it, Forgejo would schedule this job against `runs-on: ubuntu-26.04`, a
-label no Forgejo runner carries, and it would queue until the workflow timed
-out. On Forgejo the expression is false — or empty, which is also false — so
-the job skips and no status context is created.
+Known existing gaps remain visible: Windows does not run the execution-mode
+matrix, so PE legs lack native coverage there; no Wine/qemu-user is installed
+for those oracle-only legs. macOS's unversioned `gcc` resolves to an Apple Clang
+shim, not Homebrew GCC. Self-host fixed points remain limited to the supported
+x86-64 Linux/Windows and macOS configurations. This CI audit does not claim to
+solve those gaps or static-analyzer scheduling issue #92.
 
-The second half keeps the workflow inert until the repository variable
-`GH_ACTIONS_CI_ENABLED` is set to `true`. A private repository draws on a
-monthly included-minutes allowance in which macOS minutes count tenfold, so the
-workflow stays off until the repository is public, where standard runners are
-free.
+## Events and cancellation
 
-To enable it:
+`ci.yml` runs on pull requests, main pushes, tags, merge-group checks and manual
+dispatch. Feature-branch pushes use their PR instead of running a duplicate
+matrix. Fork PRs use `pull_request`, never `pull_request_target`; repository
+approval policy still applies. There are no path filters on the desktop checks,
+including documentation-only changes. Permissions are read-only.
 
-```sh
-gh variable set GH_ACTIONS_CI_ENABLED --body true --repo OWNER/REPOSITORY
-```
+A new PR revision cancels its obsolete run. Merge groups are isolated by ref.
+Main, tag and manual runs have unique run-ID concurrency groups: intentional
+observations are not discarded as active or pending work. Only bounded local
+summaries use `always()`; cancelled runs do not start new tests or uploads.
+Android's owned-emulator EXIT/signal cleanup preserves test failures and also
+fails a previously successful step when cleanup fails.
 
-## What runs
+`ios-monitor-tests.yml` retains its two original fake-tool lanes, Ubuntu 24.04
+and macOS 15, plus path-scoped PR/main triggers. Those lifecycle fault-injection
+tests complement, rather than duplicate, the real simulator suites.
 
-There is one job, `test`, and its matrix is the six runners above — **one
-runner per platform and architecture, and no more.** Each runs the work its
-platform can carry:
+`issue-33-snapshot.yml` retains its issue-33 branch trigger and adds manual
+invocation. It archives tracked files with `git archive`, uses shallow
+credential-free checkout and pinned actions, and supersedes obsolete branch
+snapshots. Manual snapshots have independent run-ID groups.
 
-| Step | Runners | Command |
-|---|---|---|
-| Combination matrix | all six | `test_all_combinations_ci` |
-| Execution-mode matrix | the four Unix runners | `test_mode_matrix --config Release` |
-| Android | `ubuntu-26.04` | `android/start_emulator_ci.sh start`, then `android/test_ci.sh --all` |
-| iOS simulator | `macos-26-intel`, `macos-26` | `ios/test_ci.sh --all` |
+## Dependencies and cache safety
 
-That is the same set of steps `.forgejo/workflows/ci.yml` runs, on twice as
-many desktop configurations and in the same shape: a runner matrix with
-per-runner steps, rather than a job per concern.
+`.github/zig.json` is the single version/SHA-256 manifest for all six Zig
+archives. `tools/ci_zig.py` downloads the pinned official archive or restores an
+exact-key cached copy, **rehashes it before tar or Zig executes**, installs into
+a fresh directory, verifies the version and publishes `GITHUB_PATH`. A corrupt
+hit fails visibly; it is not silently executed, downloaded over or republished.
+Downloads have bounded retries and partial files never become cache entries.
 
-The workflow triggers on `push` alone, as Forgejo's does. Adding
-`pull_request` only duplicates every check on a branch that already gets a push
-run, and the two do not even cancel each other, because `concurrency` keys on
-`github.ref` and the events see different refs.
+The cache key includes runner OS, runner architecture, target and manifest
+hash. There are no restore prefixes. Only the compressed archive is cached,
+not extracted executables, build trees, compiler objects, CMake state,
+credentials or test verdicts. Saving happens after verified installation and
+before compiler tests; GitHub's normal PR/base cache-scope rules still apply.
+The installer prints cache/download origin, digest, bytes and elapsed seconds.
 
-The six runners work in parallel, but a runner's own steps are sequential and
-the first failure stops the rest of that runner's work. They are ordered
-broadest signal first — combination matrix, then execution-mode matrix, then
-the mobile suite — because a compiler problem surfaces in the combination
-matrix and the narrower suites after it would only repeat the news. Its cost is
-that a run reports the Linux Android result only after that runner's
-combination matrix has passed; on Forgejo those live on two different machines.
+CI no longer downloads the mutable `ci-latest` Vulkan SDK or executes its setup
+scripts: these build configurations already leave Vulkan/rendering/shader
+compilation disabled. No enabled renderer coverage was removed. Optional manual
+SDK installers remain untouched. Distribution mold, Homebrew coreutils and the
+Android SDK/system image remain explicit installs, not unsafe wholesale caches.
 
-`fail-fast` is off, so a failure on one platform is not a reason to hide the
-others when the whole point is cross-platform coverage. `concurrency` cancels
-an in-flight run when a newer commit lands on the same ref, which is what keeps
-latency flat when several pushes arrive together.
+All referenced actions are full-SHA pinned. Checkouts do not persist Git
+credentials. Diagnostic artifacts contain captured logs, revision/runner
+metadata and `result.json`, live outside build trees erased by `generate`, and
+expire after seven days. Names include platform, architecture, run and attempt.
+Source archives expire after one day, skip redundant ZIP compression, and use
+`issue-33-source-<run>-<attempt>`; no in-repository consumer uses the old name.
 
-Both architectures of both Unix platforms run the execution-mode matrix because
-that is what makes its legs *execute* rather than fall back to the disassembly
-oracle: x86-64 ELF and Mach-O on the Intel runners, AArch64 ELF and Mach-O on
-the Arm ones. Windows is excluded from it as it is on Forgejo.
+## Sanitizers and summaries
 
-## Bootstrapping and prerequisites
+The existing sanitizer matrix inherits
+`UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`. This matters because the
+non-MSVC configuration enables sanitizer recovery: a UBSan diagnostic must not
+recover into a passing test process. Leak checks and sanitizer categories are
+not disabled. Issue [#235](https://github.com/buster14a/buster/issues/235) reports
+an invalid-bool load on the audit's starting revision; a reproduction must fail,
+not acquire a suppression. The workflow patch does not claim a compiler fix.
 
-`build.c` is compiled with the Clang already installed on the image rather than
-with TCC: the images ship no TCC, and modern macOS cannot run it. It lands at
-`build/build` (`build\build.exe` on Windows), where `build.sh` and `build.ps1`
-put it, because the superbuild writes that exact path into the manifest it
-hands CMake — anywhere else and configure stops at
-`BUSTER_SUPERBUILD_BUILD_DRIVER must name an existing absolute build driver`.
-The combination matrix removes only the `build/build-*` trees it generates, so
-the driver survives its own run.
+`tests/ci_tools_test.py` verifies cache integrity, failure propagation, summary
+contracts and timing cohorts. Its Unix probe demonstrates a recoverable UBSan
+error returning zero with recovery and nonzero with the CI environment. The
+probe is supplementary to, not a replacement for, native sanitizer coverage.
 
-The execution-mode matrix is the exception: it bootstraps a second driver into
-`RUNNER_TEMP`, because its `generate` targets the default tree — `build/`
-itself — and removes it, which would delete a driver inside between that
-command and the next.
+`tools/ci_summary.py` requires an explicit applicable-suite list. Missing,
+skipped, cancelled or failed required work is not success; `outcome`, not a
+possibly masked `conclusion`, controls failure. Summaries record an allowlist of
+revision/runner metadata, never the complete environment or tokens. Full logs
+remain in the diagnostic artifact. Runner labels can move to new images;
+`ImageOS`/`ImageVersion` are recorded when available. Label changes also require
+updating `.github/actionlint.yaml`.
 
-The combination matrix needs Clang, GCC, Zig and, on Windows, MSVC together.
-The images provide all of those except Zig, so every runner installs a
-**pinned, checksummed** Zig from `ziglang.org` — version and per-target
-SHA-256 both live in the workflow, so a rerun of an old commit cannot pick up
-a different toolchain. Three more image gaps are filled in place:
+## Reproduce a hosted failure
 
-- **mold.** On Linux `build.c` defaults every non-Zig tree to `CMAKE_LINKER_TYPE=MOLD`
-  and the images carry no mold, so the Linux runners install the distribution's
-  own package. The execution-mode matrix keeps its own `generate` spelled out
-  with `--linker DEFAULT` regardless, so its tree is pinned rather than
-  inherited: the matrix would otherwise generate one itself, and `--linker` is
-  accepted by the `generate` command alone.
-- **`gtimeout`.** The iOS simulator launcher bounds every step with
-  `timeout(1)`, which macOS ships under neither name, so the macOS runners
-  install Homebrew's `coreutils`.
-- **The Android emulator system image.** The Linux image ships the SDK, the
-  platform and the NDK but no system image, and it leaves `/dev/kvm` owned by
-  root. The x86-64 Linux runner installs
-  `system-images;android-35;google_apis;x86_64` and adds the udev rule that
-  lets the unprivileged runner user accelerate the emulator; unaccelerated, an
-  x86-64 system image boots far past the emulator's own timeout.
+Check out the exact `GITHUB_SHA` in the summary and match the recorded tool/image
+versions. GitHub's driver bootstrap uses installed Clang, **not TCC**; its outputs
+are not trusted reusable TCC-bootstrapped compiler artifacts. The combination
+superbuild expects `build/build` (`build/build.exe` on Windows). In contrast,
+execution-mode generation deletes `build/`, so that driver must live outside it.
 
-On Windows the native toolchain runs through `cmd` so its progress on stderr
-cannot become a terminating PowerShell error record. The VS developer shell is
-launched per target (`amd64` with `VC.Tools.x86.x64`, `arm64` with
-`VC.Tools.ARM64`) but always with `-HostArch amd64`: `Launch-VsDevShell.ps1`
-validates that parameter against `x86,amd64` alone, so the AArch64 runner
-drives an emulated x64 toolchain host at an arm64 target.
-
-That shell also puts Visual Studio's own x64 clang ahead of the image's
-standalone LLVM, which on the AArch64 runner emits x86-64 objects against the
-shell's arm64 import libraries — every link then fails on `strlen` and
-`__imp_GetCommandLineW`. `C:\Program Files\LLVM\bin` is therefore prepended
-after the shell is entered, and the step asserts clang's default target
-matches the runner rather than letting a wall of unresolved externals explain
-it a minute later.
-
-Two rows are weaker than they look. On macOS `/usr/bin/gcc` is an Apple Clang
-shim, so the GCC row is a second Clang row; the images do carry real Homebrew
-GCC, but only under versioned names (`gcc-15`), which is not what `build.c`
-resolves. And the self-host fan-out runs only where the fixed point exists —
-the x86-64 Linux and Windows runners and both macOS runners — so the two
-AArch64 desktop rows build and test without it.
-
-## What does not run here
-
-- **Wine and `qemu-user`.** The images carry neither, so an execution-mode
-  matrix leg whose target no runner can execute is oracle-checked instead —
-  the row still reports, with its avenue downgraded. Between the four Unix
-  runners every ELF and Mach-O leg executes natively; the PE legs are the ones
-  that stay on the oracle, because Forgejo covers them under wine and this
-  workflow does not run the execution-mode matrix on Windows.
-- **The performance series.** Hosted virtual machines expose no performance
-  counters, and their wall times are too noisy to trend. `STEP_INSTRUCTIONS`
-  needs hardware under your control.
-- **A trusted compiler artifact.** Nothing here bootstraps through TCC, so
-  nothing it produces is a reusable toolchain.
-
-A self-hosted runner attached to a **public** repository executes code from
-fork pull requests on your own machine. If the performance series moves to a
-self-hosted runner here, restrict its jobs to `push` on the default branch,
-require approval for fork workflow runs, and keep the machine off any private
-network it does not need.
-
-## Local verification
+For Linux, choose the Zig target from the table and fresh install paths:
 
 ```sh
-actionlint .github/workflows/ci.yml
+python3 tools/ci_zig.py --target x86_64-linux --cache-directory /tmp/buster-zig-cache --install-directory /tmp/buster-zig
+export PATH="/tmp/buster-zig:$PATH"; export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+mkdir -p build && clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build && ./build/build test_all_combinations_ci --verbose=1
+clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o /tmp/buster-build && CFLAGS=-Wno-error=invalid-feature-combination /tmp/buster-build generate --cc clang --config Release --linker DEFAULT && CFLAGS=-Wno-error=invalid-feature-combination /tmp/buster-build test_mode_matrix --config Release
 ```
 
-Without `.github/actionlint.yaml` every `runs-on` above is reported as an
-unknown label, so keep the two in step when a runner changes.
+On macOS change the target and omit the Linux-only `CFLAGS` exception. The
+exception addresses the hosted CPU/Clang AVX10 feature warning without hiding
+other warnings. Install mold for the Linux combination command and coreutils
+for macOS simulator timeouts. `--linker DEFAULT` belongs to `generate` only.
+
+On Windows use `python` and Windows temporary paths. Follow the workflow's
+`vswhere`/`Launch-VsDevShell.ps1` setup for `amd64` or `arm64`, with
+`-HostArch amd64`. Prepend `C:\Program Files\LLVM\bin` **after** entering the
+shell: VS's x64 Clang can otherwise precede the native ARM64 compiler. Assert
+Clang's target before building. The bootstrap is:
+
+```powershell
+$env:UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1'; New-Item -ItemType Directory -Force build | Out-Null; clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o build/build.exe; if ($LASTEXITCODE -eq 0) { ./build/build.exe test_all_combinations_ci --verbose=1 }
+```
+
+Hosted logging redirects native stderr inside `cmd`, then checks
+`$LASTEXITCODE`; PowerShell must not turn ordinary diagnostics into terminating
+`NativeCommandError` records. Bash pipelines retain `set -euo pipefail`.
+
+For Android reproduce the complete start/owned-EXIT-cleanup wrapper from
+`ci.yml`, not an unowned `adb emu kill`; it runs `./android/test_ci.sh --all`.
+For iOS use `BUSTER_IOS_ARCH=arm64 ./ios/test_ci.sh --all` or the x86-64 variant.
+The fake-tool reproduction is `bash tests/mobile_ci_scripts_test.sh`.
+
+## Comparable timing reports
+
+`tools/github_ci_time.py` uses Python's standard library and optionally a
+read-only `GH_TOKEN`/`GITHUB_TOKEN`; tokens are never serialized. Existing
+`tools/ci_time.py` retains Forgejo's different timestamp/retention semantics.
+
+```sh
+python3 tools/github_ci_time.py collect --branch main --limit 30 --output /tmp/before.json
+python3 tools/github_ci_time.py summarize /tmp/before.json --output /tmp/before-summary.json
+python3 tools/github_ci_time.py collect --head-sha CANDIDATE_COMMIT --limit 30 --output /tmp/after.json
+python3 tools/github_ci_time.py summarize /tmp/after.json --output /tmp/after-summary.json
+```
+
+Each exact workflow-blob/runner-label cohort has its own sample count and
+median. Only successful first attempts with all six platforms and applicable
+original suites count. Failed, cancelled, partial, rerun and unknown-timestamp
+observations are exclusions, never imputed or pooled into a speedup.
+`elapsed_seconds` measures workflow creation to final job completion, including
+queueing. Execution span, initial queue delay, aggregate active runner seconds
+and per-step durations are reported separately. `updated_at` is not used as a
+completion time. One observation is not a stable performance claim; review
+source changes and warm/cold cache states before attributing differences.
+
+## Local checks
+
+```sh
+python3 tests/ci_tools_test.py -v
+bash tests/mobile_ci_scripts_test.sh
+actionlint .github/workflows/ci.yml .github/workflows/ios-monitor-tests.yml .github/workflows/issue-33-snapshot.yml
+git diff --check
+```
+
+These helper tests are not replacements for Buster's C tests. Inspect the
+submitted revision's real hosted Linux, Windows and macOS checks before calling
+it merge-ready. A local YAML or shell syntax check cannot certify those runners.

@@ -8,6 +8,10 @@ on:
       - 'tests/*mobile*'
       - 'tests/ios_launch_monitor_test.sh'
       - '.github/workflows/ios-monitor-tests.yml'
+      - 'tools/ci_summary.py'
+      - 'tools/ci_zig.py'
+      - 'tests/ci_tools_test.py'
+      - '.github/zig.json'
   push:
     branches: [main]
     paths:
@@ -16,6 +20,14 @@ on:
       - 'tests/*mobile*'
       - 'tests/ios_launch_monitor_test.sh'
       - '.github/workflows/ios-monitor-tests.yml'
+      - 'tools/ci_summary.py'
+      - 'tools/ci_zig.py'
+      - 'tests/ci_tools_test.py'
+      - '.github/zig.json'
+
+concurrency:
+  group: mobile-monitor-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -30,12 +42,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - id: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
       - name: Ensure mobile test prerequisites are available
+        id: prerequisites
         shell: bash
         run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
           if ! command -v timeout >/dev/null && ! command -v gtimeout >/dev/null; then
             brew install coreutils
           fi
@@ -46,7 +62,27 @@ jobs:
             echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
           fi
       - name: Exercise mobile script and attached monitor lifecycles
+        id: lifecycle
         shell: bash
         run: |
+          set -euo pipefail
           /bin/bash --version
-          bash tests/mobile_ci_scripts_test.sh
+          bash tests/mobile_ci_scripts_test.sh 2>&1 | tee "$RUNNER_TEMP/buster-ci/mobile-lifecycle.log"
+      - name: Failure summary
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 2
+        shell: bash
+        env:
+          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+          BUSTER_CI_REQUIRED: prerequisites lifecycle
+          BUSTER_CI_REPRO: bash tests/mobile_ci_scripts_test.sh
+        run: python3 tools/ci_summary.py
+      - name: Retain lifecycle diagnostics
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mobile-lifecycle-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/buster-ci/
+          retention-days: 7
+          if-no-files-found: error

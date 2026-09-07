@@ -4,26 +4,45 @@ on:
   push:
     branches:
       - compiler/issue-33-canonical-local-promotion
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: snapshot-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
 jobs:
   source:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - id: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          fetch-depth: 0
-      - name: Pack source
+          persist-credentials: false
+      - name: Pack tracked source only
+        id: pack
         shell: bash
         run: |
           set -euo pipefail
-          tar --exclude=.git --exclude=.github/workflows/issue-33-snapshot.yml -czf "$RUNNER_TEMP/buster-source.tar.gz" .
-      - uses: actions/upload-artifact@v4
+          git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" HEAD
+      - id: archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: issue-33-source
+          name: issue-33-source-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-source.tar.gz
           if-no-files-found: error
           retention-days: 1
+          compression-level: 0
+      - name: Snapshot summary
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 2
+        shell: bash
+        env:
+          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+          BUSTER_CI_REQUIRED: pack archive
+          BUSTER_CI_REPRO: git archive --format=tar.gz --output=buster-source.tar.gz HEAD
+        run: python3 tools/ci_summary.py

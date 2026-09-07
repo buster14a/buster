@@ -38,7 +38,12 @@
   actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and
   supported-platform coverage when changing build orchestration or the
-  compiler pipeline. Do not add source mirroring, Actions artifacts/caches,
+  compiler pipeline. The GitHub workflow keeps the six existing platform check
+  names, runs full PR/main/tag/merge-group coverage without duplicate feature
+  push runs, revalidates exact-key Zig archive caches, and treats UBSan reports
+  as failures. Independent later suites run after earlier test failures;
+  captured logs and fail-closed summaries remain outside generated build trees.
+  See `docs/ci-github-actions.md` for timing cohorts and exact reproductions. Do not add source mirroring, Actions artifacts/caches,
   durable GitHub-side credentials, verbose broker logs, or untrusted-PR
   triggers to the broker; see
   `docs/ci-github-hosted-runners.md`.
