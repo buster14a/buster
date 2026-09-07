@@ -1,0 +1,30 @@
+name: Temporary export main source
+
+on:
+  push:
+    branches:
+      - agent/inspect-190-195
+    paths:
+      - .github/workflows/agent-export-main-source.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: Package source
+        run: tar --exclude=.git -czf /tmp/buster-main-source.tar.gz .
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: buster-main-source
+          path: /tmp/buster-main-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
