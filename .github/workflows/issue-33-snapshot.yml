@@ -3,6 +3,8 @@ on:
   push:
     branches:
       - test/differential-harness-source-20260907
+    paths:
+      - .github/workflows/issue-33-snapshot.yml
 concurrency:
   group: differential-source-transport
   cancel-in-progress: true
