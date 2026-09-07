@@ -8103,8 +8103,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // unsigned, and a narrow integer parameter whose register arrives with
     // the caller's leftover high half.  Each source stays separate so a future regression names
     // the exact contract it broke, and each runs under every register
-    // allocator because five of the ten are lowering rather than parsing
-    // defects.
+    // allocator because several are lowering rather than parsing defects.
+    // The audit regressions also pin promotion, constant conditional typing,
+    // and empty macro arguments across the same allocator matrix.
     String8 c_quickjs_regression_paths[] = {
         S8("tests/basic_c_aggregate_attribute.c"),
         S8("tests/basic_c_local_enum_declarator.c"),
@@ -8116,6 +8117,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_bit_field_layout.c"),
         S8("tests/basic_c_shift_operand_types.c"),
         S8("tests/basic_c_narrow_argument_abi.c"),
+        S8("tests/basic_c_bit_field_promotion.c"),
+        S8("tests/basic_c_constant_conditional_type.c"),
+        S8("tests/basic_c_macro_empty_paste.c"),
     };
     String8 c_quickjs_regression_names[] = {
         S8("buster-c-aggregate-attribute"),
@@ -8128,6 +8132,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-bit-field-layout"),
         S8("buster-c-shift-operand-types"),
         S8("buster-c-narrow-argument-abi"),
+        S8("buster-c-bit-field-promotion"),
+        S8("buster-c-constant-conditional-type"),
+        S8("buster-c-macro-empty-paste"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths); fixture_index += 1)
     {
