@@ -1,7 +1,8 @@
 // CodeView emission from the canonical debug model: the .debug$S symbol
 // and .debug$T type streams a COFF object carries for Windows debuggers,
-// built from DebugModule records. pdb.c packages these streams into a
-// standalone PDB at link time.
+// built from DebugModule records. codeview_emit_field_list chains bounded
+// type records, and codeview_scope_walk_make indexes scopes once per build.
+// pdb.c packages these streams into a standalone PDB at link time.
 
 #include <buster/lib/compiler/codeview/codeview.h>
 #include <buster/lib/string.h>
@@ -11,6 +12,9 @@
 enum
 {
     CV_SIGNATURE_C13 = 4,
+    // Match the MSVC/LLVM maximum including the four-byte record prefix.
+    CODEVIEW_MAX_RECORD_SIZE = 0xff00,
+    CODEVIEW_CONTINUATION_SIZE = 8,
 };
 
 enum
@@ -46,6 +50,7 @@ enum
     CV_LF_PROCEDURE = 0x1008,
     CV_LF_ARGLIST = 0x1201,
     CV_LF_FIELDLIST = 0x1203,
+    CV_LF_INDEX = 0x1404,
     CV_LF_ENUMERATE = 0x1502,
     CV_LF_ARRAY = 0x1503,
     CV_LF_STRUCTURE = 0x1505,
@@ -122,7 +127,7 @@ BUSTER_GLOBAL_LOCAL void codeview_write_u32_at(CodeviewBuffer* buffer, u64 offse
 
 BUSTER_GLOBAL_LOCAL void codeview_align4(CodeviewBuffer* buffer)
 {
-    while (buffer->count & 3)
+    while ((buffer->count & 3) && !buffer->overflow)
     {
         codeview_emit_u8(buffer, 0);
     }
@@ -159,7 +164,15 @@ BUSTER_GLOBAL_LOCAL u64 codeview_record_begin(CodeviewBuffer* buffer, u16 record
 BUSTER_GLOBAL_LOCAL void codeview_record_end(CodeviewBuffer* buffer, u64 length_offset)
 {
     codeview_align4(buffer);
-    codeview_write_u16_at(buffer, length_offset, (u16)(buffer->count - (length_offset + 2)));
+    u64 size = buffer->count - length_offset;
+    if (size < 4 || size > CODEVIEW_MAX_RECORD_SIZE)
+    {
+        buffer->overflow = true;
+    }
+    else
+    {
+        codeview_write_u16_at(buffer, length_offset, (u16)(size - 2));
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void codeview_emit_name(CodeviewBuffer* buffer, String8 name)
@@ -222,7 +235,7 @@ BUSTER_GLOBAL_LOCAL u64 codeview_type_record_begin(CodeviewBuffer* buffer, u16 l
     return offset;
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_type_record_end(CodeviewBuffer* buffer, u64 offset)
+BUSTER_GLOBAL_LOCAL void codeview_type_padding(CodeviewBuffer* buffer)
 {
     // Type records use CodeView padding leaves rather than the zero padding
     // accepted by the C13 subsection and symbol readers.  The pad bytes are
@@ -235,7 +248,20 @@ BUSTER_GLOBAL_LOCAL void codeview_type_record_end(CodeviewBuffer* buffer, u64 of
     {
         codeview_emit_u8(buffer, (u8)(0xf0 + index));
     }
-    codeview_write_u16_at(buffer, offset, (u16)(buffer->count - offset - 2));
+}
+
+BUSTER_GLOBAL_LOCAL void codeview_type_record_end(CodeviewBuffer* buffer, u64 offset)
+{
+    codeview_type_padding(buffer);
+    u64 size = buffer->count - offset;
+    if (size < 4 || size > CODEVIEW_MAX_RECORD_SIZE)
+    {
+        buffer->overflow = true;
+    }
+    else
+    {
+        codeview_write_u16_at(buffer, offset, (u16)(size - 2));
+    }
 }
 
 BUSTER_GLOBAL_LOCAL u32 codeview_model_register_target(u16 machine)
@@ -359,51 +385,83 @@ struct CodeviewScopeFrame
     u32 next_child;
 };
 
-BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(CodeviewBuffer* symbols, DebugModel* model, DebugScopeId root, u32 function_offset, u16 machine,
-                                                  Arena* arena)
+typedef struct CodeviewScopeWalk CodeviewScopeWalk;
+struct CodeviewScopeWalk
 {
-    if (!model || root == DEBUG_SCOPE_INVALID || root >= model->scope_count)
+    CodeviewScopeFrame* stack;
+    DebugScopeId* first_child;
+    DebugScopeId* next_sibling;
+};
+
+BUSTER_GLOBAL_LOCAL CodeviewScopeWalk codeview_scope_walk_make(Arena* arena, DebugModel* model)
+{
+    CodeviewScopeWalk result = {
+        .stack = arena_allocate(arena, CodeviewScopeFrame, model->scope_count),
+        .first_child = arena_allocate(arena, DebugScopeId, model->scope_count),
+        .next_sibling = arena_allocate(arena, DebugScopeId, model->scope_count),
+    };
+    for (u32 index = 0; index < model->scope_count; index += 1)
     {
-        return;
+        result.first_child[index] = DEBUG_SCOPE_INVALID;
+        result.next_sibling[index] = DEBUG_SCOPE_INVALID;
     }
-    CodeviewScopeFrame* stack = arena_allocate(arena, CodeviewScopeFrame, model->scope_count + 1);
-    u32 stack_count = 1;
-    stack[0] = (CodeviewScopeFrame){.scope = root};
-    for (;;)
+    // Reverse insertion retains the old walk's ascending scope-id order.
+    for (u32 index = model->scope_count; index != 0;)
     {
-        CodeviewScopeFrame* frame = stack + stack_count - 1;
-        DebugScopeId child = DEBUG_SCOPE_INVALID;
-        while (frame->next_child < model->scope_count)
+        index -= 1;
+        DebugScope* scope = model->scopes + index;
+        if (scope->parent < model->scope_count && scope->parent != index && scope->kind != DEBUG_SCOPE_FUNCTION)
         {
-            u32 candidate = frame->next_child++;
-            if (candidate != root && model->scopes[candidate].parent == frame->scope && model->scopes[candidate].kind != DEBUG_SCOPE_FUNCTION)
+            result.next_sibling[index] = result.first_child[scope->parent];
+            result.first_child[scope->parent] = index;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(CodeviewBuffer* symbols, DebugModel* model, DebugScopeId root, u32 function_offset, u16 machine,
+                                                  CodeviewScopeWalk* walk)
+{
+    if (model && root != DEBUG_SCOPE_INVALID && root < model->scope_count)
+    {
+        CodeviewScopeFrame* stack = walk->stack;
+        u32 stack_count = 1;
+        stack[0] = (CodeviewScopeFrame){.scope = root, .next_child = walk->first_child[root]};
+        while (!symbols->overflow)
+        {
+            CodeviewScopeFrame* frame = stack + stack_count - 1;
+            DebugScopeId child = frame->next_child;
+            if (child != DEBUG_SCOPE_INVALID)
             {
-                child = candidate;
+                frame->next_child = walk->next_sibling[child];
+                if (stack_count == model->scope_count)
+                {
+                    symbols->overflow = true;
+                    break;
+                }
+                DebugScope* scope = model->scopes + child;
+                u64 block = codeview_record_begin(symbols, S_BLOCK32);
+                codeview_emit_u32(symbols, 0);
+                codeview_emit_u32(symbols, 0);
+                codeview_emit_u32(symbols, scope->end > scope->start ? scope->end - scope->start : 1);
+                codeview_emit_u32(symbols, scope->start >= function_offset ? scope->start - function_offset : 0);
+                codeview_emit_u16(symbols, 1);
+                codeview_emit_name(symbols, S8("scope"));
+                codeview_record_end(symbols, block);
+                codeview_emit_scope_variables(symbols, model, scope, function_offset, machine);
+                stack[stack_count++] = (CodeviewScopeFrame){.scope = child, .next_child = walk->first_child[child]};
+            }
+            else if (stack_count == 1)
+            {
                 break;
             }
+            else
+            {
+                u64 end = codeview_record_begin(symbols, S_END);
+                codeview_record_end(symbols, end);
+                stack_count -= 1;
+            }
         }
-        if (child != DEBUG_SCOPE_INVALID)
-        {
-            DebugScope* scope = model->scopes + child;
-            u64 block = codeview_record_begin(symbols, S_BLOCK32);
-            codeview_emit_u32(symbols, 0);
-            codeview_emit_u32(symbols, 0);
-            codeview_emit_u32(symbols, scope->end > scope->start ? scope->end - scope->start : 1);
-            codeview_emit_u32(symbols, scope->start >= function_offset ? scope->start - function_offset : 0);
-            codeview_emit_u16(symbols, 1);
-            codeview_emit_name(symbols, S8("scope"));
-            codeview_record_end(symbols, block);
-            codeview_emit_scope_variables(symbols, model, scope, function_offset, machine);
-            stack[stack_count++] = (CodeviewScopeFrame){.scope = child};
-            continue;
-        }
-        if (stack_count == 1)
-        {
-            break;
-        }
-        u64 end = codeview_record_begin(symbols, S_END);
-        codeview_record_end(symbols, end);
-        stack_count -= 1;
     }
 }
 
@@ -442,29 +500,80 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_global_variable(CodeviewBuffer* symbols, 
     codeview_record_end(symbols, record);
 }
 
-BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(CodeviewBuffer* types, DebugModel* model, u32* field_indices, u32* argument_indices)
+// Emit the tail segment first, so LF_INDEX always refers to an already
+// emitted record. Segments retain ascending member order; only their physical
+// order is reversed. A primary type's field-list reference is patched later.
+BUSTER_GLOBAL_LOCAL u32 codeview_emit_field_list(CodeviewBuffer* types, DebugModel* model, DebugType* type, u32* next_index)
 {
-    u32 aggregate_count = 0;
-    for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
+    u32 end = type->kind == DEBUG_TYPE_ENUM ? type->enum_member_count : type->field_count;
+    u32 continuation = 0;
+    do
     {
-        DebugType* type = model->types + type_index;
-        field_indices[type_index] = UINT32_MAX;
-        argument_indices[type_index] = UINT32_MAX;
-        if (type->kind == DEBUG_TYPE_STRUCT || type->kind == DEBUG_TYPE_UNION || type->kind == DEBUG_TYPE_ENUM)
+        u32 begin = end;
+        u64 size = 4 + CODEVIEW_CONTINUATION_SIZE;
+        while (begin && !types->overflow)
         {
-            field_indices[type_index] = 0x1000u + model->type_count + aggregate_count++;
+            String8 name = type->kind == DEBUG_TYPE_ENUM ? type->enum_members[begin - 1].name : type->fields[begin - 1].name;
+            // Leaf, attributes, optional type index, LF_ULONG, value, name/NUL.
+            u64 prefix = type->kind == DEBUG_TYPE_ENUM ? 11u : 15u;
+            if (name.length > CODEVIEW_MAX_RECORD_SIZE - 4 - CODEVIEW_CONTINUATION_SIZE - prefix)
+            {
+                types->overflow = true;
+                break;
+            }
+            u64 member_size = (prefix + name.length + 3) & ~(u64)3;
+            if (member_size > CODEVIEW_MAX_RECORD_SIZE - size)
+            {
+                break;
+            }
+            size += member_size;
+            begin -= 1;
         }
-    }
-    u32 function_count = 0;
-    for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
-    {
-        DebugType* type = model->types + type_index;
-        if (type->kind == DEBUG_TYPE_FUNCTION)
+        if (types->overflow || (begin == end && end))
         {
-            argument_indices[type_index] = 0x1000u + model->type_count + aggregate_count + function_count++;
+            types->overflow = true;
+            break;
         }
-    }
-    for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
+        u64 record = codeview_type_record_begin(types, CV_LF_FIELDLIST);
+        for (u32 index = begin; index < end; index += 1)
+        {
+            if (type->kind == DEBUG_TYPE_ENUM)
+            {
+                DebugEnumMember* member = type->enum_members + index;
+                codeview_emit_u16(types, CV_LF_ENUMERATE);
+                codeview_emit_u16(types, 0);
+                codeview_emit_numeric_u32(types, member->value);
+                codeview_emit_name(types, member->name);
+            }
+            else
+            {
+                DebugTypeField* field = type->fields + index;
+                codeview_emit_u16(types, CV_LF_MEMBER);
+                codeview_emit_u16(types, 0);
+                codeview_emit_u32(types, codeview_model_type_index(model, field->type));
+                codeview_emit_numeric_u32(types, field->offset);
+                codeview_emit_name(types, field->name);
+            }
+            // Padding belongs to every member, not just to the enclosing list.
+            codeview_type_padding(types);
+        }
+        if (continuation)
+        {
+            codeview_emit_u16(types, CV_LF_INDEX);
+            codeview_emit_u16(types, 0);
+            codeview_emit_u32(types, continuation);
+        }
+        codeview_type_record_end(types, record);
+        continuation = *next_index;
+        *next_index += 1;
+        end = begin;
+    } while (end && !types->overflow);
+    return continuation;
+}
+
+BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(CodeviewBuffer* types, DebugModel* model, u64* auxiliary_offsets)
+{
+    for (u32 type_index = 0; type_index < model->type_count && !types->overflow; type_index += 1)
     {
         DebugType* type = model->types + type_index;
         u64 record = codeview_type_record_begin(types, type->kind == DEBUG_TYPE_POINTER ? CV_LF_POINTER
@@ -491,20 +600,27 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(CodeviewBuffer* types, DebugM
         }
         else if (type->kind == DEBUG_TYPE_STRUCT || type->kind == DEBUG_TYPE_UNION)
         {
-            codeview_emit_u16(types, (u16)BUSTER_MIN(type->field_count, UINT16_MAX));
+            types->overflow |= type->field_count > UINT16_MAX;
+            codeview_emit_u16(types, (u16)type->field_count);
             codeview_emit_u16(types, 0);
-            codeview_emit_u32(types, field_indices[type_index]);
+            auxiliary_offsets[type_index] = types->count;
             codeview_emit_u32(types, 0);
-            codeview_emit_u32(types, 0);
+            if (type->kind == DEBUG_TYPE_STRUCT)
+            {
+                codeview_emit_u32(types, 0);
+                codeview_emit_u32(types, 0);
+            }
             codeview_emit_numeric_u32(types, type->size);
             codeview_emit_name(types, type->name);
         }
         else if (type->kind == DEBUG_TYPE_ENUM)
         {
-            codeview_emit_u16(types, (u16)BUSTER_MIN(type->enum_member_count, UINT16_MAX));
+            types->overflow |= type->enum_member_count > UINT16_MAX;
+            codeview_emit_u16(types, (u16)type->enum_member_count);
             codeview_emit_u16(types, 0);
             codeview_emit_u32(types, codeview_model_type_index(model, DEBUG_ID_INVALID));
-            codeview_emit_u32(types, field_indices[type_index]);
+            auxiliary_offsets[type_index] = types->count;
+            codeview_emit_u32(types, 0);
             codeview_emit_name(types, type->name);
         }
         else if (type->kind == DEBUG_TYPE_TYPEDEF)
@@ -517,8 +633,10 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(CodeviewBuffer* types, DebugM
             codeview_emit_u32(types, codeview_model_type_index(model, type->return_type));
             codeview_emit_u8(types, 0);
             codeview_emit_u8(types, type->is_variadic ? 1 : 0);
-            codeview_emit_u16(types, (u16)BUSTER_MIN(type->parameter_count, UINT16_MAX));
-            codeview_emit_u32(types, argument_indices[type_index]);
+            types->overflow |= type->parameter_count > UINT16_MAX;
+            codeview_emit_u16(types, (u16)type->parameter_count);
+            auxiliary_offsets[type_index] = types->count;
+            codeview_emit_u32(types, 0);
         }
         else
         {
@@ -531,42 +649,18 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(CodeviewBuffer* types, DebugM
         }
         codeview_type_record_end(types, record);
     }
-    u32 aggregate_index = 0;
-    u32 function_index = 0;
-    for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
+    u32 next_index = 0x1000u + model->type_count;
+    for (u32 type_index = 0; type_index < model->type_count && !types->overflow; type_index += 1)
     {
         DebugType* type = model->types + type_index;
         if (type->kind == DEBUG_TYPE_STRUCT || type->kind == DEBUG_TYPE_UNION || type->kind == DEBUG_TYPE_ENUM)
         {
-            u64 record = codeview_type_record_begin(types, CV_LF_FIELDLIST);
-            if (type->kind == DEBUG_TYPE_ENUM)
-            {
-                for (u32 member_index = 0; member_index < type->enum_member_count; member_index += 1)
-                {
-                    DebugEnumMember* member = type->enum_members + member_index;
-                    codeview_emit_u16(types, CV_LF_ENUMERATE);
-                    codeview_emit_u16(types, 0);
-                    codeview_emit_numeric_u32(types, member->value);
-                    codeview_emit_name(types, member->name);
-                }
-            }
-            else
-            {
-                for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
-                {
-                    DebugTypeField* field = type->fields + field_index;
-                    codeview_emit_u16(types, CV_LF_MEMBER);
-                    codeview_emit_u16(types, 0);
-                    codeview_emit_u32(types, codeview_model_type_index(model, field->type));
-                    codeview_emit_numeric_u32(types, field->offset);
-                    codeview_emit_name(types, field->name);
-                }
-            }
-            codeview_type_record_end(types, record);
-            aggregate_index += 1;
+            u32 field_index = codeview_emit_field_list(types, model, type, &next_index);
+            codeview_write_u32_at(types, auxiliary_offsets[type_index], field_index);
         }
-        if (type->kind == DEBUG_TYPE_FUNCTION)
+        else if (type->kind == DEBUG_TYPE_FUNCTION)
         {
+            codeview_write_u32_at(types, auxiliary_offsets[type_index], next_index++);
             u64 record = codeview_type_record_begin(types, CV_LF_ARGLIST);
             codeview_emit_u32(types, type->parameter_count);
             for (u32 parameter_index = 0; parameter_index < type->parameter_count; parameter_index += 1)
@@ -574,11 +668,8 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_model_types(CodeviewBuffer* types, DebugM
                 codeview_emit_u32(types, codeview_model_type_index(model, type->parameter_types[parameter_index]));
             }
             codeview_type_record_end(types, record);
-            function_index += 1;
         }
     }
-    (void)aggregate_index;
-    (void)function_index;
 }
 
 CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
@@ -665,6 +756,14 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             codeview_subsection_end(&symbols, globals);
         }
 
+        // One scratch stack and one child index for the whole module, not a
+        // scope_count-sized bump allocation (and full-model scan) per function.
+        CodeviewScopeWalk scope_walk = {0};
+        if (input.model && input.model->valid && input.model->scope_count && input.function_count)
+        {
+            scope_walk = codeview_scope_walk_make(arena, input.model);
+        }
+
         // One symbols subsection and one lines subsection per function.
         u32 line_cursor = 0;
         for (u32 function_index = 0; function_index < input.function_count; function_index += 1)
@@ -708,7 +807,7 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                 if (debug_function->scope < input.model->scope_count)
                 {
                     codeview_emit_scope_variables(&symbols, input.model, input.model->scopes + debug_function->scope, function->code_offset, input.machine);
-                    codeview_emit_scope_tree(&symbols, input.model, debug_function->scope, function->code_offset, input.machine, arena);
+                    codeview_emit_scope_tree(&symbols, input.model, debug_function->scope, function->code_offset, input.machine, &scope_walk);
                 }
                 for (u32 inline_index = 0; inline_index < input.model->inline_site_count; inline_index += 1)
                 {
@@ -817,7 +916,16 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             for (u32 type_index = 0; type_index < input.model->type_count; type_index += 1)
             {
                 DebugType* type = input.model->types + type_index;
-                type_capacity += (u64)type->field_count * 48 + (u64)type->enum_member_count * 32 + (u64)type->parameter_count * 8;
+                type_capacity += type->name.length + 1 + (u64)type->field_count * 48 + (u64)type->enum_member_count * 32 +
+                                 (u64)type->parameter_count * 8;
+                for (u32 field = 0; field < type->field_count; field += 1)
+                {
+                    type_capacity += type->fields[field].name.length + 1;
+                }
+                for (u32 member = 0; member < type->enum_member_count; member += 1)
+                {
+                    type_capacity += type->enum_members[member].name.length + 1;
+                }
             }
         }
         CodeviewBuffer types = {
@@ -827,9 +935,8 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         codeview_emit_u32(&types, CV_SIGNATURE_C13);
         if (input.model && input.model->valid)
         {
-            u32* field_indices = arena_allocate(arena, u32, input.model->type_count ? input.model->type_count : 1);
-            u32* argument_indices = arena_allocate(arena, u32, input.model->type_count ? input.model->type_count : 1);
-            codeview_emit_model_types(&types, input.model, field_indices, argument_indices);
+            u64* auxiliary_offsets = arena_allocate(arena, u64, input.model->type_count ? input.model->type_count : 1);
+            codeview_emit_model_types(&types, input.model, auxiliary_offsets);
         }
         if (!symbols.overflow && !types.overflow && symbols.count <= UINT32_MAX)
         {

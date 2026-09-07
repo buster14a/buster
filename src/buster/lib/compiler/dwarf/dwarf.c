@@ -1057,20 +1057,11 @@ BUSTER_GLOBAL_LOCAL u32 dwarf_model_emit_ranges(DwarfModelWriter* writer, u32 st
     {
         end = start + 1;
     }
-    dwarf_model_relocation(writer, (DwarfRelocation){
-                                          .addend = start,
-                                          .offset = writer->ranges.count,
-                                          .section = DWARF_SECTION_RANGES,
-                                          .address = true,
-                                      });
-    dwarf_emit_u64(&writer->ranges, 0);
-    dwarf_model_relocation(writer, (DwarfRelocation){
-                                          .addend = end,
-                                          .offset = writer->ranges.count,
-                                          .section = DWARF_SECTION_RANGES,
-                                          .address = true,
-                                      });
-    dwarf_emit_u64(&writer->ranges, 0);
+    // DWARF v4 range-list endpoints are relative to the CU's DW_AT_low_pc.
+    // That attribute already relocates against this module's text section;
+    // relocating these offsets as well adds the text base twice after linking.
+    dwarf_emit_u64(&writer->ranges, start);
+    dwarf_emit_u64(&writer->ranges, end);
     dwarf_emit_u64(&writer->ranges, 0);
     dwarf_emit_u64(&writer->ranges, 0);
     return offset;
@@ -1140,20 +1131,9 @@ BUSTER_GLOBAL_LOCAL u32 dwarf_model_emit_location_list(DwarfModelWriter* writer,
         {
             continue;
         }
-        dwarf_model_relocation(writer, (DwarfRelocation){
-                                              .addend = range->start,
-                                              .offset = writer->loc.count,
-                                              .section = DWARF_SECTION_LOC,
-                                              .address = true,
-                                          });
-        dwarf_emit_u64(&writer->loc, 0);
-        dwarf_model_relocation(writer, (DwarfRelocation){
-                                              .addend = range->end,
-                                              .offset = writer->loc.count,
-                                              .section = DWARF_SECTION_LOC,
-                                              .address = true,
-                                          });
-        dwarf_emit_u64(&writer->loc, 0);
+        // Location lists use the same CU-relative base as range lists.
+        dwarf_emit_u64(&writer->loc, range->start);
+        dwarf_emit_u64(&writer->loc, range->end);
         u64 length_offset = writer->loc.count;
         dwarf_emit_u16(&writer->loc, 0);
         u64 before = writer->loc.count;

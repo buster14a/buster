@@ -3371,7 +3371,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (object.error != OBJECT_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_OBJECT;
-        result.diagnostic = string_format(arena, S8("C object generation failed with error {u32}"), (u32)object.error);
+        result.diagnostic = object.error == OBJECT_ERROR_DEBUG_INFO
+                                ? S8("CodeView debug information exceeds record or section format limits")
+                                : string_format(arena, S8("C object generation failed with error {u32}"), (u32)object.error);
         goto end;
     }
     result.object = object;
