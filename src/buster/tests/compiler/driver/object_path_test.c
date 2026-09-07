@@ -127,14 +127,10 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(left_wrong_output));
         BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(right_wrong_output));
 
-        BUSTER_TEST(arguments, compiler_driver_object_path_test_change_directory(original_directory));
     }
 
-    if (!compiler_driver_object_path_test_change_directory(original_directory))
-    {
-        BUSTER_TEST(arguments, false);
-    }
-    os_directory_delete(root_absolute);
+    BUSTER_TEST(arguments, compiler_driver_object_path_test_change_directory(original_directory));
+    BUSTER_TEST(arguments, os_directory_delete(root_absolute));
 #endif
     return result;
 }
