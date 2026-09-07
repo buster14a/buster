@@ -64,6 +64,8 @@ static int pointer_join(int n)
     return *p;
 }
 
+// `same` is both the branch predicate and an incoming edge value. Selector
+// use census must retain both roles when the local becomes a block parameter.
 static int predicate_join(int a, int b)
 {
     int same = a == b;
