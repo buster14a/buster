@@ -16,24 +16,36 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 66bf321936ccb2b4f0df42cb6f65ed197f8652b5
-          fetch-depth: 1
+          ref: ebfdd11705bc470564e726857e498f1c82aa746c
+          fetch-depth: 3
+          path: buster
           persist-credentials: false
-      - name: Pack pinned source and distro bootstrap
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          fetch-depth: 1
+          path: tinycc
+          persist-credentials: false
+      - name: Pack pinned source and bootstrap toolchain source
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/audit-source"
-          git rev-parse HEAD > "$RUNNER_TEMP/audit-source/REVISION"
-          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/audit-source/TREE"
-          tar -czf "$RUNNER_TEMP/audit-source/buster-main.tar.gz" .
-          cd "$RUNNER_TEMP/audit-source"
+          out="$RUNNER_TEMP/audit-source"
+          mkdir -p "$out"
+          git -C buster rev-parse HEAD > "$out/REVISION"
+          git -C buster rev-parse HEAD^{tree} > "$out/TREE"
+          git -C tinycc rev-parse HEAD > "$out/TCC_REVISION"
+          tar -C buster -czf "$out/buster-main.tar.gz" .
+          tar -C tinycc --exclude=.git -czf "$out/tinycc-source.tar.gz" .
           sudo apt-get update -qq
-          apt-get download tcc
-          sha256sum buster-main.tar.gz *.deb > SHA256SUMS
+          sudo apt-get install -y --no-install-recommends qemu-user-static
+          cp /usr/bin/qemu-aarch64-static "$out/"
+          cd "$out"
+          sha256sum buster-main.tar.gz tinycc-source.tar.gz qemu-aarch64-static > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: audit-correctness-source-66bf321
+          name: audit-correctness-source-ebfdd117
           path: ${{ runner.temp }}/audit-source/
           if-no-files-found: error
           retention-days: 3
