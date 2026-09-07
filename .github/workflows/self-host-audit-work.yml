@@ -5,13 +5,17 @@ on:
     branches: [work/self-host-audit-20260907]
     paths: [.github/workflows/self-host-audit-work.yml]
 
+concurrency:
+  group: self-host-source-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
 jobs:
   source:
     if: ${{ github.server_url == 'https://github.com' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
