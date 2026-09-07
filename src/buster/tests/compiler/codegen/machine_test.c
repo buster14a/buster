@@ -487,6 +487,7 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
     // construction through one of the metadata entry points.
     static MachineX64ConsumerSite const consumers[] = {
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_canonical_x64_metadata_emit")},
+        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_canonical_x64_thread_local_general_dynamic")},
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_generate_canonical_module_attempt")},
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_emit_global_assembly")},
         {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), S8_INITIALIZER("assembly_x86_metadata_emit")},
@@ -503,7 +504,6 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
     };
     static MachineX64NeutralSite const neutral_sites[] = {
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_emit_global_assembly"), false},
-        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_canonical_x64_thread_local_general_dynamic"), true},
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_generate_canonical_module_attempt")},
         {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), S8_INITIALIZER("assembly_x86_metadata_local_relocation")},
         {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_address_difference")},
@@ -1661,9 +1661,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_DISPLACEMENT] != 0);
     BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_DATA] != 0);
     BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_TARGET_PAYLOAD] != 0);
-    // One site, and it should stay one: a fixed sequence is an exception to
-    // the metadata authority, so a second one is a decision, not a detail.
-    BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_FIXED_SEQUENCE] == 1);
+    // TLS is now a metadata-owned ABI recipe, not a neutral literal escape.
+    BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_FIXED_SEQUENCE] == 0);
     MachineX64SourceAudit source_audit = machine_test_x86_source_authority_audit(arguments->arena);
     // Packaged runtimes (notably Android) do not carry the repository source
     // tree, so the scanner cannot discover its five audit files there.  Keep
@@ -1673,9 +1672,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     bool source_audit_available = source_audit.files_readable;
     BUSTER_TEST(arguments, !source_audit_available || source_audit.owners_found);
     BUSTER_TEST(arguments, !source_audit_available || source_audit.neutral_patch_count == patch_count);
-    // The source audit is the final authority gate: every handwritten x86
-    // constructor must route through metadata, while AArch64 words, .byte
-    // data, and registered neutral patches remain explicitly classified.
+    // This scanner checks named consumers and byte-writer calls, not every
+    // literal array/opcode rewrite. The complete path inventory and remaining
+    // migration boundaries live in docs/x86-64-encoding-authority.md.
     BUSTER_TEST(arguments, !source_audit_available || source_audit.forbidden_count == 0);
 
     u32 a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};

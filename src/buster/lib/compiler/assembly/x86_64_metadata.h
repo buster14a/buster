@@ -1096,6 +1096,29 @@ BUSTER_F_DECL BusterX86MetadataSelectResult buster_x86_metadata_select_form(Bust
 // entry point is the public bridge for producers that do not retain a durable
 // form key; output and relocation storage are borrowed for the call.
 BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_encode(BusterX86MetadataEncodeQuery query);
+// ELF TLS sequences are ABI recipes, not additional ISA encoders. The GD
+// envelope has two PC-relative fields, both with addend -4; object producers
+// assign TLSGD and PLT32 meanings to those fields. Relaxation preserves the
+// envelope length and all bytes outside it. These operations are transactional
+// on failure. Call prewarm_all_forms before arbitrary worker-lane use; otherwise
+// the first TLS recipe preparation, like ordinary form preparation, is serial.
+typedef enum BusterX86MetadataTlsModel
+{
+    BUSTER_X86_METADATA_TLS_GENERAL_DYNAMIC,
+    BUSTER_X86_METADATA_TLS_INITIAL_EXEC,
+} BusterX86MetadataTlsModel;
+enum
+{
+    BUSTER_X86_METADATA_TLS_FIELD_SIZE = 4,
+    BUSTER_X86_METADATA_TLS_GD_SIZE = 16,
+    BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET = 4,
+    BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET = 12,
+    BUSTER_X86_METADATA_TLS_IE_SIZE = 7,
+    BUSTER_X86_METADATA_TLS_IE_OFFSET = 3,
+};
+BUSTER_F_DECL bool buster_x86_metadata_emit_tls_general_dynamic(u8* output, u32 capacity);
+BUSTER_F_DECL bool buster_x86_metadata_relax_tls(u8* sequence, u32 capacity, BusterX86MetadataTlsModel model, s32 thread_pointer_offset);
+
 // Shared semantic proof used by source adapters and the handwritten parser:
 // an explicitly typed EVEX decorator is authoritative only for ordinary
 // 64-bit, non-APX/AMX forms with one ordinary memory broadcast or a

@@ -9918,6 +9918,34 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     for (u32 relocation_index = 0; relocation_index < thread_local_model_object.object.relocation_count; relocation_index += 1)
                     {
                         ObjectRelocation* relocation = thread_local_model_object.object.relocations + relocation_index;
+                        if (relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD)
+                        {
+                            // Independent GAS/LLVM oracle; integration checks
+                            // must not obtain expected bytes from the emitter.
+                            static u8 const tls_gd_oracle[16] = {0x66, 0x48, 0x8d, 0x3d, 0, 0, 0, 0,
+                                                                0x66, 0x66, 0x48, 0xe8, 0, 0, 0, 0};
+                            ObjectFile* tls_object = &thread_local_model_object.object;
+                            bool shape_valid = relocation->section < tls_object->section_count;
+                            if (shape_valid)
+                            {
+                                ByteSlice text = tls_object->sections[relocation->section].data;
+                                shape_valid = relocation->offset >= 4 && relocation->offset <= text.length &&
+                                              12 <= text.length - relocation->offset;
+                                if (shape_valid)
+                                    shape_valid = memcmp(text.pointer + relocation->offset - 4, tls_gd_oracle, sizeof(tls_gd_oracle)) == 0;
+                            }
+                            BUSTER_TEST(arguments, shape_valid && relocation->addend == -4);
+                            bool pair_valid = false;
+                            for (u32 pair_index = 0; pair_index < tls_object->relocation_count; pair_index += 1)
+                            {
+                                ObjectRelocation* pair = tls_object->relocations + pair_index;
+                                pair_valid |= pair->section == relocation->section && pair->offset >= relocation->offset &&
+                                              pair->offset - relocation->offset == 8 && pair->kind == OBJECT_RELOCATION_X86_64_PLT32 &&
+                                              pair->addend == -4 && pair->symbol < tls_object->symbol_count &&
+                                              string_equal(tls_object->symbols[pair->symbol].name, S8("__tls_get_addr"));
+                            }
+                            BUSTER_TEST(arguments, pair_valid);
+                        }
                         local_exec_count += relocation->kind == OBJECT_RELOCATION_X86_64_TPOFF32;
                         initial_exec_count += relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF;
                         general_dynamic_count += relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD;
