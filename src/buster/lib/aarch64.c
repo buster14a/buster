@@ -79,9 +79,10 @@ CpuModel cpu_detect_model_aarch64(void)
     {
         if (buffer[0] == '0' && buffer[1] == 'x')
         {
-            u64 value = string8_parse_u64_hexadecimal((char*)buffer + 2).value;
+            IntegerParsingU64 parsed = string8_parse_u64_hexadecimal((String8){.pointer = buffer + 2, .length = file_size - 2});
+            u64 value = parsed.value;
 
-            if (value <= UINT32_MAX)
+            if (parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == file_size - 2 && value <= UINT32_MAX)
             {
                 u32 value_u32 = (u32)value;
                 IdentificationRegister id_register = *(IdentificationRegister*)&value_u32;
