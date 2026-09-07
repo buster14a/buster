@@ -26,6 +26,8 @@ typedef enum ObjectError
     OBJECT_ERROR_CAPACITY,
     OBJECT_ERROR_UNRESOLVED_SYMBOL,
     OBJECT_ERROR_EXECUTABLE_MEMORY,
+    // Requested debug information cannot be represented by the target format.
+    OBJECT_ERROR_DEBUG_INFO,
     OBJECT_ERROR_COUNT,
 } ObjectError;
 

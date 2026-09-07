@@ -1071,9 +1071,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_include_population(UnitT
     return result;
 }
 
+
+// A valid C identifier can still exceed CodeView's single-record limit.
+// Reject -g explicitly instead of succeeding with no .debug$S/.debug$T.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_codeview_limit(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    char8* bytes = arena_allocate(temporary.arena, char8, 65300);
+    memset(bytes, 'x', 65300);
+    String8 name = {.pointer = bytes, .length = 65300};
+    String8 source = string_format(temporary.arena, S8("struct Big {{ int {S8}; }}; int f(struct Big *p) {{ return p->{S8}; }}\n"), name, name);
+    String8 path = buster_test_temporary_path(temporary.arena, S8("buster-codeview-limit"), S8(".c"));
+    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-codeview-limit"), S8(".obj"));
+    BUSTER_TEST(arguments, file_write(path, (ByteSlice){.pointer = (u8*)source.pointer, .length = source.length}));
+    String8 command[] = {S8("-c"), S8("-g"), S8("-target"), S8("x86_64-windows"), S8("-o"), output, path};
+    CompilerDriverResult built = compiler_driver_execute_invocation(temporary.arena,
+        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+    BUSTER_TEST(arguments, built.error == COMPILER_DRIVER_ERROR_OBJECT && built.object_error == OBJECT_ERROR_DEBUG_INFO);
+    BUSTER_TEST(arguments, !built.has_object && string_equal(built.diagnostic, S8("CodeView debug information exceeds record or section format limits")));
+    command[1] = S8("-g0");
+    CompilerDriverResult without_debug = compiler_driver_execute_invocation(temporary.arena,
+        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+    BUSTER_TEST(arguments, without_debug.error == COMPILER_DRIVER_ERROR_NONE && without_debug.has_object);
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
+    UnitTestResult codeview_limit = compiler_driver_test_codeview_limit(arguments);
+    result.test_count += codeview_limit.test_count;
+    result.succeeded_test_count += codeview_limit.succeeded_test_count;
 
     // compiler_prewarm() is the contract that lets a gang compile at all: the
     // frontends' remaining first-use tables are written once and read

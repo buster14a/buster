@@ -3297,11 +3297,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     result.executable = (ByteSlice){
-        .pointer = arena_allocate(arena, u8, file_size),
+        // The image is written section by section over a zero background, and
+        // the background is what a fresh arena mapping already is: the fill
+        // now covers only the arena's dirty prefix, which for the one image a
+        // link produces is nothing at all.
+        .pointer = arena_allocate_zeroed(arena, u8, file_size),
         .length = file_size,
     };
     u8* bytes = result.executable.pointer;
-    memset(bytes, 0, file_size);
     memcpy(bytes + entry_stub_offset, entry_stub, entry_stub_size);
     for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
     {
@@ -4137,11 +4140,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         return result;
     }
     result.executable = (ByteSlice){
-        .pointer = arena_allocate(arena, u8, file_size),
+        // The image is written section by section over a zero background, and
+        // the background is what a fresh arena mapping already is: the fill
+        // now covers only the arena's dirty prefix, which for the one image a
+        // link produces is nothing at all.
+        .pointer = arena_allocate_zeroed(arena, u8, file_size),
         .length = file_size,
     };
     u8* bytes = result.executable.pointer;
-    memset(bytes, 0, file_size);
     memcpy(bytes + entry_stub_offset, entry_stub, entry_stub_size);
     for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
     {
@@ -4866,11 +4872,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         return result;
     }
     result.executable = (ByteSlice){
-        .pointer = arena_allocate(arena, u8, file_size),
+        // The image is written section by section over a zero background, and
+        // the background is what a fresh arena mapping already is: the fill
+        // now covers only the arena's dirty prefix, which for the one image a
+        // link produces is nothing at all.
+        .pointer = arena_allocate_zeroed(arena, u8, file_size),
         .length = file_size,
     };
     u8* bytes = result.executable.pointer;
-    memset(bytes, 0, file_size);
     memcpy(bytes + entry_stub_offset, entry_stub, entry_stub_size);
     for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
     {

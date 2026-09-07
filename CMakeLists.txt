@@ -906,6 +906,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/link/link_test.c
     src/buster/tests/compiler/gpu/gpu_test.c
     src/buster/tests/compiler/driver/driver_test.c
+    src/buster/tests/compiler/driver/object_path_test.c
 )
 set(BUSTER_TEST_HEADERS
     src/buster/tests/test.h
@@ -948,6 +949,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/link/link_test.h
     src/buster/tests/compiler/gpu/gpu_test.h
     src/buster/tests/compiler/driver/driver_test.h
+    src/buster/tests/compiler/driver/object_path_test.h
 )
 set_source_files_properties(${BUSTER_TEST_HEADERS} PROPERTIES HEADER_FILE_ONLY TRUE)
 

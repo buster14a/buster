@@ -2411,6 +2411,9 @@ Target codegen_target_for_abi(CodegenAbi abi)
 void codegen_prewarm(void)
 {
     (void)codegen_target_for_abi(CODEGEN_ABI_X86_64_SYSTEM_V);
+    // The opcode row-facts projection is target-independent: it covers both
+    // machine backends' opcode ranges and every allocator reads it.
+    machine_opcode_rows_prewarm();
 }
 
 // x86 metadata and exact machine plans are only needed by x86 codegen.  Keep
@@ -8586,13 +8589,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         }
         *capacity += type->layout.size;
     }
-    u8* read_only_bytes = arena_allocate(arena, u8, read_only_capacity);
+    // The three data images are written initializer by initializer over a
+    // zero background; a fresh arena mapping is that background already.
+    u8* read_only_bytes = arena_allocate_zeroed(arena, u8, read_only_capacity);
     u8* writable_bytes = arena_allocate(arena, u8, writable_capacity);
     u8* thread_local_bytes = arena_allocate(arena, u8, thread_local_capacity);
-    if (read_only_capacity)
-    {
-        memset(read_only_bytes, 0, read_only_capacity);
-    }
     if (writable_capacity)
     {
         memset(writable_bytes, 0, writable_capacity);

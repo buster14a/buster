@@ -2459,6 +2459,30 @@ compilation is explicitly enabled.
     `perf report` mis-symbolizing buster-produced `ET_EXEC` images by
     `-0x400000`; clang-built binaries are PIE and symbolize normally once the
     right address space is used.
+- **Where there is no hardware counter, callgrind is the currency**, and on
+  two questions it is the better one. A cloud guest often exposes no PMU at
+  all (`perf_event_open` returning `ENOENT`, so `STEP_INSTRUCTIONS` never
+  prints); `valgrind --tool=callgrind --cache-sim=no --branch-sim=no` then
+  counts instructions exactly and deterministically, which makes an A/B one
+  run instead of three alternating pairs and removes the sampling skid and
+  period aliasing that two audits paid to discover. Three properties decide
+  how to read its numbers.
+  - **It counts `rep stosb` at one Ir a byte** (measured: an 8 KB `memset`
+    costs 8.229 Ir, a 64 KB one 65.572, a 512-byte one 62). On the machine
+    that is one retired instruction, so `instructions:u` cannot see a libc
+    fill or an ERMS copy at all, and callgrind's number for one *is the bytes
+    it moved*. Use it for the memory-traffic items — the fills and the large
+    copies — and say "MB written", never "instructions saved".
+  - **Valgrind 3.22 cannot decode EVEX**, so the measured binary has to be
+    built `-march=x86-64-v3` and every AVX-512 kernel in the tree is compiled
+    out of it and shows as its `simd.h` fallback. Architecture-neutral deltas
+    transfer to the AVX-512 build unchanged; an AVX-512 item has to be priced
+    by census (count the queries, the tokens, the windows and the useful
+    lanes, then price each against the measured cost of the loop it replaces).
+  - **A `-march=native` build and a `-march=x86-64-v3` build of the same
+    compiler do not produce the same output**, because the host build's
+    feature set reaches the compiler's own target defaults. Byte-identity
+    gates must compare like with like, and both builds need their own gate.
 - **`tools/branch_miss_survey.py` ranks branch mispredictions by source line,
   not by symbol.** `perf record -e branch-misses` is not a precise event: the
   sample lands past the branch that caused it, so its histogram names the

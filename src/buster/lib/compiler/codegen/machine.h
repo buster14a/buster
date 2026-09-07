@@ -1033,6 +1033,48 @@ struct MachineOpcodeInfo
 
 #define MACHINE_OPCODE_INFO_HAS_FIXED_REGISTERS 1
 
+// The published row-facts projection of the opcode table: everything a
+// per-instruction-row walk asks of an opcode, in sixteen bytes, so a pass over
+// 1,7 M rows reads a 6 KB table instead of five fields spread over two lines
+// of an 88-byte descriptor it touches for nothing else. The roles are the
+// projection that matters — they are a function of the opcode alone, so the
+// per-slot ladder that re-derived them once per operand is table content, not
+// work. Built once by machine_opcode_rows_prewarm() (AGENTS.md's serial
+// initialization contract) and read-only afterwards.
+typedef struct MachineOpcodeRow MachineOpcodeRow;
+struct MachineOpcodeRow
+{
+    u64 clobber_mask;
+    // Per-slot role lanes, four bits each and already trimmed to
+    // operand_count: uses (and use-defines) in 0-3, defines in 4-7,
+    // use-defines in 8-11.
+    u16 role_lanes;
+    u8 operand_count;
+    u8 flags;
+    // The x86-64 encoder's worst-case byte budget for one row of this opcode,
+    // the part that does not depend on the row's own payload. A row whose
+    // budget grows with its side data carries MACHINE_OPCODE_ROW_VARIABLE
+    // and the encoder adds the rest; every other opcode is a flat number, so
+    // the capacity pass is a table read instead of a nine-arm switch.
+    u16 encode_budget;
+    u16 reserved;
+};
+BUSTER_CT_CHECK(sizeof(MachineOpcodeRow) == 16);
+
+#define MACHINE_OPCODE_ROW_CONSTRAINED (1u << 0)
+#define MACHINE_OPCODE_ROW_CALL (1u << 1)
+#define MACHINE_OPCODE_ROW_TERMINATOR (1u << 2)
+#define MACHINE_OPCODE_ROW_INDIRECT_BRANCH (1u << 3)
+#define MACHINE_OPCODE_ROW_CLOBBERS (1u << 4)
+#define MACHINE_OPCODE_ROW_VARIABLE_BUDGET (1u << 5)
+// The byte budget of an ordinary row: no encoding the tables publish is
+// longer, and the allocator's edits are budgeted separately.
+#define MACHINE_OPCODE_ROW_FLAT_BUDGET 24u
+#define MACHINE_OPCODE_ROW_LANE_MASK 0x0fu
+#define MACHINE_OPCODE_ROW_USE_SHIFT 0u
+#define MACHINE_OPCODE_ROW_DEFINE_SHIFT 4u
+#define MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT 8u
+
 // Upper bound on any target's unified register file — the general file plus
 // the vector file behind it; every allocator mask is one u64 over this
 // numbering, so the limit may not pass sixty-four.
@@ -1594,6 +1636,11 @@ BUSTER_F_DECL u32 machine_opcode_memory_operand(MachineOpcodeInfo const* info);
 BUSTER_F_DECL bool machine_opcode_operand_is_tied(MachineOpcodeInfo const* info, u32 destination_slot, u32 source_slot);
 BUSTER_F_DECL bool machine_opcode_operand_is_early_clobber(MachineOpcodeInfo const* info, u32 slot);
 BUSTER_F_DECL bool machine_opcode_has_constraints(MachineOpcodeInfo const* info);
+// The published row-facts table, indexed by opcode. Filled by the prewarm
+// below; the accessor fills it on a first serial touch for callers that reach
+// the allocators without going through codegen (tests, the assembler).
+BUSTER_F_DECL MachineOpcodeRow const* machine_opcode_row_table(void);
+BUSTER_F_DECL void machine_opcode_rows_prewarm(void);
 BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64(void);
 // The Win64 register file: the same allocatable set with RSI and RDI moved
 // into the callee-saved half, and only the volatile vector registers.

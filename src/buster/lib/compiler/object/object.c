@@ -8326,10 +8326,10 @@ BUSTER_GLOBAL_LOCAL ObjectSymbolNameIndex object_symbol_name_index_build(Arena* 
         capacity <<= 1;
     }
     ObjectSymbolNameIndex table = {
-        .slots = arena_allocate(arena, ObjectSymbolNameSlot, capacity),
+        // An empty slot is a zero slot, which fresh arena bytes already are.
+        .slots = arena_allocate_zeroed(arena, ObjectSymbolNameSlot, capacity),
         .mask = (u32)(capacity - 1),
     };
-    memset(table.slots, 0, sizeof(*table.slots) * capacity);
     for (u32 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
     {
         object_symbol_name_index_add(table, symbols + symbol_index, symbol_index);
@@ -9405,6 +9405,10 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                                  .line_count = line_count,
                                                  .machine = target.cpu_arch == CPU_ARCH_AARCH64 ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64,
                                              });
+            if (!codeview.valid)
+            {
+                result.error = OBJECT_ERROR_DEBUG_INFO;
+            }
         }
         else
         {
