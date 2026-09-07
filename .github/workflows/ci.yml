@@ -1,10 +1,14 @@
-# Temporary source-transport branch only; implementation PRs retain the full CI.
+# Temporary transport branch only; actual implementation branches retain full CI.
 name: Buster CI
-on: workflow_dispatch
+on: [push]
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
-  unused:
+  transport-only:
+    if: ${{ false }}
     runs-on: ubuntu-24.04
     steps:
-      - run: echo 'Source transport branch; no compiler changes.'
+      - run: echo 'No compiler changes in this transport branch.'
