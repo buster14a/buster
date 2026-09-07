@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-07T233720Z`](docs/performance-audits/2026-09-07T233720Z.md) — direct old/new ABI service timing on the same scalar and aggregate query traces (#39)
 - [`2026-09-07T231507Z`](docs/performance-audits/2026-09-07T231507Z.md) — active-target ABI contexts remove mutable type caches (#39)
 - [`2026-09-07T132245Z`](docs/performance-audits/2026-09-07T132245Z.md) — debug-info correctness and linear CodeView scope scratch (#201-#204)
 - [`2026-09-07T013544Z`](docs/performance-audits/2026-09-07T013544Z.md) — five items take the frozen-tree compile from 9.583,33 M to 9.351,43 M Ir (-2,42%) byte-identically, remove 57,9 MB of per-compile zeroing, and put the matching-delimiter query on a 512-bit windowed scan
