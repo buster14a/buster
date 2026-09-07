@@ -1,0 +1,38 @@
+name: LLVM 222 validation workspace
+
+on:
+  push:
+    branches: [work/llvm-222-validation]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Prepare exact baseline and bootstrap tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y tcc mold
+          mkdir -p "$RUNNER_TEMP/llvm-222-workspace/tools"
+          git archive 9834a4253c61934a8a253641a84741a25d3717e3 | gzip > "$RUNNER_TEMP/llvm-222-workspace/main.tar.gz"
+          git bundle create "$RUNNER_TEMP/llvm-222-workspace/main.bundle" origin/main
+          cp /usr/bin/tcc /usr/bin/mold "$RUNNER_TEMP/llvm-222-workspace/tools/"
+          cp -a /usr/lib/x86_64-linux-gnu/tcc "$RUNNER_TEMP/llvm-222-workspace/tools/"
+          git rev-parse 9834a4253c61934a8a253641a84741a25d3717e3^{tree} > "$RUNNER_TEMP/llvm-222-workspace/tree.txt"
+          dpkg-query -W tcc mold > "$RUNNER_TEMP/llvm-222-workspace/tool-versions.txt"
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/llvm-222-workspace.tar.gz" llvm-222-workspace
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: llvm-222-workspace
+          path: ${{ runner.temp }}/llvm-222-workspace.tar.gz
+          if-no-files-found: error
+          retention-days: 2
