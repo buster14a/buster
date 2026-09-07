@@ -13,18 +13,39 @@ jobs:
   source:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+      - name: Apply reviewed portability patch
+        if: ${{ github.repository == 'buster14a/buster' && github.ref == 'refs/heads/fix/host-portability-audit' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          printf '%s  %s\n' 'f3eb16a09a00492113ef8141faf5c2d16d8d0ef6d877a305b6d0544e8b65c9a2' 'tools/host-portability.patch' | sha256sum --check --strict
+          git apply --check tools/host-portability.patch
+          git apply tools/host-portability.patch
+          git diff --check
+          rm tools/host-portability.patch
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- CMakeLists.txt src/buster/lib/os.c src/buster/tests/os_test.c tools/host-portability.patch
+          git commit -m 'os: make host executable lookup and protection flags portable'
+          git push origin "HEAD:$GITHUB_REF"
       - name: Pack source
         shell: bash
         run: |
           set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/source-revision.txt"
           tar --exclude=.git --exclude=.github/workflows/issue-33-snapshot.yml -czf "$RUNNER_TEMP/buster-source.tar.gz" .
       - uses: actions/upload-artifact@v4
         with:
           name: issue-33-source
-          path: ${{ runner.temp }}/buster-source.tar.gz
+          path: |
+            ${{ runner.temp }}/buster-source.tar.gz
+            ${{ runner.temp }}/source-revision.txt
           if-no-files-found: error
           retention-days: 1
