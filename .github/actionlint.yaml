@@ -3,6 +3,7 @@
 # never heard of. These are all standard GitHub-hosted labels; the option is
 # named for self-hosted runners only because that is the sole mechanism
 # actionlint offers for teaching it a label.
+# Keep this list synchronized with the matrix in .github/workflows/ci.yml.
 self-hosted-runner:
   labels:
     - ubuntu-26.04
