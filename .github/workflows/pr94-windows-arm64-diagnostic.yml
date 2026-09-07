@@ -64,6 +64,25 @@ jobs:
           test_text, traced_call_count = call_pattern.subn(trace_test_call, test_text)
           if traced_call_count < 20:
               raise SystemExit(f"only found {traced_call_count} frontend test calls")
+          nested_parse = "    CParseResult nested_conditional_parse = c_parse(nested_conditional_temporary.arena, nested_conditional_tokens);"
+          if test_text.count(nested_parse) != 1:
+              raise SystemExit("nested conditional parse anchor not found")
+          test_text = test_text.replace(nested_parse, nested_parse + r'''
+              fprintf(stderr, "PR94_NESTED parsed token_diagnostics=%u parse_diagnostics=%u\n",
+                      nested_conditional_tokens.diagnostic_count, nested_conditional_parse.diagnostic_count);
+              fflush(stderr);''', 1)
+          nested_lower = "    CIRLowerResult nested_conditional_ir = c_lower_to_ir(nested_conditional_temporary.arena, S8(\"nested-conditional.c\"), nested_conditional_tokens,"
+          if test_text.count(nested_lower) != 1:
+              raise SystemExit("nested conditional lower anchor not found")
+          test_text = test_text.replace(nested_lower, r'''    fprintf(stderr, "PR94_NESTED lowering\n"); fflush(stderr);
+              ''' + nested_lower, 1)
+          nested_lower_end = "                                                         nested_conditional_parse, target_native);"
+          if test_text.count(nested_lower_end) != 1:
+              raise SystemExit("nested conditional lower-end anchor not found")
+          test_text = test_text.replace(nested_lower_end, nested_lower_end + r'''
+              fprintf(stderr, "PR94_NESTED lowered diagnostics=%u program=%p\n", nested_conditional_ir.diagnostic_count,
+                      (void*)nested_conditional_ir.program);
+              fflush(stderr);''', 1)
           test_path.write_text(test_text, encoding="utf-8")
 
           gen_path = Path("src/buster/lib/compiler/frontend/c/c_gen.c")
