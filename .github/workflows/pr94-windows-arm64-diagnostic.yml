@@ -174,6 +174,18 @@ jobs:
               raise SystemExit("function aggregate call anchor not found")
           parse_text = parse_text.replace(aggregate_call, aggregate_call + r'''
               fprintf(stderr, "PR94_BIND aggregates_complete\n"); fflush(stderr);''', 1)
+          identifier_bind_body = '''    CToken token = preprocess.tokens[token_index];
+              c_parse_bind_identifier_entity(arena, result, preprocess, scope, token_index,
+                                             c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token));'''
+          if parse_text.count(identifier_bind_body) != 1:
+              raise SystemExit("identifier-bind body anchor not found")
+          parse_text = parse_text.replace(identifier_bind_body, r'''    CToken token = preprocess.tokens[token_index];
+              fprintf(stderr, "PR94_IDENTIFIER entry index=%u symbol=%u uses=%u bindings=%u\n", token_index, token.symbol,
+                      result->identifier_use_count, result->binding_undo_count); fflush(stderr);
+              CEntityId resolved = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+              fprintf(stderr, "PR94_IDENTIFIER resolved index=%u entity=%u\n", token_index, resolved.value); fflush(stderr);
+              c_parse_bind_identifier_entity(arena, result, preprocess, scope, token_index, resolved);
+              fprintf(stderr, "PR94_IDENTIFIER complete index=%u uses=%u\n", token_index, result->identifier_use_count); fflush(stderr);''', 1)
           parse_path.write_text(parse_text, encoding="utf-8")
 
           gen_path = Path("src/buster/lib/compiler/frontend/c/c_gen.c")
