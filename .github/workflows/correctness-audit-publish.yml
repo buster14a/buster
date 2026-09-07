@@ -11,26 +11,33 @@ permissions:
 jobs:
   publish:
     if: ${{ github.server_url == 'https://github.com' }}
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-slim
     timeout-minutes: 10
     steps:
-      - name: Retire the superseded transport job only
+      - name: Retire superseded transport jobs only
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: gh api --method POST repos/buster14a/buster/actions/runs/34164438846/cancel || true
+        run: |
+          python3 - <<'PY'
+          import os, urllib.request, urllib.error
+          for run in (34164438846, 34165133754):
+              request = urllib.request.Request(f'https://api.github.com/repos/buster14a/buster/actions/runs/{run}/cancel', data=b'', headers={'Authorization': 'Bearer '+os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json'}, method='POST')
+              try:
+                  with urllib.request.urlopen(request) as response:
+                      print(run, response.status)
+              except urllib.error.HTTPError as error:
+                  print(run, error.code)
+          PY
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: 9834a4253c61934a8a253641a84741a25d3717e3
           fetch-depth: 0
-      - name: Apply the pinned tree-verified reconstruction and export the rebased source
+      - name: Reconstruct exactly the tested tree and rebase onto current main
         shell: bash
         run: |
-          if git rev-parse --verify refs/remotes/origin/audit/transport-arena-rewind-20260907 >/dev/null 2>&1; then
-            git checkout --detach refs/remotes/origin/audit/transport-arena-rewind-20260907
-          else
-            git show 18d8be1f8b9855d2df4b3bfd8ca41441d30b4f4f:.github/workflows/correctness-audit-source.yml > "$RUNNER_TEMP/reconstruction.yml"
-            python3 - "$RUNNER_TEMP/reconstruction.yml" "$RUNNER_TEMP/reconstruct.sh" <<'PY'
+          git show 18d8be1f8b9855d2df4b3bfd8ca41441d30b4f4f:.github/workflows/correctness-audit-source.yml > "$RUNNER_TEMP/reconstruction.yml"
+          python3 - "$RUNNER_TEMP/reconstruction.yml" "$RUNNER_TEMP/reconstruct.sh" <<'PY'
           import pathlib,sys
           text=pathlib.Path(sys.argv[1]).read_text()
           text=text.split('      - name: Reconstruct exactly the locally tested arena patch\n',1)[1]
@@ -39,16 +46,15 @@ jobs:
           assert all(not line or line.startswith('          ') for line in lines)
           pathlib.Path(sys.argv[2]).write_text('\n'.join(line[10:] if line else '' for line in lines)+'\n')
           PY
-            bash -e "$RUNNER_TEMP/reconstruct.sh"
-            git rebase 66bf321936ccb2b4f0df42cb6f65ed197f8652b5
-            git diff --check 66bf321936ccb2b4f0df42cb6f65ed197f8652b5
-            git push origin HEAD:refs/heads/audit/transport-arena-rewind-20260907
-          fi
+          bash -e "$RUNNER_TEMP/reconstruct.sh"
+          git rebase ebfdd11705bc470564e726857e498f1c82aa746c
+          git diff --check ebfdd11705bc470564e726857e498f1c82aa746c
+          git push origin HEAD:refs/heads/audit/transport-v2-arena-rewind-20260907
           git rev-parse HEAD HEAD^{tree}
-          git bundle create "$RUNNER_TEMP/arena-rewind-main-66bf321.bundle" HEAD
+          git bundle create "$RUNNER_TEMP/arena-rewind-main-ebfdd11.bundle" HEAD
       - uses: actions/upload-artifact@v4
         with:
-          name: arena-rewind-main-66bf321
-          path: ${{ runner.temp }}/arena-rewind-main-66bf321.bundle
+          name: arena-rewind-main-ebfdd11
+          path: ${{ runner.temp }}/arena-rewind-main-ebfdd11.bundle
           if-no-files-found: error
           retention-days: 2
