@@ -4332,6 +4332,61 @@
    127:           git -C "$worktree" commit -m 'assembly: fix APX and EVEX operand encoding'
    128:           git -C "$worktree" push --force origin HEAD:agent/fix-assembly-190-193
 
+===== .github/workflows/agent-patch-codegen-195.yml =====
+     1: name: Temporary patch codegen issue 195
+     2: 
+     3: on:
+     4:   push:
+     5:     branches:
+     6:       - agent/inspect-190-195
+     7:     paths:
+     8:       - .github/agent_patch_codegen_195.py
+     9:       - .github/workflows/agent-patch-codegen-195.yml
+    10: 
+    11: permissions:
+    12:   contents: write
+    13: 
+    14: jobs:
+    15:   patch-test-publish:
+    16:     runs-on: ubuntu-24.04
+    17:     timeout-minutes: 90
+    18:     steps:
+    19:       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+    20:         with:
+    21:           fetch-depth: 0
+    22:       - name: Prepare clean main worktree and apply fix
+    23:         shell: bash
+    24:         run: |
+    25:           set -euo pipefail
+    26:           git fetch origin main
+    27:           rm -rf "$RUNNER_TEMP/codegen-195"
+    28:           git worktree add --detach "$RUNNER_TEMP/codegen-195" origin/main
+    29:           python3 .github/agent_patch_codegen_195.py "$RUNNER_TEMP/codegen-195"
+    30:           git -C "$RUNNER_TEMP/codegen-195" diff --check
+    31:           git -C "$RUNNER_TEMP/codegen-195" diff --stat
+    32:       - name: Install Vulkan SDK
+    33:         shell: bash
+    34:         run: bash "$RUNNER_TEMP/codegen-195/.github/scripts/install-vulkan-sdk.sh"
+    35:       - name: Build and run full Release suite
+    36:         shell: bash
+    37:         run: |
+    38:           set -euo pipefail
+    39:           cd "$RUNNER_TEMP/codegen-195"
+    40:           driver="$RUNNER_TEMP/buster-build-195"
+    41:           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+    42:           "$driver" generate --cc clang --ci --linker DEFAULT
+    43:           "$driver" build --config Release -t test_all --verbose
+    44:       - name: Publish clean fix branch
+    45:         shell: bash
+    46:         run: |
+    47:           set -euo pipefail
+    48:           worktree="$RUNNER_TEMP/codegen-195"
+    49:           git -C "$worktree" config user.name "github-actions[bot]"
+    50:           git -C "$worktree" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    51:           git -C "$worktree" add src/buster/lib/compiler/codegen/codegen.c tests/basic_c_int128.c
+    52:           git -C "$worktree" commit -m 'codegen: support 16-byte aggregate compare-exchange'
+    53:           git -C "$worktree" push --force origin HEAD:agent/fix-codegen-195
+
 ===== .github/workflows/ios-monitor-tests.yml =====
      1: name: iOS monitor lifecycle
      2: 
