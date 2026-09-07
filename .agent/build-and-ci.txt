@@ -4211,125 +4211,126 @@
      6:       - agent/inspect-190-195
      7:     paths:
      8:       - .github/agent_patch_assembly_190_193.py
-     9:       - .github/workflows/agent-patch-assembly-190-193.yml
-    10: 
-    11: permissions:
-    12:   contents: write
-    13: 
-    14: jobs:
-    15:   patch-test-publish:
-    16:     runs-on: ubuntu-24.04
-    17:     timeout-minutes: 90
-    18:     steps:
-    19:       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-    20:         with:
-    21:           fetch-depth: 0
-    22:       - name: Prepare clean main worktree and apply fixes
-    23:         shell: bash
-    24:         run: |
-    25:           set -euo pipefail
-    26:           git fetch origin main
-    27:           rm -rf "$RUNNER_TEMP/assembly-190-193"
-    28:           git worktree add --detach "$RUNNER_TEMP/assembly-190-193" origin/main
-    29:           python3 .github/agent_patch_assembly_190_193.py "$RUNNER_TEMP/assembly-190-193"
-    30:           git -C "$RUNNER_TEMP/assembly-190-193" diff --check
-    31:           git -C "$RUNNER_TEMP/assembly-190-193" diff --stat
-    32:       - name: Install Vulkan SDK
-    33:         shell: bash
-    34:         run: bash "$RUNNER_TEMP/assembly-190-193/.github/scripts/install-vulkan-sdk.sh"
-    35:       - name: Build and run full Release suite
-    36:         shell: bash
-    37:         run: |
-    38:           set -euo pipefail
-    39:           cd "$RUNNER_TEMP/assembly-190-193"
-    40:           driver="$RUNNER_TEMP/buster-build-190-193"
-    41:           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
-    42:           "$driver" generate --cc clang --ci --linker DEFAULT
-    43:           "$driver" build --config Release -t test_all --verbose
-    44:       - name: Reproduce fixed encodings
-    45:         shell: bash
-    46:         run: |
-    47:           set -euo pipefail
-    48:           cd "$RUNNER_TEMP/assembly-190-193"
-    49:           ide=build/Release/ide
-    50:           extract_text() {
-    51:             local object="$1"
-    52:             local output="$2"
-    53:             objcopy --dump-section ".text=$output" "$object"
-    54:           }
-    55:           compare_case() {
-    56:             local name="$1"
-    57:             local source="$2"
-    58:             printf '%s\n' "$source" > "$RUNNER_TEMP/$name.s"
-    59:             "$ide" cc -c -march=diamondrapids "$RUNNER_TEMP/$name.s" -o "$RUNNER_TEMP/$name-buster.o"
-    60:             clang -c -march=diamondrapids "$RUNNER_TEMP/$name.s" -o "$RUNNER_TEMP/$name-clang.o"
-    61:             extract_text "$RUNNER_TEMP/$name-buster.o" "$RUNNER_TEMP/$name-buster.bin"
-    62:             extract_text "$RUNNER_TEMP/$name-clang.o" "$RUNNER_TEMP/$name-clang.bin"
-    63:             cmp "$RUNNER_TEMP/$name-buster.bin" "$RUNNER_TEMP/$name-clang.bin"
-    64:           }
-    65:           compare_case broadcast '.text
-    66:           .globl f
-    67:           f:
-    68:             vaddps 64(%rax){1to16}, %zmm1, %zmm2
-    69:             ret'
-    70:           compare_case rex2_width '.text
-    71:           .globl f
-    72:           f:
-    73:             addq $1, (%r16)
-    74:             ret'
-    75:           compare_case exact_bts '.text
-    76:           .globl f
-    77:           f:
-    78:             bts $3, (%r23)
-    79:             ret'
-    80:           compare_case apx_vvvv '.text
-    81:           .globl f
-    82:           f:
-    83:             shlx %r17, %r18, %r19
-    84:             sarx %r20, %r21, %r22
-    85:             shrx %r24, %r25, %r26
-    86:             ret'
-    87:           cat > "$RUNNER_TEMP/apx_pp.s" <<'EOF'
-    88:           .text
-    89:           .globl f
-    90:           f:
-    91:             adcx %rax, %rcx
-    92:             adox %rax, %rcx
-    93:             ret
-    94:           EOF
-    95:           "$ide" cc -c -march=diamondrapids "$RUNNER_TEMP/apx_pp.s" -o "$RUNNER_TEMP/apx_pp.o"
-    96:           extract_text "$RUNNER_TEMP/apx_pp.o" "$RUNNER_TEMP/apx_pp.bin"
-    97:           python3 - "$RUNNER_TEMP/apx_pp.bin" <<'PY'
-    98:           from pathlib import Path
-    99:           import sys
-   100:           data = Path(sys.argv[1]).read_bytes()
-   101:           expected = bytes.fromhex('62 f4 fd 08 66 c8 62 f4 fe 08 66 c8 c3')
-   102:           if data != expected:
-   103:               raise SystemExit(f'APX pp bytes differ: got {data.hex(" ")}, expected {expected.hex(" ")}')
-   104:           PY
-   105:           for mnemonic in adds cmps movs; do
-   106:             cat > "$RUNNER_TEMP/$mnemonic.s" <<EOF
-   107:           .text
-   108:           .globl f
-   109:           f:
-   110:             $mnemonic \$3, (%rax)
-   111:             ret
-   112:           EOF
-   113:             if "$ide" cc -c -march=diamondrapids "$RUNNER_TEMP/$mnemonic.s" -o "$RUNNER_TEMP/$mnemonic.o"; then
-   114:               echo "$mnemonic unexpectedly assembled" >&2
-   115:               exit 1
-   116:             fi
-   117:           done
-   118:       - name: Publish clean fix branch
-   119:         shell: bash
-   120:         run: |
-   121:           set -euo pipefail
-   122:           worktree="$RUNNER_TEMP/assembly-190-193"
-   123:           git -C "$worktree" config user.name "github-actions[bot]"
-   124:           git -C "$worktree" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-   125:           git -C "$worktree" add src/buster/lib/compiler/assembly/x86_64_metadata.c src/buster/lib/compiler/assembly/assembly.c
-   126:           git -C "$worktree" commit -m 'assembly: fix APX and EVEX operand encoding'
-   127:           git -C "$worktree" push --force origin HEAD:agent/fix-assembly-190-193
+     9:       - .github/agent_patch_assembly_190_193_v2.py
+    10:       - .github/workflows/agent-patch-assembly-190-193.yml
+    11: 
+    12: permissions:
+    13:   contents: write
+    14: 
+    15: jobs:
+    16:   patch-test-publish:
+    17:     runs-on: ubuntu-24.04
+    18:     timeout-minutes: 90
+    19:     steps:
+    20:       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+    21:         with:
+    22:           fetch-depth: 0
+    23:       - name: Prepare clean main worktree and apply fixes
+    24:         shell: bash
+    25:         run: |
+    26:           set -euo pipefail
+    27:           git fetch origin main
+    28:           rm -rf "$RUNNER_TEMP/assembly-190-193"
+    29:           git worktree add --detach "$RUNNER_TEMP/assembly-190-193" origin/main
+    30:           python3 .github/agent_patch_assembly_190_193_v2.py "$RUNNER_TEMP/assembly-190-193"
+    31:           git -C "$RUNNER_TEMP/assembly-190-193" diff --check
+    32:           git -C "$RUNNER_TEMP/assembly-190-193" diff --stat
+    33:       - name: Install Vulkan SDK
+    34:         shell: bash
+    35:         run: bash "$RUNNER_TEMP/assembly-190-193/.github/scripts/install-vulkan-sdk.sh"
+    36:       - name: Build and run full Release suite
+    37:         shell: bash
+    38:         run: |
+    39:           set -euo pipefail
+    40:           cd "$RUNNER_TEMP/assembly-190-193"
+    41:           driver="$RUNNER_TEMP/buster-build-190-193"
+    42:           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+    43:           "$driver" generate --cc clang --ci --linker DEFAULT
+    44:           "$driver" build --config Release -t test_all --verbose
+    45:       - name: Reproduce fixed encodings
+    46:         shell: bash
+    47:         run: |
+    48:           set -euo pipefail
+    49:           cd "$RUNNER_TEMP/assembly-190-193"
+    50:           ide=build/Release/ide
+    51:           extract_text() {
+    52:             local object="$1"
+    53:             local output="$2"
+    54:             objcopy --dump-section ".text=$output" "$object"
+    55:           }
+    56:           compare_case() {
+    57:             local name="$1"
+    58:             local source="$2"
+    59:             printf '%s\n' "$source" > "$RUNNER_TEMP/$name.s"
+    60:             "$ide" cc -c -march=diamondrapids "$RUNNER_TEMP/$name.s" -o "$RUNNER_TEMP/$name-buster.o"
+    61:             clang -c -march=diamondrapids "$RUNNER_TEMP/$name.s" -o "$RUNNER_TEMP/$name-clang.o"
+    62:             extract_text "$RUNNER_TEMP/$name-buster.o" "$RUNNER_TEMP/$name-buster.bin"
+    63:             extract_text "$RUNNER_TEMP/$name-clang.o" "$RUNNER_TEMP/$name-clang.bin"
+    64:             cmp "$RUNNER_TEMP/$name-buster.bin" "$RUNNER_TEMP/$name-clang.bin"
+    65:           }
+    66:           compare_case broadcast '.text
+    67:           .globl f
+    68:           f:
+    69:             vaddps 64(%rax){1to16}, %zmm1, %zmm2
+    70:             ret'
+    71:           compare_case rex2_width '.text
+    72:           .globl f
+    73:           f:
+    74:             addq $1, (%r16)
+    75:             ret'
+    76:           compare_case exact_bts '.text
+    77:           .globl f
+    78:           f:
+    79:             bts $3, (%r23)
+    80:             ret'
+    81:           compare_case apx_vvvv '.text
+    82:           .globl f
+    83:           f:
+    84:             shlx %r17, %r18, %r19
+    85:             sarx %r20, %r21, %r22
+    86:             shrx %r24, %r25, %r26
+    87:             ret'
+    88:           cat > "$RUNNER_TEMP/apx_pp.s" <<'EOF'
+    89:           .text
+    90:           .globl f
+    91:           f:
+    92:             adcx %rax, %rcx
+    93:             adox %rax, %rcx
+    94:             ret
+    95:           EOF
+    96:           "$ide" cc -c -march=diamondrapids "$RUNNER_TEMP/apx_pp.s" -o "$RUNNER_TEMP/apx_pp.o"
+    97:           extract_text "$RUNNER_TEMP/apx_pp.o" "$RUNNER_TEMP/apx_pp.bin"
+    98:           python3 - "$RUNNER_TEMP/apx_pp.bin" <<'PY'
+    99:           from pathlib import Path
+   100:           import sys
+   101:           data = Path(sys.argv[1]).read_bytes()
+   102:           expected = bytes.fromhex('62 f4 fd 08 66 c8 62 f4 fe 08 66 c8 c3')
+   103:           if data != expected:
+   104:               raise SystemExit(f'APX pp bytes differ: got {data.hex(" ")}, expected {expected.hex(" ")}')
+   105:           PY
+   106:           for mnemonic in adds cmps movs; do
+   107:             cat > "$RUNNER_TEMP/$mnemonic.s" <<EOF
+   108:           .text
+   109:           .globl f
+   110:           f:
+   111:             $mnemonic \$3, (%rax)
+   112:             ret
+   113:           EOF
+   114:             if "$ide" cc -c -march=diamondrapids "$RUNNER_TEMP/$mnemonic.s" -o "$RUNNER_TEMP/$mnemonic.o"; then
+   115:               echo "$mnemonic unexpectedly assembled" >&2
+   116:               exit 1
+   117:             fi
+   118:           done
+   119:       - name: Publish clean fix branch
+   120:         shell: bash
+   121:         run: |
+   122:           set -euo pipefail
+   123:           worktree="$RUNNER_TEMP/assembly-190-193"
+   124:           git -C "$worktree" config user.name "github-actions[bot]"
+   125:           git -C "$worktree" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+   126:           git -C "$worktree" add src/buster/lib/compiler/assembly/x86_64_metadata.c src/buster/lib/compiler/assembly/assembly.c
+   127:           git -C "$worktree" commit -m 'assembly: fix APX and EVEX operand encoding'
+   128:           git -C "$worktree" push --force origin HEAD:agent/fix-assembly-190-193
 
 ===== .github/workflows/ios-monitor-tests.yml =====
      1: name: iOS monitor lifecycle
