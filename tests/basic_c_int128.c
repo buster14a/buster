@@ -67,8 +67,25 @@ int main(void)
     WideSigned signed_dividend = -(WideSigned)dividend;
     WideSigned signed_quotient = signed_dividend / 37;
     WideSigned signed_remainder = signed_dividend % 37;
-    if (signed_quotient * 37 + signed_remainder != signed_dividend || signed_remainder > 0)
+    // q * d + r == n alone accepts the broken q = 0, r = n result.
+    if (signed_quotient != -(WideSigned)quotient || signed_remainder != -(WideSigned)remainder)
         return 10;
+    WideSigned positive = (WideSigned)one * 100;
+    WideSigned divisor = (WideSigned)one * 7;
+    if (positive / divisor != 14 || positive % divisor != 2 ||
+        -positive / divisor != -14 || -positive % divisor != -2 ||
+        positive / -divisor != -14 || positive % -divisor != 2 ||
+        -positive / -divisor != 14 || -positive % -divisor != -2)
+        return 12;
+    if (signed_dividend / -37 != (WideSigned)quotient || signed_dividend % -37 != -(WideSigned)remainder ||
+        (WideSigned)dividend / -37 != -(WideSigned)quotient || (WideSigned)dividend % -37 != (WideSigned)remainder)
+        return 13;
+    WideSigned minimum = (WideSigned)(one << 127);
+    WideSigned maximum = (WideSigned)((one << 127) - 1);
+    // All of these are defined; INT128_MIN / -1 is deliberately excluded.
+    if (minimum / 1 != minimum || minimum % 1 != 0 || minimum / minimum != 1 || minimum % minimum != 0 ||
+        maximum / -1 != -maximum || maximum % -1 != 0 || -divisor / positive != 0 || -divisor % positive != -divisor)
+        return 14;
     if (!test_atomic_wide(high))
         return 11;
     return 0;
