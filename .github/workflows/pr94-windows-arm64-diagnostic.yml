@@ -106,6 +106,22 @@ jobs:
               raise SystemExit(f"switch body anchor count is {gen_text.count(body_gate)}")
           gen_text = gen_text.replace(body_gate, body_probe, 1)
 
+          colon_state = " " * 20 + "u32 nested = 0;"
+          colon_state_probe = colon_state + "\n" + " " * 20 + r'''fprintf(stderr, "PR94_SWITCH_STAGE label scan=%u initial_range=%u\n", scan, range_operator);
+                      fflush(stderr);'''
+          if gen_text.count(colon_state) != 1:
+              raise SystemExit(f"switch label-state anchor count is {gen_text.count(colon_state)}")
+          gen_text = gen_text.replace(colon_state, colon_state_probe, 1)
+
+          colon_token = " " * 24 + "CToken colon_token = builder->preprocess.tokens[colon];"
+          colon_token_probe = colon_token + "\n" + " " * 24 + r'''fprintf(stderr, "PR94_SWITCH_STAGE label_token colon=%u kind=%u punctuator=%u nested=%u range=%u ellipsis=%u\n", colon,
+                              (u32)colon_token.kind, (u32)colon_token.punctuator, nested, range_operator,
+                              (u32)c_token_is_punctuator(&colon_token, C_PUNCTUATOR_ELLIPSIS));
+                          fflush(stderr);'''
+          if gen_text.count(colon_token) != 1:
+              raise SystemExit(f"switch label-token anchor count is {gen_text.count(colon_token)}")
+          gen_text = gen_text.replace(colon_token, colon_token_probe, 1)
+
           case_constant_gate = " " * 28 + "if (!c_ir_constant_evaluate(builder, scan + 1, colon, &switch_case.low_constant) ||"
           case_constant_probe = " " * 28 + r'''bool pr94_constant_success = c_ir_constant_evaluate(builder, scan + 1, colon, &switch_case.low_constant);
                               fprintf(stderr, "PR94_SWITCH_STAGE case scan=%u colon=%u constant_success=%u constant_kind=%u\n", scan, colon,
