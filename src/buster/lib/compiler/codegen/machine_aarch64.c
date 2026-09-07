@@ -4357,6 +4357,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         u32* candidate_rows = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
         u32 candidate_count = 0;
         bool dense_rows = true;
+        bool nonvolatile_memory = true;
         u32 walk_ordinal = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
@@ -4367,6 +4368,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             {
                 IrInstruction* instruction = function->instructions + id.value;
                 dense_rows &= id.value == block->first_instruction.value + block_row_count;
+                nonvolatile_memory &= !instruction->volatile_access;
                 if ((MACHINE_A64_CANDIDATE_OPCODES >> instruction->opcode) & 1)
                 {
                     candidate_rows[candidate_count] = block_row_count;
@@ -5296,6 +5298,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         machine_stream_flatten(&selector.immediates, result.function.immediates);
         result.function.stack_slot_sizes = arena_allocate(arena, u32, selector.stack_slots.total_count);
         result.function.stack_slot_count = selector.stack_slots.total_count;
+        result.function.nonvolatile_memory_certified = nonvolatile_memory;
         machine_stream_flatten(&selector.stack_slots, result.function.stack_slot_sizes);
         result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slot_alignments.total_count);
         machine_stream_flatten(&selector.stack_slot_alignments, result.function.stack_slot_alignments);

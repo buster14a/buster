@@ -3304,6 +3304,8 @@ bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* 
     {
         return false;
     }
+    // Structural replay carries no canonical volatile provenance. Deliberately
+    // drop nonvolatile_memory_certified: memory stays conservatively ordered.
     MachineFunction read = {
         .instructions = arena_allocate(arena, MachineInstruction, header.instruction_count),
         .virtual_registers = arena_allocate(arena, MachineVirtualRegister, header.virtual_register_count),
