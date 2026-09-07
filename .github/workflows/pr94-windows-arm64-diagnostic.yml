@@ -80,8 +80,6 @@ jobs:
                   }
               }
               '''
-          gen_text = gen_text.replace(switch_line, probe + switch_line, 1)
-
           switch_enter = '''if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_SWITCH))
             {
                 if (index + 1 >= task.end || !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))'''
@@ -143,6 +141,7 @@ jobs:
           if gen_text.count(switch_yield) != 1:
               raise SystemExit(f"switch yield anchor count is {gen_text.count(switch_yield)}")
           gen_text = gen_text.replace(switch_yield, switch_yield_probe, 1)
+          gen_text = gen_text.replace(switch_line, probe + switch_line, 1)
           gen_path.write_text(gen_text, encoding="utf-8")
           '@ | python -
 
