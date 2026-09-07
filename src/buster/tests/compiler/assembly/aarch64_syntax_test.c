@@ -112,10 +112,14 @@ UnitTestResult aarch64_syntax_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !buster_aarch64_syntax_test_generated_row_fields_valid(0, UINT32_MAX, 0));
     BUSTER_TEST(arguments, !buster_aarch64_syntax_test_generated_row_fields_valid(0, UINT32_MAX - 1, 2));
     BUSTER_TEST(arguments, !buster_aarch64_syntax_test_generated_row_fields_valid(0, 0, UINT32_MAX));
-    BusterAarch64SyntaxRow rejected_row = first;
-    BusterAarch64SyntaxRow rejected_row_before = rejected_row;
+    // The rejection contract preserves bytes, including padding. A successful
+    // row's struct assignment does not initialize its padding for memcmp.
+    BusterAarch64SyntaxRow rejected_row;
+    memset(&rejected_row, 0xa5, sizeof(rejected_row));
+    u8 rejected_row_before[sizeof(rejected_row)];
+    memcpy(rejected_row_before, &rejected_row, sizeof(rejected_row));
     BUSTER_TEST(arguments, !buster_aarch64_syntax_row(counts.row_count, &rejected_row) &&
-                         memcmp(&rejected_row, &rejected_row_before, sizeof(rejected_row)) == 0);
+                         memcmp(&rejected_row, rejected_row_before, sizeof(rejected_row)) == 0);
     BusterAarch64SyntaxCapture rejected_captures[1] = {{.spelling = S8("row-sentinel")}};
     BusterAarch64SyntaxCapture rejected_captures_before[1];
     memcpy(rejected_captures_before, rejected_captures, sizeof(rejected_captures_before));
