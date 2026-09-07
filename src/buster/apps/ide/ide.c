@@ -1,7 +1,8 @@
 // The `ide` executable: a headless compiler driver (`ide cc` ->
 // run_c_compiler -> the compiler_driver_* API in driver.h), test runner
 // (`ide test` -> compiler_run_tests -> library_tests), benchmark driver
-// (`ide bench`, the BENCH_C_FRONTEND line), fuzz entrypoint, and x86-64
+// (`ide bench`, the BENCH_C_FRONTEND line; `ide bench-select`, BENCH_SELECT),
+// fuzz entrypoint, and x86-64
 // completion census. The name is retained for build-script compatibility.
 // The BUSTER_UNITY_BUILD include block below is the list AGENTS.md's
 // module-adding rule appends to; forgetting a module there breaks
@@ -117,6 +118,7 @@ typedef enum CompilerCommand
     COMPILER_COMMAND_HELP,
     COMPILER_COMMAND_TEST,
     COMPILER_COMMAND_BENCH,
+    COMPILER_COMMAND_BENCH_SELECT,
     COMPILER_COMMAND_CC,
     COMPILER_COMMAND_FUZZ,
     COMPILER_COMMAND_X86_64_COMPLETION_CENSUS,
@@ -129,6 +131,7 @@ struct CompilerProgram
     SliceString8 cc_arguments;
     SliceString8 fuzz_arguments;
     String8 completion_census_output_path;
+    String8 selection_benchmark_path;
     CompilerCommand command;
 };
 
@@ -141,6 +144,7 @@ BUSTER_GLOBAL_LOCAL void compiler_print_usage(void)
                     "  ide cc <C compiler options and inputs>\n"
                     "  ide test [--verbose=0|1] [--ci=0|1]\n"
                     "  ide bench\n"
+                    "  ide bench-select <self-contained-source.c>\n"
                     "  ide x86_64_completion_census [--output=<path>]\n"
                     "  ide --fuzz <libFuzzer options and corpus paths>\n"));
 }
@@ -187,6 +191,21 @@ ProcessResult process_arguments(void)
             }
         }
         return PROCESS_RESULT_SUCCESS;
+    }
+    if (string_equal(command, S8("bench-select")))
+    {
+        ProcessResult result = PROCESS_RESULT_FAILED;
+        if (arguments.length == 3 && arguments.pointer[2].length)
+        {
+            compiler_state.command = COMPILER_COMMAND_BENCH_SELECT;
+            compiler_state.selection_benchmark_path = arguments.pointer[2];
+            result = PROCESS_RESULT_SUCCESS;
+        }
+        else
+        {
+            compiler_print_usage();
+        }
+        return result;
     }
     if (string_equal(command, S8("bench")))
     {
@@ -377,6 +396,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_run_benchmarks(void)
     arena_destroy(source_arena, 1);
     return PROCESS_RESULT_SUCCESS;
 }
+
+#include <buster/apps/ide/selection_benchmark.h>
 
 #if BUSTER_FUZZ_AVAILABLE
 s32 buster_fuzz_test_input(const u8* pointer, size_t size)
@@ -952,6 +973,8 @@ ProcessResult entry_point(void)
             return compiler_run_tests();
         case COMPILER_COMMAND_BENCH:
             return compiler_run_benchmarks();
+        case COMPILER_COMMAND_BENCH_SELECT:
+            return compiler_run_selection_benchmark(compiler_state.selection_benchmark_path);
         case COMPILER_COMMAND_CC:
             return run_c_compiler();
         case COMPILER_COMMAND_FUZZ:
