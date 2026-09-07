@@ -15,7 +15,7 @@ permissions:
 jobs:
   source:
     if: ${{ github.server_url == 'https://github.com' }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: macos-26
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -26,8 +26,8 @@ jobs:
           IMPLEMENTATION_BRANCH: fix/self-host-deterministic-fixed-point
         run: |
           cp .audit-transfer/integration-driver.patch "$RUNNER_TEMP/integration-driver.patch"
-          base64 --decode .audit-transfer/self-host-harden.b64 | gzip --decompress > "$RUNNER_TEMP/harden.patch"
-          echo "0a5d0d97c08a24a7c91fcb0ac37e510b6f00c076ae6f60a8381b586fbeeaaad9  $RUNNER_TEMP/harden.patch" | sha256sum --check
+          openssl base64 -d -A < .audit-transfer/self-host-harden.b64 | gzip -dc > "$RUNNER_TEMP/harden.patch"
+          echo "0a5d0d97c08a24a7c91fcb0ac37e510b6f00c076ae6f60a8381b586fbeeaaad9  $RUNNER_TEMP/harden.patch" | shasum -a 256 -c
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git switch --detach acde6e0c7cbc582dd65ab8c7b1cda368e386965f
