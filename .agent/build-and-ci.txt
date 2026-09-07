@@ -4505,6 +4505,75 @@
    170:           git -C "$worktree" commit -m "assembly: fix issue #$issue"
    171:           git -C "$worktree" push --force origin "HEAD:agent/fix-assembly-$issue"
 
+===== .github/workflows/agent-patch-codegen-194.yml =====
+     1: name: Temporary patch codegen issue 194
+     2: 
+     3: on:
+     4:   push:
+     5:     branches:
+     6:       - agent/inspect-190-195
+     7:     paths:
+     8:       - .github/agent_patch_codegen_194.py
+     9:       - .github/workflows/agent-patch-codegen-194.yml
+    10: 
+    11: permissions:
+    12:   contents: write
+    13: 
+    14: jobs:
+    15:   patch-test-publish:
+    16:     runs-on: ubuntu-24.04
+    17:     timeout-minutes: 90
+    18:     steps:
+    19:       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+    20:         with:
+    21:           fetch-depth: 0
+    22:       - name: Prepare clean main worktree and apply fix
+    23:         shell: bash
+    24:         run: |
+    25:           set -euo pipefail
+    26:           git fetch origin main
+    27:           worktree="$RUNNER_TEMP/codegen-194"
+    28:           rm -rf "$worktree"
+    29:           git worktree add --detach "$worktree" origin/main
+    30:           python3 .github/agent_patch_codegen_194.py "$worktree"
+    31:           git -C "$worktree" diff --check
+    32:           git -C "$worktree" diff --stat
+    33:       - name: Install Vulkan SDK
+    34:         shell: bash
+    35:         run: bash "$RUNNER_TEMP/codegen-194/.github/scripts/install-vulkan-sdk.sh"
+    36:       - name: Build compiler
+    37:         shell: bash
+    38:         run: |
+    39:           set -euo pipefail
+    40:           cd "$RUNNER_TEMP/codegen-194"
+    41:           driver="$RUNNER_TEMP/buster-build-194"
+    42:           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+    43:           "$driver" generate --cc clang --ci --linker DEFAULT
+    44:           "$driver" build --config Release -t ide --verbose
+    45:       - name: Run focused i128 floating conversion regression
+    46:         shell: bash
+    47:         run: |
+    48:           set -euo pipefail
+    49:           cd "$RUNNER_TEMP/codegen-194"
+    50:           build/Release/ide cc tests/basic_c_i128_float.c -o "$RUNNER_TEMP/basic_c_i128_float"
+    51:           "$RUNNER_TEMP/basic_c_i128_float"
+    52:       - name: Run full Release suite
+    53:         shell: bash
+    54:         run: |
+    55:           set -euo pipefail
+    56:           cd "$RUNNER_TEMP/codegen-194"
+    57:           "$RUNNER_TEMP/buster-build-194" build --config Release -t test_all --verbose
+    58:       - name: Publish clean fix branch
+    59:         shell: bash
+    60:         run: |
+    61:           set -euo pipefail
+    62:           worktree="$RUNNER_TEMP/codegen-194"
+    63:           git -C "$worktree" config user.name "github-actions[bot]"
+    64:           git -C "$worktree" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    65:           git -C "$worktree" add src/buster/lib/compiler/codegen/codegen.c tests/basic_c_i128_float.c
+    66:           git -C "$worktree" commit -m 'codegen: support x86-64 i128 floating conversions'
+    67:           git -C "$worktree" push --force origin HEAD:agent/fix-codegen-194
+
 ===== .github/workflows/agent-patch-codegen-195.yml =====
      1: name: Temporary patch codegen issue 195
      2: 
