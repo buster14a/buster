@@ -15,16 +15,15 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: claude/unruffled-bhabha-f5d28a
-      - name: Dump failing tests and frontend symbols
+      - name: Dump frontend constant evaluator
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== diagnostic helper ==='
-          nl -ba src/buster/tests/compiler/frontend/c/c_test.c | sed -n '250,310p'
-          echo '=== sizeof tests ==='
-          nl -ba src/buster/tests/compiler/frontend/c/c_test.c | sed -n '6840,6960p'
-          echo '=== control-flow tests ==='
-          nl -ba src/buster/tests/compiler/frontend/c/c_test.c | sed -n '7480,8005p'
-          echo '=== related frontend definitions ==='
-          grep -RInE 'case[_ ]range|CASE_RANGE|constant_expression|constant expression|wide_immediate|narrow_immediate|CConstant|ConstantValue|constant_value' src/buster/lib/compiler/frontend/c src/buster/lib/compiler/ir | head -n 500 || true
+          file=src/buster/lib/compiler/frontend/c/c_gen.c
+          for range in 1650,1775 2700,2890 28950,29110 32580,32760 33090,33320 38770,38930 39240,39490 39520,40040 40100,40210 40210,40730; do
+            start=${range%,*}
+            end=${range#*,}
+            echo "=== c_gen.c:${start}-${end} ==="
+            nl -ba "$file" | sed -n "${start},${end}p"
+          done
           exit 1
