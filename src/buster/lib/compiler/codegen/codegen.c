@@ -20302,7 +20302,10 @@ CodegenExecutable codegen_make_executable(CodegenFunction function)
         return result;
     }
     memcpy(address, function.code.pointer, function.code.length);
-    memcpy((u8*)address + data_offset, function.read_only_data.pointer, function.read_only_data.length);
+    if (function.read_only_data.length)
+    {
+        memcpy((u8*)address + data_offset, function.read_only_data.pointer, function.read_only_data.length);
+    }
     for (CodegenDataRelocation* relocation = function.first_data_relocation; relocation; relocation = relocation->next)
     {
         u8* patch = (u8*)address + relocation->code_offset;
