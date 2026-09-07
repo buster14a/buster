@@ -6,6 +6,7 @@ on:
       - agent/inspect-190-195
     paths:
       - .github/agent_patch_assembly_190_193.py
+      - .github/agent_patch_assembly_190_193_v2.py
       - .github/workflows/agent-patch-assembly-190-193.yml
 
 permissions:
@@ -26,7 +27,7 @@ jobs:
           git fetch origin main
           rm -rf "$RUNNER_TEMP/assembly-190-193"
           git worktree add --detach "$RUNNER_TEMP/assembly-190-193" origin/main
-          python3 .github/agent_patch_assembly_190_193.py "$RUNNER_TEMP/assembly-190-193"
+          python3 .github/agent_patch_assembly_190_193_v2.py "$RUNNER_TEMP/assembly-190-193"
           git -C "$RUNNER_TEMP/assembly-190-193" diff --check
           git -C "$RUNNER_TEMP/assembly-190-193" diff --stat
       - name: Install Vulkan SDK
