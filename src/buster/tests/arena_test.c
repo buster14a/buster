@@ -243,7 +243,6 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
                                                          (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values),
                                                          (ProcessSpawnOptions){
                                                              .capture = (u64)1 << STANDARD_STREAM_ERROR,
-                                                             .use_process_environment = 1,
                                                          });
             BUSTER_TEST(arguments, spawn.handle != 0);
             if (spawn.handle)
