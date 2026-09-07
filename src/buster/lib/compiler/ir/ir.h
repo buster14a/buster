@@ -364,6 +364,7 @@ struct IrLabelProvenancePath
 struct IrValue
 {
     IrTypeId canonical_type;
+    // INVALID denotes a value defined by exactly one block parameter.
     IrInstructionId definition;
     u32 alignment;
     // IrValueCategory; u8 keeps the record at 16 bytes (one million-plus
@@ -662,6 +663,26 @@ struct IrModuleInitializer
     u8 reserved[3];
 };
 
+// Counts refer to occupied canonical rows, not reserved arena capacity. The
+// pass owns these counters until publication; consumers must not rerun it on
+// a mutated module without clearing local_promotion_complete.
+typedef struct IrLocalPromotionStatistics IrLocalPromotionStatistics;
+struct IrLocalPromotionStatistics
+{
+    u64 candidate_locals;
+    u64 promoted_locals;
+    u64 removed_loads;
+    u64 removed_stores;
+    u64 inserted_parameters;
+    u64 removed_parameters;
+    u64 uninitialized_locals;
+    u64 barrier_functions;
+    u64 instructions_before;
+    u64 instructions_after;
+    u64 values_before;
+    u64 values_after;
+};
+
 typedef struct IrModule IrModule;
 struct IrModule
 {
@@ -698,6 +719,8 @@ struct IrModule
     // without walking the global table; the count is zero for every
     // translation unit without such an initializer, which is nearly all.
     u32 label_address_relocation_count;
+    bool local_promotion_complete;
+    IrLocalPromotionStatistics local_promotion;
 };
 
 typedef struct IrProgram IrProgram;
@@ -716,6 +739,9 @@ struct IrProgram
     // Scratch for ir_source_position; a program is resolved by one consumer
     // at a time, walking in roughly ascending offset order.
     IrSourceMapCursor source_cursor;
+    // Differential controls, set before publishing any module to a consumer.
+    bool disable_local_promotion;
+    bool disable_target_local_promotion;
     u32 module_count;
     u32 lowered_function_count;
     u32 rejected_function_count;
@@ -841,3 +867,9 @@ BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrFunction* function, IrInstru
 // re-deriving block membership or guarding their walks with a counter.
 BUSTER_F_DECL IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners);
 BUSTER_F_DECL IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module);
+
+// Validate (unless the producer supplied a certificate), promote eligible
+// locals once, and revalidate changed IR before publishing it to a consumer.
+// Mutates only arena-owned canonical rows and their side tables. Unsafe locals
+// remain in memory; there is no implicit zero/undef initialization.
+BUSTER_F_DECL IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool assume_validated);

@@ -11,6 +11,8 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_opcode_count(IrFunction* function, IrOpcode opco
     return count;
 }
 
+#include <buster/tests/compiler/ir/ir_promotion_test.c>
+
 BUSTER_GLOBAL_LOCAL u32 ir_test_binary_operation_count(IrFunction* function, IrBinaryOperation operation)
 {
     u32 count = 0;
@@ -147,7 +149,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_float_global(Arena* are
 
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
-    UnitTestResult result = {0};
+    UnitTestResult result = ir_promotion_tests(arguments);
 
     IrProgram abi_program = ir_program_initialize(arguments->arena, 0, 32, 0, 0);
     IrTypeId abi_f32 = ir_program_add_type(&abi_program, (IrType){

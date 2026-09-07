@@ -64,6 +64,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_aarch64_description =
     .copy_opcode = MACHINE_A64_MOV_RR,
     .constant_opcode = MACHINE_A64_MOV_RI,
     .indirect_call_opcode = MACHINE_A64_CALL_INDIRECT,
+    .unconditional_branch_opcode = MACHINE_A64_B,
     .switch_opcode = MACHINE_A64_SWITCH,
     .float_bridge_opcode = MACHINE_A64_FMOV_TO_VEC,
     .indirect_call_register = MACHINE_A64_X16,
@@ -4335,7 +4336,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             if (definition.value < function->instruction_count)
             {
                 IrInstruction* instruction = function->instructions + definition.value;
-                if (instruction->opcode == IR_OPCODE_LOCAL && instruction->result.value == value_index)
+                if (!program->disable_target_local_promotion && instruction->opcode == IR_OPCODE_LOCAL && instruction->result.value == value_index)
                 {
                     IrType* local_type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
                     if (machine_a64_type_is_scalar_register(local_type) && (local_type->layout.size == 4 || local_type->layout.size == 8))
@@ -4423,6 +4424,25 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             }
             row_layout.block_row_counts[block_index] = block_row_count;
             block_candidate_counts[block_index] = block_candidate_count;
+        }
+        // Incoming block-parameter values are edge uses, not instruction
+        // operands. Count them before aliasing/fusion so a value carried by
+        // canonical promotion cannot be absorbed as an otherwise-dead branch
+        // condition.
+        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        {
+            for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
+            {
+                for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+                {
+                    if (incoming->value.value < function->value_count)
+                    {
+                        value_use_counts[incoming->value.value] += 1;
+                        value_use_blocks[incoming->value.value] = MACHINE_SELECTION_MULTIPLE_BLOCKS;
+                        value_last_use_ordinals[incoming->value.value] = walk_ordinal;
+                    }
+                }
+            }
         }
         if (!dense_rows)
         {
@@ -5304,6 +5324,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         for (u32 register_index = 0; register_index < selector.virtual_register_count; register_index += 1)
         {
             result.function.virtual_registers[register_index].definition_point = selector.virtual_register_definitions[register_index];
+        }
+        if (!machine_function_split_parameter_edges(arena, &result.function))
+        {
+            return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }
         result.mutable_virtual_register_count = machine_function_compact_virtual_registers(arena, &result.function);
         if (result.mutable_virtual_register_count == UINT32_MAX)
@@ -6687,9 +6711,11 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == before)
             {
                 MachineEdit* edit = placement->edits + edit_cursor;
-                if (edit->kind == MACHINE_EDIT_SPILL)
+                if (edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_TEMP_SPILL)
                 {
-                    machine_a64_emit_frame_store(&encoder, edit->location, machine_a64_frame_offset(frame_area, placement->virtual_register_offsets[edit->subject]));
+                    u32 edit_frame_offset = edit->kind == MACHINE_EDIT_TEMP_SPILL ? placement->edge_copy_temporary_offset + edit->subject
+                                                                                 : placement->virtual_register_offsets[edit->subject];
+                    machine_a64_emit_frame_store(&encoder, edit->location, machine_a64_frame_offset(frame_area, edit_frame_offset));
                 }
                 else if (edit->kind == MACHINE_EDIT_COPY)
                 {
@@ -6701,7 +6727,9 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 }
                 else
                 {
-                    machine_a64_emit_frame_load(&encoder, edit->location, machine_a64_frame_offset(frame_area, placement->virtual_register_offsets[edit->subject]));
+                    u32 edit_frame_offset = edit->kind == MACHINE_EDIT_TEMP_RELOAD ? placement->edge_copy_temporary_offset + edit->subject
+                                                                                  : placement->virtual_register_offsets[edit->subject];
+                    machine_a64_emit_frame_load(&encoder, edit->location, machine_a64_frame_offset(frame_area, edit_frame_offset));
                 }
                 edit_cursor += 1;
             }
@@ -7466,9 +7494,11 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             while (edit_cursor < placement->edit_count && placement->edits[edit_cursor].point == after)
             {
                 MachineEdit* edit = placement->edits + edit_cursor;
-                if (edit->kind == MACHINE_EDIT_RELOAD)
+                if (edit->kind == MACHINE_EDIT_RELOAD || edit->kind == MACHINE_EDIT_TEMP_RELOAD)
                 {
-                    machine_a64_emit_frame_load(&encoder, edit->location, machine_a64_frame_offset(frame_area, placement->virtual_register_offsets[edit->subject]));
+                    u32 edit_frame_offset = edit->kind == MACHINE_EDIT_TEMP_RELOAD ? placement->edge_copy_temporary_offset + edit->subject
+                                                                                  : placement->virtual_register_offsets[edit->subject];
+                    machine_a64_emit_frame_load(&encoder, edit->location, machine_a64_frame_offset(frame_area, edit_frame_offset));
                 }
                 else if (edit->kind == MACHINE_EDIT_COPY)
                 {
@@ -7480,7 +7510,9 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 }
                 else
                 {
-                    machine_a64_emit_frame_store(&encoder, edit->location, machine_a64_frame_offset(frame_area, placement->virtual_register_offsets[edit->subject]));
+                    u32 edit_frame_offset = edit->kind == MACHINE_EDIT_TEMP_SPILL ? placement->edge_copy_temporary_offset + edit->subject
+                                                                                 : placement->virtual_register_offsets[edit->subject];
+                    machine_a64_emit_frame_store(&encoder, edit->location, machine_a64_frame_offset(frame_area, edit_frame_offset));
                 }
                 edit_cursor += 1;
             }

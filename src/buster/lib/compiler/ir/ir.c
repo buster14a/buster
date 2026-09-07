@@ -8,7 +8,8 @@
 // ABI classification the frontend and codegen both consume
 // (ir_abi_unqualified_type, ir_system_v_abi_classes,
 // ir_homogeneous_float_abi, ir_classify_abi_value, ir_prepare_program_abi),
-// and the module validator
+// the shared local-promotion pass (ir_prepare_canonical_module, in
+// ir_promote.c), and the module validator
 // (ir_validate_canonical_module) that every producer runs before machine
 // selection or Wasm emission so a diagnosed frontend failure cannot leak a
 // half-built function into codegen.
@@ -4311,12 +4312,38 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* program, IrFunction* function)
 {
     IrValidationResult result = ir_validation_ok();
+    TemporalArena temporary = scratch_begin(&program->arena, 1);
+    u8* parameter_definitions = arena_allocate(temporary.arena, u8, function->value_count);
+    memset(parameter_definitions, 0, function->value_count);
+    for (u32 block_index = 0; block_index < function->block_count && result.error == IR_VALIDATION_NONE; block_index += 1)
+    {
+        IrBlock* block = function->blocks + block_index;
+        u32 count = 0;
+        for (IrBlockParameter* parameter = block->first_parameter; parameter && result.error == IR_VALIDATION_NONE; parameter = parameter->next)
+        {
+            if (count++ >= block->parameter_count || parameter->value.value >= function->value_count ||
+                parameter_definitions[parameter->value.value])
+            {
+                result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
+            }
+            else
+            {
+                parameter_definitions[parameter->value.value] = 1;
+            }
+        }
+        if (count != block->parameter_count)
+        {
+            result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
+        }
+    }
     for (u32 value_index = 0; value_index < function->value_count && result.error == IR_VALIDATION_NONE; value_index += 1)
     {
         IrValue* value = function->values + value_index;
         IrValueId value_id = {.value = value_index};
         IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
-        if (!value_type || value->definition.value >= function->instruction_count)
+        if (!value_type || (value->definition.value >= function->instruction_count &&
+                            !(value->definition.value == IR_ID_UNDERLYING_INVALID && parameter_definitions[value_index] &&
+                              value->category == IR_VALUE_VALUE)))
         {
             result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, value->definition);
         }
@@ -4347,6 +4374,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_values(IrProgram* pr
             }
         }
     }
+    scratch_end(temporary);
     return result;
 }
 
@@ -5227,3 +5255,5 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
     }
     return result;
 }
+
+#include <buster/lib/compiler/ir/ir_promote.c>

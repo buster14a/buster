@@ -130,6 +130,7 @@ struct Wasm64FunctionEmitter
     u32 sp_local;
     u32 scratch_local;
     u32 temp_base;
+    u32* block_temp_bases;
     u8* local_types;
     u32 local_count;
     u32 extra_local_count;
@@ -1692,12 +1693,12 @@ static void wasm64_fe_emit_parallel_copy(Wasm64FunctionEmitter* emitter, IrBlock
                 return;
             }
             wasm64_fe_emit_value(emitter, source);
-            wasm64_fe_local_set(emitter, emitter->temp_base + parameter_index);
+            wasm64_fe_local_set(emitter, emitter->block_temp_bases[target->id.value] + parameter_index);
         }
         parameter_index = 0;
         for (IrBlockParameter* parameter = target->first_parameter; parameter; parameter = parameter->next, parameter_index += 1)
         {
-            wasm64_fe_local_get(emitter, emitter->temp_base + parameter_index);
+            wasm64_fe_local_get(emitter, emitter->block_temp_bases[target->id.value] + parameter_index);
             wasm64_fe_local_set(emitter, emitter->value_locals[parameter->value.value]);
         }
     }
@@ -1924,8 +1925,12 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
     emitter->local_types[local_type_index++] = WASM64_VALTYPE_I64;
     emitter->local_types[local_type_index++] = WASM64_VALTYPE_I64;
     emitter->local_types[local_type_index++] = WASM64_VALTYPE_I64;
+    emitter->block_temp_bases = arena_allocate(context->arena, u32, function->block_count);
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
+        // Temporary local types are declared in block order, not one reusable
+        // untyped tile: different joins can carry different scalar types.
+        emitter->block_temp_bases[block_index] = record->signature.param_count + local_type_index;
         for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
         {
             Wasm64ValType type = 0;
@@ -2763,7 +2768,7 @@ static bool wasm64_validate_inputs(Wasm64Context* context)
     for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
     {
         IrModule* module = context->modules + module_index;
-        IrValidationResult validation = ir_validate_canonical_module(context->program, module);
+        IrValidationResult validation = ir_prepare_canonical_module(context->program, module, false);
         if (validation.error != IR_VALIDATION_NONE)
         {
             IrFunction* function = validation.function.value < module->function_count ? module->functions + validation.function.value : 0;

@@ -3262,11 +3262,11 @@ LlvmBitcodeArtifact llvm_bitcode_emit_with_options(Arena* arena, IrProgram* prog
         llvm_bc_fail(&context, LLVM_BITCODE_ERROR_INVALID_ARGUMENT, llvm_bc_s8("invalid LLVM bitcode emitter arguments"), 0, 0, 0,
                      IR_SYMBOL_ID_INVALID);
     }
-    if (!llvm_bc_failed(&context) && options.validate_ir)
+    if (!llvm_bc_failed(&context))
     {
         for (u32 module_index = 0; module_index < module_count; module_index += 1)
         {
-            IrValidationResult validation = ir_validate_canonical_module(program, modules + module_index);
+            IrValidationResult validation = ir_prepare_canonical_module(program, modules + module_index, !options.validate_ir);
             if (validation.error != IR_VALIDATION_NONE)
             {
                 context.error.code = LLVM_BITCODE_ERROR_IR_VALIDATION;
