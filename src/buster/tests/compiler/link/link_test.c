@@ -567,7 +567,7 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_section_find(ByteSlice image, String8 name
 }
 #endif
 
-#if BUSTER_CPU_ARCH_X86_64
+#if BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64
 BUSTER_GLOBAL_LOCAL bool link_test_pe_import_matches(ByteSlice executable, String8 library, String8 symbol)
 {
     if (executable.length >= 0x40 && executable.pointer[0] == 'M' && executable.pointer[1] == 'Z')
