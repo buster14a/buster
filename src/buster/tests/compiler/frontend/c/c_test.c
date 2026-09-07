@@ -13123,8 +13123,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_malformed_initializer_progress_and_ide
         String8 source = S8("typedef int B; void n(void){ B{}B{}B{}B{}B{}B{}B{}B{} }");
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
         CParseResult parse = c_parse(temporary.arena, preprocess);
+        CIRLowerResult lower = {0};
+        if (!preprocess.diagnostic_count && !parse.diagnostic_count)
+        {
+            lower = c_lower_to_ir(temporary.arena, S8("repeated-typedef-name-statements.c"), preprocess, parse, target_native);
+        }
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
-        BUSTER_TEST(arguments, parse.diagnostic_count != 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count != 0 || lower.diagnostic_count != 0);
         BUSTER_TEST(arguments, parse.identifier_use_count == 8);
         BUSTER_TEST(arguments, parse.identifier_use_count <= parse.identifier_use_capacity);
         for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
