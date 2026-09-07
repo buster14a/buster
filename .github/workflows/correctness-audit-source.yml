@@ -1,13 +1,10 @@
 name: Correctness audit source
-
 on:
   push:
     branches:
       - audit/correctness-20260907-source
-
 permissions:
   contents: read
-
 jobs:
   source:
     if: ${{ github.server_url == 'https://github.com' }}
@@ -16,15 +13,15 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 9834a4253c61934a8a253641a84741a25d3717e3
-          fetch-depth: 0
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
           persist-credentials: false
-      - name: Export pinned source history
+      - name: Export pinned bootstrap source
         shell: bash
-        run: git bundle create "$RUNNER_TEMP/buster-main.bundle" HEAD
+        run: git archive --format=tar.gz HEAD > "$RUNNER_TEMP/tinycc-0fb5430.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
-          name: correctness-audit-main-9834a42
-          path: ${{ runner.temp }}/buster-main.bundle
+          name: correctness-audit-tinycc-0fb5430
+          path: ${{ runner.temp }}/tinycc-0fb5430.tar.gz
           if-no-files-found: error
           retention-days: 1
