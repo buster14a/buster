@@ -30,6 +30,7 @@ jobs:
 
           path = Path("src/buster/tests/compiler/frontend/c/c_test.c")
           text = path.read_text(encoding="utf-8")
+          text = '#include <stdio.h>\n#include <stdlib.h>\n' + text
           anchor = '    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("sizeof-constant-expression.c"), tokens, parse, target_native);\n'
           diagnostic = r'''    if (ir.diagnostic_count)
               {
@@ -38,9 +39,8 @@ jobs:
                   for (u32 diagnostic_index = 0; diagnostic_index < ir.diagnostic_count; diagnostic_index += 1)
                   {
                       CDiagnostic* diagnostic_value = ir.diagnostics + diagnostic_index;
-                      fprintf(stderr, "PR94_DIAGNOSTIC index=%u kind=%u token=%u length=%llu message=", diagnostic_index,
-                              (u32)diagnostic_value->kind, diagnostic_value->token_index,
-                              (unsigned long long)diagnostic_value->message.length);
+                      fprintf(stderr, "PR94_DIAGNOSTIC index=%u kind=%u length=%llu message=", diagnostic_index,
+                              (u32)diagnostic_value->kind, (unsigned long long)diagnostic_value->message.length);
                       if (diagnostic_value->message.pointer && diagnostic_value->message.length)
                       {
                           fwrite(diagnostic_value->message.pointer, 1, diagnostic_value->message.length, stderr);
