@@ -1,4 +1,4 @@
-name: Temporary export for issues 190-195
+name: Temporary issue 195 fix gate
 
 on:
   push:
@@ -7,28 +7,228 @@ on:
     paths:
       - .github/workflows/agent-export-190-195.yml
 
+concurrency:
+  group: agent-tackle-190-195-control
+  cancel-in-progress: true
+
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export:
-    runs-on: ubuntu-slim
+  fix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Check out reviewed main revision
         uses: actions/checkout@v4
         with:
           ref: ebfdd11705bc470564e726857e498f1c82aa746c
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Archive working tree
+      - name: Install build dependencies
         shell: bash
-        run: tar --exclude=.git -czf /tmp/buster-main-ebfdd11.tar.gz .
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes cmake mold ninja-build
 
-      - name: Upload checkout
-        uses: actions/upload-artifact@v4
-        with:
-          name: buster-main-ebfdd11
-          path: /tmp/buster-main-ebfdd11.tar.gz
-          compression-level: 0
-          retention-days: 1
-          if-no-files-found: error
+      - name: Bootstrap and reproduce issue 195
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          ./build/build generate --ci
+          ./build/build build --config Release -t ide
+          cat >/tmp/issue195.c <<'EOF'
+          typedef struct { long long a, b; } P16;
+          static _Atomic P16 value;
+          int main(void)
+          {
+              P16 initial = {1, 2};
+              P16 expected = initial;
+              P16 desired = {3, 4};
+              __c11_atomic_store(&value, initial, __ATOMIC_SEQ_CST);
+              return !__c11_atomic_compare_exchange_strong(&value, &expected, desired, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+          }
+          EOF
+          if build/Release/ide cc /tmp/issue195.c -o /tmp/issue195-before
+          then
+              echo 'issue 195 no longer reproduces on the pinned revision' >&2
+              exit 1
+          fi
+
+      - name: Apply issue 195 root-cause fix and regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          git switch -c fix/issue-195-aggregate-cmpxchg16b
+          python3 <<'PY'
+          from pathlib import Path
+
+          codegen = Path('src/buster/lib/compiler/codegen/codegen.c')
+          text = codegen.read_text()
+          old = '''        BUSTER_ASSERT(input_layout.size == 1 || input_layout.size == 2 || input_layout.size == 4 || input_layout.size == 8 ||
+                      (input_layout.size == 16 && input_type->kind == IR_TYPE_INTEGER));'''
+          new = '''        BUSTER_ASSERT(input_layout.size == 1 || input_layout.size == 2 || input_layout.size == 4 || input_layout.size == 8 ||
+                      input_layout.size == 16);'''
+          if text.count(old) != 1:
+              raise SystemExit('issue 195 codegen anchor did not match exactly once')
+          codegen.write_text(text.replace(old, new))
+
+          test = Path('tests/basic_c_atomic_aggregate.c')
+          text = test.read_text()
+          old = '''typedef struct
+          {
+              long long a, b;
+          } sixteen;
+
+          typedef struct
+          {
+              long long a;
+              signed char b;
+          } nine;'''
+          new = '''typedef struct
+          {
+              long long a, b;
+          } sixteen;
+
+          typedef struct
+          {
+              int a, b, c, d;
+          } four_ints;
+
+          typedef struct
+          {
+              void* pointer;
+              unsigned long long counter;
+          } pointer_counter;
+
+          typedef struct
+          {
+              long long a;
+              signed char b;
+          } nine;'''
+          if text.count(old) != 1:
+              raise SystemExit('issue 195 type anchor did not match exactly once')
+          text = text.replace(old, new)
+
+          old = '''typedef _Atomic nine atomic_nine;
+
+          static _Atomic sixteen global_sixteen;
+          static atomic_nine global_nine;'''
+          new = '''typedef _Atomic sixteen atomic_sixteen;
+          typedef _Atomic four_ints atomic_four_ints;
+          typedef _Atomic pointer_counter atomic_pointer_counter;
+          typedef _Atomic nine atomic_nine;
+
+          static atomic_sixteen global_sixteen;
+          static atomic_four_ints global_four_ints;
+          static atomic_pointer_counter global_pointer_counter;
+          static atomic_nine global_nine;
+          static int pointer_anchor_a;
+          static int pointer_anchor_b;'''
+          if text.count(old) != 1:
+              raise SystemExit('issue 195 global anchor did not match exactly once')
+          text = text.replace(old, new)
+
+          anchor = '''/* Sixteen bytes ride two eightbytes rather than one, and the seven bytes the
+             promotion added to `nine` are part of what is passed. */'''
+          addition = '''static int wide_compare_exchange_round_trip(void)
+          {
+              sixteen initial = {1, 2};
+              sixteen desired = {3, 4};
+              sixteen replacement = {5, 6};
+              sixteen expected = initial;
+              __c11_atomic_store(&global_sixteen, initial, __ATOMIC_SEQ_CST);
+              int strong_succeeded = __c11_atomic_compare_exchange_strong(
+                  &global_sixteen, &expected, desired, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+              sixteen stale = initial;
+              int stale_succeeded = __c11_atomic_compare_exchange_strong(
+                  &global_sixteen, &stale, replacement, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+              sixteen loaded = __c11_atomic_load(&global_sixteen, __ATOMIC_ACQUIRE);
+
+              four_ints four_initial = {7, 8, 9, 10};
+              four_ints four_desired = {11, 12, 13, 14};
+              four_ints four_expected = four_initial;
+              __c11_atomic_store(&global_four_ints, four_initial, __ATOMIC_RELEASE);
+              int weak_succeeded = 0;
+              for (unsigned attempt = 0; attempt < 64 && !weak_succeeded; attempt += 1)
+              {
+                  four_expected = four_initial;
+                  weak_succeeded = __c11_atomic_compare_exchange_weak(
+                      &global_four_ints, &four_expected, four_desired, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+              }
+              four_ints four_loaded = __c11_atomic_load(&global_four_ints, __ATOMIC_RELAXED);
+
+              pointer_counter pointer_initial = {&pointer_anchor_a, 15};
+              pointer_counter pointer_desired = {&pointer_anchor_b, 16};
+              __c11_atomic_store(&global_pointer_counter, pointer_initial, __ATOMIC_SEQ_CST);
+              pointer_counter pointer_previous = __c11_atomic_exchange(
+                  &global_pointer_counter, pointer_desired, __ATOMIC_ACQ_REL);
+              pointer_counter pointer_loaded = __c11_atomic_load(&global_pointer_counter, __ATOMIC_ACQUIRE);
+
+              return strong_succeeded && !stale_succeeded && stale.a == desired.a && stale.b == desired.b &&
+                     loaded.a == desired.a && loaded.b == desired.b && weak_succeeded &&
+                     four_loaded.a == four_desired.a && four_loaded.b == four_desired.b &&
+                     four_loaded.c == four_desired.c && four_loaded.d == four_desired.d &&
+                     pointer_previous.pointer == pointer_initial.pointer && pointer_previous.counter == pointer_initial.counter &&
+                     pointer_loaded.pointer == pointer_desired.pointer && pointer_loaded.counter == pointer_desired.counter &&
+                     sizeof(atomic_sixteen) == 16 && _Alignof(atomic_sixteen) == 16 &&
+                     sizeof(atomic_four_ints) == 16 && _Alignof(atomic_four_ints) == 16 &&
+                     sizeof(atomic_pointer_counter) == 16 && _Alignof(atomic_pointer_counter) == 16;
+          }
+
+          ''' + anchor
+          if text.count(anchor) != 1:
+              raise SystemExit('issue 195 function anchor did not match exactly once')
+          text = text.replace(anchor, addition)
+
+          old = '''static int wide_argument_round_trip(void)
+          {
+              return 1;
+          }
+          #endif'''
+          new = '''static int wide_argument_round_trip(void)
+          {
+              return 1;
+          }
+
+          static int wide_compare_exchange_round_trip(void)
+          {
+              return 1;
+          }
+          #endif'''
+          if text.count(old) != 1:
+              raise SystemExit('issue 195 fallback anchor did not match exactly once')
+          text = text.replace(old, new)
+
+          old = '''             leading_round_trip() && argument_round_trip() && wide_round_trip() && wide_argument_round_trip());'''
+          new = '''             leading_round_trip() && argument_round_trip() && wide_round_trip() && wide_argument_round_trip() &&
+                       wide_compare_exchange_round_trip());'''
+          if text.count(old) != 1:
+              raise SystemExit('issue 195 main anchor did not match exactly once')
+          test.write_text(text.replace(old, new))
+          PY
+          git diff --check
+          git diff --stat
+
+      - name: Validate issue 195
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/build build --config Release -t test_all
+          build/Release/ide cc /tmp/issue195.c -o /tmp/issue195-after
+          /tmp/issue195-after
+          ./build/build test_mode_matrix --config Release
+          ./build/build test_self_host --config Release
+
+      - name: Publish clean issue branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'OpenAI Codex'
+          git config user.email 'codex@openai.com'
+          git add src/buster/lib/compiler/codegen/codegen.c tests/basic_c_atomic_aggregate.c
+          git commit -m 'codegen: allow aggregate cmpxchg16b values'
+          git push origin HEAD:refs/heads/fix/issue-195-aggregate-cmpxchg16b
