@@ -28,9 +28,9 @@ jobs:
           @'
           from pathlib import Path
 
-          path = Path("src/buster/tests/compiler/frontend/c/c_test.c")
-          text = path.read_text(encoding="utf-8")
-          text = '#include <stdio.h>\n#include <stdlib.h>\n' + text
+          test_path = Path("src/buster/tests/compiler/frontend/c/c_test.c")
+          test_text = test_path.read_text(encoding="utf-8")
+          test_text = '#include <stdio.h>\n#include <stdlib.h>\n' + test_text
           anchor = '    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("sizeof-constant-expression.c"), tokens, parse, target_native);\n'
           diagnostic = r'''    if (ir.diagnostic_count)
               {
@@ -51,9 +51,37 @@ jobs:
                   exit(213);
               }
           '''
-          if text.count(anchor) != 1:
+          if test_text.count(anchor) != 1:
               raise SystemExit("sizeof lower-result anchor not found")
-          path.write_text(text.replace(anchor, anchor + diagnostic, 1), encoding="utf-8")
+          test_path.write_text(test_text.replace(anchor, anchor + diagnostic, 1), encoding="utf-8")
+
+          gen_path = Path("src/buster/lib/compiler/frontend/c/c_gen.c")
+          gen_text = gen_path.read_text(encoding="utf-8")
+          gen_text = '#include <stdio.h>\n' + gen_text
+          switch_line = 'if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_SWITCH))'
+          if gen_text.count(switch_line) != 1:
+              raise SystemExit(f"switch classifier anchor count is {gen_text.count(switch_line)}")
+          probe = r'''{
+                  String8 pr94_spelling = c_token_spelling(builder->preprocess.spelling_base, first);
+                  if (string_equal(pr94_spelling, S8("switch")))
+                  {
+                      String8 pr94_expected = c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_SWITCH];
+                      fprintf(stderr,
+                              "PR94_SWITCH_TOKEN kind=%u symbol=%u expected_symbol=%u offset=%u raw_length=%u punctuator=%u well_known=%u spelling_length=%llu expected_length=%llu spelling=",
+                              (u32)first.kind, first.symbol, (u32)C_SYMBOL_WELL_KNOWN_SWITCH, first.offset, (u32)first.length,
+                              (u32)first.punctuator,
+                              (u32)c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_SWITCH),
+                              (unsigned long long)pr94_spelling.length, (unsigned long long)pr94_expected.length);
+                      fwrite(pr94_spelling.pointer, 1, pr94_spelling.length, stderr);
+                      fputs(" expected=", stderr);
+                      fwrite(pr94_expected.pointer, 1, pr94_expected.length, stderr);
+                      fputc('\n', stderr);
+                      fflush(stderr);
+                  }
+              }
+              '''
+          gen_text = gen_text.replace(switch_line, probe + switch_line, 1)
+          gen_path.write_text(gen_text, encoding="utf-8")
           '@ | python -
 
       - name: Configure and run the reproducer
