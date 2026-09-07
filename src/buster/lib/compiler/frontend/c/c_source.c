@@ -4089,17 +4089,18 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 };
             }
         }
-        CPpToken* output = arena_allocate(arena, CPpToken, materialized_count);
+        // Concatenation keeps placemarkers until the entire ## chain is
+        // complete. Compact in place: output_count never overtakes index.
+        // Dropping an empty left argument here would paste the preceding
+        // unrelated token, or falsely diagnose a replacement-list edge.
+        CMacroReplacementToken* pasted = materialized;
         u32 output_count = 0;
         for (u32 index = 0; index < materialized_count && ok; index += 1)
         {
             CMacroReplacementToken item = materialized[index];
             if (!c_macro_is_paste(item.token.token))
             {
-                if (!item.placemarker)
-                {
-                    output[output_count++] = item.token;
-                }
+                pasted[output_count++] = item;
                 continue;
             }
             if (!output_count || index + 1 >= materialized_count)
@@ -4112,7 +4113,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
             CMacroReplacementToken right = materialized[++index];
             if (right.placemarker)
             {
-                if (macro->definition.variadic && c_token_is_punctuator(&output[output_count - 1].token, C_PUNCTUATOR_COMMA))
+                if (item.comma_paste)
                 {
                     output_count -= 1;
                 }
@@ -4124,10 +4125,20 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 // already stands in the output; the argument's first token
                 // follows it as itself, and the rest of the argument flows
                 // through the loop as ordinary tokens.
-                output[output_count++] = right.token;
+                pasted[output_count++] = right;
                 continue;
             }
-            CPpToken left = output[--output_count];
+            CMacroReplacementToken left_item = pasted[output_count - 1];
+            if (left_item.placemarker)
+            {
+                // A placemarker pasted with a token is that token, located
+                // where the empty argument stood, including its spacing.
+                right.token.preceded_by_space = left_item.token.preceded_by_space;
+                pasted[output_count - 1] = right;
+                continue;
+            }
+            CPpToken left = left_item.token;
+            output_count -= 1;
             String8 left_spelling = c_token_spelling(base, left.token);
             String8 right_spelling = c_token_spelling(base, right.token.token);
             u64 joined_length = left_spelling.length + right_spelling.length;
@@ -4159,7 +4170,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 ok = false;
                 continue;
             }
-            output[output_count++] = (CPpToken){
+            pasted[output_count++] = (CMacroReplacementToken){.token = {
                 .token =
                     {
                         .offset = c_space_offset(space, joined),
@@ -4173,12 +4184,21 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 // inherits that operand's spacing; the pasted spelling itself
                 // carries none.
                 .preceded_by_space = left.preceded_by_space,
-            };
+            }};
         }
         if (ok)
         {
+            CPpToken* output = arena_allocate(arena, CPpToken, output_count);
+            u32 token_count = 0;
+            for (u32 index = 0; index < output_count; index += 1)
+            {
+                if (!pasted[index].placemarker)
+                {
+                    output[token_count++] = pasted[index].token;
+                }
+            }
             *tokens_out = output;
-            *token_count_out = output_count;
+            *token_count_out = token_count;
         }
     }
     return ok;

@@ -54,6 +54,7 @@
 #include <buster/tests/os_test.h>
 #include <buster/tests/file_test.h>
 #include <buster/tests/target_test.h>
+#include <buster/tests/compiler/metamorphic/metamorphic_test.h>
 #include <buster/tests/compiler/frontend/c/c_test.h>
 #include <buster/tests/compiler/assembly/aarch64_encoding_test.h>
 #include <buster/tests/compiler/assembly/aarch64_exact_bridge_test.h>
@@ -99,6 +100,7 @@
 #include <buster/tests/os_test.c>
 #include <buster/tests/file_test.c>
 #include <buster/tests/target_test.c>
+#include <buster/tests/compiler/metamorphic/metamorphic_test.c>
 #include <buster/tests/compiler/frontend/c/c_test.c>
 #include <buster/tests/compiler/assembly/aarch64_encoding_test.c>
 #include <buster/tests/compiler/assembly/aarch64_exact_bridge_test.c>
@@ -256,6 +258,7 @@ typedef enum TestId
     TEST_ID_FILE,
     TEST_ID_TARGET,
     TEST_ID_C_FRONTEND,
+    TEST_ID_METAMORPHIC,
     TEST_ID_AARCH64_ENCODING,
     TEST_ID_AARCH64_EXACT_BRIDGE,
     TEST_ID_AARCH64_CONTROL_SEMANTICS,
@@ -303,6 +306,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_OS] = {S8_INITIALIZER("os_tests"), &os_tests, true},
     [TEST_ID_FILE] = {S8_INITIALIZER("file_tests"), &file_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     [TEST_ID_TARGET] = {S8_INITIALIZER("target_tests"), &target_tests},
+    [TEST_ID_METAMORPHIC] = {S8_INITIALIZER("metamorphic_tests"), &metamorphic_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     [TEST_ID_C_FRONTEND] = {S8_INITIALIZER("c_frontend_tests"), &c_frontend_tests},
     [TEST_ID_AARCH64_ENCODING] = {S8_INITIALIZER("aarch64_encoding_tests"), &aarch64_encoding_tests},
     [TEST_ID_AARCH64_EXACT_BRIDGE] = {S8_INITIALIZER("aarch64_exact_bridge_tests"), &aarch64_exact_bridge_tests},

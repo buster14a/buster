@@ -58,3 +58,10 @@
 - Headers are included as `<buster/lib/...>` or `<buster/tests/...>` (include
   root is `src/`).
   `compile_commands.json` is exported to `build/` by default.
+
+`ide test` also runs a bounded source-equivalence smoke campaign under all native
+allocator modes. `ide metamorphic` exposes the wider native/LLVM/Wasm64/eBPF
+matrix, optional engine discovery, explicit unexecuted rows, and grammar-aware
+failure reduction. See [metamorphic testing](../metamorphic-testing.md) for the
+transformation preconditions, reproducible seeds, strict execution mode and
+failure bundles. Cross-target compilation is not a behavioral pass.
