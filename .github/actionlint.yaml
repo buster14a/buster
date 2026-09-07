@@ -1,8 +1,7 @@
 # actionlint validates `runs-on` against a list of runner labels compiled into
 # the binary, so a release older than a runner image reports a label it has
-# never heard of. These are all standard GitHub-hosted labels; the option is
-# named for self-hosted runners only because that is the sole mechanism
-# actionlint offers for teaching it a label.
+# never heard of. These are all standard GitHub-hosted labels; actionlint uses
+# the self-hosted-runner configuration as its extension point for newer labels.
 # Keep this list synchronized with the matrix in .github/workflows/ci.yml.
 self-hosted-runner:
   labels:
