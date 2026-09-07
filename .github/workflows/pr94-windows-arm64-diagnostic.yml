@@ -68,8 +68,9 @@ jobs:
           if test_text.count(nested_parse) != 1:
               raise SystemExit("nested conditional parse anchor not found")
           test_text = test_text.replace(nested_parse, nested_parse + r'''
-              fprintf(stderr, "PR94_NESTED parsed token_diagnostics=%u parse_diagnostics=%u\n",
-                      nested_conditional_tokens.diagnostic_count, nested_conditional_parse.diagnostic_count);
+              fprintf(stderr, "PR94_NESTED parsed token_diagnostics=%llu parse_diagnostics=%llu\n",
+                      (unsigned long long)nested_conditional_tokens.diagnostic_count,
+                      (unsigned long long)nested_conditional_parse.diagnostic_count);
               fflush(stderr);''', 1)
           nested_lower = "    CIRLowerResult nested_conditional_ir = c_lower_to_ir(nested_conditional_temporary.arena, S8(\"nested-conditional.c\"), nested_conditional_tokens,"
           if test_text.count(nested_lower) != 1:
