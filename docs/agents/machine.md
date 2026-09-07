@@ -23,6 +23,12 @@
   `machine_select_generated.c`. Target selectors may retain custom ABI and
   complex lowering, but must consume shared facts instead of introducing a
   third permanent graph IR.
+- `MachineSelectResult.signature_rejected` is set only inside target function
+  signature gates; other unclassified selection failures remain distinct.
+  Native dispatch records exactly one `CodegenFallbackReason` per discarded
+  machine function, retaining separate selection-opcode and post-selection
+  counters. The driver can require zero fallback with `-fno-machine-fallback`;
+  see the [driver guide](driver.md) for the curated CI corpus and reason names.
 - x86 ADD/SUB/AND/OR/XOR/IMUL rows are three-operand machine SSA with operand
   0 tied to operand 1. Allocators satisfy the physical two-address constraint;
   selectors must not reintroduce a MOV plus mutable USE_DEFINE result.

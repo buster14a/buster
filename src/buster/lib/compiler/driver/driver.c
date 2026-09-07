@@ -1193,6 +1193,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         // like LLVM, -O0 still uses the low-latency allocator. QUALITY stays
         // out of the optimization-level mapping because it does not yet beat
         // FAST on a measured corpus; callers can still name it explicitly.
+        if (string_equal(argument, S8("-fno-machine-fallback")) || string_equal(argument, S8("-fmachine-fallback")))
+        {
+            invocation.reject_machine_fallback = string_equal(argument, S8("-fno-machine-fallback"));
+            continue;
+        }
         if (string_starts_with_sequence(argument, S8("-O")))
         {
             String8 level = string_slice(argument, 2, argument.length);
@@ -1409,6 +1414,15 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     {
         invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         invocation.diagnostic = S8("-emit-llvm emits binary bitcode and cannot be combined with -E, -S, or -fsyntax-only");
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.reject_machine_fallback &&
+        (invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
+         (invocation.target.cpu_arch != CPU_ARCH_X86_64 && invocation.target.cpu_arch != CPU_ARCH_AARCH64) ||
+         invocation.register_allocator == CODEGEN_REGISTER_ALLOCATOR_NONE || invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS ||
+         invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY))
+    {
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("-fno-machine-fallback requires native code generation with mir-stack, fast, or quality allocation");
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && !invocation.no_standard_includes && !invocation.has_gpu_target &&
         invocation.target.os != OPERATING_SYSTEM_UEFI)
@@ -3373,6 +3387,20 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                 code.failed_instruction.value, (u32)code.failed_opcode, operation, source_line, source_column, referenced_symbol);
         goto end;
     }
+    if (invocation.reject_machine_fallback && code.statistics.fallback_function_count)
+    {
+        IrFunction* fallback_function = module->functions + code.first_fallback_function.value;
+        IrSourcePosition position = ir_source_position(lowered.program, fallback_function->source);
+        IrSource* source = ir_source_from_id(&lowered.program->sources, (IrSourceId){.value = position.source});
+        result.error = COMPILER_DRIVER_ERROR_CODEGEN;
+        result.diagnostic = string_format(arena,
+            S8("machine fallback rejected: target={S8}-{S8} allocator={S8} reason={S8} opcode={u32} function='{S8}' source={S8}:{u32}:{u32} fallbacks={u32}"),
+            cpu_arch_to_string_os(invocation.target.cpu_arch), operating_system_to_string_os(invocation.target.os),
+            codegen_register_allocator_mode_string((CodegenRegisterAllocatorMode)invocation.register_allocator),
+            codegen_fallback_reason_string(code.first_fallback_reason), (u32)code.first_fallback_opcode, fallback_function->name,
+            source ? source->path : invocation.input_paths[0], position.line, position.column, code.statistics.fallback_function_count);
+        goto end;
+    }
     ObjectFile object = object_from_canonical_codegen_module(arena, lowered.program, &code, invocation.target);
     result.object_error = object.error;
     if (object.error != OBJECT_ERROR_NONE)
@@ -3830,23 +3858,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.local_promotion.instructions_after += unit.local_promotion.instructions_after;
         result.local_promotion.values_before += unit.local_promotion.values_before;
         result.local_promotion.values_after += unit.local_promotion.values_after;
-        result.codegen_statistics.instruction_count += unit.codegen_statistics.instruction_count;
-        result.codegen_statistics.value_count += unit.codegen_statistics.value_count;
-        result.codegen_statistics.stack_value_bytes += unit.codegen_statistics.stack_value_bytes;
-        result.codegen_statistics.stack_frame_bytes += unit.codegen_statistics.stack_frame_bytes;
-        result.codegen_statistics.code_bytes += unit.codegen_statistics.code_bytes;
-        result.codegen_statistics.native_vector_operation_count += unit.codegen_statistics.native_vector_operation_count;
-        result.codegen_statistics.split_vector_operation_count += unit.codegen_statistics.split_vector_operation_count;
-        result.codegen_statistics.vzeroupper_count += unit.codegen_statistics.vzeroupper_count;
-        result.codegen_statistics.forwarded_wide_vector_load_count += unit.codegen_statistics.forwarded_wide_vector_load_count;
-        result.codegen_statistics.simd_operation_count += unit.codegen_statistics.simd_operation_count;
-        result.codegen_statistics.function_count += unit.codegen_statistics.function_count;
-        result.codegen_statistics.maximum_stack_frame_bytes =
-            BUSTER_MAX(result.codegen_statistics.maximum_stack_frame_bytes, unit.codegen_statistics.maximum_stack_frame_bytes);
-        result.codegen_statistics.exact_attempts += unit.codegen_statistics.exact_attempts;
-        result.codegen_statistics.exact_successes += unit.codegen_statistics.exact_successes;
-        result.codegen_statistics.exact_failures += unit.codegen_statistics.exact_failures;
-        result.codegen_statistics.mutable_virtual_register_count += unit.codegen_statistics.mutable_virtual_register_count;
+        codegen_statistics_add(&result.codegen_statistics, &unit.codegen_statistics);
         if (unit.error != COMPILER_DRIVER_ERROR_NONE)
         {
             if (unit.diagnostic.length)
