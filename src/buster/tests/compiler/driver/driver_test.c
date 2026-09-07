@@ -1455,6 +1455,162 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bootstrap_trace(UnitTest
     return result;
 }
 
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
+// Real object/archive and shared-library boundaries: execute the linked
+// artifacts so valid-looking section tables cannot hide placement or startup
+// errors. The host compiler builds only the reference and the shared library.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_link_boundaries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 directory = buster_test_temporary_path(arena, S8("buster-elf-link-boundaries"), S8(""));
+    os_make_directory(directory);
+    ProcessSpawnOptions capture = {
+        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+        .use_process_environment = true,
+    };
+    for (u32 hosted = 0; hosted < 2; hosted += 1)
+    {
+        String8 object_path = string_format_z(arena, S8("{S8}/alignment-{u32}.o"), directory, hosted);
+        String8 buster_path = string_format_z(arena, S8("{S8}/alignment-buster-{u32}"), directory, hosted);
+        String8 reference_path = string_format_z(arena, S8("{S8}/alignment-reference-{u32}"), directory, hosted);
+        String8 compile_arguments[] = {
+            S8("-g0"), S8("-c"), S8("-o"), object_path, S8("tests/basic_c_elf_overaligned.c"), S8("-DHOSTED_ALIGNMENT"),
+        };
+        u64 compile_count = BUSTER_ARRAY_LENGTH(compile_arguments) - (hosted == 0);
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = compile_arguments, .length = compile_count}));
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 link_arguments[] = {S8("-g0"), S8("-o"), buster_path, object_path};
+            CompilerDriverResult linked = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_arguments)));
+            BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+            String8 reference_arguments[8] = {0};
+            u64 reference_count = 0;
+            reference_arguments[reference_count++] = S8(BUSTER_HOST_C_COMPILER);
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) reference_arguments[reference_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+            reference_arguments[reference_count++] = S8("-no-pie");
+            reference_arguments[reference_count++] = object_path;
+            reference_arguments[reference_count++] = S8("-o");
+            reference_arguments[reference_count++] = reference_path;
+            ProcessSpawnResult reference_spawn = os_process_spawn(
+                (SliceString8){.pointer = reference_arguments, .length = reference_count}, (SliceString8){0}, (SliceString8){0}, capture);
+            bool reference_linked = reference_spawn.handle && os_process_wait_sync(arena, reference_spawn).result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST(arguments, reference_linked);
+            if (linked.error == COMPILER_DRIVER_ERROR_NONE && reference_linked)
+            {
+                String8 paths[] = {buster_path, reference_path};
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(paths); index += 1)
+                {
+                    ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = paths + index, .length = 1},
+                                                                (SliceString8){0}, (SliceString8){0}, capture);
+                    BUSTER_TEST(arguments, spawn.handle != 0);
+                    if (spawn.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+            }
+        }
+    }
+
+    String8 member_path = string_format_z(arena, S8("{S8}/weak-member.o"), directory);
+    String8 member_arguments[] = {S8("-g0"), S8("-c"), S8("-o"), member_path, S8("tests/basic_c_weak_archive_member.c")};
+    CompilerDriverResult member = compiler_driver_execute_invocation(
+        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(member_arguments)));
+    BUSTER_TEST(arguments, member.error == COMPILER_DRIVER_ERROR_NONE);
+    if (member.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        FileMapRead member_map = file_map_read(arena, member_path, (FileReadOptions){0});
+        ByteSlice member_bytes[] = {member_map.bytes};
+        String8 member_names[] = {S8("weak-member.o")};
+        ByteSlice archive = compiler_driver_test_archive(arena, member_bytes, member_names, 1);
+        String8 archive_path = string_format_z(arena, S8("{S8}/libweakprobe.a"), directory);
+        bool archive_written = file_write(archive_path, archive);
+        BUSTER_TEST(arguments, archive_written);
+        file_map_unmap(member_map);
+        for (u32 variant = 0; archive_written && variant < 5; variant += 1)
+        {
+            String8 path = string_format_z(arena, S8("{S8}/weak-{u32}"), directory, variant);
+            String8 command[12] = {S8("-g0"), S8("-o"), path, S8("tests/basic_c_weak_archive_main.c")};
+            u64 count = 4;
+            if (variant >= 3) command[count++] = S8("-DEXPECT_ARCHIVE_HOOK");
+            if (variant == 3) command[count++] = S8("-DREQUIRE_ARCHIVE_MEMBER");
+            if (variant == 1 || variant == 3) command[count++] = archive_path;
+            if (variant == 2)
+            {
+                command[count++] = S8("-L");
+                command[count++] = directory;
+                command[count++] = S8("-lweakprobe");
+            }
+            if (variant == 4) command[count++] = member_path;
+            CompilerDriverResult linked = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = count}));
+            BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0}, capture);
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle) BUSTER_TEST(arguments, os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+    }
+
+    String8 library_path = string_format_z(arena, S8("{S8}/liblifecycleprobe.so"), directory);
+    String8 library_arguments[10] = {0};
+    u64 library_count = 0;
+    library_arguments[library_count++] = S8(BUSTER_HOST_C_COMPILER);
+    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) library_arguments[library_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+    library_arguments[library_count++] = S8("-fPIC");
+    library_arguments[library_count++] = S8("-shared");
+    library_arguments[library_count++] = S8("tests/basic_c_elf_dso_lifecycle.c");
+    library_arguments[library_count++] = S8("-o");
+    library_arguments[library_count++] = library_path;
+    ProcessSpawnResult library_spawn = os_process_spawn((SliceString8){.pointer = library_arguments, .length = library_count},
+                                                        (SliceString8){0}, (SliceString8){0}, capture);
+    bool library_built = library_spawn.handle && os_process_wait_sync(arena, library_spawn).result == PROCESS_RESULT_SUCCESS;
+    BUSTER_TEST(arguments, library_built);
+    for (u32 local = 0; library_built && local < 2; local += 1)
+    {
+        String8 path = string_format_z(arena, S8("{S8}/lifecycle-{u32}"), directory, local);
+        String8 command[] = {
+            S8("-g0"), S8("-o"), path, S8("-L"), directory, S8("-llifecycleprobe"),
+            S8("tests/basic_c_elf_dso_lifecycle_main.c"), S8("-DEXECUTABLE_LIFECYCLE"),
+        };
+        CompilerDriverResult linked = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = BUSTER_ARRAY_LENGTH(command) - (local == 0)}));
+        BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+        for (u32 explicit_exit = 0; linked.error == COMPILER_DRIVER_ERROR_NONE && explicit_exit < 2; explicit_exit += 1)
+        {
+            String8 run[] = {path, S8("exit")};
+            String8 environment_keys[] = {S8("LD_LIBRARY_PATH")};
+            String8 environment_values[] = {directory};
+            ProcessSpawnOptions run_options = capture;
+            run_options.use_process_environment = false;
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = run, .length = 1 + explicit_exit},
+                                                        (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys),
+                                                        (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values), run_options);
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_sync(arena, spawn);
+                String8 output = {.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length};
+                String8 expected = local ? S8("shared init\nexecutable init\nshared work\nuser handler\nexecutable fini\nshared fini\n")
+                                         : S8("shared init\nshared work\nuser handler\nshared fini\n");
+                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
+                BUSTER_STRING_TEST(arguments, output, expected);
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+#endif
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
@@ -1475,6 +1631,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     UnitTestResult codeview_limit = compiler_driver_test_codeview_limit(arguments);
     result.test_count += codeview_limit.test_count;
     result.succeeded_test_count += codeview_limit.succeeded_test_count;
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
+    UnitTestResult elf_boundaries = compiler_driver_test_elf_link_boundaries(arguments);
+    result.succeeded_test_count += elf_boundaries.succeeded_test_count;
+    result.test_count += elf_boundaries.test_count;
+#endif
 
     // compiler_prewarm() is the contract that lets a gang compile at all: the
     // frontends' remaining first-use tables are written once and read

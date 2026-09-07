@@ -137,16 +137,21 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `main` never comes back, and GNU runs a destructor either way, so the hosted
   stubs synthesize a **runner** past the trap that ends the stub -- one call
   per destructor and a return -- and register it with the C runtime before the
-  constructors run. That is the position `__libc_start_main` hands `_dl_fini`
-  to `__cxa_atexit` from, and it is what leaves the runner behind every
-  handler the program registered itself (issue 781). The registration is
-  `__cxa_atexit` on ELF and `_crt_atexit` on PE, because glibc's `libc.so.6`
+  constructors run. This leaves the runner behind every handler the program
+  registered itself (issue 781). Hosted ELF startup first registers the
+  finalizer supplied by the dynamic loader in RDX on x86-64 or X0 on AArch64,
+  then the executable's runner: reverse exit order runs user handlers, the
+  executable's destructors, and finally the startup-loaded shared libraries'
+  destructors. Registering only the executable's runner silently omitted the
+  last group (GitHub #227). A null loader finalizer is skipped. The registration
+  is `__cxa_atexit` on ELF and `_crt_atexit` on PE, because glibc's `libc.so.6`
   and Windows' `ucrtbase.dll` both keep plain `atexit` in a static library
   this linker does not read; `link_elf_hosted_exit_symbol` appends the ELF
-  import beside `exit`, and both ELF dynamic writers have to agree on whether
-  it is there because the AArch64 one re-derives the x86-64 one's import
-  numbering. The freestanding ELF shape keeps its destructors inline after
-  `main`: it has no `exit` to call and no runtime to register with, and a
+  import beside `exit` for every hosted ELF image, including one without its
+  own destructor array. Both ELF dynamic writers must agree on that import
+  list because AArch64 re-derives x86-64's numbering. The freestanding ELF shape
+  keeps its destructors inline after `main`: it has no `exit` to call and no
+  runtime to register with, and a
   `-nostdlib` program that reaches the raw exit syscall runs no handler
   either. Two writers synthesize no entry point of their own, and they answer
   differently. **Mach-O** needs none for its constructors: LC_MAIN hands

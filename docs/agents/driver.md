@@ -109,6 +109,17 @@ input, and rejects native objects, archives, libraries, frameworks, linker
 arguments, `-E`, `-S`, and `-fsyntax-only`. The writer has no LLVM dependency;
 see `LLVM_BITCODE.md` for its target metadata, API, and supported boundary.
 
+An undefined weak ELF reference does not select a static archive member.
+It may bind to a member selected for a separate strong dependency, to a
+direct object input, or to an already included shared library. Keep archive
+selection separate from those later resolution rules (GitHub #226).
+
+ELF executable data placement honors both page and requested object alignment.
+Align the final virtual address, not only its file offset: an initialized
+global may require alignment larger than a page or the fixed image base.
+The object writer already carries that requirement into the section metadata
+(GitHub #225).
+
 Every hosted ELF link reads the shared libraries' own dynamic symbol tables.
 `compiler_driver_elf_library_exports` looks `libc.so.6` and each requested
 library up where the loader would — the `-L` paths, then the sysroot or host

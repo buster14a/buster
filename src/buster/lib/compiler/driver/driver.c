@@ -1530,6 +1530,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_input(String8 path)
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_member_needed(ObjectFile* member, ObjectFile* selected, u32 selected_count)
 {
+    // ELF weak references may bind to an already selected definition, but
+    // do not request archive extraction themselves. Keep other formats'
+    // existing selection policy separate from that ELF binding rule.
+    bool weak_extracts = object_format_for_target(member->target) != OBJECT_FORMAT_ELF64;
     for (u32 member_symbol_index = 0; member_symbol_index < member->symbol_count; member_symbol_index += 1)
     {
         ObjectSymbol* member_symbol = &member->symbols[member_symbol_index];
@@ -1551,7 +1555,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_member_needed(ObjectFile* membe
                 }
                 if (symbol->section == OBJECT_SECTION_UNDEFINED)
                 {
-                    unresolved = true;
+                    unresolved = unresolved || !symbol->weak || weak_extracts;
                 }
                 else
                 {
