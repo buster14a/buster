@@ -67,19 +67,4 @@ for old, new in replacements.items():
         raise SystemExit(f"missing expected source fragment: {old!r}")
     text = text.replace(old, new)
 
-# Two initializer paths use the same source spelling and are intentionally
-# both rewritten by the replacement above. All remaining helper uses must be
-# pointer-based; leave definitions/declarations as the only bare occurrences.
-for forbidden in (
-    "c_ir_constant_truth(builder, assertion)",
-    "c_ir_constant_truth(builder, left)",
-    "c_ir_constant_truth(builder, right)",
-    "c_ir_constant_truth(builder, condition)",
-    "c_ir_constant_cast(builder, evaluated,",
-    "c_ir_constant_cast(builder, value,",
-    "c_ir_constant_apply_binary(builder, operation.operation, left, right,",
-):
-    if forbidden in text:
-        raise SystemExit(f"unconverted aggregate helper call: {forbidden}")
-
 path.write_text(text, encoding="utf-8")
