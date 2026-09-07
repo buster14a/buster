@@ -25,34 +25,14 @@ BUSTER_GLOBAL_LOCAL void string_format_va_prepare(va_list* variable_arguments, u
     BUSTER_CHECK(size != 0 && size <= 2 * sizeof(u64));
     BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(alignment) && alignment <= 2 * sizeof(u64));
 
-    if (alignment < sizeof(u64))
+    // Clang 20's Windows ARM64 va_arg lowering advances the platform's
+    // pointer-form va_list correctly, but does not round 16-byte values up to
+    // their ABI alignment. Aligning the current pointer before native va_arg
+    // is sufficient for both the homed x-register area and the contiguous
+    // incoming stack area; native va_arg still performs the load and advance.
+    if (alignment > sizeof(u64))
     {
-        alignment = sizeof(u64);
-    }
-
-    u64 slot_count = (size + sizeof(u64) - 1) / sizeof(u64);
-    u8* pointer = (u8*)*variable_arguments;
-    u8* aligned_pointer = (u8*)align_forward((u64)pointer, alignment);
-    u64 alignment_slots = (u64)(aligned_pointer - pointer) / sizeof(u64);
-    u32 available_slots = *gp_register_slots_remaining > alignment_slots
-                              ? *gp_register_slots_remaining - (u32)alignment_slots
-                              : 0;
-
-    if (slot_count > available_slots && available_slots)
-    {
-        // The caller left these registers unused and placed the complete
-        // value on the stack. Point native va_arg at that stack value.
-        pointer = aligned_pointer + (u64)available_slots * sizeof(u64);
-        pointer = (u8*)align_forward((u64)pointer, alignment);
-        *variable_arguments = (char8*)pointer;
-        *gp_register_slots_remaining = 0;
-    }
-    else if (*gp_register_slots_remaining)
-    {
-        u64 consumed_slots = alignment_slots + slot_count;
-        *gp_register_slots_remaining = consumed_slots <= *gp_register_slots_remaining
-                                           ? *gp_register_slots_remaining - (u32)consumed_slots
-                                           : 0;
+        *variable_arguments = (char8*)align_forward((u64)*variable_arguments, alignment);
     }
 }
 #endif
