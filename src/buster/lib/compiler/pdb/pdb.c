@@ -4,8 +4,10 @@
 // /debug output. pdb_split_codeview separates symbols from C13 line data;
 // pdb_rewrite_symbol_scopes rebuilds links in module-stream coordinates;
 // pdb_rewrite_field_list remaps every member and LF_INDEX continuation.
+// pdb_msf_build owns the checked periodic-FPM block layout;
+// pdb_emit_contribution writes both DBI descriptions from module-owned ranges.
 
-#include <buster/lib/compiler/pdb/pdb.h>
+#include <buster/lib/compiler/pdb/pdb_internal.h>
 #include <buster/lib/string.h>
 #include <buster/lib/integer.h>
 #include <buster/lib/file.h>
@@ -18,6 +20,8 @@ enum
     PDB_BLOCK_SIZE = 4096,
     PDB_FREE_BLOCK_MAP = 2,
     PDB_FIRST_DATA_BLOCK = 3,
+    PDB_MAX_BLOCK_COUNT = UINT32_MAX / PDB_BLOCK_SIZE,
+    PDB_MAX_DIRECTORY_SIZE = PDB_BLOCK_SIZE * (PDB_BLOCK_SIZE / 4),
 };
 
 // Stream numbers 0-4 are fixed by the format; the rest are ours to assign.
@@ -100,16 +104,6 @@ enum
     PDB_LF_ENUM = 0x1507,
     PDB_LF_ALIAS = 0x150a,
     PDB_LF_MEMBER = 0x150d,
-};
-
-typedef struct PdbBuffer PdbBuffer;
-struct PdbBuffer
-{
-    u8* bytes;
-    u64 count;
-    u64 capacity;
-    bool overflow;
-    u8 reserved[7];
 };
 
 // The remaining-space form of `count + size > capacity`: `count` never passes
@@ -766,10 +760,192 @@ BUSTER_GLOBAL_LOCAL bool pdb_rewrite_symbol_types(ByteSlice symbols, PdbTypeModu
     return offset == symbols.length;
 }
 
+// All consumers use the same monotonic allocator, including the directory and
+// its map. Every block-size interval reserves two FPM slots even when those
+// slots are not yet needed to represent allocation bits.
+BUSTER_GLOBAL_LOCAL bool pdb_msf_allocate_blocks(u32* next, u32 count, u32* blocks)
+{
+    bool valid = true;
+    for (u32 index = 0; index < count && valid; index += 1)
+    {
+        u32 slot = *next % PDB_BLOCK_SIZE;
+        if (slot == 1 || slot == 2)
+        {
+            *next += 3 - slot;
+        }
+        valid = *next < PDB_MAX_BLOCK_COUNT;
+        if (valid)
+        {
+            blocks[index] = *next;
+            *next += 1;
+        }
+    }
+    return valid;
+}
+
+PdbResult pdb_msf_build(Arena* arena, PdbBuffer const* streams, u32 stream_count)
+{
+    PdbResult result = {0};
+    u64 data_block_count = 0;
+    // A directory block map occupies one block, so its directory contains at
+    // most BlockSize/4 blocks. Check even the size table before reading it.
+    bool valid = arena && streams && 4 + (u64)stream_count * 4 <= PDB_MAX_DIRECTORY_SIZE;
+    for (u32 index = 0; index < stream_count && valid; index += 1)
+    {
+        PdbBuffer const* stream = streams + index;
+        valid = !stream->overflow && stream->count < UINT32_MAX && (!stream->count || stream->bytes);
+        if (valid)
+        {
+            data_block_count += (stream->count + PDB_BLOCK_SIZE - 1) / PDB_BLOCK_SIZE;
+            valid = data_block_count < PDB_MAX_BLOCK_COUNT;
+        }
+    }
+    u64 directory_size = 4 + (u64)stream_count * 4 + data_block_count * 4;
+    valid = valid && directory_size <= PDB_MAX_DIRECTORY_SIZE;
+    if (valid)
+    {
+        u32 directory_block_count = (u32)((directory_size + PDB_BLOCK_SIZE - 1) / PDB_BLOCK_SIZE);
+        u32* data_blocks = arena_allocate(arena, u32, data_block_count);
+        u32* directory_blocks = arena_allocate(arena, u32, directory_block_count);
+        u32 next = PDB_FIRST_DATA_BLOCK;
+        u32 block_map = 0;
+        valid = pdb_msf_allocate_blocks(&next, (u32)data_block_count, data_blocks) &&
+                pdb_msf_allocate_blocks(&next, directory_block_count, directory_blocks) &&
+                pdb_msf_allocate_blocks(&next, 1, &block_map);
+        if (valid)
+        {
+            u32 block_count = next;
+            u64 file_size = (u64)block_count * PDB_BLOCK_SIZE;
+            u8* bytes = arena_allocate_zeroed(arena, u8, file_size);
+            static char8 const magic[] = "Microsoft C/C++ MSF 7.00\r\n\x1a" "DS\0\0";
+            memcpy(bytes, magic, 32);
+            u32 superblock[] = {PDB_BLOCK_SIZE, PDB_FREE_BLOCK_MAP, block_count, (u32)directory_size, 0, block_map};
+            memcpy(bytes + 32, superblock, sizeof(superblock));
+            // Initialize both maps, including their reserved unused slots.
+            // Logical FPM bytes advance to the next strided physical block.
+            for (u32 map = 1; map <= 2; map += 1)
+            {
+                for (u32 block = map; block < block_count; block += PDB_BLOCK_SIZE)
+                {
+                    memset(bytes + (u64)block * PDB_BLOCK_SIZE, 0xff, PDB_BLOCK_SIZE);
+                }
+                u64 map_bytes = ((u64)block_count + 7) / 8;
+                for (u64 offset = 0; offset < map_bytes; offset += PDB_BLOCK_SIZE)
+                {
+                    u64 destination = (map + offset / PDB_BLOCK_SIZE * PDB_BLOCK_SIZE) * PDB_BLOCK_SIZE;
+                    u64 allocated_bits = BUSTER_MIN((u64)PDB_BLOCK_SIZE * 8, block_count - offset * 8);
+                    memset(bytes + destination, 0, allocated_bits / 8);
+                    if (allocated_bits % 8)
+                    {
+                        bytes[destination + allocated_bits / 8] = (u8)(0xffu << (allocated_bits % 8));
+                    }
+                }
+            }
+            PdbBuffer directory = {.bytes = arena_allocate(arena, u8, directory_size), .capacity = directory_size};
+            pdb_emit_u32(&directory, stream_count);
+            for (u32 index = 0; index < stream_count; index += 1)
+            {
+                pdb_emit_u32(&directory, (u32)streams[index].count);
+            }
+            u32 data_cursor = 0;
+            for (u32 index = 0; index < stream_count; index += 1)
+            {
+                for (u64 offset = 0; offset < streams[index].count; offset += PDB_BLOCK_SIZE)
+                {
+                    u32 block = data_blocks[data_cursor++];
+                    u64 size = BUSTER_MIN((u64)PDB_BLOCK_SIZE, streams[index].count - offset);
+                    memcpy(bytes + (u64)block * PDB_BLOCK_SIZE, streams[index].bytes + offset, size);
+                    pdb_emit_u32(&directory, block);
+                }
+            }
+            for (u32 index = 0; index < directory_block_count; index += 1)
+            {
+                u64 offset = (u64)index * PDB_BLOCK_SIZE;
+                u64 size = BUSTER_MIN((u64)PDB_BLOCK_SIZE, directory_size - offset);
+                memcpy(bytes + (u64)directory_blocks[index] * PDB_BLOCK_SIZE, directory.bytes + offset, size);
+                memcpy(bytes + (u64)block_map * PDB_BLOCK_SIZE + (u64)index * 4, directory_blocks + index, 4);
+            }
+            if (!directory.overflow && directory.count == directory_size)
+            {
+                result.bytes = (ByteSlice){.pointer = bytes, .length = file_size};
+                result.valid = true;
+            }
+        }
+    }
+    return result;
+}
+
+// DBI embeds the first contribution in each module descriptor. Empty modules
+// keep the format's all-zero descriptor and have no address range in the list.
+BUSTER_GLOBAL_LOCAL void pdb_emit_contribution(PdbBuffer* buffer, PdbSection const* sections, PdbContribution const* contribution, u16 module)
+{
+    if (contribution)
+    {
+        pdb_emit_u16(buffer, (u16)contribution->section);
+        pdb_emit_u16(buffer, 0);
+        pdb_emit_u32(buffer, contribution->offset);
+        pdb_emit_u32(buffer, contribution->size);
+        pdb_emit_u32(buffer, sections[contribution->section - 1].characteristics);
+        pdb_emit_u16(buffer, module);
+        pdb_emit_u16(buffer, 0);
+        pdb_emit_u32(buffer, 0);
+        pdb_emit_u32(buffer, 0);
+    }
+    else
+    {
+        pdb_emit_zero(buffer, PDB_SECTION_CONTRIBUTION_SIZE);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool pdb_prepare_modules(Arena* arena, PdbInput input, PdbModule* modules, u32 module_count,
+                                            u64* contribution_count, u64* module_info_size)
+{
+    bool valid = true;
+    *contribution_count = 0;
+    *module_info_size = 0;
+    for (u32 index = 0; index < module_count && valid; index += 1)
+    {
+        PdbModule* module = modules + index;
+        String8 name = module->name.length ? module->name : S8("buster.obj");
+        valid = name.pointer && name.length <= (UINT32_MAX - 68) / 2;
+        if (valid)
+        {
+            *module_info_size += align_forward(66 + name.length * 2, 4);
+            valid = *module_info_size < UINT32_MAX;
+        }
+        if (valid && !module->contributions && !module->contribution_count && module->code_size)
+        {
+            PdbContribution* contribution = arena_allocate(arena, PdbContribution, 1);
+            *contribution = (PdbContribution){
+                .section = module->code_section ? module->code_section : (input.code_section ? input.code_section : 1),
+                .offset = module->code_offset,
+                .size = module->code_size,
+            };
+            module->contributions = contribution;
+            module->contribution_count = 1;
+        }
+        *contribution_count += module->contribution_count;
+        valid = valid && (!module->contribution_count || module->contributions) &&
+                *contribution_count <= (UINT32_MAX - 4) / PDB_SECTION_CONTRIBUTION_SIZE;
+        for (u32 range = 0; range < module->contribution_count && valid; range += 1)
+        {
+            PdbContribution const* contribution = module->contributions + range;
+            valid = contribution->section && contribution->section <= input.section_count && contribution->size;
+            if (valid)
+            {
+                u32 extent = input.sections[contribution->section - 1].virtual_size;
+                valid = contribution->offset <= extent && contribution->size <= extent - contribution->offset;
+            }
+        }
+    }
+    return valid;
+}
+
 PdbResult pdb_build(Arena* arena, PdbInput input)
 {
     PdbResult result = {0};
-    if (!arena || !input.section_count || !input.sections)
+    if (!arena || !input.section_count || !input.sections || input.section_count >= UINT16_MAX ||
+        input.module_count > UINT16_MAX - PDB_STREAM_COUNT + 1)
     {
         return result;
     }
@@ -793,12 +969,16 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
             .code_section = input.code_section,
         };
     }
+    // Normalize once; the same list owns both DBI contribution descriptions.
+    u64 contribution_count = 0;
+    u64 module_info_size = 0;
+    bool module_input_valid = pdb_prepare_modules(arena, input, modules, module_count, &contribution_count, &module_info_size);
     PdbCodeviewSplit* splits = arena_allocate(arena, PdbCodeviewSplit, module_count);
     u32* source_counts = arena_allocate(arena, u32, module_count);
     u32 total_source_file_count = 0;
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
-        if (!modules[module_index].codeview_symbols.length)
+        if (!module_input_valid || !modules[module_index].codeview_symbols.length || modules[module_index].codeview_symbols.length > UINT32_MAX - 8)
         {
             return result;
         }
@@ -812,7 +992,7 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
             return result;
         }
         source_counts[module_index] = splits[module_index].checksum_count;
-        if (total_source_file_count > UINT32_MAX - source_counts[module_index])
+        if (source_counts[module_index] > UINT16_MAX || total_source_file_count > UINT16_MAX - source_counts[module_index])
         {
             return result;
         }
@@ -997,6 +1177,21 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         memcpy(live, survivors, (u64)survivor_count * sizeof(*live));
         live_count = survivor_count;
     }
+    u64 section_contribution_size = 4 + contribution_count * PDB_SECTION_CONTRIBUTION_SIZE;
+    u64 section_map_size = 4 + (u64)input.section_count * 20;
+    u64 source_info_size = align_forward(4 + (u64)module_count * 4 + (u64)source_file_count * 4 + source_names_size, 4);
+    // Readers resolve a module's paths through the edit-and-continue name
+    // table, so an empty but well-formed string table must be present.
+    u64 ec_substream_size = align_forward(12 + 1 + 4 + 4 + 4, 4);
+    u64 dbg_header_size = PDB_DBG_HEADER_COUNT * sizeof(u16);
+    u32 names_bucket_count = 2;
+    while (names_bucket_count < source_file_count * 2 + 2)
+    {
+        names_bucket_count *= 2;
+    }
+    u64 dbi_capacity = PDB_DBI_HEADER_SIZE + module_info_size + section_contribution_size + section_map_size + source_info_size +
+                       ec_substream_size + dbg_header_size;
+    u64 names_capacity = 12 + names_buffer_size + 4 + (u64)names_bucket_count * 4 + 4;
     // Compose each module's local map with the merge result, then point its
     // symbols at the surviving records.
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
@@ -1006,7 +1201,8 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         {
             type_module->local_to_global[type_index] = final_index[type_module->local_to_global[type_index] - 0x1000];
         }
-        if (!pdb_rewrite_symbol_types(splits[module_index].symbols, type_module) ||
+        if (dbi_capacity >= UINT32_MAX || names_capacity >= UINT32_MAX ||
+            !pdb_rewrite_symbol_types(splits[module_index].symbols, type_module) ||
             !pdb_rewrite_symbol_scopes(arena, splits[module_index].symbols))
         {
             return result;
@@ -1052,7 +1248,7 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     for (u32 live_position = 0; live_position < live_count; live_position += 1)
     {
         ByteSlice type = normalized[live[live_position]];
-        if (type.length > UINT32_MAX - type_record_bytes)
+        if (type.length >= UINT32_MAX - PDB_TPI_HEADER_SIZE - type_record_bytes)
         {
             return result;
         }
@@ -1132,23 +1328,8 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         pdb_emit_u32(module, 0);
     }
 
-    // Stream 3: DBI, describing the one module and its section contributions.
-    u64 module_info_size = 0;
-    for (u32 module_index = 0; module_index < module_count; module_index += 1)
-    {
-        String8 module_name = modules[module_index].name.length ? modules[module_index].name : S8("buster.obj");
-        module_info_size += align_forward(64 + module_name.length + 1 + module_name.length + 1, 4);
-    }
-    u64 section_contribution_size = 4 + (u64)module_count * input.section_count * PDB_SECTION_CONTRIBUTION_SIZE;
-    u64 section_map_size = 4 + (u64)input.section_count * 20;
-    u64 source_info_size = align_forward(4 + (u64)module_count * 4 + (u64)source_file_count * 4 + source_names_size, 4);
-    // Readers resolve a module's paths through the edit-and-continue name
-    // table, so an empty but well-formed string table must be present.
-    u64 ec_substream_size = align_forward(12 + 1 + 4 + 4 + 4, 4);
-    u64 dbg_header_size = PDB_DBG_HEADER_COUNT * sizeof(u16);
-    PDB_STREAM_BEGIN(PDB_STREAM_DBI,
-                     PDB_DBI_HEADER_SIZE + module_info_size + section_contribution_size + section_map_size + source_info_size + ec_substream_size +
-                         dbg_header_size);
+    // Stream 3: DBI, describing the modules and their exact section contributions.
+    PDB_STREAM_BEGIN(PDB_STREAM_DBI, dbi_capacity);
     PdbBuffer* dbi = streams + PDB_STREAM_DBI;
     pdb_emit_u32(dbi, 0xffffffff);
     pdb_emit_u32(dbi, PDB_DBI_VERSION_V70);
@@ -1171,14 +1352,12 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     pdb_emit_u16(dbi, input.machine);
     pdb_emit_u32(dbi, 0);
     u64 module_info_start = dbi->count;
-    u32* module_contribution_offsets = arena_allocate(arena, u32, module_count);
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
         PdbModule* source_module = modules + module_index;
         String8 module_name = source_module->name.length ? source_module->name : S8("buster.obj");
         pdb_emit_u32(dbi, 0);
-        module_contribution_offsets[module_index] = (u32)dbi->count;
-        pdb_emit_zero(dbi, PDB_SECTION_CONTRIBUTION_SIZE);
+        pdb_emit_contribution(dbi, input.sections, source_module->contribution_count ? source_module->contributions : 0, (u16)module_index);
         pdb_emit_u16(dbi, 0);
         pdb_emit_u16(dbi, (u16)module_stream_indices[module_index]);
         pdb_emit_u32(dbi, module_symbol_sizes[module_index]);
@@ -1194,14 +1373,7 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         pdb_emit_bytes(dbi, module_name.pointer, module_name.length);
         pdb_emit_zero(dbi, 1);
         pdb_emit_align4(dbi);
-        u32 contribution_section = source_module->code_section ? source_module->code_section : (input.code_section ? input.code_section : 1);
-        u32 contribution_index = contribution_section - 1;
-        u32 code_size = source_module->code_size;
-        pdb_write_u32_at(dbi, module_contribution_offsets[module_index], contribution_section);
-        pdb_write_u32_at(dbi, module_contribution_offsets[module_index] + 4, source_module->code_offset);
-        pdb_write_u32_at(dbi, module_contribution_offsets[module_index] + 8, code_size);
-        pdb_write_u32_at(dbi, module_contribution_offsets[module_index] + 12,
-                         contribution_index < input.section_count ? input.sections[contribution_index].characteristics : 0);
+
     }
     if (dbi->count - module_info_start != module_info_size)
     {
@@ -1210,19 +1382,10 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     pdb_emit_u32(dbi, PDB_SECTION_CONTRIBUTION_VERSION);
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
     {
-        (void)module_index;
-        for (u32 section_index = 0; section_index < input.section_count; section_index += 1)
+        PdbModule* module = modules + module_index;
+        for (u32 range = 0; range < module->contribution_count; range += 1)
         {
-            PdbSection* section = input.sections + section_index;
-            pdb_emit_u16(dbi, (u16)(section_index + 1));
-            pdb_emit_u16(dbi, 0);
-            pdb_emit_u32(dbi, 0);
-            pdb_emit_u32(dbi, section->virtual_size);
-            pdb_emit_u32(dbi, section->characteristics);
-            pdb_emit_u16(dbi, 0);
-            pdb_emit_u16(dbi, 0);
-            pdb_emit_u32(dbi, 0);
-            pdb_emit_u32(dbi, 0);
+            pdb_emit_contribution(dbi, input.sections, module->contributions + range, (u16)module_index);
         }
     }
     pdb_emit_u16(dbi, (u16)input.section_count);
@@ -1304,12 +1467,7 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     pdb_emit_u32(publics, 0);
     pdb_emit_u32(publics, 0);
     // Stream 10: the PDB string table the checksum entries now index.
-    u32 names_bucket_count = 2;
-    while (names_bucket_count < source_file_count * 2 + 2)
-    {
-        names_bucket_count *= 2;
-    }
-    PDB_STREAM_BEGIN(PDB_STREAM_NAMES, 12 + names_buffer_size + 4 + (u64)names_bucket_count * 4 + 4);
+    PDB_STREAM_BEGIN(PDB_STREAM_NAMES, names_capacity);
     PdbBuffer* names = streams + PDB_STREAM_NAMES;
     pdb_emit_u32(names, PDB_STRING_TABLE_SIGNATURE);
     pdb_emit_u32(names, 1);
@@ -1343,83 +1501,6 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     }
 #undef PDB_STREAM_BEGIN
 
-    // Lay the streams out as MSF blocks, then the directory and its block map.
-    u32* stream_block_counts = arena_allocate(arena, u32, stream_count);
-    u32 data_block_count = 0;
-    for (u32 index = 0; index < stream_count; index += 1)
-    {
-        stream_block_counts[index] = (u32)((streams[index].count + PDB_BLOCK_SIZE - 1) / PDB_BLOCK_SIZE);
-        data_block_count += stream_block_counts[index];
-    }
-    u64 directory_size = 4 + (u64)stream_count * 4 + (u64)data_block_count * 4;
-    u32 directory_block_count = (u32)((directory_size + PDB_BLOCK_SIZE - 1) / PDB_BLOCK_SIZE);
-    u32 first_directory_block = PDB_FIRST_DATA_BLOCK + data_block_count;
-    u32 block_map_block = first_directory_block + directory_block_count;
-    u32 block_count = block_map_block + 1;
-    u64 file_size = (u64)block_count * PDB_BLOCK_SIZE;
-    u8* bytes = arena_allocate(arena, u8, file_size);
-    memset(bytes, 0, file_size);
-
-    static char8 const magic[] = "Microsoft C/C++ MSF 7.00\r\n\x1a"
-                                 "DS\0\0";
-    memcpy(bytes, magic, 32);
-    u32* superblock = arena_allocate(arena, u32, 6);
-    superblock[0] = PDB_BLOCK_SIZE;
-    superblock[1] = PDB_FREE_BLOCK_MAP;
-    superblock[2] = block_count;
-    superblock[3] = (u32)directory_size;
-    superblock[4] = 0;
-    superblock[5] = block_map_block;
-    memcpy(bytes + 32, superblock, sizeof(*superblock) * 6);
-    // Both free block maps mark every block outside the image as free.
-    for (u32 map = 1; map <= 2; map += 1)
-    {
-        memset(bytes + (u64)map * PDB_BLOCK_SIZE, 0xff, PDB_BLOCK_SIZE);
-    }
-    for (u32 block = 0; block < block_count; block += 1)
-    {
-        u64 map_offset = (u64)PDB_FREE_BLOCK_MAP * PDB_BLOCK_SIZE + block / 8;
-        bytes[map_offset] = (u8)(bytes[map_offset] & ~(1u << (block % 8)));
-        u64 other_offset = (u64)1 * PDB_BLOCK_SIZE + block / 8;
-        bytes[other_offset] = (u8)(bytes[other_offset] & ~(1u << (block % 8)));
-    }
-
-    PdbBuffer directory = {
-        .bytes = arena_allocate(arena, u8, directory_size),
-        .capacity = directory_size,
-    };
-    pdb_emit_u32(&directory, stream_count);
-    for (u32 index = 0; index < stream_count; index += 1)
-    {
-        pdb_emit_u32(&directory, (u32)streams[index].count);
-    }
-    u32 next_block = PDB_FIRST_DATA_BLOCK;
-    for (u32 index = 0; index < stream_count; index += 1)
-    {
-        for (u32 block = 0; block < stream_block_counts[index]; block += 1)
-        {
-            u64 destination = (u64)(next_block + block) * PDB_BLOCK_SIZE;
-            u64 offset = (u64)block * PDB_BLOCK_SIZE;
-            u64 size = BUSTER_MIN((u64)PDB_BLOCK_SIZE, streams[index].count - offset);
-            memcpy(bytes + destination, streams[index].bytes + offset, size);
-            pdb_emit_u32(&directory, next_block + block);
-        }
-        next_block += stream_block_counts[index];
-    }
-    if (directory.overflow || directory.count != directory_size)
-    {
-        return result;
-    }
-    memcpy(bytes + (u64)first_directory_block * PDB_BLOCK_SIZE, directory.bytes, directory.count);
-    for (u32 block = 0; block < directory_block_count; block += 1)
-    {
-        u32 value = first_directory_block + block;
-        memcpy(bytes + (u64)block_map_block * PDB_BLOCK_SIZE + (u64)block * 4, &value, sizeof(value));
-    }
-    result.bytes = (ByteSlice){
-        .pointer = bytes,
-        .length = file_size,
-    };
-    result.valid = true;
+    result = pdb_msf_build(arena, streams, stream_count);
     return result;
 }
