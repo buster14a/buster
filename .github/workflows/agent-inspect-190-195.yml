@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   inspect:
-    if: github.event.head_commit.message != 'chore: record issue 190-195 inspection'
+    if: ${{ github.event.head_commit.message != 'chore: record issue 190-195 inspection' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
