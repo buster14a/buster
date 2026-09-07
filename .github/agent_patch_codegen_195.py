@@ -6,19 +6,12 @@ codegen_path = root / "src/buster/lib/compiler/codegen/codegen.c"
 test_path = root / "tests/basic_c_int128.c"
 
 codegen = codegen_path.read_text(encoding="utf-8")
-old = """                        if (value_type && value_type->kind == IR_TYPE_INTEGER && value_type->layout.resolved && value_type->layout.size == 16)
-                        {
-                            // The sixteen-byte compare-exchange: the expected
-"""
-new = """                        if (value_type && value_type->layout.resolved && value_type->layout.size == 16)
-                        {
-                            // The sixteen-byte compare-exchange operates on the
-                            // object's representation, so an aggregate uses the
-                            // same CMPXCHG16B pair path as __int128.
-"""
+old = "if (value_type && value_type->kind == IR_TYPE_INTEGER && value_type->layout.resolved && value_type->layout.size == 16)"
+new = "if (value_type && value_type->layout.resolved && value_type->layout.size == 16)"
 if codegen.count(old) != 1:
     raise RuntimeError(f"compare-exchange gate: expected one match, found {codegen.count(old)}")
-codegen_path.write_text(codegen.replace(old, new, 1), encoding="utf-8")
+codegen = codegen.replace(old, new, 1)
+codegen_path.write_text(codegen, encoding="utf-8")
 
 test = test_path.read_text(encoding="utf-8")
 anchor = "static _Atomic(WideUnsigned) atomic_wide;\n"
