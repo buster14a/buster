@@ -296,9 +296,208 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_checksum_records(UnitTestArguments* 
     return result;
 }
 
+
+// Scope links are offsets in the final module symbol stream, including its
+// four-byte signature, not offsets into the input .debug$S subsection layout.
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_scope_links(UnitTestArguments* arguments, PdbResult built, CodeviewResult codeview)
+{
+    UnitTestResult result = {0};
+    ByteSlice stream = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_MODULE);
+    u64 symbol_size = 4;
+    for (u64 cursor = 4; cursor + 8 <= codeview.symbols.length;)
+    {
+        u32 kind = pdb_read_u32(codeview.symbols, cursor);
+        u32 length = pdb_read_u32(codeview.symbols, cursor + 4);
+        symbol_size += kind == 0xf1 ? length : 0;
+        cursor += 8 + (((u64)length + 3) & ~(u64)3);
+    }
+    BUSTER_TEST(arguments, symbol_size <= stream.length);
+    u32 stack[16] = {0};
+    u32 ends[16] = {0};
+    u32 depth = 0;
+    u32 procedures = 0;
+    u32 blocks = 0;
+    u32 inlines = 0;
+    u64 cursor = 4;
+    while (cursor + 4 <= symbol_size && symbol_size <= stream.length)
+    {
+        u16 length = 0;
+        u16 kind = 0;
+        memcpy(&length, stream.pointer + cursor, 2);
+        memcpy(&kind, stream.pointer + cursor + 2, 2);
+        BUSTER_TEST(arguments, length >= 2 && (u64)length + 2 <= symbol_size - cursor);
+        if (length < 2 || (u64)length + 2 > symbol_size - cursor)
+        {
+            break;
+        }
+        if (kind == 0x1110 || kind == 0x1103 || kind == 0x114d)
+        {
+            BUSTER_TEST(arguments, depth < BUSTER_ARRAY_LENGTH(stack) && length >= 14);
+            if (depth == BUSTER_ARRAY_LENGTH(stack) || length < 14)
+            {
+                break;
+            }
+            u32 parent = pdb_read_u32(stream, cursor + 4);
+            u32 end = pdb_read_u32(stream, cursor + 8);
+            BUSTER_TEST(arguments, parent == (depth ? stack[depth - 1] : 0));
+            BUSTER_TEST(arguments, end > cursor && (u64)end + 4 <= symbol_size);
+            if (end > cursor && (u64)end + 4 <= symbol_size)
+            {
+                u16 end_kind = 0;
+                memcpy(&end_kind, stream.pointer + end + 2, 2);
+                BUSTER_TEST(arguments, end_kind == (kind == 0x114d ? 0x114e : 0x0006));
+            }
+            stack[depth] = (u32)cursor;
+            ends[depth++] = end;
+            procedures += kind == 0x1110;
+            blocks += kind == 0x1103;
+            inlines += kind == 0x114d;
+        }
+        else if (kind == 0x0006 || kind == 0x114e)
+        {
+            BUSTER_TEST(arguments, depth && ends[depth - 1] == cursor);
+            if (!depth)
+            {
+                break;
+            }
+            depth -= 1;
+        }
+        cursor += ((u64)length + 2 + 3) & ~(u64)3;
+    }
+    BUSTER_TEST(arguments, cursor == symbol_size && !depth);
+    BUSTER_TEST(arguments, procedures == 2 && blocks == 4 && inlines == 2);
+    return result;
+}
+
+
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_continuation_merge(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { MEMBER_COUNT = 4096 };
+    DebugTypeField* fields = arena_allocate(arguments->arena, DebugTypeField, MEMBER_COUNT);
+    for (u32 index = 0; index < MEMBER_COUNT; index += 1)
+    {
+        fields[index] = (DebugTypeField){.name = string_format(arguments->arena, S8("continuation_member_with_a_long_name_{u32}"), index),
+            .type = 0, .offset = index * 4};
+    }
+    PdbModule modules[2] = {0};
+    for (u32 index = 0; index < 2; index += 1)
+    {
+        String8 path = index ? S8("second.c") : S8("first.c");
+        DebugType types[] = {
+            {.kind = DEBUG_TYPE_BASE, .name = index ? S8("f32") : S8("int"), .size = 4, .is_signed = true},
+            {.kind = DEBUG_TYPE_STRUCT, .name = index ? S8("Second") : S8("First"), .size = MEMBER_COUNT * 4,
+             .fields = fields, .field_count = MEMBER_COUNT},
+        };
+        DebugModel model = {.types = types, .type_count = 2, .valid = true};
+        CodeviewResult cv = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+            .machine = CODEVIEW_MACHINE_X64});
+        BUSTER_TEST(arguments, cv.valid);
+        modules[index] = (PdbModule){.name = path, .codeview_symbols = cv.symbols, .codeview_types = cv.types, .code_size = 16, .code_section = 1};
+    }
+    PdbSection section = {.name = S8(".text"), .virtual_address = 0x1000, .virtual_size = 32, .raw_size = 32, .characteristics = 0x60000020};
+    PdbResult built = pdb_build(arguments->arena, (PdbInput){.sections = &section, .section_count = 1, .modules = modules,
+        .module_count = 2, .code_section = 1, .code_size = 32, .machine = 0x8664, .age = 1});
+    BUSTER_TEST(arguments, built.valid);
+    if (built.valid)
+    {
+        ByteSlice tpi = pdb_test_stream_bytes(arguments->arena, built.bytes, PDB_TEST_STREAM_TPI);
+        u64 offsets[64] = {0};
+        u32 count = 0;
+        u64 cursor = PDB_TEST_TPI_HEADER_SIZE;
+        while (cursor + 4 <= tpi.length && count < BUSTER_ARRAY_LENGTH(offsets))
+        {
+            u16 length = 0;
+            memcpy(&length, tpi.pointer + cursor, 2);
+            if (length < 2 || (u64)length + 2 > tpi.length - cursor)
+            {
+                break;
+            }
+            offsets[count++] = cursor;
+            cursor += (u64)length + 2;
+        }
+        BUSTER_TEST(arguments, cursor == tpi.length && count >= 12);
+        u32 structures = 0;
+        for (u32 index = 0; index < count; index += 1)
+        {
+            u16 kind = 0;
+            memcpy(&kind, tpi.pointer + offsets[index] + 2, 2);
+            if (kind != 0x1505)
+            {
+                continue;
+            }
+            structures += 1;
+            u32 builtin = tpi.pointer[offsets[index] + 26] == 'F' ? 0x74u : 0x40u;
+            u32 field_index = pdb_read_u32(tpi, offsets[index] + 8);
+            u32 seen = 0;
+            u32 links = 0;
+            bool valid = true;
+            while (field_index && valid && links < count)
+            {
+                valid = field_index >= 0x1000 && field_index - 0x1000 < count;
+                BUSTER_TEST(arguments, valid);
+                if (!valid)
+                {
+                    break;
+                }
+                u64 start = offsets[field_index - 0x1000];
+                u16 length = 0;
+                memcpy(&length, tpi.pointer + start, 2);
+                memcpy(&kind, tpi.pointer + start + 2, 2);
+                BUSTER_TEST(arguments, kind == 0x1203);
+                u64 end = start + 2 + length;
+                cursor = start + 4;
+                u32 next = 0;
+                while (cursor + 2 <= end && valid)
+                {
+                    memcpy(&kind, tpi.pointer + cursor, 2);
+                    if (kind == 0x1404)
+                    {
+                        valid = end - cursor == 8;
+                        next = pdb_read_u32(tpi, cursor + 4);
+                        cursor += 8;
+                    }
+                    else
+                    {
+                        valid = kind == 0x150d && end - cursor >= 15 && seen < MEMBER_COUNT;
+                        if (!valid)
+                        {
+                            break;
+                        }
+                        u32 type = pdb_read_u32(tpi, cursor + 4);
+                        BUSTER_TEST(arguments, type >= 0x1000 && type - 0x1000 < count);
+                        if (type >= 0x1000 && type - 0x1000 < count)
+                        {
+                            BUSTER_TEST(arguments, pdb_read_u32(tpi, offsets[type - 0x1000] + 4) == builtin);
+                        }
+                        BUSTER_TEST(arguments, pdb_read_u32(tpi, cursor + 10) == seen * 4);
+                        cursor += 14;
+                        while (cursor < end && tpi.pointer[cursor])
+                        {
+                            cursor += 1;
+                        }
+                        valid = cursor < end;
+                        cursor = (cursor + 1 + 3) & ~(u64)3;
+                        seen += 1;
+                    }
+                }
+                BUSTER_TEST(arguments, valid && cursor == end);
+                field_index = next;
+                links += next != 0;
+            }
+            BUSTER_TEST(arguments, valid && !field_index && seen == MEMBER_COUNT && links >= 2);
+        }
+        BUSTER_TEST(arguments, structures == 2);
+    }
+    return result;
+}
+
 UnitTestResult pdb_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = pdb_test_checksum_records(arguments);
+    UnitTestResult continuations = pdb_test_continuation_merge(arguments);
+    result.test_count += continuations.test_count;
+    result.succeeded_test_count += continuations.succeeded_test_count;
     DwarfFunction functions[] = {
         {
             .name = S8_INITIALIZER("main"),
@@ -365,6 +564,8 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
             .variables = model_variable_ids,
             .variable_count = BUSTER_ARRAY_LENGTH(model_variable_ids),
         },
+        {.kind = DEBUG_SCOPE_LEXICAL, .parent = 0, .start = 0x10, .end = 0x80},
+        {.kind = DEBUG_SCOPE_LEXICAL, .parent = 1, .start = 0x20, .end = 0x40},
     };
     DebugFunction model_functions[] = {
         {
@@ -383,7 +584,13 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
             .code_size = 0x100,
         },
     };
+    DebugInlineSite inline_sites[] = {
+        {.function = model_functions, .start = 0x20, .end = 0x40, .has_ranges = true},
+        {.function = model_functions + 1, .start = 0x120, .end = 0x140, .has_ranges = true},
+    };
     DebugModel model = {
+        .inline_sites = inline_sites,
+        .inline_site_count = BUSTER_ARRAY_LENGTH(inline_sites),
         .source_paths = files,
         .types = model_types,
         .functions = model_functions,
@@ -447,6 +654,9 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
         {
             return result;
         }
+        UnitTestResult scope_links = pdb_test_scope_links(arguments, built, codeview);
+        result.test_count += scope_links.test_count;
+        result.succeeded_test_count += scope_links.succeeded_test_count;
         BUSTER_TEST(arguments, built.bytes.length % PDB_TEST_BLOCK_SIZE == 0);
         BUSTER_TEST(arguments, memcmp(built.bytes.pointer, "Microsoft C/C++ MSF 7.00\r\n\x1a" "DS", 30) == 0);
         u32 block_size = pdb_read_u32(built.bytes, 32);
