@@ -937,6 +937,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     // read-only table before the first module can create those workers.
     compiler_prewarm();
     BUSTER_CHECK(c_test_lex_compact_tables_ready());
+    x86_64_metadata_broadcast_prewarm();
     // Keep the root path outside the per-descriptor arena rewind points. A
     // child that exits before requesting a path therefore owns no filesystem
     // root, while a parent run keeps its root alive until teardown.

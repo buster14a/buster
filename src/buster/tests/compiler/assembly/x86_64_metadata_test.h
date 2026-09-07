@@ -46,5 +46,6 @@ struct BusterX86CompletionLedger
     u64 digest;
 };
 
+BUSTER_F_DECL void x86_64_metadata_broadcast_prewarm(void);
 BUSTER_F_DECL UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments);
 #endif
