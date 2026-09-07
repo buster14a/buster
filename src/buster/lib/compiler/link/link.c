@@ -7239,7 +7239,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         if (emit_debug)
         {
     
-            PdbSection* pdb_sections = arena_allocate(arena, PdbSection, PE_SECTION_COUNT);
+            PdbSection* pdb_sections = arena_allocate(arena, PdbSection, pe_section_count);
             for (u32 section_index = 0; section_index < pe_section_count; section_index += 1)
             {
                 String8 name = section_index == PE_SECTION_TEXT             ? S8(".text")
@@ -7356,7 +7356,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             {
                 pdb_input = (PdbInput){
                     .sections = pdb_sections,
-                    .section_count = PE_SECTION_COUNT,
+                    .section_count = pe_section_count,
                     .age = 1,
                     .machine = aarch64 ? 0xaa64 : 0x8664,
                     .modules = pdb_modules,
