@@ -1,9 +1,9 @@
-name: Issue 33 snapshot
+name: Differential harness source snapshot
 
 on:
   push:
     branches:
-      - compiler/issue-33-canonical-local-promotion
+      - test/differential-harness-source-20260907
 
 permissions:
   contents: read
@@ -16,14 +16,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Pack source
+          persist-credentials: false
+      - name: Pack source and history
         shell: bash
         run: |
           set -euo pipefail
-          tar --exclude=.git --exclude=.github/workflows/issue-33-snapshot.yml -czf "$RUNNER_TEMP/buster-source.tar.gz" .
+          git bundle create "$RUNNER_TEMP/buster-source.bundle" HEAD
       - uses: actions/upload-artifact@v4
         with:
-          name: issue-33-source
-          path: ${{ runner.temp }}/buster-source.tar.gz
+          name: differential-harness-source
+          path: ${{ runner.temp }}/buster-source.bundle
           if-no-files-found: error
           retention-days: 1
