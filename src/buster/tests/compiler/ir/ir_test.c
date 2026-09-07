@@ -1,4 +1,6 @@
 #include <buster/tests/compiler/ir/ir_test.h>
+#include <buster/lib/compiler/ir/ir_internal.h>
+#include <buster/lib/time.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL u32 ir_test_opcode_count(IrFunction* function, IrOpcode opcode)
@@ -496,6 +498,178 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, abi_struct_f80_aapcs_argument.parts[0].abi_class == IR_ABI_CLASS_FLOAT && abi_struct_f80_aapcs_argument.parts[0].size == 16);
     BUSTER_TEST(arguments, abi_struct_f80_aapcs_result.part_count == 1 && !abi_struct_f80_aapcs_result.indirect && !abi_struct_f80_aapcs_result.memory);
     BUSTER_TEST(arguments, abi_struct_f80_aapcs_result.parts[0].abi_class == IR_ABI_CLASS_FLOAT && abi_struct_f80_aapcs_result.parts[0].size == 16);
+
+    // Compare every cache use to the unchanged, uncached classifier over the
+    // scalar/aggregate ABI corpus above, in an interleaved convention order.
+    IrAbiContext abi_contexts[IR_ABI_CONVENTION_COUNT];
+    for (u32 convention = 0; convention < IR_ABI_CONVENTION_COUNT; convention += 1)
+    {
+        abi_contexts[convention] = ir_abi_context_initialize(arguments->arena, &abi_program.types, (IrAbiConvention)convention);
+    }
+    for (u32 repetition = 0; repetition < 3; repetition += 1)
+    {
+        for (u32 type = 0; type < abi_program.types.count; type += 1)
+        {
+            for (u32 use = 0; use < IR_ABI_USE_COUNT; use += 1)
+            {
+                for (u32 convention = 0; convention < IR_ABI_CONVENTION_COUNT; convention += 1)
+                {
+                    IrAbiValue expected = ir_test_abi_reference(&abi_program, (IrTypeId){type}, (IrAbiConvention)convention, (IrAbiUse)use);
+                    IrAbiValue actual = ir_abi_context_value(&abi_program, abi_contexts + convention, (IrTypeId){type}, (IrAbiUse)use);
+                    // IrAbiValue names its two tail bytes explicitly and every
+                    // classifier result initializes them; there is no padding.
+                    BUSTER_CT_CHECK(sizeof(IrAbiValue) == sizeof(IrAbiPart) * IR_ABI_MAX_PARTS + sizeof(u32) + 4);
+                    BUSTER_TEST(arguments, memcmp(&actual, &expected, sizeof(actual)) == 0);
+                }
+            }
+        }
+    }
+    for (u32 convention = 0; convention < IR_ABI_CONVENTION_COUNT; convention += 1)
+    {
+        u32 uses = convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 ? 3 : 2;
+        BUSTER_TEST(arguments, abi_contexts[convention].classified_values == (u64)uses * abi_program.types.count);
+        BUSTER_TEST(arguments, abi_contexts[convention].pages[IR_ABI_USE_ARGUMENT] != abi_program.abi_contexts[convention].pages[IR_ABI_USE_ARGUMENT]);
+    }
+    IrAbiContext independent = ir_abi_context_initialize(arguments->arena, &abi_program.types, IR_ABI_CONVENTION_SYSTEMV_X86_64);
+    IrAbiValue independent_result = ir_abi_context_value(&abi_program, &independent, abi_f80, IR_ABI_USE_RESULT);
+    BUSTER_TEST(arguments, independent.classified_values == 1 && independent_result.part_count == 2);
+    BUSTER_TEST(arguments, independent.pages[IR_ABI_USE_RESULT] != abi_contexts[IR_ABI_CONVENTION_SYSTEMV_X86_64].pages[IR_ABI_USE_RESULT]);
+    u64 other_classifications = abi_contexts[IR_ABI_CONVENTION_SYSTEMV_X86_64].classified_values;
+    ir_abi_context_invalidate(&independent);
+    independent_result = ir_abi_context_value(&abi_program, &independent, abi_f80, IR_ABI_USE_RESULT);
+    BUSTER_TEST(arguments, independent.classified_values == 2 && independent_result.part_count == 2);
+    BUSTER_TEST(arguments, abi_contexts[IR_ABI_CONVENTION_SYSTEMV_X86_64].classified_values == other_classifications);
+    // Published immutable tables may supply count without builder capacity.
+    IrProgram published_view = {.arena = arguments->arena, .types = {.types = abi_program.types.types, .count = abi_program.types.count}};
+    IrAbiValue published_result = ir_type_abi_value(&published_view, abi_f80, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+    BUSTER_TEST(arguments, published_result.part_count == 2 && published_result.parts[0].abi_class == IR_ABI_CLASS_X87);
+
+    // Grow across cache-page boundaries, defer unresolved layout, and give a
+    // second compilation identical ids with different language type contents.
+    IrProgram cache_program = ir_program_initialize(arguments->arena, 0, 260, 0, 0);
+    IrTypeId cache_pending = ir_program_add_type(&cache_program, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 64});
+    IrAbiValue pending_value = ir_type_abi_value(&cache_program, cache_pending, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+    BUSTER_TEST(arguments, pending_value.part_count == 0 && cache_program.abi_contexts[IR_ABI_CONVENTION_SYSTEMV_X86_64].classified_values == 0);
+    cache_program.types.types[cache_pending.value].layout = (IrTypeLayout){.size = 8, .alignment = 8, .resolved = true};
+    pending_value = ir_type_abi_value(&cache_program, cache_pending, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+    BUSTER_TEST(arguments, pending_value.part_count == 1 && pending_value.parts[0].abi_class == IR_ABI_CLASS_INTEGER);
+    IrAbiValue foreign_value = ir_abi_context_value(&cache_program, &independent, cache_pending, IR_ABI_USE_ARGUMENT);
+    BUSTER_TEST(arguments, foreign_value.part_count == 0 && independent.classified_values == 2);
+    for (u32 type = 1; type < 130; type += 1)
+    {
+        ir_program_add_type(&cache_program, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 64,
+                                                   .layout = {.size = 8, .alignment = 8, .resolved = true}});
+    }
+    ir_program_add_type(&cache_program, (IrType){.kind = IR_TYPE_FUNCTION, .calling_convention = IR_CALLING_CONVENTION_WIN64,
+                                               .layout = {.size = 8, .alignment = 8, .resolved = true}});
+    ir_prepare_program_abi(&cache_program, IR_ABI_CONVENTION_SYSTEMV_X86_64);
+    BUSTER_TEST(arguments, cache_program.abi_contexts[IR_ABI_CONVENTION_SYSTEMV_X86_64].classified_values == 1);
+    BUSTER_TEST(arguments, cache_program.abi_contexts[IR_ABI_CONVENTION_WIN64_X86_64].classified_values == 0);
+    u64 reserved_bytes = 0;
+    for (u32 convention = 0; convention < IR_ABI_CONVENTION_COUNT; convention += 1)
+    {
+        reserved_bytes += cache_program.abi_contexts[convention].allocated_bytes;
+    }
+    // Two active conventions still reserve much less than the old 848-byte
+    // all-convention object per type; no bytes belong to the other targets.
+    BUSTER_TEST(arguments, reserved_bytes < (u64)cache_program.types.count * 400);
+    BUSTER_TEST(arguments, !cache_program.abi_contexts[IR_ABI_CONVENTION_AAPCS64].arena);
+    TemporalArena abi_attempt = arena_begin_temporal(arguments->arena);
+    for (u32 attempt = 0; attempt < 2; attempt += 1)
+    {
+        for (u32 type = 0; type < cache_program.types.count; type += 1)
+        {
+            for (u32 convention = IR_ABI_CONVENTION_SYSTEMV_X86_64; convention <= IR_ABI_CONVENTION_WIN64_X86_64; convention += 1)
+            {
+                for (u32 use = 0; use < IR_ABI_USE_COUNT; use += 1)
+                {
+                    IrAbiValue expected = ir_test_abi_reference(&cache_program, (IrTypeId){type}, (IrAbiConvention)convention, (IrAbiUse)use);
+                    IrAbiValue actual = ir_type_abi_value(&cache_program, (IrTypeId){type}, (IrAbiConvention)convention, (IrAbiUse)use);
+                    BUSTER_TEST(arguments, memcmp(&actual, &expected, sizeof(actual)) == 0);
+                }
+            }
+        }
+        BUSTER_TEST(arguments, arguments->arena->position == abi_attempt.position);
+        u8* discarded = arena_allocate(arguments->arena, u8, 16384);
+        memset(discarded, 0xcc, 16384);
+        scratch_end(abi_attempt);
+    }
+    // Mutating a language layout invalidates all conventions and dependent
+    // aggregate classifications through one explicit program operation.
+    cache_program.types.types[cache_pending.value].bit_width = 32;
+    cache_program.types.types[cache_pending.value].layout.size = 4;
+    ir_program_invalidate_abi(&cache_program);
+    pending_value = ir_type_abi_value(&cache_program, cache_pending, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+    BUSTER_TEST(arguments, pending_value.parts[0].size == 4);
+    pending_value = ir_type_abi_value(&cache_program, cache_pending, IR_ABI_CONVENTION_WIN64_X86_64, IR_ABI_USE_ARGUMENT);
+    BUSTER_TEST(arguments, pending_value.parts[0].size == 4);
+
+    IrProgram dependent = ir_program_initialize(arguments->arena, 0, 2, 0, 0);
+    IrTypeId dependent_leaf = ir_program_add_type(&dependent, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 64,
+                                                                    .layout = {.size = 8, .alignment = 8, .resolved = true}});
+    IrField dependent_field = {.type = dependent_leaf};
+    IrTypeId dependent_aggregate = ir_program_add_type(&dependent, (IrType){.kind = IR_TYPE_STRUCT, .fields = &dependent_field, .field_count = 1,
+                                                                         .layout = {.size = 8, .alignment = 8, .resolved = true}});
+    IrAbiValue dependent_before = ir_type_abi_value(&dependent, dependent_aggregate, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+    BUSTER_TEST(arguments, dependent_before.parts[0].abi_class == IR_ABI_CLASS_FLOAT);
+    dependent.types.types[dependent_leaf.value].kind = IR_TYPE_INTEGER;
+    ir_program_invalidate_abi(&dependent);
+    IrAbiValue dependent_after = ir_type_abi_value(&dependent, dependent_aggregate, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+    BUSTER_TEST(arguments, dependent_after.parts[0].abi_class == IR_ABI_CLASS_INTEGER);
+
+    if (os_get_environment_variable(S8("BUSTER_ABI_CACHE_BENCH")).length)
+    {
+        // An opt-in classifier/cache microbenchmark; timing never gates tests.
+        // The old eager path resolves argument + result for every type and
+        // duplicates argument storage for the unused variadic result.
+        enum { ABI_BENCH_REPETITIONS = 4096 };
+        IrAbiContext measured = ir_abi_context_initialize(arguments->arena, &abi_program.types, IR_ABI_CONVENTION_SYSTEMV_X86_64);
+        TimeDataType start = timestamp_take();
+        ir_abi_context_reserve(&measured, abi_program.types.count);
+        u64 reserve_ns = timestamp_ns_between(start, timestamp_take());
+        u64 checksum = 0;
+        start = timestamp_take();
+        for (u32 type = 0; type < abi_program.types.count; type += 1)
+        {
+            for (u32 use = 0; use < IR_ABI_USE_VARIADIC_ARGUMENT; use += 1)
+            {
+                IrAbiValue value = ir_abi_context_value(&abi_program, &measured, (IrTypeId){type}, (IrAbiUse)use);
+                checksum += value.part_count + value.parts[0].size;
+            }
+        }
+        u64 cold_ns = timestamp_ns_between(start, timestamp_take());
+        start = timestamp_take();
+        for (u32 repetition = 0; repetition < ABI_BENCH_REPETITIONS; repetition += 1)
+        {
+            for (u32 type = 0; type < abi_program.types.count; type += 1)
+            {
+                for (u32 use = 0; use < IR_ABI_USE_VARIADIC_ARGUMENT; use += 1)
+                {
+                    IrAbiValue value = ir_abi_context_value(&abi_program, &measured, (IrTypeId){type}, (IrAbiUse)use);
+                    checksum += value.part_count + value.parts[0].size;
+                }
+            }
+        }
+        u64 warm_ns = timestamp_ns_between(start, timestamp_take());
+        start = timestamp_take();
+        for (u32 repetition = 0; repetition < ABI_BENCH_REPETITIONS; repetition += 1)
+        {
+            for (u32 type = 0; type < abi_program.types.count; type += 1)
+            {
+                for (u32 use = 0; use < IR_ABI_USE_VARIADIC_ARGUMENT; use += 1)
+                {
+                    IrAbiValue value = ir_test_abi_reference(&abi_program, (IrTypeId){type}, IR_ABI_CONVENTION_SYSTEMV_X86_64, (IrAbiUse)use);
+                    checksum += value.part_count + value.parts[0].size;
+                }
+            }
+        }
+        u64 uncached_ns = timestamp_ns_between(start, timestamp_take());
+        u64 queries = (u64)ABI_BENCH_REPETITIONS * abi_program.types.count * IR_ABI_USE_VARIADIC_ARGUMENT;
+        string_print(S8("ABI_CACHE_BENCH types={u32} reserve_ns={u64} cold_ns={u64} warm_ns={u64} uncached_ns={u64} warm_queries={u64} classified={u64} bytes={u64} type_bytes={u64} checksum={u64}\n"),
+                     abi_program.types.count, reserve_ns, cold_ns, warm_ns, uncached_ns, queries, measured.classified_values,
+                     measured.allocated_bytes, sizeof(IrType) * abi_program.types.count, checksum);
+        BUSTER_TEST(arguments, measured.classified_values == (u64)abi_program.types.count * IR_ABI_USE_VARIADIC_ARGUMENT);
+    }
 
     IrValidationResult valid_f80_constant =
         ir_test_canonical_f80_constant(arguments->arena, UINT64_C(0x8000000000000001), UINT64_C(0x7fff), 2, 0, 16, 16);

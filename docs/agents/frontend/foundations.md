@@ -206,3 +206,30 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
 - Native lowering is `canonical IR -> machine IR -> scheduling/register
   allocation -> encoding`. Selection patterns and scheduling classes remain
   separate metadata domains even when they share instruction-form IDs.
+
+## ABI decomposition ownership
+
+`IrType` holds language identity and layout only. Each `IrAbiContext` owns one
+calling convention's decomposition cache, keyed by canonical type id and ABI
+use. `IrProgram.abi_contexts` creates contexts only for conventions requested
+by the frontend or a target consumer. Independent contexts may share the same
+immutable language types. `ir_type_abi_value` remains the shared call-lowering
+query used by native consumers and the frontend; explicit contexts use
+`ir_abi_context_value`. Wasm, eBPF and LLVM do not acquire a native cache merely
+by existing; only an actual ABI query creates it.
+
+Cache pages contain 64 types for one use, with a resolution mask; values are
+initialized before their bit is published. Variadic arguments reuse argument
+classification except on Windows AArch64, whose convention distinguishes them.
+Unresolved layouts are not cached. Adding a type under a fresh id is supported;
+changing an existing layout requires `ir_program_invalidate_abi` (or invalidating
+every independent context), because dependent aggregate classifications change
+too. Neither cloning a type nor querying an ABI mutates the type record.
+
+`ir_prepare_program_abi` reserves the requested/default, explicit function, and
+already-used contexts before native code generation opens its retry checkpoint.
+It does not classify unused types. Queries during an attempt fill resident pages
+without retaining arena allocations that a code-buffer retry could discard.
+The type table must not grow beyond the reserved count inside such a checkpoint.
+`allocated_bytes` counts context page/directory bytes; `classified_values` counts
+completed cache misses cumulatively, including misses after invalidation.

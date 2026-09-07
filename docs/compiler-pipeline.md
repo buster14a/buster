@@ -91,6 +91,13 @@ a trusted producer. It is not permission for a consumer to reinterpret the
 IR, maintain a divergent private CFG, or skip validation after mutating the
 function.
 
+ABI decomposition is owned by per-convention `IrAbiContext` side tables rather
+than interned types. `ir_type_abi_value` is the shared query; standalone contexts
+may share immutable type/layout records. Native retry setup reserves cache pages
+before the checkpoint, and classification remains lazy per `(TypeId, AbiUse)`.
+Layout mutation invalidates all dependent ABI facts explicitly. See the
+[frontend ABI ownership contract](agents/frontend/foundations.md#abi-decomposition-ownership).
+
 ### 3. Compact FAST canonical pipeline
 
 The shared FAST pipeline is bounded to transformations that remove obvious
@@ -225,7 +232,6 @@ bounded debt, not precedent for new code.
 | Eligible C locals can still enter canonical IR as `LOCAL`/`LOAD`/`STORE`, with overlapping promotion in native selectors. | [#33](https://github.com/buster14a/buster/issues/33), then [#34](https://github.com/buster14a/buster/issues/34) |
 | Native compilation may abandon machine selection, verification, placement or encoding and emit the whole function directly from canonical IR. | [#35](https://github.com/buster14a/buster/issues/35), then [#36](https://github.com/buster14a/buster/issues/36) |
 | Canonical instruction rows are dense, but complete CFG topology is not yet published through one immutable dense interface. | [#38](https://github.com/buster14a/buster/issues/38) |
-| Interned types retain more ABI-specific state than one active compilation needs. | [#39](https://github.com/buster14a/buster/issues/39) |
 | The shared FAST canonical pass order and per-pass budgets are not yet an enforced pipeline contract. | [#40](https://github.com/buster14a/buster/issues/40) |
 | Memory scheduling is deliberately conservative and cannot yet relax dependencies by proven alias class. | [#41](https://github.com/buster14a/buster/issues/41); first preserve complete memory classification in [#126](https://github.com/buster14a/buster/issues/126) / [PR #127](https://github.com/buster14a/buster/pull/127) |
 | Declarative and handwritten instruction selection do not yet have a final, disjoint ownership boundary. | [#42](https://github.com/buster14a/buster/issues/42) |

@@ -723,6 +723,25 @@ struct IrModule
     IrLocalPromotionStatistics local_promotion;
 };
 
+// ABI decomposition belongs to one compilation/convention, never to an
+// interned type. Pages are keyed by (TypeId, AbiUse); their payload is private
+// to ir.c. A context can share immutable language types with another context.
+// Reserve before an arena retry checkpoint so later cache fills retain no
+// allocation from a discarded attempt. Type layout mutation requires explicit
+// invalidation, including classifications of aggregates containing that type.
+typedef struct IrAbiCachePage IrAbiCachePage;
+typedef struct IrAbiContext IrAbiContext;
+struct IrAbiContext
+{
+    Arena* arena;
+    IrType const* type_storage;
+    IrAbiCachePage** pages[IR_ABI_USE_COUNT];
+    u64 allocated_bytes;
+    u64 classified_values;
+    u32 page_capacity;
+    IrAbiConvention convention;
+};
+
 typedef struct IrProgram IrProgram;
 struct IrProgram
 {
@@ -730,6 +749,7 @@ struct IrProgram
     TargetDataLayout data_layout;
     IrModule* modules;
     IrTypeTable types;
+    IrAbiContext abi_contexts[IR_ABI_CONVENTION_COUNT];
     IrSymbolTable symbols;
     IrSourceTable sources;
     // How the frontend's byte space maps back to lines, when the sources are
@@ -793,6 +813,11 @@ struct IrInstructionOwnership
 BUSTER_F_DECL IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacity, u32 symbol_capacity, u32 source_capacity);
 BUSTER_F_DECL IrTypeId ir_program_add_type(IrProgram* program, IrType type);
 BUSTER_F_DECL void ir_prepare_program_abi(IrProgram* program, IrAbiConvention convention);
+BUSTER_F_DECL IrAbiContext ir_abi_context_initialize(Arena* arena, IrTypeTable const* types, IrAbiConvention convention);
+BUSTER_F_DECL void ir_abi_context_reserve(IrAbiContext* context, u32 type_count);
+BUSTER_F_DECL IrAbiValue ir_abi_context_value(IrProgram* program, IrAbiContext* context, IrTypeId type, IrAbiUse use);
+BUSTER_F_DECL void ir_abi_context_invalidate(IrAbiContext* context);
+BUSTER_F_DECL void ir_program_invalidate_abi(IrProgram* program);
 BUSTER_F_DECL IrAbiConvention ir_abi_convention_for_target(Target target);
 BUSTER_F_DECL IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type, IrAbiConvention convention, IrAbiUse use);
 // AAPCS64 starts a 16-byte, two-integer-part value at an even X-register

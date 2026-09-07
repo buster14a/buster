@@ -20209,9 +20209,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         return result;
     }
     codegen_prewarm_for_target(target);
-    // ABI records and the target-for-ABI cache are mutable on first use, and an
-    // attempt must not be the thing that fills a cache the next attempt reads.
-    // Freezing both here also keeps them out of the rewind below.
+    // Reserve the active ABI contexts before retries. Classification stays lazy,
+    // but filling a reserved page retains no allocation from an attempt that
+    // code-buffer growth might rewind. Explicit function conventions reserve
+    // their own contexts too; language type records remain untouched.
     ir_prepare_program_abi(program, codegen_canonical_ir_abi_convention(result.abi));
     IrValidationResult validation = ir_prepare_canonical_module(program, module, options.assume_validated);
     if (validation.error != IR_VALIDATION_NONE)
