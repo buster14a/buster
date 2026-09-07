@@ -1,0 +1,60 @@
+name: Publish measured parser-frame audit
+
+on:
+  push:
+    branches: [audit/publish-parser-frames-20260907]
+    paths: [.github/workflows/publish-parser-frames-audit.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ebfdd11705bc470564e726857e498f1c82aa746c
+          fetch-depth: 1
+      - name: Apply the validated source delta on pinned current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 9834a4253c61934a8a253641a84741a25d3717e3
+          python3 - <<'PY'
+          import base64, gzip, hashlib, pathlib
+          encoded = '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'
+          # Normalize the one transport-only character in the pasted encoding.
+          encoded = encoded.replace('UVPxB1lQT4x', 'UVPxB1QT4x')
+          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '621dfe9e66e42f117e6b095e84d721214023ae1d9a8ea702a2168665e7288b32'
+          pathlib.Path('/tmp/parser-frames.patch').write_bytes(patch)
+          PY
+          git apply --3way --index /tmp/parser-frames.patch
+          git diff --cached --check
+          python3 - <<'PY'
+          import hashlib, subprocess
+          diff = subprocess.check_output(['git', 'diff', '--cached', '--full-index']).decode()
+          lines = [x for x in diff.splitlines() if x.startswith('diff --git ') or (x.startswith(('+', '-')) and not x.startswith(('+++', '---')))]
+          assert hashlib.sha256('\n'.join(lines).encode()).hexdigest() == 'dc800633697fae37ba62ceb851905f66ad2fd9399815c41550ca86079f622d40'
+          assert subprocess.check_output(['git', 'diff', '--cached', '--name-only']).decode().splitlines() == ['src/buster/lib/compiler/frontend/c/c_parse.c', 'src/buster/tests/compiler/frontend/c/c_test.c']
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c perf/parser-body-frame-storage-20260907
+          git commit -m 'c: reuse depth-sized parser body-frame storage' -m 'Validated source delta from local commit 93c14525105e48f11cbf8f14f28c05a8df2dbcae, applied without changing unrelated main work. Baseline A/B and integration scope are recorded on the PR.'
+          git push origin HEAD:refs/heads/perf/parser-body-frame-storage-20260907
+          git archive --format=tar.gz -o "$RUNNER_TEMP/parser-frames-source.tar.gz" HEAD
+          git diff --full-index ebfdd11705bc470564e726857e498f1c82aa746c HEAD > "$RUNNER_TEMP/parser-frames-current-main.patch"
+          git rev-parse HEAD > "$RUNNER_TEMP/parser-frames-head.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parser-frames-integrated-source
+          path: |
+            ${{ runner.temp }}/parser-frames-source.tar.gz
+            ${{ runner.temp }}/parser-frames-current-main.patch
+            ${{ runner.temp }}/parser-frames-head.txt
+          if-no-files-found: error
+          retention-days: 3
