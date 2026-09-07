@@ -64,10 +64,17 @@ jobs:
           test_text, traced_call_count = call_pattern.subn(trace_test_call, test_text)
           if traced_call_count < 20:
               raise SystemExit(f"only found {traced_call_count} frontend test calls")
+          nested_arena = "    TemporalArena nested_conditional_temporary = scratch_begin(0, 0);"
+          if test_text.count(nested_arena) != 1:
+              raise SystemExit("nested conditional arena anchor not found")
+          test_text = test_text.replace(nested_arena, nested_arena + r'''
+              fprintf(stderr, "PR94_NESTED preprocessing\n"); fflush(stderr);''', 1)
           nested_parse = "    CParseResult nested_conditional_parse = c_parse(nested_conditional_temporary.arena, nested_conditional_tokens);"
           if test_text.count(nested_parse) != 1:
               raise SystemExit("nested conditional parse anchor not found")
-          test_text = test_text.replace(nested_parse, nested_parse + r'''
+          test_text = test_text.replace(nested_parse, r'''    fprintf(stderr, "PR94_NESTED preprocessing_complete\n"); fflush(stderr);
+              fprintf(stderr, "PR94_NESTED parsing\n"); fflush(stderr);
+              ''' + nested_parse + r'''
               fprintf(stderr, "PR94_NESTED parsed token_diagnostics=%llu parse_diagnostics=%llu\n",
                       (unsigned long long)nested_conditional_tokens.diagnostic_count,
                       (unsigned long long)nested_conditional_parse.diagnostic_count);
