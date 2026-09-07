@@ -1365,36 +1365,24 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metad
     return result;
 }
 
-// The ELF general-dynamic thread-local pair, sixteen fixed bytes:
-//
-//   66 48 8d 3d <r32>  data16 lea rdi, [rip + sym@TLSGD]
-//   66 66 48 e8 <r32>  data16 data16 rex.W call __tls_get_addr
-//
-// The prefixes are the sequence rather than an encoding of it.  Nothing
-// executes them -- a data16 on a 64-bit lea and two on a rex.W call change
-// nothing -- and they are there so the sixteen bytes have a shape a linker
-// can recognize: relaxing general-dynamic to initial-exec or local-exec
-// replaces all sixteen, and both `ld` and this tree's own linker match on
-// exactly these bytes to do it.  That makes them data whose identity is the
-// contract, which no metadata form can express, since the encoder's job is to
-// choose the shortest encoding of an instruction and the shortest one here is
-// the wrong answer.  The site is registered as a neutral fixed sequence in
-// `machine_x86_64_neutral_patch_sites` so it stays reviewable rather than
-// becoming an unaudited byte writer.
+// The metadata-owned TLS recipe preserves the ABI envelope and supplies both
+// field offsets. Model/symbol policy remains here, not in the ISA encoder.
 BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_thread_local_general_dynamic(CodegenBuffer* buffer, u32* address_offset, u32* helper_offset)
 {
-    codegen_emit_u8(buffer, 0x66);
-    codegen_emit_u8(buffer, 0x48);
-    codegen_emit_u8(buffer, 0x8d);
-    codegen_emit_u8(buffer, 0x3d);
-    *address_offset = (u32)buffer->count;
-    codegen_emit_u32(buffer, 0);
-    codegen_emit_u8(buffer, 0x66);
-    codegen_emit_u8(buffer, 0x66);
-    codegen_emit_u8(buffer, 0x48);
-    codegen_emit_u8(buffer, 0xe8);
-    *helper_offset = (u32)buffer->count;
-    codegen_emit_u32(buffer, 0);
+    if (buffer->count > buffer->capacity || BUSTER_X86_METADATA_TLS_GD_SIZE > buffer->capacity - buffer->count)
+    {
+        codegen_buffer_report_exhausted(buffer);
+    }
+    else if (!buster_x86_metadata_emit_tls_general_dynamic(buffer->bytes + buffer->count, BUSTER_X86_METADATA_TLS_GD_SIZE))
+    {
+        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+    }
+    else
+    {
+        *address_offset = (u32)buffer->count + BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET;
+        *helper_offset = (u32)buffer->count + BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET;
+        buffer->count += BUSTER_X86_METADATA_TLS_GD_SIZE;
+    }
 }
 
 BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metadata_segment_memory(

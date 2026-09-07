@@ -1921,42 +1921,19 @@ ObjectFile link_windows_libc_runtime_object(Arena* arena, Target target)
 BUSTER_GLOBAL_LOCAL bool link_elf_relax_thread_local(u8* bytes, u64 field_offset, u64 section_start, u64 section_end, bool general_dynamic,
                                                      s32 thread_pointer_offset)
 {
-    // Both rewrites reach outside the four bytes the relocation names, so the
-    // whole sequence has to be inside the section the relocation is in before
-    // any of it is read or written.
-    if (general_dynamic)
+    u32 prefix_size = general_dynamic ? BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET : BUSTER_X86_METADATA_TLS_IE_OFFSET;
+    u32 sequence_size = general_dynamic ? BUSTER_X86_METADATA_TLS_GD_SIZE : BUSTER_X86_METADATA_TLS_IE_SIZE;
+    bool result = false;
+    // The recipe reaches outside the relocation field. Use subtraction only
+    // after ordered bounds checks, including malformed near-UINT64_MAX ranges.
+    if (bytes && section_start <= field_offset && field_offset <= section_end &&
+        prefix_size <= field_offset - section_start && sequence_size - prefix_size <= section_end - field_offset)
     {
-        if (field_offset < section_start + 4 || field_offset + 12 > section_end)
-        {
-            return false;
-        }
-        static u8 const local_exec_bytes[] = {0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x80};
-        u64 sequence = field_offset - 4;
-        if (bytes[sequence] != 0x66 || bytes[sequence + 1] != 0x48 || bytes[sequence + 2] != 0x8d || bytes[sequence + 3] != 0x3d ||
-            bytes[sequence + 8] != 0x66 || bytes[sequence + 9] != 0x66 || bytes[sequence + 10] != 0x48 || bytes[sequence + 11] != 0xe8)
-        {
-            return false;
-        }
-        memcpy(bytes + sequence, local_exec_bytes, sizeof(local_exec_bytes));
-        link_write_u32(bytes, sequence + sizeof(local_exec_bytes), (u32)thread_pointer_offset);
-        return true;
+        result = buster_x86_metadata_relax_tls(bytes + field_offset - prefix_size, sequence_size,
+                                               general_dynamic ? BUSTER_X86_METADATA_TLS_GENERAL_DYNAMIC : BUSTER_X86_METADATA_TLS_INITIAL_EXEC,
+                                               thread_pointer_offset);
     }
-    if (field_offset < section_start + 3 || field_offset + 4 > section_end)
-    {
-        return false;
-    }
-    u8 rex = bytes[field_offset - 3];
-    u8 opcode = bytes[field_offset - 2];
-    u8 modrm = bytes[field_offset - 1];
-    if ((rex & 0xf8) != 0x48 || opcode != 0x03 || (modrm & 0xc7) != 0x05)
-    {
-        return false;
-    }
-    bytes[field_offset - 3] = (u8)((rex & (u8)~0x04u) | ((rex & 0x04u) ? 0x01u : 0x00u));
-    bytes[field_offset - 2] = 0x81;
-    bytes[field_offset - 1] = (u8)(0xc0u | ((modrm >> 3) & 0x07u));
-    link_write_u32(bytes, field_offset, (u32)thread_pointer_offset);
-    return true;
+    return result;
 }
 
 // Whether this relocation is the call half of a general-dynamic pair the
@@ -1965,7 +1942,8 @@ BUSTER_GLOBAL_LOCAL bool link_elf_relax_thread_local(u8* bytes, u64 field_offset
 // check only keeps the scan off every other rel32 in the object.
 BUSTER_GLOBAL_LOCAL bool link_elf_relocation_is_relaxed_tls_get_addr(ObjectFile* object, ObjectRelocation* relocation, ObjectSymbol* symbol)
 {
-    if ((relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PLT32) || relocation->offset < 8 ||
+    u32 field_delta = BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET;
+    if ((relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PLT32) || relocation->offset < field_delta ||
         !string_equal(symbol->name, S8("__tls_get_addr")))
     {
         return false;
@@ -1974,7 +1952,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_relocation_is_relaxed_tls_get_addr(ObjectFile*
     {
         ObjectRelocation* candidate = object->relocations + index;
         if (candidate->kind == OBJECT_RELOCATION_X86_64_TLSGD && candidate->section == relocation->section &&
-            candidate->offset == relocation->offset - 8)
+            candidate->offset == relocation->offset - field_delta)
         {
             return true;
         }

@@ -1044,8 +1044,8 @@ BUSTER_GLOBAL_LOCAL MachineX64EmitRegistryEntry const machine_x86_64_emit_regist
 #undef MACHINE_X64_REGISTRY_ROW
 };
 
-BUSTER_CT_CHECK(MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT == 5u);
-BUSTER_CT_CHECK(MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT == 15u);
+BUSTER_CT_CHECK(MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT == 7u);
+BUSTER_CT_CHECK(MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT == 14u);
 
 // Canonical x86 authority records.  These rows name only the metadata module
 // entry points that own instruction bytes.  Codegen, assembly, JIT, and link
@@ -1077,6 +1077,16 @@ BUSTER_GLOBAL_LOCAL MachineX64CanonicalAuthoritySite const
         .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
         .owner_symbol = S8_INITIALIZER("buster_x86_metadata_emit_exact_machine"),
     },
+    {
+        .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_METADATA_CHECKED,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
+        .owner_symbol = S8_INITIALIZER("buster_x86_metadata_emit_tls_general_dynamic"),
+    },
+    {
+        .authority_kind = MACHINE_X64_CANONICAL_AUTHORITY_METADATA_CHECKED,
+        .source_file = S8_INITIALIZER("src/buster/lib/compiler/assembly/x86_64_metadata.c"),
+        .owner_symbol = S8_INITIALIZER("buster_x86_metadata_relax_tls"),
+    },
 };
 
 // Neutral patch records are intentionally not instruction authorities.  They
@@ -1088,11 +1098,6 @@ BUSTER_GLOBAL_LOCAL MachineX64NeutralPatchSite const machine_x86_64_neutral_patc
         .patch_class = MACHINE_X64_NEUTRAL_PATCH_DATA,
         .source_file = S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"),
         .owner_symbol = S8_INITIALIZER("codegen_emit_global_assembly"),
-    },
-    {
-        .patch_class = MACHINE_X64_NEUTRAL_PATCH_FIXED_SEQUENCE,
-        .source_file = S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"),
-        .owner_symbol = S8_INITIALIZER("codegen_canonical_x64_thread_local_general_dynamic"),
     },
     {
         .patch_class = MACHINE_X64_NEUTRAL_PATCH_DISPLACEMENT,

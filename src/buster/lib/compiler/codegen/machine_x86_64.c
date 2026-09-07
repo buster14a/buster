@@ -10646,20 +10646,23 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     return true;
 }
 
-// A fixed instruction sequence copied in verbatim. The only caller is the
-// general-dynamic thread-local pair, whose prefixes are part of the sequence a
-// linker matches on rather than an encoding the metadata tables would choose;
-// everything else goes through the encoder so its form stays the audited one.
-BUSTER_GLOBAL_LOCAL bool machine_x64_emit_literal_bytes(MachineX64Encoder* encoder, u8 const* literal, u32 byte_count)
+// TLS is an ABI recipe in the metadata authority, not a literal-byte escape.
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_tls_general_dynamic(MachineX64Encoder* encoder)
 {
-    if (encoder->count > encoder->capacity || byte_count > encoder->capacity - encoder->count)
+    bool result = false;
+    if (encoder->count <= encoder->capacity && BUSTER_X86_METADATA_TLS_GD_SIZE <= encoder->capacity - encoder->count)
+    {
+        result = buster_x86_metadata_emit_tls_general_dynamic(encoder->bytes + encoder->count, BUSTER_X86_METADATA_TLS_GD_SIZE);
+    }
+    if (result)
+    {
+        encoder->count += BUSTER_X86_METADATA_TLS_GD_SIZE;
+    }
+    else
     {
         encoder->overflow = true;
-        return false;
     }
-    memcpy(encoder->bytes + encoder->count, literal, byte_count);
-    encoder->count += byte_count;
-    return true;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_pointer_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 base, u32 offset, u32 chunk,
@@ -11806,28 +11809,18 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     }
                     break; case MACHINE_X64_TLS_GENERAL_DYNAMIC:
                     {
-                        // Sixteen bytes whose prefixes are the sequence rather
-                        // than an encoding choice: a linker relaxing
-                        // general-dynamic to a cheaper model matches on
-                        // exactly these bytes and overwrites all sixteen, so
-                        // they are written directly instead of through the
-                        // encoder, which would pick each instruction's
-                        // shortest form.
-                        //   66 48 8d 3d <r32>  data16 lea rdi, [rip + sym@TLSGD]
-                        //   66 66 48 e8 <r32>  data16 data16 rex.W call __tls_get_addr
-                        static u8 const general_dynamic_bytes[] = {0x66, 0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0x66, 0x66, 0x48, 0xe8, 0, 0, 0, 0};
                         u32 sequence_offset = encoder.count;
-                        (void)machine_x64_emit_literal_bytes(&encoder, general_dynamic_bytes, (u32)BUSTER_ARRAY_LENGTH(general_dynamic_bytes));
+                        (void)machine_x64_emit_tls_general_dynamic(&encoder);
                         MachineCallSite* address_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                         *address_site = (MachineCallSite){
-                            .code_offset = sequence_offset + 4,
+                            .code_offset = sequence_offset + BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET,
                             .target = instruction->payload,
                             .is_thread_local = 1,
                             .thread_local_site = MACHINE_THREAD_LOCAL_SITE_GENERAL_DYNAMIC,
                         };
                         MachineCallSite* helper_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                         *helper_site = (MachineCallSite){
-                            .code_offset = sequence_offset + 12,
+                            .code_offset = sequence_offset + BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET,
                             .target = instruction->payload,
                             .thread_local_site = MACHINE_THREAD_LOCAL_SITE_TLS_GET_ADDR,
                         };
