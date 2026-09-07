@@ -63,10 +63,12 @@ BUSTER_CT_CHECK(MACHINE_POINT_PHASE_COUNT <= (1u << MACHINE_POINT_PHASE_BITS));
 // selected opcode, four inline packed operands, an immediate-or-side-table
 // payload, and rare dynamic flags. No source/debug information, no linked
 // pointers, no allocator state.
+#define MACHINE_INSTRUCTION_OPERAND_COUNT 4u
+
 typedef struct MachineInstruction MachineInstruction;
 struct MachineInstruction
 {
-    MachineRef operands[4];
+    MachineRef operands[MACHINE_INSTRUCTION_OPERAND_COUNT];
     u32 payload;
     u16 opcode;
     u16 flags;
@@ -1839,6 +1841,13 @@ struct MachineFastPrepass
     u32* operand_masks;
     u32* predecessor_offsets;
     u32* predecessor_list;
+    // Raw edge IDs parallel to predecessor_list and one ID per final
+    // terminator operand slot in each block. UINT32_MAX means no explicit
+    // edge; both pointers are null when the function has no raw edge table.
+    // These preserve the first raw match for duplicate source/destination
+    // pairs without rescanning all edges during either FAST or QUALITY.
+    u32* predecessor_edges;
+    u32* terminator_edges;
     u8* cold_blocks;
     u32* interval_starts;
     u32* interval_ends;
