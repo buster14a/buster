@@ -1398,7 +1398,9 @@ struct MachineSelectResult
     // and side tables. Replayed or manually assembled machine IR keeps this
     // false and must pass the structural verifier before consumption.
     bool selector_certified;
-    u8 reserved;
+    // True only while the target's function-signature gate is rejecting a
+    // parameter, result, variadic ABI, or supported argument-count limit.
+    bool signature_rejected;
     // Selector expansion statistics: typed instructions consumed and machine
     // rows produced. SIMD operations are counted during that same typed-IR
     // walk so accepted machine functions need no source-IR rescan.

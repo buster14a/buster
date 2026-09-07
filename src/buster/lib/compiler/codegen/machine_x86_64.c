@@ -5065,6 +5065,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         return result;
     }
+    result.signature_rejected = true;
     if (function_type->is_variadic)
     {
         // The machine selector models the System V register sequence.  A
@@ -5104,6 +5105,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         machine_x64_place_argument(signature_parameter_shapes + parameter_index, windows_abi, &signature_integer_count, &signature_float_count,
                                    &signature_stack_count, signature_parameter_placements + parameter_index);
     }
+    result.signature_rejected = false;
     if (!module)
     {
         // The unvalidated entry point carries no module context; one

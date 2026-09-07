@@ -4347,6 +4347,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, machine_vector_fallback_module.error == CODEGEN_ERROR_NONE);
         BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_function_count == 1);
         BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_opcode_counts[IR_OPCODE_LOAD] == 1);
+        BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 1);
+        BUSTER_TEST(arguments, machine_vector_fallback_module.first_fallback_opcode == IR_OPCODE_LOAD);
+        BUSTER_TEST(arguments, machine_vector_fallback_module.first_fallback_reason == CODEGEN_FALLBACK_OPCODE);
     }
 
     // Stage 10: the 512-bit vector subset. The corpus fixes a znver5 Linux
