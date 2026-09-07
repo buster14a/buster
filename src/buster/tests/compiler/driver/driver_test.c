@@ -1622,6 +1622,38 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 
+    // Each scalar opcode is checked independently by a separate engine.
+    // In particular, the wrong i64.ge_u byte can make the entire module invalid.
+    String8 wasm64_integer_output = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-integer-opcodes"), S8(".wasm"));
+    String8 wasm64_integer_command[] = {
+        S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), S8("-o"), wasm64_integer_output,
+        S8("tests/basic_c_wasm64_integer_opcodes.c"),
+    };
+    CompilerDriverResult wasm64_integer = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wasm64_integer_command)));
+    BUSTER_TEST(arguments, wasm64_integer.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, wasm64_integer.has_wasm64 && wasm64_integer.wasm64.stats.memory64);
+    if (wasm64_integer.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+        if (node.length)
+        {
+            String8 node_arguments[] = {node, S8("tests/wasm_integer_opcodes_execution.js"), wasm64_integer_output};
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
+                                                       (ProcessSpawnOptions){.use_process_environment = 1});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        else
+        {
+            arguments->show(arguments, S8("Wasm64 integer opcode engine execution skipped: Node is not installed\n"));
+        }
+    }
+
     String8 wasm64_assembly_command_line[] = {
         S8("-S"), S8("-target"), S8("wasm64-unknown-freestanding"), S8("tests/basic_c_wasm64.c"),
     };
