@@ -992,7 +992,9 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
             return result;
         }
         source_counts[module_index] = splits[module_index].checksum_count;
-        if (source_counts[module_index] > UINT16_MAX || total_source_file_count > UINT16_MAX - source_counts[module_index])
+        // DBI readers sum the per-module u16 counts; its total-file field is
+        // only a truncated hint and may wrap for a valid multi-module PDB.
+        if (source_counts[module_index] > UINT16_MAX || total_source_file_count > UINT32_MAX - source_counts[module_index])
         {
             return result;
         }
@@ -1184,14 +1186,14 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     // table, so an empty but well-formed string table must be present.
     u64 ec_substream_size = align_forward(12 + 1 + 4 + 4 + 4, 4);
     u64 dbg_header_size = PDB_DBG_HEADER_COUNT * sizeof(u16);
-    u32 names_bucket_count = 2;
-    while (names_bucket_count < source_file_count * 2 + 2)
+    u64 names_bucket_capacity = 2;
+    while (names_bucket_capacity < (u64)source_file_count * 2 + 2)
     {
-        names_bucket_count *= 2;
+        names_bucket_capacity *= 2;
     }
     u64 dbi_capacity = PDB_DBI_HEADER_SIZE + module_info_size + section_contribution_size + section_map_size + source_info_size +
                        ec_substream_size + dbg_header_size;
-    u64 names_capacity = 12 + names_buffer_size + 4 + (u64)names_bucket_count * 4 + 4;
+    u64 names_capacity = 12 + names_buffer_size + 4 + names_bucket_capacity * 4 + 4;
     // Compose each module's local map with the merge result, then point its
     // symbols at the surviving records.
     for (u32 module_index = 0; module_index < module_count; module_index += 1)
@@ -1466,7 +1468,8 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
     pdb_emit_u32(publics, PDB_GSI_HASH_VERSION);
     pdb_emit_u32(publics, 0);
     pdb_emit_u32(publics, 0);
-    // Stream 10: the PDB string table the checksum entries now index.
+    // Stream 10: the checked byte capacity also bounds the bucket count to u32.
+    u32 names_bucket_count = (u32)names_bucket_capacity;
     PDB_STREAM_BEGIN(PDB_STREAM_NAMES, names_capacity);
     PdbBuffer* names = streams + PDB_STREAM_NAMES;
     pdb_emit_u32(names, PDB_STRING_TABLE_SIGNATURE);

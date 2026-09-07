@@ -773,9 +773,107 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_contributions(UnitTestArguments* arg
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_large_source_count(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { module_files = 32768, total_files = module_files * 2, name_stride = 8, checksum_stride = 8 };
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = UINT64_C(1) << 28, .flags = {.no_pool = true}});
+    // Both modules use the same short names. Distinct names within each module
+    // avoid making this count-boundary test a hash-collision stress test.
+    u32 string_size = 4 + module_files * name_stride;
+    u32 checksum_header = 12 + string_size;
+    u32 checksum_start = checksum_header + 8;
+    u8* blob = arena_allocate_zeroed(arena, u8, checksum_start + total_files * checksum_stride);
+    pdb_test_store_u32(blob, 0, 4);
+    pdb_test_store_u32(blob, 4, 0xf3);
+    pdb_test_store_u32(blob, 8, string_size);
+    char const digits[] = "0123456789abcdef";
+    for (u32 file = 0; file < module_files; file += 1)
+    {
+        u8* name = blob + 12 + 4 + file * name_stride;
+        for (u32 digit = 0; digit < 4; digit += 1)
+        {
+            name[digit] = (u8)digits[(file >> (digit * 4)) & 15];
+        }
+        memcpy(name + 4, ".c", 2);
+    }
+    pdb_test_store_u32(blob, checksum_header, 0xf4);
+    pdb_test_store_u32(blob, checksum_header + 4, module_files * checksum_stride);
+    for (u32 file = 0; file < total_files; file += 1)
+    {
+        pdb_test_store_u32(blob, checksum_start + file * checksum_stride, 4 + file % module_files * name_stride);
+    }
+    ByteSlice symbols = {.pointer = blob, .length = checksum_start + module_files * checksum_stride};
+    PdbSection section = {.name = S8(".text"), .virtual_size = 16, .characteristics = 0x60000020};
+    PdbModule modules[] = {
+        {.name = S8_INITIALIZER("first.obj"), .codeview_symbols = symbols},
+        {.name = S8_INITIALIZER("second.obj"), .codeview_symbols = symbols},
+    };
+    PdbInput input = {.sections = &section, .section_count = 1, .modules = modules, .module_count = 2};
+    PdbResult built = pdb_build(arena, input);
+    BUSTER_TEST(arguments, built.valid);
+    if (built.valid)
+    {
+        ByteSlice dbi = pdb_test_stream_bytes(arena, built.bytes, PDB_TEST_STREAM_DBI);
+        BUSTER_TEST(arguments, dbi.length >= PDB_TEST_DBI_HEADER_SIZE);
+        if (dbi.length >= PDB_TEST_DBI_HEADER_SIZE)
+        {
+            u64 source_start = PDB_TEST_DBI_HEADER_SIZE + (u64)pdb_read_u32(dbi, 24) + pdb_read_u32(dbi, 28) + pdb_read_u32(dbi, 32);
+            u64 source_size = pdb_read_u32(dbi, 36);
+            bool valid = source_start <= dbi.length && source_size <= dbi.length - source_start &&
+                         source_size >= 12 + (u64)total_files * 4;
+            BUSTER_TEST(arguments, valid);
+            if (valid)
+            {
+                // NumSourceFiles wraps to zero; readers recover the full total
+                // by summing the two 16-bit ModFileCounts instead.
+                BUSTER_TEST(arguments, pdb_read_u32(dbi, source_start) == 2);
+                u32 counts = pdb_read_u32(dbi, source_start + 8);
+                BUSTER_TEST(arguments, (counts & 0xffff) == module_files && (counts >> 16) == module_files);
+                u64 names_start = source_start + 12 + (u64)total_files * 4;
+                u64 names_size = source_start + source_size - names_start;
+                for (u32 file = 0; file < total_files && valid; file += 1)
+                {
+                    u32 offset = pdb_read_u32(dbi, source_start + 12 + (u64)file * 4);
+                    valid = offset <= names_size && 7 <= names_size - offset;
+                    if (valid)
+                    {
+                        u8 const* expected = blob + 12 + 4 + file % module_files * name_stride;
+                        valid = memcmp(dbi.pointer + names_start + offset, expected, 7) == 0;
+                    }
+                }
+                BUSTER_TEST(arguments, valid);
+            }
+        }
+        for (u32 module_index = 0; module_index < BUSTER_ARRAY_LENGTH(modules); module_index += 1)
+        {
+            u32 stream_index = module_index ? PDB_TEST_STREAM_COUNT : PDB_TEST_STREAM_MODULE;
+            ByteSlice module = pdb_test_stream_bytes(arena, built.bytes, stream_index);
+            bool valid = module.length == 16 + module_files * checksum_stride;
+            BUSTER_TEST(arguments, valid);
+            for (u32 file = 0; file < module_files && valid; file += 1)
+            {
+                u32 expected = 1 + (module_index * module_files + file) * 7;
+                valid = pdb_read_u32(module, 12 + (u64)file * checksum_stride) == expected;
+            }
+            BUSTER_TEST(arguments, valid);
+        }
+    }
+    // The total may exceed 16 bits, but one module's ModFileCount may not.
+    pdb_test_store_u32(blob, checksum_header + 4, total_files * checksum_stride);
+    modules[0].codeview_symbols.length = checksum_start + total_files * checksum_stride;
+    input.module_count = 1;
+    BUSTER_TEST(arguments, !pdb_build(arena, input).valid);
+    arena_destroy(arena, 1);
+    return result;
+}
+
 UnitTestResult pdb_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = pdb_test_checksum_records(arguments);
+    UnitTestResult source_count = pdb_test_large_source_count(arguments);
+    result.test_count += source_count.test_count;
+    result.succeeded_test_count += source_count.succeeded_test_count;
     UnitTestResult layout = pdb_test_layout_regressions(arguments);
     result.test_count += layout.test_count;
     result.succeeded_test_count += layout.succeeded_test_count;
