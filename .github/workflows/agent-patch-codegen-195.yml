@@ -1,0 +1,53 @@
+name: Temporary patch codegen issue 195
+
+on:
+  push:
+    branches:
+      - agent/inspect-190-195
+    paths:
+      - .github/agent_patch_codegen_195.py
+      - .github/workflows/agent-patch-codegen-195.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Prepare clean main worktree and apply fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          rm -rf "$RUNNER_TEMP/codegen-195"
+          git worktree add --detach "$RUNNER_TEMP/codegen-195" origin/main
+          python3 .github/agent_patch_codegen_195.py "$RUNNER_TEMP/codegen-195"
+          git -C "$RUNNER_TEMP/codegen-195" diff --check
+          git -C "$RUNNER_TEMP/codegen-195" diff --stat
+      - name: Install Vulkan SDK
+        shell: bash
+        run: bash "$RUNNER_TEMP/codegen-195/.github/scripts/install-vulkan-sdk.sh"
+      - name: Build and run full Release suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/codegen-195"
+          driver="$RUNNER_TEMP/buster-build-195"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --ci --linker DEFAULT
+          "$driver" build --config Release -t test_all --verbose
+      - name: Publish clean fix branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          worktree="$RUNNER_TEMP/codegen-195"
+          git -C "$worktree" config user.name "github-actions[bot]"
+          git -C "$worktree" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$worktree" add src/buster/lib/compiler/codegen/codegen.c tests/basic_c_int128.c
+          git -C "$worktree" commit -m 'codegen: support 16-byte aggregate compare-exchange'
+          git -C "$worktree" push --force origin HEAD:agent/fix-codegen-195
