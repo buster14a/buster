@@ -1,0 +1,43 @@
+name: Self-host audit evidence
+
+on:
+  push:
+    branches: [work/self-host-audit-20260907]
+    paths: [.github/workflows/self-host-audit-work.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Capture exact source
+        run: git bundle create "$RUNNER_TEMP/buster-source.bundle" HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: self-host-audit-source
+          path: ${{ runner.temp }}/buster-source.bundle
+          retention-days: 1
+          if-no-files-found: error
+      - name: Bootstrap build driver
+        run: clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+      - name: Configure
+        run: '"$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT'
+      - name: Baseline fixed point
+        run: '"$RUNNER_TEMP/buster-build" test_self_host --config Release'
+      - name: Baseline tests
+        run: '"$RUNNER_TEMP/buster-build" build --config Release -t test_all'
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: self-host-baseline-metrics
+          path: build/*.metrics
+          retention-days: 7
+          if-no-files-found: warn
