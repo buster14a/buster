@@ -303,7 +303,6 @@ if (BUSTER_SLANGC_EXECUTABLE)
             else()
                 set(BUSTER_SLANGC_PATH "${BUSTER_SLANGC_LIB_DIR}")
             endif()
-            # Keep the Windows PATH as one cmake -E env argument when stored in a CMake list.
             string(REPLACE ";" "\\;" BUSTER_SLANGC_PATH "${BUSTER_SLANGC_PATH}")
             set(BUSTER_SLANGC_COMMAND "${CMAKE_COMMAND}" -E env "PATH=${BUSTER_SLANGC_PATH}" "${BUSTER_SLANGC_EXECUTABLE}")
         elseif(APPLE)
@@ -506,8 +505,6 @@ if ((APPLE OR UNIX) AND NOT WIN32 AND C_COMPILER_ZIG AND BUSTER_SANITIZE)
 endif()
 
 if (APPLE AND C_COMPILER_TCC)
-    # CMake's Darwin defaults are clang-style linker-driver flags.
-    # TinyCC links through its own driver and rejects these options.
     foreach(flag_variable IN ITEMS
         CMAKE_C_LINK_FLAGS
         CMAKE_EXECUTABLE_CREATE_C_FLAGS
@@ -906,6 +903,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/link/link_test.c
     src/buster/tests/compiler/gpu/gpu_test.c
     src/buster/tests/compiler/driver/driver_test.c
+    src/buster/tests/compiler/driver/object_path_test.c
 )
 set(BUSTER_TEST_HEADERS
     src/buster/tests/test.h
@@ -948,6 +946,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/link/link_test.h
     src/buster/tests/compiler/gpu/gpu_test.h
     src/buster/tests/compiler/driver/driver_test.h
+    src/buster/tests/compiler/driver/object_path_test.h
 )
 set_source_files_properties(${BUSTER_TEST_HEADERS} PROPERTIES HEADER_FILE_ONLY TRUE)
 
@@ -1076,8 +1075,6 @@ set(GNU_FAMILY_UNITY_DISABLE_WARNINGS
 
 set(GNU_FAMILY_NATIVE_TARGET -march=native)
 if (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    # Win64 guarantees only 16-byte stack alignment. MinGW GCC 15 can emit
-    # 32-byte-aligned AVX spills without realigning the incoming stack.
     list(APPEND GNU_FAMILY_NATIVE_TARGET -mno-avx)
 endif()
 
@@ -1172,8 +1169,6 @@ function(buster_compile_slang_spirv out_var shader_source entry_point stage outp
 
     set(emit_spirv_flag -emit-spirv-directly)
     if ("${stage}" STREQUAL "fragment")
-        # Slang's direct SPIR-V path currently emits Sampler2D as a depth-unknown image.
-        # Route fragments through glslang so sampler2D matches the working GLSL shader.
         set(emit_spirv_flag -emit-spirv-via-glsl)
     endif()
 
@@ -1192,9 +1187,6 @@ function(buster_compile_slang_spirv out_var shader_source entry_point stage outp
             -DBUSTER_RECT_TEXTURE_SLOT_COUNT=${BUSTER_RECT_TEXTURE_SLOT_COUNT}
             ${BUSTER_SLANG_VULKAN_EXTRA_DEFINES}
             -o "${shader_output_unstripped}"
-        # Slang emits OpSource Slang records (source language operand 11). The
-        # Android emulator's SwiftShader build rejects that newer debug enum and
-        # can take adb offline while creating shader modules, so ship stripped SPIR-V.
         COMMAND "${BUSTER_SPIRV_OPT_EXECUTABLE}" --strip-debug "${shader_output_unstripped}" -o "${shader_output}"
         MAIN_DEPENDENCY "${shader_source_path}"
         DEPENDS "${BUSTER_SHADER_SOURCE_DIR}/rect_shared.h" "${BUSTER_SHADER_SOURCE_DIR}/blur_shared.h"
@@ -1413,10 +1405,8 @@ function(executable_add name is_buster_program main_file)
     message(STATUS "${name} files: ${main_file} ${target_sources}")
 
     if (CMAKE_SYSTEM_NAME STREQUAL "Android")
-        # NativeActivity loads the app as a shared library (android.app.lib_name).
         add_library(${name} SHARED ${main_file})
     elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
-        # iOS ships the program as a .app bundle (UIApplicationMain entry point).
         add_executable(${name} MACOSX_BUNDLE ${main_file})
     else()
         add_executable(${name} ${main_file})
@@ -1501,17 +1491,12 @@ function(executable_add name is_buster_program main_file)
         target_compile_options(${name} PRIVATE ${MSVC_FAMILY_DISABLE_WARNINGS})
     endif()
 
-    # Release and MinSizeRel are the configurations CMake leaves without debug
-    # information; Debug and RelWithDebInfo already carry -g from the defaults,
-    # and a sanitized build picks its own mode further below.
     if (BUSTER_DEBUG_INFO AND NOT BUSTER_SANITIZE)
         set(debug_info_config "$<OR:$<CONFIG:Release>,$<CONFIG:MinSizeRel>>")
         if (C_COMPILER_MSVC_FAMILIY)
             target_compile_options(${name} PRIVATE "$<${debug_info_config}:/Zi>")
             target_link_options(${name} PRIVATE "$<${debug_info_config}:/DEBUG>")
         elseif (WIN32 AND C_COMPILER_GNU_FAMILY AND NOT C_COMPILER_TCC)
-            # Windows builds target the MSVC ABI, so debuggers and Superluminal
-            # read CodeView from the objects and a PDB from the linker.
             target_compile_options(${name} PRIVATE "$<${debug_info_config}:-g>" "$<${debug_info_config}:-gcodeview>")
             target_link_options(${name} PRIVATE "$<${debug_info_config}:LINKER:/DEBUG>")
         elseif (C_COMPILER_GNU_FAMILY AND NOT C_COMPILER_TCC)
@@ -1519,9 +1504,6 @@ function(executable_add name is_buster_program main_file)
         endif()
     endif()
 
-    # Frame pointers let a sampling profiler unwind the optimized tree without
-    # DWARF CFI. Debug is -O0 and keeps them already; MSVC is omitted because
-    # /Oy has no x64 meaning and Windows unwinds through the PDB instead.
     if (BUSTER_FRAME_POINTERS AND C_COMPILER_GNU_FAMILY AND NOT C_COMPILER_TCC)
         target_compile_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:-fno-omit-frame-pointer>")
     endif()
@@ -1608,7 +1590,6 @@ function(executable_add name is_buster_program main_file)
 
     if (${is_buster_program} AND ${BUSTER_FUZZ_AVAILABLE})
         if (WIN32 AND C_COMPILER_CLANG AND NOT MINGW)
-            # LLVM's Windows libFuzzer runtime is built against the static release CRT.
             set_property(TARGET ${name} PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
         endif()
         target_compile_options(${name} PRIVATE -fsanitize=fuzzer-no-link)
@@ -1623,8 +1604,6 @@ function(executable_add name is_buster_program main_file)
 
     if (${is_buster_program})
         if (WIN32)
-            # Metadata-backed compilation and sanitizer instrumentation can
-            # both exceed the PE default 1 MiB stack in Debug builds.
             if (C_COMPILER_ZIG OR MINGW)
                 target_link_options(${name} PRIVATE "LINKER:--stack,8388608")
             else()
@@ -1638,22 +1617,16 @@ function(executable_add name is_buster_program main_file)
             target_link_libraries(${name} PRIVATE ws2_32)
         endif()
         if (CMAKE_SYSTEM_NAME STREQUAL "Android")
-            # NativeActivity glue + platform libraries.
             set(BUSTER_ANDROID_GLUE
                 "${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c")
             target_sources(${name} PRIVATE "${BUSTER_ANDROID_GLUE}")
-            # Third-party glue is not clean under the project's -Werror set.
             set_source_files_properties("${BUSTER_ANDROID_GLUE}" PROPERTIES COMPILE_OPTIONS "-w")
             target_include_directories(${name} PRIVATE
                 "${ANDROID_NDK}/sources/android/native_app_glue")
             target_link_libraries(${name} PRIVATE android log)
-            # The framework finds ANativeActivity_onCreate via dlsym; keep it.
             target_link_options(${name} PRIVATE -u ANativeActivity_onCreate)
         endif()
         if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
-            # UIKit owns the mobile test-harness lifecycle. The platform
-            # bootstrap currently creates a CAMetalLayer-backed view even though
-            # the compiler entry point itself is headless.
             target_link_libraries(${name} PRIVATE
                 "-framework UIKit"
                 "-framework Foundation"
@@ -1666,13 +1639,11 @@ function(executable_add name is_buster_program main_file)
                 XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "dev.buster.ide"
                 XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO")
 
-            # Stage the bundle Info.plist (kept out of the source tree).
             configure_file(
                 "${CMAKE_SOURCE_DIR}/ios/Info.plist.in"
                 "${CMAKE_BINARY_DIR}/ios/Info-${name}.plist"
                 @ONLY)
 
-            # Bundle test data (read at runtime via relative paths) into Resources/tests.
             add_custom_command(TARGET ${name} POST_BUILD
                 COMMAND "${CMAKE_COMMAND}" -E copy_directory
                     "${CMAKE_SOURCE_DIR}/tests"
@@ -1683,12 +1654,6 @@ function(executable_add name is_buster_program main_file)
     endif()
 
     buster_apply_module_options(${name} ${module_names})
-
-    # if (NOT ${BUSTER_CI})
-    #     target_compile_options(${name} PRIVATE
-    #         -ferror-limit=1
-    #     )
-    # endif()
 
     if (BUSTER_DEVELOPER_TARGETS)
         add_custom_target(run_${name}
@@ -1733,14 +1698,11 @@ function(buster_add_executable name main_file)
     executable_add(${name} ON ${main_file} ${ARGN})
 endfunction()
 
-# Mobile operating systems own the process lifecycle. Keep only the window
-# module's platform bootstrap there; desktop compiler builds remain headless.
 set(BUSTER_COMPILER_PLATFORM_MODULES)
 if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND BUSTER_COMPILER_PLATFORM_MODULES window)
 endif()
 
-# buster_add_executable(<name> <main_file> MODULES <module>... [SOURCES <source>...])
 buster_add_executable(ide src/buster/apps/ide/ide.c
     MODULES
     os
@@ -1816,7 +1778,6 @@ if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"
 endif()
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Android")
-    # --- Android packaging: bundle libide.so into an installable APK -----------
     find_program(BUSTER_ADB_EXECUTABLE adb)
     find_program(BUSTER_BASH_EXECUTABLE bash)
 
@@ -1828,7 +1789,6 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
         endif()
     endif()
 
-    # Pick the newest installed build-tools unless told otherwise.
     if (NOT BUSTER_ANDROID_BUILD_TOOLS_DIR)
         file(GLOB BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES "${BUSTER_ANDROID_SDK}/build-tools/*")
         if (BUSTER_ANDROID_BUILD_TOOLS_CANDIDATES)
@@ -1837,7 +1797,6 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
         endif()
     endif()
 
-    # android.jar matching the configured platform (fallback to newest available).
     string(REGEX MATCH "[0-9]+" BUSTER_ANDROID_API_LEVEL "${ANDROID_PLATFORM}")
     set(BUSTER_ANDROID_JAR "${BUSTER_ANDROID_SDK}/platforms/android-${BUSTER_ANDROID_API_LEVEL}/android.jar")
     if (NOT EXISTS "${BUSTER_ANDROID_JAR}")
@@ -1865,7 +1824,6 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
     set(BUSTER_ANDROID_TEST_ARGUMENTS ${TEST_ARGUMENTS})
     list(JOIN BUSTER_ANDROID_TEST_ARGUMENTS " " BUSTER_ANDROID_TEST_ARGUMENT_STRING)
 
-    # Generate a debug keystore once, at configure time.
     if (BUSTER_KEYTOOL AND NOT EXISTS "${BUSTER_KEYSTORE}")
         execute_process(COMMAND "${BUSTER_KEYTOOL}" -genkeypair
             -keystore "${BUSTER_KEYSTORE}" -storepass android -keypass android
@@ -1894,24 +1852,19 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
 
     add_custom_command(
         OUTPUT "${BUSTER_APK}"
-        # 0. Stage test data and, only for an explicitly enabled renderer, shaders.
         COMMAND "${CMAKE_COMMAND}" -E rm -rf "${CMAKE_BINARY_DIR}/assets"
         COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/tests" "${CMAKE_BINARY_DIR}/assets/tests"
         ${BUSTER_ANDROID_SHADER_ASSET_COMMANDS}
-        # 1. Compile the manifest + assets into a base APK (binary manifest + resources.arsc).
         COMMAND "${BUSTER_AAPT2}" link
             -I "${BUSTER_ANDROID_JAR}"
             --manifest "${BUSTER_ANDROID_MANIFEST}"
             -A "${CMAKE_BINARY_DIR}/assets"
             --min-sdk-version 24 --target-sdk-version 35
             -o "${CMAKE_BINARY_DIR}/buster-base.apk"
-        # 2. Stage the native library under lib/<abi>/.
         COMMAND "${CMAKE_COMMAND}" -E rm -rf "${BUSTER_APK_STAGE}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${BUSTER_APK_STAGE}/lib/${ANDROID_ABI}"
         COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:ide>" "${BUSTER_APK_STAGE}/lib/${ANDROID_ABI}/libide.so"
-        # 3. Add the native library into the APK.
         COMMAND "${BUSTER_JAR}" uf "${CMAKE_BINARY_DIR}/buster-base.apk" -C "${BUSTER_APK_STAGE}" "lib/${ANDROID_ABI}/libide.so"
-        # 4. Align before signing, then sign with APK Signature Scheme v2/v3.
         COMMAND "${BUSTER_BASH_EXECUTABLE}" "${BUSTER_ANDROID_SIGN_SCRIPT}"
             "${BUSTER_APKSIGNER}"
             "${BUSTER_ZIPALIGN}"
@@ -1925,7 +1878,6 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
     add_custom_target(apk DEPENDS "${BUSTER_APK}")
 
     if (BUSTER_ADB_EXECUTABLE AND BUSTER_BASH_EXECUTABLE)
-        # Install, launch, and wait for the on-device compiler test result.
         add_custom_target(test_all
             COMMAND "${BUSTER_BASH_EXECUTABLE}" "${BUSTER_ANDROID_TEST_SCRIPT}"
                 "${BUSTER_ADB_EXECUTABLE}"
@@ -1947,8 +1899,6 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
         )
     endif()
 elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    # Boot a simulator, install the .app, launch it with the console attached and
-    # parse the in-app test result from stdout (mirrors the Android device flow).
     add_custom_target(test_all
         COMMAND "${CMAKE_COMMAND}" -E env
             "BUSTER_IOS_APP_BUNDLE=$<TARGET_BUNDLE_DIR:ide>"
@@ -1990,8 +1940,6 @@ else()
         )
     endif()
 
-    # Desktop-only performance benchmark. Not wired up for Android/iOS:
-    # emulator/simulator numbers are too noisy for useful local comparisons.
     add_custom_target(bench_all
         COMMAND
         ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
