@@ -2,8 +2,9 @@
 // flag decides the emitter (the reverse order deliberately restores the
 // default, which is why harnesses that ride autoconf carry the flag in
 // CFLAGS, after the project's own -O3).  The driver test compiles this
-// fixture under two allocators spelled after -O2 and asserts the objects
-// differ; the runtime body only proves each object still computes.
+// fixture under two allocators spelled after -O2 and observes either distinct
+// machine code or the non-NONE mode's explicit fallback telemetry; the runtime
+// body only proves each object still computes.
 
 __attribute__((noinline)) static int accumulate(const int* values, int count)
 {

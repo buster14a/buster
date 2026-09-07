@@ -1075,7 +1075,7 @@ UI_Box* ui_build_box_from_stringf(UI_BoxFlags flags, String8 format, ...)
     Arena* arena = ui_build_arena();
     va_list args;
     va_start(args, format);
-    String8 string = string_format_va(arena, format, args);
+    String8 string = string_format_va(arena, format, args, STRING_FORMAT_VA_GP_SLOTS(3));
     va_end(args);
     UI_Box* result = ui_build_box_from_string(flags, string);
     return result;
@@ -1091,7 +1091,7 @@ UI_Box* ui_box_make_format(UI_BoxFlags flags, String8 format, ...)
     Arena* arena = ui_build_arena();
     va_list args;
     va_start(args, format);
-    String8 string = string_format_va(arena, format, args);
+    String8 string = string_format_va(arena, format, args, STRING_FORMAT_VA_GP_SLOTS(3));
     va_end(args);
     return ui_box_make(flags, string);
 }
