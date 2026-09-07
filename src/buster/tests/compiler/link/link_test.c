@@ -1897,9 +1897,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_uefi_pe64(UnitTestArguments* argume
     return result;
 }
 
+// Inspect both ELF writers on every host; runtime fixtures separately check
+// that the C frontend's alignment survives linking a real object file.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_data_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u32 alignments[] = {16, 8192, 65536, 8 * 1024 * 1024};
+    for (u32 arch = 0; arch < BUSTER_ARRAY_LENGTH(architectures); arch += 1)
+    {
+        for (u32 hosted = 0; hosted < 2; hosted += 1)
+        {
+            for (u32 alignment_index = 0; alignment_index < BUSTER_ARRAY_LENGTH(alignments); alignment_index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                u8 text[] = {0x31, 0xc0, 0xc3, 0};
+                u32 aarch64_text[] = {0x52800000, 0xd65f03c0};
+                ByteSlice code = architectures[arch] == CPU_ARCH_X86_64 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(text)
+                                                                       : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
+                ObjectSymbol symbol = {.name = S8("main"), .size = code.length, .section = OBJECT_SECTION_TEXT,
+                                       .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+                ObjectFile object = link_test_object_make(arena, (Target){.cpu_arch = architectures[arch], .os = OPERATING_SYSTEM_LINUX},
+                                                          code, &symbol, 1, 0, 0);
+                u8 data[] = {7, 0, 0, 0};
+                object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
+                object.sections[OBJECT_SECTION_DATA].alignment = alignments[alignment_index];
+                object.sections[OBJECT_SECTION_ZERO].virtual_size = 4;
+                object.sections[OBJECT_SECTION_ZERO].alignment = alignments[alignment_index];
+                NativeDynamicLibrary library = {.name = S8("libalignmentprobe.so")};
+                NativeExecutableLinkResult linked = link_native_executable(arena, &object, (NativeExecutableLinkOptions){
+                    .dynamic_libraries = &library, .dynamic_library_count = hosted,
+                });
+                BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+                if (linked.error == LINK_ERROR_NONE)
+                {
+                    ObjectSectionKind kinds[] = {OBJECT_SECTION_DATA, OBJECT_SECTION_ZERO};
+                    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(kinds); index += 1)
+                    {
+                        u64 header = 0;
+                        bool found = link_test_elf_section_find(linked.executable, object_section_name_for_kind(kinds[index]), 0, &header);
+                        BUSTER_TEST(arguments, found);
+                        if (found)
+                        {
+                            u64 alignment = object.sections[kinds[index]].alignment;
+                            BUSTER_TEST(arguments, link_read_u64(linked.executable.pointer, header + 48) == alignment);
+                            BUSTER_TEST(arguments, link_read_u64(linked.executable.pointer, header + 16) % alignment == 0);
+                        }
+                    }
+                    if (hosted)
+                    {
+                        BUSTER_TEST(arguments, link_test_elf_dynamic_symbol(linked.executable, S8("__cxa_atexit"), 0, 0, 0));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult alignment = link_test_elf_data_alignment(arguments);
+    result.succeeded_test_count += alignment.succeeded_test_count;
+    result.test_count += alignment.test_count;
     static u8 const sha256_abc[32] = {
         0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
         0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
@@ -3515,10 +3578,10 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     {
         u64 copy_alias_hash_offset = link_read_u64(copy_alias_executable.executable.pointer, copy_alias_hash_header + 24);
         u64 copy_alias_symbol_size = link_read_u64(copy_alias_executable.executable.pointer, copy_alias_symbol_header + 32);
-        // Three imports — environ, tzname and the hosted stub's exit — three
+        // Four imports — environ, tzname, exit and __cxa_atexit — three
         // aliases and the null entry: the hash table has to grow with the
         // alias set or the loader stops walking before it reaches one.
-        BUSTER_TEST(arguments, copy_alias_symbol_size / 24 == 7);
+        BUSTER_TEST(arguments, copy_alias_symbol_size / 24 == 8);
         BUSTER_TEST(arguments, link_read_u32(copy_alias_executable.executable.pointer, copy_alias_hash_offset + 4) == copy_alias_symbol_size / 24);
     }
     // Both names of one object imported: one slot, one relocation, and no
@@ -3653,10 +3716,10 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                });
     BUSTER_TEST(arguments, aarch64_copy_executable.error == LINK_ERROR_NONE);
     // Two slots -- environ with tzname -- and one jump slot per import, the
-    // three data names plus the hosted stub's `exit`.  No x86-64 type of
+    // three data names plus the hosted stub's `exit` and `__cxa_atexit`.  No x86-64 type of
     // either kind survives.
     BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_executable.executable, 1024) == 2);
-    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_executable.executable, 1026) == 4);
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_executable.executable, 1026) == 5);
     BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_executable.executable, 5) == 0);
     BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_executable.executable, 7) == 0);
     u64 aarch64_copy_environ = 0;
@@ -3678,13 +3741,13 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                             (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
     BUSTER_TEST(arguments, aarch64_copy_unknown.error == LINK_ERROR_NONE);
     BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_unknown.executable, 1024) == 3);
-    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_unknown.executable, 1026) == 4);
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_unknown.executable, 1026) == 5);
     BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_copy_unknown.executable, 5) == 0);
     // An AArch64 image with no imported data at all keeps its jump slots and
     // gains no copy range: the dynamic array is two entries shorter there, and
     // walking it to DT_NULL is what keeps both lengths readable.
     BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_libc_executable.executable, 1024) == 0);
-    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_libc_executable.executable, 1026) == 2);
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_libc_executable.executable, 1026) == 3);
     // Symbol versions.  A shared library publishes a name under a version, and
     // an image that binds to it has to record which one: .gnu.version indexes
     // every dynamic symbol, .gnu.version_r names the versions per library, and
@@ -3698,6 +3761,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         {.name = S8("tzname"), .version = S8("GLIBC_2.2.5"), .has_default = true},
         {.name = S8("__tzname"), .version = S8("GLIBC_2.2.5"), .has_default = true},
         {.name = S8("exit"), .version = S8("GLIBC_2.34"), .has_default = true},
+        {.name = S8("__cxa_atexit"), .version = S8("GLIBC_2.2.5"), .has_default = true},
         // glibc publishes sys_errlist once per historical layout and every one
         // of them is a non-default `name@VER`.
         {.name = S8("sys_errlist"), .version = S8("GLIBC_2.2.5")},
@@ -3828,6 +3892,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         {.name = S8("tzname"), .has_default = true},
         {.name = S8("__tzname"), .has_default = true},
         {.name = S8("exit"), .has_default = true},
+        {.name = S8("__cxa_atexit"), .has_default = true},
     };
     NativeExecutableLinkOptions copy_version_plain_options = copy_version_options;
     copy_version_plain_options.runtime_versioned_symbols = copy_version_plain_exports;
@@ -3843,6 +3908,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     NativeDynamicVersionedSymbol aarch64_version_exports[] = {
         {.name = S8("abs"), .version = S8("GLIBC_2.2.5"), .has_default = true},
         {.name = S8("exit"), .version = S8("GLIBC_2.34"), .has_default = true},
+        {.name = S8("__cxa_atexit"), .version = S8("GLIBC_2.2.5"), .has_default = true},
     };
     NativeExecutableLinkResult aarch64_version_executable = link_native_executable(arguments->arena, &aarch64_libc_object,
                                                                                   (NativeExecutableLinkOptions){
@@ -3857,7 +3923,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                string_equal(aarch64_version_recorded, S8("GLIBC_2.2.5")));
     BUSTER_TEST(arguments, link_test_elf_dynamic_entry(aarch64_version_executable.executable, 0x6ffffff0, 0));
     // R_AARCH64_JUMP_SLOT, still written over the x86-64 writer's entries.
-    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_version_executable.executable, 1026) == 2);
+    BUSTER_TEST(arguments, link_test_elf_relocation_count(aarch64_version_executable.executable, 1026) == 3);
     ObjectFile aarch64_tls_object = aarch64_libc_object;
     ObjectSection* aarch64_tls_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
     memcpy(aarch64_tls_sections, aarch64_libc_object.sections, sizeof(*aarch64_tls_sections) * OBJECT_SECTION_COUNT);
@@ -4020,10 +4086,10 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, link_test_elf_section_find(weak_hosted.executable, S8(".dynsym"), 0, &weak_hosted_dynamic_symbols));
         if (weak_hosted_dynamic_symbols)
         {
-            // The null entry, `imported`, and the `exit` the hosted entry stub
-            // calls -- and not `weak_absent`, which would make a fourth
+            // The null entry, `imported`, `__cxa_atexit` and the `exit` the hosted entry stub
+            // calls -- and not `weak_absent`, which would make a fifth
             // 24-byte ELF64 symbol.
-            BUSTER_TEST(arguments, link_read_u64(weak_hosted.executable.pointer, weak_hosted_dynamic_symbols + 32) == 3 * 24);
+            BUSTER_TEST(arguments, link_read_u64(weak_hosted.executable.pointer, weak_hosted_dynamic_symbols + 32) == 4 * 24);
         }
 
         // Default visibility instead, in a link that knows nothing about what
@@ -4050,7 +4116,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
             // table opens with; 24 is the ELF64 symbol size and 4 the offset
             // of st_info within it.
             u64 dynamic_symbol_offset = link_read_u64(weak_visible.executable.pointer, weak_visible_dynamic_symbols + 24);
-            BUSTER_TEST(arguments, link_read_u64(weak_visible.executable.pointer, weak_visible_dynamic_symbols + 32) == 3 * 24);
+            BUSTER_TEST(arguments, link_read_u64(weak_visible.executable.pointer, weak_visible_dynamic_symbols + 32) == 4 * 24);
             BUSTER_TEST(arguments, weak_visible.executable.pointer[dynamic_symbol_offset + 24 + 4] == 0x21);
         }
 
@@ -4066,6 +4132,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
             {.name = S8("unrelated"), .has_default = true},
             {.name = S8("imported"), .has_default = true},
             {.name = S8("exit"), .has_default = true},
+            {.name = S8("__cxa_atexit"), .has_default = true},
             {.name = S8("atexit"), .has_default = true},
         };
         NativeExecutableLinkOptions weak_known_options = {
@@ -4086,7 +4153,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, link_test_elf_section_find(weak_known.executable, S8(".dynsym"), 0, &weak_known_dynamic_symbols));
         if (weak_known_dynamic_symbols)
         {
-            BUSTER_TEST(arguments, link_read_u64(weak_known.executable.pointer, weak_known_dynamic_symbols + 32) == 3 * 24);
+            BUSTER_TEST(arguments, link_read_u64(weak_known.executable.pointer, weak_known_dynamic_symbols + 32) == 4 * 24);
         }
 
         // And a library that does define it: the loader can answer, so the
@@ -4096,6 +4163,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
             {.name = S8("weak_absent"), .has_default = true},
             {.name = S8("imported"), .has_default = true},
             {.name = S8("exit"), .has_default = true},
+            {.name = S8("__cxa_atexit"), .has_default = true},
             {.name = S8("atexit"), .has_default = true},
         };
         NativeExecutableLinkOptions weak_defined_options = weak_known_options;
@@ -4108,7 +4176,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         if (weak_defined_dynamic_symbols)
         {
             u64 dynamic_symbol_offset = link_read_u64(weak_defined.executable.pointer, weak_defined_dynamic_symbols + 24);
-            BUSTER_TEST(arguments, link_read_u64(weak_defined.executable.pointer, weak_defined_dynamic_symbols + 32) == 4 * 24);
+            BUSTER_TEST(arguments, link_read_u64(weak_defined.executable.pointer, weak_defined_dynamic_symbols + 32) == 5 * 24);
             BUSTER_TEST(arguments, weak_defined.executable.pointer[dynamic_symbol_offset + 24 + 4] == 0x21);
         }
 
@@ -4121,6 +4189,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
             {.name = S8("weak_absent"), .version = S8("GLIBC_2.2.5")},
             {.name = S8("imported"), .has_default = true},
             {.name = S8("exit"), .has_default = true},
+            {.name = S8("__cxa_atexit"), .has_default = true},
             {.name = S8("atexit"), .has_default = true},
         };
         NativeExecutableLinkOptions weak_hidden_version_options = weak_known_options;
@@ -4139,6 +4208,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         NativeDynamicVersionedSymbol strong_absent_exports[] = {
             {.name = S8("weak_absent"), .has_default = true},
             {.name = S8("exit"), .has_default = true},
+            {.name = S8("__cxa_atexit"), .has_default = true},
             {.name = S8("atexit"), .has_default = true},
         };
         NativeExecutableLinkOptions strong_absent_options = weak_known_options;
@@ -4163,7 +4233,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, link_test_elf_section_find(weak_unread.executable, S8(".dynsym"), 0, &weak_unread_dynamic_symbols));
         if (weak_unread_dynamic_symbols)
         {
-            BUSTER_TEST(arguments, link_read_u64(weak_unread.executable.pointer, weak_unread_dynamic_symbols + 32) == 4 * 24);
+            BUSTER_TEST(arguments, link_read_u64(weak_unread.executable.pointer, weak_unread_dynamic_symbols + 32) == 5 * 24);
         }
 
         // AArch64 asks the question of two more writers. The static one
