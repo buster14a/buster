@@ -15,15 +15,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: claude/unruffled-bhabha-f5d28a
-      - name: Dump frontend constant evaluator
+      - name: Dump aggregate helper call sites
         shell: bash
         run: |
           set -euo pipefail
           file=src/buster/lib/compiler/frontend/c/c_gen.c
-          for range in 1650,1775 2700,2890 28950,29110 32580,32760 33090,33320 38770,38930 39240,39490 39520,40040 40100,40210 40210,40730; do
-            start=${range%,*}
-            end=${range#*,}
-            echo "=== c_gen.c:${start}-${end} ==="
-            nl -ba "$file" | sed -n "${start},${end}p"
-          done
+          grep -nE 'c_ir_constant_truth\(|c_ir_constant_cast\(|c_ir_constant_apply_binary\(|c_ir_constant_integer_to_float\(|c_ir_wide_(negate|less|subtract|shift_left_one|divide|multiply)\(' "$file"
           exit 1
