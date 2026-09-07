@@ -3412,7 +3412,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             ByteSlice image = arm64_executable.native_link.executable;
             bool header_valid = image.length >= 0x40;
-            u32 pe = header_valid ? link_read_u32(image.pointer, 0x3c) : 0;
+            u32 pe = header_valid ? compiler_driver_test_pe_read_u32(image, 0x3c) : 0;
             header_valid &= pe <= image.length && image.length - pe >= 24 + 240 && memcmp(image.pointer + pe, "PE\0\0", 4) == 0;
             BUSTER_TEST(arguments, header_valid);
             if (header_valid)
@@ -3422,8 +3422,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 u16 dll_characteristics = 0;
                 memcpy(&coff_characteristics, image.pointer + pe + 22, sizeof(coff_characteristics));
                 memcpy(&dll_characteristics, image.pointer + optional + 70, sizeof(dll_characteristics));
-                u32 relocation_rva = link_read_u32(image.pointer, optional + 152);
-                u32 relocation_size = link_read_u32(image.pointer, optional + 156);
+                u32 relocation_rva = compiler_driver_test_pe_read_u32(image, optional + 152);
+                u32 relocation_size = compiler_driver_test_pe_read_u32(image, optional + 156);
                 BUSTER_TEST(arguments, !(coff_characteristics & 1));
                 BUSTER_TEST(arguments, (dll_characteristics & 0x40) != 0);
                 BUSTER_TEST(arguments, relocation_rva != 0 && relocation_size >= 10);
@@ -3438,15 +3438,15 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     {
                         continue;
                     }
-                    u32 virtual_size = link_read_u32(image.pointer, section + 8);
-                    u32 virtual_address = link_read_u32(image.pointer, section + 12);
-                    u32 raw_size = link_read_u32(image.pointer, section + 16);
-                    u32 raw_offset = link_read_u32(image.pointer, section + 20);
+                    u32 virtual_size = compiler_driver_test_pe_read_u32(image, section + 8);
+                    u32 virtual_address = compiler_driver_test_pe_read_u32(image, section + 12);
+                    u32 raw_size = compiler_driver_test_pe_read_u32(image, section + 16);
+                    u32 raw_offset = compiler_driver_test_pe_read_u32(image, section + 20);
                     relocation_section_valid = virtual_size == relocation_size && virtual_address == relocation_rva && raw_offset <= image.length &&
                                                raw_size <= image.length - raw_offset && relocation_size <= raw_size;
                     if (relocation_section_valid)
                     {
-                        u32 block_size = link_read_u32(image.pointer, raw_offset + 4);
+                        u32 block_size = compiler_driver_test_pe_read_u32(image, raw_offset + 4);
                         u16 first_entry = 0;
                         memcpy(&first_entry, image.pointer + raw_offset + 8, sizeof(first_entry));
                         relocation_section_valid = block_size >= 10 && block_size <= relocation_size && (first_entry >> 12) == 10;

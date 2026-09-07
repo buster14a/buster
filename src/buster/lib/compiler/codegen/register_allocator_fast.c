@@ -1120,7 +1120,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 // loop below runs zero times without a branch of its own.
                 for (u32 pending = block_lanes; pending; pending &= pending - 1u)
                 {
-                    u32 slot = (u32)__builtin_ctz(pending);
+                    u32 slot = machine_fast_first_set(pending);
                     block_references_only_in_terminators &= (opcode_row.flags & MACHINE_OPCODE_ROW_TERMINATOR) != 0;
                     u32 successor = machine_ref_payload(instruction->operands[slot]);
                     prepass.predecessor_offsets[successor + 1] += 1;
@@ -1128,7 +1128,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                 }
                 for (u32 pending = virtual_lanes; pending; pending &= pending - 1u)
                 {
-                    u32 slot = (u32)__builtin_ctz(pending);
+                    u32 slot = machine_fast_first_set(pending);
                     MachineRef ref = instruction->operands[slot];
                     u32 virtual_register = machine_ref_payload(ref);
                     if (wants_quality_facts)
