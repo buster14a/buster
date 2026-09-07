@@ -184,7 +184,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
         String8 compile_arguments[] = {
             S8("/bin/bash"),
             S8("-c"),
-            S8("\"$1\" cc -o \"$2\" <(printf 'int main(void){return 0;}\\n')"),
+            S8("\"$1\" cc -x c -o \"$2\" <(printf 'int main(void){return 0;}\\n')"),
             S8("file-process-substitution"),
             program_state->input.arguments.pointer[0],
             executable_path,
