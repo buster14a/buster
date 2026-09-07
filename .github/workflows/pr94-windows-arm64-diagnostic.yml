@@ -67,7 +67,8 @@ jobs:
           nested_arena = "    TemporalArena nested_conditional_temporary = scratch_begin(0, 0);"
           if test_text.count(nested_arena) != 1:
               raise SystemExit("nested conditional arena anchor not found")
-          test_text = test_text.replace(nested_arena, nested_arena + r'''
+          test_text = test_text.replace(nested_arena, r'''    fprintf(stderr, "PR94_NESTED scratch_begin\n"); fflush(stderr);
+              ''' + nested_arena + r'''
               fprintf(stderr, "PR94_NESTED preprocessing\n"); fflush(stderr);''', 1)
           nested_parse = "    CParseResult nested_conditional_parse = c_parse(nested_conditional_temporary.arena, nested_conditional_tokens);"
           if test_text.count(nested_parse) != 1:
