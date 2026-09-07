@@ -261,9 +261,11 @@ struct DebugLocationSeed
 typedef struct DebugLocationIndex DebugLocationIndex;
 struct DebugLocationIndex
 {
-    // The exact array this index describes.  Consumers compare it against the
-    // seeds they were handed and fall back to a linear scan on a mismatch, so a
-    // stale index can never silently drop locations.
+    // The exact array this index describes. Model construction rebuilds stale
+    // indexes and validates matching ones once before any variable lookup.
+    // Caller-owned arrays must remain alive and contain their declared counts.
+    // Endpoints partition all seeds; each bucket's order is strictly increasing
+    // and contains exactly the seeds whose symbols hash to that bucket.
     DebugLocationSeed* locations;
     // `bucket_ends[bucket]` is the end offset of the bucket inside `order`; the
     // bucket starts at `bucket ? bucket_ends[bucket - 1] : 0`.
@@ -375,8 +377,10 @@ struct DebugModelInput
     DebugLocationSeed* locations;
     DebugInlineSeed* inline_sites;
     // Optional; `debug_model_build` builds one for its own use when a caller
-    // leaves this null.  It is only consulted when it describes exactly the
-    // `locations`/`location_count` pair beside it.
+    // leaves this null or supplies an index for a different location slice.
+    // A matching but malformed index, a nonzero count with missing locations
+    // or inline sites, or missing location pieces yields an invalid model.
+    // Empty location input needs no index. Validation occurs once per model.
     DebugLocationIndex* location_index;
     u32 function_count;
     u32 location_count;

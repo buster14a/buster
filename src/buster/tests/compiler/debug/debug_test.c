@@ -1,9 +1,97 @@
 #include <buster/tests/compiler/debug/debug_test.h>
 #if BUSTER_INCLUDE_TESTS
 
-UnitTestResult debug_model_tests(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_location_index_validation(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    IrSymbol symbol = {.name = S8("tracked"), .id = {.value = 0}, .kind = IR_SYMBOL_DATA};
+    IrProgram program = {.symbols = {.symbols = &symbol, .count = 1}};
+    IrGlobal global = {.symbol = {.value = 0}, .type = IR_TYPE_ID_INVALID};
+    IrModule module = {.globals = &global, .global_count = 1};
+    DebugLocationSeed locations[] = {
+        {.function_symbol = {.value = 0}, .local = IR_LOCAL_ID_INVALID, .start = 0, .end = 2,
+         .location = {.kind = DEBUG_LOCATION_CONSTANT, .constant = 11}},
+        {.function_symbol = {.value = 0}, .local = IR_LOCAL_ID_INVALID, .start = 2, .end = 4,
+         .location = {.kind = DEBUG_LOCATION_CONSTANT, .constant = 23}},
+        {.function_symbol = {.value = 0}, .local = IR_LOCAL_ID_INVALID, .start = 4, .end = 6,
+         .location = {.kind = DEBUG_LOCATION_CONSTANT, .constant = 37}},
+    };
+    DebugLocationIndex built = debug_location_index_build(arguments->arena, locations, (u32)BUSTER_ARRAY_LENGTH(locations));
+    BUSTER_TEST(arguments, built.bucket_count == 4 && built.location_count == 3);
+
+    // Keep the backing arrays at their declared sizes. The malformed cases
+    // exercise validation of public metadata, not inaccessible test storage.
+    for (u32 variant = 0; variant < 18; variant += 1)
+    {
+        u32 ends[4];
+        u32 order[3];
+        memcpy(ends, built.bucket_ends, sizeof(ends));
+        memcpy(order, built.order, sizeof(order));
+        DebugLocationIndex index = built;
+        index.bucket_ends = ends;
+        index.order = order;
+        DebugModelInput input = {
+            .program = &program, .module = &module, .locations = locations,
+            .location_count = 3, .location_index = &index,
+        };
+        switch (variant)
+        {
+        case 0: input.locations = 0; index.locations = 0; break;
+        case 1: index.bucket_count = 0; break;
+        case 2: index.bucket_count = 3; break;
+        case 3: index.bucket_ends = 0; break;
+        case 4: index.order = 0; break;
+        case 5: ends[0] = 4; break;
+        case 6: ends[1] = 2; break;
+        case 7: ends[0] = 2; ends[1] = 2; ends[2] = 2; ends[3] = 2; break;
+        case 8: order[0] = 3; break;
+        case 9: order[0] = UINT32_MAX; break;
+        case 10: order[1] = 0; break;
+        case 11: order[0] = 1; order[1] = 0; break;
+        case 12: ends[0] = 0; break;
+        case 13: locations[0].location.piece_count = 1; break;
+        case 14: input.inline_site_count = 1; break;
+        case 15: index.locations = locations + 1; ends[0] = UINT32_MAX; break;
+        case 16: index.location_count = 2; ends[0] = UINT32_MAX; break;
+        case 17: break;
+        default: break;
+        }
+        DebugModel model = debug_model_build(arguments->arena, input);
+        bool expected_valid = variant >= 15;
+        BUSTER_TEST(arguments, model.valid == expected_valid);
+        if (expected_valid && model.valid)
+        {
+            BUSTER_TEST(arguments, model.variable_count == 1 && model.variables[0].location_count == 3);
+            bool matches = model.variable_count == 1 && model.variables[0].location_count == 3;
+            for (u32 range = 0; matches && range < 3; range += 1)
+            {
+                DebugLocationRange* actual = model.variables[0].locations + range;
+                matches = actual->start == locations[range].start && actual->end == locations[range].end &&
+                          actual->location.constant == locations[range].location.constant;
+            }
+            BUSTER_TEST(arguments, matches);
+        }
+        else if (!expected_valid)
+        {
+            BUSTER_TEST(arguments, model.variable_count == 0 && model.scopes == 0 && model.root_scope == DEBUG_SCOPE_INVALID);
+        }
+        locations[0].location.piece_count = 0;
+    }
+
+    DebugLocationIndex empty_index = {0};
+    DebugModel empty = debug_model_build(arguments->arena, (DebugModelInput){.program = &program, .module = &module, .location_index = &empty_index});
+    BUSTER_TEST(arguments, empty.valid && empty.variable_count == 1 && empty.variables[0].location_count == 1);
+    BUSTER_TEST(arguments, empty.variables[0].locations[0].location.kind == DEBUG_LOCATION_UNAVAILABLE);
+    DebugModel automatic = debug_model_build(arguments->arena, (DebugModelInput){
+        .program = &program, .module = &module, .locations = locations, .location_count = 3,
+    });
+    BUSTER_TEST(arguments, automatic.valid && automatic.variable_count == 1 && automatic.variables[0].location_count == 3);
+    return result;
+}
+
+UnitTestResult debug_model_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = debug_test_location_index_validation(arguments);
     BUSTER_TEST(arguments, debug_register_dwarf_number((Target){.cpu_arch = CPU_ARCH_X86_64}, DEBUG_REGISTER_X86_RAX) == 0);
     BUSTER_TEST(arguments, debug_register_dwarf_number((Target){.cpu_arch = CPU_ARCH_X86_64}, DEBUG_REGISTER_X86_RSP) == 7);
     BUSTER_TEST(arguments, debug_register_dwarf_number((Target){.cpu_arch = CPU_ARCH_AARCH64}, DEBUG_REGISTER_AARCH64_X29) == 29);
