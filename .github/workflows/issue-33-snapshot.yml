@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - compiler/issue-33-canonical-local-promotion
+      - fix/host-portability-audit
 
 permissions:
   contents: read
