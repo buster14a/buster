@@ -150,7 +150,7 @@ jobs:
               ''' + bind_call + r'''
               fprintf(stderr, "PR94_SEMANTICS bind_body_complete index=%u diagnostics=%llu\n",
                       declaration_index, (unsigned long long)result.diagnostic_count); fflush(stderr);''', 1)
-          block_loop = "    while (index < body_end)\n    {"
+          block_loop = "    u32 asm_operand_range_end = UINT32_MAX;\n    while (index < body_end)\n    {"
           if parse_text.count(block_loop) != 1:
               raise SystemExit("block-binding loop anchor not found")
           parse_text = parse_text.replace(block_loop, block_loop + r'''
