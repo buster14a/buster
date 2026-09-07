@@ -1,0 +1,47 @@
+name: Allocation audit transport
+on:
+  push:
+    branches: [audit/allocation-transport-20260907]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify payload and publish only a new isolated branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/allocation-transport/part{0,1,2,3} > /tmp/allocation.patch.gz
+          echo '4eefa1334e9b3a306ab9f410a59d4b11073abe3a3934a42ace7abd1fa2fe3ff7  /tmp/allocation.patch.gz' | sha256sum -c -
+          gzip -dc /tmp/allocation.patch.gz > /tmp/allocation.patch
+          echo '9793a8a47882ff875a1966ee6f2919f73fc8ca88ef07d2a5ea337413c9753271  /tmp/allocation.patch' | sha256sum -c -
+          git switch --detach ebfdd11705bc470564e726857e498f1c82aa746c
+          git bundle create /tmp/allocation-base.bundle HEAD
+          git apply --3way --index /tmp/allocation.patch
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'perf: census allocation traffic and bound aggregate traversal scratch'
+          # The transport-only workflow/payload and CI suppression cannot enter
+          # the implementation branch: that tree is built from reviewed main.
+          test -z "$(git diff ebfdd11705bc470564e726857e498f1c82aa746c HEAD -- .github/workflows/ci.yml)"
+          test ! -e .github/allocation-transport/part0
+          test ! -e .github/workflows/allocation-transport.yml
+          git push origin HEAD:refs/heads/perf/allocation-census-20260907
+          git rev-parse HEAD > /tmp/allocation-result.txt
+          git bundle create /tmp/allocation-candidate.bundle HEAD
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: allocation-audit-candidate
+          path: |
+            /tmp/allocation-base.bundle
+            /tmp/allocation-candidate.bundle
+            /tmp/allocation-result.txt
+          retention-days: 3
+          compression-level: 0
