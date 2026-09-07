@@ -17,17 +17,17 @@ jobs:
       - name: Check out reviewed main revision
         uses: actions/checkout@v4
         with:
-          ref: 66bf321936ccb2b4f0df42cb6f65ed197f8652b5
+          ref: ebfdd11705bc470564e726857e498f1c82aa746c
           fetch-depth: 1
 
       - name: Archive working tree
         shell: bash
-        run: tar --exclude=.git -czf /tmp/buster-main-66bf321.tar.gz .
+        run: tar --exclude=.git -czf /tmp/buster-main-ebfdd11.tar.gz .
 
       - name: Upload checkout
         uses: actions/upload-artifact@v4
         with:
-          name: buster-main-66bf321
-          path: /tmp/buster-main-66bf321.tar.gz
+          name: buster-main-ebfdd11
+          path: /tmp/buster-main-ebfdd11.tar.gz
           compression-level: 0
           retention-days: 1
