@@ -7939,6 +7939,42 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void machine_x64_encoder_copy_encoding(Machine
     }
 }
 
+// Write one little-endian field of 1, 2, 4 or 8 bytes into the code buffer.
+// Every width the encoding tables publish is one store; the loop stays for a
+// width none of them uses. It was a byte loop over a field whose width the
+// caller cannot fold, on every patched immediate and displacement of the
+// compile.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE void machine_x64_encoder_store_field(u8* destination, u64 value, u32 width)
+{
+    switch (width)
+    {
+    case 1:
+        destination[0] = (u8)value;
+        break;
+    case 2:
+    {
+        u16 narrow = (u16)value;
+        memcpy(destination, &narrow, sizeof(narrow));
+        break;
+    }
+    case 4:
+    {
+        u32 narrow = (u32)value;
+        memcpy(destination, &narrow, sizeof(narrow));
+        break;
+    }
+    case 8:
+        memcpy(destination, &value, sizeof(value));
+        break;
+    default:
+        for (u32 byte_index = 0; byte_index < width; byte_index += 1)
+        {
+            destination[byte_index] = (u8)(value >> (byte_index * 8u));
+        }
+        break;
+    }
+}
+
 struct MachineX64GprEncodingTable
 {
     MachineX64GprEncoding encodings[256];
@@ -10766,19 +10802,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
                                       ? payload
                                       : immediate_value;
                 u32 immediate_offset = encoder->count + byte_count - immediate_width;
-                for (u32 byte_index = 0; byte_index < immediate_width; byte_index += 1)
-                {
-                    encoder->bytes[immediate_offset + byte_index] = (u8)(patch_value >> (byte_index * 8u));
-                }
+                machine_x64_encoder_store_field(encoder->bytes + immediate_offset, patch_value, immediate_width);
             }
             if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT)
             {
                 u32 displacement_offset = encoder->count + byte_count - (u32)sizeof(u32);
                 u32 value = (u32)displacement;
-                for (u32 byte_index = 0; byte_index < sizeof(u32); byte_index += 1)
-                {
-                    encoder->bytes[displacement_offset + byte_index] = (u8)(value >> (byte_index * 8u));
-                }
+                memcpy(encoder->bytes + displacement_offset, &value, sizeof(value));
             }
             encoder->count += byte_count;
             if (counters) counters->successes += 1;
