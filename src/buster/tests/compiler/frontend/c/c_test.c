@@ -212,7 +212,7 @@ BUSTER_GLOBAL_LOCAL bool c_test_translate_source_paths_agree(Arena* arena, Strin
     {
         result = memcmp(dispatched.translated_source.pointer, scalar, scalar_length) == 0;
     }
-    arena->position = arena_position;
+    arena_set_position(arena, arena_position);
     return result;
 }
 
@@ -2376,7 +2376,7 @@ BUSTER_GLOBAL_LOCAL bool c_test_lex_paths_agree(Arena* arena, String8 source)
         result = left.kind == right.kind && left.severity == right.severity && string_equal(left.message, right.message) &&
                  left.location.offset == right.location.offset && left.location.line == right.location.line && left.location.column == right.location.column;
     }
-    arena->position = position;
+    arena_set_position(arena, position);
     return result;
 }
 
@@ -2453,7 +2453,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
             memset(padded, ' ', pad);
             memcpy(padded + pad, differential_case.pointer, differential_case.length);
             BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){padded, padded_length}));
-            arena->position = position;
+            arena_set_position(arena, position);
         }
     }
 
@@ -2527,7 +2527,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
             buffer[run_length] = '=';
             BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){buffer, run_length + 1}));
 
-            arena->position = position;
+            arena_set_position(arena, position);
         }
     }
 
@@ -2573,7 +2573,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
                 }
             }
             file_map_unmap(source_file);
-            arena->position = position;
+            arena_set_position(arena, position);
         }
     }
 
@@ -2596,7 +2596,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
                 blob[index] = pick < fuzz_alphabet_length ? fuzz_alphabet[pick] : fuzz_high_bytes[pick - fuzz_alphabet_length];
             }
             BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, (String8){blob, fuzz_length}));
-            arena->position = position;
+            arena_set_position(arena, position);
         }
     }
 
@@ -2707,7 +2707,7 @@ BUSTER_GLOBAL_LOCAL bool c_test_quoted_paths_agree(Arena* arena, String8 prefix,
     }
     spelling[length - 1] = (char8)delimiter;
     bool result = c_test_decode_quoted_paths_agree(arena, (String8){spelling, length}, delimiter, accepted_out);
-    arena->position = position;
+    arena_set_position(arena, position);
     return result;
 }
 
@@ -2773,13 +2773,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
                 {
                     String8 body = c_test_quoted_body(arena, offsets[offset_index], accepted_escapes[escape_index], tails[tail_index]);
                     BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, delimiter, &accepted) && accepted);
-                    arena->position = position;
+                    arena_set_position(arena, position);
                 }
                 for (u64 escape_index = 0; escape_index < BUSTER_ARRAY_LENGTH(rejected_escapes); escape_index += 1)
                 {
                     String8 body = c_test_quoted_body(arena, offsets[offset_index], rejected_escapes[escape_index], tails[tail_index]);
                     BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, delimiter, &accepted) && !accepted);
-                    arena->position = position;
+                    arena_set_position(arena, position);
                 }
             }
         }
@@ -2797,7 +2797,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         {
             String8 body = c_test_quoted_body(arena, run_offsets[offset_index], runs[run_index], 3);
             BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '"', &accepted) && accepted);
-            arena->position = position;
+            arena_set_position(arena, position);
         }
     }
 
@@ -2811,7 +2811,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         {
             String8 body = c_test_quoted_repeat(arena, units[unit_index], unit_counts[count_index]);
             BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '"', &accepted) && accepted);
-            arena->position = position;
+            arena_set_position(arena, position);
         }
     }
 
@@ -2823,7 +2823,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         String8 body = c_test_quoted_body(arena, plain_lengths[length_index], S8(""), 0);
         BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '"', &accepted) && accepted);
         BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '\'', &accepted) && accepted);
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Multi-byte UTF-8 and bare high bytes pass through, across the boundary.
@@ -2832,7 +2832,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
     {
         String8 body = c_test_quoted_body(arena, offset, utf8, 2);
         BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), body, '"', &accepted) && accepted);
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // The u8 prefix is the one prefix the narrow decoder accepts; every other
@@ -2852,7 +2852,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         {
             BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, rejected_prefixes[prefix_index], S8("x"), '"', &accepted) && !accepted);
         }
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Spellings no lexer produces: the decoders must still agree on them.
@@ -2861,11 +2861,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
         {
             BUSTER_TEST(arguments, c_test_decode_quoted_paths_agree(arena, malformed[index], '"', &accepted) && !accepted);
-            arena->position = position;
+            arena_set_position(arena, position);
         }
         BUSTER_TEST(arguments, c_test_decode_quoted_paths_agree(arena, S8("\"\""), '"', &accepted) && accepted);
         BUSTER_TEST(arguments, c_test_decode_quoted_paths_agree(arena, S8("''"), '\'', &accepted) && accepted);
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Agreement is not enough on its own: a few decodes are pinned to the
@@ -2894,7 +2894,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
             BUSTER_TEST(arguments, c_test_decode_quoted(arena, expectations[index].spelling, delimiter, &decoded) &&
                                        decoded.length == expectations[index].expected.length &&
                                        (decoded.length == 0 || memcmp(decoded.pointer, expectations[index].expected.pointer, decoded.length) == 0));
-            arena->position = position;
+            arena_set_position(arena, position);
         }
         // An escaped delimiter in the second window: the prefix store, the
         // escape, and the tail land where the reference puts them.
@@ -2906,7 +2906,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         ByteSlice long_decoded = {0};
         BUSTER_TEST(arguments, c_test_decode_quoted(arena, (String8){long_spelling, long_body.length + 2}, '"', &long_decoded) && long_decoded.length == 67 &&
                                    long_decoded.pointer[64] == 'z' && long_decoded.pointer[65] == '"' && long_decoded.pointer[66] == 'y');
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // A literal longer than the u16 token length, with escapes strewn through
@@ -2918,7 +2918,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         BUSTER_TEST(arguments, c_test_decode_quoted_paths_agree(arena, giant, '"', &accepted) && accepted);
         BUSTER_TEST(arguments, c_test_decode_quoted(arena, giant, '"', &giant_decoded) && giant_decoded.length == giant_expected.length &&
                                    memcmp(giant_decoded.pointer, giant_expected.pointer, giant_expected.length) == 0);
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Fuzz over the grammar's alphabet: fillers, backslashes, every escape
@@ -2943,7 +2943,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
                 body[index] = (char8)alphabet[(state >> 24) % BUSTER_ARRAY_LENGTH(alphabet)];
             }
             BUSTER_TEST(arguments, c_test_quoted_paths_agree(arena, S8(""), (String8){body, length}, '"', &accepted));
-            arena->position = position;
+            arena_set_position(arena, position);
         }
     }
 
@@ -2982,7 +2982,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         scratch_end(temporary);
     }
 
-    arena->position = position;
+    arena_set_position(arena, position);
     return result;
 }
 
@@ -3045,7 +3045,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
             BUSTER_TEST(arguments, memcmp(big_global->bytes.pointer, decoded.pointer, decoded.length) == 0);
             BUSTER_TEST(arguments, big_global->bytes.pointer[decoded.length] == 0);
         }
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // A >64 KB character literal only has to lex: its spelling and the
@@ -3062,7 +3062,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
             BUSTER_STRING_TEST(arguments, c_token_spelling(lex.spelling_base, token), character_literal);
         }
         BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, character_literal));
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // An unterminated >64 KB string literal: the token cannot report its true
@@ -3082,7 +3082,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         BUSTER_TEST(arguments, lex.diagnostic_count == 1);
         BUSTER_TEST(arguments, lex.diagnostic_count == 1 && lex.diagnostics[0].kind == C_DIAGNOSTIC_UNTERMINATED_STRING_LITERAL);
         BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Stringify: # over a giant string-literal argument escapes its quotes
@@ -3139,7 +3139,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         {
             BUSTER_TEST(arguments, memcmp(stringified_global->bytes.pointer, inner.pointer, inner.length) == 0);
         }
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Token paste: u8 ## "..." runs the join-and-relex path with an
@@ -3179,7 +3179,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         {
             BUSTER_TEST(arguments, memcmp(glued_global->bytes.pointer, decoded.pointer, decoded.length) == 0);
         }
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Only terminated literals carry the length escape: an identifier or a
@@ -3204,7 +3204,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         BUSTER_TEST(arguments, number_lex.diagnostic_count == 1);
         BUSTER_TEST(arguments, number_lex.diagnostic_count == 1 && number_lex.diagnostics[0].kind == C_DIAGNOSTIC_TOKEN_TOO_LONG);
         BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, number_source));
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Pasting two identifiers whose join crosses the sentinel relexes with
@@ -3230,7 +3230,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){0});
         BUSTER_TEST(arguments, preprocess.error_count == 1);
         BUSTER_TEST(arguments, preprocess.diagnostic_count >= 1 && preprocess.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_TOKEN_PASTE);
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     return result;
@@ -3367,6 +3367,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArgume
     return result;
 }
 
+// A temporary lex can leave nonzero token/source bytes above its restored
+// cursor. Later zeroed parser tables must not mistake those bytes for fresh
+// pages. Use an unpooled arena so prior tests cannot supply a larger watermark.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_rewind_initialization(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+    BUSTER_TEST(arguments, arena != 0);
+    if (arena)
+    {
+        u64 position = arena->position;
+        String8 source = S8("typedef struct Reused { int field; } Reused;\n");
+        BUSTER_TEST(arguments, c_test_translate_source_paths_agree(arena, source));
+        BUSTER_TEST(arguments, arena->position == position);
+        bool retained_dirty_bytes = arena_dirty_position(arena) > position;
+        BUSTER_TEST(arguments, retained_dirty_bytes);
+        u64 byte_count = BUSTER_KB(4);
+        u8* bytes = arena_allocate_zeroed(arena, u8, byte_count);
+        bool zeroed = true;
+        for (u64 byte_index = 0; byte_index < byte_count; byte_index += 1)
+        {
+            zeroed &= bytes[byte_index] == 0;
+        }
+        BUSTER_TEST(arguments, zeroed);
+        if (zeroed && retained_dirty_bytes)
+        {
+            arena_reset_to_start(arena);
+            CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){0});
+            CParseResult parsed = c_parse(arena, preprocess);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parsed.declaration_count == 1);
+        }
+        BUSTER_TEST(arguments, arena_destroy(arena, 1));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3411,7 +3449,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
             }
             BUSTER_TEST(arguments, c_test_translate_source_paths_agree(arguments->arena, (String8){.pointer = fuzz, .length = fuzz_length}));
         }
-        arguments->arena->position = arena_position;
+        arena_set_position(arguments->arena, arena_position);
     }
 
     CLexResult basic = c_lex(arguments->arena, S8("int ma\\\r\nin(void) // comment\r\n"
@@ -13148,6 +13186,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_malformed_initializer_progress_and_ide
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    c_test_result_add(&result, c_test_frontend_rewind_initialization(arguments));
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
     c_test_result_add(&result, c_test_null_preprocessing_directives(arguments));
     c_test_result_add(&result, c_test_malformed_initializer_progress_and_identifier_uses(arguments));

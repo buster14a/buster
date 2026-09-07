@@ -1258,10 +1258,10 @@ BUSTER_GLOBAL_LOCAL void ui_test_drop_copy_lifetime_and_capacity(UnitTestArgumen
     u64 drop_saved_position = drop_build_arena->position;
     u64 drop_saved_reserved_size = drop_build_arena->reserved_size;
     drop_build_arena->reserved_size = drop_saved_reserved_size - 1;
-    drop_build_arena->position = drop_build_arena->reserved_size - sizeof(String8);
+    arena_set_position(drop_build_arena, drop_build_arena->reserved_size - sizeof(String8));
     drop_signal = ui_signal_from_box(drop_site);
     BUSTER_TEST(arguments, ui_dropped(drop_signal) && drop_signal.drop_paths.length == 0);
-    drop_build_arena->position = drop_saved_position;
+    arena_set_position(drop_build_arena, drop_saved_position);
     drop_build_arena->reserved_size = drop_saved_reserved_size;
     ui_build_end();
 
@@ -2302,10 +2302,10 @@ BUSTER_GLOBAL_LOCAL void ui_test_utf8_tooltip_and_draw_commands(UnitTestArgument
     u64 fuzzy_saved_position = fuzzy_build_arena->position;
     u64 fuzzy_saved_reserved_size = fuzzy_build_arena->reserved_size;
     fuzzy_build_arena->reserved_size = fuzzy_saved_reserved_size - 1;
-    fuzzy_build_arena->position = fuzzy_build_arena->reserved_size - sizeof(UI_FuzzyMatchRange);
+    arena_set_position(fuzzy_build_arena, fuzzy_build_arena->reserved_size - sizeof(UI_FuzzyMatchRange));
     ui_box_set_fuzzy_match_ranges(near_capacity_ranges, &near_capacity_range, 1);
     BUSTER_TEST(arguments, near_capacity_ranges->fuzzy_match_range_count == 0 && !(near_capacity_ranges->flags & UI_BoxFlag_HasFuzzyMatchRanges));
-    fuzzy_build_arena->position = fuzzy_saved_position;
+    arena_set_position(fuzzy_build_arena, fuzzy_saved_position);
     fuzzy_build_arena->reserved_size = fuzzy_saved_reserved_size;
     ui_build_end();
     BUSTER_TEST(arguments, centered->fuzzy_match_range_count == 1 && centered->fuzzy_match_ranges[0].first == 1 && centered->fuzzy_match_ranges[0].one_past_last == 3);
