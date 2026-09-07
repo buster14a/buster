@@ -206,3 +206,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
 - Native lowering is `canonical IR -> machine IR -> scheduling/register
   allocation -> encoding`. Selection patterns and scheduling classes remain
   separate metadata domains even when they share instruction-form IDs.
+
+## Immutable aggregate and complex construction
+
+`IR_OPCODE_AGGREGATE` captures already-evaluated `IR_VALUE_VALUE` operands
+at their field types and produces another `IR_VALUE_VALUE`. It never loads a
+place implicitly and never creates an addressable result. The canonical
+validator rejects either a place operand or a place result. A consumer that
+needs object identity must explicitly materialize storage.
+
+Complex rvalues use this same operation through `c_ir_complex_compose`, not a
+`LOCAL`/`FIELD`/`STORE`/`LOAD` construction sequence. Arithmetic consumers in
+`c_ir_complex_split` project a known constructor's two scalar operands directly.
+This bounded projection does not apply to the `__real__`/`__imag__` lvalue path:
+component assignments must continue to designate their original object.
+Qualifiers, volatile memory, and non-constructor values retain their existing
+explicit load/store path. No whole-function cleanup pass is required.

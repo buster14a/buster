@@ -163,6 +163,26 @@ static int check_long(complex_long_double value, long double real, long double i
 }
 #endif
 
+// Pure constructors and arithmetic projections exercise canonical AGGREGATE,
+// including the complex return ABI. Lvalue component updates above must keep
+// addressing their original objects rather than aliasing constructor operands.
+complex_double complex_constructor_chain(double r, double i)
+{
+    return -__builtin_complex(r, i) + __builtin_complex(i, r);
+}
+
+complex_float complex_constructor_float(float r, float i)
+{
+    return __builtin_complex(r, i);
+}
+
+#if FIXTURE_LONG_DOUBLE_IN_SIGNATURE
+complex_long_double complex_constructor_long(long double r, long double i)
+{
+    return __builtin_complex(r, i);
+}
+#endif
+
 int main(void)
 {
     // Layout first: a complex value is two contiguous elements of its real
@@ -329,6 +349,17 @@ int main(void)
     complex_long_double lz = complex_long_conjugate(complex_long_compose(1.0L, 0.0L));
     if (__imag__ lz != 0.0L) return 79;
     if (1.0L / __imag__ lz > 0.0L) return 80;
+#endif
+
+    real_source = 3.0;
+    imaginary_source = 4.0;
+    if (!check(complex_constructor_chain(real_source, imaginary_source), 1.0, -1.0)) return 81;
+    if (!check_float(complex_constructor_float(3.0f, -4.0f), 3.0f, -4.0f)) return 82;
+    if ((double)__builtin_complex(real_source, imaginary_source) != 3.0) return 83;
+    if (__imag__ __builtin_complex(real_source, imaginary_source) != 4.0) return 84;
+    if (!__builtin_signbit(__imag__ __builtin_complex(1.0, -0.0))) return 85;
+#if FIXTURE_LONG_DOUBLE_IN_SIGNATURE
+    if (!check_long(complex_constructor_long(3.5L, -1.25L), 3.5L, -1.25L)) return 86;
 #endif
 
     return 0;
