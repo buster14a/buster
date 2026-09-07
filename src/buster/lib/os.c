@@ -326,7 +326,7 @@ BUSTER_GLOBAL_LOCAL int os_posix_map_flags(MapFlags flags)
 // collide with the null pointer, which means "no descriptor" everywhere.
 BUSTER_GLOBAL_LOCAL OsFileDescriptor* posix_fd_to_generic_fd(int fd)
 {
-    BUSTER_CHECK(fd >= 0);
+    BUSTER_VALIDATE(fd >= 0);
     return (OsFileDescriptor*)((u64)fd + 1);
 }
 
@@ -846,7 +846,7 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
     if (syscall_result)
     {
         result = string_from_pointer(syscall_result);
-        BUSTER_CHECK(result.length <= length);
+        BUSTER_VALIDATE(result.length <= length);
     }
 
     arena->position = position + result.length + null_terminate;
@@ -896,7 +896,7 @@ void os_make_directory(String8 path)
 bool os_file_delete(String8 path)
 {
 #if defined(__linux__) || defined(__APPLE__)
-    BUSTER_CHECK(!path.pointer[path.length]);
+    BUSTER_VALIDATE(!path.pointer[path.length]);
     return unlink((const char*)path.pointer) == 0 || errno == ENOENT;
 #elif defined(_WIN32)
     TemporalArena temp = scratch_begin(0, 0);
@@ -1114,7 +1114,7 @@ bool os_directory_delete(String8 path)
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
     if (path.length)
     {
-        BUSTER_CHECK(!path.pointer[path.length]);
+        BUSTER_VALIDATE(!path.pointer[path.length]);
         // The walk holds its pending worklist in this arena for the whole
         // traversal. A scratch arena would be reachable from any nested
         // scratch_begin(0, 0) inside the walk, whose scratch_end would rewind the
@@ -1136,7 +1136,7 @@ OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions pe
     if (path.pointer)
     {
 #if defined(__linux__) || defined(__APPLE__)
-        BUSTER_CHECK(!path.pointer[path.length]);
+        BUSTER_VALIDATE(!path.pointer[path.length]);
 
         int o = 0;
         if (flags.read & flags.write)
@@ -1276,16 +1276,16 @@ BUSTER_GLOBAL_LOCAL u64 os_file_write_partially(OsFileDescriptor* file_descripto
     {
         result = write(fd, pointer, (size_t)request_byte_count);
     } while (result < 0 && errno == EINTR);
-    BUSTER_CHECK(result > 0);
+    BUSTER_VALIDATE(result > 0);
     return (u64)result;
 #elif defined(_WIN32)
     HANDLE fd = generic_fd_to_windows(file_descriptor);
     DWORD written_byte_count = 0;
     BOOL result = WriteFile(fd, pointer, (DWORD)request_byte_count, &written_byte_count, 0);
-    BUSTER_CHECK(result);
+    BUSTER_VALIDATE(result);
     // Matches the POSIX branch: a success that moved nothing is a failure to
     // the caller's loop, not a step it can be asked to repeat.
-    BUSTER_CHECK(written_byte_count > 0);
+    BUSTER_VALIDATE(written_byte_count > 0);
     return written_byte_count;
 #endif
 }
@@ -1339,7 +1339,7 @@ u64 os_file_read(OsFileDescriptor* file_descriptor, ByteSlice buffer, u64 byte_c
 {
     u64 read_byte_count = 0;
     u8* pointer = buffer.pointer;
-    BUSTER_CHECK(buffer.length >= byte_count);
+    BUSTER_VALIDATE(buffer.length >= byte_count);
     while (byte_count - read_byte_count)
     {
         u64 iteration_read_byte_count = os_file_read_partially(file_descriptor, pointer + read_byte_count, byte_count - read_byte_count);
@@ -1379,7 +1379,7 @@ FileStats os_file_get_stats(OsFileDescriptor* file_descriptor, FileStatsOptions 
         HANDLE fd = generic_fd_to_windows(file_descriptor);
         BY_HANDLE_FILE_INFORMATION file_information = {0};
         BOOL file_result = GetFileInformationByHandle(fd, &file_information);
-        BUSTER_CHECK(file_result != 0);
+        BUSTER_VALIDATE(file_result != 0);
         w32_file_stats_from_file_information(&result, options, file_information);
 #endif
     }
@@ -2106,14 +2106,14 @@ u64 os_file_get_size(OsFileDescriptor* file_descriptor)
     int fd = generic_fd_to_posix(file_descriptor);
     struct stat sb;
     int fstat_result = fstat(fd, &sb);
-    BUSTER_CHECK(fstat_result == 0);
+    BUSTER_VALIDATE(fstat_result == 0);
 
     return (u64)sb.st_size;
 #elif defined(_WIN32)
     HANDLE fd = generic_fd_to_windows(file_descriptor);
     BY_HANDLE_FILE_INFORMATION file_information = {0};
     BOOL result = GetFileInformationByHandle(fd, &file_information);
-    BUSTER_CHECK(result);
+    BUSTER_VALIDATE(result);
     return w32_file_size_from_file_information(file_information);
 #endif
 }
@@ -2153,7 +2153,7 @@ bool os_unreserve(void* address, u64 size)
 OsModuleHandle* os_dynamic_library_load(String8 library)
 {
     OsModuleHandle* result = {0};
-    BUSTER_CHECK(BUSTER_SLICE_IS_ZERO_TERMINATED(library));
+    BUSTER_VALIDATE(BUSTER_SLICE_IS_ZERO_TERMINATED(library));
 
 #if defined(_WIN32)
     TemporalArena temp = scratch_begin(0, 0);

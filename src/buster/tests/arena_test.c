@@ -7,9 +7,34 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {0};
 
+#if BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS
+    String8 failure_mode = os_get_environment_variable(S8("BUSTER_ARENA_FAILURE_MODE"));
+    if (string_equal(failure_mode, S8("commit")) || string_equal(failure_mode, S8("bound")))
+    {
+        Arena* arena = arena_create((ArenaCreation){
+            .reserved_size = BUSTER_MB(1),
+            .initial_size = BUSTER_KB(64),
+            .flags = {.no_pool = 1},
+        });
+        BUSTER_VALIDATE(arena != 0);
+        if (string_equal(failure_mode, S8("commit")))
+        {
+            arena_test_fail_next_commit();
+            arena_allocate_bytes(arena, BUSTER_KB(128), 1);
+        }
+        else
+        {
+            // This is caller-derived validation, not an invariant. It must
+            // still fail in an optimized build rather than becoming UB.
+            arena_allocate_bytes(arena, arena->reserved_size, 1);
+        }
+        BUSTER_UNREACHABLE();
+    }
+#endif
+
     // Companion to the reserved_size bound: filling an arena up to its
     // reservation stays within bounds and keeps working. Requests past
-    // reserved_size abort via BUSTER_CHECK, so they cannot be observed
+    // reserved_size abort via BUSTER_VALIDATE, so they cannot be observed
     // in-process.
     {
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1)});
@@ -25,6 +50,34 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, arena->position == arena->reserved_size);
 
             arena_destroy(arena, 1);
+        }
+    }
+
+    // A legal reservation need not be a commit-granularity multiple. Filling
+    // the final partial granule must clamp the OS request to the reservation
+    // rather than rejecting it or committing into an adjacent arena.
+    {
+        Arena* arena = arena_create((ArenaCreation){
+            .reserved_size = BUSTER_MB(1) + 64,
+            .granularity = BUSTER_KB(64),
+            .initial_size = BUSTER_KB(64),
+            .flags = {.no_pool = 1},
+        });
+        BUSTER_TEST(arguments, arena != 0);
+        if (arena)
+        {
+            u64 remaining = arena->reserved_size - arena->position;
+            u8* bytes = arena_allocate(arena, u8, remaining);
+            BUSTER_TEST(arguments, bytes != 0);
+            if (bytes && remaining)
+            {
+                bytes[0] = 0x41;
+                bytes[remaining - 1] = 0xb7;
+                BUSTER_TEST(arguments, bytes[0] == 0x41 && bytes[remaining - 1] == 0xb7);
+            }
+            BUSTER_TEST(arguments, arena->position == arena->reserved_size);
+            BUSTER_TEST(arguments, arena->os_position == arena->reserved_size);
+            BUSTER_TEST(arguments, arena_destroy(arena, 1));
         }
     }
 
@@ -169,6 +222,44 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, arena_destroy(arena, 1));
         }
     }
+
+#if BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS
+    // A failed recommit is reported at the allocation site instead of
+    // returning a pointer into inaccessible memory. Run the fatal path in a
+    // child so both Debug and Release can assert the diagnostic and exit.
+    {
+        String8 child_arguments[] = {
+            program_state->input.arguments.pointer[0],
+            S8("test"),
+        };
+        String8 modes[] = {S8("commit"), S8("bound")};
+        String8 diagnostics[] = {S8("arena commit failed"), S8("validation failed")};
+        for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(modes); mode_index += 1)
+        {
+            String8 environment_keys[] = {S8("BUSTER_ARENA_FAILURE_MODE")};
+            String8 environment_values[] = {modes[mode_index]};
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys),
+                                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values),
+                                                         (ProcessSpawnOptions){
+                                                             .capture = (u64)1 << STANDARD_STREAM_ERROR,
+                                                             .use_process_environment = 1,
+                                                         });
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                String8 error = {
+                    .pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer,
+                    .length = wait.streams[STANDARD_STREAM_ERROR].length,
+                };
+                BUSTER_TEST(arguments, !wait.timed_out);
+                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
+                BUSTER_TEST(arguments, string_first_sequence(error, diagnostics[mode_index]) != BUSTER_STRING_NO_MATCH);
+            }
+        }
+    }
+#endif
 
     return result;
 }

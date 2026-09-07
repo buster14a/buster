@@ -13094,11 +13094,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_null_preprocessing_directives(UnitTest
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_malformed_initializer_progress_and_identifier_uses(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+
+    String8 nonterminating_sources[] = {
+        S8("struct i e[]={>};"),
+        S8("struct s e[]={()};"),
+        S8("struct i e[]={<};"),
+        S8("{[]};static const struct i e[]={>};"),
+    };
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(nonterminating_sources); source_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, nonterminating_sources[source_index], (CPreprocessOptions){0});
+        CParseResult parse = {0};
+        if (!preprocess.diagnostic_count)
+        {
+            parse = c_parse(temporary.arena, preprocess);
+        }
+        BUSTER_TEST(arguments, preprocess.diagnostic_count || parse.diagnostic_count);
+        scratch_end(temporary);
+    }
+
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        String8 source = S8("typedef int B; void n(void){ B{}B{}B{}B{}B{}B{}B{}B{} }");
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count != 0);
+        BUSTER_TEST(arguments, parse.identifier_use_count == 8);
+        BUSTER_TEST(arguments, parse.identifier_use_count <= parse.identifier_use_capacity);
+        for (u32 use_index = 0; use_index < parse.identifier_use_count; use_index += 1)
+        {
+            for (u32 previous = 0; previous < use_index; previous += 1)
+            {
+                BUSTER_TEST(arguments, parse.identifier_uses[previous].token_index != parse.identifier_uses[use_index].token_index);
+            }
+        }
+        scratch_end(temporary);
+    }
+
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
     c_test_result_add(&result, c_test_null_preprocessing_directives(arguments));
+    c_test_result_add(&result, c_test_malformed_initializer_progress_and_identifier_uses(arguments));
     c_test_result_add(&result, c_test_frontend_lex_differential(arguments));
     c_test_result_add(&result, c_test_intern_scan_by_shape(arguments));
     c_test_result_add(&result, c_test_pp_class_masks(arguments));

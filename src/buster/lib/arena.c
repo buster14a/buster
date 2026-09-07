@@ -6,6 +6,14 @@ BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL bool arena_fail_next_commit;
+
+void arena_test_fail_next_commit(void)
+{
+    arena_fail_next_commit = true;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL u64 arena_os_position_after_commit(u64 requested_end, u64 reserved_size)
 {
@@ -35,21 +43,42 @@ void arena_allocation_overflow(void)
 // `reserved_size` is exact instead of bypassable by a large enough `size`.
 // The remaining-space form `size <= reserved_size - aligned_offset` needs one
 // compare fewer, but only if reservations are alignment-granular, and they are
-// not — the rendering boundary tests reserve 256 bytes on purpose. Rounding up
-// to the commit granularity lives here, in the branch that needs it, which
-// pays for the operand bound: the bump never loads `granularity` at all.
+// not — the rendering boundary tests reserve 256 bytes on purpose. Rounding
+// up to the commit granularity and clamping the final partial granule live
+// here, in the branch that needs them; the bump never loads `granularity`.
 void arena_allocate_commit(Arena* arena, u64 aligned_size_after)
 {
+    BUSTER_VALIDATE(aligned_size_after <= arena->reserved_size);
     u64 os_position = arena->os_position;
-    u64 target_committed_size = align_forward(aligned_size_after, arena->granularity);
-    BUSTER_CHECK(target_committed_size <= arena->reserved_size);
+    u64 target_committed_size = aligned_size_after;
+    u64 remainder = target_committed_size & (arena->granularity - 1);
+    if (remainder)
+    {
+        u64 increment = arena->granularity - remainder;
+        u64 remaining = arena->reserved_size - target_committed_size;
+        target_committed_size = increment <= remaining ? target_committed_size + increment : arena->reserved_size;
+    }
     u64 size_to_commit = target_committed_size - os_position;
     u8* commit_pointer = (u8*)arena + os_position;
 
-    if (os_commit(commit_pointer, size_to_commit, (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena->flags.lock_pages))
+    bool commit_succeeded;
+#if BUSTER_INCLUDE_TESTS
+    if (arena_fail_next_commit)
     {
-        arena->os_position = arena_os_position_after_commit(target_committed_size, arena->reserved_size);
+        arena_fail_next_commit = false;
+        commit_succeeded = false;
     }
+    else
+#endif
+    {
+        commit_succeeded = os_commit(commit_pointer, size_to_commit,
+                                     (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena->flags.lock_pages);
+    }
+    if (!commit_succeeded)
+    {
+        os_fail_message(S8("arena commit failed"));
+    }
+    arena->os_position = arena_os_position_after_commit(target_committed_size, arena->reserved_size);
 }
 
 u8* arena_get_byte_pointer_at_position(Arena* arena, u64 position)
@@ -228,13 +257,13 @@ Arena* arena_create(ArenaCreation original_creation)
     // The ceiling is what lets every later allocation reason about `position`
     // and `reserved_size` as small numbers: with both under 2^48 no sum or
     // alignment round-up in arena_allocate_bytes can reach 2^64.
-    BUSTER_CHECK(individual_reserved_size <= ARENA_MAX_RESERVATION);
-    BUSTER_CHECK(count <= UINT64_MAX / individual_reserved_size);
+    BUSTER_VALIDATE(individual_reserved_size <= ARENA_MAX_RESERVATION);
+    BUSTER_VALIDATE(count <= UINT64_MAX / individual_reserved_size);
     u64 total_reserved_size = individual_reserved_size * count;
 
-    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(creation.granularity));
-    BUSTER_CHECK(creation.initial_size >= arena_minimum_position);
-    BUSTER_CHECK(creation.initial_size <= individual_reserved_size);
+    BUSTER_VALIDATE(BUSTER_IS_POWER_OF_TWO(creation.granularity));
+    BUSTER_VALIDATE(creation.initial_size >= arena_minimum_position);
+    BUSTER_VALIDATE(creation.initial_size <= individual_reserved_size);
 
     // A pooled arena short-circuits the fresh reservation below; `reused` is how
     // that decision reaches the single exit without a second return.
@@ -313,7 +342,7 @@ Arena* arena_create(ArenaCreation original_creation)
                 {
                     bool destroy_result = arena_destroy_extended((Arena*)result, count, individual_reserved_size);
                     result = 0;
-                    BUSTER_CHECK(destroy_result);
+                    BUSTER_VALIDATE(destroy_result);
                     break;
                 }
             }
@@ -334,7 +363,7 @@ TemporalArena scratch_begin(Arena** conflicts, u64 count)
     Arena* arena = thread_context_get_scratch(conflicts, count);
     // Null means every scratch arena conflicted with the caller's arenas;
     // fail here instead of dereferencing null in arena_begin_temporal.
-    BUSTER_CHECK(arena);
+    BUSTER_VALIDATE(arena);
     return arena_begin_temporal(arena);
 }
 
