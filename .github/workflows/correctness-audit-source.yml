@@ -4,7 +4,7 @@ on:
     branches:
       - audit/correctness-20260907-source
 permissions:
-  contents: read
+  contents: write
 jobs:
   source:
     if: ${{ github.server_url == 'https://github.com' }}
@@ -13,15 +13,100 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          repository: TinyCC/tinycc
-          ref: 0fb54300b56512754221d80adda85ddb9815bceb
-          persist-credentials: false
-      - name: Export pinned bootstrap source
+          ref: 9834a4253c61934a8a253641a84741a25d3717e3
+          fetch-depth: 0
+      - name: Reconstruct exactly the locally tested arena patch
         shell: bash
-        run: git archive --format=tar.gz HEAD > "$RUNNER_TEMP/tinycc-0fb5430.tar.gz"
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          paths = ['src/buster/apps/ide/ide.c', 'src/buster/lib/font_provider.c', 'src/buster/lib/os.c', 'src/buster/tests/compiler/codegen/ebpf_test_internal.h', 'src/buster/tests/compiler/driver/driver_test.c', 'src/buster/tests/compiler/frontend/c/c_test.c', 'src/buster/tests/file_test.c', 'src/buster/tests/os_test.c']
+          for name in paths:
+              p = Path(name)
+              s = p.read_text()
+              s = re.sub(r'\b((?:arguments->)?arena|output)->position = ([^;\n]+);', r'arena_set_position(\1, \2);', s)
+              p.write_text(s)
+          p = Path('src/buster/lib/arena.h')
+          s = p.read_text().replace('    u64 reserved_size;\n    u64 position;', '    u64 reserved_size;\n    // Read outside this module; rewind through arena_set_position/scratch_end\n    // so discarded allocations remain part of the dirty prefix.\n    u64 position;')
+          p.write_text(s)
+          p = Path('src/buster/tests/compiler/frontend/c/c_test.c')
+          helper = '''// A lexer differential helper reuses its arena. Its rewind must retain the
+          // dirty prefix, or the following semantic parse can read non-bool bytes from
+          // an aggregate lookup table allocated with arena_allocate_zeroed (#235).
+          BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lexer_rewind_zeroed(UnitTestArguments* arguments)
+          {
+              UnitTestResult result = {0};
+              Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = 1}});
+              BUSTER_TEST(arguments, arena != 0);
+              if (arena)
+              {
+                  BUSTER_TEST(arguments, c_test_translate_source_paths_agree(arena, S8("struct S { int value; };")));
+                  BUSTER_TEST(arguments, arena_dirty_position(arena) > arena->position);
+                  u8* bytes = arena_allocate_zeroed(arena, u8, 4096);
+                  bool zeroed = true;
+                  for (u32 index = 0; index < 4096; index += 1)
+                  {
+                      zeroed = zeroed && bytes[index] == 0;
+                  }
+                  BUSTER_TEST(arguments, zeroed);
+                  BUSTER_TEST(arguments, arena_destroy(arena, 1));
+              }
+              return result;
+          }
+
+          '''
+          s = p.read_text()
+          s = s.replace('BUSTER_GLOBAL_LOCAL void c_test_auto_type_diagnostic(', helper + 'BUSTER_GLOBAL_LOCAL void c_test_auto_type_diagnostic(', 1)
+          s = s.replace('UnitTestResult c_frontend_tests(UnitTestArguments* arguments)\n{\n    UnitTestResult result = {0};', 'UnitTestResult c_frontend_tests(UnitTestArguments* arguments)\n{\n    UnitTestResult result = {0};\n    c_test_result_add(&result, c_test_lexer_rewind_zeroed(arguments));', 1)
+          p.write_text(s)
+          p = Path('src/buster/tests/os_test.c')
+          regression = '''    // realpath may write a resolved prefix even on failure. Discarding its
+              // oversized output allocation must not make those bytes look fresh to
+              // arena_allocate_zeroed. Use a fresh mapping so no prior dirty watermark
+              // can accidentally hide the broken rewind.
+              for (u32 terminate = 0; terminate < 2; terminate += 1)
+              {
+                  Arena* path_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = 1}});
+                  BUSTER_TEST(arguments, path_arena != 0);
+                  if (path_arena)
+                  {
+                      String8 missing = buster_test_temporary_path(arguments->arena, S8("buster-missing-realpath"), S8(""));
+                      String8 absolute = os_path_absolute(path_arena, missing, terminate != 0);
+                      BUSTER_TEST(arguments, absolute.length == 0);
+                      BUSTER_TEST(arguments, arena_dirty_position(path_arena) > path_arena->position);
+                      u8* bytes = arena_allocate_zeroed(path_arena, u8, 4096);
+                      bool zeroed = true;
+                      for (u32 index = 0; index < 4096; index += 1)
+                      {
+                          zeroed = zeroed && bytes[index] == 0;
+                      }
+                      BUSTER_TEST(arguments, zeroed);
+                      BUSTER_TEST(arguments, arena_destroy(path_arena, 1));
+                  }
+              }
+
+          '''
+          s = p.read_text().replace('    // Regression: draining captured stdout/stderr sequentially deadlocked when', regression + '    // Regression: draining captured stdout/stderr sequentially deadlocked when', 1)
+          p.write_text(s)
+          PY
+          git add src
+          git diff --cached --check
+          test "$(git write-tree)" = 18f3e9549e320575e6458cfdc0cd4e688ea71133
+          git config user.name 'Buster correctness audit'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'arena: preserve dirty watermarks across caller rewinds'
+      - name: Rebase onto pinned current main and publish isolated transport ref
+        shell: bash
+        run: |
+          git rebase 66bf321936ccb2b4f0df42cb6f65ed197f8652b5
+          git diff --check 66bf321936ccb2b4f0df42cb6f65ed197f8652b5
+          git push origin HEAD:refs/heads/audit/transport-arena-rewind-20260907
+          git rev-parse HEAD HEAD^{tree}
+          git bundle create "$RUNNER_TEMP/arena-rewind-main-66bf321.bundle" HEAD
       - uses: actions/upload-artifact@v4
         with:
-          name: correctness-audit-tinycc-0fb5430
-          path: ${{ runner.temp }}/tinycc-0fb5430.tar.gz
+          name: arena-rewind-main-66bf321
+          path: ${{ runner.temp }}/arena-rewind-main-66bf321.bundle
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 2
