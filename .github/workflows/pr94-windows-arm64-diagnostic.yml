@@ -191,6 +191,10 @@ jobs:
           gen_path = Path("src/buster/lib/compiler/frontend/c/c_gen.c")
           gen_text = gen_path.read_text(encoding="utf-8")
           gen_text = '#include <stdio.h>\n' + gen_text
+          preserve_most_label = "BUSTER_C_INTERNAL BUSTER_COLD BUSTER_PRESERVE_MOST bool c_ir_label_colon_at"
+          if gen_text.count(preserve_most_label) != 1:
+              raise SystemExit("preserve-most label helper anchor not found")
+          gen_text = gen_text.replace(preserve_most_label, "BUSTER_C_INTERNAL BUSTER_COLD bool c_ir_label_colon_at", 1)
           switch_line = 'if (first.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_SWITCH))'
           if gen_text.count(switch_line) != 1:
               raise SystemExit(f"switch classifier anchor count is {gen_text.count(switch_line)}")
