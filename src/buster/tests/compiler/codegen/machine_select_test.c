@@ -2,6 +2,10 @@
 
 #if BUSTER_INCLUDE_TESTS
 
+// Production selector regressions: normalized MIR survives linked-row
+// reordering; checked and prevalidated entries agree; malformed shape checks
+// remain fail-closed without building unused selection facts.
+
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/string.h>
@@ -61,20 +65,19 @@ struct MachineSelectionTestOrderPair
     IrInstructionId second;
 };
 
-BUSTER_GLOBAL_LOCAL MachineSelectionTestOrderPair machine_selection_test_find_order_pair(IrFunction* function,
-                                                                                           MachineSelectionPrepass const* prepass)
+BUSTER_GLOBAL_LOCAL MachineSelectionTestOrderPair machine_selection_test_find_order_pair(IrFunction* function)
 {
     MachineSelectionTestOrderPair result = {0};
     result.previous = IR_INSTRUCTION_ID_INVALID;
     result.first = IR_INSTRUCTION_ID_INVALID;
     result.second = IR_INSTRUCTION_ID_INVALID;
-    if (function && prepass && prepass->valid)
+    if (function)
     {
         for (u32 block_index = 0; block_index < function->block_count && result.second.value == IR_ID_UNDERLYING_INVALID; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
             IrInstructionId previous = IR_INSTRUCTION_ID_INVALID;
-            for (IrInstructionId first = block->first_instruction; first.value != IR_ID_UNDERLYING_INVALID;
+            for (IrInstructionId first = block->first_instruction; first.value != IR_ID_UNDERLYING_INVALID && !result.block;
                  first = function->instructions[first.value].next)
             {
                 IrInstructionId second = function->instructions[first.value].next;
@@ -93,8 +96,7 @@ BUSTER_GLOBAL_LOCAL MachineSelectionTestOrderPair machine_selection_test_find_or
                                           second_instruction->opcode == IR_OPCODE_BINARY;
                 bool independent = first_reorderable && second_reorderable && first_instruction->result.value != IR_ID_UNDERLYING_INVALID &&
                                    second_instruction->result.value != IR_ID_UNDERLYING_INVALID &&
-                                   machine_selection_side_effects(prepass, first) == MACHINE_SELECTION_SIDE_EFFECT_NONE &&
-                                   machine_selection_side_effects(prepass, second) == MACHINE_SELECTION_SIDE_EFFECT_NONE;
+                                   !first_instruction->volatile_access && !second_instruction->volatile_access;
                 for (u32 operand_index = 0; independent && operand_index < first_instruction->operand_count; operand_index += 1)
                 {
                     independent &= first_instruction->operands[operand_index].value != second_instruction->result.value;
@@ -109,7 +111,6 @@ BUSTER_GLOBAL_LOCAL MachineSelectionTestOrderPair machine_selection_test_find_or
                     result.previous = previous;
                     result.first = first;
                     result.second = second;
-                    return result;
                 }
                 previous = first;
             }
@@ -242,273 +243,159 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_test_stream_equal(Arena* arena, Machi
 
 BUSTER_GLOBAL_LOCAL bool machine_selection_test_order_divergence(Arena* arena, IrProgram* program, IrFunction* function, Target target)
 {
-    if (!arena || !program || !function)
+    bool equivalent = false;
+    if (arena && program && function && machine_selection_validate_function(arena, program, function) == MACHINE_SELECTION_VALIDATION_NONE)
     {
-        return false;
-    }
-    MachineSelectionPrepass prepass = machine_selection_prepass_build(arena, program, function);
-    if (!prepass.valid)
-    {
-        return false;
-    }
-    MachineSelectionTestOrderPair pair = machine_selection_test_find_order_pair(function, &prepass);
-    if (!pair.block)
-    {
-        return false;
-    }
-    u32 value_capacity = function->value_count ? function->value_count : 1;
-    u32* definition_rows = arena_allocate(arena, u32, value_capacity);
-    u32* definition_blocks = arena_allocate(arena, u32, value_capacity);
-    u32* use_blocks = arena_allocate(arena, u32, value_capacity);
-    u32* use_counts = arena_allocate(arena, u32, value_capacity);
-    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
-    {
-        definition_rows[value_index] = prepass.value_definitions[value_index].value;
-        definition_blocks[value_index] = prepass.value_definition_blocks[value_index];
-        use_blocks[value_index] = prepass.value_use_blocks[value_index];
-        use_counts[value_index] = prepass.value_use_counts[value_index];
-    }
-    MachineSelectResult before = machine_select_canonical_function(arena, program, function, target);
-    IrInstructionId saved_first = pair.block->first_instruction;
-    IrInstructionId saved_previous_next = pair.previous.value == IR_ID_UNDERLYING_INVALID ? IR_INSTRUCTION_ID_INVALID : function->instructions[pair.previous.value].next;
-    IrInstructionId saved_first_next = function->instructions[pair.first.value].next;
-    IrInstructionId saved_second_next = function->instructions[pair.second.value].next;
-    if (pair.previous.value == IR_ID_UNDERLYING_INVALID)
-    {
-        pair.block->first_instruction = pair.second;
-    }
-    else
-    {
-        function->instructions[pair.previous.value].next = pair.second;
-    }
-    function->instructions[pair.second.value].next = pair.first;
-    function->instructions[pair.first.value].next = saved_second_next;
+        MachineSelectionTestOrderPair pair = machine_selection_test_find_order_pair(function);
+        if (pair.block)
+        {
+            MachineSelectResult before = machine_select_canonical_function(arena, program, function, target);
+            IrInstructionId saved_first = pair.block->first_instruction;
+            IrInstructionId saved_previous_next = pair.previous.value == IR_ID_UNDERLYING_INVALID ? IR_INSTRUCTION_ID_INVALID : function->instructions[pair.previous.value].next;
+            IrInstructionId saved_first_next = function->instructions[pair.first.value].next;
+            IrInstructionId saved_second_next = function->instructions[pair.second.value].next;
+            if (pair.previous.value == IR_ID_UNDERLYING_INVALID)
+            {
+                pair.block->first_instruction = pair.second;
+            }
+            else
+            {
+                function->instructions[pair.previous.value].next = pair.second;
+            }
+            function->instructions[pair.second.value].next = pair.first;
+            function->instructions[pair.first.value].next = saved_second_next;
 
-    MachineSelectionPrepass diverged = machine_selection_prepass_build(arena, program, function);
-    bool stable_facts = diverged.valid;
-    for (u32 value_index = 0; stable_facts && value_index < function->value_count; value_index += 1)
-    {
-        stable_facts &= diverged.value_definitions[value_index].value == definition_rows[value_index];
-        stable_facts &= diverged.value_definition_blocks[value_index] == definition_blocks[value_index];
-        stable_facts &= diverged.value_use_blocks[value_index] == use_blocks[value_index];
-        stable_facts &= diverged.value_use_counts[value_index] == use_counts[value_index];
-    }
-    MachineSelectResult after = machine_select_canonical_function(arena, program, function, target);
-    bool equivalent = stable_facts && before.supported == after.supported && before.failed_opcode == after.failed_opcode &&
-                      before.function.instruction_count == after.function.instruction_count &&
-                      before.function.virtual_register_count == after.function.virtual_register_count &&
-                      machine_selection_test_stream_equal(arena, &before, &after);
+            MachineSelectResult after = machine_select_canonical_function(arena, program, function, target);
+            equivalent = before.supported == after.supported && before.failed_opcode == after.failed_opcode &&
+                         machine_selection_test_stream_equal(arena, &before, &after);
 
-    pair.block->first_instruction = saved_first;
-    if (pair.previous.value != IR_ID_UNDERLYING_INVALID)
-    {
-        function->instructions[pair.previous.value].next = saved_previous_next;
+            pair.block->first_instruction = saved_first;
+            if (pair.previous.value != IR_ID_UNDERLYING_INVALID)
+            {
+                function->instructions[pair.previous.value].next = saved_previous_next;
+            }
+            function->instructions[pair.first.value].next = saved_first_next;
+            function->instructions[pair.second.value].next = saved_second_next;
+        }
     }
-    function->instructions[pair.first.value].next = saved_first_next;
-    function->instructions[pair.second.value].next = saved_second_next;
     return equivalent;
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_selection_test_invalid_operand_storage(Arena* arena, IrProgram* program, IrFunction* function, Target target)
+BUSTER_GLOBAL_LOCAL bool machine_selection_test_rejected(Arena* arena, IrProgram* program, IrFunction* function, Target target,
+                                                        MachineSelectionValidationError expected)
 {
-    if (!arena || !program || !function)
-    {
-        return false;
-    }
-    IrInstruction* probe = 0;
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-    {
-        if (function->instructions[instruction_index].operand_count)
-        {
-            probe = function->instructions + instruction_index;
-            break;
-        }
-    }
-    if (!probe)
-    {
-        return false;
-    }
-    IrValueId* operands = probe->operands;
-    probe->operands = 0;
-    MachineSelectionPrepass invalid_prepass = machine_selection_prepass_build(arena, program, function);
-    MachineSelectResult fallback = machine_select_canonical_function(arena, program, function, target);
-    probe->operands = operands;
-    return !invalid_prepass.valid && invalid_prepass.error == MACHINE_SELECTION_PREPASS_INVALID_VALUE && !fallback.supported;
-}
-
-BUSTER_GLOBAL_LOCAL bool machine_selection_test_minimal_invalid_value(Arena* arena, IrProgram* program, IrFunction* function)
-{
-    if (!arena || !program || !function || function->value_count == 0)
-    {
-        return false;
-    }
-    IrInstruction* probe = 0;
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-    {
-        IrInstruction* instruction = function->instructions + instruction_index;
-        if (instruction->operand_count && instruction->operands)
-        {
-            probe = instruction;
-            break;
-        }
-    }
-    if (!probe)
-    {
-        return false;
-    }
-    IrValueId saved_operand = probe->operands[0];
-    probe->operands[0] = (IrValueId){.value = function->value_count};
-    MachineSelectionPrepass full = machine_selection_prepass_build(arena, program, function);
-    MachineSelectionPrepass minimal = machine_selection_prepass_build_minimal(arena, program, function);
-    probe->operands[0] = saved_operand;
-    return !full.valid && full.error == MACHINE_SELECTION_PREPASS_INVALID_VALUE && !minimal.valid &&
-           minimal.error == MACHINE_SELECTION_PREPASS_INVALID_VALUE;
-}
-
-BUSTER_GLOBAL_LOCAL bool machine_selection_test_invalid_opcode(Arena* arena, IrProgram* program, IrFunction* function, Target x86_target,
-                                                               Target aarch64_target)
-{
-    if (!arena || !program || !function || !function->instruction_count)
-    {
-        return false;
-    }
-    IrInstruction* probe = function->instructions;
-    u8 saved_opcode = probe->opcode;
-    probe->opcode = UINT8_MAX;
-    MachineSelectionPrepass full = machine_selection_prepass_build(arena, program, function);
-    MachineSelectionPrepass minimal = machine_selection_prepass_build_minimal(arena, program, function);
-    MachineSelectResult x86 = machine_select_canonical_function(arena, program, function, x86_target);
-    MachineSelectResult aarch64 = machine_select_canonical_function(arena, program, function, aarch64_target);
-    probe->opcode = saved_opcode;
-    return !full.valid && full.error == MACHINE_SELECTION_PREPASS_INVALID_OPCODE && !minimal.valid &&
-           minimal.error == MACHINE_SELECTION_PREPASS_INVALID_OPCODE && !x86.supported && !aarch64.supported;
+    MachineSelectionValidationError error = machine_selection_validate_function(arena, program, function);
+    MachineSelectResult selected = machine_select_canonical_function(arena, program, function, target);
+    return error == expected && !selected.supported;
 }
 
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    Target x86_target = {
-        .cpu_arch = CPU_ARCH_X86_64,
-        .os = OPERATING_SYSTEM_LINUX,
-    };
     String8 source = S8("int selection_add(int a, int b) { int local = 7; return a + local + b; }\n"
                          "int selection_memory(int *p) { *p += 1; return *p; }\n"
                          "int selection_order(void) { return 1 + 2; }\n");
-    IrProgram* program = machine_selection_test_compile(arguments->arena, source, x86_target);
-    BUSTER_TEST(arguments, program != 0);
-    IrFunction* add = machine_selection_test_find(program, S8("selection_add"));
-    IrFunction* memory = machine_selection_test_find(program, S8("selection_memory"));
-    IrFunction* order = machine_selection_test_find(program, S8("selection_order"));
-    BUSTER_TEST(arguments, add != 0 && memory != 0 && order != 0);
-    if (add && memory && order)
+    CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 arch_index = 0; arch_index < BUSTER_ARRAY_LENGTH(arches); arch_index += 1)
     {
-        MachineSelectionPrepass prepass = machine_selection_prepass_build(arguments->arena, program, add);
-        BUSTER_TEST(arguments, prepass.valid);
-        BUSTER_TEST(arguments, prepass.error == MACHINE_SELECTION_PREPASS_NONE);
-        BUSTER_TEST(arguments, prepass.instruction_count == add->instruction_count);
-        BUSTER_TEST(arguments, prepass.ordinal_count == add->instruction_count);
-        BUSTER_TEST(arguments, prepass.value_count == add->value_count);
-
-        MachineSelectionPrepass minimal_prepass = machine_selection_prepass_build_minimal(arguments->arena, program, add);
-        BUSTER_TEST(arguments, minimal_prepass.valid);
-        BUSTER_TEST(arguments, minimal_prepass.error == MACHINE_SELECTION_PREPASS_NONE);
-        BUSTER_TEST(arguments, minimal_prepass.instruction_count == prepass.instruction_count);
-        BUSTER_TEST(arguments, minimal_prepass.value_count == prepass.value_count);
-        BUSTER_TEST(arguments, minimal_prepass.block_count == prepass.block_count);
-        BUSTER_TEST(arguments, minimal_prepass.ordinal_count == prepass.ordinal_count);
-        bool minimal_facts_match = true;
-        for (u32 value_index = 0; minimal_facts_match && value_index < add->value_count; value_index += 1)
+        Target target = {.cpu_arch = arches[arch_index], .os = OPERATING_SYSTEM_LINUX};
+        IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
+        IrFunction* add = machine_selection_test_find(program, S8("selection_add"));
+        IrFunction* memory = machine_selection_test_find(program, S8("selection_memory"));
+        IrFunction* order = machine_selection_test_find(program, S8("selection_order"));
+        BUSTER_TEST(arguments, program != 0 && add != 0 && memory != 0 && order != 0);
+        if (add && memory && order)
         {
-            minimal_facts_match = minimal_prepass.value_definitions[value_index].value == prepass.value_definitions[value_index].value &&
-                                  minimal_prepass.value_definition_blocks[value_index] == prepass.value_definition_blocks[value_index] &&
-                                  minimal_prepass.value_use_counts[value_index] == prepass.value_use_counts[value_index] &&
-                                  minimal_prepass.value_use_blocks[value_index] == prepass.value_use_blocks[value_index];
-        }
-        BUSTER_TEST(arguments, minimal_facts_match);
-        MachineSelectResult checked_selection = machine_select_canonical_function(arguments->arena, program, add, x86_target);
-        MachineSelectResult validated_selection = machine_select_validated_canonical_function(arguments->arena, program, add, x86_target, false, 0);
-        BUSTER_TEST(arguments, checked_selection.supported && validated_selection.supported);
-        BUSTER_TEST(arguments, checked_selection.failed_opcode == validated_selection.failed_opcode);
-        BUSTER_TEST(arguments, machine_selection_test_stream_equal(arguments->arena, &checked_selection, &validated_selection));
-        BUSTER_TEST(arguments, minimal_prepass.instruction_owner_blocks == 0 && minimal_prepass.instruction_ordinals == 0 &&
-                                   minimal_prepass.value_definition_ordinals == 0 && minimal_prepass.value_first_use_ordinals == 0 &&
-                                   minimal_prepass.value_last_use_ordinals == 0 && minimal_prepass.value_local_store_counts == 0 &&
-                                   minimal_prepass.value_constant_bits == 0 && minimal_prepass.value_flags == 0 &&
-                                   minimal_prepass.value_promotable_local_widths == 0 && minimal_prepass.instruction_result_classes == 0 &&
-                                   minimal_prepass.instruction_side_effects == 0);
-
-        bool saw_constant = false;
-        bool saw_promotable_local = false;
-        MachineSelectionCounters counters = {0};
-        for (u32 instruction_index = 0; instruction_index < add->instruction_count; instruction_index += 1)
-        {
-            IrInstructionId instruction_id = {.value = instruction_index};
-            IrBlockId owner = prepass.instruction_owner_blocks[instruction_index];
-            BUSTER_TEST(arguments, owner.value != IR_ID_UNDERLYING_INVALID);
-            BUSTER_TEST(arguments, prepass.instruction_ordinals[instruction_index] == instruction_index);
-            BUSTER_TEST(arguments, machine_selection_prepass_instruction_owned_by(&prepass, instruction_id, owner.value));
-
-            MachineSelectionRuleContext context = machine_selection_rule_context(&prepass, instruction_id, x86_target);
-            MachineSelectionDecision fast = machine_selection_rule_select(context, MACHINE_SELECTION_MODE_FAST, &counters);
-            MachineSelectionDecision quality = machine_selection_rule_select(context, MACHINE_SELECTION_MODE_QUALITY, &counters);
-            BUSTER_TEST(arguments, fast.selected.rule != MACHINE_SELECTION_RULE_INVALID);
-            BUSTER_TEST(arguments, quality.selected.rule != MACHINE_SELECTION_RULE_INVALID);
-            BUSTER_TEST(arguments, quality.alternative_count <= MACHINE_SELECTION_MAX_QUALITY_ALTERNATIVES);
-            if (context.known_constant)
+            IrFunction* functions[] = {add, memory, order};
+            for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(functions); function_index += 1)
             {
-                saw_constant = true;
+                IrFunction* function = functions[function_index];
+                u64 before = arguments->arena->position;
+                BUSTER_TEST(arguments, machine_selection_validate_function(arguments->arena, program, function) == MACHINE_SELECTION_VALIDATION_NONE);
+                // One byte per row plus one per value replaces the four
+                // discarded u32 fact arrays and the old visited-row array.
+                BUSTER_TEST(arguments, arguments->arena->position - before == (u64)function->instruction_count + function->value_count);
+                MachineSelectResult checked = machine_select_canonical_function(arguments->arena, program, function, target);
+                MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, 0);
+                BUSTER_TEST(arguments, checked.supported && validated.supported);
+                BUSTER_TEST(arguments, checked.failed_opcode == validated.failed_opcode);
+                BUSTER_TEST(arguments, machine_selection_test_stream_equal(arguments->arena, &checked, &validated));
             }
-            if (context.promotable_local)
+            BUSTER_TEST(arguments, machine_selection_test_order_divergence(arguments->arena, program, order, target));
+
+            IrInstruction* operand_probe = 0;
+            IrInstruction* definition_probe = 0;
+            IrInstruction* second_definition = 0;
+            for (u32 instruction_index = 0; instruction_index < add->instruction_count; instruction_index += 1)
             {
-                saw_promotable_local = true;
+                IrInstruction* instruction = add->instructions + instruction_index;
+                if (instruction->operand_count && !operand_probe)
+                {
+                    operand_probe = instruction;
+                }
+                if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    if (!definition_probe)
+                    {
+                        definition_probe = instruction;
+                    }
+                    else if (!second_definition)
+                    {
+                        second_definition = instruction;
+                    }
+                }
             }
+            BUSTER_TEST(arguments, operand_probe && definition_probe && second_definition && add->block_count);
+            if (operand_probe && definition_probe && second_definition && add->block_count)
+            {
+                IrValueId* saved_operands = operand_probe->operands;
+                operand_probe->operands = 0;
+                BUSTER_TEST(arguments, machine_selection_test_rejected(arguments->arena, program, add, target, MACHINE_SELECTION_VALIDATION_INVALID_VALUE));
+                operand_probe->operands = saved_operands;
+
+                IrValueId saved_operand = operand_probe->operands[0];
+                operand_probe->operands[0] = (IrValueId){.value = add->value_count};
+                BUSTER_TEST(arguments, machine_selection_test_rejected(arguments->arena, program, add, target, MACHINE_SELECTION_VALIDATION_INVALID_VALUE));
+                operand_probe->operands[0] = saved_operand;
+
+                IrValueId saved_result = definition_probe->result;
+                definition_probe->result = (IrValueId){.value = add->value_count};
+                BUSTER_TEST(arguments, machine_selection_test_rejected(arguments->arena, program, add, target, MACHINE_SELECTION_VALIDATION_INVALID_VALUE));
+                definition_probe->result = second_definition->result;
+                BUSTER_TEST(arguments, machine_selection_test_rejected(arguments->arena, program, add, target, MACHINE_SELECTION_VALIDATION_DUPLICATE_DEFINITION));
+                definition_probe->result = saved_result;
+
+                u8 saved_opcode = operand_probe->opcode;
+                operand_probe->opcode = UINT8_MAX;
+                BUSTER_TEST(arguments, machine_selection_test_rejected(arguments->arena, program, add, target, MACHINE_SELECTION_VALIDATION_INVALID_OPCODE));
+                operand_probe->opcode = saved_opcode;
+
+                IrBlock* block = add->blocks;
+                IrInstruction* first = add->instructions + block->first_instruction.value;
+                IrInstructionId saved_next = first->next;
+                first->next = (IrInstructionId){.value = add->instruction_count};
+                BUSTER_TEST(arguments, machine_selection_test_rejected(arguments->arena, program, add, target, MACHINE_SELECTION_VALIDATION_OWNERSHIP));
+                first->next = block->first_instruction;
+                BUSTER_TEST(arguments, machine_selection_test_rejected(arguments->arena, program, add, target, MACHINE_SELECTION_VALIDATION_OWNERSHIP));
+                first->next = saved_next;
+
+                IrInstructionId saved_last = block->last_instruction;
+                block->last_instruction = IR_INSTRUCTION_ID_INVALID;
+                BUSTER_TEST(arguments, machine_selection_test_rejected(arguments->arena, program, add, target, MACHINE_SELECTION_VALIDATION_OWNERSHIP));
+                block->last_instruction = saved_last;
+
+                IrInstructionId saved_first = block->first_instruction;
+                block->first_instruction = first->next;
+                BUSTER_TEST(arguments, machine_selection_test_rejected(arguments->arena, program, add, target, MACHINE_SELECTION_VALIDATION_OWNERSHIP));
+                block->first_instruction = saved_first;
+
+                BUSTER_TEST(arguments, machine_selection_validate_function(arguments->arena, program, add) == MACHINE_SELECTION_VALIDATION_NONE);
+            }
+            BUSTER_TEST(arguments, machine_selection_validate_function(0, program, add) == MACHINE_SELECTION_VALIDATION_INVALID_ARGUMENT);
+            BUSTER_TEST(arguments, machine_selection_validate_function(arguments->arena, 0, add) == MACHINE_SELECTION_VALIDATION_INVALID_ARGUMENT);
+            BUSTER_TEST(arguments, machine_selection_validate_function(arguments->arena, program, 0) == MACHINE_SELECTION_VALIDATION_INVALID_ARGUMENT);
         }
-        BUSTER_TEST(arguments, saw_constant);
-        // A frontend may lower an address-observable local conservatively.  The
-        // test still checks the flag when such a local survives promotion.
-        BUSTER_TEST(arguments, saw_promotable_local || prepass.value_count != 0);
-        BUSTER_TEST(arguments, counters.query_count[MACHINE_SELECTION_MODE_FAST] == add->instruction_count);
-        BUSTER_TEST(arguments, counters.query_count[MACHINE_SELECTION_MODE_QUALITY] == add->instruction_count);
-
-        MachineSelectionPrepass memory_prepass = machine_selection_prepass_build(arguments->arena, program, memory);
-        BUSTER_TEST(arguments, memory_prepass.valid);
-        bool saw_memory_read = false;
-        bool saw_memory_write = false;
-        for (u32 instruction_index = 0; instruction_index < memory->instruction_count; instruction_index += 1)
-        {
-            MachineSelectionSideEffect effects = machine_selection_side_effects(&memory_prepass, (IrInstructionId){.value = instruction_index});
-            saw_memory_read |= (effects & MACHINE_SELECTION_SIDE_EFFECT_READ_MEMORY) != 0;
-            saw_memory_write |= (effects & MACHINE_SELECTION_SIDE_EFFECT_WRITE_MEMORY) != 0;
-        }
-        BUSTER_TEST(arguments, saw_memory_read && saw_memory_write);
-
-        // The IR array is append-ordered, while a block's linked list is the
-        // selector's execution order. Keep the ID-keyed facts valid when those
-        // orders diverge. Compare the complete normalized machine stream, using
-        // stable value origins for virtual registers and immediate values while
-        // matching the intentionally independent rows by their defining value.
-        BUSTER_TEST(arguments, machine_selection_test_order_divergence(arguments->arena, program, order, x86_target));
-        Target aarch64_target = {
-            .cpu_arch = CPU_ARCH_AARCH64,
-            .os = OPERATING_SYSTEM_LINUX,
-        };
-        IrProgram* aarch64_program = machine_selection_test_compile(arguments->arena, source, aarch64_target);
-        IrFunction* aarch64_order = machine_selection_test_find(aarch64_program, S8("selection_order"));
-        BUSTER_TEST(arguments, aarch64_program != 0 && aarch64_order != 0);
-        BUSTER_TEST(arguments, machine_selection_test_order_divergence(arguments->arena, aarch64_program, aarch64_order, aarch64_target));
-
-        // Operand storage is part of the instruction shape: the prepass rejects
-        // a nonzero count without backing storage before its hot operand walk, so
-        // later scans can rely on the count alone without a per-row pointer
-        // branch.
-        BUSTER_TEST(arguments, machine_selection_test_invalid_operand_storage(arguments->arena, program, memory, x86_target));
-        BUSTER_TEST(arguments, machine_selection_test_minimal_invalid_value(arguments->arena, program, memory));
-        BUSTER_TEST(arguments, machine_selection_test_invalid_opcode(arguments->arena, program, add, x86_target, aarch64_target));
-
-        MachineSelectionPrepass invalid = machine_selection_prepass_build(0, program, add);
-        BUSTER_TEST(arguments, !invalid.valid && invalid.error == MACHINE_SELECTION_PREPASS_INVALID_ARGUMENT);
     }
-
     return result;
 }
 

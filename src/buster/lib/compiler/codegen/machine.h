@@ -1370,6 +1370,11 @@ typedef enum MachineSymbolReference
     MACHINE_SYMBOL_REFERENCE_COUNT,
 } MachineSymbolReference;
 
+// Removing these cold words regressed cache/branch misses in the controlled
+// 2026-08-17e audit. Preserve that measured layout independently of selection
+// policy; the old declarative matcher and its telemetry no longer exist.
+#define MACHINE_SELECTION_RESERVED_LAYOUT_WORDS 30u
+
 typedef struct MachineSelectResult MachineSelectResult;
 struct MachineSelectResult
 {
@@ -1391,10 +1396,7 @@ struct MachineSelectResult
     // Explicit non-SSA values retained by transitional lowering. This is the
     // selector-side telemetry counterpart of MachineVerifyResult's count.
     u32 mutable_virtual_register_count;
-    // Reserved matcher telemetry storage. Target selectors no longer run the
-    // declarative matcher on their hot path, but retaining this cold block
-    // preserves the measured favorable layout of selection results.
-    MachineSelectionCounters selection_counters;
+    u64 reserved_selection_layout[MACHINE_SELECTION_RESERVED_LAYOUT_WORDS];
 };
 
 // Stage-9 scheduling output: a reordered copy of the input function, or the
