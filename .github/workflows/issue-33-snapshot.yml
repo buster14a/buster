@@ -1,16 +1,16 @@
 name: Differential harness source snapshot
-
 on:
   push:
     branches:
       - test/differential-harness-source-20260907
-
+concurrency:
+  group: differential-source-transport
+  cancel-in-progress: true
 permissions:
   contents: read
-
 jobs:
   source:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
