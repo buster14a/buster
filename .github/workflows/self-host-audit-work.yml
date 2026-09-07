@@ -11,36 +11,37 @@ permissions:
 jobs:
   source:
     if: ${{ github.server_url == 'https://github.com' }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      - name: Verify transfer and publish implementation-only tree
+      - name: Publish exact locally resolved rebase without transfer files
         env:
-          IMPLEMENTATION_BRANCH: work/self-host-implementation-transfer-20260907
+          IMPLEMENTATION_BRANCH: fix/self-host-deterministic-fixed-point
         run: |
-          cat .audit-transfer/self-host-0{0,1,2,3,4}.b64 | base64 --decode | gzip --decompress > "$RUNNER_TEMP/self-host-audit.patch"
-          printf 'e4046d64efa6ae1684d23f611008bf2b48a55b1caaa6afa1a95ef6bbf19759e4  %s\n' "$RUNNER_TEMP/self-host-audit.patch" | sha256sum --check
-          git switch --detach 9834a4253c61934a8a253641a84741a25d3717e3
-          git apply --index --exclude=.github/workflows/self-host-audit.yml "$RUNNER_TEMP/self-host-audit.patch"
-          git diff --cached --check
-          test "$(git write-tree)" = 5013e246bdbe51c79fa06cb9bdcf474a2b2dae1c
+          cp .audit-transfer/integration-driver.patch "$RUNNER_TEMP/integration-driver.patch"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'bootstrap: validate repeated generations and retain phase evidence'
+          git switch --detach acde6e0c7cbc582dd65ab8c7b1cda368e386965f
+          if ! git rebase ebfdd11705bc470564e726857e498f1c82aa746c; then
+            test "$(git diff --name-only --diff-filter=U)" = src/buster/lib/compiler/driver/driver.c
+            git checkout --ours -- src/buster/lib/compiler/driver/driver.c
+            git apply --index "$RUNNER_TEMP/integration-driver.patch"
+            GIT_EDITOR=true git rebase --continue
+          fi
+          git diff --check
+          test "$(git write-tree)" = 2d6a2b11adc70d89c3584a69e96e564f26a43b90
           git push origin "HEAD:refs/heads/$IMPLEMENTATION_BRANCH"
           git rev-parse HEAD > "$RUNNER_TEMP/implementation-sha.txt"
-          git update-ref refs/heads/audit-integration-base ebfdd11705bc470564e726857e498f1c82aa746c
-          git bundle create "$RUNNER_TEMP/buster-source.bundle" HEAD refs/heads/audit-integration-base
+          git bundle create "$RUNNER_TEMP/buster-source.bundle" HEAD
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
-          name: self-host-audit-integration-source
+          name: self-host-audit-rebased-source
           path: |
             ${{ runner.temp }}/buster-source.bundle
             ${{ runner.temp }}/implementation-sha.txt
-            ${{ runner.temp }}/self-host-audit.patch
           retention-days: 1
           if-no-files-found: error

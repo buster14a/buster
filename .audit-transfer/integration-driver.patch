@@ -1,0 +1,135 @@
+diff --git a/src/buster/lib/compiler/driver/driver.c b/src/buster/lib/compiler/driver/driver.c
+index 8567438a..96c6c675 100644
+--- a/src/buster/lib/compiler/driver/driver.c
++++ b/src/buster/lib/compiler/driver/driver.c
+@@ -22,6 +22,7 @@
+ #include <buster/lib/compiler/frontend/c/c.h>
+ #include <buster/lib/compiler/ir/ir.h>
+ #include <buster/lib/compiler/codegen/codegen.h>
++#include <buster/lib/compiler/codegen/bootstrap_trace.h>
+ #include <buster/lib/compiler/object/object.h>
+ #include <buster/lib/file.h>
+ #include <buster/lib/string.h>
+@@ -1173,6 +1174,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
+             invocation.entry_symbol = value;
+             continue;
+         }
++        value = compiler_driver_option_value(argument, S8("-fbootstrap-trace="));
++        if (value.length)
++        {
++            invocation.bootstrap_trace_prefix = value;
++            continue;
++        }
+         value = compiler_driver_option_value(argument, S8("-fsource-metrics="));
+         if (value.length)
+         {
+@@ -3188,6 +3195,24 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
+         }
+         goto end;
+     }
++    if (invocation.bootstrap_trace_prefix.length)
++    {
++        String8 path = string_format_z(arena, S8("{S8}.tokens"), invocation.bootstrap_trace_prefix);
++        BootstrapTrace trace = bootstrap_trace_open(arena, path, S8("tokens"));
++        bootstrap_trace_u64(&trace, preprocess.token_count);
++        for (u64 i = 0; i < preprocess.token_count; i += 1)
++        {
++            CToken token = preprocess.tokens[i];
++            bootstrap_trace_u64(&trace, token.kind);
++            bootstrap_trace_string(&trace, token.kind == C_TOKEN_END_OF_FILE ? (String8){0} : c_token_spelling(preprocess.spelling_base, token));
++        }
++        if (!bootstrap_trace_close(&trace))
++        {
++            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
++            result.diagnostic = string_format(arena, S8("could not write bootstrap tokens: {S8}"), path);
++            goto end;
++        }
++    }
+     CParserResult syntax = c_parse_ast(arena, preprocess);
+     result.parser_diagnostic_count = syntax.diagnostic_count;
+     if (syntax.diagnostic_count)
+@@ -3234,7 +3259,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
+     IrModule* module = &lowered.program->modules[0];
+     lowered.program->disable_local_promotion = invocation.disable_local_promotion;
+     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion;
+-    IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module, lowered.canonical_ir_certified);
++    IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module,
++                                                                lowered.canonical_ir_certified && !invocation.bootstrap_trace_prefix.length);
+     result.local_promotion = module->local_promotion;
+     if (validation.error != IR_VALIDATION_NONE)
+     {
+@@ -3274,14 +3300,55 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
+         compiler_driver_write_ebpf(arena, invocation, artifact, &result);
+         goto end;
+     }
+-    CodegenModule code = codegen_generate_canonical_module(arena, lowered.program, module, invocation.target,
++    BootstrapTrace mir_trace = {0};
++    if (invocation.bootstrap_trace_prefix.length)
++    {
++        String8 ir_path = string_format_z(arena, S8("{S8}.ir"), invocation.bootstrap_trace_prefix);
++        BootstrapTrace trace = bootstrap_trace_open(arena, ir_path, S8("canonical IR"));
++        bootstrap_trace_ir(&trace, lowered.program, module);
++        if (!bootstrap_trace_close(&trace))
++        {
++            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
++            result.diagnostic = string_format(arena, S8("could not write bootstrap IR: {S8}"), ir_path);
++            goto end;
++        }
++        String8 mir_path = string_format_z(arena, S8("{S8}.mir"), invocation.bootstrap_trace_prefix);
++        mir_trace = bootstrap_trace_open(arena, mir_path, S8("selected MIR"));
++        bootstrap_trace_u64(&mir_trace, invocation.target.cpu_arch);
++        bootstrap_trace_u64(&mir_trace, invocation.register_allocator);
++        bootstrap_trace_u64(&mir_trace, invocation.position_independent);
++        if (mir_trace.failed)
++        {
++            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
++            result.diagnostic = string_format(arena, S8("could not open bootstrap MIR: {S8}"), mir_path);
++            goto end;
++        }
++    }
++    CodegenModule code = codegen_generate_canonical_module_with_trace(arena, lowered.program, module, invocation.target,
+                                                            (CodegenModuleOptions){
+                                                                .debug_info = invocation.debug_info,
+                                                                .assume_validated = true,
+                                                                .position_independent = invocation.position_independent,
+                                                                .register_allocator = invocation.register_allocator,
+                                                                .assembly_syntax = (u8)invocation.assembly_syntax,
+-                                                           });
++                                                           }, invocation.bootstrap_trace_prefix.length ? &mir_trace : 0);
++    if (invocation.bootstrap_trace_prefix.length)
++    {
++        if (!bootstrap_trace_close(&mir_trace))
++        {
++            result.error = COMPILER_DRIVER_ERROR_FILE_READ;
++            result.diagnostic = S8("could not complete bootstrap MIR trace");
++            goto end;
++        }
++        if (mir_trace.invalid_mir)
++        {
++            result.error = COMPILER_DRIVER_ERROR_IR;
++            result.diagnostic = string_format(arena, S8("bootstrap MIR validation failed in '{S8}': error {u32}, block {u32}, instruction {u32}, operand {u32}"),
++                                              mir_trace.invalid_function, (u32)mir_trace.invalid_validation.error, mir_trace.invalid_validation.block,
++                                              mir_trace.invalid_validation.instruction, mir_trace.invalid_validation.operand);
++            goto end;
++        }
++    }
+     result.codegen_statistics = code.statistics;
+     result.codegen_error = code.error;
+     if (code.error != CODEGEN_ERROR_NONE && code.failed_in_assembly)
+@@ -3511,6 +3578,16 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
+         result.diagnostic = invocation.diagnostic.length ? invocation.diagnostic : S8("invalid compiler invocation");
+         goto finish;
+     }
++    if (invocation.bootstrap_trace_prefix.length &&
++        (invocation.input_count != 1 || !compiler_driver_c_input(invocation, invocation.input_paths[0]) ||
++         compiler_driver_assembly_input(invocation, invocation.input_paths[0]) || invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
++         (invocation.target.cpu_arch != CPU_ARCH_X86_64 && invocation.target.cpu_arch != CPU_ARCH_AARCH64) ||
++         (invocation.action != COMPILER_DRIVER_ACTION_LINK && invocation.action != COMPILER_DRIVER_ACTION_OBJECT)))
++    {
++        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
++        result.diagnostic = S8("bootstrap traces require exactly one native C input and object or executable output");
++        goto finish;
++    }
+     if (invocation.has_gpu_target)
+     {
+         result = compiler_driver_execute_gpu(arena, invocation, &warnings);
