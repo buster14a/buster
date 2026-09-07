@@ -4202,6 +4202,38 @@
    143:           "$driver" generate --cc clang --config Release --linker DEFAULT
    144:           "$driver" test_mode_matrix --config Release
 
+===== .github/workflows/agent-export-main-source.yml =====
+     1: name: Temporary export main source
+     2: 
+     3: on:
+     4:   push:
+     5:     branches:
+     6:       - agent/inspect-190-195
+     7:     paths:
+     8:       - .github/workflows/agent-export-main-source.yml
+     9: 
+    10: permissions:
+    11:   contents: read
+    12: 
+    13: jobs:
+    14:   export:
+    15:     runs-on: ubuntu-latest
+    16:     steps:
+    17:       - name: Check out main
+    18:         uses: actions/checkout@v4
+    19:         with:
+    20:           ref: main
+    21:           fetch-depth: 1
+    22:       - name: Package source
+    23:         run: tar --exclude=.git -czf /tmp/buster-main-source.tar.gz .
+    24:       - name: Upload source archive
+    25:         uses: actions/upload-artifact@v4
+    26:         with:
+    27:           name: buster-main-source
+    28:           path: /tmp/buster-main-source.tar.gz
+    29:           if-no-files-found: error
+    30:           retention-days: 1
+
 ===== .github/workflows/agent-patch-assembly-190-193.yml =====
      1: name: Temporary patch assembly issues 190-193
      2: 
