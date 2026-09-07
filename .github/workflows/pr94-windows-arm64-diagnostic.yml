@@ -64,6 +64,12 @@ jobs:
           test_text, traced_call_count = call_pattern.subn(trace_test_call, test_text)
           if traced_call_count < 20:
               raise SystemExit(f"only found {traced_call_count} frontend test calls")
+          frontend_open = "UnitTestResult c_frontend_tests(UnitTestArguments* arguments)\n{"
+          if test_text.count(frontend_open) != 1:
+              raise SystemExit("frontend test entry anchor not found")
+          test_text = test_text.replace(frontend_open, frontend_open + r'''
+              fprintf(stderr, "PR94_ISOLATED nested conditional only\n"); fflush(stderr);
+              return c_test_then_nested_conditionals(arguments);''', 1)
           nested_arena = "    TemporalArena nested_conditional_temporary = scratch_begin(0, 0);"
           if test_text.count(nested_arena) != 1:
               raise SystemExit("nested conditional arena anchor not found")
