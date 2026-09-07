@@ -1,0 +1,30 @@
+name: Strict verifier source bundle
+
+on:
+  push:
+    branches:
+      - work/strict-ir-verifier-source
+    paths:
+      - .github/workflows/strict-verifier-source.yml
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export source history
+        shell: bash
+        run: git bundle create "$RUNNER_TEMP/buster-source.bundle" --all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strict-verifier-source
+          path: ${{ runner.temp }}/buster-source.bundle
+          if-no-files-found: error
+          retention-days: 1
