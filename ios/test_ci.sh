@@ -68,21 +68,6 @@ fi
 cmake --version
 xcrun --sdk iphonesimulator --show-sdk-path
 
-# Xcode 26 has a documented first-run simulator failure mode after the host
-# macOS image changes. Apple recommends rebuilding the simulator dyld shared
-# caches before booting. GitHub's Intel macOS image is ephemeral and exercised
-# exactly this path: boot eventually completed, but freshly launched x86-64
-# simulator apps immediately disappeared before they could emit the CI result
-# marker. Keep the workaround narrowly scoped to GitHub's Intel simulator leg;
-# Apple Silicon is unaffected and local/Forgejo runs retain their normal state.
-if [[ $arch == x86_64 && ${GITHUB_ACTIONS:-false} == true ]]; then
-    echo "Refreshing Intel iOS simulator dyld shared caches"
-    if ! xcrun simctl runtime dyld_shared_cache update --all; then
-        echo "error: failed to refresh iOS simulator dyld shared caches" >&2
-        exit 1
-    fi
-fi
-
 configure_started=$SECONDS
 cmake --warn-uninitialized -Werror=dev \
     -B "$build_directory" \
@@ -124,12 +109,12 @@ done
 # Xcode 26 deliberately stopped shipping Intel support in simulator runtimes by
 # default. GitHub's macos-26-intel image currently exposes iOS runtimes that
 # boot, install an x86-64 bundle, report a launch PID, and then terminate that
-# process before user code runs; rebuilding dyld caches does not change the
-# result. Keep the hosted Intel leg useful and deterministic by making it an
-# x86-64 iOS compile/link/bundle gate. The Apple-Silicon macOS leg still boots
-# the simulator and executes both configurations end to end, while local Intel
-# runners with a universal simulator runtime continue through the normal launch
-# path because this exception is GitHub-only.
+# process before user code runs. Keep the hosted Intel leg useful and
+# deterministic by making it an x86-64 iOS compile/link/bundle gate. The
+# Apple-Silicon macOS leg still boots the simulator and executes both
+# configurations end to end, while local Intel runners with a universal
+# simulator runtime continue through the normal launch path because this
+# exception is GitHub-only.
 if [[ $arch == x86_64 && ${GITHUB_ACTIONS:-false} == true ]]; then
     for index in "${!build_configs[@]}"; do
         build_config=${build_configs[$index]}
@@ -139,7 +124,7 @@ if [[ $arch == x86_64 && ${GITHUB_ACTIONS:-false} == true ]]; then
             echo "error: expected iOS ${build_config} executable not found at '$executable'" >&2
             exit 1
         fi
-        if ! lipo -verify_arch x86_64 "$executable"; then
+        if ! lipo "$executable" -verify_arch x86_64; then
             echo "error: iOS ${build_config} bundle does not contain an x86-64 simulator executable" >&2
             exit 1
         fi
@@ -147,6 +132,16 @@ if [[ $arch == x86_64 && ${GITHUB_ACTIONS:-false} == true ]]; then
     done
     echo "iOS x86-64 execution skipped on GitHub macos-26-intel: Xcode 26 simulator runtimes do not provide reliable Intel execution coverage."
     exit 0
+fi
+
+# The hosted 3-core Apple-Silicon runner executes the unoptimized Debug binary
+# substantially more slowly than Release. Main has repeatedly reached the
+# fixed 180-second deadline while the Debug process was still alive and
+# streaming test progress, then completed the same Release suite in seconds.
+# Give hosted arm64 Debug enough headroom without weakening local/Forgejo
+# timeout policy or overriding an explicit caller-provided timeout.
+if [[ $arch == arm64 && ${GITHUB_ACTIONS:-false} == true && -z ${BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS:-} ]]; then
+    export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=300
 fi
 
 launch_args=(--batch)

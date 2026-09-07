@@ -4,7 +4,7 @@ Performance audit history for this repository, newest first. Every entry is a
 record of what was measured, what was fixed, and what the numbers were at the
 time; the methodology for taking new measurements — which benchmark to trust,
 how to profile the sanitized and Release trees, how to symbolize — stays in
-the "Benchmarking and diagnostics" section of `AGENTS.md`.
+the [benchmarking and diagnostics guide](docs/agents/benchmarking.md).
 
 Each audit is one file under `docs/performance-audits/`, named for its id, and
 this file is the index. **A new audit adds a file, never a paragraph to an
