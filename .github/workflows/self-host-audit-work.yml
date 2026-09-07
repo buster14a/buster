@@ -17,22 +17,28 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      - name: Publish exact locally resolved rebase without transfer files
+      - name: Publish the locally validated implementation tree
         env:
           IMPLEMENTATION_BRANCH: fix/self-host-deterministic-fixed-point
         run: |
           cp .audit-transfer/integration-driver.patch "$RUNNER_TEMP/integration-driver.patch"
+          base64 --decode .audit-transfer/self-host-harden.b64 | gzip --decompress > "$RUNNER_TEMP/harden.patch"
+          echo "0a5d0d97c08a24a7c91fcb0ac37e510b6f00c076ae6f60a8381b586fbeeaaad9  $RUNNER_TEMP/harden.patch" | sha256sum --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git switch --detach acde6e0c7cbc582dd65ab8c7b1cda368e386965f
           if ! git rebase ebfdd11705bc470564e726857e498f1c82aa746c; then
             test "$(git diff --name-only --diff-filter=U)" = src/buster/lib/compiler/driver/driver.c
             git checkout --ours -- src/buster/lib/compiler/driver/driver.c
+            git add -- src/buster/lib/compiler/driver/driver.c
             git apply --index "$RUNNER_TEMP/integration-driver.patch"
             GIT_EDITOR=true git rebase --continue
           fi
-          git diff --check
           test "$(git write-tree)" = 2d6a2b11adc70d89c3584a69e96e564f26a43b90
+          git apply --index "$RUNNER_TEMP/harden.patch"
+          git diff --check --cached
+          test "$(git write-tree)" = 4182045dd548770193faceb0004d46b709375625
+          git commit -m 'bootstrap: stop at invalid MIR before diagnostic dereference or allocation'
           git push origin "HEAD:refs/heads/$IMPLEMENTATION_BRANCH"
           git rev-parse HEAD > "$RUNNER_TEMP/implementation-sha.txt"
           git bundle create "$RUNNER_TEMP/buster-source.bundle" HEAD
