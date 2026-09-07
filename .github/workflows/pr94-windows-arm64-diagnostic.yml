@@ -1,0 +1,78 @@
+name: PR 94 Windows ARM64 frontend diagnostic
+
+on:
+  push:
+    branches:
+      - claude/unruffled-bhabha-f5d28a
+    paths:
+      - .github/workflows/pr94-windows-arm64-diagnostic.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Install Vulkan SDK
+        shell: powershell
+        run: . .github/scripts/install-vulkan-sdk.ps1
+
+      - name: Instrument the first failing frontend test
+        shell: powershell
+        run: |
+          @'
+          from pathlib import Path
+
+          path = Path("src/buster/tests/compiler/frontend/c/c_test.c")
+          text = path.read_text(encoding="utf-8")
+          anchor = '    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("sizeof-constant-expression.c"), tokens, parse, target_native);\n'
+          diagnostic = r'''    if (ir.diagnostic_count)
+              {
+                  fprintf(stderr, "PR94_FIRST_LOWER_FAILURE count=%u program=%p diagnostics=%p canonical=%u\n", ir.diagnostic_count,
+                          (void*)ir.program, (void*)ir.diagnostics, (u32)ir.canonical_ir_certified);
+                  for (u32 diagnostic_index = 0; diagnostic_index < ir.diagnostic_count; diagnostic_index += 1)
+                  {
+                      CDiagnostic* diagnostic_value = ir.diagnostics + diagnostic_index;
+                      fprintf(stderr, "PR94_DIAGNOSTIC index=%u kind=%u token=%u length=%llu message=", diagnostic_index,
+                              (u32)diagnostic_value->kind, diagnostic_value->token_index,
+                              (unsigned long long)diagnostic_value->message.length);
+                      if (diagnostic_value->message.pointer && diagnostic_value->message.length)
+                      {
+                          fwrite(diagnostic_value->message.pointer, 1, diagnostic_value->message.length, stderr);
+                      }
+                      fputc('\n', stderr);
+                  }
+                  fflush(stderr);
+                  exit(213);
+              }
+          '''
+          if text.count(anchor) != 1:
+              raise SystemExit("sizeof lower-result anchor not found")
+          path.write_text(text.replace(anchor, anchor + diagnostic, 1), encoding="utf-8")
+          '@ | python -
+
+      - name: Configure and run the reproducer
+        shell: powershell
+        env:
+          VS_ARCH: arm64
+          VS_COMPONENT: Microsoft.VisualStudio.Component.VC.Tools.ARM64
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPath = (& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath | Select-Object -First 1).Trim()
+          if (-not $VsPath) { throw "Visual Studio ARM64 tools were not found" }
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          cmake -B build/pr94-diag -DBUSTER_CI=ON -DCMAKE_C_COMPILER=clang -DBUSTER_FUZZ_AVAILABLE=OFF -DBUSTER_SANITIZE=OFF -DCMAKE_LINKER_TYPE=DEFAULT -DBUSTER_LTO=OFF -DBUSTER_TIME_TRACE=OFF -DBUSTER_INSTRUMENT=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_LINK_LIBC=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF -DBUSTER_DEVELOPER_TARGETS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -G "Ninja Multi-Config" -DCMAKE_DEFAULT_BUILD_TYPE=Release -DCMAKE_CONFIGURATION_TYPES=Release -DCMAKE_CROSS_CONFIGS=all -DBUSTER_SINGLE_THREADED=OFF -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build/pr94-diag --config Release --target ide:Release --parallel 4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:BUSTER_TEST_JOBS = '1'
+          $env:BUSTER_TEST_TABLE_AUDITS = '1'
+          & build/pr94-diag/Release/ide.exe test --verbose=1 --ci=1
+          exit $LASTEXITCODE
