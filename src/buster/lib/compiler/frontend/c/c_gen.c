@@ -29340,6 +29340,17 @@ BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, S
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
 {
+    // The shape sidecar answers this whole query 64 tokens at a time; the row
+    // scan below stays as the definition for a stream that carries no
+    // sidecar, for a host without the wide compares, and as the reference the
+    // windowed kernel is held to.
+#if BUSTER_C_LEX_COMPACT
+    CTokenShape const* shapes = c_preprocess_token_shapes(&preprocess);
+    if (BUSTER_LIKELY(shapes != 0))
+    {
+        return c_shape_matching_delimiter(shapes, open, end, opening, closing);
+    }
+#endif
     // The pair is loop-invariant, so it becomes one set the scan tests each
     // token against: the two chained compares per token were two dependent
     // branches, and the delimiters themselves are a small minority of the

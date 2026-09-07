@@ -2542,6 +2542,17 @@ base_resolved:;
 
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
 {
+    // The windowed shape scan, with this caller's own spelling of "no match":
+    // `end` rather than the sentinel, for both an unbalanced closer and a
+    // range that never returns to depth zero.
+#if BUSTER_C_LEX_COMPACT
+    CTokenShape const* shapes = c_preprocess_token_shapes(&preprocess);
+    if (BUSTER_LIKELY(shapes != 0))
+    {
+        u32 match = c_shape_matching_delimiter(shapes, open, end, opening, closing);
+        return match == UINT32_MAX ? end : match;
+    }
+#endif
     // The pair is loop-invariant, so it becomes one set the scan tests each
     // token against; see c_ir_matching_delimiter for the same shape.
     u64 delimiters = C_PUNCTUATOR_BIT(opening) | C_PUNCTUATOR_BIT(closing);

@@ -47,6 +47,89 @@
 #define BUSTER_C_DATA static
 #endif
 
+// The matching-delimiter scan, over the one-byte shape sidecar rather than the
+// token rows.
+//
+// Every caller asks the same question: starting at `open` with depth zero,
+// where does the depth return to zero. A shape byte answers it alone -- a
+// punctuator's shape is C_TOKEN_SHAPE_PUNCTUATOR | its id -- so the scan reads
+// one byte a token instead of reaching into a twelve-byte row for one field,
+// and 64 tokens are classified at once: the openers and the closers of a
+// window are two masks, and the walk then visits only the lanes that can
+// change the depth. Delimiters are about one token in nine here, so eight
+// tokens in nine are never looked at individually.
+//
+// The window skip is what makes a long range cheap: a window can only bring
+// the depth to zero if it holds at least `depth` closers, so when it does not,
+// the entire window costs two population counts and an add -- no per-token
+// work at all, and no branch a scan of ordinary code can mispredict.
+//
+// **Lane accounting.** One masked load and two compares answer 64 tokens; the
+// row scan they replace runs a byte load, a set test and a branch on each of
+// them. Every lane of the load is useful (the sidecar is one byte a token and
+// the range is contiguous), and both compares are 64 of 64, so the trade is
+// positive on a double-pumped 256-bit datapath as well, not only on Zen 5's
+// native width.
+//
+// **The 64-bit spelling of the same algorithm is measured negative and is not
+// here.** A `-march=x86-64-v3` build of it -- eight tokens a step, the masks
+// out of the classic byte-equality and movemask identities -- costs +13,8 M
+// instructions against the row scan on the stage-1 workload, because the
+// ranges are short (~16 tokens a query, ~1,4 M queries) and the per-query
+// setup and per-window mask arithmetic outweigh a sixteen-iteration loop whose
+// branch predicts. The width is the whole of the win: at 64 tokens a window
+// the same query is one load and two compares, at eight it is two windows of
+// arithmetic. Only the wide path is compiled.
+#if BUSTER_C_LEX_COMPACT
+#define C_SHAPE_DELIMITER_WINDOW 64u
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 c_shape_matching_delimiter(CTokenShape const* shapes, u32 open, u32 end, CPunctuator opening,
+                                                                     CPunctuator closing)
+{
+    Simd512 open_lanes = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | (u8)opening));
+    Simd512 close_lanes = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | (u8)closing));
+    u32 depth = 0;
+    for (u32 base = open; base < end; base += C_SHAPE_DELIMITER_WINDOW)
+    {
+        u32 remaining = end - base;
+        u32 window_tokens = remaining < C_SHAPE_DELIMITER_WINDOW ? remaining : C_SHAPE_DELIMITER_WINDOW;
+        // The window is read once and asked both questions. Lanes past the
+        // range are masked off the load and read as C_TOKEN_INVALID, which no
+        // punctuator shape can equal, so the tail needs no separate trim.
+        Simd512 window = simd512_load_masked(shapes + base, mask64_prefix(window_tokens));
+        Mask64 opens = simd512_equal_byte(window, open_lanes);
+        Mask64 closes = simd512_equal_byte(window, close_lanes);
+        u32 close_count = mask64_count(closes);
+        if (depth > close_count)
+        {
+            depth += mask64_count(opens) - close_count;
+            continue;
+        }
+        for (Mask64 pending = mask64_or(opens, closes); pending; pending &= pending - 1u)
+        {
+            u32 lane = mask64_first_set(pending);
+            if ((opens >> lane) & 1u)
+            {
+                depth += 1;
+            }
+            else
+            {
+                if (!depth)
+                {
+                    return UINT32_MAX;
+                }
+                depth -= 1;
+                if (!depth)
+                {
+                    return base + lane;
+                }
+            }
+        }
+    }
+    return UINT32_MAX;
+}
+#endif
+
 typedef struct CTypeParseMachine CTypeParseMachine;
 typedef struct CIrDecodedString CIrDecodedString;
 #define C_DECLARATION_KEYWORD_SLOT_COUNT 256
