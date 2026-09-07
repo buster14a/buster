@@ -1,0 +1,127 @@
+name: Temporary patch assembly issues 190-193
+
+on:
+  push:
+    branches:
+      - agent/inspect-190-195
+    paths:
+      - .github/agent_patch_assembly_190_193.py
+      - .github/workflows/agent-patch-assembly-190-193.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Prepare clean main worktree and apply fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          rm -rf "$RUNNER_TEMP/assembly-190-193"
+          git worktree add --detach "$RUNNER_TEMP/assembly-190-193" origin/main
+          python3 .github/agent_patch_assembly_190_193.py "$RUNNER_TEMP/assembly-190-193"
+          git -C "$RUNNER_TEMP/assembly-190-193" diff --check
+          git -C "$RUNNER_TEMP/assembly-190-193" diff --stat
+      - name: Install Vulkan SDK
+        shell: bash
+        run: bash "$RUNNER_TEMP/assembly-190-193/.github/scripts/install-vulkan-sdk.sh"
+      - name: Build and run full Release suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/assembly-190-193"
+          driver="$RUNNER_TEMP/buster-build-190-193"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" generate --cc clang --ci --linker DEFAULT
+          "$driver" build --config Release -t test_all --verbose
+      - name: Reproduce fixed encodings
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/assembly-190-193"
+          ide=build/Release/ide
+          extract_text() {
+            local object="$1"
+            local output="$2"
+            objcopy --dump-section ".text=$output" "$object"
+          }
+          compare_case() {
+            local name="$1"
+            local source="$2"
+            printf '%s\n' "$source" > "$RUNNER_TEMP/$name.s"
+            "$ide" cc -c -march=diamondrapids "$RUNNER_TEMP/$name.s" -o "$RUNNER_TEMP/$name-buster.o"
+            clang -c -march=diamondrapids "$RUNNER_TEMP/$name.s" -o "$RUNNER_TEMP/$name-clang.o"
+            extract_text "$RUNNER_TEMP/$name-buster.o" "$RUNNER_TEMP/$name-buster.bin"
+            extract_text "$RUNNER_TEMP/$name-clang.o" "$RUNNER_TEMP/$name-clang.bin"
+            cmp "$RUNNER_TEMP/$name-buster.bin" "$RUNNER_TEMP/$name-clang.bin"
+          }
+          compare_case broadcast '.text
+          .globl f
+          f:
+            vaddps 64(%rax){1to16}, %zmm1, %zmm2
+            ret'
+          compare_case rex2_width '.text
+          .globl f
+          f:
+            addq $1, (%r16)
+            ret'
+          compare_case exact_bts '.text
+          .globl f
+          f:
+            bts $3, (%r23)
+            ret'
+          compare_case apx_vvvv '.text
+          .globl f
+          f:
+            shlx %r17, %r18, %r19
+            sarx %r20, %r21, %r22
+            shrx %r24, %r25, %r26
+            ret'
+          cat > "$RUNNER_TEMP/apx_pp.s" <<'EOF'
+          .text
+          .globl f
+          f:
+            adcx %rax, %rcx
+            adox %rax, %rcx
+            ret
+          EOF
+          "$ide" cc -c -march=diamondrapids "$RUNNER_TEMP/apx_pp.s" -o "$RUNNER_TEMP/apx_pp.o"
+          extract_text "$RUNNER_TEMP/apx_pp.o" "$RUNNER_TEMP/apx_pp.bin"
+          python3 - "$RUNNER_TEMP/apx_pp.bin" <<'PY'
+          from pathlib import Path
+          import sys
+          data = Path(sys.argv[1]).read_bytes()
+          expected = bytes.fromhex('62 f4 fd 08 66 c8 62 f4 fe 08 66 c8 c3')
+          if data != expected:
+              raise SystemExit(f'APX pp bytes differ: got {data.hex(" ")}, expected {expected.hex(" ")}')
+          PY
+          for mnemonic in adds cmps movs; do
+            cat > "$RUNNER_TEMP/$mnemonic.s" <<EOF
+          .text
+          .globl f
+          f:
+            $mnemonic \$3, (%rax)
+            ret
+          EOF
+            if "$ide" cc -c -march=diamondrapids "$RUNNER_TEMP/$mnemonic.s" -o "$RUNNER_TEMP/$mnemonic.o"; then
+              echo "$mnemonic unexpectedly assembled" >&2
+              exit 1
+            fi
+          done
+      - name: Publish clean fix branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          worktree="$RUNNER_TEMP/assembly-190-193"
+          git -C "$worktree" config user.name "github-actions[bot]"
+          git -C "$worktree" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$worktree" add src/buster/lib/compiler/assembly/x86_64_metadata.c src/buster/lib/compiler/assembly/assembly.c
+          git -C "$worktree" commit -m 'assembly: fix APX and EVEX operand encoding'
+          git -C "$worktree" push --force origin HEAD:agent/fix-assembly-190-193
