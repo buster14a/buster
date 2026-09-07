@@ -634,6 +634,24 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         elf_magic_matches = elf.bytes.pointer[0] == 0x7f && elf.bytes.pointer[1] == 'E' && elf.bytes.pointer[2] == 'L' && elf.bytes.pointer[3] == 'F';
     }
     BUSTER_TEST(arguments, elf_magic_matches);
+    // Capacity checks in object readers are part of malformed-input handling,
+    // not optimizer assumptions. A deliberately tiny result arena must reject
+    // an otherwise valid object without attempting the checked allocation.
+    {
+        Arena* constrained_arena = arena_create((ArenaCreation){
+            .reserved_size = arena_minimum_position + 1,
+            .initial_size = arena_minimum_position,
+            .granularity = 1,
+            .flags = {.no_pool = 1},
+        });
+        BUSTER_TEST(arguments, constrained_arena != 0);
+        if (constrained_arena)
+        {
+            ObjectFile constrained = object_read(constrained_arena, elf.bytes, object.target);
+            BUSTER_TEST(arguments, constrained.error == OBJECT_ERROR_INVALID_INPUT);
+            BUSTER_TEST(arguments, arena_destroy(constrained_arena, 1));
+        }
+    }
     ObjectFile elf_roundtrip = object_read(arguments->arena, elf.bytes, object.target);
     BUSTER_TEST(arguments, elf_roundtrip.error == OBJECT_ERROR_NONE);
     BUSTER_TEST(arguments, elf_roundtrip.section_count == OBJECT_SECTION_COUNT);

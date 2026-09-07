@@ -95,10 +95,10 @@ BUSTER_C_INTERNAL char8* c_space_allocate(CSpellingSpace* space, u64 size)
     {
         char8* result = (char8*)arena_allocate_bytes(space->arena, size, 1);
         space->used = (u64)(result - space->base) + size;
-        BUSTER_CHECK(space->used <= UINT32_MAX);
+        BUSTER_VALIDATE(space->used <= UINT32_MAX);
         return result;
     }
-    BUSTER_CHECK(space->used + size <= space->capacity);
+    BUSTER_VALIDATE(space->used + size <= space->capacity);
     char8* result = space->base + space->used;
     space->used += size;
     return result;
@@ -982,7 +982,7 @@ BUSTER_C_INTERNAL void c_token_push(CLexResult* result, CTranslatedSource transl
 BUSTER_C_INTERNAL void c_diagnostic_push(CLexResult* result, Arena* diagnostic_arena, u64* diagnostic_capacity, u64 maximum_diagnostic_count,
                                            u64 offset, CDiagnosticKind kind, String8 message)
 {
-    BUSTER_CHECK(result->diagnostic_count < maximum_diagnostic_count);
+    BUSTER_VALIDATE(result->diagnostic_count < maximum_diagnostic_count);
     if (result->diagnostic_count == *diagnostic_capacity)
     {
         u64 capacity = *diagnostic_capacity > maximum_diagnostic_count / 2 ? maximum_diagnostic_count : *diagnostic_capacity * 2;
@@ -2645,12 +2645,12 @@ BUSTER_C_SHARED u64 c_macro_name_hash(String8 name)
 // entries; the caller guarantees every defined symbol id lies below it.
 BUSTER_C_INTERNAL void c_macro_index_rebuild(Arena* arena, CMacro* first, u32 capacity)
 {
-    BUSTER_CHECK(first && capacity);
+    BUSTER_VALIDATE(first && capacity);
     CMacro** by_symbol = arena_allocate(arena, CMacro*, capacity);
     memset(by_symbol, 0, sizeof(*by_symbol) * capacity);
     for (CMacro* macro = first; macro; macro = macro->next)
     {
-        BUSTER_CHECK(macro->symbol < capacity);
+        BUSTER_VALIDATE(macro->symbol < capacity);
         by_symbol[macro->symbol] = macro;
     }
     first->by_symbol = by_symbol;
@@ -3167,7 +3167,7 @@ BUSTER_C_INTERNAL CSymbolTable c_symbol_table_create(Arena* arena)
     {
         c_symbol_intern(&table, c_symbol_classified_extras[index]);
     }
-    BUSTER_CHECK(table.count < C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    BUSTER_VALIDATE(table.count < C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
     table.predefined_limit = table.count;
     for (u32 id = 1; id <= table.count; id += 1)
     {
@@ -3295,7 +3295,7 @@ BUSTER_C_INTERNAL u32 c_pp_stamp_push(CPpStampTable* stamps, CSourceLocation loc
         stamps->entries = entries;
         stamps->capacity = capacity;
     }
-    BUSTER_CHECK(stamps->count < C_PP_STAMP_MASK);
+    BUSTER_VALIDATE(stamps->count < C_PP_STAMP_MASK);
     stamps->entries[stamps->count] = location;
     stamps->count += 1;
     return stamps->count;
