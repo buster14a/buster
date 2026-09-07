@@ -36,9 +36,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /c 'lld-link /entry:main /subsystem:console /nodefaultlib /out:build\lld-arm64.exe build\buster-arm64.obj'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c 'lld-link /fixed /entry:main /subsystem:console /nodefaultlib /out:build\lld-arm64-fixed.exe build\buster-arm64.obj'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           llvm-readobj --file-headers --sections --coff-imports --unwind build\buster-arm64.exe
           llvm-readobj --file-headers --sections --unwind build\lld-arm64.exe
+          llvm-readobj --file-headers --sections --unwind build\lld-arm64-fixed.exe
 
           Copy-Item build\buster-arm64.exe build\buster-arm64-no-exceptions.exe
           $Image = [IO.File]::ReadAllBytes((Resolve-Path build\buster-arm64-no-exceptions.exe))
@@ -47,7 +50,18 @@ jobs:
           [Array]::Clear($Image, $Optional + 136, 8)
           [IO.File]::WriteAllBytes((Resolve-Path build\buster-arm64-no-exceptions.exe), $Image)
 
-          foreach ($Program in @('build\buster-arm64.exe', 'build\buster-arm64-no-exceptions.exe', 'build\lld-arm64.exe')) {
+          Copy-Item build\buster-arm64.exe build\buster-arm64-direct-main.exe
+          $Image = [IO.File]::ReadAllBytes((Resolve-Path build\buster-arm64-direct-main.exe))
+          $Pe = [BitConverter]::ToUInt32($Image, 0x3c)
+          $Optional = $Pe + 24
+          $MainLine = (llvm-nm build\buster-arm64.obj | Select-String ' T main$').Line
+          $MainOffset = [Convert]::ToUInt32(($MainLine -split '\s+')[0], 16)
+          [BitConverter]::GetBytes([uint32](0x1000 + $MainOffset)).CopyTo($Image, $Optional + 16)
+          [Array]::Clear($Image, $Optional + 120, 8)
+          [Array]::Clear($Image, $Optional + 208, 8)
+          [IO.File]::WriteAllBytes((Resolve-Path build\buster-arm64-direct-main.exe), $Image)
+
+          foreach ($Program in @('build\buster-arm64.exe', 'build\buster-arm64-no-exceptions.exe', 'build\buster-arm64-direct-main.exe', 'build\lld-arm64.exe', 'build\lld-arm64-fixed.exe')) {
             Write-Output "RUN $Program"
             try {
               & $Program
