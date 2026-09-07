@@ -1,0 +1,1815 @@
+
+===== src/buster/lib/compiler/assembly/assembly.c: 'assembly_x86_metadata_suffix_alias', hits [11147, 11730] =====
+ 11047:     if (assembly_word_equal(mnemonic, S8("movzwl")) || assembly_word_equal(mnemonic, S8("movzwq")) ||
+ 11048:         assembly_word_equal(mnemonic, S8("movswl")) || assembly_word_equal(mnemonic, S8("movswq")))
+ 11049:         return 16;
+ 11050:     if (assembly_word_equal(mnemonic, S8("movslq"))) return 32;
+ 11051:     return 0;
+ 11052: }
+ 11053: 
+ 11054: BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_apx_disasm_alias(
+ 11055:     String8 mnemonic, BusterX86MetadataPhysicalAttributes* attributes)
+ 11056: {
+ 11057:     if (!mnemonic.length || !attributes)
+ 11058:     {
+ 11059:         return false;
+ 11060:     }
+ 11061:     BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
+ 11062:     bool found = false;
+ 11063:     bool ambiguous = false;
+ 11064:     for (u32 position = 0; position < candidates.count; position += 1)
+ 11065:     {
+ 11066:         u32 form_id = 0;
+ 11067:         BusterX86MetadataForm form = {0};
+ 11068:         if (!buster_x86_metadata_candidate_at(candidates, position, &form_id) || !buster_x86_metadata_form(form_id, &form))
+ 11069:         {
+ 11070:             continue;
+ 11071:         }
+ 11072:         String8 disasm = buster_x86_metadata_string_span(form.disasm);
+ 11073:         if (disasm.length == mnemonic.length && assembly_word_equal(disasm, mnemonic))
+ 11074:         {
+ 11075:             found = true;
+ 11076:             ambiguous |= !(form.apx_flags & BUSTER_X86_METADATA_APX_NDD);
+ 11077:         }
+ 11078:     }
+ 11079:     if (found && !ambiguous)
+ 11080:     {
+ 11081:         // The generated disassembly aliases (IMULZU and SET*ZU) select the
+ 11082:         // APX NDD family.  An explicit {nf} remains an independent source
+ 11083:         // attribute, so IMULZU can select either its NF=0 or NF=1 row.
+ 11084:         attributes->apx_flags |= BUSTER_X86_METADATA_APX_NDD;
+ 11085:     }
+ 11086:     return found && !ambiguous;
+ 11087: }
+ 11088: 
+ 11089: BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_mnemonic_requires_dfv(String8 mnemonic)
+ 11090: {
+ 11091:     BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
+ 11092:     for (u32 position = 0; position < candidates.count; position += 1)
+ 11093:     {
+ 11094:         u32 form_id = 0;
+ 11095:         if (buster_x86_metadata_candidate_at(candidates, position, &form_id) &&
+ 11096:             buster_x86_metadata_form_requires_dfv(form_id))
+ 11097:         {
+ 11098:             return true;
+ 11099:         }
+ 11100:     }
+ 11101:     return false;
+ 11102: }
+ 11103: 
+ 11104: BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_parse_dfv(AssemblyOperand operand, u8* value)
+ 11105: {
+ 11106:     if (operand.kind != ASSEMBLY_OPERAND_EXPRESSION || operand.expression.has_symbol)
+ 11107:     {
+ 11108:         return false;
+ 11109:     }
+ 11110:     if (operand.expression.has_unsigned_addend)
+ 11111:     {
+ 11112:         if (operand.expression.unsigned_addend > 15) return false;
+ 11113:         if (value) *value = (u8)operand.expression.unsigned_addend;
+ 11114:         return true;
+ 11115:     }
+ 11116:     if (operand.expression.addend < 0 || operand.expression.addend > 15)
+ 11117:     {
+ 11118:         return false;
+ 11119:     }
+ 11120:     if (value) *value = (u8)operand.expression.addend;
+ 11121:     return true;
+ 11122: }
+ 11123: 
+ 11124: BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_mnemonic_has_visible_operands(String8 mnemonic)
+ 11125: {
+ 11126:     BusterX86MetadataCandidateRange candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
+ 11127:     for (u32 position = 0; position < candidates.count; position += 1)
+ 11128:     {
+ 11129:         u32 form_id = 0;
+ 11130:         BusterX86MetadataForm form = {0};
+ 11131:         if (!buster_x86_metadata_candidate_at(candidates, position, &form_id) || !buster_x86_metadata_form(form_id, &form))
+ 11132:         {
+ 11133:             continue;
+ 11134:         }
+ 11135:         for (u32 operand_index = 0; operand_index < form.operand_count; operand_index += 1)
+ 11136:         {
+ 11137:             BusterX86MetadataOperand operand = {0};
+ 11138:             if (buster_x86_metadata_operand(form_id, operand_index, &operand) && operand.visible)
+ 11139:             {
+ 11140:                 return true;
+ 11141:             }
+ 11142:         }
+ 11143:     }
+ 11144:     return false;
+ 11145: }
+ 11146: 
+ 11147: BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, AssemblySyntax syntax, String8 mnemonic,
+ 11148:                                                              String8* base, AssemblyInstructionInfo* base_info, u8* width)
+ 11149: {
+ 11150:     if (syntax != ASSEMBLY_SYNTAX_ATT || mnemonic.length <= 1 || !base || !width)
+ 11151:     {
+ 11152:         return false;
+ 11153:     }
+ 11154:     char8 suffix = assembly_ascii_lower(mnemonic.pointer[mnemonic.length - 1]);
+ 11155:     u8 suffix_width = suffix == 'b' ? 8 : suffix == 'w' ? 16 : suffix == 'l' ? 32 : suffix == 'q' ? 64
+ 11156:                      : suffix == 's' ? 32
+ 11157:                      : suffix == 't' ? 80
+ 11158:                                       : 0;
+ 11159:     if (!suffix_width)
+ 11160:     {
+ 11161:         return false;
+ 11162:     }
+ 11163:     // The full AT&T mnemonic is present in the x87 typed alias table (for
+ 11164:     // example `fiadds`), while the base candidate below is the unsuffixed
+ 11165:     // `fiadd` entry and therefore has no suffix_width metadata of its own.
+ 11166:     // Capture the typed width before stripping the suffix.
+ 11167:     AssemblyInstructionInfo suffixed_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+ 11168:     if (assembly_instruction_lookup(target, syntax, mnemonic, &suffixed_info) && suffixed_info.suffix_width)
+ 11169:     {
+ 11170:         suffix_width = suffixed_info.suffix_width;
+ 11171:     }
+ 11172:     // GNU spells the 64-bit x87 integer forms with a doubled `l` -- `fistpll`,
+ 11173:     // `fildll`, `fisttpll` -- which is one suffix character more than the
+ 11174:     // single-character strip below reads. Stripping one leaves `fistpl`, which
+ 11175:     // is the *32-bit* alias and is not a mnemonic the metadata tables know at
+ 11176:     // all, so the whole spelling was reported as an unknown instruction. The
+ 11177:     // typed alias table above already carries the doubled spelling and its
+ 11178:     // width, so a doubled suffix strips two characters and keeps that width
+ 11179:     // rather than rediscovering a narrower one from what one strip left behind.
+ 11180:     u64 suffix_length = 1;
+ 11181:     if (suffix == 'l' && mnemonic.length > 2 && assembly_ascii_lower(mnemonic.pointer[mnemonic.length - 2]) == 'l' && suffix_width == 64 &&
+ 11182:         (suffixed_info.opcode == ASSEMBLY_OPCODE_X86_FILD || suffixed_info.opcode == ASSEMBLY_OPCODE_X86_FIST ||
+ 11183:          suffixed_info.opcode == ASSEMBLY_OPCODE_X86_FISTP || suffixed_info.opcode == ASSEMBLY_OPCODE_X86_FISTTP))
+ 11184:     {
+ 11185:         suffix_length = 2;
+ 11186:     }
+ 11187:     String8 candidate = string_slice(mnemonic, 0, mnemonic.length - suffix_length);
+ 11188:     AssemblyInstructionInfo info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+ 11189:     bool has_handwritten_base = assembly_instruction_lookup(target, syntax, candidate, &info);
+ 11190:     if (has_handwritten_base && suffix_length == 1)
+ 11191:     {
+ 11192:         // x87 AT&T suffix aliases carry their architectural element width in
+ 11193:         // the handwritten lookup table (`fiadds` is mem16int, while `fadds`
+ 11194:         // is mem32real).  Prefer that typed width over the generic character
+ 11195:         // suffix mapping, which treats every `-s` as 32 bits and would select
+ 11196:         // the DB opcode for 16-bit integer forms.
+ 11197:         if (info.suffix_width)
+ 11198:         {
+ 11199:             suffix_width = info.suffix_width;
+ 11200:         }
+ 11201:         if ((!info.operand_count && info.opcode != ASSEMBLY_OPCODE_X86_RET) || info.opcode == ASSEMBLY_OPCODE_X86_JCC ||
+ 11202:             info.opcode == ASSEMBLY_OPCODE_X86_SETCC)
+ 11203:         {
+ 11204:             return false;
+ 11205:         }
+ 11206:         if (suffix == 'l' &&
+ 11207:             (info.opcode == ASSEMBLY_OPCODE_X86_FLD || info.opcode == ASSEMBLY_OPCODE_X86_FST ||
+ 11208:              info.opcode == ASSEMBLY_OPCODE_X86_FSTP ||
+ 11209:              (info.opcode >= ASSEMBLY_OPCODE_X86_FADD && info.opcode <= ASSEMBLY_OPCODE_X86_FDIVR) ||
+ 11210:              (info.opcode >= ASSEMBLY_OPCODE_X86_FCOM && info.opcode <= ASSEMBLY_OPCODE_X86_FCMOVCC)))
+ 11211:         {
+ 11212:             suffix_width = 64;
+ 11213:         }
+ 11214:     }
+ 11215:     else if (!buster_x86_metadata_lookup_mnemonic(candidate).count ||
+ 11216:              !assembly_x86_metadata_mnemonic_has_visible_operands(candidate))
+ 11217:     {
+ 11218:         return false;
+ 11219:     }
+ 11220:     if (assembly_x86_metadata_relative_mnemonic(candidate) && !assembly_word_equal(candidate, S8("jmp")) &&
+ 11221:         !assembly_word_equal(candidate, S8("call")) && !assembly_word_equal(candidate, S8("call_near")))
+ 11222:     {
+ 11223:         return false;
+ 11224:     }
+ 11225:     *base = candidate;
+ 11226:     if (base_info)
+ 11227:     {
+ 11228:         *base_info = info;
+ 11229:     }
+ 11230:     *width = suffix_width;
+ 11231:     return true;
+ 11232: }
+ 11233: 
+ 11234: BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_applies(AssemblyOpcode opcode, u32 operand_index, u32 operand_count)
+ 11235: {
+ 11236:     if (opcode == ASSEMBLY_OPCODE_X86_LEA || assembly_x86_opcode_is_rotate(opcode) ||
+ 11237:         opcode == ASSEMBLY_OPCODE_X86_MOVZX || opcode == ASSEMBLY_OPCODE_X86_MOVSX || opcode == ASSEMBLY_OPCODE_X86_MOVSXD)
+ 11238:     {
+ 11239:         return operand_index == 0;
+ 11240:     }
+ 11241:     if (opcode == ASSEMBLY_OPCODE_X86_SHLD || opcode == ASSEMBLY_OPCODE_X86_SHRD)
+ 11242:     {
+ 11243:         return operand_index < 2;
+ 11244:     }
+ 11245:     if (assembly_x86_opcode_is_shift(opcode))
+ 11246:     {
+ 11247:         // An explicit literal one is normalized away before metadata
+ 11630:         return assembly_x86_metadata_instruction_parse(builder, alias_statement, line, column, offset, target, syntax);
+ 11631:     }
+ 11632:     bool lock = false;
+ 11633:     bool rep = false;
+ 11634:     bool repne = false;
+ 11635:     bool notrack = false;
+ 11636:     u8 segment_override = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11637:     bool segment_override_seen = false;
+ 11638:     bool source_address_size_seen = false;
+ 11639:     u8 source_address_size = 64;
+ 11640:     String8 work = assembly_trim(statement);
+ 11641:     for (;;)
+ 11642:     {
+ 11643:         u64 prefix_end = 0;
+ 11644:         while (prefix_end < work.length && !assembly_space(work.pointer[prefix_end])) prefix_end += 1;
+ 11645:         String8 prefix = string_slice(work, 0, prefix_end);
+ 11646:         if (assembly_word_equal(prefix, S8("lock")))
+ 11647:         {
+ 11648:             if (lock)
+ 11649:             {
+ 11650:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11651:             }
+ 11652:             lock = true;
+ 11653:         }
+ 11654:         else if (assembly_word_equal(prefix, S8("rep")) || assembly_word_equal(prefix, S8("repe")) ||
+ 11655:                  assembly_word_equal(prefix, S8("repz")))
+ 11656:         {
+ 11657:             if (rep || repne)
+ 11658:             {
+ 11659:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11660:             }
+ 11661:             rep = true;
+ 11662:         }
+ 11663:         else if (assembly_word_equal(prefix, S8("repne")) || assembly_word_equal(prefix, S8("repnz")))
+ 11664:         {
+ 11665:             if (rep || repne)
+ 11666:             {
+ 11667:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11668:             }
+ 11669:             repne = true;
+ 11670:         }
+ 11671:         else if (assembly_word_equal(prefix, S8("notrack")))
+ 11672:         {
+ 11673:             if (notrack)
+ 11674:             {
+ 11675:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11676:             }
+ 11677:             notrack = true;
+ 11678:         }
+ 11679:         else if (assembly_word_equal(prefix, S8("addr32")))
+ 11680:         {
+ 11681:             if (source_address_size_seen)
+ 11682:             {
+ 11683:                 // Address-size prefixes are source-level instruction
+ 11684:                 // modifiers.  A duplicate or conflicting modifier must not
+ 11685:                 // silently select a different EAMODE row.
+ 11686:                 return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+ 11687:             }
+ 11688:             source_address_size = 32;
+ 11689:             source_address_size_seen = true;
+ 11690:         }
+ 11691:         else
+ 11692:         {
+ 11693:             u8 requested_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11694:             if (!assembly_x86_segment_parse(prefix, ASSEMBLY_SYNTAX_INTEL, &requested_segment))
+ 11695:             {
+ 11696:                 break;
+ 11697:             }
+ 11698:             if (segment_override_seen)
+ 11699:             {
+ 11700:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11701:             }
+ 11702:             segment_override = requested_segment;
+ 11703:             segment_override_seen = true;
+ 11704:         }
+ 11705:         work = assembly_trim(string_slice(work, prefix_end, work.length));
+ 11706:     }
+ 11707:     bool no_flags = false;
+ 11708:     if (work.length && work.pointer[0] == '{')
+ 11709:     {
+ 11710:         u64 end = 1;
+ 11711:         while (end < work.length && work.pointer[end] != '}') end += 1;
+ 11712:         if (end >= work.length || !assembly_word_equal(assembly_trim(string_slice(work, 1, end)), S8("nf")))
+ 11713:         {
+ 11714:             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 11715:         }
+ 11716:         no_flags = true;
+ 11717:         work = assembly_trim(string_slice(work, end + 1, work.length));
+ 11718:     }
+ 11719:     u64 mnemonic_end = 0;
+ 11720:     while (mnemonic_end < work.length && !assembly_space(work.pointer[mnemonic_end])) mnemonic_end += 1;
+ 11721:     String8 source_mnemonic = string_slice(work, 0, mnemonic_end);
+ 11722:     u16 att_scalar_extend_source_width = syntax == ASSEMBLY_SYNTAX_ATT
+ 11723:                                             ? assembly_x86_metadata_att_scalar_extend_source_width(source_mnemonic)
+ 11724:                                             : 0;
+ 11725:     String8 metadata_source_mnemonic = assembly_x86_metadata_att_string_alias(syntax, source_mnemonic);
+ 11726:     String8 mnemonic = assembly_x86_metadata_mnemonic(metadata_source_mnemonic);
+ 11727:     String8 mnemonic_suffix_base = {0};
+ 11728:     AssemblyInstructionInfo mnemonic_suffix_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+ 11729:     u8 mnemonic_suffix_width = 0;
+ 11730:     bool has_suffix_alias = assembly_x86_metadata_suffix_alias(target, syntax, source_mnemonic, &mnemonic_suffix_base,
+ 11731:                                                                 &mnemonic_suffix_info, &mnemonic_suffix_width);
+ 11732:     bool has_mnemonic = mnemonic.length && buster_x86_metadata_lookup_mnemonic(mnemonic).count;
+ 11733:     if (!has_mnemonic)
+ 11734:     {
+ 11735:         if (!has_suffix_alias)
+ 11736:         {
+ 11737:             return BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC;
+ 11738:         }
+ 11739:         mnemonic = mnemonic_suffix_base;
+ 11740:         mnemonic = assembly_x86_metadata_mnemonic(mnemonic);
+ 11741:     }
+ 11742:     else if (!has_suffix_alias)
+ 11743:     {
+ 11744:         mnemonic_suffix_base = (String8){0};
+ 11745:     }
+ 11746:     bool suffix_alias_selected = !has_mnemonic && has_suffix_alias;
+ 11747:     String8 operands_text = assembly_trim(string_slice(work, mnemonic_end, work.length));
+ 11748:     u8 leading_rounding = 0;
+ 11749:     bool leading_sae = false;
+ 11750:     if (operands_text.length && operands_text.pointer[0] == '{')
+ 11751:     {
+ 11752:         u64 end = 1;
+ 11753:         while (end < operands_text.length && operands_text.pointer[end] != '}') end += 1;
+ 11754:         if (end >= operands_text.length)
+ 11755:         {
+ 11756:             return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 11757:         }
+ 11758:         String8 decorator = assembly_trim(string_slice(operands_text, 1, end));
+ 11759:         leading_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? BUSTER_X86_METADATA_ROUNDING_NEAREST
+ 11760:                           : assembly_word_equal(decorator, S8("rd-sae")) ? BUSTER_X86_METADATA_ROUNDING_DOWN
+ 11761:                           : assembly_word_equal(decorator, S8("ru-sae")) ? BUSTER_X86_METADATA_ROUNDING_UP
+ 11762:                           : assembly_word_equal(decorator, S8("rz-sae")) ? BUSTER_X86_METADATA_ROUNDING_ZERO
+ 11763:                                                                           : 0;
+ 11764:         leading_sae = assembly_word_equal(decorator, S8("sae")) || leading_rounding != 0;
+ 11765:         if (!leading_sae)
+ 11766:         {
+ 11767:             return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 11768:         }
+ 11769:         operands_text = assembly_trim(string_slice(operands_text, end + 1, operands_text.length));
+ 11770:         if (operands_text.length && operands_text.pointer[0] == ',')
+ 11771:         {
+ 11772:             operands_text = assembly_trim(string_slice(operands_text, 1, operands_text.length));
+ 11773:         }
+ 11774:     }
+ 11775:     AssemblyOperand operands[ASSEMBLY_MAX_OPERANDS] = {0};
+ 11776:     u32 operand_count = 0;
+ 11777:     u64 operand_start = 0;
+ 11778:     bool relative = assembly_x86_metadata_relative_mnemonic(mnemonic);
+ 11779:     u8 branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NONE;
+ 11780:     u8 implicit_segment = segment_override;
+ 11781:     if (segment_override == BUSTER_X86_METADATA_SEGMENT_CS)
+ 11782:     {
+ 11783:         if (relative)
+ 11784:         {
+ 11785:             branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN;
+ 11786:             implicit_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11787:         }
+ 11788:     }
+ 11789:     else if (segment_override == BUSTER_X86_METADATA_SEGMENT_DS)
+ 11790:     {
+ 11791:         if (relative)
+ 11792:         {
+ 11793:             branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_TAKEN;
+ 11794:             implicit_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11795:         }
+ 11796:     }
+ 11797:     bool mnemonic_requires_dfv = assembly_x86_metadata_mnemonic_requires_dfv(mnemonic);
+ 11798:     u32 symbol_count_before_dfv = builder->result.symbol_count;
+ 11799:     bool has_dfv = false;
+ 11800:     u8 dfv = 0;
+ 11801:     while (operand_start < operands_text.length)
+ 11802:     {
+ 11803:         if (operand_count >= BUSTER_ARRAY_LENGTH(operands))
+ 11804:         {
+ 11805:             return BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT;
+ 11806:         }
+ 11807:         String8 text = {0};
+ 11808:         if (assembly_operand_split_next(operands_text, &operand_start, &text) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
+ 11809:         {
+ 11810:             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 11811:         }
+ 11812:         // Metadata-only EVEX mnemonics do not pass through the handwritten
+ 11813:         // vector parser, but they use the same standalone SAE/rounding token
+ 11814:         // placement: Intel after the visible operands (or before an
+ 11815:         // immediate), and AT&T after the immediate.  Consume that token here
+ 11816:         // so it becomes the typed query attribute instead of being sent to
+ 11817:         // the expression parser.  Form selection remains the authority for
+ 11818:         // whether the selected metadata row actually permits the control.
+ 11819:         if (text.length >= 3 && text.pointer[0] == '{' && text.pointer[text.length - 1] == '}')
+ 11820:         {
+ 11821:             String8 decorator = assembly_trim(string_slice(text, 1, text.length - 1));
+ 11822:             u8 pseudo_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? BUSTER_X86_METADATA_ROUNDING_NEAREST
+ 11823:                                : assembly_word_equal(decorator, S8("rd-sae")) ? BUSTER_X86_METADATA_ROUNDING_DOWN
+ 11824:                                : assembly_word_equal(decorator, S8("ru-sae")) ? BUSTER_X86_METADATA_ROUNDING_UP
+ 11825:                                : assembly_word_equal(decorator, S8("rz-sae")) ? BUSTER_X86_METADATA_ROUNDING_ZERO
+ 11826:                                                                                 : 0;
+ 11827:             bool pseudo_sae = assembly_word_equal(decorator, S8("sae")) || pseudo_rounding != 0;
+ 11828:             if (pseudo_sae)
+ 11829:             {
+ 11830:                 if (leading_sae || (syntax == ASSEMBLY_SYNTAX_ATT && operand_count == 0))
+
+===== src/buster/lib/compiler/assembly/assembly.c: 'mnemonic_suffix_base', hits [11727, 11730, 11739, 11744, 12643, 12666] =====
+ 11627:     if (x87_alias_rewrite)
+ 11628:     {
+ 11629:         String8 alias_statement = string_format(builder->arena, S8("{S8} {S8}"), x87_alias_mnemonic, x87_alias_operands);
+ 11630:         return assembly_x86_metadata_instruction_parse(builder, alias_statement, line, column, offset, target, syntax);
+ 11631:     }
+ 11632:     bool lock = false;
+ 11633:     bool rep = false;
+ 11634:     bool repne = false;
+ 11635:     bool notrack = false;
+ 11636:     u8 segment_override = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11637:     bool segment_override_seen = false;
+ 11638:     bool source_address_size_seen = false;
+ 11639:     u8 source_address_size = 64;
+ 11640:     String8 work = assembly_trim(statement);
+ 11641:     for (;;)
+ 11642:     {
+ 11643:         u64 prefix_end = 0;
+ 11644:         while (prefix_end < work.length && !assembly_space(work.pointer[prefix_end])) prefix_end += 1;
+ 11645:         String8 prefix = string_slice(work, 0, prefix_end);
+ 11646:         if (assembly_word_equal(prefix, S8("lock")))
+ 11647:         {
+ 11648:             if (lock)
+ 11649:             {
+ 11650:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11651:             }
+ 11652:             lock = true;
+ 11653:         }
+ 11654:         else if (assembly_word_equal(prefix, S8("rep")) || assembly_word_equal(prefix, S8("repe")) ||
+ 11655:                  assembly_word_equal(prefix, S8("repz")))
+ 11656:         {
+ 11657:             if (rep || repne)
+ 11658:             {
+ 11659:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11660:             }
+ 11661:             rep = true;
+ 11662:         }
+ 11663:         else if (assembly_word_equal(prefix, S8("repne")) || assembly_word_equal(prefix, S8("repnz")))
+ 11664:         {
+ 11665:             if (rep || repne)
+ 11666:             {
+ 11667:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11668:             }
+ 11669:             repne = true;
+ 11670:         }
+ 11671:         else if (assembly_word_equal(prefix, S8("notrack")))
+ 11672:         {
+ 11673:             if (notrack)
+ 11674:             {
+ 11675:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11676:             }
+ 11677:             notrack = true;
+ 11678:         }
+ 11679:         else if (assembly_word_equal(prefix, S8("addr32")))
+ 11680:         {
+ 11681:             if (source_address_size_seen)
+ 11682:             {
+ 11683:                 // Address-size prefixes are source-level instruction
+ 11684:                 // modifiers.  A duplicate or conflicting modifier must not
+ 11685:                 // silently select a different EAMODE row.
+ 11686:                 return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+ 11687:             }
+ 11688:             source_address_size = 32;
+ 11689:             source_address_size_seen = true;
+ 11690:         }
+ 11691:         else
+ 11692:         {
+ 11693:             u8 requested_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11694:             if (!assembly_x86_segment_parse(prefix, ASSEMBLY_SYNTAX_INTEL, &requested_segment))
+ 11695:             {
+ 11696:                 break;
+ 11697:             }
+ 11698:             if (segment_override_seen)
+ 11699:             {
+ 11700:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11701:             }
+ 11702:             segment_override = requested_segment;
+ 11703:             segment_override_seen = true;
+ 11704:         }
+ 11705:         work = assembly_trim(string_slice(work, prefix_end, work.length));
+ 11706:     }
+ 11707:     bool no_flags = false;
+ 11708:     if (work.length && work.pointer[0] == '{')
+ 11709:     {
+ 11710:         u64 end = 1;
+ 11711:         while (end < work.length && work.pointer[end] != '}') end += 1;
+ 11712:         if (end >= work.length || !assembly_word_equal(assembly_trim(string_slice(work, 1, end)), S8("nf")))
+ 11713:         {
+ 11714:             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 11715:         }
+ 11716:         no_flags = true;
+ 11717:         work = assembly_trim(string_slice(work, end + 1, work.length));
+ 11718:     }
+ 11719:     u64 mnemonic_end = 0;
+ 11720:     while (mnemonic_end < work.length && !assembly_space(work.pointer[mnemonic_end])) mnemonic_end += 1;
+ 11721:     String8 source_mnemonic = string_slice(work, 0, mnemonic_end);
+ 11722:     u16 att_scalar_extend_source_width = syntax == ASSEMBLY_SYNTAX_ATT
+ 11723:                                             ? assembly_x86_metadata_att_scalar_extend_source_width(source_mnemonic)
+ 11724:                                             : 0;
+ 11725:     String8 metadata_source_mnemonic = assembly_x86_metadata_att_string_alias(syntax, source_mnemonic);
+ 11726:     String8 mnemonic = assembly_x86_metadata_mnemonic(metadata_source_mnemonic);
+ 11727:     String8 mnemonic_suffix_base = {0};
+ 11728:     AssemblyInstructionInfo mnemonic_suffix_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+ 11729:     u8 mnemonic_suffix_width = 0;
+ 11730:     bool has_suffix_alias = assembly_x86_metadata_suffix_alias(target, syntax, source_mnemonic, &mnemonic_suffix_base,
+ 11731:                                                                 &mnemonic_suffix_info, &mnemonic_suffix_width);
+ 11732:     bool has_mnemonic = mnemonic.length && buster_x86_metadata_lookup_mnemonic(mnemonic).count;
+ 11733:     if (!has_mnemonic)
+ 11734:     {
+ 11735:         if (!has_suffix_alias)
+ 11736:         {
+ 11737:             return BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC;
+ 11738:         }
+ 11739:         mnemonic = mnemonic_suffix_base;
+ 11740:         mnemonic = assembly_x86_metadata_mnemonic(mnemonic);
+ 11741:     }
+ 11742:     else if (!has_suffix_alias)
+ 11743:     {
+ 11744:         mnemonic_suffix_base = (String8){0};
+ 11745:     }
+ 11746:     bool suffix_alias_selected = !has_mnemonic && has_suffix_alias;
+ 11747:     String8 operands_text = assembly_trim(string_slice(work, mnemonic_end, work.length));
+ 11748:     u8 leading_rounding = 0;
+ 11749:     bool leading_sae = false;
+ 11750:     if (operands_text.length && operands_text.pointer[0] == '{')
+ 11751:     {
+ 11752:         u64 end = 1;
+ 11753:         while (end < operands_text.length && operands_text.pointer[end] != '}') end += 1;
+ 11754:         if (end >= operands_text.length)
+ 11755:         {
+ 11756:             return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 11757:         }
+ 11758:         String8 decorator = assembly_trim(string_slice(operands_text, 1, end));
+ 11759:         leading_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? BUSTER_X86_METADATA_ROUNDING_NEAREST
+ 11760:                           : assembly_word_equal(decorator, S8("rd-sae")) ? BUSTER_X86_METADATA_ROUNDING_DOWN
+ 11761:                           : assembly_word_equal(decorator, S8("ru-sae")) ? BUSTER_X86_METADATA_ROUNDING_UP
+ 11762:                           : assembly_word_equal(decorator, S8("rz-sae")) ? BUSTER_X86_METADATA_ROUNDING_ZERO
+ 11763:                                                                           : 0;
+ 11764:         leading_sae = assembly_word_equal(decorator, S8("sae")) || leading_rounding != 0;
+ 11765:         if (!leading_sae)
+ 11766:         {
+ 11767:             return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 11768:         }
+ 11769:         operands_text = assembly_trim(string_slice(operands_text, end + 1, operands_text.length));
+ 11770:         if (operands_text.length && operands_text.pointer[0] == ',')
+ 11771:         {
+ 11772:             operands_text = assembly_trim(string_slice(operands_text, 1, operands_text.length));
+ 11773:         }
+ 11774:     }
+ 11775:     AssemblyOperand operands[ASSEMBLY_MAX_OPERANDS] = {0};
+ 11776:     u32 operand_count = 0;
+ 11777:     u64 operand_start = 0;
+ 11778:     bool relative = assembly_x86_metadata_relative_mnemonic(mnemonic);
+ 11779:     u8 branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NONE;
+ 11780:     u8 implicit_segment = segment_override;
+ 11781:     if (segment_override == BUSTER_X86_METADATA_SEGMENT_CS)
+ 11782:     {
+ 11783:         if (relative)
+ 11784:         {
+ 11785:             branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN;
+ 11786:             implicit_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11787:         }
+ 11788:     }
+ 11789:     else if (segment_override == BUSTER_X86_METADATA_SEGMENT_DS)
+ 11790:     {
+ 11791:         if (relative)
+ 11792:         {
+ 11793:             branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_TAKEN;
+ 11794:             implicit_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11795:         }
+ 11796:     }
+ 11797:     bool mnemonic_requires_dfv = assembly_x86_metadata_mnemonic_requires_dfv(mnemonic);
+ 11798:     u32 symbol_count_before_dfv = builder->result.symbol_count;
+ 11799:     bool has_dfv = false;
+ 11800:     u8 dfv = 0;
+ 11801:     while (operand_start < operands_text.length)
+ 11802:     {
+ 11803:         if (operand_count >= BUSTER_ARRAY_LENGTH(operands))
+ 11804:         {
+ 11805:             return BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT;
+ 11806:         }
+ 11807:         String8 text = {0};
+ 11808:         if (assembly_operand_split_next(operands_text, &operand_start, &text) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
+ 11809:         {
+ 11810:             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 11811:         }
+ 11812:         // Metadata-only EVEX mnemonics do not pass through the handwritten
+ 11813:         // vector parser, but they use the same standalone SAE/rounding token
+ 11814:         // placement: Intel after the visible operands (or before an
+ 11815:         // immediate), and AT&T after the immediate.  Consume that token here
+ 11816:         // so it becomes the typed query attribute instead of being sent to
+ 11817:         // the expression parser.  Form selection remains the authority for
+ 11818:         // whether the selected metadata row actually permits the control.
+ 11819:         if (text.length >= 3 && text.pointer[0] == '{' && text.pointer[text.length - 1] == '}')
+ 11820:         {
+ 11821:             String8 decorator = assembly_trim(string_slice(text, 1, text.length - 1));
+ 11822:             u8 pseudo_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? BUSTER_X86_METADATA_ROUNDING_NEAREST
+ 11823:                                : assembly_word_equal(decorator, S8("rd-sae")) ? BUSTER_X86_METADATA_ROUNDING_DOWN
+ 11824:                                : assembly_word_equal(decorator, S8("ru-sae")) ? BUSTER_X86_METADATA_ROUNDING_UP
+ 11825:                                : assembly_word_equal(decorator, S8("rz-sae")) ? BUSTER_X86_METADATA_ROUNDING_ZERO
+ 11826:                                                                                 : 0;
+ 11827:             bool pseudo_sae = assembly_word_equal(decorator, S8("sae")) || pseudo_rounding != 0;
+ 11639:     u8 source_address_size = 64;
+ 11640:     String8 work = assembly_trim(statement);
+ 11641:     for (;;)
+ 11642:     {
+ 11643:         u64 prefix_end = 0;
+ 11644:         while (prefix_end < work.length && !assembly_space(work.pointer[prefix_end])) prefix_end += 1;
+ 11645:         String8 prefix = string_slice(work, 0, prefix_end);
+ 11646:         if (assembly_word_equal(prefix, S8("lock")))
+ 11647:         {
+ 11648:             if (lock)
+ 11649:             {
+ 11650:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11651:             }
+ 11652:             lock = true;
+ 11653:         }
+ 11654:         else if (assembly_word_equal(prefix, S8("rep")) || assembly_word_equal(prefix, S8("repe")) ||
+ 11655:                  assembly_word_equal(prefix, S8("repz")))
+ 11656:         {
+ 11657:             if (rep || repne)
+ 11658:             {
+ 11659:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11660:             }
+ 11661:             rep = true;
+ 11662:         }
+ 11663:         else if (assembly_word_equal(prefix, S8("repne")) || assembly_word_equal(prefix, S8("repnz")))
+ 11664:         {
+ 11665:             if (rep || repne)
+ 11666:             {
+ 11667:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11668:             }
+ 11669:             repne = true;
+ 11670:         }
+ 11671:         else if (assembly_word_equal(prefix, S8("notrack")))
+ 11672:         {
+ 11673:             if (notrack)
+ 11674:             {
+ 11675:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11676:             }
+ 11677:             notrack = true;
+ 11678:         }
+ 11679:         else if (assembly_word_equal(prefix, S8("addr32")))
+ 11680:         {
+ 11681:             if (source_address_size_seen)
+ 11682:             {
+ 11683:                 // Address-size prefixes are source-level instruction
+ 11684:                 // modifiers.  A duplicate or conflicting modifier must not
+ 11685:                 // silently select a different EAMODE row.
+ 11686:                 return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+ 11687:             }
+ 11688:             source_address_size = 32;
+ 11689:             source_address_size_seen = true;
+ 11690:         }
+ 11691:         else
+ 11692:         {
+ 11693:             u8 requested_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11694:             if (!assembly_x86_segment_parse(prefix, ASSEMBLY_SYNTAX_INTEL, &requested_segment))
+ 11695:             {
+ 11696:                 break;
+ 11697:             }
+ 11698:             if (segment_override_seen)
+ 11699:             {
+ 11700:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11701:             }
+ 11702:             segment_override = requested_segment;
+ 11703:             segment_override_seen = true;
+ 11704:         }
+ 11705:         work = assembly_trim(string_slice(work, prefix_end, work.length));
+ 11706:     }
+ 11707:     bool no_flags = false;
+ 11708:     if (work.length && work.pointer[0] == '{')
+ 11709:     {
+ 11710:         u64 end = 1;
+ 11711:         while (end < work.length && work.pointer[end] != '}') end += 1;
+ 11712:         if (end >= work.length || !assembly_word_equal(assembly_trim(string_slice(work, 1, end)), S8("nf")))
+ 11713:         {
+ 11714:             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 11715:         }
+ 11716:         no_flags = true;
+ 11717:         work = assembly_trim(string_slice(work, end + 1, work.length));
+ 11718:     }
+ 11719:     u64 mnemonic_end = 0;
+ 11720:     while (mnemonic_end < work.length && !assembly_space(work.pointer[mnemonic_end])) mnemonic_end += 1;
+ 11721:     String8 source_mnemonic = string_slice(work, 0, mnemonic_end);
+ 11722:     u16 att_scalar_extend_source_width = syntax == ASSEMBLY_SYNTAX_ATT
+ 11723:                                             ? assembly_x86_metadata_att_scalar_extend_source_width(source_mnemonic)
+ 11724:                                             : 0;
+ 11725:     String8 metadata_source_mnemonic = assembly_x86_metadata_att_string_alias(syntax, source_mnemonic);
+ 11726:     String8 mnemonic = assembly_x86_metadata_mnemonic(metadata_source_mnemonic);
+ 11727:     String8 mnemonic_suffix_base = {0};
+ 11728:     AssemblyInstructionInfo mnemonic_suffix_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+ 11729:     u8 mnemonic_suffix_width = 0;
+ 11730:     bool has_suffix_alias = assembly_x86_metadata_suffix_alias(target, syntax, source_mnemonic, &mnemonic_suffix_base,
+ 11731:                                                                 &mnemonic_suffix_info, &mnemonic_suffix_width);
+ 11732:     bool has_mnemonic = mnemonic.length && buster_x86_metadata_lookup_mnemonic(mnemonic).count;
+ 11733:     if (!has_mnemonic)
+ 11734:     {
+ 11735:         if (!has_suffix_alias)
+ 11736:         {
+ 11737:             return BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC;
+ 11738:         }
+ 11739:         mnemonic = mnemonic_suffix_base;
+ 11740:         mnemonic = assembly_x86_metadata_mnemonic(mnemonic);
+ 11741:     }
+ 11742:     else if (!has_suffix_alias)
+ 11743:     {
+ 11744:         mnemonic_suffix_base = (String8){0};
+ 11745:     }
+ 11746:     bool suffix_alias_selected = !has_mnemonic && has_suffix_alias;
+ 11747:     String8 operands_text = assembly_trim(string_slice(work, mnemonic_end, work.length));
+ 11748:     u8 leading_rounding = 0;
+ 11749:     bool leading_sae = false;
+ 11750:     if (operands_text.length && operands_text.pointer[0] == '{')
+ 11751:     {
+ 11752:         u64 end = 1;
+ 11753:         while (end < operands_text.length && operands_text.pointer[end] != '}') end += 1;
+ 11754:         if (end >= operands_text.length)
+ 11755:         {
+ 11756:             return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 11757:         }
+ 11758:         String8 decorator = assembly_trim(string_slice(operands_text, 1, end));
+ 11759:         leading_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? BUSTER_X86_METADATA_ROUNDING_NEAREST
+ 11760:                           : assembly_word_equal(decorator, S8("rd-sae")) ? BUSTER_X86_METADATA_ROUNDING_DOWN
+ 11761:                           : assembly_word_equal(decorator, S8("ru-sae")) ? BUSTER_X86_METADATA_ROUNDING_UP
+ 11762:                           : assembly_word_equal(decorator, S8("rz-sae")) ? BUSTER_X86_METADATA_ROUNDING_ZERO
+ 11763:                                                                           : 0;
+ 11764:         leading_sae = assembly_word_equal(decorator, S8("sae")) || leading_rounding != 0;
+ 11765:         if (!leading_sae)
+ 11766:         {
+ 11767:             return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 11768:         }
+ 11769:         operands_text = assembly_trim(string_slice(operands_text, end + 1, operands_text.length));
+ 11770:         if (operands_text.length && operands_text.pointer[0] == ',')
+ 11771:         {
+ 11772:             operands_text = assembly_trim(string_slice(operands_text, 1, operands_text.length));
+ 11773:         }
+ 11774:     }
+ 11775:     AssemblyOperand operands[ASSEMBLY_MAX_OPERANDS] = {0};
+ 11776:     u32 operand_count = 0;
+ 11777:     u64 operand_start = 0;
+ 11778:     bool relative = assembly_x86_metadata_relative_mnemonic(mnemonic);
+ 11779:     u8 branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NONE;
+ 11780:     u8 implicit_segment = segment_override;
+ 11781:     if (segment_override == BUSTER_X86_METADATA_SEGMENT_CS)
+ 11782:     {
+ 11783:         if (relative)
+ 11784:         {
+ 11785:             branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN;
+ 11786:             implicit_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11787:         }
+ 11788:     }
+ 11789:     else if (segment_override == BUSTER_X86_METADATA_SEGMENT_DS)
+ 11790:     {
+ 11791:         if (relative)
+ 11792:         {
+ 11793:             branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_TAKEN;
+ 11794:             implicit_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11795:         }
+ 11796:     }
+ 11797:     bool mnemonic_requires_dfv = assembly_x86_metadata_mnemonic_requires_dfv(mnemonic);
+ 11798:     u32 symbol_count_before_dfv = builder->result.symbol_count;
+ 11799:     bool has_dfv = false;
+ 11800:     u8 dfv = 0;
+ 11801:     while (operand_start < operands_text.length)
+ 11802:     {
+ 11803:         if (operand_count >= BUSTER_ARRAY_LENGTH(operands))
+ 11804:         {
+ 11805:             return BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT;
+ 11806:         }
+ 11807:         String8 text = {0};
+ 11808:         if (assembly_operand_split_next(operands_text, &operand_start, &text) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
+ 11809:         {
+ 11810:             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 11811:         }
+ 11812:         // Metadata-only EVEX mnemonics do not pass through the handwritten
+ 11813:         // vector parser, but they use the same standalone SAE/rounding token
+ 11814:         // placement: Intel after the visible operands (or before an
+ 11815:         // immediate), and AT&T after the immediate.  Consume that token here
+ 11816:         // so it becomes the typed query attribute instead of being sent to
+ 11817:         // the expression parser.  Form selection remains the authority for
+ 11818:         // whether the selected metadata row actually permits the control.
+ 11819:         if (text.length >= 3 && text.pointer[0] == '{' && text.pointer[text.length - 1] == '}')
+ 11820:         {
+ 11821:             String8 decorator = assembly_trim(string_slice(text, 1, text.length - 1));
+ 11822:             u8 pseudo_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? BUSTER_X86_METADATA_ROUNDING_NEAREST
+ 11823:                                : assembly_word_equal(decorator, S8("rd-sae")) ? BUSTER_X86_METADATA_ROUNDING_DOWN
+ 11824:                                : assembly_word_equal(decorator, S8("ru-sae")) ? BUSTER_X86_METADATA_ROUNDING_UP
+ 11825:                                : assembly_word_equal(decorator, S8("rz-sae")) ? BUSTER_X86_METADATA_ROUNDING_ZERO
+ 11826:                                                                                 : 0;
+ 11827:             bool pseudo_sae = assembly_word_equal(decorator, S8("sae")) || pseudo_rounding != 0;
+ 11828:             if (pseudo_sae)
+ 11829:             {
+ 11830:                 if (leading_sae || (syntax == ASSEMBLY_SYNTAX_ATT && operand_count == 0))
+ 11831:                     return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 11832:                 leading_rounding = pseudo_rounding;
+ 11833:                 leading_sae = true;
+ 11834:                 continue;
+ 11835:             }
+ 11836:         }
+ 11837:         bool indirect = syntax == ASSEMBLY_SYNTAX_ATT && relative && text.pointer[0] == '*';
+ 11838:         if (indirect)
+ 11839:         {
+ 11644:         while (prefix_end < work.length && !assembly_space(work.pointer[prefix_end])) prefix_end += 1;
+ 11645:         String8 prefix = string_slice(work, 0, prefix_end);
+ 11646:         if (assembly_word_equal(prefix, S8("lock")))
+ 11647:         {
+ 11648:             if (lock)
+ 11649:             {
+ 11650:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11651:             }
+ 11652:             lock = true;
+ 11653:         }
+ 11654:         else if (assembly_word_equal(prefix, S8("rep")) || assembly_word_equal(prefix, S8("repe")) ||
+ 11655:                  assembly_word_equal(prefix, S8("repz")))
+ 11656:         {
+ 11657:             if (rep || repne)
+ 11658:             {
+ 11659:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11660:             }
+ 11661:             rep = true;
+ 11662:         }
+ 11663:         else if (assembly_word_equal(prefix, S8("repne")) || assembly_word_equal(prefix, S8("repnz")))
+ 11664:         {
+ 11665:             if (rep || repne)
+ 11666:             {
+ 11667:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11668:             }
+ 11669:             repne = true;
+ 11670:         }
+ 11671:         else if (assembly_word_equal(prefix, S8("notrack")))
+ 11672:         {
+ 11673:             if (notrack)
+ 11674:             {
+ 11675:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11676:             }
+ 11677:             notrack = true;
+ 11678:         }
+ 11679:         else if (assembly_word_equal(prefix, S8("addr32")))
+ 11680:         {
+ 11681:             if (source_address_size_seen)
+ 11682:             {
+ 11683:                 // Address-size prefixes are source-level instruction
+ 11684:                 // modifiers.  A duplicate or conflicting modifier must not
+ 11685:                 // silently select a different EAMODE row.
+ 11686:                 return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+ 11687:             }
+ 11688:             source_address_size = 32;
+ 11689:             source_address_size_seen = true;
+ 11690:         }
+ 11691:         else
+ 11692:         {
+ 11693:             u8 requested_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11694:             if (!assembly_x86_segment_parse(prefix, ASSEMBLY_SYNTAX_INTEL, &requested_segment))
+ 11695:             {
+ 11696:                 break;
+ 11697:             }
+ 11698:             if (segment_override_seen)
+ 11699:             {
+ 11700:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11701:             }
+ 11702:             segment_override = requested_segment;
+ 11703:             segment_override_seen = true;
+ 11704:         }
+ 11705:         work = assembly_trim(string_slice(work, prefix_end, work.length));
+ 11706:     }
+ 11707:     bool no_flags = false;
+ 11708:     if (work.length && work.pointer[0] == '{')
+ 11709:     {
+ 11710:         u64 end = 1;
+ 11711:         while (end < work.length && work.pointer[end] != '}') end += 1;
+ 11712:         if (end >= work.length || !assembly_word_equal(assembly_trim(string_slice(work, 1, end)), S8("nf")))
+ 11713:         {
+ 11714:             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 11715:         }
+ 11716:         no_flags = true;
+ 11717:         work = assembly_trim(string_slice(work, end + 1, work.length));
+ 11718:     }
+ 11719:     u64 mnemonic_end = 0;
+ 11720:     while (mnemonic_end < work.length && !assembly_space(work.pointer[mnemonic_end])) mnemonic_end += 1;
+ 11721:     String8 source_mnemonic = string_slice(work, 0, mnemonic_end);
+ 11722:     u16 att_scalar_extend_source_width = syntax == ASSEMBLY_SYNTAX_ATT
+ 11723:                                             ? assembly_x86_metadata_att_scalar_extend_source_width(source_mnemonic)
+ 11724:                                             : 0;
+ 11725:     String8 metadata_source_mnemonic = assembly_x86_metadata_att_string_alias(syntax, source_mnemonic);
+ 11726:     String8 mnemonic = assembly_x86_metadata_mnemonic(metadata_source_mnemonic);
+ 11727:     String8 mnemonic_suffix_base = {0};
+ 11728:     AssemblyInstructionInfo mnemonic_suffix_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+ 11729:     u8 mnemonic_suffix_width = 0;
+ 11730:     bool has_suffix_alias = assembly_x86_metadata_suffix_alias(target, syntax, source_mnemonic, &mnemonic_suffix_base,
+ 11731:                                                                 &mnemonic_suffix_info, &mnemonic_suffix_width);
+ 11732:     bool has_mnemonic = mnemonic.length && buster_x86_metadata_lookup_mnemonic(mnemonic).count;
+ 11733:     if (!has_mnemonic)
+ 11734:     {
+ 11735:         if (!has_suffix_alias)
+ 11736:         {
+ 11737:             return BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC;
+ 11738:         }
+ 11739:         mnemonic = mnemonic_suffix_base;
+ 11740:         mnemonic = assembly_x86_metadata_mnemonic(mnemonic);
+ 11741:     }
+ 11742:     else if (!has_suffix_alias)
+ 11743:     {
+ 11744:         mnemonic_suffix_base = (String8){0};
+ 11745:     }
+ 11746:     bool suffix_alias_selected = !has_mnemonic && has_suffix_alias;
+ 11747:     String8 operands_text = assembly_trim(string_slice(work, mnemonic_end, work.length));
+ 11748:     u8 leading_rounding = 0;
+ 11749:     bool leading_sae = false;
+ 11750:     if (operands_text.length && operands_text.pointer[0] == '{')
+ 11751:     {
+ 11752:         u64 end = 1;
+ 11753:         while (end < operands_text.length && operands_text.pointer[end] != '}') end += 1;
+ 11754:         if (end >= operands_text.length)
+ 11755:         {
+ 11756:             return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 11757:         }
+ 11758:         String8 decorator = assembly_trim(string_slice(operands_text, 1, end));
+ 11759:         leading_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? BUSTER_X86_METADATA_ROUNDING_NEAREST
+ 11760:                           : assembly_word_equal(decorator, S8("rd-sae")) ? BUSTER_X86_METADATA_ROUNDING_DOWN
+ 11761:                           : assembly_word_equal(decorator, S8("ru-sae")) ? BUSTER_X86_METADATA_ROUNDING_UP
+ 11762:                           : assembly_word_equal(decorator, S8("rz-sae")) ? BUSTER_X86_METADATA_ROUNDING_ZERO
+ 11763:                                                                           : 0;
+ 11764:         leading_sae = assembly_word_equal(decorator, S8("sae")) || leading_rounding != 0;
+ 11765:         if (!leading_sae)
+ 11766:         {
+ 11767:             return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 11768:         }
+ 11769:         operands_text = assembly_trim(string_slice(operands_text, end + 1, operands_text.length));
+ 11770:         if (operands_text.length && operands_text.pointer[0] == ',')
+ 11771:         {
+ 11772:             operands_text = assembly_trim(string_slice(operands_text, 1, operands_text.length));
+ 11773:         }
+ 11774:     }
+ 11775:     AssemblyOperand operands[ASSEMBLY_MAX_OPERANDS] = {0};
+ 11776:     u32 operand_count = 0;
+ 11777:     u64 operand_start = 0;
+ 11778:     bool relative = assembly_x86_metadata_relative_mnemonic(mnemonic);
+ 11779:     u8 branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NONE;
+ 11780:     u8 implicit_segment = segment_override;
+ 11781:     if (segment_override == BUSTER_X86_METADATA_SEGMENT_CS)
+ 11782:     {
+ 11783:         if (relative)
+ 11784:         {
+ 11785:             branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN;
+ 11786:             implicit_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11787:         }
+ 11788:     }
+ 11789:     else if (segment_override == BUSTER_X86_METADATA_SEGMENT_DS)
+ 11790:     {
+ 11791:         if (relative)
+ 11792:         {
+ 11793:             branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_TAKEN;
+ 11794:             implicit_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11795:         }
+ 11796:     }
+ 11797:     bool mnemonic_requires_dfv = assembly_x86_metadata_mnemonic_requires_dfv(mnemonic);
+ 11798:     u32 symbol_count_before_dfv = builder->result.symbol_count;
+ 11799:     bool has_dfv = false;
+ 11800:     u8 dfv = 0;
+ 11801:     while (operand_start < operands_text.length)
+ 11802:     {
+ 11803:         if (operand_count >= BUSTER_ARRAY_LENGTH(operands))
+ 11804:         {
+ 11805:             return BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT;
+ 11806:         }
+ 11807:         String8 text = {0};
+ 11808:         if (assembly_operand_split_next(operands_text, &operand_start, &text) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
+ 11809:         {
+ 11810:             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 11811:         }
+ 11812:         // Metadata-only EVEX mnemonics do not pass through the handwritten
+ 11813:         // vector parser, but they use the same standalone SAE/rounding token
+ 11814:         // placement: Intel after the visible operands (or before an
+ 11815:         // immediate), and AT&T after the immediate.  Consume that token here
+ 11816:         // so it becomes the typed query attribute instead of being sent to
+ 11817:         // the expression parser.  Form selection remains the authority for
+ 11818:         // whether the selected metadata row actually permits the control.
+ 11819:         if (text.length >= 3 && text.pointer[0] == '{' && text.pointer[text.length - 1] == '}')
+ 11820:         {
+ 11821:             String8 decorator = assembly_trim(string_slice(text, 1, text.length - 1));
+ 11822:             u8 pseudo_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? BUSTER_X86_METADATA_ROUNDING_NEAREST
+ 11823:                                : assembly_word_equal(decorator, S8("rd-sae")) ? BUSTER_X86_METADATA_ROUNDING_DOWN
+ 11824:                                : assembly_word_equal(decorator, S8("ru-sae")) ? BUSTER_X86_METADATA_ROUNDING_UP
+ 11825:                                : assembly_word_equal(decorator, S8("rz-sae")) ? BUSTER_X86_METADATA_ROUNDING_ZERO
+ 11826:                                                                                 : 0;
+ 11827:             bool pseudo_sae = assembly_word_equal(decorator, S8("sae")) || pseudo_rounding != 0;
+ 11828:             if (pseudo_sae)
+ 11829:             {
+ 11830:                 if (leading_sae || (syntax == ASSEMBLY_SYNTAX_ATT && operand_count == 0))
+ 11831:                     return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 11832:                 leading_rounding = pseudo_rounding;
+ 11833:                 leading_sae = true;
+ 11834:                 continue;
+ 11835:             }
+ 11836:         }
+ 11837:         bool indirect = syntax == ASSEMBLY_SYNTAX_ATT && relative && text.pointer[0] == '*';
+ 11838:         if (indirect)
+ 11839:         {
+ 11840:             text = assembly_trim(string_slice(text, 1, text.length));
+ 11841:             if (!text.length)
+ 11842:             {
+ 11843:                 return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 11844:             }
+ 12543:                 physical[index].value < INT8_MIN || physical[index].value > UINT8_MAX)
+ 12544:                 continue;
+ 12545:             physical[index].width = 8;
+ 12546:             if (physical[index].value < 0)
+ 12547:             {
+ 12548:                 physical[index].unsigned_value = (u64)(u8)physical[index].value;
+ 12549:                 physical[index].has_unsigned_value = true;
+ 12550:                 physical[index].has_value = false;
+ 12551:             }
+ 12552:         }
+ 12553:     }
+ 12554:     if (leading_sae)
+ 12555:     {
+ 12556:         attributes.sae = true;
+ 12557:         attributes.decorator_flags |= BUSTER_X86_METADATA_DECORATOR_SAE;
+ 12558:     }
+ 12559:     if (!assembly_x86_metadata_operand_decorators(&attributes, operands, operand_count))
+ 12560:     {
+ 12561:         return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 12562:     }
+ 12563:     if (leading_rounding)
+ 12564:     {
+ 12565:         attributes.rounding_mode = leading_rounding;
+ 12566:         attributes.sae = true;
+ 12567:         attributes.decorator_flags |= BUSTER_X86_METADATA_DECORATOR_ROUNDING | BUSTER_X86_METADATA_DECORATOR_SAE;
+ 12568:     }
+ 12569:     String8 feature_names[TARGET_CPU_FEATURE_COUNT] = {0};
+ 12570:     u32 feature_count = assembly_x86_metadata_feature_names(target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
+ 12571:     assembly_x86_metadata_append_avx10_aliases(target, feature_names, &feature_count, BUSTER_ARRAY_LENGTH(feature_names), physical,
+ 12572:                                                 operand_count);
+ 12573:     // XED classifies a subset of legacy MMX rows under SSE2MMX even though
+ 12574:     // the assembler's baseline MMX contract accepts them without SSE2.  The
+ 12575:     // physical query is already restricted to MMX rows above, so supplying
+ 12576:     // the feature token here cannot make an XMM form pass the selector.
+ 12577:     if (mmx_instruction && !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_SSE2) &&
+ 12578:         feature_count < BUSTER_ARRAY_LENGTH(feature_names))
+ 12579:     {
+ 12580:         feature_names[feature_count++] = S8("sse2");
+ 12581:     }
+ 12582:     u8 address_size = source_address_size;
+ 12583:     bool memory_address_size_seen = false;
+ 12584:     for (u32 index = 0; index < operand_count; index += 1)
+ 12585:     {
+ 12586:         if (physical[index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+ 12587:         {
+ 12588:             continue;
+ 12589:         }
+ 12590:         u8 memory_address_size = physical[index].memory.address_size ? physical[index].memory.address_size : 64;
+ 12591:         if (source_address_size_seen && address_size != memory_address_size)
+ 12592:         {
+ 12593:             return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+ 12594:         }
+ 12595:         if (memory_address_size_seen && address_size != memory_address_size)
+ 12596:         {
+ 12597:             return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+ 12598:         }
+ 12599:         address_size = memory_address_size;
+ 12600:         memory_address_size_seen = true;
+ 12601:     }
+ 12602:     BusterX86MetadataPhysicalQuery query = {
+ 12603:         .mnemonic = mnemonic,
+ 12604:         .operands = physical,
+ 12605:         .operand_count = operand_count,
+ 12606:         .features = {.names = feature_names, .count = feature_count},
+ 12607:         .attributes = attributes,
+ 12608:         .address_size = address_size,
+ 12609:         .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+ 12610:         .include_privileged = true,
+ 12611:         .include_not64 = false,
+ 12612:         .include_implicit = operand_count && physical[operand_count - 1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+ 12613:                             physical[operand_count - 1].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&
+ 12614:                             physical[operand_count - 1].reg.index == 1 && physical[operand_count - 1].reg.width == 8 &&
+ 12615:                             (assembly_word_equal(mnemonic, S8("rol")) || assembly_word_equal(mnemonic, S8("ror")) ||
+ 12616:                              assembly_word_equal(mnemonic, S8("rcl")) || assembly_word_equal(mnemonic, S8("rcr")) ||
+ 12617:                              assembly_word_equal(mnemonic, S8("shld")) || assembly_word_equal(mnemonic, S8("shrd"))),
+ 12618:         .source_semantics = true,
+ 12619:     };
+ 12620:     bool relative_literal = false;
+ 12621:     for (u32 index = 0; index < operand_count; index += 1)
+ 12622:     {
+ 12623:         relative_literal |= physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE && !physical[index].has_symbol;
+ 12624:     }
+ 12625:     BusterX86MetadataSelectResult selection = {
+ 12626:         .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
+ 12627:         .form_id = UINT32_MAX,
+ 12628:         .failure_form_id = UINT32_MAX,
+ 12629:     };
+ 12630:     bool selected = false;
+ 12631:     u32 trial_count = relative_literal ? 15 : 1;
+ 12632:     for (u32 trial_byte_count = 1; trial_byte_count <= trial_count; trial_byte_count += 1)
+ 12633:     {
+ 12634:         BusterX86MetadataPhysicalOperand trial_physical[ASSEMBLY_MAX_OPERANDS] = {0};
+ 12635:         memcpy(trial_physical, physical, operand_count * sizeof(*physical));
+ 12636:         if (relative_literal && !assembly_x86_metadata_adjust_relative_literals(trial_physical, operand_count, offset, trial_byte_count))
+ 12637:         {
+ 12638:             continue;
+ 12639:         }
+ 12640:         query.operands = trial_physical;
+ 12641:         String8 trial_mnemonic = mnemonic;
+ 12642:         BusterX86MetadataSelectResult trial_selection = assembly_x86_metadata_select_source_form(
+ 12643:             query, mnemonic, mnemonic_suffix_base, mnemonic_suffix_info, mnemonic_suffix_width, operands, trial_physical, operand_count,
+ 12644:             &trial_mnemonic);
+ 12645:         if (trial_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+ 12646:             (!relative_literal || trial_selection.selected_byte_count == trial_byte_count))
+ 12647:         {
+ 12648:             if (trial_selection.selected_memory_width && trial_selection.selected_memory_operand < operand_count)
+ 12649:                 trial_physical[trial_selection.selected_memory_operand].width = trial_selection.selected_memory_width;
+ 12650:             memcpy(physical, trial_physical, operand_count * sizeof(*physical));
+ 12651:             mnemonic = trial_mnemonic;
+ 12652:             selection = trial_selection;
+ 12653:             selected = true;
+ 12654:             break;
+ 12655:         }
+ 12656:         if (!relative_literal)
+ 12657:         {
+ 12658:             selection = trial_selection;
+ 12659:             break;
+ 12660:         }
+ 12661:     }
+ 12662:     if (!selected && relative_literal)
+ 12663:     {
+ 12664:         query.operands = physical;
+ 12665:         String8 original_mnemonic = mnemonic;
+ 12666:         selection = assembly_x86_metadata_select_source_form(query, mnemonic, mnemonic_suffix_base, mnemonic_suffix_info,
+ 12667:                                                               mnemonic_suffix_width, operands, physical, operand_count, &original_mnemonic);
+ 12668:         if (selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS)
+ 12669:         {
+ 12670:             selection.status = BUSTER_X86_METADATA_ENCODE_RELATIVE_RANGE;
+ 12671:         }
+ 12672:     }
+ 12673:     if (selection.status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
+ 12674:     {
+ 12675:         BusterX86MetadataForm failure_form = {0};
+ 12676:         bool typed_decorator_authoritative = selection.failure_form_id != UINT32_MAX &&
+ 12677:                                              buster_x86_metadata_form(selection.failure_form_id, &failure_form) &&
+ 12678:                                              assembly_x86_metadata_typed_decorator_authoritative(
+ 12679:                                                  failure_form,
+ 12680:                                                  (BusterX86MetadataPhysicalQuery){
+ 12681:                                                      .operands = physical,
+ 12682:                                                      .operand_count = operand_count,
+ 12683:                                                      .attributes = attributes,
+ 12684:                                                      .address_size = address_size,
+ 12685:                                                      .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+ 12686:                                                     .source_semantics = true,
+ 12687:                                                 });
+ 12688:         builder->metadata_failure_typed_decorator_authoritative = typed_decorator_authoritative &&
+ 12689:                                                                    selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+ 12690:                                                                    selection.required_feature.length != 0;
+ 12691:         if (selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+ 12692:             (!selection.required_feature.length ||
+ 12693:              (assembly_x86_metadata_physical_has_duplicate_registers(physical, operand_count) && query.source_semantics &&
+ 12694:               !typed_decorator_authoritative)))
+ 12695:         {
+ 12696:             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 12697:         }
+ 12698:         return selection.status;
+ 12699:     }
+ 12700:     if (is_push_mnemonic)
+ 12701:     {
+ 12702:         query.operands = physical;
+ 12703:         assembly_x86_metadata_select_symbolic_push_imm32(query, &selection);
+ 12704:     }
+ 12705:     if (builder->instruction_count >= builder->instruction_capacity)
+ 12706:     {
+ 12707:         return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
+ 12708:     }
+ 12709:     AssemblyInstruction instruction = {
+ 12710:         .offset = offset,
+ 12711:         .line = line,
+ 12712:         .column = column,
+ 12713:         .size = selection.selected_byte_count,
+ 12714:         .metadata = true,
+ 12715:         .metadata_operand_count = (u8)operand_count,
+ 12716:         .metadata_include_implicit = query.include_implicit,
+ 12717:         .metadata_form_id = selection.form_id,
+ 12718:         .metadata_mnemonic = mnemonic,
+ 12719:         .metadata_address_size = address_size,
+ 12720:         .metadata_attributes = attributes,
+ 12721:     };
+ 12722:     if (operand_count)
+ 12723:     {
+ 12724:         memcpy(instruction.metadata_operands, physical, operand_count * sizeof(*physical));
+ 12725:     }
+ 12726:     builder->instructions[builder->instruction_count++] = instruction;
+ 12727:     return BUSTER_X86_METADATA_ENCODE_SUCCESS;
+ 12728: }
+ 12729: 
+ 12730: BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_has_unsigned_expression(AssemblyInstruction instruction)
+ 12731: {
+ 12732:     for (u32 index = 0; index < instruction.operand_count; index += 1)
+ 12733:     {
+ 12734:         AssemblyOperand operand = instruction.operands[index];
+ 12735:         if (operand.kind == ASSEMBLY_OPERAND_EXPRESSION && operand.expression.has_unsigned_addend)
+ 12736:         {
+ 12737:             return true;
+ 12738:         }
+ 12739:         if (operand.kind == ASSEMBLY_OPERAND_MEMORY && operand.memory.displacement.has_unsigned_addend)
+ 12740:         {
+ 12741:             return true;
+ 12742:         }
+ 12743:     }
+ 12566:         attributes.sae = true;
+ 12567:         attributes.decorator_flags |= BUSTER_X86_METADATA_DECORATOR_ROUNDING | BUSTER_X86_METADATA_DECORATOR_SAE;
+ 12568:     }
+ 12569:     String8 feature_names[TARGET_CPU_FEATURE_COUNT] = {0};
+ 12570:     u32 feature_count = assembly_x86_metadata_feature_names(target, feature_names, BUSTER_ARRAY_LENGTH(feature_names));
+ 12571:     assembly_x86_metadata_append_avx10_aliases(target, feature_names, &feature_count, BUSTER_ARRAY_LENGTH(feature_names), physical,
+ 12572:                                                 operand_count);
+ 12573:     // XED classifies a subset of legacy MMX rows under SSE2MMX even though
+ 12574:     // the assembler's baseline MMX contract accepts them without SSE2.  The
+ 12575:     // physical query is already restricted to MMX rows above, so supplying
+ 12576:     // the feature token here cannot make an XMM form pass the selector.
+ 12577:     if (mmx_instruction && !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_SSE2) &&
+ 12578:         feature_count < BUSTER_ARRAY_LENGTH(feature_names))
+ 12579:     {
+ 12580:         feature_names[feature_count++] = S8("sse2");
+ 12581:     }
+ 12582:     u8 address_size = source_address_size;
+ 12583:     bool memory_address_size_seen = false;
+ 12584:     for (u32 index = 0; index < operand_count; index += 1)
+ 12585:     {
+ 12586:         if (physical[index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+ 12587:         {
+ 12588:             continue;
+ 12589:         }
+ 12590:         u8 memory_address_size = physical[index].memory.address_size ? physical[index].memory.address_size : 64;
+ 12591:         if (source_address_size_seen && address_size != memory_address_size)
+ 12592:         {
+ 12593:             return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+ 12594:         }
+ 12595:         if (memory_address_size_seen && address_size != memory_address_size)
+ 12596:         {
+ 12597:             return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+ 12598:         }
+ 12599:         address_size = memory_address_size;
+ 12600:         memory_address_size_seen = true;
+ 12601:     }
+ 12602:     BusterX86MetadataPhysicalQuery query = {
+ 12603:         .mnemonic = mnemonic,
+ 12604:         .operands = physical,
+ 12605:         .operand_count = operand_count,
+ 12606:         .features = {.names = feature_names, .count = feature_count},
+ 12607:         .attributes = attributes,
+ 12608:         .address_size = address_size,
+ 12609:         .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+ 12610:         .include_privileged = true,
+ 12611:         .include_not64 = false,
+ 12612:         .include_implicit = operand_count && physical[operand_count - 1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+ 12613:                             physical[operand_count - 1].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&
+ 12614:                             physical[operand_count - 1].reg.index == 1 && physical[operand_count - 1].reg.width == 8 &&
+ 12615:                             (assembly_word_equal(mnemonic, S8("rol")) || assembly_word_equal(mnemonic, S8("ror")) ||
+ 12616:                              assembly_word_equal(mnemonic, S8("rcl")) || assembly_word_equal(mnemonic, S8("rcr")) ||
+ 12617:                              assembly_word_equal(mnemonic, S8("shld")) || assembly_word_equal(mnemonic, S8("shrd"))),
+ 12618:         .source_semantics = true,
+ 12619:     };
+ 12620:     bool relative_literal = false;
+ 12621:     for (u32 index = 0; index < operand_count; index += 1)
+ 12622:     {
+ 12623:         relative_literal |= physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE && !physical[index].has_symbol;
+ 12624:     }
+ 12625:     BusterX86MetadataSelectResult selection = {
+ 12626:         .status = BUSTER_X86_METADATA_ENCODE_INVALID_INPUT,
+ 12627:         .form_id = UINT32_MAX,
+ 12628:         .failure_form_id = UINT32_MAX,
+ 12629:     };
+ 12630:     bool selected = false;
+ 12631:     u32 trial_count = relative_literal ? 15 : 1;
+ 12632:     for (u32 trial_byte_count = 1; trial_byte_count <= trial_count; trial_byte_count += 1)
+ 12633:     {
+ 12634:         BusterX86MetadataPhysicalOperand trial_physical[ASSEMBLY_MAX_OPERANDS] = {0};
+ 12635:         memcpy(trial_physical, physical, operand_count * sizeof(*physical));
+ 12636:         if (relative_literal && !assembly_x86_metadata_adjust_relative_literals(trial_physical, operand_count, offset, trial_byte_count))
+ 12637:         {
+ 12638:             continue;
+ 12639:         }
+ 12640:         query.operands = trial_physical;
+ 12641:         String8 trial_mnemonic = mnemonic;
+ 12642:         BusterX86MetadataSelectResult trial_selection = assembly_x86_metadata_select_source_form(
+ 12643:             query, mnemonic, mnemonic_suffix_base, mnemonic_suffix_info, mnemonic_suffix_width, operands, trial_physical, operand_count,
+ 12644:             &trial_mnemonic);
+ 12645:         if (trial_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+ 12646:             (!relative_literal || trial_selection.selected_byte_count == trial_byte_count))
+ 12647:         {
+ 12648:             if (trial_selection.selected_memory_width && trial_selection.selected_memory_operand < operand_count)
+ 12649:                 trial_physical[trial_selection.selected_memory_operand].width = trial_selection.selected_memory_width;
+ 12650:             memcpy(physical, trial_physical, operand_count * sizeof(*physical));
+ 12651:             mnemonic = trial_mnemonic;
+ 12652:             selection = trial_selection;
+ 12653:             selected = true;
+ 12654:             break;
+ 12655:         }
+ 12656:         if (!relative_literal)
+ 12657:         {
+ 12658:             selection = trial_selection;
+ 12659:             break;
+ 12660:         }
+ 12661:     }
+ 12662:     if (!selected && relative_literal)
+ 12663:     {
+ 12664:         query.operands = physical;
+ 12665:         String8 original_mnemonic = mnemonic;
+ 12666:         selection = assembly_x86_metadata_select_source_form(query, mnemonic, mnemonic_suffix_base, mnemonic_suffix_info,
+ 12667:                                                               mnemonic_suffix_width, operands, physical, operand_count, &original_mnemonic);
+ 12668:         if (selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS)
+ 12669:         {
+ 12670:             selection.status = BUSTER_X86_METADATA_ENCODE_RELATIVE_RANGE;
+ 12671:         }
+ 12672:     }
+ 12673:     if (selection.status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
+ 12674:     {
+ 12675:         BusterX86MetadataForm failure_form = {0};
+ 12676:         bool typed_decorator_authoritative = selection.failure_form_id != UINT32_MAX &&
+ 12677:                                              buster_x86_metadata_form(selection.failure_form_id, &failure_form) &&
+ 12678:                                              assembly_x86_metadata_typed_decorator_authoritative(
+ 12679:                                                  failure_form,
+ 12680:                                                  (BusterX86MetadataPhysicalQuery){
+ 12681:                                                      .operands = physical,
+ 12682:                                                      .operand_count = operand_count,
+ 12683:                                                      .attributes = attributes,
+ 12684:                                                      .address_size = address_size,
+ 12685:                                                      .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+ 12686:                                                     .source_semantics = true,
+ 12687:                                                 });
+ 12688:         builder->metadata_failure_typed_decorator_authoritative = typed_decorator_authoritative &&
+ 12689:                                                                    selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+ 12690:                                                                    selection.required_feature.length != 0;
+ 12691:         if (selection.status == BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE &&
+ 12692:             (!selection.required_feature.length ||
+ 12693:              (assembly_x86_metadata_physical_has_duplicate_registers(physical, operand_count) && query.source_semantics &&
+ 12694:               !typed_decorator_authoritative)))
+ 12695:         {
+ 12696:             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 12697:         }
+ 12698:         return selection.status;
+ 12699:     }
+ 12700:     if (is_push_mnemonic)
+ 12701:     {
+ 12702:         query.operands = physical;
+ 12703:         assembly_x86_metadata_select_symbolic_push_imm32(query, &selection);
+ 12704:     }
+ 12705:     if (builder->instruction_count >= builder->instruction_capacity)
+ 12706:     {
+ 12707:         return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
+ 12708:     }
+ 12709:     AssemblyInstruction instruction = {
+ 12710:         .offset = offset,
+ 12711:         .line = line,
+ 12712:         .column = column,
+ 12713:         .size = selection.selected_byte_count,
+ 12714:         .metadata = true,
+ 12715:         .metadata_operand_count = (u8)operand_count,
+ 12716:         .metadata_include_implicit = query.include_implicit,
+ 12717:         .metadata_form_id = selection.form_id,
+ 12718:         .metadata_mnemonic = mnemonic,
+ 12719:         .metadata_address_size = address_size,
+ 12720:         .metadata_attributes = attributes,
+ 12721:     };
+ 12722:     if (operand_count)
+ 12723:     {
+ 12724:         memcpy(instruction.metadata_operands, physical, operand_count * sizeof(*physical));
+ 12725:     }
+ 12726:     builder->instructions[builder->instruction_count++] = instruction;
+ 12727:     return BUSTER_X86_METADATA_ENCODE_SUCCESS;
+ 12728: }
+ 12729: 
+ 12730: BUSTER_GLOBAL_LOCAL bool assembly_x86_instruction_has_unsigned_expression(AssemblyInstruction instruction)
+ 12731: {
+ 12732:     for (u32 index = 0; index < instruction.operand_count; index += 1)
+ 12733:     {
+ 12734:         AssemblyOperand operand = instruction.operands[index];
+ 12735:         if (operand.kind == ASSEMBLY_OPERAND_EXPRESSION && operand.expression.has_unsigned_addend)
+ 12736:         {
+ 12737:             return true;
+ 12738:         }
+ 12739:         if (operand.kind == ASSEMBLY_OPERAND_MEMORY && operand.memory.displacement.has_unsigned_addend)
+ 12740:         {
+ 12741:             return true;
+ 12742:         }
+ 12743:     }
+ 12744:     return false;
+ 12745: }
+ 12746: 
+ 12747: BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_instruction_is_novel(AssemblyInstruction instruction)
+ 12748: {
+ 12749:     if (assembly_word_equal(instruction.metadata_mnemonic, S8("vcvtbf42hf8")) ||
+ 12750:         assembly_word_equal(instruction.metadata_mnemonic, S8("vpslld")) ||
+ 12751:         assembly_word_equal(instruction.metadata_mnemonic, S8("vpsrld")))
+ 12752:     {
+ 12753:         return true;
+ 12754:     }
+ 12755:     // PUSH immediate is a classic encoding that has no handwritten form yet.
+ 12756:     // Preserve its metadata result instead of restoring the handwritten
+ 12757:     // invalid-operand diagnostic just because the encoding is not an ISA
+ 12758:     // extension.  Metadata selects the signed-imm8 or sign-extended imm32
+ 12759:     // form and carries symbol relocations through to emission.
+ 12760:     if (assembly_word_equal(instruction.metadata_mnemonic, S8("PUSH")) && instruction.metadata_operand_count == 1 &&
+ 12761:         instruction.metadata_operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE)
+ 12762:     {
+ 12763:         return true;
+ 12764:     }
+ 12765:     // PUSH and POP of a memory operand are classic encodings with no
+ 12766:     // handwritten form. A sigsetjmp that moves a return address in and out of
+
+===== src/buster/lib/compiler/assembly/assembly.c: 'suffix_alias_selected', hits [11746, 12392] =====
+ 11646:         if (assembly_word_equal(prefix, S8("lock")))
+ 11647:         {
+ 11648:             if (lock)
+ 11649:             {
+ 11650:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11651:             }
+ 11652:             lock = true;
+ 11653:         }
+ 11654:         else if (assembly_word_equal(prefix, S8("rep")) || assembly_word_equal(prefix, S8("repe")) ||
+ 11655:                  assembly_word_equal(prefix, S8("repz")))
+ 11656:         {
+ 11657:             if (rep || repne)
+ 11658:             {
+ 11659:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11660:             }
+ 11661:             rep = true;
+ 11662:         }
+ 11663:         else if (assembly_word_equal(prefix, S8("repne")) || assembly_word_equal(prefix, S8("repnz")))
+ 11664:         {
+ 11665:             if (rep || repne)
+ 11666:             {
+ 11667:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11668:             }
+ 11669:             repne = true;
+ 11670:         }
+ 11671:         else if (assembly_word_equal(prefix, S8("notrack")))
+ 11672:         {
+ 11673:             if (notrack)
+ 11674:             {
+ 11675:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11676:             }
+ 11677:             notrack = true;
+ 11678:         }
+ 11679:         else if (assembly_word_equal(prefix, S8("addr32")))
+ 11680:         {
+ 11681:             if (source_address_size_seen)
+ 11682:             {
+ 11683:                 // Address-size prefixes are source-level instruction
+ 11684:                 // modifiers.  A duplicate or conflicting modifier must not
+ 11685:                 // silently select a different EAMODE row.
+ 11686:                 return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
+ 11687:             }
+ 11688:             source_address_size = 32;
+ 11689:             source_address_size_seen = true;
+ 11690:         }
+ 11691:         else
+ 11692:         {
+ 11693:             u8 requested_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11694:             if (!assembly_x86_segment_parse(prefix, ASSEMBLY_SYNTAX_INTEL, &requested_segment))
+ 11695:             {
+ 11696:                 break;
+ 11697:             }
+ 11698:             if (segment_override_seen)
+ 11699:             {
+ 11700:                 return BUSTER_X86_METADATA_ENCODE_PREFIX_COMBINATION;
+ 11701:             }
+ 11702:             segment_override = requested_segment;
+ 11703:             segment_override_seen = true;
+ 11704:         }
+ 11705:         work = assembly_trim(string_slice(work, prefix_end, work.length));
+ 11706:     }
+ 11707:     bool no_flags = false;
+ 11708:     if (work.length && work.pointer[0] == '{')
+ 11709:     {
+ 11710:         u64 end = 1;
+ 11711:         while (end < work.length && work.pointer[end] != '}') end += 1;
+ 11712:         if (end >= work.length || !assembly_word_equal(assembly_trim(string_slice(work, 1, end)), S8("nf")))
+ 11713:         {
+ 11714:             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 11715:         }
+ 11716:         no_flags = true;
+ 11717:         work = assembly_trim(string_slice(work, end + 1, work.length));
+ 11718:     }
+ 11719:     u64 mnemonic_end = 0;
+ 11720:     while (mnemonic_end < work.length && !assembly_space(work.pointer[mnemonic_end])) mnemonic_end += 1;
+ 11721:     String8 source_mnemonic = string_slice(work, 0, mnemonic_end);
+ 11722:     u16 att_scalar_extend_source_width = syntax == ASSEMBLY_SYNTAX_ATT
+ 11723:                                             ? assembly_x86_metadata_att_scalar_extend_source_width(source_mnemonic)
+ 11724:                                             : 0;
+ 11725:     String8 metadata_source_mnemonic = assembly_x86_metadata_att_string_alias(syntax, source_mnemonic);
+ 11726:     String8 mnemonic = assembly_x86_metadata_mnemonic(metadata_source_mnemonic);
+ 11727:     String8 mnemonic_suffix_base = {0};
+ 11728:     AssemblyInstructionInfo mnemonic_suffix_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+ 11729:     u8 mnemonic_suffix_width = 0;
+ 11730:     bool has_suffix_alias = assembly_x86_metadata_suffix_alias(target, syntax, source_mnemonic, &mnemonic_suffix_base,
+ 11731:                                                                 &mnemonic_suffix_info, &mnemonic_suffix_width);
+ 11732:     bool has_mnemonic = mnemonic.length && buster_x86_metadata_lookup_mnemonic(mnemonic).count;
+ 11733:     if (!has_mnemonic)
+ 11734:     {
+ 11735:         if (!has_suffix_alias)
+ 11736:         {
+ 11737:             return BUSTER_X86_METADATA_ENCODE_UNKNOWN_MNEMONIC;
+ 11738:         }
+ 11739:         mnemonic = mnemonic_suffix_base;
+ 11740:         mnemonic = assembly_x86_metadata_mnemonic(mnemonic);
+ 11741:     }
+ 11742:     else if (!has_suffix_alias)
+ 11743:     {
+ 11744:         mnemonic_suffix_base = (String8){0};
+ 11745:     }
+ 11746:     bool suffix_alias_selected = !has_mnemonic && has_suffix_alias;
+ 11747:     String8 operands_text = assembly_trim(string_slice(work, mnemonic_end, work.length));
+ 11748:     u8 leading_rounding = 0;
+ 11749:     bool leading_sae = false;
+ 11750:     if (operands_text.length && operands_text.pointer[0] == '{')
+ 11751:     {
+ 11752:         u64 end = 1;
+ 11753:         while (end < operands_text.length && operands_text.pointer[end] != '}') end += 1;
+ 11754:         if (end >= operands_text.length)
+ 11755:         {
+ 11756:             return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 11757:         }
+ 11758:         String8 decorator = assembly_trim(string_slice(operands_text, 1, end));
+ 11759:         leading_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? BUSTER_X86_METADATA_ROUNDING_NEAREST
+ 11760:                           : assembly_word_equal(decorator, S8("rd-sae")) ? BUSTER_X86_METADATA_ROUNDING_DOWN
+ 11761:                           : assembly_word_equal(decorator, S8("ru-sae")) ? BUSTER_X86_METADATA_ROUNDING_UP
+ 11762:                           : assembly_word_equal(decorator, S8("rz-sae")) ? BUSTER_X86_METADATA_ROUNDING_ZERO
+ 11763:                                                                           : 0;
+ 11764:         leading_sae = assembly_word_equal(decorator, S8("sae")) || leading_rounding != 0;
+ 11765:         if (!leading_sae)
+ 11766:         {
+ 11767:             return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 11768:         }
+ 11769:         operands_text = assembly_trim(string_slice(operands_text, end + 1, operands_text.length));
+ 11770:         if (operands_text.length && operands_text.pointer[0] == ',')
+ 11771:         {
+ 11772:             operands_text = assembly_trim(string_slice(operands_text, 1, operands_text.length));
+ 11773:         }
+ 11774:     }
+ 11775:     AssemblyOperand operands[ASSEMBLY_MAX_OPERANDS] = {0};
+ 11776:     u32 operand_count = 0;
+ 11777:     u64 operand_start = 0;
+ 11778:     bool relative = assembly_x86_metadata_relative_mnemonic(mnemonic);
+ 11779:     u8 branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NONE;
+ 11780:     u8 implicit_segment = segment_override;
+ 11781:     if (segment_override == BUSTER_X86_METADATA_SEGMENT_CS)
+ 11782:     {
+ 11783:         if (relative)
+ 11784:         {
+ 11785:             branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_NOT_TAKEN;
+ 11786:             implicit_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11787:         }
+ 11788:     }
+ 11789:     else if (segment_override == BUSTER_X86_METADATA_SEGMENT_DS)
+ 11790:     {
+ 11791:         if (relative)
+ 11792:         {
+ 11793:             branch_hint = BUSTER_X86_METADATA_BRANCH_HINT_TAKEN;
+ 11794:             implicit_segment = BUSTER_X86_METADATA_SEGMENT_NONE;
+ 11795:         }
+ 11796:     }
+ 11797:     bool mnemonic_requires_dfv = assembly_x86_metadata_mnemonic_requires_dfv(mnemonic);
+ 11798:     u32 symbol_count_before_dfv = builder->result.symbol_count;
+ 11799:     bool has_dfv = false;
+ 11800:     u8 dfv = 0;
+ 11801:     while (operand_start < operands_text.length)
+ 11802:     {
+ 11803:         if (operand_count >= BUSTER_ARRAY_LENGTH(operands))
+ 11804:         {
+ 11805:             return BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT;
+ 11806:         }
+ 11807:         String8 text = {0};
+ 11808:         if (assembly_operand_split_next(operands_text, &operand_start, &text) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
+ 11809:         {
+ 11810:             return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 11811:         }
+ 11812:         // Metadata-only EVEX mnemonics do not pass through the handwritten
+ 11813:         // vector parser, but they use the same standalone SAE/rounding token
+ 11814:         // placement: Intel after the visible operands (or before an
+ 11815:         // immediate), and AT&T after the immediate.  Consume that token here
+ 11816:         // so it becomes the typed query attribute instead of being sent to
+ 11817:         // the expression parser.  Form selection remains the authority for
+ 11818:         // whether the selected metadata row actually permits the control.
+ 11819:         if (text.length >= 3 && text.pointer[0] == '{' && text.pointer[text.length - 1] == '}')
+ 11820:         {
+ 11821:             String8 decorator = assembly_trim(string_slice(text, 1, text.length - 1));
+ 11822:             u8 pseudo_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? BUSTER_X86_METADATA_ROUNDING_NEAREST
+ 11823:                                : assembly_word_equal(decorator, S8("rd-sae")) ? BUSTER_X86_METADATA_ROUNDING_DOWN
+ 11824:                                : assembly_word_equal(decorator, S8("ru-sae")) ? BUSTER_X86_METADATA_ROUNDING_UP
+ 11825:                                : assembly_word_equal(decorator, S8("rz-sae")) ? BUSTER_X86_METADATA_ROUNDING_ZERO
+ 11826:                                                                                 : 0;
+ 11827:             bool pseudo_sae = assembly_word_equal(decorator, S8("sae")) || pseudo_rounding != 0;
+ 11828:             if (pseudo_sae)
+ 11829:             {
+ 11830:                 if (leading_sae || (syntax == ASSEMBLY_SYNTAX_ATT && operand_count == 0))
+ 11831:                     return BUSTER_X86_METADATA_ENCODE_DECORATOR;
+ 11832:                 leading_rounding = pseudo_rounding;
+ 11833:                 leading_sae = true;
+ 11834:                 continue;
+ 11835:             }
+ 11836:         }
+ 11837:         bool indirect = syntax == ASSEMBLY_SYNTAX_ATT && relative && text.pointer[0] == '*';
+ 11838:         if (indirect)
+ 11839:         {
+ 11840:             text = assembly_trim(string_slice(text, 1, text.length));
+ 11841:             if (!text.length)
+ 11842:             {
+ 11843:                 return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 11844:             }
+ 11845:         }
+ 11846:         AssemblyOperand* operand = operands + operand_count;
+ 12292:         // destination implicitly repeated as its source.  The metadata schema
+ 12293:         // keeps that source binding visible to the physical query.
+ 12294:         physical[2] = physical[1];
+ 12295:         physical[1] = physical[0];
+ 12296:         operands[2] = operands[1];
+ 12297:         operands[1] = operands[0];
+ 12298:         operand_count = 3;
+ 12299:     }
+ 12300:     bool rotate_mnemonic = assembly_x86_opcode_is_rotate(mnemonic_suffix_info.opcode) ||
+ 12301:                            assembly_word_equal(mnemonic, S8("rol")) || assembly_word_equal(mnemonic, S8("ror")) ||
+ 12302:                            assembly_word_equal(mnemonic, S8("rcl")) || assembly_word_equal(mnemonic, S8("rcr"));
+ 12303:     if (rotate_mnemonic)
+ 12304:     {
+ 12305:         for (u32 index = 0; index < operand_count; index += 1)
+ 12306:         {
+ 12307:             BusterX86MetadataPhysicalOperand* count = physical + index;
+ 12308:             if (count->kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE && count->has_value && count->value < 0)
+ 12309:             {
+ 12310:                 count->unsigned_value = (u64)count->value & UINT64_C(0xff);
+ 12311:                 count->has_unsigned_value = true;
+ 12312:                 count->has_value = false;
+ 12313:             }
+ 12314:         }
+ 12315:     }
+ 12316:     // Direct symbol-relative calls/jumps/conditions have no link-time range
+ 12317:     // information. Preserve the legacy near form (disp32) and relocation
+ 12318:     // width instead of allowing metadata to choose a short disp8 candidate.
+ 12319:     bool near_symbol_relative = assembly_word_equal(mnemonic, S8("call")) || assembly_word_equal(mnemonic, S8("jmp")) ||
+ 12320:                                 assembly_word_equal(mnemonic, S8("xbegin")) ||
+ 12321:                                 (mnemonic.length && (mnemonic.pointer[0] == 'j' || mnemonic.pointer[0] == 'J') &&
+ 12322:                                  !assembly_word_equal(mnemonic, S8("jcxz")) && !assembly_word_equal(mnemonic, S8("jecxz")) &&
+ 12323:                                  !assembly_word_equal(mnemonic, S8("jrcxz")));
+ 12324:     if (near_symbol_relative)
+ 12325:     {
+ 12326:         for (u32 index = 0; index < operand_count; index += 1)
+ 12327:         {
+ 12328:             if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE && physical[index].has_symbol)
+ 12329:             {
+ 12330:                 // A label already defined in this source stream can use the
+ 12331:                 // canonical short form when the resolved displacement fits.
+ 12332:                 // Keep forward/unknown symbols at the near width so an
+ 12333:                 // external linker relocation never depends on an 8-bit range.
+ 12334:                 u32 symbol_index = assembly_symbol_find(builder, physical[index].symbol);
+ 12335:                 bool symbol_defined = symbol_index != UINT32_MAX && builder->result.symbols[symbol_index].defined;
+ 12336:                 if (!symbol_defined)
+ 12337:                 {
+ 12338:                     physical[index].width = 32;
+ 12339:                 }
+ 12340:             }
+ 12341:         }
+ 12342:     }
+ 12343:     // These metadata forms have a fixed memory element width.  Intel permits
+ 12344:     // unsized CLRSSBSY/RSTORSSP memory operands, while AT&T leaves the width
+ 12345:     // implicit for the WRSS/WRUSS rows too.  Normalize the cohort before form
+ 12346:     // selection so both dialects select the same rows, including APX-F CET.
+ 12347:     u16 implicit_memory_width = 0;
+ 12348:     bool cet_unsized_intel = syntax == ASSEMBLY_SYNTAX_INTEL &&
+ 12349:                              (assembly_word_equal(mnemonic, S8("rstorssp")) || assembly_word_equal(mnemonic, S8("clrssbsy")));
+ 12350:     bool implicit_att_memory = syntax == ASSEMBLY_SYNTAX_ATT;
+ 12351:     if (implicit_att_memory && assembly_word_equal(mnemonic, S8("cldemote"))) implicit_memory_width = 8;
+ 12352:     else if (implicit_att_memory && (assembly_word_equal(mnemonic, S8("stmxcsr")) || assembly_word_equal(mnemonic, S8("ldmxcsr"))))
+ 12353:         // MXCSR is one 32-bit control word and AT&T carries no size suffix on
+ 12354:         // the spelling a libc's <fenv.h> uses.
+ 12355:         implicit_memory_width = 32;
+ 12356:     else if (implicit_att_memory &&
+ 12357:              (assembly_word_equal(mnemonic, S8("wrssd")) || assembly_word_equal(mnemonic, S8("wrussd"))))
+ 12358:         implicit_memory_width = 32;
+ 12359:     else if (implicit_att_memory &&
+ 12360:              (assembly_word_equal(mnemonic, S8("wrssq")) || assembly_word_equal(mnemonic, S8("wrussq")) ||
+ 12361:               assembly_word_equal(mnemonic, S8("rstorssp")) || assembly_word_equal(mnemonic, S8("clrssbsy"))))
+ 12362:         implicit_memory_width = 64;
+ 12363:     else if (implicit_att_memory &&
+ 12364:              (assembly_word_equal(mnemonic, S8("bsrmovh")) || assembly_word_equal(mnemonic, S8("bsrmovl"))))
+ 12365:         // BSRMOVH/L's only memory schema is a fixed u64 element.  AT&T has
+ 12366:         // no ptr qualifier, so resolve an unsized memory operand here; an
+ 12367:         // explicit q suffix remains accepted by the generic alias path.
+ 12368:         implicit_memory_width = 64;
+ 12369:     else if (assembly_word_equal(mnemonic, S8("tileloadd")) || assembly_word_equal(mnemonic, S8("tileloaddt1")) ||
+ 12370:              assembly_word_equal(mnemonic, S8("tilestored")))
+ 12371:         // AMX tile rows use one u32 address element even when Intel syntax
+ 12372:         // omits a ptr qualifier.  Resolve the unsized memory before metadata
+ 12373:         // form selection so standard AMX_TILE rows remain distinct from the
+ 12374:         // feature-gated APX siblings.
+ 12375:         implicit_memory_width = 32;
+ 12376:     else if (implicit_att_memory &&
+ 12377:              (assembly_word_equal(mnemonic, S8("tileloaddrs")) || assembly_word_equal(mnemonic, S8("tileloaddrst1"))))
+ 12378:         // AMX MOVRS has one fixed u32 memory schema. AT&T carries no `ptr`
+ 12379:         // qualifier, so resolve the unsized address before metadata selection.
+ 12380:         implicit_memory_width = 32;
+ 12381:     else if (cet_unsized_intel) implicit_memory_width = 64;
+ 12382:     if (implicit_memory_width)
+ 12383:     {
+ 12384:         for (u32 index = 0; index < operand_count; index += 1)
+ 12385:         {
+ 12386:             if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && !physical[index].width)
+ 12387:             {
+ 12388:                 physical[index].width = implicit_memory_width;
+ 12389:             }
+ 12390:         }
+ 12391:     }
+ 12392:     if (suffix_alias_selected && !assembly_x86_metadata_suffix_width_matches(mnemonic_suffix_info, mnemonic_suffix_width, operands,
+ 12393:                                                                                physical, operand_count))
+ 12394:     {
+ 12395:         return BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+ 12396:     }
+ 12397:     AssemblyInstructionInfo mnemonic_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
+ 12398:     bool is_push_mnemonic = assembly_instruction_lookup(target, syntax, mnemonic, &mnemonic_info) &&
+ 12399:                             mnemonic_info.opcode == ASSEMBLY_OPCODE_X86_PUSH;
+ 12400:     // An unresolved PUSH immediate cannot be proven to fit the short form.
+ 12401:     // Reserve the architectural sign-extended imm32 relocation so linking a
+ 12402:     // normal symbol address does not depend on it happening to fit in 8 bits.
+ 12403:     if (is_push_mnemonic)
+ 12404:     {
+ 12405:         for (u32 index = 0; index < operand_count; index += 1)
+ 12406:         {
+ 12407:             if (physical[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE && physical[index].has_symbol)
+ 12408:             {
+ 12409:                 physical[index].width = 32;
+ 12410:             }
+ 12411:         }
+ 12412:     }
+ 12413:     for (u32 immediate_index = 0; immediate_index < operand_count; immediate_index += 1)
+ 12414:     {
+ 12415:         if (physical[immediate_index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE || physical[immediate_index].width)
+ 12416:         {
+ 12417:             continue;
+ 12418:         }
+ 12419:         // IMUL's immediate is a variable signed 8/32-bit field independent
+ 12420:         // of the destination width; SHLD/SHRD and rotate/shift counts are
+ 12421:         // fixed imm8 fields.  Leave those widths unconstrained so metadata
+ 12422:         // can select the canonical short form instead of rejecting a query
+ 12423:         // merely because the data operand is 16/32/64 bits wide.
+ 12424:         if (assembly_word_equal(mnemonic, S8("imul")) || assembly_word_equal(mnemonic, S8("shld")) ||
+ 12425:             assembly_word_equal(mnemonic, S8("shrd")) || assembly_x86_opcode_is_rotate(mnemonic_suffix_info.opcode) ||
+ 12426:             assembly_x86_opcode_is_shift(mnemonic_suffix_info.opcode))
+ 12427:         {
+ 12428:             continue;
+ 12429:         }
+ 12430:         for (u32 source_index = 0; source_index < operand_count; source_index += 1)
+ 12431:         {
+ 12432:             if (source_index == immediate_index)
+ 12433:             {
+ 12434:                 continue;
+ 12435:             }
+ 12436:             BusterX86MetadataPhysicalOperand source = physical[source_index];
+ 12437:             u16 width = 0;
+ 12438:             if (source.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+ 12439:                 source.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR && source.reg.width <= 64)
+ 12440:             {
+ 12441:                 width = source.reg.width;
+ 12442:             }
+ 12443:             else if (source.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && source.width && source.width <= 64)
+ 12444:             {
+ 12445:                 width = source.width;
+ 12446:             }
+ 12447:             if (width)
+ 12448:             {
+ 12449:                 physical[immediate_index].width = width;
+ 12450:                 break;
+ 12451:             }
+ 12452:         }
+ 12453:     }
+ 12454:     // GNU as writes an immediate's bit pattern, not its arithmetic value:
+ 12455:     // `movl $0xc2820000,-4(%rsp)` and `or $0x8000,%ax` each name a field whose
+ 12456:     // top bit is set. Re-express such a literal as the signed value that field
+ 12457:     // holds, so form selection sees a width it can encode instead of a
+ 12458:     // magnitude past the signed maximum. Only the 16- and 32-bit widths need
+ 12459:     // it: those are the IMMz fields whose literal is range-checked as signed,
+ 12460:     // while a byte operand's immediate is the operand's own width and the
+ 12461:     // unsigned spelling already fits it.
+ 12462:     for (u32 index = 0; index < operand_count; index += 1)
+ 12463:     {
+ 12464:         BusterX86MetadataPhysicalOperand* immediate = physical + index;
+ 12465:         if (immediate->kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE || !immediate->has_value || immediate->value <= 0 ||
+ 12466:             (immediate->width != 16 && immediate->width != 32))
+ 12467:         {
+ 12468:             continue;
+ 12469:         }
+ 12470:         u64 limit = (u64)1 << immediate->width;
+ 12471:         u64 magnitude = (u64)immediate->value;
+ 12472:         if (magnitude >= limit >> 1 && magnitude < limit)
+ 12473:         {
+ 12474:             immediate->value = (s64)magnitude - (s64)limit;
+ 12475:         }
+ 12476:     }
+ 12477:     BusterX86MetadataPhysicalAttributes attributes = {
+ 12478:         .lock = lock,
+ 12479:         .rep = rep,
+ 12480:         .repne = repne,
+ 12481:         .implicit_segment = implicit_segment,
+ 12482:         .branch_hint = branch_hint,
+ 12483:         .notrack = notrack,
+ 12484:         .no_flags = no_flags,
+ 12485:         .dfv = dfv,
+ 12486:         .has_dfv = has_dfv,
+ 12487:     };
+ 12488:     if (no_flags)
+ 12489:     {
+ 12490:         attributes.apx_flags |= BUSTER_X86_METADATA_APX_NF;
+ 12491:     }
+ 12492:     assembly_x86_metadata_apx_disasm_alias(metadata_source_mnemonic, &attributes);
