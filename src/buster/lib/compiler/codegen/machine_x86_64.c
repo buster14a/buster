@@ -7918,6 +7918,27 @@ struct MachineX64GprEncoding
     u8 bytes[15];
     u8 byte_count;
 };
+BUSTER_CT_CHECK(sizeof(MachineX64GprEncoding) == 16);
+
+// Copy one published encoding into the code buffer. Every record is exactly
+// one sixteen-byte line and every emitted row was budgeted at least
+// MACHINE_OPCODE_ROW_FLAT_BUDGET bytes, so the ordinary case is a whole-line
+// load and store the compiler emits inline -- 15 Ir a call went to libc for a
+// length it could not see, over 2,0 M calls a compile. The exact copy stays
+// for the last row of a buffer, the only place where sixteen bytes of slack
+// is not already reserved.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE void machine_x64_encoder_copy_encoding(MachineX64Encoder* encoder, MachineX64GprEncoding const* encoding, u32 byte_count)
+{
+    if (BUSTER_LIKELY(encoder->capacity - encoder->count >= sizeof(*encoding)))
+    {
+        memcpy(encoder->bytes + encoder->count, encoding, sizeof(*encoding));
+    }
+    else
+    {
+        memcpy(encoder->bytes + encoder->count, encoding->bytes, byte_count);
+    }
+}
+
 struct MachineX64GprEncodingTable
 {
     MachineX64GprEncoding encodings[256];
@@ -10527,7 +10548,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
         return false;
     }
 
-    memcpy(encoder->bytes + encoder->count, encoding->bytes, byte_count);
+    // The published encoding record is exactly one sixteen-byte line, so a
+    // 1-15 byte copy is one load and one store whose width the caller can
+    // fold, not a call into libc with a length it cannot see. The spare bytes
+    // land inside the row budget every emitter already reserved and the next
+    // emit overwrites them; only a row that would end within sixteen bytes of
+    // capacity takes the exact copy.
+    machine_x64_encoder_copy_encoding(encoder, encoding, byte_count);
     if (displacement_class == 1)
     {
         encoder->bytes[encoder->count + byte_count - 1u] = (u8)displacement;
@@ -10536,10 +10563,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     {
         u32 patch_offset = encoder->count + byte_count - (u32)sizeof(u32);
         u32 value = (u32)displacement;
-        for (u32 byte_index = 0; byte_index < sizeof(u32); byte_index += 1)
-        {
-            encoder->bytes[patch_offset + byte_index] = (u8)(value >> (byte_index * 8u));
-        }
+        // One 32-bit store: the byte loop spelled the same little-endian
+        // field four times over, and the fixup path below has always written
+        // it as one store.
+        memcpy(encoder->bytes + patch_offset, &value, sizeof(value));
     }
     encoder->count += byte_count;
     if (counters)
@@ -10725,7 +10752,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
             }
             else
             {
-                memcpy(encoder->bytes + encoder->count, encoding->bytes, byte_count);
+                machine_x64_encoder_copy_encoding(encoder, encoding, byte_count);
             }
             if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_IMMEDIATE)
             {
@@ -11247,50 +11274,22 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     {
         return result;
     }
-    // Per-row worst-case byte budget: switches and aggregate copies expand
-    // with their side data, everything else fits the flat row budget.
+    // Per-row worst-case byte budget, read from the published opcode row
+    // rather than re-derived by a switch: the budget is a function of the
+    // opcode, so it is table content. Switches and aggregate copies are the
+    // only rows whose budget also depends on their own side data, and they
+    // are 2% of the stream, so their arm is a predicted-not-taken branch
+    // instead of a nine-way dispatch on every one of 1,7 M rows.
+    MachineOpcodeRow const* opcode_rows = machine_opcode_row_table();
     u64 capacity64 = 64;
     for (u32 capacity_index = 0; capacity_index < function->instruction_count; capacity_index += 1)
     {
         MachineInstruction* capacity_row = function->instructions + capacity_index;
-        switch (capacity_row->opcode)
+        MachineOpcodeRow row = opcode_rows[capacity_row->opcode];
+        capacity64 += row.encode_budget;
+        if (BUSTER_UNLIKELY((row.flags & MACHINE_OPCODE_ROW_VARIABLE_BUDGET) != 0))
         {
-            break;
-        case MACHINE_X64_SWITCH:
-            capacity64 += (u64)capacity_row->flags * 24 + 8;
-            break;
-        case MACHINE_X64_COPY_FRAME_FROM_FRAME:
-        case MACHINE_X64_COPY_FRAME_FROM_PTR:
-        case MACHINE_X64_COPY_PTR_FROM_FRAME:
-            capacity64 += ((u64)capacity_row->payload / 8 + 4) * 24;
-            break;
-        case MACHINE_X64_STACK_ALLOCATE:
-            // Alignment, the page-probe loop, the final subtract/touch, and
-            // the RSP result are substantially larger than a normal row.
-            capacity64 += 64;
-            break;
-        case MACHINE_X64_VA_SAVE:
-            // Six GP stores plus eight XMM stores, each with a disp32 frame
-            // address and (for XMM) the legacy SSE prefix. Keep ample room
-            // for the fixed prologue and allocator edits around the row.
-            capacity64 += 320;
-            break;
-        case MACHINE_X64_VA_ARG:
-            // Mixed/aggregate values may emit two bounds checks, one load
-            // per eightbyte, frame stores, and the complete overflow copy.
-            capacity64 += 640;
-            break;
-        case MACHINE_X64_FCMP_SET:
-            capacity64 += 40;
-            break;
-        case MACHINE_X64_ATOMIC_RMW:
-            capacity64 += 48;
-            break;
-        case MACHINE_X64_ATOMIC_CMPXCHG16:
-            capacity64 += 96;
-            break;
-        default:
-            capacity64 += 24;
+            capacity64 += capacity_row->opcode == MACHINE_X64_SWITCH ? (u64)capacity_row->flags * 24u : ((u64)capacity_row->payload / 8u) * 24u;
         }
     }
     // The fixed frame is reserved in the prologue, independently of any
