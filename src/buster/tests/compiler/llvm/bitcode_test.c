@@ -1,5 +1,122 @@
 #include <buster/tests/compiler/llvm/bitcode_test.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/os.h>
+
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    String8 fixtures[] = {
+        S8("tests/basic_c_llvm_scalars.c"), S8("tests/basic_c_llvm_layout.c"),
+#if BUSTER_CPU_ARCH_X86_64
+        S8("tests/basic_c_llvm_aggregate_abi_callee.c"), S8("tests/basic_c_llvm_aggregate_abi_caller.c"),
+        S8("tests/basic_c_llvm_vector_abi.c"),
+#endif
+    };
+    for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-consumer"), S8(".bc"));
+        String8 command[] = {S8("-emit-llvm"), S8("-o"), output, fixtures[fixture]};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("LLVM fixture {S8}: {S8}\n"), fixtures[fixture], emitted.diagnostic);
+        }
+        BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-consumer"),
+#if BUSTER_WINDOWS
+                                                          S8(".exe"));
+#else
+                                                          S8(""));
+#endif
+            String8 compile[6];
+            u64 compile_count = 0;
+            compile[compile_count++] = compiler;
+            compile[compile_count++] = S8("-O2");
+            compile[compile_count++] = output;
+            if (fixture >= 2)
+            {
+                compile[compile_count++] = fixture == 4 ? S8("tests/basic_c_llvm_vector_abi_main.c") : fixtures[fixture ^ 1u];
+            }
+            compile[compile_count++] = S8("-o");
+            compile[compile_count++] = executable;
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = compile, .length = compile_count}, (SliceString8){0}, (SliceString8){0},
+                (ProcessSpawnOptions){.use_process_environment = true,
+                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+            BUSTER_TEST(arguments, spawned.handle != 0);
+            if (spawned.handle)
+            {
+                ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                if (compiled.result != PROCESS_RESULT_SUCCESS)
+                {
+                    ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                    arguments->show(arguments, S8("LLVM consumer rejected {S8}: {S8}\n"), fixtures[fixture],
+                                    (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                }
+                BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                if (compiled.result == PROCESS_RESULT_SUCCESS)
+                {
+                    String8 run[] = {executable};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    BUSTER_TEST(arguments, child.handle != 0);
+                    if (child.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    if (!compiler.length)
+    {
+        arguments->show(arguments, S8("LLVM consumer execution skipped: clang is unavailable on PATH\n"));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_abi_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("aarch64-unknown-linux-gnu"), S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux"), S8("x86_64-unknown-linux-gnu")};
+    String8 modes[] = {S8("-DABI_TEST_MODE=0"), S8("-DABI_TEST_MODE=1"), S8("-DABI_TEST_MODE=2"), S8("-DABI_TEST_MODE=3"),
+                       S8("-DABI_TEST_MODE=4"), S8("-DABI_TEST_MODE=5"), S8("-DABI_TEST_MODE=6")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = target == 3 ? 3 : 0; mode < BUSTER_ARRAY_LENGTH(modes) - (target != 3); mode += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 output = buster_test_temporary_path(arena, S8("buster-llvm-unsupported-abi"), S8(".bc"));
+            String8 command[] = {S8("-emit-llvm"), S8("-target"), targets[target], modes[mode], S8("-o"), output,
+                                 S8("tests/basic_c_llvm_abi_unsupported.c")};
+            CompilerDriverResult emitted = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            if (mode != 3)
+            {
+                BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_LLVM_BITCODE);
+                BUSTER_TEST(arguments, !emitted.llvm_bitcode.success && emitted.llvm_bitcode.bytes.length == 0);
+                String8 diagnostic = mode == 4 ? S8("aggregate variadic arguments") :
+                                     target == 3 && mode == 6 ? S8("SysV aggregate register layout") : S8("aggregate function ABI");
+                BUSTER_TEST(arguments, string_first_sequence(emitted.diagnostic, diagnostic) != BUSTER_STRING_NO_MATCH);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE);
+                BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(emitted.llvm_bitcode));
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
 
 /* One module holding a three-byte record and an `_Atomic` copy of it whose
    promoted size is `atomic_size`, emitted for its type table alone: the walk in
@@ -344,6 +461,12 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(atomic_padded));
     BUSTER_TEST(arguments, atomic_alias.stats.type_count == without_atomic.stats.type_count);
     BUSTER_TEST(arguments, atomic_padded.stats.type_count == without_atomic.stats.type_count + 2);
+    UnitTestResult consumers = llvm_bitcode_test_consumers(arguments);
+    result.test_count += consumers.test_count;
+    result.succeeded_test_count += consumers.succeeded_test_count;
+    UnitTestResult diagnostics = llvm_bitcode_test_abi_diagnostics(arguments);
+    result.test_count += diagnostics.test_count;
+    result.succeeded_test_count += diagnostics.succeeded_test_count;
     return result;
 }
 #endif

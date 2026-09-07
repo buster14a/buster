@@ -75,6 +75,19 @@ save/restore, instruction-cache clearing, slice/reverse helpers, variadic
 intrinsics, inline assembly, SIMD, label addresses, indirect branches, and
 debug traps, are deliberate diagnostics.
 
+Aggregate storage preserves canonical field offsets, packing, and tail padding.
+Aggregate function parameters and results follow the x86-64 System V or Win64
+C calling convention, including indirect calls, register exhaustion, by-value
+stack arguments, and hidden result pointers. LLVM parameter attributes describe
+these ABI storage requirements.
+
+Aggregate function signatures on AArch64, Wasm64, and eBPF, aggregate
+parameters/results without value fields, aggregate variadic arguments, and System V unions containing
+128-bit floating values currently produce an
+explicit diagnostic. Scalar signatures and aggregate local storage remain
+available on those targets. The emitter does not substitute a raw LLVM record
+signature for an unimplemented target ABI.
+
 Source-level debug metadata and LLVM optimization pipelines are outside the
 current emitter. Add new mappings only with deterministic byte-level tests and
 validation through an LLVM consumer that can parse the generated module.

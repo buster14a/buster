@@ -1,6 +1,8 @@
 #include <buster/lib/compiler/llvm/bitcode.h>
 
-// LLVM's bitstream is LSB-first. The writer intentionally emits
+// Direct canonical-IR serialization: llvm_bc_build_types preserves storage
+// layout, llvm_bc_plan_function assigns SSA ids, and llvm_bc_emit_module writes
+// the records. LLVM's bitstream is LSB-first. The writer intentionally emits
 // unabbreviated records: this keeps the implementation small and auditable,
 // while remaining a fully conforming, self-describing LLVM bitcode stream.
 
@@ -12,10 +14,20 @@ enum
     LLVM_BC_UNABBREV_RECORD = 3,
 
     LLVM_BC_MODULE_BLOCK = 8,
+    LLVM_BC_PARAMATTR_BLOCK = 9,
+    LLVM_BC_PARAMATTR_GROUP_BLOCK = 10,
     LLVM_BC_CONSTANTS_BLOCK = 11,
     LLVM_BC_FUNCTION_BLOCK = 12,
     LLVM_BC_VALUE_SYMTAB_BLOCK = 14,
     LLVM_BC_TYPE_BLOCK = 17,
+
+    LLVM_BC_ATTRIBUTE_LIST = 2,
+    LLVM_BC_ATTRIBUTE_GROUP = 3,
+    LLVM_BC_ATTRIBUTE_INTEGER = 1,
+    LLVM_BC_ATTRIBUTE_TYPE = 6,
+    LLVM_BC_ATTRIBUTE_ALIGNMENT = 1,
+    LLVM_BC_ATTRIBUTE_BYVAL = 3,
+    LLVM_BC_ATTRIBUTE_SRET = 29,
 
     LLVM_BC_MODULE_VERSION = 1,
     LLVM_BC_MODULE_TRIPLE = 2,
@@ -164,6 +176,37 @@ struct LlvmBcConstant
     u32 operand_count;
 };
 
+typedef struct LlvmBcAbiValue LlvmBcAbiValue;
+struct LlvmBcAbiValue
+{
+    u32 type_id;
+    u32 storage_type_id;
+    u32 alignment;
+    bool aggregate;
+    bool indirect;
+    bool byval;
+};
+
+typedef struct LlvmBcAbiSignature LlvmBcAbiSignature;
+struct LlvmBcAbiSignature
+{
+    LlvmBcAbiValue result;
+    LlvmBcAbiValue* parameters;
+    u32 parameter_count;
+    u32 attribute_list_id;
+    u32 first_attribute_group;
+    u32 attribute_group_count;
+};
+
+typedef struct LlvmBcAttributeGroup LlvmBcAttributeGroup;
+struct LlvmBcAttributeGroup
+{
+    u32 parameter;
+    u32 kind;
+    u32 type_id;
+    u32 alignment;
+};
+
 typedef struct LlvmBcGlobal LlvmBcGlobal;
 struct LlvmBcGlobal
 {
@@ -229,6 +272,15 @@ struct LlvmBcContext
     u32 type_count;
     u32 type_capacity;
     u32* ir_type_ids;
+    u32** ir_field_indices;
+    LlvmBcAbiSignature** abi_signatures;
+    LlvmBcAbiSignature** attribute_lists;
+    LlvmBcAttributeGroup* attribute_groups;
+    u32 attribute_group_count;
+    u32 attribute_group_capacity;
+    u32 attribute_list_count;
+    Target abi_target;
+    bool abi_target_valid;
     u32 void_type_id;
     u32 pointer_type_id;
     u32 i1_type_id;
@@ -528,6 +580,50 @@ static IrSymbol* llvm_bc_ir_symbol(LlvmBcContext* context, IrSymbolId id)
     return ir_symbol_from_id(&context->program->symbols, id);
 }
 
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_struct_type(LlvmBcContext* context, IrType* type)
+{
+    // Packed LLVM records with explicit gaps have exactly the canonical
+    // offsets and allocation size, including nested and over-aligned records.
+    // Object/access alignment is recorded separately on allocas and accesses.
+    u64* operands = arena_allocate(context->arena, u64, (u64)type->field_count * 2 + 2);
+    u32* indices = arena_allocate(context->arena, u32, type->field_count ? type->field_count : 1);
+    context->ir_field_indices[type->id.value] = indices;
+    u32 count = 1;
+    operands[0] = 1;
+    u64 cursor = 0;
+    for (u32 index = 0; index < type->field_count && !llvm_bc_failed(context); index += 1)
+    {
+        IrField* field = type->fields + index;
+        IrType* member = llvm_bc_ir_type(context, field->type);
+        if (!member || !member->layout.resolved || field->offset < cursor || field->offset > type->layout.size ||
+            member->layout.size > type->layout.size - field->offset)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("invalid canonical LLVM struct storage layout"),
+                         0, 0, 0, IR_SYMBOL_ID_INVALID);
+        }
+        else
+        {
+            if (field->offset != cursor)
+            {
+                operands[count++] = llvm_bc_array_type(context, field->offset - cursor, context->i8_type_id);
+            }
+            indices[index] = count - 1;
+            operands[count++] = context->ir_type_ids[field->type.value];
+            cursor = field->offset + member->layout.size;
+        }
+    }
+    if (cursor < type->layout.size && !llvm_bc_failed(context))
+    {
+        operands[count++] = llvm_bc_array_type(context, type->layout.size - cursor, context->i8_type_id);
+    }
+    u32 result = LLVM_BC_INVALID_ID;
+    if (!llvm_bc_failed(context))
+    {
+        result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_STRUCT_ANON, operands, count);
+    }
+    return result;
+}
+
 static bool llvm_bc_type_dependencies_ready(LlvmBcContext* context, IrType* type)
 {
     if (type)
@@ -617,6 +713,7 @@ static bool llvm_bc_add_ir_type(LlvmBcContext* context, u32 type_index)
             context->ir_type_ids[type->unqualified_type.value] != LLVM_BC_INVALID_ID)
         {
             IrType* operand = context->program->types.types + type->unqualified_type.value;
+            context->ir_field_indices[type_index] = context->ir_field_indices[type->unqualified_type.value];
             u64 padding = type->layout.resolved && operand->layout.resolved && type->layout.size > operand->layout.size
                               ? type->layout.size - operand->layout.size
                               : 0;
@@ -718,13 +815,7 @@ static bool llvm_bc_add_ir_type(LlvmBcContext* context, u32 type_index)
             }
             else
             {
-                u64* operands = arena_allocate(context->arena, u64, type->field_count + 1);
-                operands[0] = 0;
-                for (u32 index = 0; index < type->field_count; index += 1)
-                {
-                    operands[index + 1] = context->ir_type_ids[type->fields[index].type.value];
-                }
-                result = llvm_bc_add_type_record(context, LLVM_BC_TYPE_STRUCT_ANON, operands, type->field_count + 1);
+                result = llvm_bc_struct_type(context, type);
             }
             break;
         }
@@ -772,6 +863,14 @@ static bool llvm_bc_build_types(LlvmBcContext* context)
 
     u32 count = context->program->types.count;
     context->ir_type_ids = arena_allocate(context->arena, u32, count ? count : 1);
+    context->abi_signatures = arena_allocate(context->arena, LlvmBcAbiSignature*, count ? count : 1);
+    context->attribute_lists = arena_allocate(context->arena, LlvmBcAbiSignature*, count ? count : 1);
+    memset(context->abi_signatures, 0, sizeof(*context->abi_signatures) * count);
+    TargetParseResult target = target_parse_triple(context->options.target_triple);
+    context->abi_target = target.target;
+    context->abi_target_valid = target.error == TARGET_PARSE_ERROR_NONE;
+    context->ir_field_indices = arena_allocate(context->arena, u32*, count ? count : 1);
+    memset(context->ir_field_indices, 0, sizeof(*context->ir_field_indices) * count);
     for (u32 index = 0; index < count; index += 1)
     {
         context->ir_type_ids[index] = LLVM_BC_INVALID_ID;
@@ -800,6 +899,359 @@ static bool llvm_bc_build_types(LlvmBcContext* context)
         }
     }
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool llvm_bc_is_aggregate(IrType* type)
+{
+    return type && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY);
+}
+
+BUSTER_GLOBAL_LOCAL void llvm_bc_sysv_aggregate_parts(LlvmBcContext* context, IrTypeId root, IrAbiValue* abi)
+{
+    typedef struct LlvmBcAbiTask LlvmBcAbiTask;
+    struct LlvmBcAbiTask
+    {
+        IrTypeId type;
+        u64 offset;
+        bool in_union;
+    };
+    TemporalArena temporary = scratch_begin(&context->arena, 1);
+    u32 capacity = BUSTER_MAX(context->program->types.count * 16, 16u);
+    LlvmBcAbiTask* tasks = arena_allocate(temporary.arena, LlvmBcAbiTask, capacity);
+    u32 count = 1;
+    tasks[0] = (LlvmBcAbiTask){.type = root};
+    u32 occupied = 0;
+    bool upper_register = false;
+    bool independent_upper = false;
+    bool valid = true;
+    while (count && valid)
+    {
+        LlvmBcAbiTask task = tasks[--count];
+        IrType* type = llvm_bc_ir_type(context, task.type);
+        if (!type || !type->layout.resolved || task.offset + type->layout.size > 16)
+        {
+            valid = false;
+        }
+        else if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
+        {
+            if (type->field_count > capacity - count)
+            {
+                valid = false;
+            }
+            else
+            {
+                for (u32 index = 0; index < type->field_count; index += 1)
+                {
+                    IrField* field = type->fields + index;
+                    if (field->is_bit_field)
+                    {
+                        if (field->name.length && field->bit_width)
+                        {
+                            u64 first = ((task.offset + field->offset) * 8 + field->bit_offset) / 64;
+                            u64 last = ((task.offset + field->offset) * 8 + field->bit_offset + field->bit_width - 1) / 64;
+                            if (last >= 2)
+                            {
+                                valid = false;
+                            }
+                            else
+                            {
+                                for (u64 part = first; part <= last; part += 1)
+                                {
+                                    occupied |= 1u << part;
+                                }
+                                independent_upper |= last == 1;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        tasks[count++] = (LlvmBcAbiTask){.type = field->type, .offset = task.offset + field->offset,
+                            .in_union = task.in_union || type->kind == IR_TYPE_UNION};
+                    }
+                }
+            }
+        }
+        else if (type->kind == IR_TYPE_ARRAY)
+        {
+            IrType* element = llvm_bc_ir_type(context, type->element_type);
+            if (!element || type->element_count > capacity - count)
+            {
+                valid = false;
+            }
+            else
+            {
+                for (u64 index = 0; index < type->element_count; index += 1)
+                {
+                    tasks[count++] = (LlvmBcAbiTask){.type = type->element_type,
+                        .offset = task.offset + index * element->layout.size, .in_union = task.in_union};
+                }
+            }
+        }
+        else if (type->layout.size)
+        {
+            u32 first = (u32)(task.offset / 8);
+            u32 last = (u32)((task.offset + type->layout.size - 1) / 8);
+            for (u32 part = first; part <= last; part += 1)
+            {
+                occupied |= 1u << part;
+            }
+            bool quad = type->kind == IR_TYPE_FLOAT && type->bit_width == 128;
+            bool wide = (type->kind == IR_TYPE_VECTOR || quad) && type->layout.size == 16 && task.offset == 0;
+            upper_register |= wide;
+            independent_upper |= last == 1 && !wide;
+            // The shared model cannot express Clang's f128 union merging.
+            // Keep these signatures explicit until that rule is represented.
+            valid &= !(quad && task.in_union);
+        }
+    }
+    if (!valid || !occupied || occupied == 2)
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE,
+                     llvm_bc_s8("unsupported LLVM SysV aggregate register layout"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
+    }
+    else if (occupied == 1)
+    {
+        // NO_CLASS tail padding consumes no register. Keep canonical storage
+        // size for coercion temporaries, but omit its synthetic INTEGER part.
+        abi->part_count = 1;
+    }
+    else if (upper_register && !independent_upper && abi->part_count == 2 &&
+             abi->parts[0].abi_class == IR_ABI_CLASS_FLOAT && abi->parts[1].abi_class == IR_ABI_CLASS_FLOAT)
+    {
+        // SSEUP uses the upper half of the first XMM register. A floating
+        // field in the upper eightbyte would instead require a second XMM.
+        abi->part_count = 1;
+        abi->parts[0] = (IrAbiPart){.abi_class = IR_ABI_CLASS_VECTOR, .size = 16};
+    }
+    scratch_end(temporary);
+}
+
+BUSTER_GLOBAL_LOCAL LlvmBcAbiValue llvm_bc_abi_value(LlvmBcContext* context, IrTypeId type_id, IrAbiConvention convention,
+                                                    bool result_position, u32* integer_registers, u32* float_registers)
+{
+    IrType* type = llvm_bc_ir_type(context, type_id);
+    LlvmBcAbiValue result = {.type_id = context->ir_type_ids[type_id.value], .alignment = type->layout.alignment};
+    result.aggregate = llvm_bc_is_aggregate(type);
+    if (result.aggregate)
+    {
+        if (!context->abi_target_valid || context->abi_target.cpu_arch != CPU_ARCH_X86_64 || !type->layout.size)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE,
+                         llvm_bc_s8("LLVM aggregate function ABI requires a supported x86-64 target and a nonempty layout"),
+                         0, 0, 0, IR_SYMBOL_ID_INVALID);
+        }
+        else
+        {
+            IrAbiValue abi = ir_type_abi_value(context->program, type_id, convention,
+                                              result_position ? IR_ABI_USE_RESULT : IR_ABI_USE_ARGUMENT);
+            if (convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 && !abi.indirect && !abi.memory && type->layout.size <= 16)
+            {
+                llvm_bc_sysv_aggregate_parts(context, type_id, &abi);
+            }
+            u32 integers = 0;
+            u32 floats = 0;
+            u32 part_types[IR_ABI_MAX_PARTS];
+            u32 part_count = 0;
+            u64 storage_size = type->layout.size;
+            result.indirect = abi.indirect || abi.memory;
+            for (u32 part = 0; !result.indirect && part < abi.part_count; part += 1)
+            {
+                IrAbiPart* piece = abi.parts + part;
+                u32 part_type = LLVM_BC_INVALID_ID;
+                if (piece->abi_class == IR_ABI_CLASS_INTEGER || piece->abi_class == IR_ABI_CLASS_POINTER)
+                {
+                    // All bytes of an INTEGER eightbyte ride the same GPR.
+                    // The padded temporary supplies storage for its tail.
+                    u32 width = convention == IR_ABI_CONVENTION_WIN64_X86_64 ? piece->size * 8 : 64;
+                    part_type = llvm_bc_integer_type(context, width);
+                    integers += 1;
+                    storage_size = BUSTER_MAX(storage_size, (u64)piece->value_offset + width / 8);
+                }
+                else if (piece->abi_class == IR_ABI_CLASS_FLOAT || piece->abi_class == IR_ABI_CLASS_VECTOR)
+                {
+                    if (piece->size <= 8)
+                    {
+                        part_type = llvm_bc_add_type_record(context, piece->size <= 4 ? LLVM_BC_TYPE_FLOAT : LLVM_BC_TYPE_DOUBLE, 0, 0);
+                    }
+                    else
+                    {
+                        u64 operands[2] = {2, context->i64_type_id};
+                        part_type = llvm_bc_add_type_record(context, LLVM_BC_TYPE_VECTOR, operands, 2);
+                    }
+                    u32 storage_bytes = piece->size <= 4 ? 4 : piece->size <= 8 ? 8 : 16;
+                    storage_size = BUSTER_MAX(storage_size, (u64)piece->value_offset + storage_bytes);
+                    floats += 1;
+                }
+                else if (piece->abi_class == IR_ABI_CLASS_X87 && part + 1 < abi.part_count &&
+                         abi.parts[part + 1].abi_class == IR_ABI_CLASS_X87_UP)
+                {
+                    part_type = llvm_bc_add_type_record(context, LLVM_BC_TYPE_X86_FP80, 0, 0);
+                    part += 1;
+                }
+                else
+                {
+                    llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("unsupported LLVM aggregate ABI part"),
+                                 0, 0, 0, IR_SYMBOL_ID_INVALID);
+                }
+                part_types[part_count++] = part_type;
+            }
+            if (!result_position && convention == IR_ABI_CONVENTION_SYSTEMV_X86_64 &&
+                (integers > 6 - BUSTER_MIN(*integer_registers, 6u) || floats > 8 - BUSTER_MIN(*float_registers, 8u)))
+            {
+                // SysV rolls the whole aggregate back to the stack when any
+                // register class is exhausted; separate LLVM scalars do not.
+                result.indirect = true;
+            }
+            if (result.indirect)
+            {
+                result.type_id = context->pointer_type_id;
+                result.byval = !result_position && convention == IR_ABI_CONVENTION_SYSTEMV_X86_64;
+                if (result.byval)
+                {
+                    result.alignment = BUSTER_MAX(result.alignment, 8u);
+                }
+                else if (!result_position)
+                {
+                    *integer_registers += 1;
+                }
+            }
+            else if (part_count)
+            {
+                if (part_count == 1)
+                {
+                    result.type_id = part_types[0];
+                }
+                else
+                {
+                    // Coercion records have LLVM tail padding even when the
+                    // canonical object ends in a four-byte floating part.
+                    storage_size = (storage_size + 15) & ~UINT64_C(15);
+                    u64 operands[IR_ABI_MAX_PARTS + 1] = {0};
+                    for (u32 part = 0; part < part_count; part += 1)
+                    {
+                        operands[part + 1] = part_types[part];
+                    }
+                    result.type_id = llvm_bc_add_type_record(context, LLVM_BC_TYPE_STRUCT_ANON, operands, part_count + 1);
+                }
+                if (!result_position)
+                {
+                    *integer_registers += integers;
+                    *float_registers += floats;
+                }
+            }
+            else
+            {
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("empty LLVM aggregate ABI classification"),
+                             0, 0, 0, IR_SYMBOL_ID_INVALID);
+            }
+            result.storage_type_id = llvm_bc_array_type(context, storage_size, context->i8_type_id);
+            result.alignment = BUSTER_MAX(result.alignment, 16u);
+        }
+    }
+    else if (!result_position)
+    {
+        if (type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM || type->kind == IR_TYPE_POINTER)
+        {
+            u32 registers = (u32)BUSTER_MAX((type->layout.size + 7) / 8, UINT64_C(1));
+            if (convention != IR_ABI_CONVENTION_SYSTEMV_X86_64 || registers <= 6 - BUSTER_MIN(*integer_registers, 6u))
+            {
+                *integer_registers += registers;
+            }
+        }
+        else if (type->kind == IR_TYPE_VECTOR || (type->kind == IR_TYPE_FLOAT && type->bit_width != 80))
+        {
+            *float_registers += 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void llvm_bc_abi_attribute(LlvmBcContext* context, LlvmBcAbiSignature* signature, u32 parameter,
+                                               u32 kind, u32 type_id, u32 alignment)
+{
+    llvm_bc_vec_reserve(context->arena, (void**)&context->attribute_groups, &context->attribute_group_capacity,
+                        context->attribute_group_count + 1, sizeof(*context->attribute_groups), BUSTER_ALIGN_OF(LlvmBcAttributeGroup));
+    context->attribute_groups[context->attribute_group_count++] =
+        (LlvmBcAttributeGroup){.parameter = parameter, .kind = kind, .type_id = type_id, .alignment = alignment};
+    signature->attribute_group_count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL LlvmBcAbiSignature* llvm_bc_prepare_abi_signature(LlvmBcContext* context, IrType* type)
+{
+    LlvmBcAbiSignature* signature = context->abi_signatures[type->id.value];
+    if (!signature)
+    {
+        signature = arena_allocate(context->arena, LlvmBcAbiSignature, 1);
+        *signature = (LlvmBcAbiSignature){.parameter_count = type->parameter_count, .first_attribute_group = context->attribute_group_count};
+        signature->parameters = arena_allocate(context->arena, LlvmBcAbiValue, type->parameter_count ? type->parameter_count : 1);
+        context->abi_signatures[type->id.value] = signature;
+        IrAbiConvention convention = ir_abi_convention_for_target(context->abi_target);
+        if (type->calling_convention == IR_CALLING_CONVENTION_SYSTEMV)
+        {
+            convention = IR_ABI_CONVENTION_SYSTEMV_X86_64;
+        }
+        else if (type->calling_convention == IR_CALLING_CONVENTION_WIN64)
+        {
+            convention = IR_ABI_CONVENTION_WIN64_X86_64;
+        }
+        u32 integers = 0;
+        u32 floats = 0;
+        IrType* return_type = llvm_bc_ir_type(context, type->return_type);
+        signature->result = llvm_bc_abi_value(context, type->return_type, convention, true, &integers, &floats);
+        bool indirect_result = signature->result.aggregate && signature->result.indirect;
+        u64* operands = arena_allocate(context->arena, u64, (u64)type->parameter_count + 3);
+        u32 count = 0;
+        operands[count++] = type->is_variadic;
+        operands[count++] = indirect_result ? context->void_type_id : signature->result.type_id;
+        if (indirect_result)
+        {
+            operands[count++] = context->pointer_type_id;
+            integers += 1;
+            llvm_bc_abi_attribute(context, signature, 1, LLVM_BC_ATTRIBUTE_SRET, context->ir_type_ids[type->return_type.value], return_type->layout.alignment);
+        }
+        for (u32 index = 0; index < type->parameter_count && !llvm_bc_failed(context); index += 1)
+        {
+            IrType* parameter = llvm_bc_ir_type(context, type->parameter_types[index]);
+            signature->parameters[index] = llvm_bc_abi_value(context, type->parameter_types[index], convention, false, &integers, &floats);
+            LlvmBcAbiValue* abi = signature->parameters + index;
+            operands[count++] = abi->type_id;
+            if (abi->byval)
+            {
+                llvm_bc_abi_attribute(context, signature, index + 1 + indirect_result, LLVM_BC_ATTRIBUTE_BYVAL, context->ir_type_ids[type->parameter_types[index].value],
+                                     BUSTER_MAX(parameter->layout.alignment, 8u));
+            }
+        }
+        if (signature->attribute_group_count)
+        {
+            context->attribute_lists[context->attribute_list_count] = signature;
+            signature->attribute_list_id = ++context->attribute_list_count;
+        }
+        context->ir_type_ids[type->id.value] = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, operands, count);
+    }
+    return signature;
+}
+
+BUSTER_GLOBAL_LOCAL LlvmBcAbiSignature* llvm_bc_call_signature(LlvmBcContext* context, IrFunction* function, IrInstruction* instruction)
+{
+    LlvmBcAbiSignature* result = 0;
+    if (instruction->operand_count && instruction->operands[0].value < function->value_count)
+    {
+        IrType* signature = llvm_bc_ir_type(context, function->values[instruction->operands[0].value].canonical_type);
+        if (signature && signature->kind == IR_TYPE_POINTER)
+        {
+            signature = llvm_bc_ir_type(context, signature->element_type);
+        }
+        if (signature && signature->kind == IR_TYPE_FUNCTION)
+        {
+            result = llvm_bc_prepare_abi_signature(context, signature);
+        }
+    }
+    if (!result)
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("LLVM call has no ABI signature"),
+                     function, 0, instruction, instruction->symbol);
+    }
+    return result;
 }
 
 static bool llvm_bc_string_equal(String8 left, String8 right)
@@ -865,7 +1317,7 @@ static u32 llvm_bc_alignment(u64 alignment)
     return encoded;
 }
 
-static u32 llvm_bc_access_alignment(LlvmBcContext* context, IrValue* pointer_value, IrTypeId accessed_type)
+static u32 llvm_bc_access_alignment(LlvmBcContext* context, IrFunction* function, IrValue* pointer_value, IrTypeId accessed_type)
 {
     u64 alignment = pointer_value ? pointer_value->alignment : 0;
     if (!alignment)
@@ -875,6 +1327,57 @@ static u32 llvm_bc_access_alignment(LlvmBcContext* context, IrValue* pointer_val
         {
             alignment = type->layout.alignment;
         }
+    }
+    // A field's own type can be naturally aligned while its enclosing record
+    // is packed. Walk only the address chain, reducing the guarantee for each
+    // enclosing layout and offset; no input-dependent recursion is needed.
+    IrValue* address = pointer_value;
+    for (u32 depth = 0; address && depth < function->value_count; depth += 1)
+    {
+        IrType* address_type = llvm_bc_ir_type(context, address->canonical_type);
+        if (address->category == IR_VALUE_PLACE && address_type && address_type->layout.alignment &&
+            (!alignment || address_type->layout.alignment < alignment))
+        {
+            alignment = address_type->layout.alignment;
+        }
+        IrInstruction* definition = address->definition.value < function->instruction_count
+                                        ? function->instructions + address->definition.value : 0;
+        IrValue* base = definition && definition->operand_count && definition->operands[0].value < function->value_count
+                            ? function->values + definition->operands[0].value : 0;
+        u64 offset = 0;
+        bool follows = false;
+        if (base && definition->opcode == IR_OPCODE_FIELD && definition->immediate_count == 1)
+        {
+            IrType* aggregate = llvm_bc_ir_type(context, base->canonical_type);
+            if (aggregate && definition->immediates[0] < aggregate->field_count)
+            {
+                offset = aggregate->fields[definition->immediates[0]].offset;
+                follows = true;
+            }
+        }
+        else if (base && definition->opcode == IR_OPCODE_INDEX)
+        {
+            IrType* indexed = llvm_bc_ir_type(context, base->canonical_type);
+            IrType* element = indexed ? llvm_bc_ir_type(context, indexed->element_type) : 0;
+            if (element)
+            {
+                offset = element->layout.size;
+                follows = true;
+            }
+        }
+        else if (base && (definition->opcode == IR_OPCODE_ADDRESS_OF || definition->opcode == IR_OPCODE_DEREFERENCE))
+        {
+            follows = true;
+        }
+        if (offset)
+        {
+            u64 offset_alignment = offset & (0 - offset);
+            if (!alignment || offset_alignment < alignment)
+            {
+                alignment = offset_alignment;
+            }
+        }
+        address = follows ? base : 0;
     }
     return llvm_bc_alignment(alignment);
 }
@@ -992,6 +1495,11 @@ static bool llvm_bc_add_function_entity(LlvmBcContext* context, IrFunction* func
     {
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("function has no canonical LLVM function type"), function, 0, 0,
                      symbol->id);
+        return false;
+    }
+    llvm_bc_prepare_abi_signature(context, type);
+    if (llvm_bc_failed(context))
+    {
         return false;
     }
     u32 calling_convention = llvm_bc_calling_convention(type->calling_convention);
@@ -1505,6 +2013,7 @@ static bool llvm_bc_prepare_global_initializers(LlvmBcContext* context)
 
 static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
 {
+    llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 1);
     for (u32 function_index = 0; function_index < context->function_count; function_index += 1)
     {
         LlvmBcFunction* function_record = context->functions + function_index;
@@ -1519,6 +2028,9 @@ static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
             IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
             switch (instruction->opcode)
             {
+            case IR_OPCODE_CALL:
+                llvm_bc_call_signature(context, function, instruction);
+                break;
             case IR_OPCODE_CONSTANT_INTEGER:
             case IR_OPCODE_ENUM:
                 if (!instruction->immediate_count)
@@ -1739,6 +2251,11 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
     switch (instruction->opcode)
     {
     case IR_OPCODE_ARGUMENT:
+    {
+        LlvmBcAbiSignature* signature = context->abi_signatures[function->canonical_type.value];
+        LlvmBcAbiValue* argument = signature->parameters + instruction->immediates[0];
+        return argument->aggregate ? (argument->indirect ? 1 : 2) : 0;
+    }
     case IR_OPCODE_GLOBAL:
     case IR_OPCODE_CONSTANT_INTEGER:
     case IR_OPCODE_CONSTANT_FLOAT:
@@ -1816,8 +2333,38 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
         return 1;
     case IR_OPCODE_CALL:
     {
+        LlvmBcAbiSignature* signature = llvm_bc_call_signature(context, function, instruction);
+        if (!signature)
+        {
+            return LLVM_BC_INVALID_ID;
+        }
         IrType* result = llvm_bc_ir_type(context, instruction->canonical_type);
-        return result && result->kind != IR_TYPE_VOID ? 1 : 0;
+        u32 count = result && result->kind != IR_TYPE_VOID ? 1 : 0;
+        if (signature->result.aggregate)
+        {
+            count = signature->result.indirect ? 2 : 3;
+        }
+        for (u32 index = 1; index < instruction->operand_count; index += 1)
+        {
+            if (index <= signature->parameter_count)
+            {
+                LlvmBcAbiValue* argument = signature->parameters + index - 1;
+                count += argument->aggregate ? (argument->indirect ? 1 : 2) : 0;
+            }
+            else if (llvm_bc_is_aggregate(llvm_bc_ir_type(context, function->values[instruction->operands[index].value].canonical_type)))
+            {
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE,
+                             llvm_bc_s8("LLVM aggregate variadic arguments require call-site ABI lowering"),
+                             function, block, instruction, instruction->symbol);
+                return LLVM_BC_INVALID_ID;
+            }
+        }
+        return count;
+    }
+    case IR_OPCODE_RETURN:
+    {
+        LlvmBcAbiValue result = context->abi_signatures[function->canonical_type.value]->result;
+        return result.aggregate && !result.indirect ? 2 : 0;
     }
     case IR_OPCODE_STORE:
     case IR_OPCODE_ATOMIC_STORE:
@@ -1825,7 +2372,6 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
     case IR_OPCODE_BRANCH:
     case IR_OPCODE_BRANCH_IF:
     case IR_OPCODE_SWITCH:
-    case IR_OPCODE_RETURN:
     case IR_OPCODE_UNREACHABLE:
         return 0;
     case IR_OPCODE_STACK_SAVE:
@@ -1965,6 +2511,8 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
             return false;
         }
 
+        LlvmBcAbiSignature* abi = context->abi_signatures[function->canonical_type.value];
+        u32 hidden_result = abi->result.aggregate && abi->result.indirect;
         u32 block_count = function->block_count;
         record->block_order = arena_allocate(context->arena, IrBlock*, block_count ? block_count : 1);
         record->block_indices = arena_allocate(context->arena, u32, block_count ? block_count : 1);
@@ -2040,7 +2588,10 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
                     }
                     u32 argument = (u32)instruction->immediates[0];
                     argument_seen[argument] = 1;
-                    record->value_ids[instruction->result.value] = record->first_local_value_id + argument;
+                    if (!abi->parameters[argument].aggregate)
+                    {
+                        record->value_ids[instruction->result.value] = record->first_local_value_id + argument + hidden_result;
+                    }
                 }
                 if (instruction_id.value == block->last_instruction.value)
                 {
@@ -2059,7 +2610,7 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
             }
         }
 
-        u32 next_value_id = record->first_local_value_id + signature->parameter_count;
+        u32 next_value_id = record->first_local_value_id + signature->parameter_count + hidden_result;
         for (u32 block_index = 0; block_index < block_count; block_index += 1)
         {
             IrBlock* block = record->block_order[block_index];
@@ -2092,14 +2643,18 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
                 record->emitted_counts[instruction_id.value] = emitted;
                 if (emitted)
                 {
-                    if (instruction->result.value >= value_count || record->value_ids[instruction->result.value] != LLVM_BC_INVALID_ID ||
+                    if ((instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+                         (instruction->result.value >= value_count || record->value_ids[instruction->result.value] != LLVM_BC_INVALID_ID)) ||
                         next_value_id > UINT32_MAX - emitted)
                     {
                         llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("invalid LLVM instruction result numbering"), function,
                                      block, instruction, function->symbol);
                         return false;
                     }
-                    record->value_ids[instruction->result.value] = next_value_id + emitted - 1;
+                    if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
+                    {
+                        record->value_ids[instruction->result.value] = next_value_id + emitted - 1;
+                    }
                     next_value_id += emitted;
                 }
                 if (instruction_id.value == block->last_instruction.value)
@@ -2435,6 +2990,18 @@ static bool llvm_bc_emit_aggregate_instruction(LlvmBcContext* context, LlvmBcFun
         else
         {
             u64 field = instruction->opcode == IR_OPCODE_AGGREGATE ? instruction->immediates[index] : index;
+            if (instruction->opcode == IR_OPCODE_AGGREGATE)
+            {
+                if (aggregate_type->is_atomic && aggregate_type->unqualified_type.value < context->program->types.count)
+                {
+                    IrType* operand = llvm_bc_ir_type(context, aggregate_type->unqualified_type);
+                    if (operand && aggregate_type->layout.size > operand->layout.size)
+                    {
+                        operands[count++] = 0;
+                    }
+                }
+                field = context->ir_field_indices[aggregate_type->id.value][field];
+            }
             operands[count++] = field;
             llvm_bc_record(&context->stream, LLVM_BC_FUNC_INSERTVAL, operands, count);
         }
@@ -2538,58 +3105,133 @@ static bool llvm_bc_emit_gep(LlvmBcContext* context, LlvmBcFunction* record, IrB
     return !llvm_bc_failed(context);
 }
 
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_abi_temporary(LlvmBcContext* context, LlvmBcAbiValue abi, u32* current_value_id)
+{
+    u32 size = llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 1);
+    u64 operands[4] = {abi.storage_type_id, context->i32_type_id, size, (UINT64_C(1) << 6) | llvm_bc_alignment(abi.alignment)};
+    llvm_bc_record(&context->stream, LLVM_BC_FUNC_ALLOCA, operands, 4);
+    u32 result = *current_value_id;
+    *current_value_id += 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void llvm_bc_abi_store(LlvmBcContext* context, u32 pointer, u32 value, u32 type, u32 alignment, u32 current_value_id)
+{
+    u64 operands[8];
+    u32 count = 0;
+    llvm_bc_push_value_and_type(operands, &count, current_value_id, pointer, context->pointer_type_id);
+    llvm_bc_push_value_and_type(operands, &count, current_value_id, value, type);
+    operands[count++] = llvm_bc_alignment(alignment);
+    operands[count++] = 0;
+    llvm_bc_record(&context->stream, LLVM_BC_FUNC_STORE, operands, count);
+}
+
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_abi_load(LlvmBcContext* context, u32 pointer, u32 type, u32 alignment, u32* current_value_id)
+{
+    u64 operands[6];
+    u32 count = 0;
+    llvm_bc_push_value_and_type(operands, &count, *current_value_id, pointer, context->pointer_type_id);
+    operands[count++] = type;
+    operands[count++] = llvm_bc_alignment(alignment);
+    operands[count++] = 0;
+    llvm_bc_record(&context->stream, LLVM_BC_FUNC_LOAD, operands, count);
+    u32 result = *current_value_id;
+    *current_value_id += 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_abi_convert(LlvmBcContext* context, LlvmBcAbiValue abi, u32 value, u32 source_type,
+                                            u32 destination_type, u32* current_value_id)
+{
+    u32 temporary = llvm_bc_abi_temporary(context, abi, current_value_id);
+    llvm_bc_abi_store(context, temporary, value, source_type, abi.alignment, *current_value_id);
+    return llvm_bc_abi_load(context, temporary, destination_type, abi.alignment, current_value_id);
+}
+
 static bool llvm_bc_emit_call(LlvmBcContext* context, LlvmBcFunction* record, IrBlock* block, IrInstruction* instruction,
-                              u32 current_value_id)
+                              u32* current_value_id)
 {
     IrFunction* function = record->function;
-    if (!instruction->operand_count)
+    LlvmBcAbiSignature* abi = llvm_bc_call_signature(context, function, instruction);
+    IrType* signature = llvm_bc_ir_type(context, function->values[instruction->operands[0].value].canonical_type);
+    if (signature->kind == IR_TYPE_POINTER)
     {
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("LLVM call has no callee"), function, block, instruction,
-                     instruction->symbol);
-        return false;
-    }
-    IrValue* callee_value = function->values + instruction->operands[0].value;
-    IrType* callee_type = llvm_bc_ir_type(context, callee_value->canonical_type);
-    IrType* signature = callee_type;
-    if (callee_type && callee_type->kind == IR_TYPE_POINTER)
-    {
-        signature = llvm_bc_ir_type(context, callee_type->element_type);
-    }
-    if (!signature || signature->kind != IR_TYPE_FUNCTION)
-    {
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("LLVM call target has no function signature"), function, block,
-                     instruction, instruction->symbol);
-        return false;
+        signature = llvm_bc_ir_type(context, signature->element_type);
     }
     u32 calling_convention = llvm_bc_calling_convention(signature->calling_convention);
     if (calling_convention == UINT32_MAX)
     {
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("unsupported LLVM call convention"), function, block, instruction,
-                     instruction->symbol);
-        return false;
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("unsupported LLVM call convention"), function, block,
+                     instruction, instruction->symbol);
     }
-    u32 maximum = instruction->operand_count * 2 + 5;
-    u64* operands = arena_allocate(context->arena, u64, maximum);
-    u32 count = 0;
-    operands[count++] = 0; // parameter attribute list id
-    operands[count++] = ((u64)calling_convention << 1) | LLVM_BC_CALL_EXPLICIT_TYPE;
-    operands[count++] = context->ir_type_ids[signature->id.value];
-    u32 callee = llvm_bc_function_value_id(context, record, instruction->operands[0]);
-    llvm_bc_push_value_and_type(operands, &count, current_value_id, callee, context->pointer_type_id);
+    bool indirect_result = abi->result.aggregate && abi->result.indirect;
+    u32 result_pointer = LLVM_BC_INVALID_ID;
+    if (indirect_result)
+    {
+        result_pointer = llvm_bc_abi_temporary(context, abi->result, current_value_id);
+    }
+    u32* values = arena_allocate(context->arena, u32, instruction->operand_count);
+    u32* types = arena_allocate(context->arena, u32, instruction->operand_count);
     for (u32 argument = 1; argument < instruction->operand_count; argument += 1)
     {
         u32 value = llvm_bc_function_value_id(context, record, instruction->operands[argument]);
         u32 type = llvm_bc_function_value_type_id(context, record, instruction->operands[argument]);
+        if (argument <= abi->parameter_count && abi->parameters[argument - 1].aggregate)
+        {
+            LlvmBcAbiValue parameter = abi->parameters[argument - 1];
+            if (parameter.indirect)
+            {
+                u32 pointer = llvm_bc_abi_temporary(context, parameter, current_value_id);
+                llvm_bc_abi_store(context, pointer, value, type, parameter.alignment, *current_value_id);
+                value = pointer;
+            }
+            else
+            {
+                value = llvm_bc_abi_convert(context, parameter, value, type, parameter.type_id, current_value_id);
+            }
+            type = parameter.type_id;
+        }
+        values[argument] = value;
+        types[argument] = type;
+    }
+    u64* operands = arena_allocate(context->arena, u64, (u64)instruction->operand_count * 2 + 6);
+    u32 count = 0;
+    operands[count++] = abi->attribute_list_id;
+    operands[count++] = ((u64)calling_convention << 1) | LLVM_BC_CALL_EXPLICIT_TYPE;
+    operands[count++] = context->ir_type_ids[signature->id.value];
+    u32 callee = llvm_bc_function_value_id(context, record, instruction->operands[0]);
+    llvm_bc_push_value_and_type(operands, &count, *current_value_id, callee, context->pointer_type_id);
+    if (indirect_result)
+    {
+        llvm_bc_push_relative(operands, &count, *current_value_id, result_pointer);
+    }
+    for (u32 argument = 1; argument < instruction->operand_count; argument += 1)
+    {
         if (argument <= signature->parameter_count)
         {
-            llvm_bc_push_relative(operands, &count, current_value_id, value);
+            llvm_bc_push_relative(operands, &count, *current_value_id, values[argument]);
         }
         else
         {
-            llvm_bc_push_value_and_type(operands, &count, current_value_id, value, type);
+            llvm_bc_push_value_and_type(operands, &count, *current_value_id, values[argument], types[argument]);
         }
     }
     llvm_bc_record(&context->stream, LLVM_BC_FUNC_CALL, operands, count);
+    u32 called_value = *current_value_id;
+    IrType* result = llvm_bc_ir_type(context, instruction->canonical_type);
+    *current_value_id += !indirect_result && result->kind != IR_TYPE_VOID;
+    if (abi->result.aggregate)
+    {
+        u32 canonical_type = context->ir_type_ids[instruction->canonical_type.value];
+        if (indirect_result)
+        {
+            llvm_bc_abi_load(context, result_pointer, canonical_type, abi->result.alignment, current_value_id);
+        }
+        else
+        {
+            llvm_bc_abi_convert(context, abi->result, called_value, abi->result.type_id, canonical_type, current_value_id);
+        }
+    }
     return !llvm_bc_failed(context);
 }
 
@@ -2604,6 +3246,26 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
     switch (instruction->opcode)
     {
     case IR_OPCODE_ARGUMENT:
+    {
+        LlvmBcAbiSignature* signature = context->abi_signatures[function->canonical_type.value];
+        u32 index = (u32)instruction->immediates[0];
+        LlvmBcAbiValue parameter = signature->parameters[index];
+        if (parameter.aggregate)
+        {
+            u32 value = record->first_local_value_id + index + (signature->result.aggregate && signature->result.indirect);
+            u32 canonical_type = context->ir_type_ids[instruction->canonical_type.value];
+            if (parameter.indirect)
+            {
+                IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
+                llvm_bc_abi_load(context, value, canonical_type, type->layout.alignment, current_value_id);
+            }
+            else
+            {
+                llvm_bc_abi_convert(context, parameter, value, parameter.type_id, canonical_type, current_value_id);
+            }
+        }
+        break;
+    }
     case IR_OPCODE_GLOBAL:
     case IR_OPCODE_CONSTANT_INTEGER:
     case IR_OPCODE_CONSTANT_FLOAT:
@@ -2656,7 +3318,7 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         IrValue* pointer_value = function->values + pointer_id.value;
         u32 pointer = llvm_bc_function_value_id(context, record, pointer_id);
         u32 result_type = context->ir_type_ids[instruction->canonical_type.value];
-        u32 alignment = llvm_bc_access_alignment(context, pointer_value, instruction->canonical_type);
+        u32 alignment = llvm_bc_access_alignment(context, function, pointer_value, instruction->canonical_type);
         if (alignment == UINT32_MAX || (instruction->opcode == IR_OPCODE_ATOMIC_LOAD && !alignment))
         {
             llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE,
@@ -2692,7 +3354,7 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         u32 value = llvm_bc_function_value_id(context, record, instruction->operands[1]);
         u32 value_type = llvm_bc_function_value_type_id(context, record, instruction->operands[1]);
         IrTypeId value_ir_type = function->values[instruction->operands[1].value].canonical_type;
-        u32 alignment = llvm_bc_access_alignment(context, pointer_value, value_ir_type);
+        u32 alignment = llvm_bc_access_alignment(context, function, pointer_value, value_ir_type);
         if (alignment == UINT32_MAX || (instruction->opcode == IR_OPCODE_ATOMIC_STORE && !alignment))
         {
             llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE,
@@ -2731,7 +3393,7 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         u32 value = llvm_bc_function_value_id(context, record, instruction->operands[1]);
         u32 value_type = llvm_bc_function_value_type_id(context, record, instruction->operands[1]);
         IrTypeId value_ir_type = function->values[instruction->operands[1].value].canonical_type;
-        u32 alignment = llvm_bc_access_alignment(context, pointer_value, value_ir_type);
+        u32 alignment = llvm_bc_access_alignment(context, function, pointer_value, value_ir_type);
         u32 operation = llvm_bc_atomic_operation(instruction->atomic_operation);
         u32 ordering = llvm_bc_memory_order(instruction->memory_order);
         if (!alignment || alignment == UINT32_MAX || operation == UINT32_MAX || ordering == UINT32_MAX)
@@ -2759,7 +3421,7 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         u32 desired = llvm_bc_function_value_id(context, record, instruction->operands[2]);
         u32 value_type = llvm_bc_function_value_type_id(context, record, instruction->operands[1]);
         IrTypeId value_ir_type = function->values[instruction->operands[1].value].canonical_type;
-        u32 alignment = llvm_bc_access_alignment(context, pointer_value, value_ir_type);
+        u32 alignment = llvm_bc_access_alignment(context, function, pointer_value, value_ir_type);
         u32 success_ordering = llvm_bc_memory_order(instruction->memory_order);
         u32 failure_ordering = llvm_bc_memory_order(instruction->failure_memory_order);
         if (!alignment || alignment == UINT32_MAX || success_ordering == UINT32_MAX || failure_ordering == UINT32_MAX)
@@ -2813,11 +3475,10 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         *current_value_id += 1;
         break;
     case IR_OPCODE_CALL:
-        if (!llvm_bc_emit_call(context, record, block, instruction, *current_value_id))
+        if (!llvm_bc_emit_call(context, record, block, instruction, current_value_id))
         {
             return false;
         }
-        *current_value_id += expected_count;
         break;
     case IR_OPCODE_CAST:
         if (!llvm_bc_cast_is_alias(context, function, instruction))
@@ -2923,7 +3584,21 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         {
             u32 value = llvm_bc_function_value_id(context, record, instruction->operands[0]);
             u32 type = llvm_bc_function_value_type_id(context, record, instruction->operands[0]);
-            llvm_bc_push_value_and_type(operands, &count, *current_value_id, value, type);
+            LlvmBcAbiValue result = context->abi_signatures[function->canonical_type.value]->result;
+            if (result.aggregate && result.indirect)
+            {
+                IrType* stored = llvm_bc_ir_type(context, function->values[instruction->operands[0].value].canonical_type);
+                llvm_bc_abi_store(context, record->first_local_value_id, value, type, stored->layout.alignment, *current_value_id);
+            }
+            else
+            {
+                if (result.aggregate)
+                {
+                    value = llvm_bc_abi_convert(context, result, value, type, result.type_id, current_value_id);
+                    type = result.type_id;
+                }
+                llvm_bc_push_value_and_type(operands, &count, *current_value_id, value, type);
+            }
             llvm_bc_record(&context->stream, LLVM_BC_FUNC_RET, operands, count);
         }
         else
@@ -2959,7 +3634,8 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
                      block, instruction, instruction->symbol);
         return false;
     }
-    if (expected_count && record->value_ids[instruction->result.value] != *current_value_id - 1)
+    if (expected_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+        record->value_ids[instruction->result.value] != *current_value_id - 1)
     {
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("LLVM instruction result id does not match the plan"), function,
                      block, instruction, instruction->symbol);
@@ -2981,7 +3657,8 @@ static bool llvm_bc_emit_function_body(LlvmBcContext* context, LlvmBcFunction* r
     llvm_bc_enter_block(&context->stream, LLVM_BC_FUNCTION_BLOCK, 5);
     u64 block_count = function->block_count;
     llvm_bc_record(&context->stream, LLVM_BC_FUNC_DECLAREBLOCKS, &block_count, 1);
-    u32 current_value_id = record->first_local_value_id + signature->parameter_count;
+    LlvmBcAbiValue abi_result = context->abi_signatures[function->canonical_type.value]->result;
+    u32 current_value_id = record->first_local_value_id + signature->parameter_count + (abi_result.aggregate && abi_result.indirect);
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         IrBlock* block = record->block_order[block_index];
@@ -3054,6 +3731,35 @@ static bool llvm_bc_emit_type_block(LlvmBcContext* context)
     return !context->stream.failed;
 }
 
+BUSTER_GLOBAL_LOCAL void llvm_bc_emit_attributes(LlvmBcContext* context)
+{
+    if (context->attribute_group_count)
+    {
+        llvm_bc_enter_block(&context->stream, LLVM_BC_PARAMATTR_GROUP_BLOCK, 3);
+        for (u32 index = 0; index < context->attribute_group_count; index += 1)
+        {
+            LlvmBcAttributeGroup* group = context->attribute_groups + index;
+            // Typed byval/sret attribute, followed by integer alignment.
+            u64 operands[8] = {index + 1, group->parameter, LLVM_BC_ATTRIBUTE_TYPE, group->kind, group->type_id,
+                               LLVM_BC_ATTRIBUTE_INTEGER, LLVM_BC_ATTRIBUTE_ALIGNMENT, BUSTER_MAX(group->alignment, 1u)};
+            llvm_bc_record(&context->stream, LLVM_BC_ATTRIBUTE_GROUP, operands, 8);
+        }
+        llvm_bc_exit_block(&context->stream);
+        llvm_bc_enter_block(&context->stream, LLVM_BC_PARAMATTR_BLOCK, 3);
+        for (u32 index = 0; index < context->attribute_list_count; index += 1)
+        {
+            LlvmBcAbiSignature* signature = context->attribute_lists[index];
+            u64* operands = arena_allocate(context->arena, u64, signature->attribute_group_count);
+            for (u32 group = 0; group < signature->attribute_group_count; group += 1)
+            {
+                operands[group] = signature->first_attribute_group + group + 1;
+            }
+            llvm_bc_record(&context->stream, LLVM_BC_ATTRIBUTE_LIST, operands, signature->attribute_group_count);
+        }
+        llvm_bc_exit_block(&context->stream);
+    }
+}
+
 static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
 {
     for (u32 index = 0; index < context->global_count; index += 1)
@@ -3097,7 +3803,7 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             function->calling_convention,
             function->declaration,
             llvm_bc_linkage(function->symbol),
-            0, // parameter attribute list id
+            context->abi_signatures[function->canonical_type.value]->attribute_list_id, // parameter attribute list id
             0, // alignment
             0, // section id
             0, // visibility
@@ -3202,7 +3908,12 @@ static bool llvm_bc_emit_module(LlvmBcContext* context)
     {
         llvm_bc_string_record(&context->stream, LLVM_BC_MODULE_SOURCE_FILENAME, context->options.source_filename);
     }
-    if (!llvm_bc_emit_type_block(context) || !llvm_bc_emit_module_entities(context) || !llvm_bc_emit_constants_block(context))
+    if (!llvm_bc_emit_type_block(context))
+    {
+        return false;
+    }
+    llvm_bc_emit_attributes(context);
+    if (!llvm_bc_emit_module_entities(context) || !llvm_bc_emit_constants_block(context))
     {
         return false;
     }
