@@ -100,6 +100,23 @@ jobs:
               fflush(stderr);''', 1)
           test_path.write_text(test_text, encoding="utf-8")
 
+          parse_path = Path("src/buster/lib/compiler/frontend/c/c_parse.c")
+          parse_text = '#include <stdio.h>\n' + parse_path.read_text(encoding="utf-8")
+          parse_entry = "CParseResult c_parse(Arena* arena, CPreprocessResult preprocess)\n{"
+          parse_body = "    CParserResult syntax = c_parse_ast(arena, preprocess);\n    return c_analyze_semantics(arena, preprocess, syntax);"
+          if parse_text.count(parse_entry) != 1 or parse_text.count(parse_body) != 1:
+              raise SystemExit("c_parse stage anchors not found")
+          parse_text = parse_text.replace(parse_entry, parse_entry + r'''
+              fprintf(stderr, "PR94_PARSE entry tokens=%llu\n", (unsigned long long)preprocess.token_count); fflush(stderr);''', 1)
+          parse_text = parse_text.replace(parse_body, r'''    fprintf(stderr, "PR94_PARSE ast\n"); fflush(stderr);
+              CParserResult syntax = c_parse_ast(arena, preprocess);
+              fprintf(stderr, "PR94_PARSE ast_complete diagnostics=%llu\n", (unsigned long long)syntax.diagnostic_count); fflush(stderr);
+              fprintf(stderr, "PR94_PARSE semantics\n"); fflush(stderr);
+              CParseResult result = c_analyze_semantics(arena, preprocess, syntax);
+              fprintf(stderr, "PR94_PARSE semantics_complete diagnostics=%llu\n", (unsigned long long)result.diagnostic_count); fflush(stderr);
+              return result;''', 1)
+          parse_path.write_text(parse_text, encoding="utf-8")
+
           gen_path = Path("src/buster/lib/compiler/frontend/c/c_gen.c")
           gen_text = gen_path.read_text(encoding="utf-8")
           gen_text = '#include <stdio.h>\n' + gen_text
