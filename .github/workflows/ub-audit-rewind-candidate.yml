@@ -1,0 +1,146 @@
+name: UB audit rewind candidate
+
+on:
+  push:
+    branches: [audit/ub-source-20260907]
+    paths: [.github/workflows/ub-audit-rewind-candidate.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  candidate:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 9834a4253c61934a8a253641a84741a25d3717e3
+          fetch-depth: 1
+      - name: Reconstruct the locally tested tree and integrate current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          paths = {
+              'src/buster/apps/ide/ide.c': 2,
+              'src/buster/lib/font_provider.c': 1,
+              'src/buster/lib/os.c': 1,
+              'src/buster/tests/file_test.c': 5,
+              'src/buster/tests/ui_test.c': 4,
+              'src/buster/tests/os_test.c': 10,
+              'src/buster/tests/compiler/frontend/c/c_test.c': 29,
+              'src/buster/tests/compiler/codegen/ebpf_test_internal.h': 1,
+              'src/buster/tests/compiler/driver/driver_test.c': 1,
+          }
+          pattern = re.compile(r'^(\s*)([a-zA-Z_]\w*(?:->[a-zA-Z_]\w*)*)->position = ([^;\n]*);$', re.M)
+          for filename, expected in paths.items():
+              path = Path(filename)
+              content, count = pattern.subn(r'\1arena_set_position(\2, \3);', path.read_text())
+              assert count == expected, (filename, count, expected)
+              path.write_text(content)
+          path = Path('src/buster/tests/compiler/frontend/c/c_test.c')
+          content = path.read_text()
+          marker = 'BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArguments* arguments)\n'
+          addition = r'''// A temporary lex can leave nonzero token/source bytes above its restored
+          // cursor. Later zeroed parser tables must not mistake those bytes for fresh
+          // pages. Use an unpooled arena so prior tests cannot supply a larger watermark.
+          BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_rewind_initialization(UnitTestArguments* arguments)
+          {
+              UnitTestResult result = {0};
+              Arena* arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+              BUSTER_TEST(arguments, arena != 0);
+              if (arena)
+              {
+                  u64 position = arena->position;
+                  String8 source = S8("typedef struct Reused { int field; } Reused;\n");
+                  BUSTER_TEST(arguments, c_test_translate_source_paths_agree(arena, source));
+                  BUSTER_TEST(arguments, arena->position == position);
+                  bool retained_dirty_bytes = arena_dirty_position(arena) > position;
+                  BUSTER_TEST(arguments, retained_dirty_bytes);
+                  u64 byte_count = BUSTER_KB(4);
+                  u8* bytes = arena_allocate_zeroed(arena, u8, byte_count);
+                  bool zeroed = true;
+                  for (u64 byte_index = 0; byte_index < byte_count; byte_index += 1)
+                  {
+                      zeroed &= bytes[byte_index] == 0;
+                  }
+                  BUSTER_TEST(arguments, zeroed);
+                  if (zeroed && retained_dirty_bytes)
+                  {
+                      arena_reset_to_start(arena);
+                      CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){0});
+                      CParseResult parsed = c_parse(arena, preprocess);
+                      BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+                      BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+                      BUSTER_TEST(arguments, parsed.declaration_count == 1);
+                  }
+                  BUSTER_TEST(arguments, arena_destroy(arena, 1));
+              }
+              return result;
+          }
+
+          '''
+          assert content.count(marker) == 1
+          content = content.replace(marker, addition + marker)
+          marker = '    c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));'
+          assert content.count(marker) == 1
+          content = content.replace(marker, '    c_test_result_add(&result, c_test_frontend_rewind_initialization(arguments));\n' + marker)
+          path.write_text(content)
+          path = Path('src/buster/tests/os_test.c')
+          content = path.read_text()
+          marker = '    // Releasing the selected context must clear TLS before its arenas go\n'
+          addition = '''#if defined(__linux__) || defined(__APPLE__)
+              // realpath receives a PATH_MAX-sized span, but the returned string keeps
+              // only its prefix. Shrinking that span must retain the dirty watermark,
+              // including bytes a failing syscall is permitted to have written.
+              {
+                  Arena* path_arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+                  BUSTER_TEST(arguments, path_arena != 0);
+                  if (path_arena)
+                  {
+                      String8 path = os_path_absolute(path_arena, S8("."), false);
+                      BUSTER_TEST(arguments, path.length != 0);
+                      BUSTER_TEST(arguments, arena_dirty_position(path_arena) > path_arena->position);
+                      BUSTER_TEST(arguments, arena_destroy(path_arena, 1));
+                  }
+              }
+          #endif
+
+          '''
+          assert content.count(marker) == 1
+          path.write_text(content.replace(marker, addition + marker))
+          path = Path('src/buster/lib/arena.h')
+          content = path.read_text()
+          marker = 'BUSTER_F_DECL void arena_set_position(Arena* arena, u64 position);'
+          assert content.count(marker) == 1
+          path.write_text(content.replace(marker, '// Callers must move the cursor through this function, not assign position:\n// even shrinking a syscall buffer must retain dirtiness for zeroed reuse.\n' + marker))
+          PY
+          git add src
+          git diff --cached --check
+          test "$(git write-tree)" = db1ea0e01ef07a1c3d9ec372f279762489e64a35
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'arena: preserve dirty bytes across client cursor rewinds'
+          git fetch --depth=16 origin 66bf321936ccb2b4f0df42cb6f65ed197f8652b5
+          git rebase --onto 66bf321936ccb2b4f0df42cb6f65ed197f8652b5 9834a4253c61934a8a253641a84741a25d3717e3
+          git diff 66bf321936ccb2b4f0df42cb6f65ed197f8652b5 --check
+          git push origin HEAD:refs/heads/audit/ub-rewind-candidate-235
+          mkdir -p "$RUNNER_TEMP/ub-rewind-candidate"
+          git rev-parse HEAD > "$RUNNER_TEMP/ub-rewind-candidate/commit.txt"
+          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/ub-rewind-candidate/tree.txt"
+          git diff 66bf321936ccb2b4f0df42cb6f65ed197f8652b5 HEAD > "$RUNNER_TEMP/ub-rewind-candidate/candidate.patch"
+          git bundle create "$RUNNER_TEMP/ub-rewind-candidate/source.bundle" HEAD
+          if test -f .git/shallow; then cp .git/shallow "$RUNNER_TEMP/ub-rewind-candidate/shallow.txt"; fi
+          git archive --format=tar.gz -o "$RUNNER_TEMP/ub-rewind-candidate/source.tar.gz" HEAD
+          cd "$RUNNER_TEMP/ub-rewind-candidate"
+          sha256sum source.bundle source.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ub-rewind-candidate-235
+          path: ${{ runner.temp }}/ub-rewind-candidate/
+          if-no-files-found: error
+          retention-days: 3
