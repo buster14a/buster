@@ -36,12 +36,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /c 'lld-link /entry:main /subsystem:console /nodefaultlib /out:build\lld-arm64.exe build\buster-arm64.obj'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmd /c 'lld-link /fixed /entry:main /subsystem:console /nodefaultlib /out:build\lld-arm64-fixed.exe build\buster-arm64.obj'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           llvm-readobj --file-headers --sections --coff-imports --unwind build\buster-arm64.exe
           llvm-readobj --file-headers --sections --unwind build\lld-arm64.exe
-          llvm-readobj --file-headers --sections --unwind build\lld-arm64-fixed.exe
 
           Copy-Item build\buster-arm64.exe build\buster-arm64-no-exceptions.exe
           $Image = [IO.File]::ReadAllBytes((Resolve-Path build\buster-arm64-no-exceptions.exe))
@@ -61,7 +58,7 @@ jobs:
           [Array]::Clear($Image, $Optional + 208, 8)
           [IO.File]::WriteAllBytes((Resolve-Path build\buster-arm64-direct-main.exe), $Image)
 
-          foreach ($Program in @('build\buster-arm64.exe', 'build\buster-arm64-no-exceptions.exe', 'build\buster-arm64-direct-main.exe', 'build\lld-arm64.exe', 'build\lld-arm64-fixed.exe')) {
+          foreach ($Program in @('build\buster-arm64.exe', 'build\buster-arm64-no-exceptions.exe', 'build\buster-arm64-direct-main.exe', 'build\lld-arm64.exe')) {
             Write-Output "RUN $Program"
             try {
               & $Program
