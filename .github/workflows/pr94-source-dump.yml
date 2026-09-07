@@ -1,0 +1,45 @@
+name: PR 94 lower-body source dump
+
+on:
+  push:
+    branches:
+      - claude/unruffled-bhabha-f5d28a
+    paths:
+      - .github/workflows/pr94-source-dump.yml
+
+permissions:
+  contents: read
+
+jobs:
+  dump:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Dump lower-body definitions and call sites
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=src/buster/lib/compiler/frontend/c/c_gen.c
+          patterns=(
+            'struct CIrBodyTask'
+            'struct CIrLowerFrame'
+            'struct CIrLowerBodyState'
+            'c_ir_lower_body_yield'
+            'c_ir_lower_body_advance'
+            'unsupported C function-body statement or expression near'
+            'C_IR_LOWER_BODY_CONTINUE_SWITCH'
+          )
+          for pattern in "${patterns[@]}"; do
+            echo "========== $pattern =========="
+            grep -nF "$pattern" "$file" || true
+            while IFS=: read -r line rest; do
+              [[ "$line" =~ ^[0-9]+$ ]] || continue
+              start=$(( line > 90 ? line - 90 : 1 ))
+              end=$(( line + 140 ))
+              echo "---------- ${file}:${start}-${end} ----------"
+              nl -ba "$file" | sed -n "${start},${end}p"
+            done < <(grep -nF "$pattern" "$file" || true)
+          done
+          exit 1
