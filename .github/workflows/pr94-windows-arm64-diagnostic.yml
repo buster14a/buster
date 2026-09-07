@@ -127,6 +127,29 @@ jobs:
           parse_text = parse_text.replace(census_call, r'''    fprintf(stderr, "PR94_SEMANTICS census tokens=%u\n", token_count); fflush(stderr);
               ''' + census_call + r'''
               fprintf(stderr, "PR94_SEMANTICS census_complete declarations=%u\n", census.identifier_count); fflush(stderr);''', 1)
+          semantic_stage_anchors = [
+              ("    TemporalArena machine_temporary = scratch_begin(machine_conflicts, BUSTER_ARRAY_LENGTH(machine_conflicts));",
+               "PR94_SEMANTICS machine_ready"),
+              ("    CTypeId declarator_list_base = C_TYPE_ID_INVALID;",
+               "PR94_SEMANTICS storage_ready"),
+              ("    if (result.enum_member_count)",
+               "PR94_SEMANTICS declarations_complete"),
+              ("    c_parse_infer_file_array_bounds(&machine, arena, preprocess, &result);",
+               "PR94_SEMANTICS initializers_complete"),
+          ]
+          for stage_anchor, stage_message in semantic_stage_anchors:
+              if parse_text.count(stage_anchor) != 1:
+                  raise SystemExit(f"semantic-analysis stage anchor not unique: {stage_anchor}")
+              parse_text = parse_text.replace(stage_anchor,
+                  f'    fprintf(stderr, "{stage_message}\\n"); fflush(stderr);\n' + stage_anchor, 1)
+          bind_call = "        c_parse_bind_function_body(&machine, arena, &result, preprocess, declaration_index);"
+          if parse_text.count(bind_call) != 1:
+              raise SystemExit("semantic-analysis body-bind anchor not found")
+          parse_text = parse_text.replace(bind_call, r'''        fprintf(stderr, "PR94_SEMANTICS bind_body index=%u body_start=%u body_count=%u\n",
+                      declaration_index, declaration->body_start, declaration->body_token_count); fflush(stderr);
+              ''' + bind_call + r'''
+              fprintf(stderr, "PR94_SEMANTICS bind_body_complete index=%u diagnostics=%llu\n",
+                      declaration_index, (unsigned long long)result.diagnostic_count); fflush(stderr);''', 1)
           parse_path.write_text(parse_text, encoding="utf-8")
 
           gen_path = Path("src/buster/lib/compiler/frontend/c/c_gen.c")
