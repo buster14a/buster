@@ -15375,8 +15375,6 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), divisor_sign_move, 2) ||
                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("SAR"), divisor_sign_shift, 2) ||
                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), save_dividend_sign, 2) ||
-                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), sign_xor, 2) ||
-                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), save_sign, 2) ||
                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), dividend_low_xor, 2) ||
                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), dividend_high_xor, 2) ||
                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), dividend_low_sub, 2) ||
@@ -15384,7 +15382,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), divisor_low_xor, 2) ||
                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), divisor_high_xor, 2) ||
                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), divisor_low_sub, 2) ||
-                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SBB"), divisor_high_sbb, 2))
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SBB"), divisor_high_sbb, 2) ||
+                                        // R9 must retain the divisor mask through the absolute-value pair.
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), sign_xor, 2) ||
+                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), save_sign, 2))
                                     {
                                         result.error = buffer.error;
                                         return result;
@@ -15578,15 +15579,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     }
                                     else
                                     {
+                                        // The saved value is a 0/-1 mask, not a 0/1 flag.
                                         BusterX86MetadataPhysicalOperand load_sign[2] = {
-                                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 32),
+                                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
                                             codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 32, result_displacement + 4),
                                         };
-                                        BusterX86MetadataPhysicalOperand negate_sign[] = {
-                                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
-                                        };
-                                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), load_sign, 2) ||
-                                            !codegen_canonical_x64_metadata_emit(&buffer, S8("NEG"), negate_sign, 1))
+                                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOVSXD"), load_sign, 2))
                                         {
                                             result.error = buffer.error;
                                             return result;
