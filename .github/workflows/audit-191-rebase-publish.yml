@@ -1,0 +1,48 @@
+name: Rebase and export verified audit 191
+on:
+  push:
+    branches: [work/audit-191-rebase-publish-20260907]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Verify patch, rebase without dropping other work, and export history
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show a13bc56a324158fbe95b6864e30f160206c8cb86:.github/workflows/audit-191-publish.yml > "$RUNNER_TEMP/transport.yml"
+          python3 - "$RUNNER_TEMP/transport.yml" "$RUNNER_TEMP/audit.patch" <<'PY'
+          import base64, gzip, hashlib, pathlib, sys
+          text = pathlib.Path(sys.argv[1]).read_text()
+          start = text.index('          H4sIA')
+          end = text.index('          PATCH\n', start)
+          patch = gzip.decompress(base64.b64decode(''.join(text[start:end].split()), validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '5e3f6fd7a75103807e0ebab98f00376e5288be542ebf07f31ec071c512874b1f'
+          pathlib.Path(sys.argv[2]).write_bytes(patch)
+          PY
+          git checkout --detach ebfdd11705bc470564e726857e498f1c82aa746c
+          git apply --check "$RUNNER_TEMP/audit.patch"
+          git apply --index "$RUNNER_TEMP/audit.patch"
+          test "$(git write-tree)" = 9ec96ae199e9bac14a9c9d6106dc44d7d8be6896
+          git config user.name 'Buster audit'
+          git config user.email 'buster-audit@users.noreply.github.com'
+          git commit -m 'fix: scale EVEX broadcasts by memory element width'
+          git fetch origin main
+          git rebase refs/remotes/origin/main
+          git diff --check refs/remotes/origin/main
+          git log -1 --format='PUBLISHED_COMMIT=%H TREE=%T'
+          git rev-parse refs/remotes/origin/main
+          git push origin HEAD:refs/heads/work/audit-191-rebased-object-20260907
+          git bundle create "$RUNNER_TEMP/buster-191.bundle" HEAD refs/remotes/origin/main
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: audit-191-rebased-source
+          path: ${{ runner.temp }}/buster-191.bundle
+          if-no-files-found: error
+          retention-days: 1
