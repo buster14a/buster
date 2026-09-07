@@ -5448,6 +5448,95 @@ BUSTER_GLOBAL_LOCAL String8 link_pe_pdb_path(Arena* arena, String8 executable_pa
     return string_format_z(arena, S8("{S8}.pdb"), string_slice(executable_path, 0, dot));
 }
 
+BUSTER_GLOBAL_LOCAL void link_u32_shell_sort(u32* values, u32 count)
+{
+    for (u32 gap = count / 2; gap; gap /= 2)
+    {
+        for (u32 index = gap; index < count; index += 1)
+        {
+            u32 value = values[index];
+            u32 cursor = index;
+            while (cursor >= gap && values[cursor - gap] > value)
+            {
+                values[cursor] = values[cursor - gap];
+                cursor -= gap;
+            }
+            values[cursor] = value;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool link_pe_base_relocation_size(u32 const* rvas, u32 count, u64* size)
+{
+    if ((!rvas && count) || !size)
+    {
+        return false;
+    }
+    *size = 0;
+    for (u32 index = 0; index < count;)
+    {
+        if (index && rvas[index] == rvas[index - 1])
+        {
+            return false;
+        }
+        u32 page = rvas[index] & ~UINT32_C(0xfff);
+        u32 end = index + 1;
+        while (end < count && (rvas[end] & ~UINT32_C(0xfff)) == page)
+        {
+            if (rvas[end] == rvas[end - 1])
+            {
+                return false;
+            }
+            end += 1;
+        }
+        u64 unaligned = 0;
+        u64 block = 0;
+        if (!link_u64_add(8, (u64)(end - index) * sizeof(u16), &unaligned) || !link_u64_align_forward(unaligned, 4, &block) ||
+            !link_u64_add(*size, block, size))
+        {
+            return false;
+        }
+        index = end;
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_pe_base_relocations_write(u8* bytes, u64 capacity, u64 output, u32 const* rvas, u32 count, u64 size)
+{
+    if (!bytes || (!rvas && count) || output > capacity || size > capacity - output)
+    {
+        return false;
+    }
+    u64 end_output = output + size;
+    for (u32 index = 0; index < count;)
+    {
+        u32 page = rvas[index] & ~UINT32_C(0xfff);
+        u32 end = index + 1;
+        while (end < count && (rvas[end] & ~UINT32_C(0xfff)) == page)
+        {
+            end += 1;
+        }
+        u64 unaligned = 0;
+        u64 block = 0;
+        if (!link_u64_add(8, (u64)(end - index) * sizeof(u16), &unaligned) || !link_u64_align_forward(unaligned, 4, &block) ||
+            output > end_output || block > end_output - output)
+        {
+            return false;
+        }
+        link_write_u32(bytes, output, page);
+        link_write_u32(bytes, output + 4, (u32)block);
+        u64 entry_output = output + 8;
+        for (u32 relocation = index; relocation < end; relocation += 1)
+        {
+            link_write_u16(bytes, entry_output, (u16)((10u << 12) | (rvas[relocation] - page)));
+            entry_output += sizeof(u16);
+        }
+        output += block;
+        index = end;
+    }
+    return output == end_output;
+}
+
 ByteSlice link_pe_resolved_codeview(Arena* arena, ObjectFile* object, ObjectDebugModule* debug_module,
                                                        u32 const* object_output_sections, u64 const* object_section_offsets,
                                                        u32 output_section_count)
@@ -5528,6 +5617,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         PE_SECTION_XDATA,
         PE_SECTION_IMPORT,
         PE_SECTION_DEBUG,
+        PE_SECTION_RELOCATION,
         PE_SECTION_COUNT,
         PE_IMPORT_DESCRIPTOR_SIZE = 20,
         PE_IMAGE_BASE_LOW = 0x40000000,
@@ -5831,7 +5921,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     u16 pe_section_count = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        pe_section_count = emit_debug ? PE_SECTION_COUNT : PE_SECTION_DEBUG;
+        pe_section_count = aarch64 ? (emit_debug ? PE_SECTION_COUNT : PE_SECTION_DEBUG + 1)
+                                     : (emit_debug ? PE_SECTION_RELOCATION : PE_SECTION_DEBUG);
     }
     String8 pdb_path = {0};
     if (result.error == LINK_ERROR_NONE)
@@ -6156,6 +6247,72 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
     {
         import_raw_size = align_forward(import_virtual_size, PE_FILE_ALIGNMENT);
     }
+    u32*base_relocation_rvas = 0;
+    u32 base_relocation_count = 0;
+    if (result.error == LINK_ERROR_NONE && aarch64)
+    {
+        if (object->relocation_count > UINT32_MAX - 4)
+        {
+            result.error = LINK_ERROR_INVALID_INPUT;
+        }
+        else
+        {
+            base_relocation_rvas = arena_allocate(arena, u32, object->relocation_count + 4);
+        }
+    }
+    if (result.error == LINK_ERROR_NONE && aarch64)
+    {
+        for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+        {
+            ObjectRelocation* relocation = object->relocations + relocation_index;
+            if (relocation->kind != OBJECT_RELOCATION_ABSOLUTE64 || relocation->section >= OBJECT_SECTION_COUNT ||
+                relocation->symbol >= object->symbol_count || object_section_kind_is_debug((ObjectSectionKind)relocation->section) ||
+                object->symbols[relocation->symbol].section == OBJECT_SECTION_UNDEFINED)
+            {
+                continue;
+            }
+            ObjectSection* source = object->sections + relocation->section;
+            u32 output_section = object_output_sections[relocation->section];
+            u64 rva = 0;
+            if (output_section >= PE_SECTION_DEBUG || relocation->offset > source->data.length ||
+                source->data.length - relocation->offset < sizeof(u64) ||
+                !link_u64_add(section_rvas[output_section], object_section_offsets[relocation->section], &rva) ||
+                !link_u64_add(rva, relocation->offset, &rva) || rva > UINT32_MAX)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                break;
+            }
+            base_relocation_rvas[base_relocation_count++] = (u32)rva;
+        }
+        if (result.error == LINK_ERROR_NONE && tls_virtual_size)
+        {
+            u64 directory_rva = section_rvas[PE_SECTION_IMPORT] + tls_directory_offset;
+            for (u32 field = 0; field < 4; field += 1)
+            {
+                u64 rva = directory_rva + (u64)field * sizeof(u64);
+                if (rva > UINT32_MAX)
+                {
+                    result.error = LINK_ERROR_RELOCATION;
+                    break;
+                }
+                base_relocation_rvas[base_relocation_count++] = (u32)rva;
+            }
+        }
+    }
+    u64 relocation_virtual_size = 0;
+    u64 relocation_raw_size = 0;
+    if (result.error == LINK_ERROR_NONE && aarch64)
+    {
+        link_u32_shell_sort(base_relocation_rvas, base_relocation_count);
+        if (!link_pe_base_relocation_size(base_relocation_rvas, base_relocation_count, &relocation_virtual_size))
+        {
+            result.error = LINK_ERROR_RELOCATION;
+        }
+        else
+        {
+            relocation_raw_size = align_forward(BUSTER_MAX(relocation_virtual_size, 1), PE_FILE_ALIGNMENT);
+        }
+    }
     u64 base_file_size = 0;
     if (result.error == LINK_ERROR_NONE)
     {
@@ -6167,17 +6324,27 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             section_raw_offsets[PE_SECTION_DEBUG] = (u32)base_file_size;
         }
     }
+    u64 relocation_file_offset = 0;
+    if (result.error == LINK_ERROR_NONE && aarch64)
+    {
+        u64 previous_rva = emit_debug ? section_rvas[PE_SECTION_DEBUG] + BUSTER_MAX(debug_virtual_size, 1)
+                                      : section_rvas[PE_SECTION_IMPORT] + BUSTER_MAX(import_virtual_size, 1);
+        relocation_file_offset = base_file_size + (emit_debug ? debug_raw_size : 0);
+        section_rvas[PE_SECTION_RELOCATION] = (u32)align_forward(previous_rva, PE_SECTION_ALIGNMENT);
+        section_raw_offsets[PE_SECTION_RELOCATION] = (u32)relocation_file_offset;
+    }
     u64 file_size = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        file_size = base_file_size + (emit_debug ? debug_raw_size : 0);
+        file_size = base_file_size + (emit_debug ? debug_raw_size : 0) + (aarch64 ? relocation_raw_size : 0);
     }
     u64 image_size = 0;
     if (result.error == LINK_ERROR_NONE)
     {
-        image_size = align_forward((emit_debug ? section_rvas[PE_SECTION_DEBUG] + debug_virtual_size
-                                                   : section_rvas[PE_SECTION_IMPORT] + import_virtual_size),
-                                       PE_SECTION_ALIGNMENT);
+        u64 image_end = aarch64 ? section_rvas[PE_SECTION_RELOCATION] + BUSTER_MAX(relocation_virtual_size, 1)
+                                : (emit_debug ? section_rvas[PE_SECTION_DEBUG] + debug_virtual_size
+                                              : section_rvas[PE_SECTION_IMPORT] + import_virtual_size);
+        image_size = align_forward(image_end, PE_SECTION_ALIGNMENT);
         if (file_size > UINT32_MAX || image_size > UINT32_MAX)
         {
             result.error = LINK_ERROR_INVALID_INPUT;
@@ -6951,6 +7118,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
             }
         }
     }
+    if (result.error == LINK_ERROR_NONE && aarch64 &&
+        !link_pe_base_relocations_write(bytes, file_size, relocation_file_offset, base_relocation_rvas, base_relocation_count,
+                                        relocation_virtual_size))
+    {
+        result.error = LINK_ERROR_RELOCATION;
+    }
     if (result.error == LINK_ERROR_NONE)
     {
         bytes[0] = 'M';
@@ -6965,7 +7138,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         link_write_u16(bytes, coff, aarch64 ? 0xaa64 : 0x8664);
         link_write_u16(bytes, coff + 2, pe_section_count);
         link_write_u16(bytes, coff + 16, PE_OPTIONAL_HEADER_SIZE);
-        link_write_u16(bytes, coff + 18, 0x23);
+        link_write_u16(bytes, coff + 18, aarch64 ? 0x22 : 0x23);
     }
     u64 optional = 0;
     if (result.error == LINK_ERROR_NONE)
@@ -6975,7 +7148,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         link_write_u32(bytes, optional + 4, (u32)text_raw_size);
         link_write_u32(bytes, optional + 8,
                        (u32)(read_only_raw_size + data_raw_size + tls_raw_size + pdata_raw_size + xdata_raw_size + import_raw_size +
-                             (emit_debug ? debug_raw_size : 0)));
+                             (emit_debug ? debug_raw_size : 0) + (aarch64 ? relocation_raw_size : 0)));
         link_write_u32(bytes, optional + 12, (u32)zero_virtual_size);
         link_write_u32(bytes, optional + 16, (u32)entry_rva);
         link_write_u32(bytes, optional + 20, section_rvas[PE_SECTION_TEXT]);
@@ -6988,7 +7161,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         link_write_u32(bytes, optional + 56, (u32)image_size);
         link_write_u32(bytes, optional + 60, (u32)header_size);
         link_write_u16(bytes, optional + 68, 3);
-        link_write_u16(bytes, optional + 70, 0x100);
+        link_write_u16(bytes, optional + 70, aarch64 ? 0x160 : 0x100);
         link_write_u64(bytes, optional + 72, LINK_PE_STACK_RESERVE);
         link_write_u64(bytes, optional + 80, LINK_PE_STACK_COMMIT);
         link_write_u64(bytes, optional + 88, LINK_PE_HEAP_RESERVE);
@@ -7005,6 +7178,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         {
             link_write_u32(bytes, optional + 184, import_section_rva + (u32)tls_directory_offset);
             link_write_u32(bytes, optional + 188, 40);
+        }
+        if (aarch64 && relocation_virtual_size)
+        {
+            link_write_u32(bytes, optional + 152, section_rvas[PE_SECTION_RELOCATION]);
+            link_write_u32(bytes, optional + 156, (u32)relocation_virtual_size);
         }
         link_write_u32(bytes, optional + 208, import_section_rva + (u32)(total_import_slots ? runtime_address_offset : terminate_address_offset));
         link_write_u32(bytes, optional + 212,
@@ -7041,9 +7219,19 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
         {
             link_pe_section_header(bytes, section_header + PE_SECTION_DEBUG * PE_SECTION_HEADER_SIZE, ".debug\0\0", (u32)debug_virtual_size,
                                    section_rvas[PE_SECTION_DEBUG], (u32)debug_raw_size, section_raw_offsets[PE_SECTION_DEBUG], 0x40000040);
+        }
+        if (aarch64)
+        {
+            u32 relocation_header = emit_debug ? PE_SECTION_RELOCATION : PE_SECTION_DEBUG;
+            link_pe_section_header(bytes, section_header + (u64)relocation_header * PE_SECTION_HEADER_SIZE, ".reloc\0\0",
+                                   (u32)relocation_virtual_size, section_rvas[PE_SECTION_RELOCATION], (u32)relocation_raw_size,
+                                   section_raw_offsets[PE_SECTION_RELOCATION], 0x42000040);
+        }
+        if (emit_debug)
+        {
     
             PdbSection* pdb_sections = arena_allocate(arena, PdbSection, PE_SECTION_COUNT);
-            for (u32 section_index = 0; section_index < PE_SECTION_COUNT; section_index += 1)
+            for (u32 section_index = 0; section_index < pe_section_count; section_index += 1)
             {
                 String8 name = section_index == PE_SECTION_TEXT             ? S8(".text")
                               : section_index == PE_SECTION_READ_ONLY_DATA ? S8(".rdata")
@@ -7053,7 +7241,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                               : section_index == PE_SECTION_PDATA          ? S8(".pdata")
                               : section_index == PE_SECTION_XDATA          ? S8(".xdata")
                               : section_index == PE_SECTION_IMPORT         ? S8(".idata")
-                                                                          : S8(".debug");
+                              : section_index == PE_SECTION_DEBUG          ? S8(".debug")
+                                                                          : S8(".reloc");
                 u64 virtual_size = section_index == PE_SECTION_TEXT             ? text_virtual_size
                                    : section_index == PE_SECTION_READ_ONLY_DATA ? read_only_virtual_size
                                    : section_index == PE_SECTION_DATA           ? data_virtual_size
@@ -7062,7 +7251,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                                    : section_index == PE_SECTION_PDATA          ? pdata_virtual_size
                                    : section_index == PE_SECTION_XDATA          ? xdata_virtual_size
                                    : section_index == PE_SECTION_IMPORT         ? import_virtual_size
-                                                                               : debug_virtual_size;
+                                   : section_index == PE_SECTION_DEBUG          ? debug_virtual_size
+                                                                               : relocation_virtual_size;
                 u64 raw_size = section_index == PE_SECTION_TEXT             ? text_raw_size
                                : section_index == PE_SECTION_READ_ONLY_DATA ? read_only_raw_size
                                : section_index == PE_SECTION_DATA           ? data_raw_size
@@ -7071,12 +7261,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                                : section_index == PE_SECTION_PDATA          ? pdata_raw_size
                                : section_index == PE_SECTION_XDATA          ? xdata_raw_size
                                : section_index == PE_SECTION_IMPORT         ? import_raw_size
-                                                                           : debug_raw_size;
+                               : section_index == PE_SECTION_DEBUG          ? debug_raw_size
+                                                                           : relocation_raw_size;
                 u32 characteristics = section_index == PE_SECTION_TEXT             ? 0x60000020
                                       : section_index == PE_SECTION_DATA           ? 0xc0000040
                                       : section_index == PE_SECTION_ZERO           ? 0xc0000080
                                       : section_index == PE_SECTION_TLS            ? 0xc0000040
                                       : section_index == PE_SECTION_IMPORT         ? 0xc0000040
+                                      : section_index == PE_SECTION_RELOCATION     ? 0x42000040
                                                                                    : 0x40000040;
                 pdb_sections[section_index] = (PdbSection){
                     .name = name,
@@ -7228,24 +7420,6 @@ struct LinkUefiPeSection
     bool present;
     u8 reserved[3];
 };
-
-BUSTER_GLOBAL_LOCAL void link_u32_shell_sort(u32* values, u32 count)
-{
-    for (u32 gap = count / 2; gap; gap /= 2)
-    {
-        for (u32 index = gap; index < count; index += 1)
-        {
-            u32 value = values[index];
-            u32 cursor = index;
-            while (cursor >= gap && values[cursor - gap] > value)
-            {
-                values[cursor] = values[cursor - gap];
-                cursor -= gap;
-            }
-            values[cursor] = value;
-        }
-    }
-}
 
 BUSTER_GLOBAL_LOCAL bool link_uefi_relocation_is_tls(ObjectRelocationKind kind)
 {

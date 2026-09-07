@@ -3370,6 +3370,62 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ByteSlice arm64_unwind_file = file_read(arm64_unwind_temporary.arena, arm64_unwind_object_path, (FileReadOptions){0});
             BUSTER_TEST(arguments, arm64_unwind_file.length != 0 && arm64_unwind_file.length < BUSTER_MB(1));
         }
+        String8 arm64_executable_path = buster_test_temporary_path(arm64_unwind_temporary.arena, S8("buster-c-arm64-dynamic-base"), S8(".exe"));
+        String8 arm64_executable_command_line[] = {
+            S8("-target"), S8("aarch64-windows"), S8("-g0"), S8("-o"), arm64_executable_path, S8("tests/basic_c_compile.c"),
+        };
+        CompilerDriverResult arm64_executable = compiler_driver_execute_invocation(
+            arm64_unwind_temporary.arena,
+            compiler_driver_parse_arguments(arm64_unwind_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arm64_executable_command_line)));
+        BUSTER_TEST(arguments, arm64_executable.error == COMPILER_DRIVER_ERROR_NONE);
+        if (arm64_executable.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            ByteSlice image = arm64_executable.native_link.executable;
+            bool header_valid = image.length >= 0x40;
+            u32 pe = header_valid ? link_read_u32(image.pointer, 0x3c) : 0;
+            header_valid &= pe <= image.length && image.length - pe >= 24 + 240 && memcmp(image.pointer + pe, "PE\0\0", 4) == 0;
+            BUSTER_TEST(arguments, header_valid);
+            if (header_valid)
+            {
+                u64 optional = (u64)pe + 24;
+                u16 coff_characteristics = 0;
+                u16 dll_characteristics = 0;
+                memcpy(&coff_characteristics, image.pointer + pe + 22, sizeof(coff_characteristics));
+                memcpy(&dll_characteristics, image.pointer + optional + 70, sizeof(dll_characteristics));
+                u32 relocation_rva = link_read_u32(image.pointer, optional + 152);
+                u32 relocation_size = link_read_u32(image.pointer, optional + 156);
+                BUSTER_TEST(arguments, !(coff_characteristics & 1));
+                BUSTER_TEST(arguments, (dll_characteristics & 0x40) != 0);
+                BUSTER_TEST(arguments, relocation_rva != 0 && relocation_size >= 10);
+                u16 section_count = 0;
+                memcpy(&section_count, image.pointer + pe + 6, sizeof(section_count));
+                u64 section_headers = optional + 240;
+                bool relocation_section_valid = false;
+                for (u32 section_index = 0; section_index < section_count; section_index += 1)
+                {
+                    u64 section = section_headers + (u64)section_index * 40;
+                    if (section > image.length || image.length - section < 40 || memcmp(image.pointer + section, ".reloc\0\0", 8) != 0)
+                    {
+                        continue;
+                    }
+                    u32 virtual_size = link_read_u32(image.pointer, section + 8);
+                    u32 virtual_address = link_read_u32(image.pointer, section + 12);
+                    u32 raw_size = link_read_u32(image.pointer, section + 16);
+                    u32 raw_offset = link_read_u32(image.pointer, section + 20);
+                    relocation_section_valid = virtual_size == relocation_size && virtual_address == relocation_rva && raw_offset <= image.length &&
+                                               raw_size <= image.length - raw_offset && relocation_size <= raw_size;
+                    if (relocation_section_valid)
+                    {
+                        u32 block_size = link_read_u32(image.pointer, raw_offset + 4);
+                        u16 first_entry = 0;
+                        memcpy(&first_entry, image.pointer + raw_offset + 8, sizeof(first_entry));
+                        relocation_section_valid = block_size >= 10 && block_size <= relocation_size && (first_entry >> 12) == 10;
+                    }
+                    break;
+                }
+                BUSTER_TEST(arguments, relocation_section_valid);
+            }
+        }
         scratch_end(arm64_unwind_temporary);
     }
     // Recording line rows must not change the code that is generated for

@@ -1113,6 +1113,126 @@ BUSTER_GLOBAL_LOCAL bool link_test_runtime_symbol_find(ObjectFile* object, Strin
 }
 
 #if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_arm64_xdata(ObjectFile* object, bool* has_frame_register, bool* has_large_allocation)
+{
+    ByteSlice xdata = object->sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+    u32 record_count = 0;
+    for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + relocation_index;
+        if (relocation->section != OBJECT_SECTION_WINDOWS_PDATA || relocation->offset % 8 != 4 || relocation->addend < 0)
+        {
+            continue;
+        }
+        u64 xdata_offset = (u64)relocation->addend;
+        if (xdata_offset % 4 || xdata_offset > xdata.length || xdata.length - xdata_offset < 4)
+        {
+            return false;
+        }
+        u8 const* record = xdata.pointer + xdata_offset;
+        u32 header = 0;
+        memcpy(&header, record, sizeof(header));
+        if (!(header & ((1u << 18) - 1)) || ((header >> 18) & 3) != 0 || (header & (1u << 20)))
+        {
+            return false;
+        }
+        bool epilog_packed = (header & (1u << 21)) != 0;
+        u32 epilog_count = (header >> 22) & 31;
+        u32 code_words = header >> 27;
+        u32 header_size = 4;
+        if (!(header >> 22))
+        {
+            if (xdata.length - xdata_offset < 8)
+            {
+                return false;
+            }
+            u32 extension = 0;
+            memcpy(&extension, record + 4, sizeof(extension));
+            if (extension >> 24)
+            {
+                return false;
+            }
+            epilog_count = extension & 0xffff;
+            code_words = (extension >> 16) & 0xff;
+            header_size = 8;
+        }
+        u64 scope_bytes = epilog_packed ? 0 : (u64)epilog_count * 4;
+        u64 code_bytes = (u64)code_words * 4;
+        u64 record_bytes = (u64)header_size + scope_bytes + code_bytes;
+        if (!code_words || record_bytes > xdata.length - xdata_offset)
+        {
+            return false;
+        }
+        u8 const* codes = record + header_size + scope_bytes;
+        if (!epilog_packed)
+        {
+            for (u32 epilog = 0; epilog < epilog_count; epilog += 1)
+            {
+                u32 scope = 0;
+                memcpy(&scope, record + header_size + (u64)epilog * 4, sizeof(scope));
+                if ((scope & (15u << 18)) || (scope >> 22) >= code_bytes)
+                {
+                    return false;
+                }
+            }
+        }
+        for (u32 cursor = 0; cursor < code_bytes;)
+        {
+            u8 operation = codes[cursor];
+            u32 operation_bytes = 0;
+            if (operation <= 0x1f || operation == 0x81 || operation == 0xe1 || operation == 0xe3 || operation == 0xe4)
+            {
+                operation_bytes = 1;
+            }
+            else if ((operation & 0xf8) == 0xc0 || (operation >= 0xd0 && operation <= 0xd2) || operation == 0xe2)
+            {
+                operation_bytes = 2;
+            }
+            else if (operation == 0xe0)
+            {
+                operation_bytes = 4;
+            }
+            else
+            {
+                return false;
+            }
+            if (operation_bytes > code_bytes - cursor)
+            {
+                return false;
+            }
+            if (operation == 0xe1 || operation == 0xe2)
+            {
+                *has_frame_register = true;
+            }
+            if (operation == 0xe0)
+            {
+                u32 units = (u32)codes[cursor + 1] << 16 | (u32)codes[cursor + 2] << 8 | codes[cursor + 3];
+                *has_large_allocation |= units * 16 > 4096;
+            }
+            else if ((operation & 0xf8) == 0xc0)
+            {
+                u32 units = ((u32)operation & 7) << 8 | codes[cursor + 1];
+                *has_large_allocation |= units * 16 > 4096;
+            }
+            cursor += operation_bytes;
+            if (operation == 0xe4)
+            {
+                bool padding = true;
+                for (u32 tail = cursor; tail < code_bytes; tail += 1)
+                {
+                    padding &= codes[tail] == 0;
+                }
+                if (padding)
+                {
+                    break;
+                }
+            }
+        }
+        record_count += 1;
+    }
+    return record_count != 0 && *has_frame_register && *has_large_allocation;
+}
+
 BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_xdata(ObjectFile* object, bool* has_frame_register, bool* has_large_allocation)
 {
     if (!object || !object->sections || !has_frame_register || !has_large_allocation)
@@ -1121,6 +1241,10 @@ BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_xdata(ObjectFile* object, boo
     }
     *has_frame_register = false;
     *has_large_allocation = false;
+    if (object->target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        return link_test_runtime_windows_arm64_xdata(object, has_frame_register, has_large_allocation);
+    }
     ByteSlice xdata = object->sections[OBJECT_SECTION_WINDOWS_XDATA].data;
     u32 record_count = 0;
     for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
