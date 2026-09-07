@@ -1,0 +1,275 @@
+diff --git a/src/buster/lib/compiler/llvm/bitcode.c b/src/buster/lib/compiler/llvm/bitcode.c
+index 45c453b..d7ac903 100644
+--- a/src/buster/lib/compiler/llvm/bitcode.c
++++ b/src/buster/lib/compiler/llvm/bitcode.c
+@@ -2908,11 +2908,12 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
+         u32 switch_count = 0;
+         switch_operands[switch_count++] = llvm_bc_function_value_type_id(context, record, condition_id);
+         switch_operands[switch_count++] = (u32)(*current_value_id - llvm_bc_function_value_id(context, record, condition_id));
+-        switch_operands[switch_count++] = llvm_bc_function_block_index(context, record, instruction->targets[0]);
++        // Canonical SWITCH stores case targets first, followed by the default.
++        switch_operands[switch_count++] = llvm_bc_function_block_index(context, record, instruction->targets[instruction->immediate_count]);
+         for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
+         {
+             switch_operands[switch_count++] = llvm_bc_scalar_integer_constant(context, condition_type, instruction->immediates[case_index], false);
+-            switch_operands[switch_count++] = llvm_bc_function_block_index(context, record, instruction->targets[case_index + 1]);
++            switch_operands[switch_count++] = llvm_bc_function_block_index(context, record, instruction->targets[case_index]);
+         }
+         llvm_bc_record(&context->stream, LLVM_BC_FUNC_SWITCH, switch_operands, switch_count);
+         break;
+diff --git a/src/buster/tests/compiler/driver/driver_test.c b/src/buster/tests/compiler/driver/driver_test.c
+index 2286e3c..9aca556 100644
+--- a/src/buster/tests/compiler/driver/driver_test.c
++++ b/src/buster/tests/compiler/driver/driver_test.c
+@@ -1098,12 +1098,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_codeview_limit(UnitTestA
+     return result;
+ }
+ 
++// Execute LLVM bitcode with an independently compiled oracle. A verifier can
++// accept a switch whose case/default destinations are semantically rotated.
++BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_llvm_switch(UnitTestArguments* arguments)
++{
++    UnitTestResult result = {0};
++#if defined(__clang__) && defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC && !BUSTER_ANDROID && !BUSTER_IOS
++    String8 allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
++    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(allocators); index += 1)
++    {
++        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
++        String8 bitcode_path = buster_test_temporary_path(temporary.arena, S8("buster-llvm-switch"), S8(".bc"));
++        String8 executable_path = buster_test_temporary_path(temporary.arena, S8("buster-llvm-switch"),
++#if BUSTER_WINDOWS
++                                                             S8(".exe"));
++#else
++                                                             S8(""));
++#endif
++        String8 command[] = {
++            S8("-emit-llvm"), S8("-nostdinc"), S8("-o"), bitcode_path,
++            string_format(temporary.arena, S8("-fregister-allocator={S8}"), allocators[index]),
++            S8("tests/basic_c_llvm_switch.c"),
++        };
++        CompilerDriverResult built = compiler_driver_execute_invocation(
++            temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
++        BUSTER_TEST(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_llvm_bitcode && built.llvm_bitcode.success);
++        if (built.error == COMPILER_DRIVER_ERROR_NONE && built.has_llvm_bitcode && built.llvm_bitcode.success)
++        {
++            OsArgumentBuilder consumer_builder = os_argument_builder_start(temporary.arena);
++            os_argument_builder_append(&consumer_builder, S8(BUSTER_HOST_C_COMPILER));
++            String8 compiler_arg1 = S8(BUSTER_HOST_C_COMPILER_ARG1);
++            if (compiler_arg1.length)
++            {
++                os_argument_builder_append(&consumer_builder, compiler_arg1);
++            }
++            os_argument_builder_append(&consumer_builder, bitcode_path);
++            os_argument_builder_append(&consumer_builder, S8("tests/basic_c_llvm_switch_caller.c"));
++            os_argument_builder_append(&consumer_builder, S8("-o"));
++            os_argument_builder_append(&consumer_builder, executable_path);
++            ProcessSpawnResult consumer = os_process_spawn(os_argument_builder_flush(&consumer_builder), (SliceString8){0},
++                                                           (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
++            BUSTER_TEST(arguments, consumer.handle != 0);
++            if (consumer.handle)
++            {
++                ProcessWaitResult compiled = os_process_wait_sync(temporary.arena, consumer);
++                BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
++                if (compiled.result == PROCESS_RESULT_SUCCESS)
++                {
++                    String8 run[] = {executable_path};
++                    ProcessSpawnResult execution = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
++                                                                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
++                    BUSTER_TEST(arguments, execution.handle != 0);
++                    if (execution.handle)
++                    {
++                        ProcessWaitResult executed = os_process_wait_sync(temporary.arena, execution);
++                        if (executed.result != PROCESS_RESULT_SUCCESS)
++                        {
++                            arguments->show(arguments, S8("LLVM switch oracle failed: allocator={S8} status={u32}\n"),
++                                            allocators[index], executed.platform_status);
++                        }
++                        BUSTER_TEST(arguments, executed.result == PROCESS_RESULT_SUCCESS);
++                    }
++                }
++            }
++        }
++        scratch_end(temporary);
++    }
++#else
++    arguments->show(arguments, S8("LLVM switch external-consumer test requires a desktop Clang host compiler\n"));
++#endif
++    return result;
++}
++
+ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
+ {
+     UnitTestResult result = compiler_driver_test_include_population(arguments);
+     UnitTestResult codeview_limit = compiler_driver_test_codeview_limit(arguments);
+     result.test_count += codeview_limit.test_count;
+     result.succeeded_test_count += codeview_limit.succeeded_test_count;
++    UnitTestResult llvm_switch = compiler_driver_test_llvm_switch(arguments);
++    result.test_count += llvm_switch.test_count;
++    result.succeeded_test_count += llvm_switch.succeeded_test_count;
+ 
+     // compiler_prewarm() is the contract that lets a gang compile at all: the
+     // frontends' remaining first-use tables are written once and read
+diff --git a/tests/basic_c_llvm_switch.c b/tests/basic_c_llvm_switch.c
+new file mode 100644
+index 0000000..1819ed7
+--- /dev/null
++++ b/tests/basic_c_llvm_switch.c
+@@ -0,0 +1,100 @@
++/* This translation unit is emitted as Buster bitcode. The oracle is compiled
++   separately by Clang so incorrectly routed expectations cannot hide a bug. */
++int llvm_switch_dense(int value)
++{
++    int result;
++    switch (value)
++    {
++    case 0: result = 11; break;
++    case 1: result = 23; break;
++    case 2: result = 37; break;
++    default: result = 53; break;
++    }
++    return result;
++}
++
++int llvm_switch_grouped(int value)
++{
++    int result = 3;
++    switch (value)
++    {
++    case 0:
++    case 1:
++        result += 4;
++        /* fall through */
++    case 2:
++        result += 8;
++        break;
++    default:
++        result = 31;
++        break;
++    case 4:
++        result = 47;
++        break;
++    }
++    return result;
++}
++
++int llvm_switch_no_default(int value)
++{
++    int result = 17;
++    switch (value)
++    {
++    case -7: result = 19; break;
++    case 5: result = 23; break;
++    }
++    return result;
++}
++
++int llvm_switch_default_only(int value)
++{
++    int result;
++    switch (value)
++    {
++    default: result = 59; break;
++    }
++    return result;
++}
++
++int llvm_switch_nested(int outer, int inner)
++{
++    int result;
++    switch (outer)
++    {
++    case 1:
++        switch (inner)
++        {
++        case -3: result = 61; break;
++        case 4: result = 67; break;
++        default: result = 71; break;
++        }
++        break;
++    case -2: result = 73; break;
++    default: result = 79; break;
++    }
++    return result;
++}
++
++int llvm_switch_wide_unsigned(unsigned long long value)
++{
++    int result;
++    switch (value)
++    {
++    case 0x10000000007ULL: result = 83; break;
++    case 0x20000000011ULL: result = 89; break;
++    default: result = 97; break;
++    }
++    return result;
++}
++
++int llvm_switch_wide_signed(long long value)
++{
++    int result;
++    switch (value)
++    {
++    case -0x10000000007LL: result = 101; break;
++    case 0x20000000011LL: result = 103; break;
++    default: result = 107; break;
++    }
++    return result;
++}
+diff --git a/tests/basic_c_llvm_switch_caller.c b/tests/basic_c_llvm_switch_caller.c
+new file mode 100644
+index 0000000..9c0460b
+--- /dev/null
++++ b/tests/basic_c_llvm_switch_caller.c
+@@ -0,0 +1,52 @@
++#include <stdio.h>
++
++extern int llvm_switch_dense(int value);
++extern int llvm_switch_grouped(int value);
++extern int llvm_switch_no_default(int value);
++extern int llvm_switch_default_only(int value);
++extern int llvm_switch_nested(int outer, int inner);
++extern int llvm_switch_wide_unsigned(unsigned long long value);
++extern int llvm_switch_wide_signed(long long value);
++
++int main(void)
++{
++    unsigned int checks = 0;
++    unsigned int failures = 0;
++    for (int value = -8; value <= 8; value += 1)
++    {
++        int dense = value == 0 ? 11 : value == 1 ? 23 : value == 2 ? 37 : 53;
++        int grouped = value == 0 || value == 1 ? 15 : value == 2 ? 11 : value == 4 ? 47 : 31;
++        int no_default = value == -7 ? 19 : value == 5 ? 23 : 17;
++        failures += llvm_switch_dense(value) != dense;
++        failures += llvm_switch_grouped(value) != grouped;
++        failures += llvm_switch_no_default(value) != no_default;
++        failures += llvm_switch_default_only(value) != 59;
++        checks += 4;
++        for (int inner = -4; inner <= 5; inner += 1)
++        {
++            int nested = value == 1 ? (inner == -3 ? 61 : inner == 4 ? 67 : 71) : value == -2 ? 73 : 79;
++            failures += llvm_switch_nested(value, inner) != nested;
++            checks += 1;
++        }
++    }
++    unsigned long long unsigned_keys[] = {0, 7, 0x10000000006ULL, 0x10000000007ULL, 0x10000000008ULL,
++                                          0x20000000010ULL, 0x20000000011ULL, 0x20000000012ULL, ~0ULL};
++    for (unsigned int index = 0; index < sizeof(unsigned_keys) / sizeof(unsigned_keys[0]); index += 1)
++    {
++        unsigned long long value = unsigned_keys[index];
++        int expected = value == 0x10000000007ULL ? 83 : value == 0x20000000011ULL ? 89 : 97;
++        failures += llvm_switch_wide_unsigned(value) != expected;
++        checks += 1;
++    }
++    long long signed_keys[] = {0, -7, -0x10000000006LL, -0x10000000007LL, -0x10000000008LL,
++                               0x20000000010LL, 0x20000000011LL, 0x20000000012LL};
++    for (unsigned int index = 0; index < sizeof(signed_keys) / sizeof(signed_keys[0]); index += 1)
++    {
++        long long value = signed_keys[index];
++        int expected = value == -0x10000000007LL ? 101 : value == 0x20000000011LL ? 103 : 107;
++        failures += llvm_switch_wide_signed(value) != expected;
++        checks += 1;
++    }
++    printf("LLVM_SWITCH checks=%u failures=%u\n", checks, failures);
++    return failures != 0;
++}
