@@ -1,5 +1,120 @@
 #include <buster/tests/compiler/llvm/bitcode_test.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/llvm/bitcode_internal.h>
+#include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/os.h>
+
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_encoding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // LLVM reserves the encoded value 1 for INT64_MIN, not for the minimum
+    // of the IR integer type. These are wire values, independent of the writer.
+    u32 widths[] = {1, 8, 16, 32, 64};
+    u64 expected[] = {3, 257, 65537, UINT64_C(4294967297), 1};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(widths); index += 1)
+    {
+        u64 sign = UINT64_C(1) << (widths[index] - 1);
+        BUSTER_TEST(arguments, llvm_bitcode_test_encode_integer_bits(sign, widths[index]) == expected[index]);
+    }
+    for (u32 width = 1; width <= 64; width += 1)
+    {
+        u64 sign = UINT64_C(1) << (width - 1);
+        u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+        // Exhaust every pattern through i16; then check each larger width's
+        // zero, one, sign boundary, all-ones, and discarded high input bits.
+        u64 boundaries[] = {0, 1, sign - 1, sign, sign + 1, mask, UINT64_MAX};
+        u64 count = width <= 16 ? (UINT64_C(1) << width) : BUSTER_ARRAY_LENGTH(boundaries);
+        for (u64 index = 0; index < count; index += 1)
+        {
+            u64 bits = width <= 16 ? index : boundaries[index];
+            u64 encoded = llvm_bitcode_test_encode_integer_bits(bits, width);
+            u64 decoded = encoded >> 1;
+            if (encoded == 1)
+            {
+                decoded = UINT64_C(1) << 63;
+            }
+            else if (encoded & 1)
+            {
+                decoded = 0 - decoded;
+            }
+            BUSTER_TEST(arguments, (decoded & mask) == (bits & mask));
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_run(UnitTestArguments* arguments, SliceString8 command)
+{
+    bool success = false;
+    ProcessSpawnResult spawn = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
+                                                (ProcessSpawnOptions){.use_process_environment = true,
+                                                                      .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR)});
+    if (spawn.handle)
+    {
+        ProcessWaitResult wait = os_process_wait_sync(arguments->arena, spawn);
+        success = wait.result == PROCESS_RESULT_SUCCESS;
+        if (!success)
+        {
+            ByteSlice errors = wait.streams[STANDARD_STREAM_ERROR];
+            arguments->show(arguments, S8("LLVM integer consumer failed: {S8}\n"),
+                            (String8){.pointer = errors.pointer, .length = errors.length});
+        }
+    }
+    return success;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_consumer(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 probe_command[] = {S8("clang"), S8("--version")};
+    bool clang_available = llvm_bitcode_test_run(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(probe_command));
+    if (clang_available)
+    {
+        String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        String8 optimizations[] = {S8("-O0"), S8("-O2")};
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            Arena* arena = temporary.arena;
+            String8 bitcode_path = buster_test_temporary_path(arena, S8("buster-llvm-integer"), S8(".bc"));
+            String8 executable_path = buster_test_temporary_path(arena, S8("buster-llvm-integer"), S8(".exe"));
+            String8 allocator = string_format(arena, S8("-fregister-allocator={S8}"), modes[mode]);
+            String8 emit_command[] = {S8("-emit-llvm"), S8("-c"), S8("-nostdinc"), allocator, S8("-o"), bitcode_path,
+                                      S8("tests/basic_c_llvm_integer_constants.c")};
+            CompilerDriverResult emitted = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(emit_command)));
+            BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+            if (emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success)
+            {
+                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                {
+                    // The checker is compiled independently: comparing constants
+                    // produced by the same broken writer can hide this regression.
+                    String8 consume_command[] = {S8("clang"), S8("--driver-mode=gcc"), S8("-Wno-override-module"), optimizations[optimization],
+                                                  bitcode_path, S8("tests/basic_c_llvm_integer_constants_check.c"), S8("-o"), executable_path};
+                    bool compiled = llvm_bitcode_test_run(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(consume_command));
+                    BUSTER_TEST(arguments, compiled);
+                    if (compiled)
+                    {
+                        String8 run_command[] = {executable_path};
+                        BUSTER_TEST(arguments, llvm_bitcode_test_run(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(run_command)));
+                    }
+                }
+            }
+            else
+            {
+                arguments->show(arguments, S8("LLVM integer producer failed: {S8}\n"), emitted.diagnostic);
+            }
+            scratch_end(temporary);
+        }
+    }
+    else
+    {
+        arguments->show(arguments, S8("LLVM integer consumer skipped: clang unavailable; wire-encoding tests still run.\n"));
+    }
+    return result;
+}
+
 
 /* One module holding a three-byte record and an `_Atomic` copy of it whose
    promoted size is `atomic_size`, emitted for its type table alone: the walk in
@@ -212,6 +327,12 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(atomic_padded));
     BUSTER_TEST(arguments, atomic_alias.stats.type_count == without_atomic.stats.type_count);
     BUSTER_TEST(arguments, atomic_padded.stats.type_count == without_atomic.stats.type_count + 2);
+    UnitTestResult integers = llvm_bitcode_test_integer_encoding(arguments);
+    result.succeeded_test_count += integers.succeeded_test_count;
+    result.test_count += integers.test_count;
+    UnitTestResult consumer = llvm_bitcode_test_integer_consumer(arguments);
+    result.succeeded_test_count += consumer.succeeded_test_count;
+    result.test_count += consumer.test_count;
     return result;
 }
 #endif
