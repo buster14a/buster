@@ -58,6 +58,7 @@ keep current.
 - [`2026-09-07T225617Z`](docs/performance-audits/2026-09-07T225617Z.md) — publish scheduler chain membership from immutable machine metadata (#45)
 - [`2026-09-07T225141Z`](docs/performance-audits/2026-09-07T225141Z.md) — remove the unused declarative selector and its unconsumed facts (#42)
 - [`2026-09-07T223310Z`](docs/performance-audits/2026-09-07T223310Z.md) — TLS encoding authority: correct redundant REX relaxation; bound cold recipe preparation
+- [`2026-09-07T222944Z`](docs/performance-audits/2026-09-07T222944Z.md) — FAST CFG edge indexing: remove quadratic queries without changing allocation decisions
 - [`2026-09-07T222813Z`](docs/performance-audits/2026-09-07T222813Z.md) — production selector audit and guarded replay benchmark
 - [`2026-09-07T220716Z`](docs/performance-audits/2026-09-07T220716Z.md) — GitHub workflow integrity, failure isolation, archive caching, and comparable timing cohorts
 - [`2026-09-07T212739Z`](docs/performance-audits/2026-09-07T212739Z.md) — FAST owner-mask draft rebased onto sparse contracts: guarded dense SIMD, deterministic output, performance gate still open
