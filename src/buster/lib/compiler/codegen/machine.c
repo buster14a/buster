@@ -1828,6 +1828,261 @@ MachineFunction machine_function_builder_finish(Arena* arena, MachineFunctionBui
     return function;
 }
 
+// A block-parameter assignment belongs to one CFG edge. A conditional or
+// indirect terminator cannot host such an assignment because edits before the
+// row execute for every successor. Normalize those edges into dedicated
+// one-successor blocks before allocation. The transformation is shared by all
+// targets; the target description supplies only its unconditional branch row.
+BUSTER_GLOBAL_LOCAL bool machine_function_parameter_edge_needs_split(MachineFunction const* function, MachineEdge const* edge)
+{
+    bool result = false;
+    if (edge->copy_count && edge->source_block < function->block_count)
+    {
+        MachineBlock const* source = function->blocks + edge->source_block;
+        if (source->instruction_count)
+        {
+            MachineInstruction const* terminator = function->instructions + source->first_instruction + source->instruction_count - 1u;
+            MachineOpcodeInfo const* row = machine_opcode_info(terminator->opcode);
+            u32 target_count = 0;
+            if (row)
+            {
+                for (u32 slot = 0; slot < row->operand_count; slot += 1)
+                {
+                    target_count += machine_ref_kind(terminator->operands[slot]) == MACHINE_REF_BLOCK;
+                }
+                result = terminator->opcode == MACHINE_X64_INDIRECT_BRANCH || terminator->opcode == MACHINE_A64_INDIRECT_BRANCH ||
+                         (function->target && terminator->opcode == function->target->switch_opcode) || target_count != 1;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 machine_function_parameter_edge_target(MachineFunction const* function, u32 const* old_to_new,
+                                                                u32 const* split_blocks, u32 source_block, u32 destination_block)
+{
+    u32 result = old_to_new[destination_block];
+    for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+    {
+        MachineEdge const* edge = function->edges + edge_index;
+        if (edge->source_block == source_block && edge->destination_block == destination_block && split_blocks[edge_index] != UINT32_MAX)
+        {
+            result = split_blocks[edge_index];
+            break;
+        }
+    }
+    return result;
+}
+
+bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function)
+{
+    bool result = function && function->target && function->target->unconditional_branch_opcode != MACHINE_OPCODE_INVALID;
+    u32 split_count = 0;
+    if (result)
+    {
+        for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+        {
+            split_count += machine_function_parameter_edge_needs_split(function, function->edges + edge_index);
+        }
+    }
+    if (result && split_count)
+    {
+        u64 new_block_count64 = (u64)function->block_count + split_count;
+        u64 new_instruction_count64 = (u64)function->instruction_count + split_count;
+        u64 new_edge_count64 = (u64)function->edge_count + split_count;
+        result = new_block_count64 < MACHINE_REF_PAYLOAD_LIMIT && new_instruction_count64 < MACHINE_POINT_INSTRUCTION_LIMIT &&
+                 new_edge_count64 <= UINT32_MAX;
+        if (result)
+        {
+            u32 old_block_count = function->block_count;
+            u32 old_instruction_count = function->instruction_count;
+            u32 old_edge_count = function->edge_count;
+            u32 new_block_count = (u32)new_block_count64;
+            u32 new_instruction_count = (u32)new_instruction_count64;
+            u32 new_edge_count = (u32)new_edge_count64;
+            u32* old_to_new = arena_allocate(arena, u32, old_block_count);
+            u32* split_blocks = arena_allocate(arena, u32, old_edge_count);
+            u32* old_to_new_instruction = arena_allocate(arena, u32, old_instruction_count);
+            memset(split_blocks, 0xff, sizeof(*split_blocks) * old_edge_count);
+            u32 block_cursor = 0;
+            for (u32 old_block = 0; old_block < old_block_count; old_block += 1)
+            {
+                old_to_new[old_block] = block_cursor++;
+                for (u32 edge_index = 0; edge_index < old_edge_count; edge_index += 1)
+                {
+                    MachineEdge const* edge = function->edges + edge_index;
+                    if (edge->source_block == old_block && machine_function_parameter_edge_needs_split(function, edge))
+                    {
+                        split_blocks[edge_index] = block_cursor++;
+                    }
+                }
+            }
+            MachineInstruction* instructions = arena_allocate(arena, MachineInstruction, new_instruction_count);
+            MachineBlock* blocks = arena_allocate(arena, MachineBlock, new_block_count);
+            MachineEdge* edges = arena_allocate(arena, MachineEdge, new_edge_count);
+            MachineSwitchCase* switch_cases = arena_allocate(arena, MachineSwitchCase, function->switch_case_count);
+            if (function->switch_case_count)
+            {
+                memcpy(switch_cases, function->switch_cases, sizeof(*switch_cases) * function->switch_case_count);
+            }
+            u32 instruction_cursor = 0;
+            block_cursor = 0;
+            for (u32 old_block = 0; old_block < old_block_count; old_block += 1)
+            {
+                MachineBlock const* old = function->blocks + old_block;
+                MachineBlock* copied = blocks + block_cursor++;
+                *copied = *old;
+                copied->first_instruction = instruction_cursor;
+                for (u32 offset = 0; offset < old->instruction_count; offset += 1)
+                {
+                    u32 old_instruction = old->first_instruction + offset;
+                    MachineInstruction instruction = function->instructions[old_instruction];
+                    MachineOpcodeInfo const* row = machine_opcode_info(instruction.opcode);
+                    old_to_new_instruction[old_instruction] = instruction_cursor;
+                    if (!row)
+                    {
+                        result = false;
+                        break;
+                    }
+                    for (u32 slot = 0; slot < row->operand_count; slot += 1)
+                    {
+                        if (machine_ref_kind(instruction.operands[slot]) == MACHINE_REF_BLOCK)
+                        {
+                            u32 destination = machine_ref_payload(instruction.operands[slot]);
+                            if (destination >= old_block_count)
+                            {
+                                result = false;
+                                break;
+                            }
+                            instruction.operands[slot] = machine_ref_make(
+                                MACHINE_REF_BLOCK,
+                                machine_function_parameter_edge_target(function, old_to_new, split_blocks, old_block, destination));
+                        }
+                    }
+                    if (!result)
+                    {
+                        break;
+                    }
+                    if (instruction.opcode == MACHINE_X64_LEA_BLOCK || instruction.opcode == MACHINE_A64_LEA_BLOCK)
+                    {
+                        if (instruction.payload >= old_block_count)
+                        {
+                            result = false;
+                            break;
+                        }
+                        instruction.payload = old_to_new[instruction.payload];
+                    }
+                    if (instruction.opcode == MACHINE_X64_INDIRECT_BRANCH || instruction.opcode == MACHINE_A64_INDIRECT_BRANCH ||
+                        instruction.opcode == function->target->switch_opcode)
+                    {
+                        if (instruction.payload > function->switch_case_count || instruction.flags > function->switch_case_count - instruction.payload)
+                        {
+                            result = false;
+                            break;
+                        }
+                        for (u32 case_index = 0; case_index < instruction.flags; case_index += 1)
+                        {
+                            MachineSwitchCase* switch_case = switch_cases + instruction.payload + case_index;
+                            if (switch_case->target_block >= old_block_count)
+                            {
+                                result = false;
+                                break;
+                            }
+                            switch_case->target_block = machine_function_parameter_edge_target(
+                                function, old_to_new, split_blocks, old_block, switch_case->target_block);
+                        }
+                    }
+                    instructions[instruction_cursor++] = instruction;
+                }
+                for (u32 edge_index = 0; result && edge_index < old_edge_count; edge_index += 1)
+                {
+                    MachineEdge const* edge = function->edges + edge_index;
+                    if (edge->source_block == old_block && split_blocks[edge_index] != UINT32_MAX)
+                    {
+                        blocks[block_cursor++] = (MachineBlock){.first_instruction = instruction_cursor, .instruction_count = 1};
+                        instructions[instruction_cursor++] = (MachineInstruction){
+                            .operands = {machine_ref_make(MACHINE_REF_BLOCK, old_to_new[edge->destination_block])},
+                            .opcode = function->target->unconditional_branch_opcode,
+                        };
+                    }
+                }
+                if (!result)
+                {
+                    break;
+                }
+            }
+            u32 edge_cursor = 0;
+            for (u32 edge_index = 0; result && edge_index < old_edge_count; edge_index += 1)
+            {
+                MachineEdge edge = function->edges[edge_index];
+                edge.source_block = old_to_new[edge.source_block];
+                if (split_blocks[edge_index] == UINT32_MAX)
+                {
+                    edge.destination_block = old_to_new[edge.destination_block];
+                }
+                else
+                {
+                    u32 destination = edge.destination_block;
+                    edge.destination_block = split_blocks[edge_index];
+                    edge.copy_count = 0;
+                    edges[edge_cursor++] = edge;
+                    edge = (MachineEdge){
+                        .source_block = split_blocks[edge_index],
+                        .destination_block = old_to_new[destination],
+                        .copy_offset = function->edges[edge_index].copy_offset,
+                        .copy_count = function->edges[edge_index].copy_count,
+                        .flags = function->edges[edge_index].flags,
+                    };
+                }
+                edges[edge_cursor++] = edge;
+            }
+            result = result && instruction_cursor == new_instruction_count && block_cursor == new_block_count && edge_cursor == new_edge_count;
+            if (result)
+            {
+                for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
+                {
+                    MachineVirtualRegister* virtual_register = function->virtual_registers + register_index;
+                    if (virtual_register->definition_point != MACHINE_POINT_INVALID)
+                    {
+                        u32 old_instruction = machine_point_instruction(virtual_register->definition_point);
+                        result = old_instruction < old_instruction_count;
+                        if (!result)
+                        {
+                            break;
+                        }
+                        virtual_register->definition_point = machine_point_make(old_to_new_instruction[old_instruction],
+                                                                               machine_point_phase(virtual_register->definition_point));
+                    }
+                }
+            }
+            for (u32 mark_index = 0; result && mark_index < function->line_mark_count; mark_index += 1)
+            {
+                MachineLineMark* mark = function->line_marks + mark_index;
+                result = mark->row <= old_instruction_count;
+                if (result && mark->row < old_instruction_count)
+                {
+                    mark->row = old_to_new_instruction[mark->row];
+                }
+                else if (result)
+                {
+                    mark->row = new_instruction_count;
+                }
+            }
+            if (result)
+            {
+                function->instructions = instructions;
+                function->instruction_count = new_instruction_count;
+                function->blocks = blocks;
+                function->block_count = new_block_count;
+                function->edges = edges;
+                function->edge_count = new_edge_count;
+                function->switch_cases = switch_cases;
+            }
+        }
+    }
+    return result;
+}
+
 // Selection deliberately over-reserves classification registers so load
 // aliasing and dead branch-fusion members can be decided without moving the
 // builder's hot rows. Remove those unreferenced reservations before MIR is
@@ -2599,6 +2854,43 @@ machine_verify_done:
     return result;
 }
 
+// The largest edge-local parallel-copy tile. Every edge reuses this one frame
+// region because only one edge executes at a time. Scalar values consume one
+// eight-byte cell; vector cells retain the same sixteen-byte alignment and
+// sixty-four-byte width as their ordinary virtual-register homes.
+BUSTER_GLOBAL_LOCAL u64 machine_function_edge_copy_temporary_size(MachineFunction const* function)
+{
+    u64 result = 0;
+    if (function && function->block_parameters)
+    {
+        for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+        {
+            MachineEdge const* edge = function->edges + edge_index;
+            u64 running = 0;
+            if (edge->destination_block < function->block_count)
+            {
+                MachineBlock const* destination = function->blocks + edge->destination_block;
+                u32 copy_count = BUSTER_MIN(edge->copy_count, destination->parameter_count);
+                for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
+                {
+                    u32 value = function->block_parameters[destination->parameter_offset + copy_index].virtual_register;
+                    if (value < function->virtual_register_count &&
+                        function->virtual_registers[value].register_class == MACHINE_REGISTER_CLASS_VECTOR)
+                    {
+                        running = ((running + 15u) & ~(u64)15u) + 64u;
+                    }
+                    else
+                    {
+                        running += 8u;
+                    }
+                }
+            }
+            result = BUSTER_MAX(result, running);
+        }
+    }
+    return result;
+}
+
 // MIR_STACK placement: every virtual register owns one 8-byte frame slot
 // and every operand round-trips through the target's fixed per-slot scratch
 // register. This is the selector/encoder verification mode, not an
@@ -2671,6 +2963,13 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
             running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
             placement.stack_slot_offsets[slot_index] = running;
         }
+        u64 edge_copy_temporary_size = machine_function_edge_copy_temporary_size(function);
+        if (edge_copy_temporary_size > UINT32_MAX - running)
+        {
+            return placement;
+        }
+        placement.edge_copy_temporary_offset = running;
+        running += (u32)edge_copy_temporary_size;
         MachineBuilderStream edits;
         machine_stream_initialize(&edits, sizeof(MachineEdit));
         for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
@@ -2680,6 +2979,85 @@ MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunctio
             if (!info)
             {
                 return placement;
+            }
+            // Parameter assignments are edge-local parallel copies. Capture
+            // every source in the reusable temporary tile before publishing
+            // any destination home; this also handles loop rotations where a
+            // source is another parameter whose home is a destination here.
+            for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+            {
+                MachineEdge const* edge = function->edges + edge_index;
+                MachineBlock const* source_block = function->blocks + edge->source_block;
+                if (!edge->copy_count || !source_block->instruction_count ||
+                    source_block->first_instruction + source_block->instruction_count - 1u != instruction_index)
+                {
+                    continue;
+                }
+                MachineBlock const* destination_block = function->blocks + edge->destination_block;
+                u32 copy_count = BUSTER_MIN(edge->copy_count, destination_block->parameter_count);
+                for (u32 capture_pass = 0; capture_pass < 2; capture_pass += 1)
+                {
+                    u32 temporary_offset = 0;
+                    for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
+                    {
+                        MachineRef source = function->edge_copy_sources[edge->copy_offset + copy_index];
+                        u32 destination = function->block_parameters[destination_block->parameter_offset + copy_index].virtual_register;
+                        bool vector = function->virtual_registers[destination].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+                        temporary_offset = vector ? (temporary_offset + 15u) & ~15u : temporary_offset;
+                        temporary_offset += vector ? 64u : 8u;
+                        bool physical = machine_ref_kind(source) == MACHINE_REF_PHYSICAL_REGISTER;
+                        if (physical != (capture_pass == 0))
+                        {
+                            continue;
+                        }
+                        u8 copy_register = physical ? (u8)machine_ref_payload(source)
+                                                    : vector ? target->vector_slot_scratch[0] : target->slot_scratch[0];
+                        if (!physical)
+                        {
+                            MachineEdit* reload = (MachineEdit*)machine_stream_append(arena, &edits);
+                            *reload = (MachineEdit){
+                                .point = machine_point_make(instruction_index, MACHINE_POINT_BEFORE),
+                                .kind = MACHINE_EDIT_RELOAD,
+                                .subject = machine_ref_payload(source),
+                                .location = copy_register,
+                            };
+                            placement.reload_count += 1;
+                            placement.boundary_reload_count += 1;
+                        }
+                        MachineEdit* capture = (MachineEdit*)machine_stream_append(arena, &edits);
+                        *capture = (MachineEdit){
+                            .point = machine_point_make(instruction_index, MACHINE_POINT_BEFORE),
+                            .kind = MACHINE_EDIT_TEMP_SPILL,
+                            .subject = temporary_offset,
+                            .location = copy_register,
+                        };
+                    }
+                }
+                u32 temporary_offset = 0;
+                for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
+                {
+                    u32 destination = function->block_parameters[destination_block->parameter_offset + copy_index].virtual_register;
+                    bool vector = function->virtual_registers[destination].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+                    temporary_offset = vector ? (temporary_offset + 15u) & ~15u : temporary_offset;
+                    temporary_offset += vector ? 64u : 8u;
+                    u8 copy_register = vector ? target->vector_slot_scratch[0] : target->slot_scratch[0];
+                    MachineEdit* restore = (MachineEdit*)machine_stream_append(arena, &edits);
+                    *restore = (MachineEdit){
+                        .point = machine_point_make(instruction_index, MACHINE_POINT_BEFORE),
+                        .kind = MACHINE_EDIT_TEMP_RELOAD,
+                        .subject = temporary_offset,
+                        .location = copy_register,
+                    };
+                    MachineEdit* spill = (MachineEdit*)machine_stream_append(arena, &edits);
+                    *spill = (MachineEdit){
+                        .point = machine_point_make(instruction_index, MACHINE_POINT_BEFORE),
+                        .kind = MACHINE_EDIT_SPILL,
+                        .subject = destination,
+                        .location = copy_register,
+                    };
+                    placement.spill_count += 1;
+                    placement.boundary_spill_count += 1;
+                }
             }
             u8* row_operand_registers = placement.operand_registers + (u64)instruction_index * 4;
             for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction->operands); slot += 1)

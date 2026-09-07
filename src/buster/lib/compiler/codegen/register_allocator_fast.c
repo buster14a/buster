@@ -563,16 +563,10 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
     }
 }
 
-// Edge copies are SSA block-parameter assignments.  The regular contract
-// arrays name the value at the source block, while the successor contract
-// must name the parameter value.  Keep that rename edge-local: a conditional
-// source can deliver different parameter values to each successor, so the
-// scan state and its out snapshot must continue to describe the source block.
-// Apply parameter renames to a private edge snapshot, then feed it through
-// the existing parallel-copy resolver.  Cloning is intentional: the source
-// block may have another successor with a different parameter mapping, and
-// mutating its live register file would make the second edge observe the
-// first edge's SSA names.
+// Edge copies are SSA block-parameter assignments. The predecessor contract
+// names source values, while the successor contract names the parameters.
+// Capture every source into the edge-copy tile before publishing any
+// destination so cycles and repeated sources retain parallel-copy semantics.
 BUSTER_GLOBAL_LOCAL bool machine_fast_edge_can_move(MachineFunction* function, MachineEdge const* edge)
 {
     if (!function || !edge || edge->source_block >= function->block_count || !function->blocks[edge->source_block].instruction_count)
@@ -605,79 +599,115 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         machine_fast_conform_edge(state, stream, point, owner, held, dirty, locations, contract_owner, contract_held, contract_dirty, allow_moves);
         return;
     }
-    u32 register_count = state->active_register_count;
-    u32* mapped_owner = arena_allocate(state->arena, u32, register_count);
-    u64 mapped_held = *held;
-    u64 mapped_dirty = *dirty;
-    memset(mapped_owner, 0xff, sizeof(u32) * register_count);
-    for (u64 remaining = mapped_held; remaining; remaining &= remaining - 1u)
-    {
-        u32 physical_register = machine_fast_first_set(remaining);
-        mapped_owner[physical_register] = owner[physical_register];
-    }
-    u32* mapped_locations = 0;
-    if (locations)
-    {
-        mapped_locations = arena_allocate(state->arena, u32, state->function->virtual_register_count);
-        memcpy(mapped_locations, locations, sizeof(u32) * state->function->virtual_register_count);
-    }
     MachineBlock const* destination = state->function->blocks + edge->destination_block;
     u32 copy_count = BUSTER_MIN(edge->copy_count, destination->parameter_count);
+    // Capture resident and pinned sources before flushing the predecessor.
+    // A source with no direct location may still have a dirty predecessor
+    // alias, so its home is safe to reload only after that flush.
+    TemporalArena temporary = scratch_begin(&state->arena, 1);
+    u8* captured = arena_allocate(temporary.arena, u8, copy_count);
+    memset(captured, 0, copy_count);
+    u32 temporary_offset = 0;
     for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
     {
-        u32 source_index = edge->copy_offset + copy_index;
-        if (source_index >= state->function->edge_copy_source_count)
-        {
-            break;
-        }
-        MachineRef source = state->function->edge_copy_sources[source_index];
+        MachineRef source = state->function->edge_copy_sources[edge->copy_offset + copy_index];
         u32 destination_value = state->function->block_parameters[destination->parameter_offset + copy_index].virtual_register;
-        for (u64 remaining = mapped_held; remaining; remaining &= remaining - 1u)
+        bool vector = state->function->virtual_registers[destination_value].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+        temporary_offset = vector ? (temporary_offset + 15u) & ~15u : temporary_offset;
+        temporary_offset += vector ? 64u : 8u;
+        u32 source_value = machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER ? machine_ref_payload(source) : UINT32_MAX;
+        u32 source_register = machine_ref_kind(source) == MACHINE_REF_PHYSICAL_REGISTER ? machine_ref_payload(source) : UINT32_MAX;
+        if (source_value != UINT32_MAX)
         {
-            u32 physical_register = machine_fast_first_set(remaining);
-            if (mapped_owner[physical_register] == destination_value)
+            if (locations)
             {
-                mapped_owner[physical_register] = UINT32_MAX;
-                mapped_held &= ~machine_fast_lane(physical_register);
-                mapped_dirty &= ~machine_fast_lane(physical_register);
+                source_register = locations[source_value];
             }
-        }
-        u32 source_value = UINT32_MAX;
-        u32 source_register = UINT32_MAX;
-        if (machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER)
-        {
-            source_value = machine_ref_payload(source);
-            source_register = mapped_locations ? mapped_locations[source_value] : UINT32_MAX;
-            if (!mapped_locations)
+            else
             {
-                for (u64 remaining = mapped_held; remaining && source_register == UINT32_MAX; remaining &= remaining - 1u)
+                for (u64 remaining = *held; remaining && source_register == UINT32_MAX; remaining &= remaining - 1u)
                 {
-                    u32 physical_register = machine_fast_first_set(remaining);
-                    source_register = mapped_owner[physical_register] == source_value ? physical_register : source_register;
+                    u32 physical = machine_fast_first_set(remaining);
+                    source_register = owner[physical] == source_value ? physical : source_register;
                 }
             }
-        }
-        else if (machine_ref_kind(source) == MACHINE_REF_PHYSICAL_REGISTER)
-        {
-            source_register = machine_ref_payload(source);
-            source_register = source_register < register_count ? source_register : UINT32_MAX;
+            if (state->pinned_registers && state->pinned_registers[source_value] != UINT32_MAX &&
+                machine_fast_pin_covers(state, source_value, machine_point_instruction(point)))
+            {
+                source_register = state->pinned_registers[source_value];
+            }
         }
         if (source_register != UINT32_MAX)
         {
-            mapped_owner[source_register] = destination_value;
-            mapped_held |= machine_fast_lane(source_register);
-            if (mapped_locations)
-            {
-                mapped_locations[destination_value] = source_register;
-                if (source_value != UINT32_MAX)
-                {
-                    mapped_locations[source_value] = UINT32_MAX;
-                }
-            }
+            machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_SPILL, temporary_offset, source_register);
+            captured[copy_index] = 1;
         }
     }
-    machine_fast_conform_edge(state, stream, point, mapped_owner, &mapped_held, &mapped_dirty, mapped_locations, contract_owner, contract_held,
-                              contract_dirty, allow_moves);
+    machine_fast_conform_edge(state, stream, point, owner, held, dirty, locations, machine_fast_empty_contract_owner, 0, 0, true);
+    // The physical values still present after an empty conformance carry the
+    // predecessor's SSA names. An edge assignment ends those names even when
+    // a clean register happens to contain identical bits, so the successor
+    // must rebuild its contract from the newly published parameter homes.
+    for (u64 remaining = *held; remaining; remaining &= remaining - 1u)
+    {
+        u32 physical = machine_fast_first_set(remaining);
+        u32 previous = owner[physical];
+        if (locations && previous != UINT32_MAX && locations[previous] == physical)
+        {
+            locations[previous] = UINT32_MAX;
+        }
+        owner[physical] = UINT32_MAX;
+    }
+    *held = 0;
+    *dirty = 0;
+    temporary_offset = 0;
+    for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
+    {
+        MachineRef source = state->function->edge_copy_sources[edge->copy_offset + copy_index];
+        u32 destination_value = state->function->block_parameters[destination->parameter_offset + copy_index].virtual_register;
+        bool vector = state->function->virtual_registers[destination_value].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+        temporary_offset = vector ? (temporary_offset + 15u) & ~15u : temporary_offset;
+        temporary_offset += vector ? 64u : 8u;
+        if (!captured[copy_index])
+        {
+            BUSTER_CHECK(machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER);
+            u32 source_value = machine_ref_payload(source);
+            u32 scratch = vector ? state->description->vector_slot_scratch[0] : state->description->slot_scratch[0];
+            if (state->rematerialize_immediates[source_value] != UINT32_MAX)
+            {
+                machine_fast_conform_append(state, stream, point, MACHINE_EDIT_REMATERIALIZE,
+                                            state->rematerialize_immediates[source_value], scratch);
+                state->placement->rematerialize_count += 1;
+            }
+            else
+            {
+                machine_fast_conform_append(state, stream, point, MACHINE_EDIT_RELOAD, source_value, scratch);
+                state->placement->reload_count += 1;
+                state->placement->boundary_reload_count += 1;
+            }
+            machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_SPILL, temporary_offset, scratch);
+        }
+    }
+    temporary_offset = 0;
+    for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
+    {
+        u32 destination_value = state->function->block_parameters[destination->parameter_offset + copy_index].virtual_register;
+        bool vector = state->function->virtual_registers[destination_value].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+        temporary_offset = vector ? (temporary_offset + 15u) & ~15u : temporary_offset;
+        temporary_offset += vector ? 64u : 8u;
+        u8 scratch = vector ? state->description->vector_slot_scratch[0] : state->description->slot_scratch[0];
+        if (state->pinned_registers && state->pinned_registers[destination_value] != UINT32_MAX && destination->instruction_count &&
+            machine_fast_pin_covers(state, destination_value, destination->first_instruction))
+        {
+            scratch = (u8)state->pinned_registers[destination_value];
+        }
+        machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_RELOAD, temporary_offset, scratch);
+        machine_fast_conform_append(state, stream, point, MACHINE_EDIT_SPILL, destination_value, scratch);
+        state->placement->spill_count += 1;
+        state->placement->boundary_spill_count += 1;
+    }
+    machine_fast_conform_edge(state, stream, point, owner, held, dirty, locations, contract_owner, contract_held, contract_dirty, allow_moves);
+    scratch_end(temporary);
 }
 
 BUSTER_GLOBAL_LOCAL u32 machine_fast_edge_mapped_owner(MachineFunction* function, MachineEdge const* edge, u32 value, u32 const* owner,
@@ -1462,7 +1492,13 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             // value must escape its block (anything else is dead at a
             // boundary), still be live here, and not be a rematerializable
             // constant, which recreates anywhere for less than a register.
-            if (block_index > 0 && !cold_blocks[block_index])
+            // Parameterized entries start from memory. Their incoming edges
+            // first publish the parallel assignment into the parameter homes;
+            // carrying the predecessor's register contract would require an
+            // edge-specific SSA rename and can otherwise make the block assume
+            // a parameter is resident while the predecessor still names its
+            // source value in that register.
+            if (block_index > 0 && !cold_blocks[block_index] && !block->parameter_count)
             {
                 u32 first_predecessor = predecessor_offsets[block_index];
                 u32 predecessor_limit = predecessor_offsets[block_index + 1];
@@ -2305,6 +2341,13 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             running = (running + function->stack_slot_sizes[slot_index] + slot_alignment - 1) & ~(slot_alignment - 1);
             placement.stack_slot_offsets[slot_index] = running;
         }
+        u64 edge_copy_temporary_size = machine_function_edge_copy_temporary_size(function);
+        if (edge_copy_temporary_size > UINT32_MAX - running)
+        {
+            return placement;
+        }
+        placement.edge_copy_temporary_offset = running;
+        running += (u32)edge_copy_temporary_size;
         placement.frame_size = ((running - pool_base + 15u) & ~15u) + ((push_count & 1u) ? 8u : 0u) + function->outgoing_bytes;
         if (function->outgoing_bytes)
         {

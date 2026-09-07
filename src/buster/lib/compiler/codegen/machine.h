@@ -1110,6 +1110,9 @@ struct MachineTargetDescription
     // Indirect call and the fixed register its callee pointer rides in,
     // immune to the argument registers and any variadic setup.
     u16 indirect_call_opcode;
+    // Direct unconditional branch used by the shared CFG normalizer when a
+    // parameterized critical edge needs an edge-local copy block.
+    u16 unconditional_branch_opcode;
     // Table dispatch, or MACHINE_OPCODE_INVALID for a target without one.
     // Its targets cannot host per-edge repairs, so the edge contracts
     // force them cold; every other terminator classifies structurally by
@@ -1339,6 +1342,11 @@ typedef enum MachineEditKind
     MACHINE_EDIT_RELOAD, // subject vreg loads into location preg at point
     MACHINE_EDIT_SPILL,  // subject vreg stores from location preg at point
     MACHINE_EDIT_COPY,   // subject preg copies into location preg at point
+    // subject is a byte offset within the edge-copy temporary tile. Parallel
+    // block-parameter assignments capture every source there before any
+    // destination home is published.
+    MACHINE_EDIT_TEMP_SPILL,
+    MACHINE_EDIT_TEMP_RELOAD,
     // subject immediate index materializes into location preg at point:
     // the reload of a value whose whole definition is a constant.
     MACHINE_EDIT_REMATERIALIZE,
@@ -1416,6 +1424,9 @@ struct MachineStackPlacement
     u32* stack_slot_offsets;
     u32 edit_count;
     u32 frame_size;
+    // Distance below the frame base immediately before the reusable
+    // edge-copy temporary tile. TEMP edit subjects are relative to this base.
+    u32 edge_copy_temporary_offset;
     // Distance from the frame pointer to the caller's stack frame, beyond the
     // saved frame pointer and return address every x86-64 frame carries. It is
     // the callee-saved save area wherever the prologue pushes those registers
@@ -1678,6 +1689,7 @@ BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, Mach
 // re-stamping a scheduled function that shares its blocks array with the
 // original is safe.
 BUSTER_F_DECL void machine_function_stamp_frequency_classes(MachineFunction* function);
+BUSTER_F_DECL bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineVerifyResult machine_verify_function(MachineFunction* function);
 BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* function);

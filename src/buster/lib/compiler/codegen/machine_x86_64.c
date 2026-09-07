@@ -282,6 +282,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_description = 
     .copy_opcode = MACHINE_X64_MOV_RR,
     .constant_opcode = MACHINE_X64_MOV_RI,
     .indirect_call_opcode = MACHINE_X64_CALL_INDIRECT,
+    .unconditional_branch_opcode = MACHINE_X64_JMP,
     .switch_opcode = MACHINE_X64_SWITCH,
     .float_bridge_opcode = MACHINE_X64_MOVQ_TO_XMM,
     .indirect_call_register = MACHINE_X64_R10,
@@ -335,6 +336,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_windows_descri
     .copy_opcode = MACHINE_X64_MOV_RR,
     .constant_opcode = MACHINE_X64_MOV_RI,
     .indirect_call_opcode = MACHINE_X64_CALL_INDIRECT,
+    .unconditional_branch_opcode = MACHINE_X64_JMP,
     .switch_opcode = MACHINE_X64_SWITCH,
     .float_bridge_opcode = MACHINE_X64_MOVQ_TO_XMM,
     .indirect_call_register = MACHINE_X64_R10,
@@ -5227,7 +5229,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         // The value's own definition still has to agree: a popped row keeps
         // its opcode, so the round trip is what makes this the same set the
         // per-value form selected.
-        if (instruction->opcode != IR_OPCODE_LOCAL || instruction->result.value >= function->value_count ||
+        if (program->disable_target_local_promotion || instruction->opcode != IR_OPCODE_LOCAL || instruction->result.value >= function->value_count ||
             function->values[instruction->result.value].definition.value != instruction_index)
         {
             continue;
@@ -5338,6 +5340,26 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         }
         row_layout.block_row_counts[block_index] = block_row_count;
         block_candidate_counts[block_index] = block_candidate_count;
+    }
+    // Block-parameter incoming values are uses on CFG edges rather than row
+    // operands. Keep them visible to aliasing and branch fusion: in
+    // particular, a comparison that also supplies a promoted local is not a
+    // dead condition merely because BRANCH_IF is its only instruction use.
+    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    {
+        for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
+        {
+            for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+            {
+                if (incoming->value.value < function->value_count)
+                {
+                    MachineX64ValueUse* use = value_uses + incoming->value.value;
+                    use->use_count += 1;
+                    use->use_block = MACHINE_SELECTION_MULTIPLE_BLOCKS;
+                    use->last_use_ordinal = walk_ordinal;
+                }
+            }
+        }
     }
     if (!dense_rows)
     {
@@ -6372,6 +6394,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     result.function.va_args = arena_allocate(arena, MachineVaArg, selector.va_args.total_count);
     result.function.va_arg_count = selector.va_args.total_count;
     machine_stream_flatten(&selector.va_args, result.function.va_args);
+    if (!machine_function_split_parameter_edges(arena, &result.function))
+    {
+        return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
+    }
     result.mutable_virtual_register_count = machine_function_compact_virtual_registers(arena, &result.function);
     if (result.mutable_virtual_register_count == UINT32_MAX)
     {
@@ -11281,14 +11307,16 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encode
         }
         else
         {
-            // Allocators emit only SPILL/RELOAD here. Preserve the previous
-            // phase-specific fallback for malformed internal edit streams.
-            bool store = edit->kind == MACHINE_EDIT_SPILL || (edit->kind != MACHINE_EDIT_RELOAD && default_store);
+            bool temporary = edit->kind == MACHINE_EDIT_TEMP_SPILL || edit->kind == MACHINE_EDIT_TEMP_RELOAD;
+            bool store = edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_TEMP_SPILL ||
+                         (edit->kind != MACHINE_EDIT_RELOAD && edit->kind != MACHINE_EDIT_TEMP_RELOAD && default_store);
+            u32 frame_offset = temporary ? placement->edge_copy_temporary_offset + edit->subject
+                                         : placement->virtual_register_offsets[edit->subject];
             if (vector_location)
             {
                 (void)machine_x64_emit_metadata_zmm_memory(
                     encoder, S8("VMOVDQU8"), edit->location - MACHINE_X64_ZMM0, MACHINE_X64_RBP,
-                    -(s64)(s32)placement->virtual_register_offsets[edit->subject], store, 512, 8,
+                    -(s64)(s32)frame_offset, store, 512, 8,
                     (BusterX86MetadataFeatureInput){.names = machine_x64_avx512_features,
                                                    .count = BUSTER_ARRAY_LENGTH(machine_x64_avx512_features)},
                     0);
@@ -11296,7 +11324,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 machine_x64_emit_edit_run(MachineX64Encode
             else
             {
                 (void)machine_x64_emit_exact_frame_chunk(
-                    encoder, !store, edit->location, placement->virtual_register_offsets[edit->subject], 8, 0);
+                    encoder, !store, edit->location, frame_offset, 8, 0);
             }
         }
         edit_cursor += 1;

@@ -8282,8 +8282,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_atomic_byte_assembly.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(c_atomic_byte_assembly.output, S8("0x86, 0x02")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(c_atomic_byte_assembly.output, S8("0xf0, 0x40, 0x0f, 0xb0")) != BUSTER_STRING_NO_MATCH);
-    // Nine frontend gaps, each with its own fixture so a regression names the
-    // contract it broke. Seven came from the 2026-08-30 differential harness
+    // Ten frontend and canonical-lowering gaps, each with its own fixture so
+    // a regression names the contract it broke. Seven came from the
+    // 2026-08-30 differential harness
     // run and two from the CPython configure differential: a
     // positional initializer storing into an anonymous bit-field instead of
     // skipping it (#818), a typedef taking an attributed struct definition's
@@ -8296,8 +8297,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // (#829), and the function-pointer conversions that must stay legal beside
     // the incompatible ones now refused (#830), and a read-modify-write on an
     // atomic floating-point object, which lowers to a compare-exchange loop
-    // (#821). All nine run under every register allocator: five are layout or
-    // lowering defects rather than parsing ones, the layout pair has to agree
+    // (#821), and the canonical local-promotion fixture exercises parallel
+    // block-parameter copies without selector-local promotion. All ten run
+    // under every register allocator: six are layout or lowering defects
+    // rather than parsing ones, the layout pair has to agree
     // between the sizeof folding in the parse and the IR layout, and the
     // atomic-float loop has to terminate -- none of which a compile alone
     // proves.
@@ -8311,6 +8314,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_gnu_atomic_builtins.c"),
         S8("tests/basic_c_function_pointer_compatibility.c"),
         S8("tests/basic_c_atomic_float_update.c"),
+        S8("tests/basic_c_local_promotion.c"),
     };
     String8 c_differential_regression_names[] = {
         S8("buster-c-anonymous-bit-field-initializer"),
@@ -8322,6 +8326,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-gnu-atomic-builtins"),
         S8("buster-c-function-pointer-compatibility"),
         S8("buster-c-atomic-float-update"),
+        S8("buster-c-local-promotion"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_differential_regression_paths); fixture_index += 1)
     {
@@ -8332,9 +8337,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 fixture_command_line[] = {
                 c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_differential_regression_paths[fixture_index],
             };
-            CompilerDriverResult fixture = compiler_driver_execute_invocation(
-                differential_temporary.arena,
-                compiler_driver_parse_arguments(differential_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+            CompilerDriverInvocation fixture_invocation =
+                compiler_driver_parse_arguments(differential_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line));
+            // The promotion witness must not depend on the native selectors'
+            // legacy local-to-mutable-register transformation.
+            fixture_invocation.disable_target_local_promotion = string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_local_promotion.c"));
+            CompilerDriverResult fixture = compiler_driver_execute_invocation(differential_temporary.arena, fixture_invocation);
             BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
             if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
             {

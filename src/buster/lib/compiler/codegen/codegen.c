@@ -7873,6 +7873,7 @@ typedef struct CCanonicalBranchPatch CCanonicalBranchPatch;
 struct CCanonicalBranchPatch
 {
     IrBlockId target;
+    IrBlockId predecessor;
     u32 offset;
     u32 secondary_offset;
     bool aarch64;
@@ -7906,6 +7907,7 @@ struct CCanonicalEmitter
     // moves the position and invalidates the record.
     u64 forwarded_store_end;
     s32 forwarded_store_displacement;
+    IrBlockId current_block;
     CCanonicalBranchPatch* branch_patches;
     u32 branch_patch_count;
     u32 branch_patch_capacity;
@@ -7922,6 +7924,7 @@ BUSTER_GLOBAL_LOCAL bool c_branch_patch_push(CCanonicalEmitter* emitter, CCanoni
     }
     else
     {
+        patch.predecessor = emitter->current_block;
         emitter->branch_patches[emitter->branch_patch_count] = patch;
         emitter->branch_patch_count += 1;
         result = true;
@@ -7933,6 +7936,85 @@ BUSTER_GLOBAL_LOCAL bool c_branch_patch_push(CCanonicalEmitter* emitter, CCanoni
 BUSTER_GLOBAL_LOCAL s32 c_x64_frame_displacement(CCanonicalEmitter* emitter, u32 offset)
 {
     return codegen_canonical_x64_rebase_frame_displacement(emitter->buffer, -(s64)offset, emitter->frame_base_offset);
+}
+
+// Branches to parameterized blocks pass through an out-of-line edge thunk.
+// First capture every source into the frame tile, then publish destinations;
+// no edge can overwrite a source needed by another assignment. Label-address
+// relocations bypass thunks so address-taken block identity never changes.
+BUSTER_GLOBAL_LOCAL u32 c_canonical_edge_thunk(CCanonicalEmitter* emitter, IrProgram* program, IrFunction* function,
+                                              CCanonicalBranchPatch patch, u32 scratch_offset, u32 target_offset)
+{
+    CodegenBuffer* buffer = emitter->buffer;
+    u32 start = (u32)buffer->count;
+    IrBlock* target = function->blocks + patch.target.value;
+    for (u32 pass = 0; pass < 2 && !buffer->error; pass += 1)
+    {
+        u32 cursor = 0;
+        for (IrBlockParameter* parameter = target->first_parameter; parameter && !buffer->error; parameter = parameter->next)
+        {
+            IrIncoming* incoming = parameter->first_incoming;
+            while (incoming && incoming->predecessor.value != patch.predecessor.value)
+            {
+                incoming = incoming->next;
+            }
+            if (!incoming)
+            {
+                buffer->error = CODEGEN_ERROR_INVALID_IR;
+            }
+            else
+            {
+                IrType* type = ir_type_from_id(&program->types, parameter->canonical_type);
+                u64 bytes = (BUSTER_MAX(type->layout.size, (u64)8) + 7) & ~(u64)7;
+                u32 value = pass ? parameter->value.value : incoming->value.value;
+                for (u32 byte = 0; byte < bytes && !buffer->error; byte += 8)
+                {
+                    if (patch.aarch64)
+                    {
+                        u32 value_offset = emitter->value_offsets[value] + byte;
+                        u32 temp_offset = scratch_offset + cursor + byte;
+                        if (!codegen_canonical_a64_frame_memory_operation(buffer, 9, pass ? temp_offset : value_offset, 8, false, false) ||
+                            !codegen_canonical_a64_frame_memory_operation(buffer, 9, pass ? value_offset : temp_offset, 8, true, false))
+                        {
+                            if (!buffer->error)
+                            {
+                                buffer->error = CODEGEN_ERROR_INVALID_IR;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        s32 value_offset = c_x64_frame_displacement(emitter, emitter->value_offsets[value]) + (s32)byte;
+                        s32 temp_offset = c_x64_frame_displacement(emitter, scratch_offset) + (s32)(cursor + byte);
+                        codegen_canonical_x64_asm_load(buffer, X64_REGISTER_RAX, X64_REGISTER_RBP, (u32)(pass ? temp_offset : value_offset), 8);
+                        codegen_canonical_x64_asm_store(buffer, X64_REGISTER_RBP, X64_REGISTER_RAX, (u32)(pass ? value_offset : temp_offset), 8);
+                    }
+                }
+                cursor += (u32)bytes;
+            }
+        }
+    }
+    if (!buffer->error)
+    {
+        s64 delta = (s64)target_offset - (s64)buffer->count;
+        if (patch.aarch64)
+        {
+            if ((delta & 3) || delta < -(1 << 27) || delta >= (1 << 27))
+            {
+                buffer->error = CODEGEN_ERROR_CAPACITY;
+            }
+            else
+            {
+                codegen_emit_u32(buffer, UINT32_C(0x14000000) | ((u32)(delta >> 2) & UINT32_C(0x03ffffff)));
+            }
+        }
+        else
+        {
+            BusterX86MetadataPhysicalOperand operand = codegen_canonical_x64_metadata_relative(delta - 5, 32);
+            codegen_canonical_x64_metadata_emit(buffer, S8("JMP"), &operand, 1);
+        }
+    }
+    return start;
 }
 
 BUSTER_GLOBAL_LOCAL s32 c_x64_value_displacement(CCanonicalEmitter* emitter, IrValueId value_id)
@@ -9297,6 +9379,21 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 frame_size_64 += 8;
             }
         }
+        // A single scratch tile gives edge assignments parallel-copy semantics,
+        // including swaps on loop backedges. It is reused by all edge thunks.
+        u64 edge_copy_size = 0;
+        for (u32 block = 0; block < function->block_count; block += 1)
+        {
+            u64 bytes = 0;
+            for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
+            {
+                IrType* type = ir_type_from_id(&program->types, parameter->canonical_type);
+                bytes += (BUSTER_MAX(type->layout.size, (u64)8) + 7) & ~(u64)7;
+            }
+            edge_copy_size = BUSTER_MAX(edge_copy_size, bytes);
+        }
+        u64 edge_copy_offset_64 = target.cpu_arch == CPU_ARCH_AARCH64 ? frame_size_64 : frame_size_64 + edge_copy_size;
+        frame_size_64 += edge_copy_size;
         frame_size_64 = (frame_size_64 + 15) & ~(u64)15;
         if (frame_size_64 > UINT32_MAX)
         {
@@ -10035,6 +10132,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             IrBlock* emitted_block = function->blocks + block_index;
+            emitter.current_block = emitted_block->id;
             block_offsets[block_index] = (u32)buffer.count;
             // Every branch in this emitter targets either a block start or an
             // offset inside its own instruction expansion, so dropping the
@@ -11314,12 +11412,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     else if (instruction->opcode == IR_OPCODE_INDEX)
                     {
                         IrValueId base = instruction->operands[0];
-                        IrInstruction* base_definition = function->instructions + function->values[base.value].definition.value;
+                        IrInstructionId base_definition_id = function->values[base.value].definition;
+                        IrInstruction* base_definition = base_definition_id.value < function->instruction_count
+                                                             ? function->instructions + base_definition_id.value
+                                                             : 0;
                         IrType* base_type = ir_type_from_id(&program->types, function->values[base.value].canonical_type);
-                        if (base_definition->opcode == IR_OPCODE_LOCAL || (function->values[base.value].category == IR_VALUE_VALUE && base_type &&
-                                                                           (base_type->kind == IR_TYPE_ARRAY || base_type->kind == IR_TYPE_VECTOR)))
+                        if ((base_definition && base_definition->opcode == IR_OPCODE_LOCAL) ||
+                            (function->values[base.value].category == IR_VALUE_VALUE && base_type &&
+                             (base_type->kind == IR_TYPE_ARRAY || base_type->kind == IR_TYPE_VECTOR)))
                         {
-                            if (base_definition->opcode == IR_OPCODE_LOCAL && function->values[base.value].alignment > 16)
+                            if (base_definition && base_definition->opcode == IR_OPCODE_LOCAL && function->values[base.value].alignment > 16)
                             {
                                 c_x64_load(&emitter, 0x85, base);
                             }
@@ -17539,13 +17641,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     else if (instruction->opcode == IR_OPCODE_INDEX)
                     {
                         IrValueId base = instruction->operands[0];
-                        IrInstruction* base_definition = function->instructions + function->values[base.value].definition.value;
+                        IrInstructionId base_definition_id = function->values[base.value].definition;
+                        IrInstruction* base_definition = base_definition_id.value < function->instruction_count
+                                                             ? function->instructions + base_definition_id.value
+                                                             : 0;
                         IrType* base_type = ir_type_from_id(&program->types, function->values[base.value].canonical_type);
                         u32 base_offset = value_offsets[base.value];
-                        if (base_definition->opcode == IR_OPCODE_LOCAL || (function->values[base.value].category == IR_VALUE_VALUE && base_type &&
-                                                                           (base_type->kind == IR_TYPE_ARRAY || base_type->kind == IR_TYPE_VECTOR)))
+                        if ((base_definition && base_definition->opcode == IR_OPCODE_LOCAL) ||
+                            (function->values[base.value].category == IR_VALUE_VALUE && base_type &&
+                             (base_type->kind == IR_TYPE_ARRAY || base_type->kind == IR_TYPE_VECTOR)))
                         {
-                            if (base_definition->opcode == IR_OPCODE_LOCAL && function->values[base.value].alignment > 16)
+                            if (base_definition && base_definition->opcode == IR_OPCODE_LOCAL && function->values[base.value].alignment > 16)
                             {
                                 c_a64_load(&emitter, 9, base);
                             }
@@ -19957,7 +20063,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 result.error = CODEGEN_ERROR_INVALID_IR;
                 return result;
             }
-            s64 delta = (s64)block_offsets[patch.target.value] - (s64)patch.offset;
+            u32 target_offset = block_offsets[patch.target.value];
+            if (!patch.label_address && function->blocks[patch.target.value].parameter_count)
+            {
+                target_offset = c_canonical_edge_thunk(&emitter, program, function, patch,
+                                                       (u32)edge_copy_offset_64, target_offset);
+                if (buffer.error)
+                {
+                    result.error = buffer.error;
+                    return result;
+                }
+            }
+            s64 delta = (s64)target_offset - (s64)patch.offset;
             if (!patch.aarch64)
             {
                 delta -= 4;
@@ -20096,14 +20213,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     // attempt must not be the thing that fills a cache the next attempt reads.
     // Freezing both here also keeps them out of the rewind below.
     ir_prepare_program_abi(program, codegen_canonical_ir_abi_convention(result.abi));
-    if (!options.assume_validated)
+    IrValidationResult validation = ir_prepare_canonical_module(program, module, options.assume_validated);
+    if (validation.error != IR_VALIDATION_NONE)
     {
-        IrValidationResult validation = ir_validate_canonical_module(program, module);
-        if (validation.error != IR_VALIDATION_NONE)
-        {
-            result.error = CODEGEN_ERROR_INVALID_IR;
-            return result;
-        }
+        result.error = CODEGEN_ERROR_INVALID_IR;
+        return result;
     }
     CodegenCanonicalX64F80Cache f80_cache = {0};
     CodegenX64MetadataCache* x64_metadata_cache = 0;

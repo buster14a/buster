@@ -12493,7 +12493,17 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     IrInstructionId reference_id = c_ir_append_instruction(builder, reference, reference_source);
     builder->function->values[reference_result.value].definition = reference_id;
 
-    IrValueId result = signature.returns_void ? IR_VALUE_ID_INVALID : c_ir_add_result(builder, signature.return_type);
+    // The declaration's attribute is the general answer -- glibc marks exit,
+    // abort and longjmp with it -- and the three names remain because a
+    // platform's headers may declare the assertion helpers without one.
+    bool noreturn = signature.is_noreturn || string_equal(target->name, S8("abort")) || string_equal(target->name, S8("__assert_fail")) ||
+                    string_equal(target->name, S8("__assert_perror_fail"));
+    bool terminates = noreturn && !c_ir_lowering_resumes_after_call(builder);
+    // A void call still needs an expression-machine placeholder. Emit it
+    // before a terminating call so UNREACHABLE follows the call immediately;
+    // ordinary and expression-nested calls materialize it afterwards.
+    IrValueId result = signature.returns_void ? (terminates ? c_ir_emit_integer_value(builder, 0, false, token) : IR_VALUE_ID_INVALID)
+                                              : c_ir_add_result(builder, signature.return_type);
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
     operands[0] = reference_result;
     for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
@@ -12505,23 +12515,18 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     call.operands = operands;
     call.operand_count = argument_count + 1;
     call.symbol = target->symbol;
-    call.result = result;
+    call.result = signature.returns_void ? IR_VALUE_ID_INVALID : result;
     IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
-    // A call to a noreturn callee ends control flow, so a direct body must not
-    // fall through after it.  The declaration's attribute is the general
-    // answer -- glibc marks exit, abort and longjmp with it -- and the three
-    // names remain because a platform's headers may declare the assertion
-    // helpers without one, and losing that would silently reintroduce a
-    // fall-through past an assertion failure.
-    bool noreturn = signature.is_noreturn || string_equal(target->name, S8("abort")) || string_equal(target->name, S8("__assert_fail")) ||
-                    string_equal(target->name, S8("__assert_perror_fail"));
-    c_ir_end_control_flow_after_call(builder, noreturn, call_source);
     if (!signature.returns_void)
     {
         builder->function->values[result.value].definition = call_id;
-        return result;
     }
-    return c_ir_emit_integer_value(builder, 0, false, token);
+    else if (!terminates)
+    {
+        result = c_ir_emit_integer_value(builder, 0, false, token);
+    }
+    c_ir_end_control_flow_after_call(builder, noreturn, call_source);
+    return result;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_call_values(CIntegerIrBuilder* builder, CToken token, u32 declaration_index, IrValueId* arguments, u32 argument_count)
@@ -17614,7 +17619,9 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     return false;
                 }
             }
-            IrValueId result = signature.returns_void ? IR_VALUE_ID_INVALID : c_ir_add_result(builder, signature.return_type);
+            bool terminates = signature.is_noreturn && !c_ir_lowering_resumes_after_call(builder);
+            IrValueId result = signature.returns_void ? (terminates ? c_ir_emit_integer_value(builder, 0, false, token) : IR_VALUE_ID_INVALID)
+                                                      : c_ir_add_result(builder, signature.return_type);
             IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
             operands[0] = indirect_callee;
             for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
@@ -17624,9 +17631,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, signature.return_type);
             call.operands = operands;
             call.operand_count = argument_count + 1;
-            call.result = result;
+            call.result = signature.returns_void ? IR_VALUE_ID_INVALID : result;
             IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
-            c_ir_end_control_flow_after_call(builder, signature.is_noreturn, call_source);
             if (!signature.returns_void)
             {
                 builder->function->values[result.value].definition = call_id;
@@ -17634,8 +17640,9 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             else
             {
-                selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+                selected->result = terminates ? result : c_ir_emit_integer_value(builder, 0, false, token);
             }
+            c_ir_end_control_flow_after_call(builder, signature.is_noreturn, call_source);
         }
         else
         {
