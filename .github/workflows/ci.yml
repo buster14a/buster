@@ -68,6 +68,11 @@ jobs:
       - name: Test (Linux, macOS)
         if: ${{ matrix.platform == 'unix' }}
         shell: bash
+        env:
+          # Like the execution-mode job, allow Clang's host AVX10 promotion.
+          # Keep the diagnostic visible and all source warnings as errors;
+          # only Linux hosted CPUs need this driver-warning exception.
+          CFLAGS: ${{ runner.os == 'Linux' && '-Wno-error=invalid-feature-combination' || '' }}
         run: |
           set -euo pipefail
           # generate wipes build/, so the bootstrap driver lives outside it.
