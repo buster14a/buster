@@ -15481,10 +15481,10 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         u32 aggregate_slot_count = 16384;
         result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
         *result.aggregate_lookup = (CAggregateLookup){
-            .slots = arena_allocate(arena, CAggregateLookupSlot, aggregate_slot_count),
+            // An empty slot is a zero slot; fresh arena bytes are zero.
+            .slots = arena_allocate_zeroed(arena, CAggregateLookupSlot, aggregate_slot_count),
             .slot_count = aggregate_slot_count,
         };
-        memset(result.aggregate_lookup->slots, 0, sizeof(*result.aggregate_lookup->slots) * aggregate_slot_count);
     }
     result.position_index = arena_allocate(arena, CTokenPositionIndex, 1);
     *result.position_index = (CTokenPositionIndex){0};
