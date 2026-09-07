@@ -6,24 +6,23 @@ on:
       - agent/inspect-190-195
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  inspect:
+  export-main-source:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out main
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-      - name: Extract relevant source contexts
-        run: python3 .github/agent_inspect_190_195.py
-      - name: Commit inspection output
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add .agent
-          if git diff --cached --quiet; then
-            exit 0
-          fi
-          git commit -m 'chore: record focused issue 190-195 inspection'
-          git push origin HEAD:agent/inspect-190-195
+          ref: main
+          fetch-depth: 1
+      - name: Package source
+        run: tar --exclude=.git -czf /tmp/buster-main-source.tar.gz .
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: buster-main-source
+          path: /tmp/buster-main-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
