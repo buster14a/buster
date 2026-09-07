@@ -188,6 +188,38 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ObjectSymbol* compiler_driver_test_symbol
     return result;
 }
 
+// Read the serialized .data back through the object reader. Literal byte
+// expectations cannot agree accidentally with a broken 128-bit expression.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_wide_initializer_bytes(ObjectFile* object)
+{
+    u8 expected_signed[] = {
+        0,0,0,0,0,0,0,0,0,0,0,0,0x10,0,0,0,
+        255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0xf0,255,255,255,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x80,
+    };
+    u8 expected_unsigned[] = {
+        0,0,0,0,0,0,0,0,0,0,0,0,0x10,0,0,0,
+        255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x80,
+    };
+    struct { String8 name; u8* bytes; } cases[] = {
+        {S8("signed_array"), expected_signed}, {S8("signed_struct"), expected_signed},
+        {S8("unsigned_array"), expected_unsigned}, {S8("unsigned_struct"), expected_unsigned},
+    };
+    bool result = object && object->error == OBJECT_ERROR_NONE && object->sections && object->section_count > OBJECT_SECTION_DATA;
+    for (u32 index = 0; result && index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        ObjectSymbol* symbol = compiler_driver_test_symbol_by_name(object, cases[index].name);
+        ByteSlice data = object->sections[OBJECT_SECTION_DATA].data;
+        result = symbol && symbol->section == OBJECT_SECTION_DATA && symbol->value <= data.length &&
+                 sizeof(expected_signed) <= data.length - symbol->value &&
+                 memory_compare(data.pointer + symbol->value, cases[index].bytes, sizeof(expected_signed));
+    }
+    return result;
+}
+
 // The symbol table __attribute__((weak)) and __attribute__((alias)) have to
 // produce, which is the one Clang produces for the same fixture: an alias
 // takes its target's section, offset, size and kind and contributes only its
@@ -2093,6 +2125,26 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("x86_64-unknown-linux-gnu"),  S8("x86_64-pc-windows-msvc"),  S8("x86_64-apple-macos"),  S8("x86_64-linux-android"),  S8("x86_64-apple-ios"),
         S8("aarch64-unknown-linux-gnu"), S8("aarch64-pc-windows-msvc"), S8("aarch64-apple-macos"), S8("aarch64-linux-android"), S8("aarch64-apple-ios"),
     };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(c_object_targets); target_index += 1)
+    {
+        TemporalArena wide_temporary = arena_begin_temporal(c_object_arena);
+        String8 wide_path = buster_test_temporary_path(wide_temporary.arena, S8("buster-c-wide-initializers"), S8(".o"));
+        String8 wide_command_line[] = {
+            S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), wide_path,
+            S8("tests/basic_c_int128_aggregate_constants.c"),
+        };
+        CompilerDriverResult wide = compiler_driver_execute_invocation(
+            wide_temporary.arena, compiler_driver_parse_arguments(wide_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wide_command_line)));
+        BUSTER_TEST(arguments, wide.error == COMPILER_DRIVER_ERROR_NONE && wide.has_object);
+        if (wide.error == COMPILER_DRIVER_ERROR_NONE && wide.has_object)
+        {
+            FileMapRead wide_map = file_map_read(wide_temporary.arena, wide_path, (FileReadOptions){0});
+            ObjectFile serialized = object_read(wide_temporary.arena, wide_map.bytes, wide.object.target);
+            BUSTER_TEST(arguments, compiler_driver_test_wide_initializer_bytes(&serialized));
+            file_map_unmap(wide_map);
+        }
+        scratch_end(wide_temporary);
+    }
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(c_object_targets); target_index += 1)
     {
         TemporalArena cross_temp = arena_begin_temporal(c_object_arena);
@@ -6628,6 +6680,41 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, c_sqlite_regression_names[fixture_index], S8(""));
             String8 fixture_command_line[] = {
                 c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_sqlite_regression_paths[fixture_index],
+            };
+            CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+            if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 fixture_arguments[] = {fixture_path};
+                ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                if (fixture_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(fixture_temporary);
+        }
+    }
+    // Static scalar conversions and automatic nested string initialization
+    // exercise distinct frontend paths and must agree under every allocator.
+    String8 c_initializer_regression_paths[] = {
+        S8("tests/basic_c_bool_aggregate_constants.c"),
+        S8("tests/basic_c_unsigned_float_aggregate_constants.c"),
+        S8("tests/basic_c_int128_aggregate_constants.c"),
+        S8("tests/basic_c_nested_string_initializers.c"),
+        S8("tests/basic_c_float_integer_constants.c"),
+    };
+    for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_initializer_regression_paths); fixture_index += 1)
+    {
+        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+            String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-initializer-regression"), S8(""));
+            String8 fixture_command_line[] = {
+                c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_initializer_regression_paths[fixture_index],
             };
             CompilerDriverResult fixture = compiler_driver_execute_invocation(
                 fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
