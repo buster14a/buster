@@ -66,6 +66,117 @@ BUSTER_GLOBAL_LOCAL LlvmBitcodeArtifact llvm_bitcode_test_atomic_record(Arena* a
     return llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
 }
 
+// Independent, bounded reader for the unabbreviated records this writer emits.
+// Decode the serialized value instead of duplicating the encoder's sign mapping.
+typedef struct LlvmBitcodeTestReader
+{
+    ByteSlice bytes;
+    u64 bit;
+    bool failed;
+} LlvmBitcodeTestReader;
+
+BUSTER_GLOBAL_LOCAL u64 llvm_bitcode_test_bits(LlvmBitcodeTestReader* reader, u32 count)
+{
+    u64 result = 0;
+    if (count > 64 || reader->bit > reader->bytes.length * 8 || count > reader->bytes.length * 8 - reader->bit)
+    {
+        reader->failed = true;
+    }
+    else
+    {
+        for (u32 index = 0; index < count; index += 1)
+        {
+            result |= (u64)((reader->bytes.pointer[reader->bit >> 3] >> (reader->bit & 7)) & 1) << index;
+            reader->bit += 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 llvm_bitcode_test_vbr(LlvmBitcodeTestReader* reader, u32 width)
+{
+    u64 result = 0;
+    u32 shift = 0;
+    bool more = true;
+    while (more && !reader->failed)
+    {
+        u64 word = llvm_bitcode_test_bits(reader, width);
+        u64 payload = word & ((UINT64_C(1) << (width - 1)) - 1);
+        more = (word >> (width - 1)) != 0;
+        if (shift >= 64 || payload > (UINT64_MAX >> shift))
+        {
+            reader->failed = true;
+        }
+        else
+        {
+            result |= payload << shift;
+            shift += width - 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_integer(ByteSlice bytes, u64 expected, u32 width)
+{
+    LlvmBitcodeTestReader reader = {.bytes = bytes, .bit = 32};
+    u32 code_widths[3] = {2};
+    u64 blocks[3] = {0};
+    u32 depth = 0;
+    u32 integers = 0;
+    bool matched = false;
+    while (!reader.failed && reader.bit < bytes.length * 8)
+    {
+        u64 code = llvm_bitcode_test_bits(&reader, code_widths[depth]);
+        if (code == 1) // ENTER_SUBBLOCK
+        {
+            u64 block = llvm_bitcode_test_vbr(&reader, 8);
+            u64 code_width = llvm_bitcode_test_vbr(&reader, 4);
+            reader.bit = (reader.bit + 31) & ~UINT64_C(31);
+            u64 words = llvm_bitcode_test_bits(&reader, 32);
+            if ((block == 8 || block == 11) && depth < 2 && code_width > 0 && code_width <= 32)
+            {
+                depth += 1;
+                blocks[depth] = block;
+                code_widths[depth] = (u32)code_width;
+            }
+            else if (reader.bit <= bytes.length * 8 && words <= (bytes.length * 8 - reader.bit) / 32)
+            {
+                reader.bit += words * 32;
+            }
+            else
+            {
+                reader.failed = true;
+            }
+        }
+        else if (code == 0 && depth) // END_BLOCK
+        {
+            reader.bit = (reader.bit + 31) & ~UINT64_C(31);
+            depth -= 1;
+        }
+        else if (code == 3) // UNABBREV_RECORD
+        {
+            u64 record = llvm_bitcode_test_vbr(&reader, 6);
+            u64 count = llvm_bitcode_test_vbr(&reader, 6);
+            for (u64 index = 0; index < count && !reader.failed; index += 1)
+            {
+                u64 operand = llvm_bitcode_test_vbr(&reader, 6);
+                if (blocks[depth] == 11 && record == 4 && count == 1) // CST_CODE_INTEGER
+                {
+                    u64 decoded = operand == 1 ? UINT64_C(1) << 63 : (operand & 1) ? 0 - (operand >> 1) : operand >> 1;
+                    u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+                    matched = (decoded & mask) == (expected & mask);
+                    integers += 1;
+                }
+            }
+        }
+        else
+        {
+            reader.failed = true;
+        }
+    }
+    return !reader.failed && integers == 1 && matched;
+}
+
 UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -77,6 +188,7 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
         .layout = {.resolved = true},
     };
     types[1] = (IrType){
+        .id = {.value = 1},
         .kind = IR_TYPE_INTEGER,
         .layout = {.size = 4, .alignment = 4, .resolved = true},
         .bit_width = 32,
@@ -193,6 +305,26 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, first.stats.binary_bytes == first.bytes.length);
     BUSTER_TEST(arguments, string_equal(llvm_bitcode_error_code_name(LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION),
                                         S8("unsupported_instruction")));
+
+    u32 widths[] = {1, 8, 16, 32, 64};
+    for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(widths); width_index += 1)
+    {
+        u32 width = widths[width_index];
+        u64 sign = UINT64_C(1) << (width - 1);
+        u64 patterns[] = {0, 1, sign - 1, sign, sign + 1, UINT64_MAX};
+        types[1].kind = width == 1 ? IR_TYPE_BOOLEAN : IR_TYPE_INTEGER;
+        types[1].bit_width = width;
+        types[1].is_signed = width != 1;
+        types[1].layout.size = (width + 7) / 8;
+        types[1].layout.alignment = (width + 7) / 8;
+        for (u32 pattern_index = 0; pattern_index < BUSTER_ARRAY_LENGTH(patterns); pattern_index += 1)
+        {
+            constant_immediates[0] = patterns[pattern_index];
+            LlvmBitcodeArtifact encoded = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+            BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(encoded));
+            BUSTER_TEST(arguments, llvm_bitcode_test_integer(encoded.bytes, constant_immediates[0], width));
+        }
+    }
 
     LlvmBitcodeArtifact invalid = llvm_bitcode_emit_with_options(0, &program, modules, 1, options);
     BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(invalid));
