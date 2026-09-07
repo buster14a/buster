@@ -130,7 +130,41 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_bytes(
     return result;
 }
 
+// An allocation that comes back zeroed, without zeroing what the operating
+// system already zeroed.
+//
+// A fresh mapping's pages are zero, and an arena hands its bytes out in one
+// direction, so the only part of a new allocation that can hold anything is
+// the part below the arena's allocation high-water mark -- what a temporal
+// rewind or a pooled reuse left behind. Everything above it has never been
+// written in this arena and needs no fill. `dirty_position` is that mark
+// (`position` supplies the live half of it, so no store is paid per
+// allocation), and clearing through it also covers a boundary that falls
+// inside an element, leaving every field above it zero.
+//
+// This is the general form of the x86 template cache's clear, which measured
+// this on one buffer first; the compiler's largest fills are single
+// allocations of a few megabytes each -- the linker's output image, the
+// per-token arrays of the analysis and the lowering -- and every one of them
+// is fresh in a result arena.
+BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_zeroed_bytes(Arena* arena, u64 size, u64 alignment)
+{
+    u64 dirty_position = arena_dirty_position(arena);
+    u8* result = (u8*)arena_allocate_bytes(arena, size, alignment);
+    u64 end = arena->position;
+    u64 start = end - size;
+    u64 clear_end = BUSTER_MIN(dirty_position, end);
+    if (clear_end > start)
+    {
+        memset(result, 0, clear_end - start);
+    }
+    return result;
+}
+
 #define arena_allocate(arena, T, count) (T*)arena_allocate_bytes(arena, arena_array_size(sizeof(T), count), BUSTER_ALIGN_OF(T))
+// The zeroed form of arena_allocate: same array, already zero, with only the
+// overlap with the arena's dirty prefix actually written.
+#define arena_allocate_zeroed(arena, T, count) (T*)arena_allocate_zeroed_bytes(arena, arena_array_size(sizeof(T), count), BUSTER_ALIGN_OF(T))
 #define arena_buffer_is_empty(arena) ((arena)->position == arena_minimum_position)
 #define arena_buffer_size(arena) ((arena)->position - arena_minimum_position)
 #define arena_buffer_start(arena) ((u8*)arena + arena_minimum_position)

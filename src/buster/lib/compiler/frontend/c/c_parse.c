@@ -2542,6 +2542,17 @@ base_resolved:;
 
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
 {
+    // The windowed shape scan, with this caller's own spelling of "no match":
+    // `end` rather than the sentinel, for both an unbalanced closer and a
+    // range that never returns to depth zero.
+#if BUSTER_C_LEX_COMPACT
+    CTokenShape const* shapes = c_preprocess_token_shapes(&preprocess);
+    if (BUSTER_LIKELY(shapes != 0))
+    {
+        u32 match = c_shape_matching_delimiter(shapes, open, end, opening, closing);
+        return match == UINT32_MAX ? end : match;
+    }
+#endif
     // The pair is loop-invariant, so it becomes one set the scan tests each
     // token against; see c_ir_matching_delimiter for the same shape.
     u64 delimiters = C_PUNCTUATOR_BIT(opening) | C_PUNCTUATOR_BIT(closing);
@@ -15470,10 +15481,10 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         u32 aggregate_slot_count = 16384;
         result.aggregate_lookup = arena_allocate(arena, CAggregateLookup, 1);
         *result.aggregate_lookup = (CAggregateLookup){
-            .slots = arena_allocate(arena, CAggregateLookupSlot, aggregate_slot_count),
+            // An empty slot is a zero slot; fresh arena bytes are zero.
+            .slots = arena_allocate_zeroed(arena, CAggregateLookupSlot, aggregate_slot_count),
             .slot_count = aggregate_slot_count,
         };
-        memset(result.aggregate_lookup->slots, 0, sizeof(*result.aggregate_lookup->slots) * aggregate_slot_count);
     }
     result.position_index = arena_allocate(arena, CTokenPositionIndex, 1);
     *result.position_index = (CTokenPositionIndex){0};

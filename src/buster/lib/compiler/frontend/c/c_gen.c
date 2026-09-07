@@ -29340,6 +29340,17 @@ BUSTER_C_INTERNAL CIrLabel* c_ir_label_find(CIrLabel* labels, u32 label_count, S
 
 BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
 {
+    // The shape sidecar answers this whole query 64 tokens at a time; the row
+    // scan below stays as the definition for a stream that carries no
+    // sidecar, for a host without the wide compares, and as the reference the
+    // windowed kernel is held to.
+#if BUSTER_C_LEX_COMPACT
+    CTokenShape const* shapes = c_preprocess_token_shapes(&preprocess);
+    if (BUSTER_LIKELY(shapes != 0))
+    {
+        return c_shape_matching_delimiter(shapes, open, end, opening, closing);
+    }
+#endif
     // The pair is loop-invariant, so it becomes one set the scan tests each
     // token against: the two chained compares per token were two dependent
     // branches, and the delimiters themselves are a small minority of the
@@ -42149,7 +42160,8 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     CIrPointerTypeCache pointer_types = {
         .by_element = arena_allocate(arena, IrTypeId, program->types.capacity),
         .contains_pointer = arena_allocate(arena, u8, program->types.capacity),
-        .array_slots = arena_allocate(arena, CIrArrayTypeSlot, array_slot_count),
+        // An empty slot is a zero slot; fresh arena bytes are zero already.
+        .array_slots = arena_allocate_zeroed(arena, CIrArrayTypeSlot, array_slot_count),
         .array_slot_mask = (u32)(array_slot_count - 1),
         .capacity = program->types.capacity,
     };
@@ -42158,7 +42170,6 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
         pointer_types.by_element[type_index] = IR_TYPE_ID_INVALID;
         pointer_types.contains_pointer[type_index] = 0;
     }
-    memset(pointer_types.array_slots, 0, sizeof(*pointer_types.array_slots) * array_slot_count);
     CIrTypeContext type_context = {
         .program = program,
         .target = target,
