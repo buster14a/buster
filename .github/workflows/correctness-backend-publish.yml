@@ -1,0 +1,66 @@
+name: Publish verified correctness backend fixes
+on:
+  push:
+    branches:
+      - audit/correctness-20260907-source
+    paths:
+      - .github/workflows/correctness-backend-publish.yml
+      - .audit/**
+permissions:
+  contents: write
+jobs:
+  publish:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 9834a4253c61934a8a253641a84741a25d3717e3
+          fetch-depth: 0
+      - name: Verify each locally tested tree and publish independent rebased commits
+        env:
+          PAYLOAD_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, os, subprocess
+          def git(*args, **kwargs):
+              return subprocess.check_output(['git', *args], **kwargs).decode().strip()
+          git('config', 'user.name', 'Buster correctness audit')
+          git('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
+          base = 'ebfdd11705bc470564e726857e498f1c82aa746c'
+          payload = os.environ['PAYLOAD_SHA']
+          jobs = [
+              ('i128', '80cd89bb63034ef1e70210cf89e545dad233ffbc', 'i128-signed-divrem', 'codegen: preserve signed i128 divisor and quotient masks'),
+              ('llvm', '1e0f117e3b8f138b635d55dccd5c1483be7f3f2a', 'llvm-integer-sign-bit', 'llvm: restrict minimum-integer encoding sentinel to 64 bits'),
+              ('wasm', 'efe35a79843ee2a84b8a96c5c8c5fb8c591f53cb', 'wasm-scalar-opcodes', 'wasm: correct scalar integer arithmetic opcode mappings'),
+          ]
+          exports = []
+          for name, tree, branch, message in jobs:
+              paths = [f'.audit/wasm.{i}' for i in range(4)] if name == 'wasm' else [f'.audit/{name}.patch.gz.base64']
+              encoded = ''.join(git('show', f'{payload}:{path}') for path in paths)
+              patch = gzip.decompress(base64.b64decode(encoded))
+              git('checkout', '--detach', '9834a4253c61934a8a253641a84741a25d3717e3')
+              subprocess.run(['git', 'apply', '--index', '-'], input=patch, check=True)
+              git('diff', '--cached', '--check')
+              actual = git('write-tree')
+              if actual != tree:
+                  raise RuntimeError(f'{name}: expected {tree}, got {actual}')
+              git('commit', '-m', message)
+              git('rebase', base)
+              git('diff', '--check', base)
+              ref = f'audit/transport-v2-{branch}-20260907'
+              git('push', 'origin', f'HEAD:refs/heads/{ref}')
+              export = f'export-{name}'
+              git('branch', export, 'HEAD')
+              exports.append(export)
+              print(name, git('rev-parse', 'HEAD'), git('rev-parse', 'HEAD^{tree}'), flush=True)
+          git('bundle', 'create', os.path.join(os.environ['RUNNER_TEMP'], 'correctness-backend-fixes-main-ebfdd11.bundle'), *exports)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: correctness-backend-fixes-main-ebfdd11
+          path: ${{ runner.temp }}/correctness-backend-fixes-main-ebfdd11.bundle
+          if-no-files-found: error
+          retention-days: 2
