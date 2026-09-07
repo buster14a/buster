@@ -1455,6 +1455,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk_variant(UnitTest
                     return result;
                 }
                 ProcessWaitResult wait = os_process_wait_sync(arguments->arena, spawn);
+                if (wait.result != PROCESS_RESULT_SUCCESS)
+                {
+                    arguments->show(arguments, S8("runtime stack-walk child failed: result={u32} platform_status=0x{u32:x}\n"),
+                                    (u32)wait.result, wait.platform_status);
+                }
                 BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
                 ByteSlice output = wait.streams[STANDARD_STREAM_OUTPUT];
                 BUSTER_TEST(arguments, output.length == sizeof(LinkTestRuntimeReport));

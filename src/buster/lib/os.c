@@ -1843,6 +1843,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             DWORD exit_code;
             if (GetExitCodeProcess(spawn.handle, &exit_code))
             {
+                result.platform_status = exit_code;
                 if (exit_code >= 0xC0000000u)
                 {
                     // NTSTATUS failure codes (e.g. 0xC0000005, access
@@ -1997,6 +1998,10 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                          usage.ru_majflt, usage.ru_inblock, usage.ru_oublock, usage.ru_nvcsw, usage.ru_nivcsw);
         }
 
+        if (wait_result == pid)
+        {
+            result.platform_status = (u32)status;
+        }
         if (wait_result == pid && WIFEXITED(status))
         {
             int exit_code = WEXITSTATUS(status);

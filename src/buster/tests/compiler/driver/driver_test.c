@@ -2575,6 +2575,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         if (c_spawn.handle)
         {
             ProcessWaitResult c_wait = os_process_wait_sync(arguments->arena, c_spawn);
+            if (c_wait.result != PROCESS_RESULT_SUCCESS)
+            {
+                arguments->show(arguments, S8("basic_c_operations child failed: result={u32} platform_status=0x{u32:x}\n"),
+                                (u32)c_wait.result, c_wait.platform_status);
+            }
             BUSTER_TEST(arguments, c_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
@@ -4379,6 +4384,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         if (c_aggregate_spawn.handle)
         {
             ProcessWaitResult c_aggregate_wait = os_process_wait_sync(arguments->arena, c_aggregate_spawn);
+            if (c_aggregate_wait.result != PROCESS_RESULT_SUCCESS)
+            {
+                arguments->show(arguments, S8("basic_c_argv_aggregate child failed: result={u32} platform_status=0x{u32:x}\n"),
+                                (u32)c_aggregate_wait.result, c_aggregate_wait.platform_status);
+            }
             BUSTER_TEST(arguments, c_aggregate_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
@@ -10455,7 +10465,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
 #endif
         // Driver options follow last-option-wins: an allocator named AFTER
-        // the -O flag decides the emitter, and the two objects must differ.
+        // the -O flag decides the emitter. A retained machine function makes
+        // the two objects differ; an architecture that routes the FAST
+        // request through canonical emission records those fallbacks instead.
         // (The reverse order deliberately restores the default -- the
         // parse-level contract earlier in this file pins that -- which is
         // why the CPython harness carries its allocator in CFLAGS, after
@@ -10480,7 +10492,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 ByteSlice fast_bytes = file_read(asm_unit_arena, sticky_fast_path, (FileReadOptions){0});
                 bool identical = none_bytes.length == fast_bytes.length && none_bytes.length &&
                                  memcmp(none_bytes.pointer, fast_bytes.pointer, none_bytes.length) == 0;
-                BUSTER_TEST(arguments, none_bytes.length && fast_bytes.length && !identical);
+                bool fast_request_observable = !identical || sticky_fast.codegen_statistics.fallback_function_count != 0;
+                BUSTER_TEST(arguments, sticky_none.codegen_statistics.fallback_function_count == 0);
+                BUSTER_TEST(arguments, sticky_fast.codegen_statistics.function_count != 0 && fast_request_observable);
+                BUSTER_TEST(arguments, none_bytes.length && fast_bytes.length);
             }
         }
         // A directive the vocabulary does not cover is refused by name and by
