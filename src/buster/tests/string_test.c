@@ -141,7 +141,12 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
              S8("10000000000000000000000000000000000000000000000000000000000000000"), S8("101"), 5, S8("2")},
         };
         u64 page_size = os_get_page_size();
-        char8* pages = (char8*)os_reserve(0, page_size * 2, (ProtectionFlags){0}, (MapFlags){.priv = 1, .anonymous = 1});
+        // Windows requires a valid protection even for a reservation; leaving
+        // the second page uncommitted keeps it inaccessible. POSIX maps both
+        // pages without access before os_commit enables only the first one.
+        ProtectionFlags reserve_protection = {.read = BUSTER_WINDOWS, .write = BUSTER_WINDOWS};
+        MapFlags reserve_flags = {.priv = 1, .anonymous = 1, .no_reserve = 1};
+        char8* pages = (char8*)os_reserve(0, page_size * 2, reserve_protection, reserve_flags);
         BUSTER_TEST(arguments, pages != 0);
         bool committed = pages && os_commit(pages, page_size, (ProtectionFlags){.read = 1, .write = 1}, false);
         BUSTER_TEST(arguments, committed);
