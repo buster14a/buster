@@ -77,28 +77,40 @@ UnitTestResult debug_model_tests(UnitTestArguments* arguments)
                                                    (DebugSourceLocation){.line = 4}, 0, 40, 4);
     DebugScopeId lexical_scope = debug_scope_add(arguments->arena, &scope_model, function_scope, DEBUG_SCOPE_LEXICAL,
                                                   (DebugSourceLocation){.line = 6}, 8, 32, 4);
-    DebugVariableId scope_variable = debug_variable_add(arguments->arena, &scope_model, &location_input, scope_model.scopes + lexical_scope,
+    DebugVariableId scope_variable = debug_variable_add(arguments->arena, &scope_model, &location_input, lexical_scope,
                                                          S8("value"), 0, (DebugSourceLocation){.line = 7},
                                                          DEBUG_VARIABLE_LOCAL, (IrSymbolId){.value = 7}, (IrLocalId){.value = 3}, 8, 32);
     BUSTER_TEST(arguments, function_scope == 0 && lexical_scope == 1);
     BUSTER_TEST(arguments, scope_variable == 0 && scope_model.scopes[lexical_scope].variable_count == 1);
     BUSTER_TEST(arguments, scope_model.variables[scope_variable].declaration.line == 7);
 
-    DebugScope foreign_scope = {0};
-    DebugVariableId null_scope_variable = debug_variable_add(arguments->arena, &scope_model, &location_input, 0, S8("null"), 0,
-                                                              (DebugSourceLocation){0}, DEBUG_VARIABLE_LOCAL, IR_SYMBOL_ID_INVALID,
-                                                              IR_LOCAL_ID_INVALID, 0, 1);
-    DebugVariableId foreign_scope_variable = debug_variable_add(arguments->arena, &scope_model, &location_input, &foreign_scope, S8("foreign"), 0,
+    // Invalid IDs are rejected before any pointer arithmetic. A foreign
+    // pointer cannot be passed to the ID-based builder at all.
+    DebugVariableId invalid_scope_variable = debug_variable_add(arguments->arena, &scope_model, &location_input, DEBUG_SCOPE_INVALID, S8("invalid"), 0,
                                                                  (DebugSourceLocation){0}, DEBUG_VARIABLE_LOCAL, IR_SYMBOL_ID_INVALID,
                                                                  IR_LOCAL_ID_INVALID, 0, 1);
     DebugVariableId out_of_range_variable = debug_variable_add(arguments->arena, &scope_model, &location_input,
-                                                                scope_model.scopes + scope_model.scope_count, S8("past"), 0,
+                                                                scope_model.scope_count, S8("past"), 0,
                                                                 (DebugSourceLocation){0}, DEBUG_VARIABLE_LOCAL, IR_SYMBOL_ID_INVALID,
                                                                 IR_LOCAL_ID_INVALID, 0, 1);
-    BUSTER_TEST(arguments, null_scope_variable == DEBUG_ID_INVALID);
-    BUSTER_TEST(arguments, foreign_scope_variable == DEBUG_ID_INVALID);
+    DebugModel empty_scope_model = {0};
+    DebugVariableId empty_scope_variable = debug_variable_add(arguments->arena, &empty_scope_model, &location_input, 0, S8("empty"), 0,
+                                                               (DebugSourceLocation){0}, DEBUG_VARIABLE_LOCAL, IR_SYMBOL_ID_INVALID,
+                                                               IR_LOCAL_ID_INVALID, 0, 1);
+    empty_scope_model.scope_count = 1;
+    DebugVariableId null_storage_variable = debug_variable_add(arguments->arena, &empty_scope_model, &location_input, 0, S8("missing"), 0,
+                                                                (DebugSourceLocation){0}, DEBUG_VARIABLE_LOCAL, IR_SYMBOL_ID_INVALID,
+                                                                IR_LOCAL_ID_INVALID, 0, 1);
+    BUSTER_TEST(arguments, invalid_scope_variable == DEBUG_ID_INVALID);
     BUSTER_TEST(arguments, out_of_range_variable == DEBUG_ID_INVALID);
+    BUSTER_TEST(arguments, empty_scope_variable == DEBUG_ID_INVALID && empty_scope_model.variable_count == 0);
+    BUSTER_TEST(arguments, null_storage_variable == DEBUG_ID_INVALID && empty_scope_model.variable_count == 0);
     BUSTER_TEST(arguments, scope_model.variable_count == 1 && scope_model.scopes[lexical_scope].variable_count == 1);
+    DebugVariableId first_scope_variable = debug_variable_add(arguments->arena, &scope_model, &location_input, function_scope, S8("first"), 0,
+                                                               (DebugSourceLocation){0}, DEBUG_VARIABLE_LOCAL, IR_SYMBOL_ID_INVALID,
+                                                               IR_LOCAL_ID_INVALID, 0, 1);
+    BUSTER_TEST(arguments, first_scope_variable == 1 && scope_model.variables[first_scope_variable].scope == function_scope);
+    BUSTER_TEST(arguments, scope_model.scopes[function_scope].variable_count == 1 && scope_model.scopes[lexical_scope].variable_count == 1);
 
     // Canonical IR type graphs may be recursive.  The model keeps the
     // frontend names while preserving the cycle through explicit IDs.

@@ -313,40 +313,35 @@ DebugScopeId debug_scope_add(Arena* arena, DebugModel* model, DebugScopeId paren
     return id;
 }
 
-DebugVariableId debug_variable_add(Arena* arena, DebugModel* model, DebugModelInput* input, DebugScope* scope,
+DebugVariableId debug_variable_add(Arena* arena, DebugModel* model, DebugModelInput* input, DebugScopeId scope_id,
                                                        String8 name, DebugTypeId type, DebugSourceLocation declaration, DebugVariableKind kind,
                                                        IrSymbolId symbol, IrLocalId local, u32 start, u32 end)
 {
-    // Rejects a scope that does not belong to this model without scanning it:
-    // debug info is built for every function by default, so an O(scope_count)
-    // check here would be quadratic across a translation unit.
-    DebugScopeId scope_id = DEBUG_SCOPE_INVALID;
-    if (scope && model->scopes && scope >= model->scopes && scope < model->scopes + model->scope_count &&
-        (u64)((u8*)scope - (u8*)model->scopes) % sizeof(*model->scopes) == 0)
+    // Scope ownership is a dense ID, not a relational comparison between a
+    // possibly unrelated pointer and the model's storage. Validate before
+    // forming the pointer, without a linear scan on each variable.
+    DebugVariableId result = DEBUG_ID_INVALID;
+    if (name.length && model->variable_count < UINT32_MAX && model->scopes && scope_id < model->scope_count)
     {
-        scope_id = (DebugScopeId)(scope - model->scopes);
+        DebugScope* scope = model->scopes + scope_id;
+        result = model->variable_count++;
+        DebugVariable* variable = model->variables + result;
+        *variable = (DebugVariable){
+            .name = debug_string(arena, name),
+            .type = type,
+            .declaration = declaration,
+            .symbol = symbol,
+            .local = local,
+            .scope = scope_id,
+            .kind = kind,
+        };
+        debug_variable_add_location(arena, input, variable, symbol, local, start, end);
+        if (scope->variable_count < UINT32_MAX)
+        {
+            scope->variables[scope->variable_count++] = result;
+        }
     }
-    if (!name.length || model->variable_count == UINT32_MAX || scope_id == DEBUG_SCOPE_INVALID)
-    {
-        return DEBUG_ID_INVALID;
-    }
-    DebugVariableId id = model->variable_count++;
-    DebugVariable* variable = model->variables + id;
-    *variable = (DebugVariable){
-        .name = debug_string(arena, name),
-        .type = type,
-        .declaration = declaration,
-        .symbol = symbol,
-        .local = local,
-        .scope = scope_id,
-        .kind = kind,
-    };
-    debug_variable_add_location(arena, input, variable, symbol, local, start, end);
-    if (scope->variable_count < UINT32_MAX)
-    {
-        scope->variables[scope->variable_count++] = id;
-    }
-    return id;
+    return result;
 }
 
 
@@ -378,9 +373,8 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* mo
             scopes[scope_depth] = debug_scope_add(arena, model, scopes[scope_depth - 1], DEBUG_SCOPE_LEXICAL, debug_source_from_ir(arena, input->program, local->source),
                                                   function->code_offset, function->code_offset + function->code_size, scope_variable_capacity);
         }
-        DebugScope* scope = model->scopes + scopes[desired_depth];
         DebugVariableKind kind = local->is_parameter ? DEBUG_VARIABLE_PARAMETER : DEBUG_VARIABLE_LOCAL;
-        DebugVariableId variable = debug_variable_add(arena, model, input, scope, local->name,
+        DebugVariableId variable = debug_variable_add(arena, model, input, scopes[desired_depth], local->name,
                                                       debug_canonical_type_id(model, local->type), debug_source_from_ir(arena, input->program, local->source),
                                                       kind, seed->symbol, local->id, function->code_offset,
                                                       function->code_offset + function->code_size);
@@ -410,7 +404,7 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_globals(Arena* arena, DebugModel* m
         {
             continue;
         }
-        DebugVariableId variable = debug_variable_add(arena, model, input, scope, symbol->name, debug_canonical_type_id(model, global->type),
+        DebugVariableId variable = debug_variable_add(arena, model, input, model->root_scope, symbol->name, debug_canonical_type_id(model, global->type),
                                                       debug_source_from_ir(arena, input->program, global->source), DEBUG_VARIABLE_GLOBAL, global->symbol,
                                                       IR_LOCAL_ID_INVALID, 0, 1);
         if (variable != DEBUG_ID_INVALID)
