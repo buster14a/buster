@@ -12,13 +12,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 9834a4253c61934a8a253641a84741a25d3717e3
+          ref: ebfdd11705bc470564e726857e498f1c82aa746c
           persist-credentials: false
       - name: Archive exact baseline
-        run: git archive --format=tar.gz --output=baseline-9834a42.tar.gz HEAD
+        run: git archive --format=tar.gz --output=baseline-ebfdd11.tar.gz HEAD
       - uses: actions/upload-artifact@v4
         with:
-          name: fast-ra-baseline-9834a42
-          path: baseline-9834a42.tar.gz
+          name: fast-ra-baseline-ebfdd11
+          path: baseline-ebfdd11.tar.gz
           retention-days: 3
           if-no-files-found: error
