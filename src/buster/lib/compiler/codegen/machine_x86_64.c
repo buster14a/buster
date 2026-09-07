@@ -11916,8 +11916,9 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         u32 source = operand_registers[1];
                         u32 destination = operand_registers[0];
                         (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 0, source, 128, 64, 0);
+                        // IEEE encodings of 2^63 in binary64 and binary32.
                         (void)machine_x64_emit_exact_immediate_value(&encoder, destination,
-                                from_f64 ? UINT64_C(0x43e0000000000000) : UINT64_C(0x4f000000), 0);
+                                from_f64 ? UINT64_C(0x43e0000000000000) : UINT64_C(0x5f000000), 0);
                         (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 1, destination, 128, 64, 0);
                         (void)machine_x64_emit_metadata_xmm_registers(&encoder, from_f64 ? S8("UCOMISD") : S8("UCOMISS"), 0, 1,
                                 from_f64 ? 64 : 32, 0);

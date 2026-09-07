@@ -11763,6 +11763,82 @@ BUSTER_GLOBAL_LOCAL bool c_test_ext80_global_bytes(IrProgram* program, IrGlobal*
            global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && bytes_match && padding_zero;
 }
 
+// These expected payloads come from the object representation, not a second
+// expression evaluated by Buster. This catches agreement between two broken
+// lowering paths as well as the optimized/general initializer disagreement.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_constant_bytes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    String8 source = S8("enum { even = 4 };"
+                        " struct B { _Bool a,b,c,d,e,f,g,h; };"
+                        " struct B booleans = {2,256,1,-2,2147483648u,'\\2',even,0};"
+                        " _Bool bool_array[] = {2,256,1,-2,2147483648u,'\\2',even,0};"
+                        " struct F { float a,b,c; }; struct D { double a,b,c; };"
+                        " struct F floats = {9223372036854775808ULL,9223372036854775809ULL,18446744073709551615ULL};"
+                        " struct D doubles = {9223372036854775808ULL,9223372036854775809ULL,18446744073709551615ULL};"
+                        " float single_round[] = {9223372586610589697ULL};"
+                        " typedef __int128 I; typedef unsigned __int128 U;"
+                        " struct W { I a,b,c,d; };"
+                        " struct W wide = {((I)1<<100),(I)0xffffffffffffffffULL,-((I)1<<100),-((I)1<<126)*2};"
+                        " U unsigned_wide[] = {((U)1<<100),(U)0xffffffffffffffffULL,(U)-1,(U)1<<127};");
+    u8 expected_bool[] = {1, 1, 1, 1, 1, 1, 1, 0};
+    u8 expected_float[] = {0,0,0,0x5f, 0,0,0,0x5f, 0,0,0x80,0x5f};
+    u8 expected_double[] = {0,0,0,0,0,0,0xe0,0x43, 0,0,0,0,0,0,0xe0,0x43, 0,0,0,0,0,0,0xf0,0x43};
+    u8 expected_round[] = {1,0,0,0x5f};
+    u8 expected_wide[] = {
+        0,0,0,0,0,0,0,0,0,0,0,0,0x10,0,0,0,
+        255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0xf0,255,255,255,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x80,
+    };
+    u8 expected_unsigned[] = {
+        0,0,0,0,0,0,0,0,0,0,0,0,0x10,0,0,0,
+        255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x80,
+    };
+    struct { String8 name; ByteSlice expected; } cases[] = {
+        {S8("booleans"), BUSTER_ARRAY_TO_SLICE(expected_bool)},
+        {S8("bool_array"), BUSTER_ARRAY_TO_SLICE(expected_bool)},
+        {S8("floats"), BUSTER_ARRAY_TO_SLICE(expected_float)},
+        {S8("doubles"), BUSTER_ARRAY_TO_SLICE(expected_double)},
+        {S8("single_round"), BUSTER_ARRAY_TO_SLICE(expected_round)},
+        {S8("wide"), BUSTER_ARRAY_TO_SLICE(expected_wide)},
+        {S8("unsigned_wide"), BUSTER_ARRAY_TO_SLICE(expected_unsigned)},
+    };
+    String8 targets[] = {
+        S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"),
+        S8("x86_64-pc-windows-msvc"), S8("aarch64-pc-windows-msvc"),
+        S8("x86_64-apple-macos"), S8("aarch64-apple-macos"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        TargetParseResult target = target_parse_triple(targets[target_index]);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, targets[target_index], target.target, &preprocess, &parse);
+        BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
+        if (lowered.program)
+        {
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program, cases[case_index].name);
+                ByteSlice expected = cases[case_index].expected;
+                BUSTER_TEST(arguments, global && global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES &&
+                                       global->bytes.length == expected.length &&
+                                       memory_compare(global->bytes.pointer, expected.pointer, expected.length));
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_initializers(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -12884,6 +12960,90 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_integer_constants(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    struct
+    {
+        String8 source;
+        String8 bytes;
+    } cases[] = {
+        {S8("signed char values[] = {(signed char)-2.5, (signed char)127.75, (signed char)-128.75};"), S8("\xfe\x7f\x80")},
+        {S8("unsigned char values[] = {(unsigned char)-0.75, (unsigned char)255.75};"), S8("\x00\xff")},
+        {S8("short values[] = {(short)-2.5, (short)-32768.75};"), S8("\xfe\xff\x00\x80")},
+        {S8("unsigned short values[] = {(unsigned short)-0.75, (unsigned short)65535.75};"), S8("\x00\x00\xff\xff")},
+        {S8("int values[] = {(int)-2147483648.75, (int)2147483647.75};"), S8("\x00\x00\x00\x80\xff\xff\xff\x7f")},
+        {S8("unsigned int values[] = {(unsigned int)-0.75, (unsigned int)4294967295.75};"), S8("\x00\x00\x00\x00\xff\xff\xff\xff")},
+        {S8("long long values[] = {(long long)-2147483648.0, (long long)-0x1p63, (long long)0x1.fffffffffffffp62};"),
+         S8("\x00\x00\x00\x80\xff\xff\xff\xff" "\x00\x00\x00\x00\x00\x00\x00\x80" "\x00\xfc\xff\xff\xff\xff\xff\x7f")},
+        {S8("unsigned long long values[] = {(unsigned long long)0x1p63, (unsigned long long)0x1.fffffffffffffp63};"),
+         S8("\x00\x00\x00\x00\x00\x00\x00\x80" "\x00\xf8\xff\xff\xff\xff\xff\xff")},
+        {S8("__int128 values[] = {(__int128)-2.5, (__int128)0x1.0000000000001p64, (__int128)-0x1.8p100, (__int128)-0x1p127};"),
+         S8("\xfe\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"
+            "\x00\x10\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00"
+            "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xe8\xff\xff\xff"
+            "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80")},
+        {S8("unsigned __int128 values[] = {(unsigned __int128)-0.75, (unsigned __int128)0x1.0000000000001p64,"
+            " (unsigned __int128)0x1.fffffffffffffp127};"),
+         S8("\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            "\x00\x10\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00"
+            "\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf8\xff\xff\xff\xff\xff\xff")},
+    };
+    TargetParseResult parsed_target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, cases[case_index].source, S8("float-integer-constant-bytes.c"),
+                                                     parsed_target.target, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        IrGlobal* values = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("values")) : 0;
+        BUSTER_TEST(arguments, values && values->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES);
+        BUSTER_TEST(arguments, values && values->bytes.length == cases[case_index].bytes.length);
+        if (values && values->bytes.pointer && values->bytes.length == cases[case_index].bytes.length)
+            BUSTER_TEST(arguments, memcmp(values->bytes.pointer, cases[case_index].bytes.pointer, (size_t)values->bytes.length) == 0);
+        scratch_end(temporary);
+    }
+
+    // Unrepresentable conversions have undefined source semantics. Refuse the
+    // constant initializer rather than executing undefined host conversions.
+    String8 invalid[] = {
+        S8("signed char value = (signed char)128.0;"), S8("signed char value = (signed char)-129.0;"),
+        S8("unsigned char value = (unsigned char)256.0;"), S8("unsigned char value = (unsigned char)-1.0;"),
+        S8("short value = (short)32768.0;"), S8("short value = (short)-32769.0;"),
+        S8("unsigned short value = (unsigned short)65536.0;"), S8("unsigned short value = (unsigned short)-1.0;"),
+        S8("int value = (int)2147483648.0;"), S8("int value = (int)-2147483649.0;"),
+        S8("unsigned int value = (unsigned int)4294967296.0;"), S8("unsigned int value = (unsigned int)-1.0;"),
+        S8("long long value = (long long)0x1p63;"), S8("long long value = (long long)-0x1.0000000000001p63;"),
+        S8("unsigned long long value = (unsigned long long)0x1p64;"), S8("unsigned long long value = (unsigned long long)-1.0;"),
+        S8("__int128 value = (__int128)0x1p127;"), S8("__int128 value = (__int128)-0x1.0000000000001p127;"),
+        S8("unsigned __int128 value = (unsigned __int128)0x1p128;"), S8("unsigned __int128 value = (unsigned __int128)-1.0;"),
+        S8("int value = (int)__builtin_inf();"), S8("int value = (int)-__builtin_inf();"),
+        S8("int value = (int)__builtin_nan(\"\");"), S8("unsigned __int128 value = (unsigned __int128)__builtin_nan(\"\");"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, invalid[case_index], S8("invalid-float-integer-constant.c"),
+                                                     parsed_target.target, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 1);
+        if (lowered.diagnostic_count == 1)
+            BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_entity_lookup(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -13199,11 +13359,13 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_wide_float_cleanup_signature_calls(arguments));
     c_test_result_add(&result, c_test_wide_float_local_transport(arguments));
     c_test_result_add(&result, c_test_wide_float_global_initializers(arguments));
+    c_test_result_add(&result, c_test_aggregate_constant_bytes(arguments));
     c_test_result_add(&result, c_test_wide_float_global_rejections(arguments));
     c_test_result_add(&result, c_test_wide_float_android_rejection(arguments));
     c_test_result_add(&result, c_test_wide_float_global_boundaries(arguments));
     c_test_result_add(&result, c_test_wide_float_global_braces(arguments));
     c_test_result_add(&result, c_test_wide_float_global_folding(arguments));
+    c_test_result_add(&result, c_test_float_integer_constants(arguments));
     c_test_result_add(&result, c_test_constant_entity_lookup(arguments));
 
     c_test_result_add(&result, c_test_static_range_designators(arguments));
