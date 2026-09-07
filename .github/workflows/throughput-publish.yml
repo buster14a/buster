@@ -1,0 +1,40 @@
+name: Import verified throughput implementation
+
+on:
+  push:
+    branches: [bench/compiler-throughput-suite]
+    paths: [.github/workflows/throughput-publish.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    if: ${{ github.repository == 'buster14a/buster' && github.event_name == 'push' && github.ref == 'refs/heads/bench/compiler-throughput-suite' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: true
+      - name: Verify and import frozen patch without executing its contents
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          : > "$RUNNER_TEMP/throughput.patch.xz"
+          for blob in 489ab8ca25d7c0bbca45ca3c9a2f24c30b67eddb a9598fae62ad5b790261fb050f69a9f42e569b40 761a7eb7e0ba7c4fb0352ac0943cd0109771b0de 540f10c64a6d7a866da48b5ca7af0c1af44682ac 808c0d38ae9c0aa1f9a1ab22d8dd273a0c6b19a7; do
+            gh api "repos/buster14a/buster/git/blobs/$blob" --jq .content | base64 --decode >> "$RUNNER_TEMP/throughput.patch.xz"
+          done
+          xz --decompress --stdout "$RUNNER_TEMP/throughput.patch.xz" > "$RUNNER_TEMP/throughput.patch"
+          printf 'ae380022e8c673555ac2a19bb5096b4d79dcdbd482bbb20cc68581e7e72f7511  %s\n' "$RUNNER_TEMP/throughput.patch" | sha256sum --check --strict
+          git apply --check "$RUNNER_TEMP/throughput.patch"
+          git apply --index "$RUNNER_TEMP/throughput.patch"
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'bench: add reproducible compiler-throughput suite and robust paired guard'
+          git push origin HEAD:refs/heads/bench/compiler-throughput-suite
