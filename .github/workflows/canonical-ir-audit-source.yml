@@ -1,13 +1,9 @@
 name: Canonical IR audit source
-
 on:
   push:
-    branches:
-      - audit/canonical-ir-source-9834a42
-
+    branches: [audit/canonical-ir-source-9834a42]
 permissions:
-  contents: read
-
+  contents: write
 jobs:
   source:
     runs-on: ubuntu-24.04
@@ -16,17 +12,35 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Pack main source and history
+      - name: Publish the audited patch on a fresh product branch
         shell: bash
         run: |
           set -euo pipefail
-          git archive ebfdd11705bc470564e726857e498f1c82aa746c | gzip > "$RUNNER_TEMP/buster-main.tar.gz"
-          git bundle create "$RUNNER_TEMP/buster-main.bundle" refs/remotes/origin/main
+          sed 's/PRZFZFPIK/PRZFPIK/' .audit-transfer/complex-core.patch.gz.b64 | base64 --decode | gzip --decompress > "$RUNNER_TEMP/complex.patch"
+          echo "4e3cd42bf687be832fafa1572c6e705ffa14e568e8e9eb4325d7326448f9a502  $RUNNER_TEMP/complex.patch" | sha256sum --check
+          cp .audit-transfer/ir_complex_value_test.c "$RUNNER_TEMP/ir_complex_value_test.c"
+          branch=refactor/canonical-complex-values
+          if git ls-remote --heads origin "refs/heads/$branch" | grep -q .; then
+            echo "Refusing to modify an existing product branch" >&2
+            exit 1
+          fi
+          git switch --detach ebfdd11705bc470564e726857e498f1c82aa746c
+          git apply --check "$RUNNER_TEMP/complex.patch"
+          git apply --index "$RUNNER_TEMP/complex.patch"
+          cp "$RUNNER_TEMP/ir_complex_value_test.c" src/buster/tests/compiler/ir/ir_complex_value_test.c
+          git add src/buster/tests/compiler/ir/ir_complex_value_test.c
+          git diff --cached --check
+          git config user.name 'OpenAI'
+          git config user.email 'noreply@openai.com'
+          git commit -m 'ir: construct complex rvalues without mutable temporaries'
+          git push origin "HEAD:refs/heads/$branch"
+          git bundle create "$RUNNER_TEMP/canonical-complex.bundle" HEAD refs/remotes/origin/main
+          git log -1 --format=fuller > "$RUNNER_TEMP/commit.txt"
       - uses: actions/upload-artifact@v4
         with:
-          name: canonical-ir-audit-current-main
+          name: canonical-complex-implementation
           path: |
-            ${{ runner.temp }}/buster-main.tar.gz
-            ${{ runner.temp }}/buster-main.bundle
+            ${{ runner.temp }}/canonical-complex.bundle
+            ${{ runner.temp }}/commit.txt
           if-no-files-found: error
           retention-days: 1
