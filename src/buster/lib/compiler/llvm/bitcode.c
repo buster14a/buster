@@ -1192,7 +1192,8 @@ static u64 llvm_bc_encode_integer_bits(u64 bits, u32 width)
     {
         return bits << 1;
     }
-    if (bits == sign)
+    // LLVM reserves 1 for INT64_MIN, not for a narrower type's sign bit.
+    if (width == 64 && bits == sign)
     {
         return 1;
     }

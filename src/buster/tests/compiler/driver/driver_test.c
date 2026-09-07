@@ -1149,6 +1149,52 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         arena->position = position;
     }
 
+    // Feed the emitted bitcode to an independent LLVM consumer. A header or
+    // same-writer comparison cannot detect i1 true being serialized as false.
+    String8 llvm_integer_output = buster_test_temporary_path(arguments->arena, S8("buster-llvm-integer-constants"), S8(".bc"));
+    String8 llvm_integer_command[] = {
+        S8("-emit-llvm"), S8("-c"), S8("-o"), llvm_integer_output, S8("tests/basic_c_llvm_integer_constants.c"),
+    };
+    CompilerDriverResult llvm_integer = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(llvm_integer_command)));
+    BUSTER_TEST(arguments, llvm_integer.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, llvm_integer.has_llvm_bitcode && llvm_integer.llvm_bitcode.success);
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    if (llvm_integer.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 clang = executable_resolve_in_path(arguments->arena, S8("clang"));
+        if (clang.length)
+        {
+            String8 executable = buster_test_temporary_path(arguments->arena, S8("buster-llvm-integer-constants"), S8(""));
+            String8 compile_arguments[] = {clang, S8("-O0"), llvm_integer_output, S8("-o"), executable};
+            ProcessSpawnResult compile = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile_arguments), (SliceString8){0}, (SliceString8){0},
+                                                         (ProcessSpawnOptions){.use_process_environment = 1});
+            BUSTER_TEST(arguments, compile.handle != 0);
+            if (compile.handle)
+            {
+                ProcessWaitResult compiled = os_process_wait_deadline(arguments->arena, compile, 30000000);
+                BUSTER_TEST(arguments, !compiled.timed_out && compiled.result == PROCESS_RESULT_SUCCESS);
+                if (!compiled.timed_out && compiled.result == PROCESS_RESULT_SUCCESS)
+                {
+                    String8 run_arguments[] = {executable};
+                    ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                             (ProcessSpawnOptions){.use_process_environment = 1});
+                    BUSTER_TEST(arguments, run.handle != 0);
+                    if (run.handle)
+                    {
+                        ProcessWaitResult executed = os_process_wait_deadline(arguments->arena, run, 30000000);
+                        BUSTER_TEST(arguments, !executed.timed_out && executed.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+            }
+        }
+        else
+        {
+            arguments->show(arguments, S8("LLVM integer constant execution skipped: Clang is not installed\n"));
+        }
+    }
+#endif
+
     Target wasm64_target = {
         .cpu_arch = CPU_ARCH_WASM64,
         .cpu_model = CPU_MODEL_BASELINE,
