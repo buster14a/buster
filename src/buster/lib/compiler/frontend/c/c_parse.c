@@ -4848,12 +4848,15 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
     u64 progress_budget = ((u64)span + 1) * ((u64)span + 1);
     while (frame_count)
     {
+        CParseInitializerInferenceFrame* frame = frames + frame_count - 1;
         if (BUSTER_UNLIKELY(progress_budget == 0))
         {
+            u32 diagnostic_token = frame->cursor < preprocess.token_count ? frame->cursor : start;
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[diagnostic_token]),
+                               C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("initializer inference made no progress"));
             return false;
         }
         progress_budget -= 1;
-        CParseInitializerInferenceFrame* frame = frames + frame_count - 1;
         if (!c_initializer_consume_separator(preprocess.tokens, frame->limit, &frame->cursor, frame->next_index))
         {
             return false;
@@ -4886,6 +4889,12 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
         u64 slots = 0;
         if (!c_parse_initializer_type_slots(machine, result_arena, preprocess, result, scope, frame, &slots))
         {
+            return false;
+        }
+        if (!slots && frame->borrowed && frame->cursor < frame->limit)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[frame->cursor]),
+                               C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("invalid brace-elided initializer for incomplete aggregate type"));
             return false;
         }
         if (frame->cursor >= frame->limit)
