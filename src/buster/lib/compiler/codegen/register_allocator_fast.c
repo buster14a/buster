@@ -9,7 +9,10 @@
 // encoder sequences pin specific registers. The output is the same
 // placement contract the MIR_STACK builder produces, so the encoder is
 // untouched: per-slot operand registers plus a point-sorted reload/spill
-// edit stream.
+// edit stream. Liveness is derived from the complete textual use/definition
+// stream rather than MachineVirtualRegister.definition_point, so explicit
+// mutable virtual registers are handled conservatively without an SSA
+// assumption.
 
 // A physical register index is a bit lane, and every per-register predicate
 // the pass carries is a mask: the scan's occupancy and dirtiness, the

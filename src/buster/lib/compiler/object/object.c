@@ -9405,6 +9405,10 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                                  .line_count = line_count,
                                                  .machine = target.cpu_arch == CPU_ARCH_AARCH64 ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64,
                                              });
+            if (!codeview.valid)
+            {
+                result.error = OBJECT_ERROR_DEBUG_INFO;
+            }
         }
         else
         {

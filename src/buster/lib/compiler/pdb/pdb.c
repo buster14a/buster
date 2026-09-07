@@ -1,7 +1,9 @@
 // PDB writing: packages the CodeView streams codeview.c produced into the
 // MSF container Windows debuggers load — superblock, free-page maps,
 // directory, and the fixed DBI/TPI/IPI/info streams — for the PE linker's
-// /debug output.
+// /debug output. pdb_split_codeview separates symbols from C13 line data;
+// pdb_rewrite_symbol_scopes rebuilds links in module-stream coordinates;
+// pdb_rewrite_field_list remaps every member and LF_INDEX continuation.
 
 #include <buster/lib/compiler/pdb/pdb.h>
 #include <buster/lib/string.h>
@@ -71,7 +73,15 @@ enum
 
 enum
 {
+    PDB_S_END = 0x0006,
+    PDB_S_THUNK32 = 0x1102,
+    PDB_S_BLOCK32 = 0x1103,
     PDB_S_CONSTANT = 0x1107,
+    PDB_S_LPROC32 = 0x110f,
+    PDB_S_LPROC32_ID = 0x1146,
+    PDB_S_GPROC32_ID = 0x1147,
+    PDB_S_INLINESITE_END = 0x114e,
+    PDB_S_PROC_ID_END = 0x114f,
     PDB_S_GDATA32 = 0x110d,
     PDB_S_LOCAL = 0x113e,
     PDB_S_GPROC32 = 0x1110,
@@ -82,6 +92,7 @@ enum
     PDB_LF_PROCEDURE = 0x1008,
     PDB_LF_ARGLIST = 0x1201,
     PDB_LF_FIELDLIST = 0x1203,
+    PDB_LF_INDEX = 0x1404,
     PDB_LF_ENUMERATE = 0x1502,
     PDB_LF_ARRAY = 0x1503,
     PDB_LF_STRUCTURE = 0x1505,
@@ -514,6 +525,120 @@ BUSTER_GLOBAL_LOCAL u64 pdb_skip_name(ByteSlice bytes, u64 offset)
     return offset < bytes.length ? offset + 1 : bytes.length + 1;
 }
 
+// Scope links in .debug$S are not module-stream offsets: the split removes
+// subsection headers and interleaved line data, then the module adds a u32
+// signature. Reconstruct links from record nesting after flattening instead
+// of trying to subtract one constant from the producer's offsets.
+BUSTER_GLOBAL_LOCAL bool pdb_rewrite_symbol_scopes(Arena* arena, ByteSlice symbols)
+{
+    bool valid = symbols.length <= UINT32_MAX - 4;
+    if (valid)
+    {
+        u32* stack = arena_allocate(arena, u32, symbols.length / 4);
+        u32 depth = 0;
+        u64 offset = 0;
+        while (offset < symbols.length && valid)
+        {
+            u16 length = 0;
+            u16 kind = 0;
+            valid = pdb_read_u16_checked(symbols, offset, &length) && pdb_read_u16_checked(symbols, offset + 2, &kind) && length >= 2;
+            u64 size = (2 + (u64)length + 3) & ~(u64)3;
+            valid = valid && size <= symbols.length - offset;
+            if (valid)
+            {
+                bool procedure = kind == PDB_S_GPROC32 || kind == PDB_S_LPROC32 || kind == PDB_S_GPROC32_ID || kind == PDB_S_LPROC32_ID;
+                bool opens = procedure || kind == PDB_S_BLOCK32 || kind == PDB_S_INLINESITE || kind == PDB_S_THUNK32;
+                if (opens)
+                {
+                    u32 minimum = procedure ? 40u : kind == PDB_S_BLOCK32 ? 24u : kind == PDB_S_THUNK32 ? 28u : 16u;
+                    valid = (u64)length + 2 >= minimum;
+                    if (valid)
+                    {
+                        u32 parent = depth ? stack[depth - 1] + 4 : 0;
+                        valid = pdb_write_u32_checked(symbols, offset + 4, parent) && pdb_write_u32_checked(symbols, offset + 8, 0);
+                        if (procedure || kind == PDB_S_THUNK32)
+                        {
+                            valid = valid && pdb_write_u32_checked(symbols, offset + 12, 0);
+                        }
+                        stack[depth++] = (u32)offset;
+                    }
+                }
+                else if (kind == PDB_S_END || kind == PDB_S_INLINESITE_END || kind == PDB_S_PROC_ID_END)
+                {
+                    valid = depth != 0;
+                    if (valid)
+                    {
+                        u32 start = stack[--depth];
+                        u16 opening = 0;
+                        valid = pdb_read_u16_checked(symbols, (u64)start + 2, &opening);
+                        u16 closing = opening == PDB_S_INLINESITE ? PDB_S_INLINESITE_END
+                                      : opening == PDB_S_GPROC32_ID || opening == PDB_S_LPROC32_ID ? PDB_S_PROC_ID_END : PDB_S_END;
+                        valid = valid && kind == closing && pdb_write_u32_checked(symbols, (u64)start + 8, (u32)offset + 4);
+                    }
+                }
+                offset += size;
+            }
+        }
+        valid = valid && offset == symbols.length && depth == 0;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool pdb_rewrite_field_list(PdbTypeModule* module, ByteSlice record)
+{
+    bool valid = true;
+    u64 cursor = 4;
+    while (cursor < record.length && valid)
+    {
+        u8 byte = record.pointer[cursor];
+        if (byte >= 0xf0)
+        {
+            u32 padding = byte & 0x0fu;
+            valid = padding && padding <= 3 && padding <= record.length - cursor;
+            for (u32 index = 0; index < padding && valid; index += 1)
+            {
+                valid = record.pointer[cursor + index] == 0xf0u + padding - index;
+            }
+            cursor += padding;
+        }
+        else
+        {
+            u16 leaf = 0;
+            valid = pdb_read_u16_checked(record, cursor, &leaf);
+            if (valid && leaf == PDB_LF_MEMBER)
+            {
+                valid = record.length - cursor >= 8 && pdb_type_index_map(module, record, cursor + 4);
+                if (valid)
+                {
+                    cursor = pdb_skip_numeric(record, cursor + 8);
+                    cursor = pdb_skip_name(record, cursor);
+                }
+            }
+            else if (valid && leaf == PDB_LF_ENUMERATE)
+            {
+                valid = record.length - cursor >= 4;
+                if (valid)
+                {
+                    cursor = pdb_skip_numeric(record, cursor + 4);
+                    cursor = pdb_skip_name(record, cursor);
+                }
+            }
+            else if (valid && leaf == PDB_LF_INDEX)
+            {
+                // A continuation is the final member, not an untyped suffix.
+                valid = record.length - cursor == 8 && pdb_type_index_map(module, record, cursor + 4);
+                cursor += 8;
+            }
+            else
+            {
+                valid = false;
+            }
+            valid = valid && cursor <= record.length;
+        }
+    }
+    return valid && cursor == record.length;
+}
+
 BUSTER_GLOBAL_LOCAL bool pdb_rewrite_type_record(PdbTypeModule* module, ByteSlice record)
 {
     u16 leaf = 0;
@@ -529,8 +654,9 @@ BUSTER_GLOBAL_LOCAL bool pdb_rewrite_type_record(PdbTypeModule* module, ByteSlic
     case PDB_LF_ARRAY:
         return pdb_type_index_map(module, record, 4) && pdb_type_index_map(module, record, 8);
     case PDB_LF_STRUCTURE:
-    case PDB_LF_UNION:
         return pdb_type_index_map(module, record, 8) && pdb_type_index_map(module, record, 12) && pdb_type_index_map(module, record, 16);
+    case PDB_LF_UNION:
+        return pdb_type_index_map(module, record, 8);
     case PDB_LF_ENUM:
         return pdb_type_index_map(module, record, 8) && pdb_type_index_map(module, record, 12);
     case PDB_LF_ALIAS:
@@ -554,43 +680,7 @@ BUSTER_GLOBAL_LOCAL bool pdb_rewrite_type_record(PdbTypeModule* module, ByteSlic
         return true;
     }
     case PDB_LF_FIELDLIST:
-    {
-        u64 cursor = 4;
-        while (cursor + 2 <= record.length)
-        {
-            u16 member_leaf = 0;
-            if (!pdb_read_u16_checked(record, cursor, &member_leaf))
-            {
-                return false;
-            }
-            if (member_leaf == PDB_LF_MEMBER)
-            {
-                if (cursor + 8 > record.length || !pdb_type_index_map(module, record, cursor + 4))
-                {
-                    return false;
-                }
-                cursor = pdb_skip_numeric(record, cursor + 8);
-                cursor = pdb_skip_name(record, cursor);
-            }
-            else if (member_leaf == PDB_LF_ENUMERATE)
-            {
-                cursor = pdb_skip_numeric(record, cursor + 4);
-                cursor = pdb_skip_name(record, cursor);
-            }
-            else
-            {
-                // Field-list padding and future leaf records are left intact;
-                // the known records above are the only ones emitted by the
-                // current CodeView frontend.
-                break;
-            }
-            if (cursor > record.length)
-            {
-                return false;
-            }
-        }
-        return true;
-    }
+        return pdb_rewrite_field_list(module, record);
     default:
         return true;
     }
@@ -916,7 +1006,8 @@ PdbResult pdb_build(Arena* arena, PdbInput input)
         {
             type_module->local_to_global[type_index] = final_index[type_module->local_to_global[type_index] - 0x1000];
         }
-        if (!pdb_rewrite_symbol_types(splits[module_index].symbols, type_module))
+        if (!pdb_rewrite_symbol_types(splits[module_index].symbols, type_module) ||
+            !pdb_rewrite_symbol_scopes(arena, splits[module_index].symbols))
         {
             return result;
         }

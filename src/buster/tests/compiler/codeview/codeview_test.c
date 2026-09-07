@@ -1,9 +1,206 @@
 #include <buster/tests/compiler/codeview/codeview_test.h>
 #if BUSTER_INCLUDE_TESTS
 
-UnitTestResult codeview_tests(UnitTestArguments* arguments)
+
+BUSTER_GLOBAL_LOCAL u16 codeview_test_u16(u8 const* bytes)
+{
+    u16 value;
+    memcpy(&value, bytes, sizeof(value));
+    return value;
+}
+
+BUSTER_GLOBAL_LOCAL u32 codeview_test_u32(u8 const* bytes)
+{
+    u32 value;
+    memcpy(&value, bytes, sizeof(value));
+    return value;
+}
+
+// Decode the produced stream independently, following LF_INDEX rather than
+// assuming field lists are contiguous or are emitted in primary-type order.
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_large_types(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    enum { MEMBER_COUNT = 4096, TYPE_BASE = 0x1000, MAX_RECORD = 0xff00 };
+    String8 path = S8("large.c");
+    DebugTypeField* fields = arena_allocate(arguments->arena, DebugTypeField, MEMBER_COUNT);
+    DebugEnumMember* members = arena_allocate(arguments->arena, DebugEnumMember, MEMBER_COUNT);
+    for (u32 index = 0; index < MEMBER_COUNT; index += 1)
+    {
+        String8 name = string_format(arguments->arena, S8("member_with_a_deliberately_long_debug_name_{u32}"), index);
+        fields[index] = (DebugTypeField){.name = name, .type = 0, .offset = index * 4};
+        members[index] = (DebugEnumMember){.name = name, .value = index};
+    }
+    DebugTypeId parameters[] = {0};
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
+        // An argument list preceding a field list used to invalidate the
+        // precomputed auxiliary indices even without any continuation records.
+        {.kind = DEBUG_TYPE_FUNCTION, .return_type = 0, .parameter_types = parameters, .parameter_count = 1},
+        {.kind = DEBUG_TYPE_STRUCT, .name = S8("Large"), .size = MEMBER_COUNT * 4, .fields = fields, .field_count = MEMBER_COUNT},
+        {.kind = DEBUG_TYPE_ENUM, .name = S8("Values"), .size = 4, .enum_members = members, .enum_member_count = MEMBER_COUNT},
+        {.kind = DEBUG_TYPE_UNION, .name = S8("Choice"), .size = 4, .fields = fields, .field_count = 1},
+    };
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .valid = true};
+    CodeviewInput input = {.model = &model, .file_paths = &path, .file_count = 1, .machine = CODEVIEW_MACHINE_X64};
+    CodeviewResult built = codeview_build(arguments->arena, input);
+    BUSTER_TEST(arguments, built.valid);
+    u64 offsets[64] = {0};
+    u32 record_count = 0;
+    u64 cursor = 4;
+    while (built.valid && cursor + 4 <= built.types.length && record_count < BUSTER_ARRAY_LENGTH(offsets))
+    {
+        u32 size = (u32)codeview_test_u16(built.types.pointer + cursor) + 2;
+        BUSTER_TEST(arguments, size >= 4 && size <= MAX_RECORD && !(size & 3));
+        if (size < 4 || size > built.types.length - cursor)
+        {
+            break;
+        }
+        offsets[record_count++] = cursor;
+        cursor += size;
+    }
+    BUSTER_TEST(arguments, built.valid && cursor == built.types.length && record_count >= 12);
+    if (built.valid && cursor == built.types.length && record_count >= 12)
+    {
+        u32 arguments_index = codeview_test_u32(built.types.pointer + offsets[1] + 12);
+        BUSTER_TEST(arguments, arguments_index >= TYPE_BASE && arguments_index - TYPE_BASE < record_count);
+        if (arguments_index >= TYPE_BASE && arguments_index - TYPE_BASE < record_count)
+        {
+            u8* record = built.types.pointer + offsets[arguments_index - TYPE_BASE];
+            BUSTER_TEST(arguments, codeview_test_u16(record + 2) == 0x1201 && codeview_test_u32(record + 8) == TYPE_BASE);
+        }
+        for (u32 type_index = 2; type_index <= 4; type_index += 1)
+        {
+            bool enumeration = type_index == 3;
+            u32 field_index = codeview_test_u32(built.types.pointer + offsets[type_index] + (enumeration ? 12 : 8));
+            u32 seen = 0;
+            u32 links = 0;
+            bool valid = true;
+            while (field_index && valid && links < record_count)
+            {
+                valid = field_index >= TYPE_BASE && field_index - TYPE_BASE < record_count;
+                BUSTER_TEST(arguments, valid);
+                if (!valid)
+                {
+                    break;
+                }
+                u64 offset = offsets[field_index - TYPE_BASE];
+                u64 end = offset + 2 + codeview_test_u16(built.types.pointer + offset);
+                BUSTER_TEST(arguments, codeview_test_u16(built.types.pointer + offset + 2) == 0x1203);
+                cursor = offset + 4;
+                u32 next = 0;
+                while (cursor < end && valid)
+                {
+                    u8* record = built.types.pointer + cursor;
+                    u16 leaf = codeview_test_u16(record);
+                    if (leaf == 0x1404)
+                    {
+                        valid = end - cursor == 8 && !codeview_test_u16(record + 2);
+                        next = codeview_test_u32(record + 4);
+                        valid &= next < field_index && next >= TYPE_BASE;
+                        cursor += 8;
+                    }
+                    else
+                    {
+                        u32 prefix = enumeration ? 10 : 14;
+                        valid = leaf == (enumeration ? 0x1502 : 0x150d) && seen < MEMBER_COUNT && end - cursor > prefix;
+                        if (!valid)
+                        {
+                            break;
+                        }
+                        BUSTER_TEST(arguments, codeview_test_u16(record + prefix - 6) == 0x8003);
+                        BUSTER_TEST(arguments, codeview_test_u32(record + prefix - 4) == seen * (enumeration ? 1u : 4u));
+                        if (!enumeration)
+                        {
+                            BUSTER_TEST(arguments, codeview_test_u32(record + 4) == TYPE_BASE);
+                        }
+                        String8 expected = fields[seen].name;
+                        valid = expected.length + 1 <= end - cursor - prefix;
+                        if (!valid)
+                        {
+                            break;
+                        }
+                        BUSTER_TEST(arguments, !memcmp(record + prefix, expected.pointer, expected.length) && !record[prefix + expected.length]);
+                        cursor += prefix + expected.length + 1;
+                        u32 padding = (u32)((4 - (cursor & 3)) & 3);
+                        for (u32 pad = padding; pad && cursor < end; pad -= 1)
+                        {
+                            BUSTER_TEST(arguments, built.types.pointer[cursor++] == 0xf0 + pad);
+                        }
+                        seen += 1;
+                    }
+                }
+                BUSTER_TEST(arguments, valid && cursor == end);
+                field_index = next;
+                links += next != 0;
+            }
+            BUSTER_TEST(arguments, !field_index && valid && seen == (type_index == 4 ? 1u : MEMBER_COUNT));
+            BUSTER_TEST(arguments, type_index == 4 || links >= 2);
+        }
+        // LF_UNION has no derived/vshape words: the numeric size starts at +12.
+        BUSTER_TEST(arguments, codeview_test_u16(built.types.pointer + offsets[4] + 12) == 0x8003);
+    }
+
+    // Exact reserved-continuation boundary, then one byte over. A single member
+    // cannot itself be continued; do not wrap the length or loop on overflow.
+    char8* large_name = arena_allocate(arguments->arena, char8, MAX_RECORD);
+    memset(large_name, 'x', MAX_RECORD);
+    fields[0].name = (String8){.pointer = large_name, .length = MAX_RECORD - 4 - 8 - 15};
+    types[2].field_count = 1;
+    model.type_count = 3;
+    BUSTER_TEST(arguments, codeview_build(arguments->arena, input).valid);
+    fields[0].name.length += 1;
+    BUSTER_TEST(arguments, !codeview_build(arguments->arena, input).valid);
+    fields[0].name = S8("field");
+    types[2].name = (String8){.pointer = large_name, .length = MAX_RECORD};
+    BUSTER_TEST(arguments, !codeview_build(arguments->arena, input).valid);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_scope_growth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 previous = 0;
+    for (u32 count = 256; count <= 1024; count *= 4)
+    {
+        String8 path = S8("scopes.c");
+        DebugType type = {.kind = DEBUG_TYPE_FUNCTION, .return_type = DEBUG_ID_INVALID};
+        DebugScope* scopes = arena_allocate(arguments->arena, DebugScope, count * 3);
+        DebugFunction* functions = arena_allocate(arguments->arena, DebugFunction, count);
+        DwarfFunction* legacy = arena_allocate(arguments->arena, DwarfFunction, count);
+        for (u32 index = 0; index < count; index += 1)
+        {
+            scopes[index] = (DebugScope){.kind = DEBUG_SCOPE_FUNCTION, .parent = DEBUG_SCOPE_INVALID, .start = index * 8, .end = index * 8 + 8};
+            scopes[count + index] = (DebugScope){.kind = DEBUG_SCOPE_LEXICAL, .parent = index, .start = index * 8 + 1, .end = index * 8 + 7};
+            scopes[count * 2 + index] = (DebugScope){.kind = DEBUG_SCOPE_LEXICAL, .parent = count + index, .start = index * 8 + 2, .end = index * 8 + 6};
+            functions[index] = (DebugFunction){.name = S8("f"), .scope = index, .type = 0, .code_offset = index * 8, .code_size = 8};
+            legacy[index] = (DwarfFunction){.name = S8("f"), .code_offset = index * 8, .code_size = 8, .line = 1};
+        }
+        DebugModel model = {.types = &type, .type_count = 1, .scopes = scopes, .scope_count = count * 3,
+                            .functions = functions, .function_count = count, .valid = true};
+        u64 start = arguments->arena->position;
+        CodeviewResult built = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+            .functions = legacy, .function_count = count, .machine = CODEVIEW_MACHINE_X64});
+        u64 allocated = arguments->arena->position - start;
+        BUSTER_TEST(arguments, built.valid);
+        // Includes output buffers, relocations, types and traversal scratch.
+        BUSTER_TEST(arguments, allocated < (u64)count * 1024 + 16384);
+        BUSTER_TEST(arguments, !previous || allocated < previous * 6);
+        if (arguments->show)
+        {
+            arguments->show(arguments, S8("CODEVIEW_SCOPE_ALLOCATION functions={u32} scopes={u32} bytes={u64}\n"), count, count * 3, allocated);
+        }
+        previous = allocated;
+    }
+    return result;
+}
+
+UnitTestResult codeview_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = codeview_test_large_types(arguments);
+    UnitTestResult growth = codeview_test_scope_growth(arguments);
+    result.test_count += growth.test_count;
+    result.succeeded_test_count += growth.succeeded_test_count;
     String8 files[] = {
         S8_INITIALIZER("main.c"),
         S8_INITIALIZER("helper.h"),
