@@ -13383,11 +13383,132 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_malformed_initializer_progress_and_ide
     return result;
 }
 
+// Check interval indexing independently of parser allocation order. Small
+// trees agree with the unindexed semantic query; wide and deep trees pin the
+// same answers without relying on wall-clock thresholds in the test suite.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_scope_interval_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 sizes[] = {16, 4096};
+    for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
+    {
+        u32 siblings = sizes[size_index];
+        u32 depth = 256;
+        CParseResult parse = {.scope_count = siblings + depth + 2};
+        parse.scopes = arena_allocate(temporary.arena, CScope, parse.scope_count);
+        memset(parse.scopes, 0, sizeof(*parse.scopes) * parse.scope_count);
+        parse.scopes[0] = (CScope){.parent = C_SCOPE_ID_INVALID, .token_end = siblings * 4 + 8};
+        for (u32 index = 1; index <= siblings; index += 1)
+        {
+            u32 start = (siblings + 1 - index) * 4;
+            parse.scopes[index] = (CScope){.parent = {0}, .token_start = start, .token_end = start + 2};
+        }
+        for (u32 index = 0; index < depth; index += 1)
+        {
+            parse.scopes[siblings + index + 1] = (CScope){
+                .parent = {siblings + index}, .token_start = 4, .token_end = 6,
+            };
+        }
+        // An empty sibling at the same start must not hide the containing one.
+        parse.scopes[parse.scope_count - 1] = (CScope){.parent = {0}, .token_start = 4, .token_end = 4};
+        CParseResult unindexed = parse;
+        c_parse_index_scope_children(&parse, temporary.arena);
+        BUSTER_TEST(arguments, c_parse_scope_for_token(0, (CScopeId){7}, 0).value == 7);
+        BUSTER_TEST(arguments, c_parse_scope_for_token(&parse, C_SCOPE_ID_INVALID, 4).value == C_ID_UNDERLYING_INVALID);
+        for (u32 index = 1; index <= siblings; index += 1)
+        {
+            u32 token = parse.scopes[index].token_start;
+            u32 expected = index == siblings ? siblings + depth : index;
+            BUSTER_TEST(arguments, c_parse_scope_for_token(&parse, (CScopeId){0}, token).value == expected);
+            BUSTER_TEST(arguments, c_parse_scope_for_token(&parse, (CScopeId){0}, token + 2).value == 0);
+            if (size_index == 0)
+            {
+                BUSTER_TEST(arguments, c_parse_scope_for_token(&unindexed, (CScopeId){0}, token).value == expected);
+                BUSTER_TEST(arguments, c_parse_scope_for_token(&unindexed, (CScopeId){0}, token + 2).value == 0);
+            }
+        }
+        BUSTER_TEST(arguments, c_parse_scope_for_token(&parse, (CScopeId){siblings}, 4).value == siblings + depth);
+        BUSTER_TEST(arguments, c_parse_scope_for_token(&parse, (CScopeId){0}, siblings * 4 + 8).value == 0);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_relocation_orders(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena,
+        S8("int values[3] = {3, 5, 7};"
+           "int *positional[] = {values + 1, values + 2, values};"
+           "int *ascending[] = {[0] = values + 1, [1] = values + 2, [2] = values};"
+           "int *descending[] = {[2] = values, [1] = values + 2, [0] = values + 1};"
+           "int *repeated[] = {values, values, values, [0] = values + 1, [1] = values + 2};"
+           "int *ranged[] = {[0 ... 2] = values, [0] = values + 1, [1] = values + 2};"
+           "struct Nested { int *p[3]; };"
+           "struct Nested nested = {.p = {[2] = values, [0] = values + 1, [1] = values + 2}};"
+           "int *erased[] = {values + 1, values + 2, values, [1] = 0};"
+           "union Overlap { int *p[2]; struct {int *first; int *second;} pair; };"
+           "union Overlap unioned[2] = {[0].pair = {values, values}, [0].p = {values + 1, values + 2},"
+           " [1].p = {values, values}, [1] = {0}};\n"),
+        (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23});
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("relocation-orders.c"), preprocess, parse, target_native);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
+    if (lowered.program && lowered.program->module_count)
+    {
+        IrModule* module = &lowered.program->modules[0];
+        String8 names[] = {S8("positional"), S8("ascending"), S8("descending"), S8("repeated"),
+                           S8("ranged"), S8("nested"), S8("erased"), S8("unioned")};
+        u64 pointer_size = target_data_layout(target_native).pointer.size;
+        u64 integer_size = target_data_layout(target_native).integer.size;
+        for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+        {
+            IrGlobal* global = c_test_find_ir_global(module, lowered.program, names[name_index]);
+            BUSTER_TEST(arguments, global != 0);
+            if (global)
+            {
+                u32 expected_mask = name_index == 6 ? 5u : name_index == 7 ? 3u : 7u;
+                u32 seen = 0;
+                BUSTER_TEST(arguments, global->relocation_count == (name_index >= 6 ? 2u : 3u));
+                for (u32 index = 0; index < global->relocation_count; index += 1)
+                {
+                    IrGlobalRelocation relocation = global->relocations[index];
+                    IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, relocation.symbol);
+                    BUSTER_TEST(arguments, symbol && string_equal(symbol->name, S8("values")));
+                    BUSTER_TEST(arguments, relocation.offset % pointer_size == 0 && relocation.offset < pointer_size * 3);
+                    if (relocation.offset < pointer_size * 3)
+                    {
+                        u32 slot = (u32)(relocation.offset / pointer_size);
+                        u32 bit = 1u << slot;
+                        BUSTER_TEST(arguments, !(seen & bit) && (expected_mask & bit));
+                        BUSTER_TEST(arguments, relocation.addend == (s64)(integer_size * ((slot + 1) % 3)));
+                        seen |= bit;
+                    }
+                }
+                BUSTER_TEST(arguments, seen == expected_mask);
+                for (u64 index = 0; index < global->bytes.length; index += 1)
+                {
+                    BUSTER_TEST(arguments, global->bytes.pointer[index] == 0);
+                }
+            }
+        }
+        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
     c_test_result_add(&result, c_test_lexer_rewind_zeroed(arguments));
+    c_test_result_add(&result, c_test_scope_interval_index(arguments));
+    c_test_result_add(&result, c_test_initializer_relocation_orders(arguments));
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
     c_test_result_add(&result, c_test_null_preprocessing_directives(arguments));
     c_test_result_add(&result, c_test_malformed_initializer_progress_and_identifier_uses(arguments));

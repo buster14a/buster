@@ -54,6 +54,22 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   selected x86-64 float-to-u64 conversion whose binary32 threshold encoded
   2^31 instead of 2^63. Runtime float-to-128-bit conversion on x86-64 remains
   unsupported; constant conversion supports both integer limbs.
+- `c_parse_index_scope_children` stores siblings in token-interval order.
+  Source-ordered rows keep a linear construction path; synthesized rows use
+  iterative merging with the finished CSR cursor storage as scratch.
+  `c_parse_scope_for_token` binary-searches the last child starting at or
+  before the query, checks its exclusive end, and descends iteratively.
+  Sibling intervals must remain disjoint; equal-range nesting resolves to the
+  deepest child. Empty siblings sort before nonempty siblings at the same
+  start. Queries before index construction retain the unindexed fallback.
+- Each aggregate initializer context retains a `CIrInitializerRelocationExtent`.
+  Before clearing a subobject, it incorporates only relocation records appended
+  since the preceding query. Clears wholly outside the occupied extent skip
+  relocation compaction. Overlapping clears preserve stable record order and
+  recompute the surviving bounds during that same compaction. The extent is a
+  conservative overlap test: holes inside it and arbitrary repeated overwrites
+  still take the full compaction path. GNU range copies use their parent
+  context's extent; separately materialized range values own a fresh context.
 - **GNU's `__alignof__` takes an expression; `_Alignof` takes only a type
   name.** Both spellings reach the same fold in `c_gen.c`, and it resolved an
   expression operand only for a compound literal until libc-test's

@@ -61,6 +61,7 @@ keep current.
 - [`2026-09-07T222944Z`](docs/performance-audits/2026-09-07T222944Z.md) — FAST CFG edge indexing: remove quadratic queries without changing allocation decisions
 - [`2026-09-07T222813Z`](docs/performance-audits/2026-09-07T222813Z.md) — production selector audit and guarded replay benchmark
 - [`2026-09-07T220716Z`](docs/performance-audits/2026-09-07T220716Z.md) — GitHub workflow integrity, failure isolation, archive caching, and comparable timing cohorts
+- [`2026-09-07T214619Z`](docs/performance-audits/2026-09-07T214619Z.md) — bound frontend sibling lookup and skip disjoint relocation compaction (#229, #230)
 - [`2026-09-07T212739Z`](docs/performance-audits/2026-09-07T212739Z.md) — FAST owner-mask draft rebased onto sparse contracts: guarded dense SIMD, deterministic output, performance gate still open
 - [`2026-09-07T132245Z`](docs/performance-audits/2026-09-07T132245Z.md) — debug-info correctness and linear CodeView scope scratch (#201-#204)
 - [`2026-09-07T013544Z`](docs/performance-audits/2026-09-07T013544Z.md) — five items take the frozen-tree compile from 9.583,33 M to 9.351,43 M Ir (-2,42%) byte-identically, remove 57,9 MB of per-compile zeroing, and put the matching-delimiter query on a 512-bit windowed scan
