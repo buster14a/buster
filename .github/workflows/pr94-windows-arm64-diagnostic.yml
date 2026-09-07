@@ -150,6 +150,30 @@ jobs:
               ''' + bind_call + r'''
               fprintf(stderr, "PR94_SEMANTICS bind_body_complete index=%u diagnostics=%llu\n",
                       declaration_index, (unsigned long long)result.diagnostic_count); fflush(stderr);''', 1)
+          block_loop = "    while (index < body_end)\n    {"
+          if parse_text.count(block_loop) != 1:
+              raise SystemExit("block-binding loop anchor not found")
+          parse_text = parse_text.replace(block_loop, block_loop + r'''
+              fprintf(stderr, "PR94_BIND token index=%u shape=%u punctuator=%u statement_start=%u\n", index,
+                      (u32)c_preprocess_token_shape_at(token_shapes, &preprocess, index),
+                      (u32)c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index)),
+                      (u32)statement_start); fflush(stderr);''', 1)
+          function_block_call = "        c_parse_bind_block_statements(machine, result_arena, result, preprocess, declaration_index, declaration->scope, declaration->body_start,\n                                      declaration->body_token_count);"
+          if parse_text.count(function_block_call) != 1:
+              raise SystemExit("function block call anchor not found")
+          parse_text = parse_text.replace(function_block_call, r'''        fprintf(stderr, "PR94_BIND block\n"); fflush(stderr);
+              ''' + function_block_call + r'''
+              fprintf(stderr, "PR94_BIND block_complete\n"); fflush(stderr);''', 1)
+          static_assert_call = "        c_parse_bind_function_static_asserts(machine, result_arena, result, preprocess, declaration);"
+          if parse_text.count(static_assert_call) != 1:
+              raise SystemExit("function static-assert call anchor not found")
+          parse_text = parse_text.replace(static_assert_call, static_assert_call + r'''
+              fprintf(stderr, "PR94_BIND static_asserts_complete\n"); fflush(stderr);''', 1)
+          aggregate_call = "        c_parse_bind_expression_aggregates(machine, result, preprocess, declaration->scope, declaration->body_start,\n                                           declaration->body_start + declaration->body_token_count);"
+          if parse_text.count(aggregate_call) != 1:
+              raise SystemExit("function aggregate call anchor not found")
+          parse_text = parse_text.replace(aggregate_call, aggregate_call + r'''
+              fprintf(stderr, "PR94_BIND aggregates_complete\n"); fflush(stderr);''', 1)
           parse_path.write_text(parse_text, encoding="utf-8")
 
           gen_path = Path("src/buster/lib/compiler/frontend/c/c_gen.c")
