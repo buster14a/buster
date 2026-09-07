@@ -2411,6 +2411,9 @@ Target codegen_target_for_abi(CodegenAbi abi)
 void codegen_prewarm(void)
 {
     (void)codegen_target_for_abi(CODEGEN_ABI_X86_64_SYSTEM_V);
+    // The opcode row-facts projection is target-independent: it covers both
+    // machine backends' opcode ranges and every allocator reads it.
+    machine_opcode_rows_prewarm();
 }
 
 // x86 metadata and exact machine plans are only needed by x86 codegen.  Keep

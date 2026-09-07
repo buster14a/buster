@@ -33,6 +33,13 @@
 // probe into the ninety-six-byte descriptor table.
 #define MACHINE_FAST_OPERAND_CALL_ROW (1u << 25)
 #define MACHINE_FAST_OPERAND_LANE_MASK 0x0fu
+// The published opcode row keeps the three role nibbles contiguous from bit
+// zero, and this word keeps them contiguous from bit twelve, so the whole
+// role half of a row's classification is one shift of the table's field.
+#define MACHINE_FAST_OPERAND_ROW_ROLE_SHIFT 12u
+BUSTER_CT_CHECK(MACHINE_FAST_OPERAND_USE_SHIFT == MACHINE_FAST_OPERAND_ROW_ROLE_SHIFT + MACHINE_OPCODE_ROW_USE_SHIFT);
+BUSTER_CT_CHECK(MACHINE_FAST_OPERAND_DEFINE_SHIFT == MACHINE_FAST_OPERAND_ROW_ROLE_SHIFT + MACHINE_OPCODE_ROW_DEFINE_SHIFT);
+BUSTER_CT_CHECK(MACHINE_FAST_OPERAND_USE_DEFINE_SHIFT == MACHINE_FAST_OPERAND_ROW_ROLE_SHIFT + MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT);
 // Contract-held, contract-dirty, out-held and out-dirty: the four per-block
 // register-file masks, allocated and cleared as one block.
 #define MACHINE_FAST_BLOCK_MASK_COUNT 4u
@@ -1056,6 +1063,11 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
         memset(prepass.predecessor_offsets, 0, ((u64)function->block_count + 1u) * sizeof(*prepass.predecessor_offsets));
         u32 backward_edge_count = 0;
         bool block_references_only_in_terminators = true;
+        MachineOpcodeRow const* opcode_rows = machine_opcode_row_table();
+        // The callee-saved question is asked of the union, once, instead of of
+        // every row: the mask is a reduction and the row walk only needs to
+        // add to it.
+        u64 clobber_union = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             MachineBlock* block = function->blocks + block_index;
@@ -1063,38 +1075,58 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
             {
                 u32 instruction_index = block->first_instruction + offset;
                 MachineInstruction* instruction = function->instructions + instruction_index;
-                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-                if (!info)
+                u32 opcode = instruction->opcode;
+                if (opcode >= MACHINE_OPCODE_COUNT)
                 {
                     return prepass;
                 }
-                prepass.callee_saved_clobber_mask |= info->clobber_mask & description->callee_saved_mask;
-                bool constrained = machine_opcode_has_constraints(info);
-                u32 operand_masks = 0;
-                for (u32 slot = 0; slot < info->operand_count; slot += 1)
+                // One sixteen-byte row answers every question this walk used
+                // to ask of the 88-byte descriptor: the operand roles, the
+                // constraint predicate, the call/terminator attributes, the
+                // clobber set and the indirect-branch identity.
+                MachineOpcodeRow opcode_row = opcode_rows[opcode];
+                clobber_union |= opcode_row.clobber_mask;
+                bool constrained = (opcode_row.flags & MACHINE_OPCODE_ROW_CONSTRAINED) != 0;
+                // The operand kinds are three compares of the four inline
+                // refs, not a per-slot ladder: the kind is the top three bits
+                // of a ref, the four slots are one sixteen-byte row, and each
+                // question's answer is a nibble the lane loops below consume
+                // with a trailing-zero count. Lanes past operand_count are
+                // trimmed once, so no test inside the loops repeats it.
+                u32 lanes_active = (1u << opcode_row.operand_count) - 1u;
+                u32 virtual_lanes = 0;
+                u32 physical_lanes = 0;
+                u32 block_lanes = 0;
+                for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction->operands); slot += 1)
                 {
+                    u32 kind = instruction->operands[slot] >> MACHINE_REF_PAYLOAD_BITS;
+                    virtual_lanes |= (u32)(kind == MACHINE_REF_VIRTUAL_REGISTER) << slot;
+                    physical_lanes |= (u32)(kind == MACHINE_REF_PHYSICAL_REGISTER) << slot;
+                    block_lanes |= (u32)(kind == MACHINE_REF_BLOCK) << slot;
+                }
+                virtual_lanes &= lanes_active;
+                physical_lanes &= lanes_active;
+                block_lanes &= lanes_active;
+                u32 role_lanes = opcode_row.role_lanes;
+                u32 operand_masks = (u32)(role_lanes << MACHINE_FAST_OPERAND_ROW_ROLE_SHIFT) |
+                                    (physical_lanes << MACHINE_FAST_OPERAND_PHYSICAL_SHIFT) |
+                                    (virtual_lanes << MACHINE_FAST_OPERAND_VIRTUAL_SHIFT) |
+                                    (block_lanes << MACHINE_FAST_OPERAND_BLOCK_SHIFT);
+                // Block references: only terminators carry them, so the lane
+                // word is empty on all but 83.434 rows of the compile and the
+                // loop below runs zero times without a branch of its own.
+                for (u32 pending = block_lanes; pending; pending &= pending - 1u)
+                {
+                    u32 slot = (u32)__builtin_ctz(pending);
+                    block_references_only_in_terminators &= (opcode_row.flags & MACHINE_OPCODE_ROW_TERMINATOR) != 0;
+                    u32 successor = machine_ref_payload(instruction->operands[slot]);
+                    prepass.predecessor_offsets[successor + 1] += 1;
+                    backward_edge_count += successor <= block_index;
+                }
+                for (u32 pending = virtual_lanes; pending; pending &= pending - 1u)
+                {
+                    u32 slot = (u32)__builtin_ctz(pending);
                     MachineRef ref = instruction->operands[slot];
-                    MachineRefKind kind = machine_ref_kind(ref);
-                    u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-                    operand_masks |= (u32)(role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
-                                     << (MACHINE_FAST_OPERAND_USE_SHIFT + slot);
-                    operand_masks |= (u32)(role == MACHINE_OPERAND_ROLE_DEFINE) << (MACHINE_FAST_OPERAND_DEFINE_SHIFT + slot);
-                    operand_masks |= (u32)(role == MACHINE_OPERAND_ROLE_USE_DEFINE) << (MACHINE_FAST_OPERAND_USE_DEFINE_SHIFT + slot);
-                    if (kind == MACHINE_REF_BLOCK)
-                    {
-                        operand_masks |= 1u << (MACHINE_FAST_OPERAND_BLOCK_SHIFT + slot);
-                        block_references_only_in_terminators &= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) != 0;
-                        u32 successor = machine_ref_payload(ref);
-                        prepass.predecessor_offsets[successor + 1] += 1;
-                        backward_edge_count += successor <= block_index;
-                        continue;
-                    }
-                    if (kind != MACHINE_REF_VIRTUAL_REGISTER)
-                    {
-                        operand_masks |= (u32)(kind == MACHINE_REF_PHYSICAL_REGISTER) << (MACHINE_FAST_OPERAND_PHYSICAL_SHIFT + slot);
-                        continue;
-                    }
-                    operand_masks |= 1u << (MACHINE_FAST_OPERAND_VIRTUAL_SHIFT + slot);
                     u32 virtual_register = machine_ref_payload(ref);
                     if (wants_quality_facts)
                     {
@@ -1106,7 +1138,8 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                         // register relation from QUALITY's split probes.
                         prepass.disqualified[virtual_register] |= constrained ? 1u : 0u;
                     }
-                    if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+                    if ((role_lanes >> (MACHINE_OPCODE_ROW_DEFINE_SHIFT + slot)) & 1u ||
+                        (role_lanes >> (MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT + slot)) & 1u)
                     {
                         if (prepass.definition_blocks[virtual_register] == UINT32_MAX)
                         {
@@ -1116,13 +1149,13 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                         // never pay for a store or a slot. A second definition of
                         // the same value disables the recipe: which constant is
                         // current would then depend on the path.
-                        bool constant_definition = instruction->opcode == description->constant_opcode && slot == 0 &&
+                        bool constant_definition = opcode == description->constant_opcode && slot == 0 &&
                                                    machine_ref_kind(instruction->operands[1]) == MACHINE_REF_IMMEDIATE;
                         prepass.rematerialize_immediates[virtual_register] =
                             constant_definition && !definition_seen[virtual_register] ? machine_ref_payload(instruction->operands[1]) : UINT32_MAX;
                         definition_seen[virtual_register] = 1;
                     }
-                    if (role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
+                    if ((role_lanes >> (MACHINE_OPCODE_ROW_USE_SHIFT + slot)) & 1u)
                     {
                         prepass.last_use[virtual_register] = BUSTER_MAX(prepass.last_use[virtual_register], instruction_index);
                         if (use_blocks)
@@ -1132,7 +1165,7 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                         }
                     }
                 }
-                if (instruction->opcode == MACHINE_X64_INDIRECT_BRANCH || instruction->opcode == MACHINE_A64_INDIRECT_BRANCH)
+                if (opcode_row.flags & MACHINE_OPCODE_ROW_INDIRECT_BRANCH)
                 {
                     if (instruction->payload > function->switch_case_count ||
                         instruction->flags > function->switch_case_count - instruction->payload)
@@ -1150,16 +1183,16 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                         backward_edge_count += successor <= block_index;
                     }
                 }
-                if (!constrained && !(info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) && !info->clobber_mask &&
-                    !(operand_masks & ((MACHINE_FAST_OPERAND_LANE_MASK << MACHINE_FAST_OPERAND_PHYSICAL_SHIFT) |
-                                       (MACHINE_FAST_OPERAND_LANE_MASK << MACHINE_FAST_OPERAND_BLOCK_SHIFT))))
-                {
-                    operand_masks |= MACHINE_FAST_OPERAND_SIMPLE_ROW;
-                }
-                operand_masks |= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL) ? MACHINE_FAST_OPERAND_CALL_ROW : 0u;
+                operand_masks |= !(opcode_row.flags & (MACHINE_OPCODE_ROW_CONSTRAINED | MACHINE_OPCODE_ROW_CALL | MACHINE_OPCODE_ROW_TERMINATOR |
+                                                       MACHINE_OPCODE_ROW_CLOBBERS)) &&
+                                         !(physical_lanes | block_lanes)
+                                     ? MACHINE_FAST_OPERAND_SIMPLE_ROW
+                                     : 0u;
+                operand_masks |= (opcode_row.flags & MACHINE_OPCODE_ROW_CALL) ? MACHINE_FAST_OPERAND_CALL_ROW : 0u;
                 prepass.operand_masks[instruction_index] = operand_masks;
             }
         }
+        prepass.callee_saved_clobber_mask |= clobber_union & description->callee_saved_mask;
         for (u32 register_index = 0; use_blocks && register_index < register_count; register_index += 1)
         {
             u16 use_block = use_blocks[register_index];
@@ -1346,6 +1379,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         {
             return placement;
         }
+        MachineOpcodeRow const* placement_opcode_rows = machine_opcode_row_table();
         MachineBuilderStream edits;
         machine_stream_initialize(&edits, sizeof(MachineEdit));
         // Only the callee-saved pins cost a prologue save; a caller-saved pin
@@ -1790,16 +1824,20 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 }
                 u32 physical_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_PHYSICAL_SHIFT);
                 u32 block_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_BLOCK_SHIFT);
-                bool constrained = machine_opcode_has_constraints(info);
-                bool is_call = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL) != 0;
-                bool is_terminator = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) != 0;
+                // The three predicates and the clobber set come from the
+                // published row, one line, instead of six fields of the
+                // descriptor spread over two.
+                MachineOpcodeRow opcode_row = placement_opcode_rows[instruction->opcode];
+                bool constrained = (opcode_row.flags & MACHINE_OPCODE_ROW_CONSTRAINED) != 0;
+                bool is_call = (opcode_row.flags & MACHINE_OPCODE_ROW_CALL) != 0;
+                bool is_terminator = (opcode_row.flags & MACHINE_OPCODE_ROW_TERMINATOR) != 0;
                 u32 tied_destination = machine_fast_tied_destination(info);
                 u32 tied_source = machine_fast_tied_source(info);
                 u32 tied_target = UINT32_MAX;
                 bool tied_source_dies = false;
                 // Fixed physical operands and the constrained layout vacate
                 // their registers first so uses cannot land on them.
-                u64 reserved_mask = info->clobber_mask;
+                u64 reserved_mask = opcode_row.clobber_mask;
                 u32 reservation_slots =
                     (physical_slots | info->fixed_register_mask | (constrained ? virtual_slots : 0u)) & MACHINE_FAST_OPERAND_LANE_MASK;
                 for (u32 remaining = reservation_slots; remaining; remaining &= remaining - 1u)

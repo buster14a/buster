@@ -1297,6 +1297,109 @@ MachineEmitRecipeId machine_opcode_emit_recipe(u16 opcode)
     return opcode < MACHINE_OPCODE_COUNT ? machine_opcode_emit_recipes[opcode] : MACHINE_EMIT_RECIPE_INVALID;
 }
 
+// The row-facts projection. The allocator prepass asked five questions of
+// every one of 1,7 M rows -- the operand roles, the constraint predicate, the
+// call and terminator attributes, the clobber set and the indirect-branch
+// identity -- and every one of them is a function of the opcode alone. They
+// are a table, and this is where it is written: once, from the descriptors,
+// into sixteen bytes an opcode, so the pass reads one line instead of two of
+// a descriptor whose other seventy bytes it never looks at.
+BUSTER_GLOBAL_LOCAL MachineOpcodeRow machine_opcode_row_records[MACHINE_OPCODE_COUNT];
+BUSTER_GLOBAL_LOCAL bool machine_opcode_rows_built;
+
+BUSTER_GLOBAL_LOCAL void machine_opcode_rows_once(void)
+{
+    if (machine_opcode_rows_built)
+    {
+        return;
+    }
+    BUSTER_CHECK_SERIAL_INITIALIZATION();
+    for (u32 opcode = 0; opcode < MACHINE_OPCODE_COUNT; opcode += 1)
+    {
+        MachineOpcodeInfo const* info = machine_opcode_infos + opcode;
+        u32 operand_count = info->operand_count;
+        BUSTER_CHECK(operand_count <= BUSTER_ARRAY_LENGTH(info->operand_info));
+        operand_count = operand_count <= BUSTER_ARRAY_LENGTH(info->operand_info) ? operand_count : BUSTER_ARRAY_LENGTH(info->operand_info);
+        u32 role_lanes = 0;
+        for (u32 slot = 0; slot < operand_count; slot += 1)
+        {
+            u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+            role_lanes |= (u32)(role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) << (MACHINE_OPCODE_ROW_USE_SHIFT + slot);
+            role_lanes |= (u32)(role == MACHINE_OPERAND_ROLE_DEFINE) << (MACHINE_OPCODE_ROW_DEFINE_SHIFT + slot);
+            role_lanes |= (u32)(role == MACHINE_OPERAND_ROLE_USE_DEFINE) << (MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT + slot);
+        }
+        u32 flags = 0;
+        flags |= machine_opcode_has_constraints(info) ? MACHINE_OPCODE_ROW_CONSTRAINED : 0u;
+        flags |= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CALL) ? MACHINE_OPCODE_ROW_CALL : 0u;
+        flags |= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) ? MACHINE_OPCODE_ROW_TERMINATOR : 0u;
+        flags |= (opcode == MACHINE_X64_INDIRECT_BRANCH || opcode == MACHINE_A64_INDIRECT_BRANCH) ? MACHINE_OPCODE_ROW_INDIRECT_BRANCH : 0u;
+        flags |= info->clobber_mask ? MACHINE_OPCODE_ROW_CLOBBERS : 0u;
+        // The encoder's per-row byte budget, which was a nine-arm switch over
+        // the same opcode this row is keyed by. Switches and aggregate copies
+        // expand with their side data and keep the flag; everything else is
+        // flat, which is 98% of every compile's rows.
+        u32 encode_budget = MACHINE_OPCODE_ROW_FLAT_BUDGET;
+        switch (opcode)
+        {
+        case MACHINE_X64_SWITCH:
+            encode_budget = 8;
+            flags |= MACHINE_OPCODE_ROW_VARIABLE_BUDGET;
+            break;
+        case MACHINE_X64_COPY_FRAME_FROM_FRAME:
+        case MACHINE_X64_COPY_FRAME_FROM_PTR:
+        case MACHINE_X64_COPY_PTR_FROM_FRAME:
+            encode_budget = 4 * 24;
+            flags |= MACHINE_OPCODE_ROW_VARIABLE_BUDGET;
+            break;
+        case MACHINE_X64_STACK_ALLOCATE:
+            // Alignment, the page-probe loop, the final subtract/touch, and
+            // the RSP result are substantially larger than a normal row.
+            encode_budget = 64;
+            break;
+        case MACHINE_X64_VA_SAVE:
+            // Six GP stores plus eight XMM stores, each with a disp32 frame
+            // address and (for XMM) the legacy SSE prefix.
+            encode_budget = 320;
+            break;
+        case MACHINE_X64_VA_ARG:
+            // Mixed/aggregate values may emit two bounds checks, one load
+            // per eightbyte, frame stores, and the complete overflow copy.
+            encode_budget = 640;
+            break;
+        case MACHINE_X64_FCMP_SET:
+            encode_budget = 40;
+            break;
+        case MACHINE_X64_ATOMIC_RMW:
+            encode_budget = 48;
+            break;
+        case MACHINE_X64_ATOMIC_CMPXCHG16:
+            encode_budget = 96;
+            break;
+        default:
+            break;
+        }
+        machine_opcode_row_records[opcode] = (MachineOpcodeRow){
+            .clobber_mask = info->clobber_mask,
+            .role_lanes = (u16)role_lanes,
+            .operand_count = (u8)operand_count,
+            .flags = (u8)flags,
+            .encode_budget = (u16)encode_budget,
+        };
+    }
+    machine_opcode_rows_built = true;
+}
+
+void machine_opcode_rows_prewarm(void)
+{
+    machine_opcode_rows_once();
+}
+
+MachineOpcodeRow const* machine_opcode_row_table(void)
+{
+    machine_opcode_rows_once();
+    return machine_opcode_row_records;
+}
+
 u32 machine_x86_64_emit_registry_count(void)
 {
     return MACHINE_X86_64_EMIT_REGISTRY_COUNT;
