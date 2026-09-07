@@ -1,0 +1,30 @@
+name: Temporary issue 190-195 inspection
+
+on:
+  push:
+    branches:
+      - agent/inspect-190-195
+
+permissions:
+  contents: write
+
+jobs:
+  inspect:
+    if: github.event.head_commit.message != 'chore: record issue 190-195 inspection'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Extract relevant source contexts
+        run: python3 .github/agent_inspect_190_195.py
+      - name: Commit inspection output
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .agent/inspect-190-195.txt
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'chore: record issue 190-195 inspection'
+          git push origin HEAD:agent/inspect-190-195
