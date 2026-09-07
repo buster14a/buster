@@ -8,10 +8,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: throughput-source-import
+  cancel-in-progress: true
+
 jobs:
   import:
     if: ${{ github.repository == 'buster14a/buster' && github.event_name == 'push' && github.ref == 'refs/heads/bench/compiler-throughput-suite' }}
-    runs-on: ubuntu-26.04
+    runs-on: macos-26
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -27,10 +31,9 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           : > "$RUNNER_TEMP/throughput.patch.xz"
           for blob in 489ab8ca25d7c0bbca45ca3c9a2f24c30b67eddb a9598fae62ad5b790261fb050f69a9f42e569b40 761a7eb7e0ba7c4fb0352ac0943cd0109771b0de 540f10c64a6d7a866da48b5ca7af0c1af44682ac 808c0d38ae9c0aa1f9a1ab22d8dd273a0c6b19a7; do
-            gh api "repos/buster14a/buster/git/blobs/$blob" --jq .content | base64 --decode >> "$RUNNER_TEMP/throughput.patch.xz"
+            gh api "repos/buster14a/buster/git/blobs/$blob" --jq .content | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' >> "$RUNNER_TEMP/throughput.patch.xz"
           done
-          xz --decompress --stdout "$RUNNER_TEMP/throughput.patch.xz" > "$RUNNER_TEMP/throughput.patch"
-          printf 'ae380022e8c673555ac2a19bb5096b4d79dcdbd482bbb20cc68581e7e72f7511  %s\n' "$RUNNER_TEMP/throughput.patch" | sha256sum --check --strict
+          python3 -c 'import hashlib,lzma,os,pathlib; root=pathlib.Path(os.environ["RUNNER_TEMP"]); data=lzma.decompress((root/"throughput.patch.xz").read_bytes()); assert hashlib.sha256(data).hexdigest()=="ae380022e8c673555ac2a19bb5096b4d79dcdbd482bbb20cc68581e7e72f7511"; (root/"throughput.patch").write_bytes(data)'
           git apply --check "$RUNNER_TEMP/throughput.patch"
           git apply --index "$RUNNER_TEMP/throughput.patch"
           git diff --cached --check
