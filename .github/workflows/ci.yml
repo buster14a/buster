@@ -1,0 +1,34 @@
+# Temporary transport branch only. No changes from this workflow enter a fix PR.
+# Reuse this branch's CI concurrency group to cancel its redundant baseline run.
+name: Buster CI
+on:
+  push:
+    branches: [audit/2026-09-07-correctness-source]
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: write
+jobs:
+  stage-reviewed-patches:
+    if: ${{ github.server_url == 'https://github.com' && github.ref == 'refs/heads/audit/2026-09-07-correctness-source' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ebfdd11705bc470564e726857e498f1c82aa746c
+          fetch-depth: 3
+          path: work
+      - name: Stage isolated, checksum-verified source patches on pinned main
+        run: python3 control/tools/audit-stage-fixes.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audit-staged-fixes
+          path: staged-fixes.json
+          retention-days: 3
+          if-no-files-found: error

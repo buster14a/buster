@@ -1,0 +1,184 @@
+diff --git a/src/buster/lib/compiler/codegen/codegen.c b/src/buster/lib/compiler/codegen/codegen.c
+index d566998..6288f78 100644
+--- a/src/buster/lib/compiler/codegen/codegen.c
++++ b/src/buster/lib/compiler/codegen/codegen.c
+@@ -15138,13 +15138,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
+                                         codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSI, 64),
+                                         codegen_canonical_x64_metadata_gpr(X64_REGISTER_R9, 64),
+                                     };
++                                    // R9 must retain the divisor sign until its magnitude is normalized.
+                                     if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), dividend_sign_move, 2) ||
+                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("SAR"), dividend_sign_shift, 2) ||
+                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), divisor_sign_move, 2) ||
+                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("SAR"), divisor_sign_shift, 2) ||
+                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), save_dividend_sign, 2) ||
+-                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), sign_xor, 2) ||
+-                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), save_sign, 2) ||
+                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), dividend_low_xor, 2) ||
+                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), dividend_high_xor, 2) ||
+                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), dividend_low_sub, 2) ||
+@@ -15152,7 +15151,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
+                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), divisor_low_xor, 2) ||
+                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), divisor_high_xor, 2) ||
+                                         !codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), divisor_low_sub, 2) ||
+-                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SBB"), divisor_high_sbb, 2))
++                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("SBB"), divisor_high_sbb, 2) ||
++                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("XOR"), sign_xor, 2) ||
++                                        !codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), save_sign, 2))
+                                     {
+                                         result.error = buffer.error;
+                                         return result;
+@@ -15346,15 +15347,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
+                                     }
+                                     else
+                                     {
++                                        // The stored value is a 0/-1 mask, not a 0/1 predicate.
+                                         BusterX86MetadataPhysicalOperand load_sign[2] = {
+-                                            codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 32),
+-                                            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 32, result_displacement + 4),
+-                                        };
+-                                        BusterX86MetadataPhysicalOperand negate_sign[] = {
+                                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_R8, 64),
++                                            codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 32, result_displacement + 4),
+                                         };
+-                                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), load_sign, 2) ||
+-                                            !codegen_canonical_x64_metadata_emit(&buffer, S8("NEG"), negate_sign, 1))
++                                        if (!codegen_canonical_x64_metadata_emit(&buffer, S8("MOVSXD"), load_sign, 2))
+                                         {
+                                             result.error = buffer.error;
+                                             return result;
+diff --git a/src/buster/tests/compiler/driver/driver_test.c b/src/buster/tests/compiler/driver/driver_test.c
+index 0d76b19..24a15e2 100644
+--- a/src/buster/tests/compiler/driver/driver_test.c
++++ b/src/buster/tests/compiler/driver/driver_test.c
+@@ -3012,6 +3012,54 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
+             }
+         }
+     }
++    // A wrong quotient and remainder can still recompose the dividend. Pin
++    // both independently, including negative operands and full-width divisors.
++    if (target_native.cpu_arch == CPU_ARCH_X86_64)
++    {
++        String8 division_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
++        String8 division_levels[] = {S8("-O0"), S8("-O1"), S8("-O2"), S8("-O3"), S8("-Os"), S8("-Oz"), S8("-Ofast")};
++        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(division_allocators); allocator_index += 1)
++        {
++            for (u32 level_index = 0; level_index < BUSTER_ARRAY_LENGTH(division_levels); level_index += 1)
++            {
++                TemporalArena division_temporary = arena_begin_temporal(arguments->arena);
++                String8 division_path = buster_test_temporary_path(division_temporary.arena, S8("buster-c-i128-division"),
++#if BUSTER_WINDOWS
++                                                                       S8(".exe"));
++#else
++                                                                       S8(""));
++#endif
++                // -O sets the default allocator, so the explicit allocator follows it.
++                String8 division_command[] = {
++                    division_levels[level_index],
++                    string_format(division_temporary.arena, S8("-fregister-allocator={S8}"), division_allocators[allocator_index]),
++                    S8("-o"), division_path, S8("tests/basic_c_i128_division.c"),
++                };
++                CompilerDriverResult division = compiler_driver_execute_invocation(
++                    division_temporary.arena,
++                    compiler_driver_parse_arguments(division_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(division_command)));
++                BUSTER_TEST(arguments, division.error == COMPILER_DRIVER_ERROR_NONE);
++                if (division.error == COMPILER_DRIVER_ERROR_NONE)
++                {
++                    String8 division_run[] = {division_path};
++                    ProcessSpawnResult division_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(division_run), (SliceString8){0},
++                                                                           (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
++                    BUSTER_TEST(arguments, division_spawn.handle != 0);
++                    if (division_spawn.handle)
++                    {
++                        ProcessWaitResult division_wait = os_process_wait_sync(division_temporary.arena, division_spawn);
++                        if (division_wait.result != PROCESS_RESULT_SUCCESS)
++                        {
++                            arguments->show(arguments, S8("i128 division failed: allocator={S8} optimization={S8} status={u32}\n"),
++                                            division_allocators[allocator_index], division_levels[level_index], division_wait.platform_status);
++                        }
++                        BUSTER_TEST(arguments, division_wait.result == PROCESS_RESULT_SUCCESS);
++                    }
++                }
++                arena_set_position(division_temporary.arena, division_temporary.position);
++            }
++        }
++    }
+     // And the same for the vector shapes, whose x86-64 answer is registers
+     // rather than a reference: the host model decides how many of them one
+     // vector takes, and running it is what says the caller and the callee
+diff --git a/tests/basic_c_i128_division.c b/tests/basic_c_i128_division.c
+new file mode 100644
+index 0000000..ae227c9
+--- /dev/null
++++ b/tests/basic_c_i128_division.c
+@@ -0,0 +1,57 @@
++/* Signed division must restore quotient and remainder signs independently.
++   Recomposition alone is not an oracle: q=0, r=dividend also recomposes. */
++typedef unsigned __int128 DivisionUnsigned;
++typedef __int128 DivisionSigned;
++
++static volatile unsigned long long division_seed = 1;
++
++int main(void)
++{
++    DivisionUnsigned one = division_seed;
++    DivisionSigned high = (DivisionSigned)(one << 64);
++    DivisionSigned quarter = (DivisionSigned)(one << 126);
++    DivisionSigned maximum = (quarter - 1) + quarter;
++    struct DivisionCase
++    {
++        DivisionSigned dividend;
++        DivisionSigned divisor;
++        DivisionSigned quotient;
++        DivisionSigned remainder;
++    };
++    struct DivisionCase cases[] = {
++        {100, 7, 14, 2},
++        {98, 7, 14, 0},
++        {3, 7, 0, 3},
++        {0, 7, 0, 0},
++        {100, 1, 100, 0},
++        {(high + 13) * 7 + 5, 7, high + 13, 5},
++        {((DivisionSigned)(one << 35)) * (high + 3) + 7, high + 3, (DivisionSigned)(one << 35), 7},
++        {maximum, 2, quarter - 1, 1},
++        {maximum, quarter, 1, quarter - 1},
++    };
++    int result = 0;
++    for (unsigned int index = 0; index < sizeof(cases) / sizeof(cases[0]); index += 1)
++    {
++        for (unsigned int negative_dividend = 0; negative_dividend < 2; negative_dividend += 1)
++        {
++            for (unsigned int negative_divisor = 0; negative_divisor < 2; negative_divisor += 1)
++            {
++                DivisionSigned dividend = negative_dividend ? -cases[index].dividend : cases[index].dividend;
++                DivisionSigned divisor = negative_divisor ? -cases[index].divisor : cases[index].divisor;
++                DivisionSigned expected_quotient = negative_dividend != negative_divisor ? -cases[index].quotient : cases[index].quotient;
++                DivisionSigned expected_remainder = negative_dividend ? -cases[index].remainder : cases[index].remainder;
++                DivisionSigned quotient = dividend / divisor;
++                DivisionSigned remainder = dividend % divisor;
++                result |= quotient != expected_quotient || remainder != expected_remainder;
++            }
++        }
++    }
++    /* Form MIN without overflowing a signed shift or negating MIN itself.
++       MIN/-1 and division by zero are deliberately absent: they are undefined. */
++    DivisionSigned minimum = -quarter - quarter;
++    DivisionSigned signed_one = (DivisionSigned)one;
++    result |= minimum / signed_one != minimum || minimum % signed_one != 0;
++    result |= minimum / (signed_one + signed_one) != -quarter || minimum % (signed_one + signed_one) != 0;
++    result |= minimum / (-signed_one - signed_one) != quarter || minimum % (-signed_one - signed_one) != 0;
++    return result;
++}
+diff --git a/tests/basic_c_int128.c b/tests/basic_c_int128.c
+index 6529b73..571ffa2 100644
+--- a/tests/basic_c_int128.c
++++ b/tests/basic_c_int128.c
+@@ -67,7 +67,7 @@ int main(void)
+     WideSigned signed_dividend = -(WideSigned)dividend;
+     WideSigned signed_quotient = signed_dividend / 37;
+     WideSigned signed_remainder = signed_dividend % 37;
+-    if (signed_quotient * 37 + signed_remainder != signed_dividend || signed_remainder > 0)
++    if (signed_quotient * 37 + signed_remainder != signed_dividend || signed_remainder > 0 || signed_remainder <= -37)
+         return 10;
+     if (!test_atomic_wide(high))
+         return 11;
