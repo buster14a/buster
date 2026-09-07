@@ -1,7 +1,6 @@
 name: PR 94 Windows ARM64 loader diagnostic
 
-on:
-  workflow_dispatch:
+on: [push, workflow_dispatch]
 
 permissions:
   contents: read
