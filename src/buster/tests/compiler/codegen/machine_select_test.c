@@ -426,7 +426,7 @@ UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, minimal_facts_match);
         MachineSelectResult checked_selection = machine_select_canonical_function(arguments->arena, program, add, x86_target);
-        MachineSelectResult validated_selection = machine_select_validated_canonical_function(arguments->arena, program, add, x86_target, false);
+        MachineSelectResult validated_selection = machine_select_validated_canonical_function(arguments->arena, program, add, x86_target, false, 0);
         BUSTER_TEST(arguments, checked_selection.supported && validated_selection.supported);
         BUSTER_TEST(arguments, checked_selection.failed_opcode == validated_selection.failed_opcode);
         BUSTER_TEST(arguments, machine_selection_test_stream_equal(arguments->arena, &checked_selection, &validated_selection));

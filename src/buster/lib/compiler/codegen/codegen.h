@@ -139,7 +139,10 @@ struct CodegenDataRelocation
 // Hundreds of thousands of rows per compile, so the record is 12 bytes:
 // source and column are u16, saturated by codegen_record_line (a compile
 // with 64K+ files degrades to file 0, and no consumer distinguishes
-// columns past 64K).
+// columns past 64K). A module's rows also hold no source outside the
+// program's source table -- one past it is recorded as 0 -- because the
+// object writer hands the array to the DWARF builder as it is; DwarfLineEntry
+// mirrors this layout and the writer checks the two against each other.
 typedef struct CodegenLineEntry CodegenLineEntry;
 struct CodegenLineEntry
 {
@@ -374,6 +377,9 @@ struct CodegenStatistics
     u64 exact_attempts;
     u64 exact_successes;
     u64 exact_failures;
+    // Explicit mutable machine virtual registers emitted by selected
+    // functions. Zero means the native machine path is fully SSA.
+    u64 mutable_virtual_register_count;
 };
 
 struct CodegenModule

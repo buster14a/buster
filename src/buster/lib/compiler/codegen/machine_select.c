@@ -1,4 +1,5 @@
 #include <buster/lib/compiler/codegen/machine_select.h>
+#include <buster/lib/integer.h>
 
 // This pass intentionally has no target-specific lowering.  Its outputs are
 // stable source-order facts and conservative classifications that both
@@ -369,6 +370,45 @@ MachineSelectionValueFacts machine_selection_value_facts_allocate(Arena* arena, 
         memset(result.use_blocks, 0xff, (u64)value_count * sizeof(*result.use_blocks));
     }
     return result;
+}
+
+MachineTypeClass* machine_type_classes_build(Arena* arena, IrTypeTable const* types)
+{
+    MachineTypeClass* classes = arena_allocate(arena, MachineTypeClass, types->count ? types->count : 1);
+    for (u32 type_index = 0; type_index < types->count; type_index += 1)
+    {
+        IrType const* type = types->types + type_index;
+        bool resolved = type->layout.resolved;
+        bool scalar_kind = type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_ENUM;
+        u32 flags = 0;
+        flags |= resolved ? MACHINE_TYPE_CLASS_RESOLVED : 0;
+        flags |= resolved && scalar_kind && type->layout.size <= 8 ? MACHINE_TYPE_CLASS_SCALAR_REGISTER : 0;
+        flags |= type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64) ? MACHINE_TYPE_CLASS_FLOAT_SCALAR : 0;
+        flags |= resolved && type->kind == IR_TYPE_VECTOR && type->layout.size == 64 ? MACHINE_TYPE_CLASS_VECTOR_REGISTER : 0;
+        flags |= type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION || (type->kind == IR_TYPE_INTEGER && type->bit_width > 32)
+                     ? MACHINE_TYPE_CLASS_WIDE
+                     : 0;
+        flags |= type->is_signed ? MACHINE_TYPE_CLASS_SIGNED : 0;
+        flags |= type->kind == IR_TYPE_INTEGER && type->bit_width == 128 ? MACHINE_TYPE_CLASS_INTEGER128 : 0;
+        flags |= type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_SLICE ? MACHINE_TYPE_CLASS_AGGREGATE : 0;
+        u32 size_log2 = MACHINE_TYPE_CLASS_NO_LOG2;
+        if (resolved && BUSTER_IS_POWER_OF_TWO(type->layout.size))
+        {
+            size_log2 = trailing_zeroes_u64(type->layout.size);
+        }
+        u32 bit_width_log2 = MACHINE_TYPE_CLASS_NO_LOG2;
+        if (BUSTER_IS_POWER_OF_TWO(type->bit_width))
+        {
+            bit_width_log2 = trailing_zeroes_u64(type->bit_width);
+        }
+        classes[type_index] = (MachineTypeClass){
+            .flags = (u8)flags,
+            .kind = (u8)type->kind,
+            .size_log2 = (u8)size_log2,
+            .bit_width_log2 = (u8)bit_width_log2,
+        };
+    }
+    return classes;
 }
 
 MachineSelectionPrepass machine_selection_prepass_build_minimal(Arena* arena, IrProgram* program, IrFunction* function)

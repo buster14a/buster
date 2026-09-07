@@ -2,7 +2,7 @@
 // FLT_/DBL_/LDBL_ constant in terms of __FLT_MAX__-style compiler
 // predefines, so a compiler that lacks one turns `double m = DBL_MAX;` into
 // an undeclared identifier -- which is where CPython's
-// Objects/floatobject.c stopped compiling.  The values are pinned as static
+// Objects/floatobject.c stopped compiling. The values are pinned as static
 // initializers (the failing shape) and compared against their literal
 // spellings, so a predefine that folds to the wrong bits fails at run time.
 #include <float.h>
@@ -11,7 +11,11 @@ static double max_double = DBL_MAX;
 static double min_double = DBL_MIN;
 static double epsilon_double = DBL_EPSILON;
 static float max_float = FLT_MAX;
+// The frontend exposes binary128 limits on AAPCS64, while native f128
+// constant materialization is not yet part of this runtime fixture.
+#if LDBL_MANT_DIG <= 64
 static long double max_long_double = LDBL_MAX;
+#endif
 
 int main(void)
 {
@@ -31,12 +35,14 @@ int main(void)
     {
         return 4;
     }
+#if LDBL_MANT_DIG <= 64
     // On targets whose long double is double -- Windows, AArch64 macOS --
     // the two maxima are equal, so only a smaller value is wrong.
     if (max_long_double < (long double)max_double)
     {
         return 5;
     }
+#endif
     if (DBL_MANT_DIG != 53 || FLT_RADIX != 2 || DBL_MAX_EXP != 1024 || DBL_MIN_EXP != -1021)
     {
         return 6;

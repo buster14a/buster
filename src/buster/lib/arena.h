@@ -1,5 +1,6 @@
 #pragma once
 #include <buster/lib/base.h>
+#include <buster/lib/integer.h>
 typedef struct ArenaFlags ArenaFlags;
 struct ArenaFlags
 {
@@ -34,6 +35,12 @@ struct Arena
 
 // The arenas need to be aligned in order for SIMD data (AVX buffers, vertex data) to work as expected
 BUSTER_CT_CHECK(sizeof(Arena) == 64);
+
+// After the struct, not beside base.h: os.h declares entry points taking
+// `Arena*` and includes nothing itself, so it needs the typedef above to have
+// been read. It is included at all because the inline bump at the bottom of
+// this header states BUSTER_CHECK, which os.h owns.
+#include <buster/lib/os.h>
 
 typedef struct ArenaCreation ArenaCreation;
 struct ArenaCreation
@@ -70,7 +77,9 @@ BUSTER_F_DECL void arena_set_position(Arena* arena, u64 position);
 // it. This remains safe for legal arenas whose granularity is sub-page.
 BUSTER_F_DECL bool arena_set_position_and_decommit(Arena* arena, u64 position);
 BUSTER_F_DECL void arena_reset_to_start(Arena* arena);
-BUSTER_F_DECL void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment);
+// The commit half of arena_allocate_bytes, outlined so the bump below stays a
+// handful of instructions at each of its ~1.400 call sites.
+BUSTER_F_DECL void arena_allocate_commit(Arena* arena, u64 aligned_size_after);
 BUSTER_F_DECL u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment);
 
 BUSTER_F_DECL TemporalArena arena_begin_temporal(Arena* arena);
@@ -98,7 +107,64 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE u64 arena_array_size(u64 el
     return element_size * count;
 }
 
+// The bump is inline and the commit is not. Every allocation performs the same
+// four operations -- align the position, add the size, test the committed
+// high-water mark, publish the new position -- and the test fails on the order
+// of once per arena page, so the branch is predicted and the call it used to
+// make was most of the cost of an allocation that never touches the OS. The
+// bounds reasoning the outlined body carried stays with it in arena.c; what is
+// asserted here is the same pair, and both fold away in builds without checks.
+BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
+{
+    BUSTER_CHECK(size <= ARENA_MAX_RESERVATION);
+    u64 aligned_offset = align_forward(arena->position, alignment);
+    u64 aligned_size_after = aligned_offset + size;
+    BUSTER_CHECK(aligned_size_after <= arena->reserved_size);
+    if (BUSTER_UNLIKELY(aligned_size_after > arena->os_position))
+    {
+        arena_allocate_commit(arena, aligned_size_after);
+    }
+    void* result = (u8*)arena + aligned_offset;
+    arena->position = aligned_size_after;
+    BUSTER_CHECK(arena->position <= arena->os_position);
+    return result;
+}
+
+// An allocation that comes back zeroed, without zeroing what the operating
+// system already zeroed.
+//
+// A fresh mapping's pages are zero, and an arena hands its bytes out in one
+// direction, so the only part of a new allocation that can hold anything is
+// the part below the arena's allocation high-water mark -- what a temporal
+// rewind or a pooled reuse left behind. Everything above it has never been
+// written in this arena and needs no fill. `dirty_position` is that mark
+// (`position` supplies the live half of it, so no store is paid per
+// allocation), and clearing through it also covers a boundary that falls
+// inside an element, leaving every field above it zero.
+//
+// This is the general form of the x86 template cache's clear, which measured
+// this on one buffer first; the compiler's largest fills are single
+// allocations of a few megabytes each -- the linker's output image, the
+// per-token arrays of the analysis and the lowering -- and every one of them
+// is fresh in a result arena.
+BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_zeroed_bytes(Arena* arena, u64 size, u64 alignment)
+{
+    u64 dirty_position = arena_dirty_position(arena);
+    u8* result = (u8*)arena_allocate_bytes(arena, size, alignment);
+    u64 end = arena->position;
+    u64 start = end - size;
+    u64 clear_end = BUSTER_MIN(dirty_position, end);
+    if (clear_end > start)
+    {
+        memset(result, 0, clear_end - start);
+    }
+    return result;
+}
+
 #define arena_allocate(arena, T, count) (T*)arena_allocate_bytes(arena, arena_array_size(sizeof(T), count), BUSTER_ALIGN_OF(T))
+// The zeroed form of arena_allocate: same array, already zero, with only the
+// overlap with the arena's dirty prefix actually written.
+#define arena_allocate_zeroed(arena, T, count) (T*)arena_allocate_zeroed_bytes(arena, arena_array_size(sizeof(T), count), BUSTER_ALIGN_OF(T))
 #define arena_buffer_is_empty(arena) ((arena)->position == arena_minimum_position)
 #define arena_buffer_size(arena) ((arena)->position - arena_minimum_position)
 #define arena_buffer_start(arena) ((u8*)arena + arena_minimum_position)

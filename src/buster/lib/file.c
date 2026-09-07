@@ -95,7 +95,6 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
         }
     }
 #elif BUSTER_LINUX || BUSTER_MACOS
-    if (path.pointer[0] == '/')
     {
         char* path_buffer = (char*)arena_allocate_bytes(arena, path.length + 1, 1);
         if (path_buffer)

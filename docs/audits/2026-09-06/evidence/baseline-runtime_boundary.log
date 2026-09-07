@@ -1,0 +1,13 @@
+before=128 after=128 returned=/bin/sh
+output survives next allocation: NO
+Traceback (most recent call last):
+  File "/mnt/data/buster-audit/buster-copy-pro/tests/runtime_boundary_regression.py", line 34, in <module>
+    main()
+    ~~~~^^
+  File "/mnt/data/buster-audit/buster-copy-pro/tests/runtime_boundary_regression.py", line 30, in main
+    subprocess.run([str(binary)] + args, check=True)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['/tmp/buster-runtime_boundary_regression-0kpw5g1w/probe', 'scratch']' returned non-zero exit status 1.

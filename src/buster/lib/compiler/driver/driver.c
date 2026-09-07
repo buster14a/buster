@@ -632,6 +632,49 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
 
 // The builtin resource headers plus whatever the sysroot, the target triple, or
 // the host environment says the system headers are.
+#if BUSTER_WINDOWS || BUSTER_INCLUDE_TESTS
+// Reserve from the actual INCLUDE population, not from a fixed allowance.
+// The prefix already contains -isystem and resource paths in search order.
+BUSTER_GLOBAL_LOCAL void compiler_driver_append_environment_includes(Arena* arena, CompilerDriverInvocation* invocation, String8 includes)
+{
+    u64 extra_count = 0;
+    for (u64 i = 0; i < includes.length; ++i)
+        extra_count += includes.pointer[i] != ';' && (i == 0 || includes.pointer[i - 1] == ';');
+    u64 count = (u64)invocation->system_include_path_count + extra_count;
+    if (count > UINT32_MAX)
+    {
+        invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation->diagnostic = S8("too many system include paths");
+    }
+    else if (extra_count)
+    {
+        String8* paths = arena_allocate(arena, String8, count);
+        if (invocation->system_include_path_count)
+            memcpy(paths, invocation->system_include_paths, (u64)invocation->system_include_path_count * sizeof(*paths));
+        // Keep the environment snapshot alive for the invocation, independently
+        // of later environment queries or the caller's temporary storage.
+        includes = string_duplicate_arena(arena, includes, false);
+        for (u64 start = 0; start < includes.length;)
+        {
+            u64 end = start;
+            while (end < includes.length && includes.pointer[end] != ';')
+                ++end;
+            if (end != start)
+                paths[invocation->system_include_path_count++] = string_slice(includes, start, end);
+            start = end + (end < includes.length);
+        }
+        invocation->system_include_paths = paths;
+    }
+}
+#endif
+
+#if BUSTER_INCLUDE_TESTS
+void compiler_driver_test_append_environment_includes(Arena* arena, CompilerDriverInvocation* invocation, String8 includes)
+{
+    compiler_driver_append_environment_includes(arena, invocation, includes);
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL void compiler_driver_append_system_includes(Arena* arena, CompilerDriverInvocation* invocation)
 {
 #if defined(BUSTER_HOST_C_RESOURCE_INCLUDE)
@@ -671,20 +714,8 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_append_system_includes(Arena* arena, Co
         invocation->system_include_paths[invocation->system_include_path_count++] = S8("/usr/include");
 #endif
 #if BUSTER_WINDOWS
-        String8 system_includes = os_get_environment_variable(S8("INCLUDE"));
-        for (u64 start = 0; start < system_includes.length;)
-        {
-            u64 end = start;
-            while (end < system_includes.length && system_includes.pointer[end] != ';')
-            {
-                end += 1;
-            }
-            if (end != start)
-            {
-                invocation->system_include_paths[invocation->system_include_path_count++] = string_slice(system_includes, start, end);
-            }
-            start = end + 1;
-        }
+        // Capture once: counting and appending must see the same snapshot.
+        compiler_driver_append_environment_includes(arena, invocation, os_get_environment_variable(S8("INCLUDE")));
 #endif
     }
 }
@@ -708,9 +739,18 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         return invocation;
     }
+    // At most one resource directory plus four sysroot directories. Native
+    // Windows INCLUDE entries reserve their own exact-sized array below.
+    u64 default_include_capacity = 5;
+    if (arguments.length > UINT32_MAX - default_include_capacity)
+    {
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("too many compiler arguments");
+        return invocation;
+    }
     invocation.input_paths = arena_allocate(arena, String8, arguments.length);
     invocation.include_paths = arena_allocate(arena, String8, arguments.length);
-    invocation.system_include_paths = arena_allocate(arena, String8, arguments.length + 64);
+    invocation.system_include_paths = arena_allocate(arena, String8, arguments.length + default_include_capacity);
     invocation.definitions = arena_allocate(arena, String8, arguments.length);
     invocation.undefinitions = arena_allocate(arena, String8, arguments.length);
     invocation.library_paths = arena_allocate(arena, String8, arguments.length);
@@ -3331,7 +3371,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (object.error != OBJECT_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_OBJECT;
-        result.diagnostic = string_format(arena, S8("C object generation failed with error {u32}"), (u32)object.error);
+        result.diagnostic = object.error == OBJECT_ERROR_DEBUG_INFO
+                                ? S8("CodeView debug information exceeds record or section format limits")
+                                : string_format(arena, S8("C object generation failed with error {u32}"), (u32)object.error);
         goto end;
     }
     result.object = object;
@@ -3344,23 +3386,24 @@ end:
 
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_object_path(Arena* arena, String8 input)
 {
+    u64 name = 0;
     u64 extension = input.length;
     for (u64 index = input.length; index != 0; index -= 1)
     {
         char8 byte = input.pointer[index - 1];
-        if (byte == '.')
+        if (byte == '.' && extension == input.length)
         {
             extension = index - 1;
-            break;
         }
         if (byte == '/' || byte == '\\')
         {
+            name = index;
             break;
         }
     }
     return string_format_z(arena, S8("{S8}.o"), (String8){
-                                                           .pointer = input.pointer,
-                                                           .length = extension,
+                                                           .pointer = input.pointer + name,
+                                                           .length = extension - name,
                                                        });
 }
 
@@ -3707,26 +3750,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         bool suppress_object_write = !invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK;
         if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
         {
-            String8 input = invocation.input_paths[input_index];
-            u64 extension = input.length;
-            for (u64 index = input.length; index != 0; index -= 1)
-            {
-                char8 byte = input.pointer[index - 1];
-                if (byte == '.')
-                {
-                    extension = index - 1;
-                    break;
-                }
-                if (byte == '/' || byte == '\\')
-                {
-                    break;
-                }
-            }
-            single.output_path = string_format(arena, S8("{S8}.o"),
-                                               (String8){
-                                                   .pointer = input.pointer,
-                                                   .length = extension,
-                                               });
+            single.output_path = compiler_driver_default_object_path(arena, invocation.input_paths[input_index]);
         }
         else if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK)
         {
@@ -3803,6 +3827,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.codegen_statistics.exact_attempts += unit.codegen_statistics.exact_attempts;
         result.codegen_statistics.exact_successes += unit.codegen_statistics.exact_successes;
         result.codegen_statistics.exact_failures += unit.codegen_statistics.exact_failures;
+        result.codegen_statistics.mutable_virtual_register_count += unit.codegen_statistics.mutable_virtual_register_count;
         if (unit.error != COMPILER_DRIVER_ERROR_NONE)
         {
             if (unit.diagnostic.length)

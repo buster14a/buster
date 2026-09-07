@@ -126,7 +126,8 @@ applicable Forgejo branch rule if it should gate merges. The job also checks
 ## Per-run credential lifecycle
 
 1. The dispatcher revokes any `github-bridge-*` deploy key older than two
-   hours (leftovers of a crashed run), then waits until no broker run is
+   hours (leftovers of a crashed run), reading every deploy-key page before
+   deleting keys so pagination cannot skip shifted entries, then waits until no broker run is
    active, because the single secret name serializes runs.
 2. It generates a fresh ed25519 keypair under `/dev/shm`, registers the
    public half as a **read-only** Forgejo deploy key titled

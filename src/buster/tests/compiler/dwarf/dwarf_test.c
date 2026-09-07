@@ -393,9 +393,89 @@ bool dwarf_line_lookup(ByteSlice debug_line, u64 address, DwarfLineRow* row)
     return false;
 }
 
-UnitTestResult dwarf_tests(UnitTestArguments* arguments)
+
+// Apply the same text-base relocation a linker applies, then interpret lists
+// under DWARF v4's CU-relative rule. Distinct module bases exercise the
+// concatenated-object case that a relocatable object at base zero cannot show.
+BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_list_bases(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    String8 path = S8("bases.c");
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
+        {.kind = DEBUG_TYPE_FUNCTION, .return_type = 0},
+    };
+    DebugLocationRange location = {.start = 0x34, .end = 0x48, .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -8}};
+    DebugVariable variable = {.name = S8("local"), .type = 0, .kind = DEBUG_VARIABLE_LOCAL, .locations = &location, .location_count = 1};
+    DebugVariableId variable_id = 0;
+    DebugScope scopes[] = {
+        {.kind = DEBUG_SCOPE_FUNCTION, .parent = DEBUG_SCOPE_INVALID, .start = 0x30, .end = 0x50, .variables = &variable_id, .variable_count = 1},
+        {.kind = DEBUG_SCOPE_LEXICAL, .parent = 0, .start = 0x38, .end = 0x48},
+    };
+    DebugFunction function = {.name = S8("offset_function"), .type = 1, .scope = 0, .code_offset = 0x30, .code_size = 0x20};
+    DebugModel model = {.types = types, .type_count = 2, .functions = &function, .function_count = 1,
+        .scopes = scopes, .scope_count = 2, .variables = &variable, .variable_count = 1, .valid = true};
+    u64 bases[] = {0x401000, 0x403000};
+    for (u32 module = 0; module < BUSTER_ARRAY_LENGTH(bases); module += 1)
+    {
+        DwarfResult built = dwarf_build(arguments->arena, (DwarfInput){.model = &model, .file_paths = &path, .file_count = 1,
+            .producer = S8("buster"), .comp_dir = S8("."), .code_size = 0x50, .target = {.cpu_arch = CPU_ARCH_X86_64}});
+        BUSTER_TEST(arguments, built.valid);
+        if (!built.valid)
+        {
+            continue;
+        }
+        for (u32 index = 0; index < built.relocation_count; index += 1)
+        {
+            DwarfRelocation relocation = built.relocations[index];
+            if (relocation.address)
+            {
+                ByteSlice bytes = built.sections[relocation.section];
+                BUSTER_TEST(arguments, relocation.offset + 8 <= bytes.length);
+                if (relocation.offset + 8 <= bytes.length)
+                {
+                    u64 value = bases[module] + (u64)relocation.addend;
+                    memcpy(bytes.pointer + relocation.offset, &value, sizeof(value));
+                }
+            }
+        }
+        ByteSlice info = built.sections[DWARF_SECTION_INFO];
+        u64 cursor = 11;
+        u64 abbreviation = 0;
+        DwarfTestAbbrev cu = {0};
+        bool valid = dwarf_test_read_uleb128(info, &cursor, &abbreviation) &&
+                     dwarf_test_find_abbrev(built.sections[DWARF_SECTION_ABBREV], (u32)abbreviation, &cu);
+        u64 low_pc = 0;
+        for (u32 index = 0; valid && index < cu.attribute_count; index += 1)
+        {
+            if (cu.attributes[index] == 0x11 && cu.forms[index] == DWARF_TEST_FORM_ADDR && cursor + 8 <= info.length)
+            {
+                memcpy(&low_pc, info.pointer + cursor, sizeof(low_pc));
+            }
+            valid = dwarf_test_skip_form(info, &cursor, cu.forms[index]);
+        }
+        BUSTER_TEST(arguments, valid && low_pc == bases[module]);
+        ByteSlice ranges = built.sections[DWARF_SECTION_RANGES];
+        ByteSlice locations = built.sections[DWARF_SECTION_LOC];
+        BUSTER_TEST(arguments, ranges.length == 64 && locations.length >= 34);
+        if (ranges.length == 64 && locations.length >= 34)
+        {
+            u64 endpoints[8];
+            memcpy(endpoints, ranges.pointer, sizeof(endpoints));
+            BUSTER_TEST(arguments, low_pc + endpoints[0] == bases[module] + 0x30 && low_pc + endpoints[1] == bases[module] + 0x50);
+            BUSTER_TEST(arguments, !endpoints[2] && !endpoints[3]);
+            BUSTER_TEST(arguments, low_pc + endpoints[4] == bases[module] + 0x38 && low_pc + endpoints[5] == bases[module] + 0x48);
+            BUSTER_TEST(arguments, !endpoints[6] && !endpoints[7]);
+            memcpy(endpoints, locations.pointer, 16);
+            BUSTER_TEST(arguments, low_pc + endpoints[0] == bases[module] + 0x34 && low_pc + endpoints[1] == bases[module] + 0x48);
+        }
+    }
+    return result;
+}
+
+UnitTestResult dwarf_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = dwarf_test_list_bases(arguments);
     String8 files[] = {
         S8_INITIALIZER("main.c"),
         S8_INITIALIZER("helper.h"),

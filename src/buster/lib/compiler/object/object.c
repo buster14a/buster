@@ -8326,10 +8326,10 @@ BUSTER_GLOBAL_LOCAL ObjectSymbolNameIndex object_symbol_name_index_build(Arena* 
         capacity <<= 1;
     }
     ObjectSymbolNameIndex table = {
-        .slots = arena_allocate(arena, ObjectSymbolNameSlot, capacity),
+        // An empty slot is a zero slot, which fresh arena bytes already are.
+        .slots = arena_allocate_zeroed(arena, ObjectSymbolNameSlot, capacity),
         .mask = (u32)(capacity - 1),
     };
-    memset(table.slots, 0, sizeof(*table.slots) * capacity);
     for (u32 symbol_index = 0; symbol_index < symbol_count; symbol_index += 1)
     {
         object_symbol_name_index_add(table, symbols + symbol_index, symbol_index);
@@ -8454,7 +8454,14 @@ enum
 
 // Returns the local text-section symbol it adds, which the unwind records
 // share when they need one, or UINT32_MAX when there was no DWARF to append.
-BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult built)
+// `name_index` is the module writer's own symbol-name index, still live and
+// still exact: the symbols this function appends are added to it in symbol
+// order, which is the order a fresh build would have inserted them in, so a
+// lookup lands on the same slot with the same first-defined/first-undefined
+// resolution. Building a second table here cost a 2 MB zero fill and a
+// byte-serial FNV hash of every symbol name in the module to answer the
+// 13.790 named relocations a self-host stage brings.
+BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult built, ObjectSymbolNameIndex name_index)
 {
     if (!built.valid)
     {
@@ -8470,6 +8477,7 @@ BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult buil
         .section = OBJECT_SECTION_TEXT,
         .kind = OBJECT_SYMBOL_FUNCTION,
     };
+    object_symbol_name_index_add(name_index, object->symbols + text_symbol, text_symbol);
     u32 debug_symbols[DWARF_SECTION_COUNT];
     for (u32 kind = 0; kind < DWARF_SECTION_COUNT; kind += 1)
     {
@@ -8480,9 +8488,8 @@ BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult buil
             .section = (u32)section_kind,
             .kind = OBJECT_SYMBOL_DATA,
         };
+        object_symbol_name_index_add(name_index, object->symbols + debug_symbols[kind], debug_symbols[kind]);
     }
-    TemporalArena name_temporary = scratch_begin(0, 0);
-    ObjectSymbolNameIndex name_index = object_symbol_name_index_build(name_temporary.arena, object->symbols, object->symbol_count, object->symbol_count);
     for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
     {
         DwarfRelocation relocation = built.relocations[relocation_index];
@@ -8503,7 +8510,6 @@ BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult buil
             .kind = relocation.address ? OBJECT_RELOCATION_ABSOLUTE64 : OBJECT_RELOCATION_ABSOLUTE32,
         };
     }
-    scratch_end(name_temporary);
     return text_symbol;
 }
 
@@ -9186,6 +9192,16 @@ BUSTER_GLOBAL_LOCAL bool object_codegen_relocation_width(ObjectRelocationKind ki
     }
 }
 
+// The module writer hands the codegen line rows to the DWARF and CodeView
+// builders as DwarfLineEntry rows without copying them, which is sound only
+// while the two records agree byte for byte.
+BUSTER_CT_CHECK(sizeof(DwarfLineEntry) == sizeof(CodegenLineEntry));
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DwarfLineEntry, code_offset) == BUSTER_OFFSET_OF(CodegenLineEntry, code_offset));
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DwarfLineEntry, line) == BUSTER_OFFSET_OF(CodegenLineEntry, line));
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DwarfLineEntry, file) == BUSTER_OFFSET_OF(CodegenLineEntry, source));
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(DwarfLineEntry, column) == BUSTER_OFFSET_OF(CodegenLineEntry, column));
+BUSTER_CT_CHECK(sizeof(((DwarfLineEntry*)0)->file) == sizeof(((CodegenLineEntry*)0)->source));
+BUSTER_CT_CHECK(sizeof(((DwarfLineEntry*)0)->line) == sizeof(((CodegenLineEntry*)0)->line));
 
 ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program, CodegenModule* module, Target target)
 {
@@ -9360,17 +9376,12 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             };
         }
         u32 line_count = module->entry_count ? module->line_entry_count : 0;
-        DwarfLineEntry* lines = arena_allocate(arena, DwarfLineEntry, line_count);
-        for (u32 line_index = 0; line_index < line_count; line_index += 1)
-        {
-            CodegenLineEntry entry = module->line_entries[line_index];
-            lines[line_index] = (DwarfLineEntry){
-                .code_offset = entry.code_offset,
-                .file = entry.source < program->sources.count ? entry.source : 0,
-                .line = entry.line,
-                .column = entry.column,
-            };
-        }
+        // The module's own rows serve as the builders' input: DwarfLineEntry is
+        // CodegenLineEntry field for field, and codegen recorded every source
+        // already clamped to the program's source table (its
+        // `line_source_limit`), which is the one thing a copy here used to do
+        // to a million rows.
+        DwarfLineEntry* lines = (DwarfLineEntry*)module->line_entries;
         if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
         {
             DebugModel debug_model = debug_model_build(arena, (DebugModelInput){
@@ -9394,6 +9405,10 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                                  .line_count = line_count,
                                                  .machine = target.cpu_arch == CPU_ARCH_AARCH64 ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64,
                                              });
+            if (!codeview.valid)
+            {
+                result.error = OBJECT_ERROR_DEBUG_INFO;
+            }
         }
         else
         {
@@ -9608,8 +9623,18 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             entry_by_symbol[symbol_value] = entry_index;
         }
     }
-    ObjectSymbolNameIndex name_index = object_symbol_name_index_build(name_temporary.arena, result.symbols, result.symbol_count,
-                                                                      (u64)result.symbol_count + module->relocation_count);
+    // Every add after the build comes from one of three places: the
+    // relocation loop below, which appends at most one symbol per distinct
+    // name it resolves and so at most one per program symbol plus the
+    // substituted `__tls_get_addr`; and the .text and per-section symbols
+    // object_append_dwarf appends. Bounding it by the relocation count
+    // instead -- a self-host stage has 100 k relocations against 18 k
+    // symbols -- sized the table at 262.144 slots and paid an 8 MB zero fill
+    // to hold 18 k names.
+    u64 name_index_capacity =
+        (u64)result.symbol_count + program->symbols.count + 1 + (dwarf.valid ? (u64)OBJECT_DWARF_EXTRA_SYMBOLS : 0);
+    ObjectSymbolNameIndex name_index =
+        object_symbol_name_index_build(name_temporary.arena, result.symbols, result.symbol_count, name_index_capacity);
     for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
     {
         CodegenModuleRelocation source = module->relocations[relocation_index];
@@ -9663,6 +9688,17 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             };
             object_symbol_name_index_add(name_index, &result.symbols[symbol_index], symbol_index);
         }
+        // The answer holds for the rest of the loop -- a name in the index is
+        // never added again, and only undefined symbols are added here, so a
+        // name's first-defined-then-first-undefined resolution cannot change
+        // once it has one -- and a program symbol has one name, so every later
+        // relocation against it takes the index from the table instead of
+        // hashing the name: data symbols and externs, which the table above
+        // did not carry, are most of a module's relocations.
+        if (!tls_get_addr && source.symbol.value < entry_symbol_capacity)
+        {
+            entry_by_symbol[source.symbol.value] = symbol_index;
+        }
         result.relocations[result.relocation_count++] = (ObjectRelocation){
             .addend = source.addend + (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
                                                kind == OBJECT_RELOCATION_X86_64_GOTPCREL ||
@@ -9704,10 +9740,9 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         result.initializer_priorities[slot][initializer_offsets[slot] / OBJECT_INITIALIZER_ENTRY_SIZE] = initializer.priority;
         initializer_offsets[slot] += OBJECT_INITIALIZER_ENTRY_SIZE;
     }
-    scratch_end(name_temporary);
     if (result.error == OBJECT_ERROR_NONE)
     {
-        u32 dwarf_text_symbol = object_append_dwarf(&result, dwarf);
+        u32 dwarf_text_symbol = object_append_dwarf(&result, dwarf, name_index);
         object_append_codeview(&result, codeview);
         // One local symbol over the text section, added only for the code
         // model that needs it and only when the debug sections did not
@@ -9730,15 +9765,17 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         if (cfi.valid && !object_append_dwarf_cfi(&result, cfi, cfi_text_symbol))
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
-            return result;
         }
-        if (windows_unwind.valid && !object_append_windows_unwind(arena, &result, windows_unwind))
+        else if (windows_unwind.valid && !object_append_windows_unwind(arena, &result, windows_unwind))
         {
             result.error = OBJECT_ERROR_INVALID_INPUT;
-            return result;
         }
-        object_debug_module_set(arena, &result, program->sources.count ? program->sources.sources[0].path : S8("buster.obj"), module->code.length);
+        else
+        {
+            object_debug_module_set(arena, &result, program->sources.count ? program->sources.sources[0].path : S8("buster.obj"), module->code.length);
+        }
     }
+    scratch_end(name_temporary);
 
     return result;
 }

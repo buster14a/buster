@@ -825,10 +825,16 @@ struct CEnumMember
 {
     String8 name;
     CSourceLocation location;
+    // Interned id of `name`, carried from the declaring token so the entity
+    // filed from this record is keyed without a second intern; 0 when the
+    // parse ran without a symbol table.  It sits in the alignment hole
+    // ahead of `value`, so the record's size is unchanged.
+    u32 symbol;
     u64 value;
     bool is_negative;
     u8 reserved[7];
 };
+BUSTER_CT_CHECK(sizeof(CEnumMember) == 56);
 
 typedef struct CParameter CParameter;
 struct CParameter
@@ -837,9 +843,11 @@ struct CParameter
     CSourceLocation location;
     CTypeId type;
     CEntityId entity;
+    // Interned id of `name`, as CEnumMember.symbol; fills the tail padding.
+    u32 symbol;
 };
+BUSTER_CT_CHECK(sizeof(CParameter) == 48);
 
-typedef struct CParserStatement CParserStatement;
 typedef struct CParserDeclaration CParserDeclaration;
 
 typedef enum CEntityKind
@@ -891,6 +899,14 @@ struct CEntity
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
     u64 constant_value;
+};
+
+// One shadowed binding, restored when the scope that shadowed it closes.
+typedef struct CParseBindingUndo CParseBindingUndo;
+struct CParseBindingUndo
+{
+    u32 symbol;
+    CEntityId previous;
 };
 
 typedef struct CScope CScope;
@@ -947,7 +963,6 @@ struct CDeclaration
     CEntityId entity;
     CScopeId scope;
     CParserDeclaration* syntax_declaration;
-    CParserStatement* syntax_body;
     CDeclarationKind kind;
     bool is_definition;
     bool is_variadic;
@@ -979,17 +994,6 @@ typedef enum CParserDeclarationKind
     C_PARSER_DECLARATION_COUNT,
 } CParserDeclarationKind;
 
-typedef enum CParserStatementKind
-{
-    C_PARSER_STATEMENT_BLOCK,
-    C_PARSER_STATEMENT_STATIC_ASSERT,
-    C_PARSER_STATEMENT_DECLARATION,
-    C_PARSER_STATEMENT_EXPRESSION,
-    C_PARSER_STATEMENT_LABEL,
-    C_PARSER_STATEMENT_UNKNOWN,
-    C_PARSER_STATEMENT_COUNT,
-} CParserStatementKind;
-
 typedef struct CParserExpression CParserExpression;
 struct CParserExpression
 {
@@ -997,19 +1001,19 @@ struct CParserExpression
     u32 token_count;
 };
 
-struct CParserStatement
+// One _Static_assert statement of a function body, at any block depth: the
+// statement's token range, a leading C23 attribute sequence included, listed
+// in the order the body reads.  It is the only fact the syntax pass keeps
+// about a body statement -- the semantic pass rebinds bodies from their
+// tokens, and the _Static_assert checks, which run against the block scopes
+// that binding creates, were the one consumer of the per-statement tree the
+// pass used to build.
+typedef struct CParserStaticAssert CParserStaticAssert;
+struct CParserStaticAssert
 {
-    CParserStatement* next;
-    CParserStatement* first_child;
-    CParserStatement* last_child;
-    CParserExpression expression;
-    CSourceLocation location;
+    CParserStaticAssert* next;
     u32 token_start;
     u32 token_count;
-    u32 body_start;
-    u32 body_token_count;
-    CParserStatementKind kind;
-    u8 reserved[4];
 };
 
 struct CParserDeclaration
@@ -1026,15 +1030,12 @@ struct CParserDeclaration
     u32 body_token_count;
     u32 name_token;
     u32 function_name_token;
-    CParserStatement* first_statement;
-    CParserStatement* last_statement;
+    // The body's _Static_assert statements in body order; null for the
+    // body that has none, which is nearly every body.
+    CParserStaticAssert* first_static_assert;
+    CParserStaticAssert* last_static_assert;
     CParserExpression expression;
     CParserDeclarationKind kind;
-    // Whether any statement of this body, at any nesting depth, is a
-    // _Static_assert. Recorded as the statements are appended so the binding
-    // pass can skip the whole statement tree of a body that has none, which
-    // is nearly every body.
-    bool body_has_static_assert;
     bool is_definition;
     bool is_typedef;
     bool is_constexpr;
@@ -1147,6 +1148,9 @@ struct CParseResult
     CEntity* entities;
     CScope* scopes;
     CEntityId* entity_lookup_buckets;
+    CEntityId* binding_by_symbol;
+    CParseBindingUndo* binding_undo;
+    CScopeId binding_scope;
     CEntityId* typedef_lookup_buckets;
     CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
@@ -1199,6 +1203,20 @@ struct CParseResult
     u32 entity_capacity;
     u32 scope_capacity;
     u32 entity_lookup_bucket_count;
+    // The innermost visible binding of every interned symbol, and the LIFO
+    // record that restores the shadowed one when a scope closes.  The
+    // scope-and-symbol bucket chain stays authoritative -- it is what every
+    // lookup outside the binder's own scope stack still asks, and what the
+    // unoptimized gate holds this array to -- but a lookup in the scope the
+    // array stands for is one indexed load instead of a hash, a masked probe
+    // into a table far larger than L2 and a dependent walk of the chain.
+    // `binding_scope` is the scope the array currently describes; a lookup in
+    // any other scope falls back, which is how the passes that re-enter a
+    // scope out of stack order (the static-assert and aggregate binders, and
+    // the lowering through c_parse_scope_for_token) stay correct.
+    u32 binding_capacity;
+    u32 binding_undo_count;
+    u32 binding_undo_capacity;
     u32 identifier_use_capacity;
     u32 identifier_use_by_token_capacity;
     u32 diagnostic_capacity;

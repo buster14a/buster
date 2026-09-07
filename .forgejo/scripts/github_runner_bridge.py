@@ -236,10 +236,21 @@ class ForgejoClient(JsonApiClient):
         return result["id"]
 
     def list_deploy_keys(self) -> list[dict[str, object]]:
-        result = self.request("GET", "/repos/%s/keys?limit=50" % quote_repository(self.repository))
-        if not isinstance(result, list):
-            raise BridgeError("Forgejo deploy-key list has an unexpected shape")
-        return result
+        keys = []
+        page = 1
+        while True:
+            result = self.request(
+                "GET", "/repos/%s/keys?limit=50&page=%d" % (quote_repository(self.repository), page)
+            )
+            if not isinstance(result, list):
+                raise BridgeError("Forgejo deploy-key list has an unexpected shape")
+            # An instance may cap the requested page size below 50. Only an
+            # empty page proves the sweep is complete. Collect before deleting
+            # so revocation cannot shift unseen keys into an earlier page.
+            if not result:
+                return keys
+            keys.extend(result)
+            page += 1
 
     def delete_deploy_key(self, key_id: int) -> None:
         self.request(

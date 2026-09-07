@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/codegen/codegen_test.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/tests/compiler/codegen/ebpf_test_internal.h>
 
 typedef u64 CodegenTestFunction2(u64 left, u64 right);
 typedef u64 CodegenTestFunction1(u64 value);
@@ -734,7 +735,7 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_x64_vector_frame_lea_count(ByteSlice code, 
 
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
-    UnitTestResult result = {0};
+    UnitTestResult result = codegen_test_ebpf_scalars(arguments);
     u8 negative_rsp_store_bytes[] = {0x48, 0x89, 0x44, 0x24, 0xf8, 0x5d, 0xc3};
     CodegenTestX64BodyScan negative_rsp_store_scan =
         codegen_test_x64_scan_body((ByteSlice){.pointer = negative_rsp_store_bytes, .length = sizeof(negative_rsp_store_bytes)}, 0,
@@ -1610,6 +1611,53 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, dynamic_outgoing_cleanup_valid);
         }
     }
+    // Windows ARM64 is the one AArch64 ABI whose va_list is a single cursor
+    // and whose variadic calls carry floating-point bits in the X register
+    // file. Compile register and overflow reads together so neither path can
+    // silently fall back to the four-word ELF layout.
+    Target aarch64_windows_target = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_WINDOWS,
+    };
+    TargetDataLayout aarch64_windows_layout = target_data_layout(aarch64_windows_target);
+    BUSTER_TEST(arguments, aarch64_windows_layout.va_list.size == 8);
+    String8 aarch64_windows_variadic_source = S8(
+        "typedef void *va_list;\n"
+        "static long sum_many(int count, ...) {\n"
+        "    va_list arguments; va_list copy; long total = 0;\n"
+        "    __builtin_va_start(arguments, count); __builtin_va_copy(copy, arguments);\n"
+        "    for (int index = 0; index < count; index += 1) total += __builtin_va_arg(copy, long);\n"
+        "    __builtin_va_end(copy); __builtin_va_end(arguments); return total;\n"
+        "}\n"
+        "static double sum_double(double first, ...) {\n"
+        "    va_list arguments; __builtin_va_start(arguments, first);\n"
+        "    double second = __builtin_va_arg(arguments, double); __builtin_va_end(arguments); return first + second;\n"
+        "}\n"
+        "int windows_variadic(void) {\n"
+        "    return (int)sum_many(10, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L) + (int)sum_double(1.25, 2.75);\n"
+        "}\n");
+    CPreprocessResult aarch64_windows_variadic_tokens =
+        c_preprocess(arguments->arena, aarch64_windows_variadic_source,
+                     (CPreprocessOptions){.target = aarch64_windows_target, .data_layout = aarch64_windows_layout});
+    CParseResult aarch64_windows_variadic_parse = c_parse(arguments->arena, aarch64_windows_variadic_tokens);
+    CIRLowerResult aarch64_windows_variadic_ir =
+        c_lower_to_ir(arguments->arena, S8("aarch64-windows-variadic.c"), aarch64_windows_variadic_tokens,
+                      aarch64_windows_variadic_parse, aarch64_windows_target);
+    BUSTER_TEST(arguments, aarch64_windows_variadic_tokens.error_count == 0);
+    BUSTER_TEST(arguments, aarch64_windows_variadic_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, aarch64_windows_variadic_ir.diagnostic_count == 0);
+    if (aarch64_windows_variadic_ir.program)
+    {
+        IrValidationResult aarch64_windows_variadic_validation =
+            ir_validate_canonical_module(aarch64_windows_variadic_ir.program, aarch64_windows_variadic_ir.program->modules);
+        BUSTER_TEST(arguments, aarch64_windows_variadic_validation.error == IR_VALIDATION_NONE);
+        CodegenModule aarch64_windows_variadic_module = codegen_generate_canonical_module(
+            arguments->arena, aarch64_windows_variadic_ir.program, aarch64_windows_variadic_ir.program->modules,
+            aarch64_windows_target, (CodegenModuleOptions){.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE});
+        BUSTER_TEST(arguments, aarch64_windows_variadic_module.error == CODEGEN_ERROR_NONE);
+    }
+
     // A System V stack argument is placed at an address respecting its own
     // alignment rather than immediately after the argument before it, and the
     // area itself starts at the widest alignment any of them asked for. This is

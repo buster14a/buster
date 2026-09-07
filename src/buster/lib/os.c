@@ -238,7 +238,7 @@ BUSTER_GLOBAL_LOCAL void os_error_print(String8 format, ...)
 {
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), format, variable_arguments);
+    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(2));
     va_end(variable_arguments);
 }
 
@@ -246,7 +246,7 @@ BUSTER_NORETURN BUSTER_COLD void os_fail_va(u32 line, String8 function, String8 
 {
     va_list variable_arguments;
     va_start(variable_arguments, context);
-    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), context, variable_arguments);
+    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), context, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(7));
     va_end(variable_arguments);
     os_error_print(S8(" at {S8}:{u32} in {S8}\n"), file, line, function);
     os_exit(1);
@@ -851,7 +851,7 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
 
     arena->position = position + result.length + null_terminate;
 #elif defined(_WIN32)
-    TemporalArena temp = scratch_begin(0, 0);
+    TemporalArena temp = scratch_begin(&arena, 1);
     String16 relative_file_path_w = string16_from_string8(temp.arena, relative_file_path, true);
     DWORD length_plus_null_termination = GetFullPathNameW(relative_file_path_w.pointer, 0, 0, 0);
 
@@ -1843,6 +1843,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             DWORD exit_code;
             if (GetExitCodeProcess(spawn.handle, &exit_code))
             {
+                result.platform_status = exit_code;
                 if (exit_code >= 0xC0000000u)
                 {
                     // NTSTATUS failure codes (e.g. 0xC0000005, access
@@ -1997,6 +1998,10 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                          usage.ru_majflt, usage.ru_inblock, usage.ru_oublock, usage.ru_nvcsw, usage.ru_nivcsw);
         }
 
+        if (wait_result == pid)
+        {
+            result.platform_status = (u32)status;
+        }
         if (wait_result == pid && WIFEXITED(status))
         {
             int exit_code = WEXITSTATUS(status);
@@ -2945,7 +2950,7 @@ bool program_flag_get(ProgramFlag flag)
 
 String8 executable_resolve_in_path(Arena* arena, String8 file)
 {
-    TemporalArena temp = scratch_begin(0, 0);
+    TemporalArena temp = scratch_begin(&arena, 1);
 
     String8 result = {0};
     String8 path_value = {0};

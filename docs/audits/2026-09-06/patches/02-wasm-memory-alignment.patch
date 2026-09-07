@@ -1,0 +1,194 @@
+From c0e4f988d4630c1aa3bcd378abca60e794ba2ba4 Mon Sep 17 00:00:00 2001
+From: Audit Assistant <audit@localhost>
+Date: Sun, 6 Sep 2026 13:13:43 +0000
+Subject: [PATCH] wasm: cap scalar memory alignment hints at access width
+
+---
+ src/buster/lib/compiler/wasm/wasm.c       |  6 +-
+ tests/wasm_memory_alignment_regression.c  | 66 ++++++++++++++++++++
+ tests/wasm_memory_alignment_regression.py | 76 +++++++++++++++++++++++
+ 3 files changed, 146 insertions(+), 2 deletions(-)
+ create mode 100644 tests/wasm_memory_alignment_regression.c
+ create mode 100644 tests/wasm_memory_alignment_regression.py
+
+diff --git a/src/buster/lib/compiler/wasm/wasm.c b/src/buster/lib/compiler/wasm/wasm.c
+index 2efa251b..1688e866 100644
+--- a/src/buster/lib/compiler/wasm/wasm.c
++++ b/src/buster/lib/compiler/wasm/wasm.c
+@@ -1483,7 +1483,8 @@ static void wasm64_fe_emit_result_set(Wasm64FunctionEmitter* emitter, IrInstruct
+ static void wasm64_fe_load(Wasm64FunctionEmitter* emitter, IrType* type)
+ {
+     u32 size = wasm64_type_size(type);
+-    u32 alignment = type && type->layout.alignment ? wasm64_log2_alignment(type->layout.alignment) : 0;
++    // A stronger object alignment is not a legal memory-op alignment immediate.
++    u32 alignment = type && type->layout.alignment ? wasm64_log2_alignment(BUSTER_MIN(type->layout.alignment, BUSTER_MIN(size, 8u))) : 0;
+     if (type && (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION))
+     {
+         wasm64_fe_u8(emitter, 0x29); // i64.load
+@@ -1522,7 +1523,8 @@ static void wasm64_fe_load(Wasm64FunctionEmitter* emitter, IrType* type)
+ static void wasm64_fe_store(Wasm64FunctionEmitter* emitter, IrType* type)
+ {
+     u32 size = wasm64_type_size(type);
+-    u32 alignment = type && type->layout.alignment ? wasm64_log2_alignment(type->layout.alignment) : 0;
++    // A stronger object alignment is not a legal memory-op alignment immediate.
++    u32 alignment = type && type->layout.alignment ? wasm64_log2_alignment(BUSTER_MIN(type->layout.alignment, BUSTER_MIN(size, 8u))) : 0;
+     if (type && (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION))
+     {
+         wasm64_fe_u8(emitter, 0x37); // i64.store
+diff --git a/tests/wasm_memory_alignment_regression.c b/tests/wasm_memory_alignment_regression.c
+new file mode 100644
+index 00000000..0ed1d468
+--- /dev/null
++++ b/tests/wasm_memory_alignment_regression.c
+@@ -0,0 +1,66 @@
++#define BUSTER_UNITY_BUILD 1
++#define BUSTER_SINGLE_THREADED 1
++#include <buster/lib/base.h>
++#include <buster/lib/os.h>
++#include <buster/lib/arena.h>
++#include <buster/lib/string.h>
++#include <buster/lib/file.h>
++#include <buster/lib/integer.h>
++#include <buster/lib/string.c>
++#include <buster/lib/os.c>
++#include <buster/lib/arena.c>
++#include <buster/lib/file.c>
++#include <buster/lib/integer.c>
++#include <stdio.h>
++BUSTER_GLOBAL_LOCAL void audit_initialize(void)
++{
++    static ProgramState state;
++    program_state = &state;
++    os_state.page_size = (u64)sysconf(_SC_PAGESIZE);
++    os_state.allocation_granularity = os_state.page_size;
++    os_state.logical_thread_count = 1;
++    pthread_mutex_init(&os_state.entity_mutex, 0);
++    os_state.entity_arena = arena_create((ArenaCreation){0});
++    state.arena = arena_create((ArenaCreation){0});
++    thread_context_select(thread_context_allocate());
++}
++
++#include <buster/lib/hash.c>
++#include <buster/lib/compiler/ir/ir.c>
++#include <buster/lib/compiler/wasm/wasm.c>
++
++int main(void)
++{
++    audit_initialize();
++    Wasm64Context context = {.arena = program_state->arena};
++    Wasm64FunctionEmitter emitter = {.context = &context, .body = {.arena = program_state->arena}};
++    IrType types[] = {
++        {.kind=IR_TYPE_INTEGER, .bit_width=8, .layout={.size=1, .resolved=true}},
++        {.kind=IR_TYPE_INTEGER, .bit_width=16, .layout={.size=2, .resolved=true}},
++        {.kind=IR_TYPE_INTEGER, .bit_width=32, .layout={.size=4, .resolved=true}},
++        {.kind=IR_TYPE_INTEGER, .bit_width=64, .layout={.size=8, .resolved=true}},
++        {.kind=IR_TYPE_BOOLEAN, .bit_width=1, .layout={.size=1, .resolved=true}},
++        {.kind=IR_TYPE_FLOAT, .bit_width=32, .layout={.size=4, .resolved=true}},
++        {.kind=IR_TYPE_FLOAT, .bit_width=64, .layout={.size=8, .resolved=true}},
++        {.kind=IR_TYPE_POINTER, .bit_width=64, .layout={.size=8, .resolved=true}},
++    };
++    for (u32 t=0; t<BUSTER_ARRAY_LENGTH(types); t+=1)
++    {
++        for (u32 alignment=1; alignment<=64; alignment*=2)
++        {
++            types[t].layout.alignment=alignment;
++            Wasm64ValType valtype=WASM64_VALTYPE_INVALID;
++            wasm64_valtype_for_type(&types[t],false,&valtype);
++            for (u32 store=0; store<2; store+=1)
++            {
++                emitter.body.length=0;
++                if (store) wasm64_fe_store(&emitter,&types[t]);
++                else wasm64_fe_load(&emitter,&types[t]);
++                printf("%u %u %u %u ",t,alignment,store,valtype);
++                for (u64 i=0; i<emitter.body.length; i+=1) printf("%02x",emitter.body.data[i]);
++                puts("");
++            }
++        }
++    }
++    return context.error.code!=WASM64_ERROR_NONE;
++}
+diff --git a/tests/wasm_memory_alignment_regression.py b/tests/wasm_memory_alignment_regression.py
+new file mode 100644
+index 00000000..3ecc5841
+--- /dev/null
++++ b/tests/wasm_memory_alignment_regression.py
+@@ -0,0 +1,76 @@
++#!/usr/bin/env python3
++"""Focused Linux-host regression against the repository's real C implementation.
++
++Requires a host C compiler. This does not replace test_all or Release self-host.
++Set CC=gcc, AUDIT_OPT=-O0, or AUDIT_SANITIZE=1 to vary the host configuration.
++"""
++import os
++from pathlib import Path
++import shlex
++import subprocess
++import tempfile
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def build(source: str, out: Path) -> None:
++    compiler = shlex.split(os.environ.get("CC", "clang"))
++    flags = [os.environ.get("AUDIT_OPT", "-O2"), "-g", "-fwrapv", "-funsigned-char",
++             "-Wno-unused-function", "-ffunction-sections", "-fdata-sections", "-I", str(ROOT / "src")]
++    if os.environ.get("AUDIT_SANITIZE") == "1":
++        flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer"]
++    subprocess.run(compiler + flags + [str(ROOT / "tests" / source), "-Wl,--gc-sections",
++                                      "-pthread", "-lm", "-o", str(out)], check=True)
++
++
++def leb(value: int) -> bytes:
++    out = bytearray()
++    while value >= 128:
++        out.append((value & 127) | 128)
++        value >>= 7
++    out.append(value)
++    return bytes(out)
++
++
++def module(store: bool, value_type: int, instruction: bytes) -> bytes:
++    # memory64, one function; the memory access bytes come directly from wasm.c.
++    params = bytes([0x7e, value_type]) if store else bytes([0x7e])
++    results = b"" if store else bytes([value_type])
++    function_type = bytes([1, 0x60, len(params)]) + params + bytes([len(results)]) + results
++    body = bytes([0, 0x20, 0]) + (bytes([0x20, 1]) if store else b"") + instruction + bytes([0x0b])
++    sections = [(1, function_type), (3, bytes([1, 0])), (5, bytes([1, 4, 1])),
++                (10, bytes([1]) + leb(len(body)) + body)]
++    return bytes([0, 97, 115, 109, 1, 0, 0, 0]) + b"".join(bytes([i]) + leb(len(p)) + p for i, p in sections)
++
++
++def main() -> None:
++    with tempfile.TemporaryDirectory(prefix="buster-wasm-alignment-") as directory:
++        directory = Path(directory)
++        binary = directory / "probe"
++        build("wasm_memory_alignment_regression.c", binary)
++        output = subprocess.check_output([str(binary)], text=True)
++        names = []
++        for line in output.splitlines():
++            kind, alignment, store, value_type, encoded = line.split()
++            name = directory / f"kind{kind}-align{alignment}-store{store}.wasm"
++            name.write_bytes(module(bool(int(store)), int(value_type), bytes.fromhex(encoded)))
++            names.append(str(name))
++        if len(names) != 112:
++            raise RuntimeError(f"Expected 112 emitted cases, got {len(names)}")
++        js = directory / "validate.js"
++        js.write_text("""const fs = require('fs');
++let failed = 0;
++for (const path of process.argv.slice(2)) {
++    try { new WebAssembly.Module(fs.readFileSync(path)); }
++    catch (e) { ++failed; if (failed <= 4) console.error(path + ': ' + e.message); }
++}
++console.log((process.argv.length - 2 - failed) + '/' + (process.argv.length - 2) + ' Wasm modules valid');
++process.exitCode = failed ? 1 : 0;
++""")
++        node = shlex.split(os.environ.get("NODE", "node"))
++        node_flags = shlex.split(os.environ.get("AUDIT_NODE_FLAGS", "--experimental-wasm-memory64"))
++        subprocess.run(node + node_flags + [str(js)] + names, check=True)
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.47.3
+

@@ -1,0 +1,7 @@
+In file included from /mnt/data/buster-audit/buster-copy-pro/src/buster/lib/compiler/ir/ir.h:10,
+                 from /mnt/data/buster-audit/buster-copy-pro/src/buster/lib/compiler/ir/ir.c:16,
+                 from /mnt/data/buster-audit/buster-copy-pro/tests/wasm_memory_alignment_regression.c:29:
+/mnt/data/buster-audit/buster-copy-pro/src/buster/lib/target.h:525:32: warning: ‘target_data_layout’ used but never defined
+  525 | BUSTER_F_DECL TargetDataLayout target_data_layout(Target target);
+      |                                ^~~~~~~~~~~~~~~~~~
+112/112 Wasm modules valid

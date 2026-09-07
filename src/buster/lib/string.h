@@ -24,8 +24,15 @@ BUSTER_F_DECL bool string_ends_with_sequence(String8 string, String8 ending);
 BUSTER_F_DECL u64 string_first_code_unit(String8 string, char8 code_unit);
 BUSTER_F_DECL u64 string_first_sequence(String8 string, String8 sequence);
 BUSTER_F_DECL String8 string_slice(String8 slice, u64 start, u64 end);
-BUSTER_F_DECL String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments);
-BUSTER_F_DECL void string_write_to_file_va(OsFileDescriptor* file_handle, String8 format, va_list variable_arguments);
+// Windows ARM64 has eight general-purpose argument registers. Variadic
+// wrappers pass the number left after their named arguments so the
+// formatter can honor aggregate placement and stack alignment.
+// Other targets keep their native va_arg implementation and ignore it.
+#define STRING_FORMAT_VA_GP_REGISTER_COUNT 8u
+#define STRING_FORMAT_VA_GP_SLOTS(named_gp_slots) ((u32)(STRING_FORMAT_VA_GP_REGISTER_COUNT - (named_gp_slots)))
+BUSTER_F_DECL String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments, u32 gp_register_slots_remaining);
+BUSTER_F_DECL void string_write_to_file_va(OsFileDescriptor* file_handle, String8 format, va_list variable_arguments,
+                                                   u32 gp_register_slots_remaining);
 BUSTER_F_DECL String8 string_duplicate_arena(Arena* arena, String8 string, bool zero_terminate);
 BUSTER_F_DECL bool string_starts_with_sequence(String8 string, String8 sequence);
 BUSTER_F_DECL String8 string_from_pointer_length(const char8* pointer, u64 length);

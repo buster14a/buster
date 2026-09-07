@@ -83,9 +83,25 @@ typedef enum MachineRegisterClass
     MACHINE_REGISTER_CLASS_COUNT,
 } MachineRegisterClass;
 
+typedef enum MachineVirtualRegisterFlags
+{
+    MACHINE_VIRTUAL_REGISTER_FLAG_NONE = 0,
+    // Transitional non-SSA value. The verifier still requires at least one
+    // definition, but duplicate definitions and full dominance are handled
+    // conservatively by allocation and scheduling until local promotion is
+    // rewritten around block parameters and edge copies.
+    MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE = 1u << 0,
+} MachineVirtualRegisterFlags;
+
+#define MACHINE_VIRTUAL_REGISTER_FLAG_MASK MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE
+
 typedef struct MachineVirtualRegister MachineVirtualRegister;
 struct MachineVirtualRegister
 {
+    // Exactly one defining instruction point for an SSA value. Block
+    // parameters use MACHINE_POINT_INVALID because their definition is the
+    // destination block entry. Mutable values record their first instruction
+    // definition, or INVALID when the first definition is a block parameter.
     MachinePoint definition_point;
     u8 register_class;
     u8 flags;
@@ -870,21 +886,19 @@ typedef enum MachineResourceMask
     MACHINE_RESOURCE_CONTROL_MASK = 1u << MACHINE_RESOURCE_CONTROL,
 } MachineResourceMask;
 
-// One source mark per lowered IR instruction: the machine row where its
-// rows begin and the canonical source position, consumed by the encoder's
-// per-row offsets into per-function line entries.
+// One mark per lowered IR instruction, in selection order: the machine row
+// where its rows begin and the IR row itself. The source position is not
+// carried: the encoder's line walk reads the range from the function's
+// canonical-source column and resolves the line and column once per emitted
+// row, the same on-demand contract the canonical path follows, so selection
+// writes eight sequential bytes per row and looks nothing up.
 typedef struct MachineLineMark MachineLineMark;
 struct MachineLineMark
 {
     u32 row;
-    u32 source;
-    // The byte offset inside that source, not a resolved position: the line
-    // and column are recovered once per emitted row, which is the same
-    // on-demand contract the canonical path follows.
-    u32 offset;
-    u32 reserved;
+    u32 instruction;
 };
-BUSTER_CT_CHECK(sizeof(MachineLineMark) == 16);
+BUSTER_CT_CHECK(sizeof(MachineLineMark) == 8);
 
 typedef struct MachineSwitchCase MachineSwitchCase;
 struct MachineSwitchCase
@@ -974,10 +988,11 @@ BUSTER_CT_CHECK(MACHINE_REGISTER_CLASS_COUNT <= (1u << 3));
 typedef struct MachineOpcodeInfo MachineOpcodeInfo;
 struct MachineOpcodeInfo
 {
-    // FAST allocation/prepass hot prefix.  These fields are consumed for
-    // every machine row; keep them together and ahead of the diagnostic name
-    // and scheduler-only metadata so the common classifier normally touches
-    // one cache line of the 96-byte descriptor.
+    // Operand and allocation constraints occupy the first 32 bytes. Simple
+    // FAST rows use MachineOpcodeRow; full-descriptor consumers keep these
+    // facts together ahead of the diagnostic name and scheduling metadata.
+    // Extra registers the opcode's encoder sequence scribbles on beyond its
+    // declared operands; owners must vacate before the instruction runs.
     u64 clobber_mask;
     u16 attributes;
     u16 fixed_register_set;
@@ -1027,8 +1042,54 @@ struct MachineOpcodeInfo
     String8 name;
 };
 BUSTER_CT_CHECK(sizeof(MachineOpcodeInfo) == 96);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, clobber_mask) == 0);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, fixed_registers) + sizeof(((MachineOpcodeInfo*)0)->fixed_registers) <= 32);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, implicit_physical_uses) == 48);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, name) == 80);
 
 #define MACHINE_OPCODE_INFO_HAS_FIXED_REGISTERS 1
+
+// The published row-facts projection of the opcode table: everything a
+// per-instruction-row walk asks of an opcode, in sixteen bytes, so a pass over
+// 1,7 M rows reads a 6 KB table instead of fields in a 96-byte descriptor it
+// touches for nothing else. The roles are the
+// projection that matters — they are a function of the opcode alone, so the
+// per-slot ladder that re-derived them once per operand is table content, not
+// work. Built once by machine_opcode_rows_prewarm() (AGENTS.md's serial
+// initialization contract) and read-only afterwards.
+typedef struct MachineOpcodeRow MachineOpcodeRow;
+struct MachineOpcodeRow
+{
+    u64 clobber_mask;
+    // Per-slot role lanes, four bits each and already trimmed to
+    // operand_count: uses (and use-defines) in 0-3, defines in 4-7,
+    // use-defines in 8-11.
+    u16 role_lanes;
+    u8 operand_count;
+    u8 flags;
+    // The x86-64 encoder's worst-case byte budget for one row of this opcode,
+    // the part that does not depend on the row's own payload. A row whose
+    // budget grows with its side data carries MACHINE_OPCODE_ROW_VARIABLE
+    // and the encoder adds the rest; every other opcode is a flat number, so
+    // the capacity pass is a table read instead of a nine-arm switch.
+    u16 encode_budget;
+    u16 reserved;
+};
+BUSTER_CT_CHECK(sizeof(MachineOpcodeRow) == 16);
+
+#define MACHINE_OPCODE_ROW_CONSTRAINED (1u << 0)
+#define MACHINE_OPCODE_ROW_CALL (1u << 1)
+#define MACHINE_OPCODE_ROW_TERMINATOR (1u << 2)
+#define MACHINE_OPCODE_ROW_INDIRECT_BRANCH (1u << 3)
+#define MACHINE_OPCODE_ROW_CLOBBERS (1u << 4)
+#define MACHINE_OPCODE_ROW_VARIABLE_BUDGET (1u << 5)
+// The byte budget of an ordinary row: no encoding the tables publish is
+// longer, and the allocator's edits are budgeted separately.
+#define MACHINE_OPCODE_ROW_FLAT_BUDGET 24u
+#define MACHINE_OPCODE_ROW_LANE_MASK 0x0fu
+#define MACHINE_OPCODE_ROW_USE_SHIFT 0u
+#define MACHINE_OPCODE_ROW_DEFINE_SHIFT 4u
+#define MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT 8u
 
 // Upper bound on any target's unified register file — the general file plus
 // the vector file behind it; every allocator mask is one u64 over this
@@ -1335,6 +1396,9 @@ struct MachineSelectResult
     u32 selected_typed_instructions;
     u32 machine_instructions;
     u32 simd_operation_count;
+    // Explicit non-SSA values retained by transitional lowering. This is the
+    // selector-side telemetry counterpart of MachineVerifyResult's count.
+    u32 mutable_virtual_register_count;
     // Reserved matcher telemetry storage. Target selectors no longer run the
     // declarative matcher on their hot path, but retaining this cold block
     // preserves the measured favorable layout of selection results.
@@ -1490,6 +1554,11 @@ struct MachineBuilderStream
     u32 reserved;
 };
 
+// The three streams every selected function fills per row, per virtual
+// register and per block are appended through typed cursor/end pairs: the
+// hot append is a pointer bump plus the row store, and only a full chunk
+// reaches machine_stream_cursor_refill. The chunk counts of a cursor stream
+// are stamped by the refill and by the finish, never per append.
 typedef struct MachineFunctionBuilder MachineFunctionBuilder;
 struct MachineFunctionBuilder
 {
@@ -1498,7 +1567,11 @@ struct MachineFunctionBuilder
     MachineInstruction* instruction_cursor;
     MachineInstruction* instruction_end;
     MachineBuilderStream virtual_registers;
+    MachineVirtualRegister* virtual_register_cursor;
+    MachineVirtualRegister* virtual_register_end;
     MachineBuilderStream blocks;
+    MachineBlock* block_cursor;
+    MachineBlock* block_end;
     MachineBuilderStream edges;
     MachineBuilderStream block_parameters;
     MachineBuilderStream edge_copy_sources;
@@ -1519,6 +1592,10 @@ typedef enum MachineVerifyError
     MACHINE_VERIFY_OPERAND_SLOT,
     MACHINE_VERIFY_TERMINATOR,
     MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION,
+    MACHINE_VERIFY_VIRTUAL_REGISTER_MISSING_DEFINITION,
+    MACHINE_VERIFY_VIRTUAL_REGISTER_DUPLICATE_DEFINITION,
+    MACHINE_VERIFY_VIRTUAL_REGISTER_USE_BEFORE_DEFINITION,
+    MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION_POINT,
     MACHINE_VERIFY_POINT_CAPACITY,
     MACHINE_VERIFY_EDGE_RANGE,
     MACHINE_VERIFY_EDGE_COPY,
@@ -1534,6 +1611,10 @@ struct MachineVerifyResult
     u32 block;
     u32 instruction;
     u32 operand;
+    // Explicit transitional debt in an otherwise single-definition MIR. This
+    // is populated on both success and definition-contract failures so tests
+    // and compiler telemetry can account for mutable values directly.
+    u32 mutable_virtual_register_count;
 };
 
 // Test-only replay serialization. Versioned; readers reject unknown versions
@@ -1571,6 +1652,11 @@ BUSTER_F_DECL u32 machine_opcode_memory_operand(MachineOpcodeInfo const* info);
 BUSTER_F_DECL bool machine_opcode_operand_is_tied(MachineOpcodeInfo const* info, u32 destination_slot, u32 source_slot);
 BUSTER_F_DECL bool machine_opcode_operand_is_early_clobber(MachineOpcodeInfo const* info, u32 slot);
 BUSTER_F_DECL bool machine_opcode_has_constraints(MachineOpcodeInfo const* info);
+// The published row-facts table, indexed by opcode. Filled by the prewarm
+// below; the accessor fills it on a first serial touch for callers that reach
+// the allocators without going through codegen (tests, the assembler).
+BUSTER_F_DECL MachineOpcodeRow const* machine_opcode_row_table(void);
+BUSTER_F_DECL void machine_opcode_rows_prewarm(void);
 BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64(void);
 // The Win64 register file: the same allocatable set with RSI and RDI moved
 // into the callee-saved half, and only the volatile vector registers.
@@ -1578,6 +1664,17 @@ BUSTER_F_DECL MachineTargetDescription const* machine_target_x86_64_windows(void
 BUSTER_F_DECL MachineTargetDescription const* machine_target_aarch64(void);
 BUSTER_F_DECL void machine_stream_initialize(MachineBuilderStream* stream, u64 element_size);
 BUSTER_F_DECL void* machine_stream_append(Arena* arena, MachineBuilderStream* stream);
+// The typed-cursor append shape, for a stream whose rows are written through
+// a caller-held cursor/end pair instead of machine_stream_append: the caller
+// bumps the cursor and `total_count` per row, and calls the refill only when
+// the cursor reaches the end. The refill stamps the chunk it leaves as full
+// and returns the new chunk's first row, whose end is that row plus
+// `chunk_capacity`; the close stamps the open chunk's count from the cursor.
+// A stream is appended in one mode or the other, never both: the generic
+// append keeps counts per row, the cursor keeps them per chunk, and a
+// flatten reads whichever the close left exact.
+BUSTER_F_DECL void* machine_stream_cursor_refill(Arena* arena, MachineBuilderStream* stream);
+BUSTER_F_DECL void machine_stream_cursor_close(MachineBuilderStream* stream, void const* cursor);
 BUSTER_F_DECL void machine_stream_flatten(MachineBuilderStream* stream, void* destination);
 BUSTER_F_DECL MachineFunctionBuilder machine_function_builder_begin(Arena* arena);
 BUSTER_F_DECL u32 machine_builder_virtual_register(MachineFunctionBuilder* builder, MachineVirtualRegister virtual_register);
@@ -1610,10 +1707,15 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena
 // thread-local model and selects the GOT and PLT forms for the symbols
 // another object could interpose. The unqualified entry point above passes
 // false, which is every caller that is not module code generation.
+// `module` is the context machine_select_module_prepare built once for the
+// module before its functions select; a null one makes the x86-64 selector
+// prepare a context for this function alone, which is the unvalidated entry
+// point's cost and never module code generation's.
+BUSTER_F_DECL MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* program, Target target);
 BUSTER_F_DECL MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                             bool position_independent);
+                                                                             bool position_independent, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                          bool position_independent, bool assume_validated);
+                                                                          bool position_independent, bool assume_validated, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                             bool assume_validated);
 BUSTER_F_DECL MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function);
@@ -1679,8 +1781,9 @@ struct MachineFastPrepass
     u32* next_call;
     // One compact SoA word per instruction. Six four-bit lane masks record
     // physical, virtual, block, use, define, and use-define operands after
-    // the prepass has classified the row once. A high state bit separates
-    // unconstrained virtual-only dataflow from irregular rows; FAST and
+    // the prepass has classified the row once. Two high state bits separate
+    // unconstrained virtual-only dataflow from irregular rows and mark the
+    // call rows the prepass's own backward next-call walk looks for; FAST and
     // QUALITY consume the compact homogeneous facts instead of repeatedly
     // decoding tagged refs and opcode policy.
     u32* operand_masks;
@@ -1701,7 +1804,10 @@ struct MachineFastPrepass
     bool valid;
     u8 reserved[3];
 };
-BUSTER_F_DECL MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* function);
+// `wants_quality_facts` false leaves the QUALITY-only facts — the touch
+// intervals, the disqualifications and the loop spans — unbuilt: their
+// pointers stay null and `loop_span_count` zero. FAST never reads them.
+BUSTER_F_DECL MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* function, bool wants_quality_facts);
 // The pinned scan against an already-built prepass of the same function,
 // same pin/span/split contract as `machine_fast_placement_build_pinned`.
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, MachineFunction* function, MachineFastPrepass const* prepass,
@@ -1774,6 +1880,10 @@ struct MachineX64ExactMapAudit
     u32 memory_base_tables;
     u32 displacement_patch_tables;
     u32 variable_memory_encoding_tables;
+    // Fixed-shape template rows allotted by prewarm, and how many of them
+    // the metadata authority refused (those rows keep their metadata lane).
+    u32 fixed_template_rows;
+    u32 fixed_template_invalid_rows;
     bool valid;
     u8 reserved[3];
 };

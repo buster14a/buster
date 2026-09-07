@@ -47,6 +47,89 @@
 #define BUSTER_C_DATA static
 #endif
 
+// The matching-delimiter scan, over the one-byte shape sidecar rather than the
+// token rows.
+//
+// Every caller asks the same question: starting at `open` with depth zero,
+// where does the depth return to zero. A shape byte answers it alone -- a
+// punctuator's shape is C_TOKEN_SHAPE_PUNCTUATOR | its id -- so the scan reads
+// one byte a token instead of reaching into a twelve-byte row for one field,
+// and 64 tokens are classified at once: the openers and the closers of a
+// window are two masks, and the walk then visits only the lanes that can
+// change the depth. Delimiters are about one token in nine here, so eight
+// tokens in nine are never looked at individually.
+//
+// The window skip is what makes a long range cheap: a window can only bring
+// the depth to zero if it holds at least `depth` closers, so when it does not,
+// the entire window costs two population counts and an add -- no per-token
+// work at all, and no branch a scan of ordinary code can mispredict.
+//
+// **Lane accounting.** One masked load and two compares answer 64 tokens; the
+// row scan they replace runs a byte load, a set test and a branch on each of
+// them. Every lane of the load is useful (the sidecar is one byte a token and
+// the range is contiguous), and both compares are 64 of 64, so the trade is
+// positive on a double-pumped 256-bit datapath as well, not only on Zen 5's
+// native width.
+//
+// **The 64-bit spelling of the same algorithm is measured negative and is not
+// here.** A `-march=x86-64-v3` build of it -- eight tokens a step, the masks
+// out of the classic byte-equality and movemask identities -- costs +13,8 M
+// instructions against the row scan on the stage-1 workload, because the
+// ranges are short (~16 tokens a query, ~1,4 M queries) and the per-query
+// setup and per-window mask arithmetic outweigh a sixteen-iteration loop whose
+// branch predicts. The width is the whole of the win: at 64 tokens a window
+// the same query is one load and two compares, at eight it is two windows of
+// arithmetic. Only the wide path is compiled.
+#if BUSTER_C_LEX_COMPACT
+#define C_SHAPE_DELIMITER_WINDOW 64u
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 c_shape_matching_delimiter(CTokenShape const* shapes, u32 open, u32 end, CPunctuator opening,
+                                                                     CPunctuator closing)
+{
+    Simd512 open_lanes = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | (u8)opening));
+    Simd512 close_lanes = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | (u8)closing));
+    u32 depth = 0;
+    for (u32 base = open; base < end; base += C_SHAPE_DELIMITER_WINDOW)
+    {
+        u32 remaining = end - base;
+        u32 window_tokens = remaining < C_SHAPE_DELIMITER_WINDOW ? remaining : C_SHAPE_DELIMITER_WINDOW;
+        // The window is read once and asked both questions. Lanes past the
+        // range are masked off the load and read as C_TOKEN_INVALID, which no
+        // punctuator shape can equal, so the tail needs no separate trim.
+        Simd512 window = simd512_load_masked(shapes + base, mask64_prefix(window_tokens));
+        Mask64 opens = simd512_equal_byte(window, open_lanes);
+        Mask64 closes = simd512_equal_byte(window, close_lanes);
+        u32 close_count = mask64_count(closes);
+        if (depth > close_count)
+        {
+            depth += mask64_count(opens) - close_count;
+            continue;
+        }
+        for (Mask64 pending = mask64_or(opens, closes); pending; pending &= pending - 1u)
+        {
+            u32 lane = mask64_first_set(pending);
+            if ((opens >> lane) & 1u)
+            {
+                depth += 1;
+            }
+            else
+            {
+                if (!depth)
+                {
+                    return UINT32_MAX;
+                }
+                depth -= 1;
+                if (!depth)
+                {
+                    return base + lane;
+                }
+            }
+        }
+    }
+    return UINT32_MAX;
+}
+#endif
+
 typedef struct CTypeParseMachine CTypeParseMachine;
 typedef struct CIrDecodedString CIrDecodedString;
 #define C_DECLARATION_KEYWORD_SLOT_COUNT 256
@@ -94,8 +177,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_ir_named_label_at(CP
 }
 BUSTER_C_EXTERN bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
                                                                   u32 start, u32 end, CIrDecodedString* decoded_out);
+// The same answer without the bytes, for the callers that only size or type
+// the literal; see the definition.
+BUSTER_C_EXTERN bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
+                                                                 u32 start, u32 end, CIrDecodedString* decoded_out);
 BUSTER_C_EXTERN String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
 BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start);
+BUSTER_C_EXTERN bool c_parse_type_name_start_word_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_EXTERN u32 c_symbol_intern(CSymbolTable* table, String8 name);
 BUSTER_C_EXTERN bool c_type_parse_buffer_size_add(u64* size, u64 count, u64 element_size, u64 alignment);
 BUSTER_C_EXTERN void c_parse_declaration_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
@@ -123,7 +211,9 @@ BUSTER_C_EXTERN void c_parse_validate_unattached_cleanup_attributes(CParseResult
 BUSTER_C_EXTERN u64 c_parse_name_hash(u32 symbol, String8 name);
 BUSTER_C_EXTERN u32 c_parse_name_symbol(CParseResult* result, String8 name);
 BUSTER_C_EXTERN bool c_parse_types_compatible(Arena* result_arena, CParseResult* result, CPreprocessResult preprocess, CTypeId left, CTypeId right);
-BUSTER_C_EXTERN void c_parse_scope_add_entity(CParseResult* result, CScopeId scope, CEntityId entity);
+// `symbol` is the interned id of the entity's name when the creating site
+// holds the declaring token, and 0 to have it interned here.
+BUSTER_C_EXTERN void c_parse_scope_add_entity(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol);
 BUSTER_C_EXTERN CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
 BUSTER_C_EXTERN bool c_parse_c23_attribute_at(CPreprocessResult preprocess, u32 index, u32 end, u32* after_out);
 BUSTER_C_EXTERN u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 index, u32 end);
@@ -134,9 +224,14 @@ BUSTER_C_EXTERN bool c_parse_attribute_unsigned(String8 spelling, u32* value_out
 BUSTER_C_EXTERN CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest);
+// The token forms of the String8 lookups: the token's own interned id keys
+// the probe, and only a symbol-0 token (pasted, synthesized, test-built)
+// pays an intern of its spelling.
+BUSTER_C_EXTERN CEntityId c_parse_lookup_typedef_name_token(CParseResult* result, char8 const* spelling_base, CToken token, bool oldest);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* result, String8 name);
 BUSTER_C_EXTERN u32 c_parse_identifier_use_index(CParseResult* result, u32 token_index);
 BUSTER_C_EXTERN CEntity* c_parse_first_constant_entity(CParseResult* result, String8 name);
+BUSTER_C_EXTERN CEntity* c_parse_first_constant_entity_token(CParseResult* result, char8 const* spelling_base, CToken token);
 BUSTER_C_EXTERN void c_parse_index_scope_children(CParseResult* result, Arena* arena);
 BUSTER_C_EXTERN void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
@@ -327,6 +422,18 @@ typedef enum CSymbolWellKnown
     C_SYMBOL_WELL_KNOWN_CONSTRUCTOR_GNU,
     C_SYMBOL_WELL_KNOWN_DESTRUCTOR,
     C_SYMBOL_WELL_KNOWN_DESTRUCTOR_GNU,
+    // The two decorations c_parse_skip_attributes steps over beside the
+    // attribute spellings above; every specifier scan runs it once per
+    // declaration, so the ladder it replaced ran on every identifier there.
+    C_SYMBOL_WELL_KNOWN_EXTENSION,
+    C_SYMBOL_WELL_KNOWN_DECLSPEC,
+    C_SYMBOL_WELL_KNOWN_REGISTER,
+    C_SYMBOL_WELL_KNOWN_BUILTIN_OFFSETOF,
+    C_SYMBOL_WELL_KNOWN_VOLATILE,
+    C_SYMBOL_WELL_KNOWN_VOLATILE_GNU_ALT,
+    C_SYMBOL_WELL_KNOWN_CONSTEXPR,
+    C_SYMBOL_WELL_KNOWN_CONST,
+    C_SYMBOL_WELL_KNOWN_ATOMIC,
     C_SYMBOL_WELL_KNOWN_COUNT,
 } CSymbolWellKnown;
 
@@ -371,6 +478,34 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_in_well_known_set(
         for (u64 remaining = set; remaining && !result; remaining &= remaining - 1)
         {
             result = string_equal(spelling, c_symbol_well_known_spellings[trailing_zeroes_u64(remaining)]);
+        }
+    }
+    return result;
+}
+
+// The member of `set` this identifier token spells, as its
+// C_SYMBOL_WELL_KNOWN_BIT, or 0 when it spells none: the membership test
+// that also says which name matched, for a specifier scan that folds several
+// flags out of one pass and reads them off the accumulated bits afterwards.
+// The interned answer is a shift and a mask; the uninterned fallback walks
+// the set bits the way c_token_in_well_known_set does.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE u64 c_token_well_known_bit(char8 const* spelling_base, CToken token, u64 set)
+{
+    u64 result;
+    if (token.symbol)
+    {
+        result = token.symbol < 64 ? set & (1ull << token.symbol) : 0;
+    }
+    else
+    {
+        String8 spelling = c_token_spelling(spelling_base, token);
+        result = 0;
+        for (u64 remaining = set; remaining && !result; remaining &= remaining - 1)
+        {
+            if (string_equal(spelling, c_symbol_well_known_spellings[trailing_zeroes_u64(remaining)]))
+            {
+                result = remaining & (0 - remaining);
+            }
         }
     }
     return result;
@@ -582,6 +717,19 @@ struct CTypeLayoutCache
     u64* sizes;
     u32* alignments;
     u8* states;
+    // Every type id whose layout is not committed in `states`, which is the
+    // set c_parse_type_layout's seed, solve and commit passes have anything
+    // to do for.  Without it each of those three passes walked the whole
+    // type table -- 32.141 ids on average for the 39 uncached queries of a
+    // stage-1 compile of this tree, for the ~6.200 that were still open.
+    // `pending_mark` keeps the list free of duplicates when a record
+    // mutation drops an id back onto it, and `pending_seeded` is the
+    // high-water mark of ids ever listed, so a query only has to list the
+    // types added since the last one.
+    u32* pending;
+    u8* pending_mark;
+    u32 pending_count;
+    u32 pending_seeded;
     u32 capacity;
     CToken const* tokens;
 };

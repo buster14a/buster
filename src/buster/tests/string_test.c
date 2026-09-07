@@ -97,6 +97,27 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !string16_equal(invalid16, invalid16));
     }
 
+    // Null-empty strings are valid slices, not valid memcpy arguments. Both
+    // termination policies and mixed joins must avoid zero-count null copies.
+    for (u32 terminated = 0; terminated < 2; terminated += 1)
+    {
+        String8 empty = {0};
+        String8 copy = string_duplicate_arena(arena, empty, terminated != 0);
+        BUSTER_TEST(arguments, copy.length == 0);
+        BUSTER_TEST(arguments, !terminated || (copy.pointer && copy.pointer[0] == 0));
+        String8 pieces[] = {empty, S8("ab"), empty, S8("cd"), empty};
+        String8 joined = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pieces), terminated != 0);
+        BUSTER_STRING_TEST(arguments, joined, S8("abcd"));
+        BUSTER_TEST(arguments, !terminated || (joined.pointer && joined.pointer[joined.length] == 0));
+        String8 empties[] = {empty, empty, empty};
+        joined = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(empties), terminated != 0);
+        BUSTER_TEST(arguments, joined.length == 0);
+        BUSTER_TEST(arguments, !terminated || (joined.pointer && joined.pointer[0] == 0));
+        joined = string_join_arena(arena, (SliceString8){0}, terminated != 0);
+        BUSTER_TEST(arguments, joined.length == 0);
+        BUSTER_TEST(arguments, !terminated || (joined.pointer && joined.pointer[0] == 0));
+    }
+
     // The formatter deliberately terminates the process for malformed input.
     // A child-mode hook lets the parent test that behavior without terminating
     // the main test process.
@@ -122,6 +143,25 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
 
     // string8_format
     {
+        // A two-slot aggregate must move wholly to the stack when
+        // only x7 remains; it cannot be split across the boundary.
+        {
+            String8 formatted = string_format(arena, S8("{S8}{S8}{S8}"), S8("a"), S8("b"), S8("c"));
+            BUSTER_STRING_TEST(arguments, formatted, S8("abc"));
+        }
+        {
+            String8 formatted =
+                string_format(arena, S8("{u64}{u64}{u64}{u64}{S8}"), (u64)1, (u64)2, (u64)3, (u64)4, S8("x"));
+            BUSTER_STRING_TEST(arguments, formatted, S8("1234x"));
+        }
+        // After arguments spill, u128 still starts at a 16-byte
+        // stack boundary even when one u64 immediately precedes it.
+        {
+            u128 seven = string_test_u128(7, 0);
+            String8 formatted = string_format(arena, S8("{u64}{u64}{u64}{u64}{u64}{u64}{u128}"), (u64)1, (u64)2,
+                                              (u64)3, (u64)4, (u64)5, (u64)6, seven);
+            BUSTER_STRING_TEST(arguments, formatted, S8("1234567"));
+        }
         {
             String8 formatted = string_format(arena, S8("{{ {S8} }}"), S8("value"));
             BUSTER_STRING_TEST(arguments, formatted, S8("{ value }"));

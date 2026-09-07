@@ -1,0 +1,6 @@
+scratch=0 before=128 after=136 returned=/bin/sh
+output survives next allocation: yes
+scratch=1 before=64 after=72 returned=/bin/sh
+output survives next allocation: yes
+relative required mapping: success
+empty string operations completed

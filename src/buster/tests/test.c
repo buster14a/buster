@@ -85,6 +85,7 @@
 #include <buster/tests/compiler/link/link_test.h>
 #include <buster/tests/compiler/gpu/gpu_test.h>
 #include <buster/tests/compiler/driver/driver_test.h>
+#include <buster/tests/compiler/driver/object_path_test.h>
 
 #if BUSTER_CPU_ARCH_X86_64
 #include <buster/tests/x86_64_test.h>
@@ -129,6 +130,7 @@
 #include <buster/tests/compiler/link/link_test.c>
 #include <buster/tests/compiler/gpu/gpu_test.c>
 #include <buster/tests/compiler/driver/driver_test.c>
+#include <buster/tests/compiler/driver/object_path_test.c>
 #if BUSTER_CPU_ARCH_X86_64
 #include <buster/tests/x86_64_test.c>
 #endif
@@ -286,6 +288,7 @@ typedef enum TestId
     TEST_ID_LINK,
     TEST_ID_GPU_PIPELINE,
     TEST_ID_COMPILER_DRIVER,
+    TEST_ID_COMPILER_DRIVER_OBJECT_PATH,
 #if BUSTER_CPU_ARCH_X86_64
     TEST_ID_X86_64,
 #endif
@@ -334,6 +337,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_LINK] = {S8_INITIALIZER("link_tests"), &link_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     [TEST_ID_GPU_PIPELINE] = {S8_INITIALIZER("gpu_pipeline_tests"), &gpu_pipeline_tests},
     [TEST_ID_COMPILER_DRIVER] = {S8_INITIALIZER("compiler_driver_tests"), &compiler_driver_tests, true},
+    [TEST_ID_COMPILER_DRIVER_OBJECT_PATH] = {S8_INITIALIZER("compiler_driver_object_path_tests"), &compiler_driver_object_path_tests, !BUSTER_ANDROID && !BUSTER_IOS},
 #if BUSTER_CPU_ARCH_X86_64
     [TEST_ID_X86_64] = {S8_INITIALIZER("x86_64_tests"), &x86_64_tests},
 #endif
@@ -377,7 +381,7 @@ BUSTER_GLOBAL_LOCAL void test_parallel_show(UnitTestArguments* arguments, String
     }
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    String8 text = string_format_va(parallel_arguments->output_arena, format, variable_arguments);
+    String8 text = string_format_va(parallel_arguments->output_arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(3));
     va_end(variable_arguments);
     BUSTER_UNUSED(text);
 }
@@ -455,7 +459,7 @@ void buster_test_error(u32 line, String8 function, String8 file_path, String8 fo
     TemporalArena scratch = scratch_begin(0, 0);
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    String8 message = string_format_va(scratch.arena, format, variable_arguments);
+    String8 message = string_format_va(scratch.arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(7));
     va_end(variable_arguments);
 
     string_print(S8("{S8} failed at {S8}:{S8}:{u32}\n"), message, file_path, function, line);
@@ -472,7 +476,7 @@ void buster_test_error_arguments(UnitTestArguments* arguments, u32 line, String8
     TemporalArena scratch = scratch_begin(0, 0);
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    String8 message = string_format_va(scratch.arena, format, variable_arguments);
+    String8 message = string_format_va(scratch.arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(8));
     va_end(variable_arguments);
 
     arguments->show(arguments, S8("{S8} failed at {S8}:{S8}:{u32}\n"), message, file_path, function, line);
@@ -665,7 +669,7 @@ void default_show(UnitTestArguments* arguments, String8 format, ...)
     TemporalArena scratch = scratch_begin(0, 0);
     va_list variable_arguments;
     va_start(variable_arguments, format);
-    String8 string = string_format_va(scratch.arena, format, variable_arguments);
+    String8 string = string_format_va(scratch.arena, format, variable_arguments, STRING_FORMAT_VA_GP_SLOTS(3));
     va_end(variable_arguments);
 
     if (string.length)
@@ -833,7 +837,9 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
     }
 
     compiler_prewarm();
-    buster_x86_metadata_prewarm();
+    // The lanes below query arbitrary forms, so every form is prepared here
+    // rather than on first touch; the compiler itself never needs this walk.
+    buster_x86_metadata_prewarm_all_forms();
     // The metadata and machine suites exercise x86 emission on every host,
     // including AArch64 CI. Prepare the exact-plan tables before their lanes.
     machine_x86_64_exact_prewarm();
