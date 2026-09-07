@@ -3386,23 +3386,24 @@ end:
 
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_object_path(Arena* arena, String8 input)
 {
+    u64 name = 0;
     u64 extension = input.length;
     for (u64 index = input.length; index != 0; index -= 1)
     {
         char8 byte = input.pointer[index - 1];
-        if (byte == '.')
+        if (byte == '.' && extension == input.length)
         {
             extension = index - 1;
-            break;
         }
         if (byte == '/' || byte == '\\')
         {
+            name = index;
             break;
         }
     }
     return string_format_z(arena, S8("{S8}.o"), (String8){
-                                                           .pointer = input.pointer,
-                                                           .length = extension,
+                                                           .pointer = input.pointer + name,
+                                                           .length = extension - name,
                                                        });
 }
 
@@ -3749,26 +3750,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         bool suppress_object_write = !invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK;
         if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
         {
-            String8 input = invocation.input_paths[input_index];
-            u64 extension = input.length;
-            for (u64 index = input.length; index != 0; index -= 1)
-            {
-                char8 byte = input.pointer[index - 1];
-                if (byte == '.')
-                {
-                    extension = index - 1;
-                    break;
-                }
-                if (byte == '/' || byte == '\\')
-                {
-                    break;
-                }
-            }
-            single.output_path = string_format(arena, S8("{S8}.o"),
-                                               (String8){
-                                                   .pointer = input.pointer,
-                                                   .length = extension,
-                                               });
+            single.output_path = compiler_driver_default_object_path(arena, invocation.input_paths[input_index]);
         }
         else if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK)
         {
