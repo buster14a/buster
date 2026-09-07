@@ -1,0 +1,33 @@
+name: UB audit tool package
+
+on:
+  push:
+    branches: [audit/ub-source-20260907]
+    paths: [.github/workflows/ub-audit-tools.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  tcc:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Fetch distribution TCC package
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          mkdir -p "$RUNNER_TEMP/ub-audit-tools"
+          cd "$RUNNER_TEMP/ub-audit-tools"
+          apt-get download tcc
+          sha256sum ./*.deb > SHA256SUMS
+          apt-cache policy tcc > package-policy.txt
+          dpkg-deb --info ./*.deb > package-info.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ub-audit-tcc
+          path: ${{ runner.temp }}/ub-audit-tools/
+          if-no-files-found: error
+          retention-days: 3
