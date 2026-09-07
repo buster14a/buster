@@ -149,6 +149,16 @@ if [[ $arch == x86_64 && ${GITHUB_ACTIONS:-false} == true ]]; then
     exit 0
 fi
 
+# The hosted 3-core Apple-Silicon runner executes the unoptimized Debug binary
+# substantially more slowly than Release. Main has repeatedly reached the
+# fixed 180-second deadline while the Debug process was still alive and
+# streaming test progress, then completed the same Release suite in seconds.
+# Give hosted arm64 Debug enough headroom without weakening local/Forgejo
+# timeout policy or overriding an explicit caller-provided timeout.
+if [[ $arch == arm64 && ${GITHUB_ACTIONS:-false} == true && -z ${BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS:-} ]]; then
+    export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=300
+fi
+
 launch_args=(--batch)
 for index in "${!build_configs[@]}"; do
     launch_args+=("${build_configs[$index]}" "${app_paths[$index]}")
