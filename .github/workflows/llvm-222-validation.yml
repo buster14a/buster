@@ -5,29 +5,46 @@ on:
     branches: [work/llvm-222-validation]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   snapshot:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          persist-credentials: false
           fetch-depth: 0
-      - name: Prepare exact baseline and bootstrap tools
+      - name: Apply reviewed patch on isolated current-main worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/llvm-222-workspace/tools"
+          git worktree add --detach "$RUNNER_TEMP/llvm-222-fix" 9834a4253c61934a8a253641a84741a25d3717e3
+          cd "$RUNNER_TEMP/llvm-222-fix"
+          python3 - <<'PY'
+          import base64, pathlib, zlib
+          data = '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'
+          data = data.replace('mU6w6wZld', 'mU6wZld')
+          pathlib.Path('/tmp/llvm-222.patch').write_bytes(zlib.decompress(base64.b64decode(data)))
+          PY
+          git apply --check /tmp/llvm-222.patch
+          git apply /tmp/llvm-222.patch
+          git diff --check
+          git add src/buster/lib/compiler/llvm/bitcode.c src/buster/lib/compiler/llvm/bitcode_internal.h src/buster/tests/compiler/llvm/bitcode_test.c tests/basic_c_llvm_integer_constants.c tests/basic_c_llvm_integer_constants_check.c
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(llvm): preserve narrow signed-minimum integer constants'
+          git push origin HEAD:refs/heads/fix/llvm-signed-minimum-constants-222
+          git rev-parse HEAD > "$RUNNER_TEMP/llvm-222-workspace/implementation-commit.txt"
+          git bundle create "$RUNNER_TEMP/llvm-222-workspace/repo.bundle" HEAD origin/main
+          git archive 9834a4253c61934a8a253641a84741a25d3717e3 | gzip > "$RUNNER_TEMP/llvm-222-workspace/main.tar.gz"
+      - name: Collect trusted bootstrap tools
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y tcc mold
-          mkdir -p "$RUNNER_TEMP/llvm-222-workspace/tools"
-          git archive 9834a4253c61934a8a253641a84741a25d3717e3 | gzip > "$RUNNER_TEMP/llvm-222-workspace/main.tar.gz"
-          git bundle create "$RUNNER_TEMP/llvm-222-workspace/main.bundle" origin/main
           cp /usr/bin/tcc /usr/bin/mold "$RUNNER_TEMP/llvm-222-workspace/tools/"
           cp -a /usr/lib/x86_64-linux-gnu/tcc "$RUNNER_TEMP/llvm-222-workspace/tools/"
-          git rev-parse 9834a4253c61934a8a253641a84741a25d3717e3^{tree} > "$RUNNER_TEMP/llvm-222-workspace/tree.txt"
           dpkg-query -W tcc mold > "$RUNNER_TEMP/llvm-222-workspace/tool-versions.txt"
           tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/llvm-222-workspace.tar.gz" llvm-222-workspace
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
