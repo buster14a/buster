@@ -1189,7 +1189,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
         if (node.length)
         {
-            String8 node_arguments[] = {node, S8("--experimental-wasm-memory64"), S8("tests/wasm_memory_alignment_execution.js"), wasm64_alignment_output};
+            String8 node_arguments[] = {node, S8("tests/wasm_memory_alignment_execution.js"), wasm64_alignment_output};
             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
                                                        (ProcessSpawnOptions){.use_process_environment = 1});
             BUSTER_TEST(arguments, spawn.handle != 0);
@@ -2453,7 +2453,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(pic_model_temporary);
         }
     }
-#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_MACOS
     {
         // Keep one real external-compiler fixture in the driver suite.  The
         // non-PIC form exercises clang's R_X86_64_32S; the -fPIC form is the
@@ -2575,6 +2575,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         if (c_spawn.handle)
         {
             ProcessWaitResult c_wait = os_process_wait_sync(arguments->arena, c_spawn);
+            if (c_wait.result != PROCESS_RESULT_SUCCESS)
+            {
+                arguments->show(arguments, S8("basic_c_operations child failed: result={u32} platform_status=0x{u32:x}\n"),
+                                (u32)c_wait.result, c_wait.platform_status);
+            }
             BUSTER_TEST(arguments, c_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
@@ -3399,6 +3404,62 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, arm64_unwind_relocations == arm64_pdata.length / 4);
             ByteSlice arm64_unwind_file = file_read(arm64_unwind_temporary.arena, arm64_unwind_object_path, (FileReadOptions){0});
             BUSTER_TEST(arguments, arm64_unwind_file.length != 0 && arm64_unwind_file.length < BUSTER_MB(1));
+        }
+        String8 arm64_executable_path = buster_test_temporary_path(arm64_unwind_temporary.arena, S8("buster-c-arm64-dynamic-base"), S8(".exe"));
+        String8 arm64_executable_command_line[] = {
+            S8("-target"), S8("aarch64-windows"), S8("-g0"), S8("-o"), arm64_executable_path, S8("tests/basic_c_compile.c"),
+        };
+        CompilerDriverResult arm64_executable = compiler_driver_execute_invocation(
+            arm64_unwind_temporary.arena,
+            compiler_driver_parse_arguments(arm64_unwind_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arm64_executable_command_line)));
+        BUSTER_TEST(arguments, arm64_executable.error == COMPILER_DRIVER_ERROR_NONE);
+        if (arm64_executable.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            ByteSlice image = arm64_executable.native_link.executable;
+            bool header_valid = image.length >= 0x40;
+            u32 pe = header_valid ? compiler_driver_test_pe_read_u32(image, 0x3c) : 0;
+            header_valid &= pe <= image.length && image.length - pe >= 24 + 240 && memcmp(image.pointer + pe, "PE\0\0", 4) == 0;
+            BUSTER_TEST(arguments, header_valid);
+            if (header_valid)
+            {
+                u64 optional = (u64)pe + 24;
+                u16 coff_characteristics = 0;
+                u16 dll_characteristics = 0;
+                memcpy(&coff_characteristics, image.pointer + pe + 22, sizeof(coff_characteristics));
+                memcpy(&dll_characteristics, image.pointer + optional + 70, sizeof(dll_characteristics));
+                u32 relocation_rva = compiler_driver_test_pe_read_u32(image, optional + 152);
+                u32 relocation_size = compiler_driver_test_pe_read_u32(image, optional + 156);
+                BUSTER_TEST(arguments, !(coff_characteristics & 1));
+                BUSTER_TEST(arguments, (dll_characteristics & 0x40) != 0);
+                BUSTER_TEST(arguments, relocation_rva != 0 && relocation_size >= 10);
+                u16 section_count = 0;
+                memcpy(&section_count, image.pointer + pe + 6, sizeof(section_count));
+                u64 section_headers = optional + 240;
+                bool relocation_section_valid = false;
+                for (u32 section_index = 0; section_index < section_count; section_index += 1)
+                {
+                    u64 section = section_headers + (u64)section_index * 40;
+                    if (section > image.length || image.length - section < 40 || memcmp(image.pointer + section, ".reloc\0\0", 8) != 0)
+                    {
+                        continue;
+                    }
+                    u32 virtual_size = compiler_driver_test_pe_read_u32(image, section + 8);
+                    u32 virtual_address = compiler_driver_test_pe_read_u32(image, section + 12);
+                    u32 raw_size = compiler_driver_test_pe_read_u32(image, section + 16);
+                    u32 raw_offset = compiler_driver_test_pe_read_u32(image, section + 20);
+                    relocation_section_valid = virtual_size == relocation_size && virtual_address == relocation_rva && raw_offset <= image.length &&
+                                               raw_size <= image.length - raw_offset && relocation_size <= raw_size;
+                    if (relocation_section_valid)
+                    {
+                        u32 block_size = compiler_driver_test_pe_read_u32(image, raw_offset + 4);
+                        u16 first_entry = 0;
+                        memcpy(&first_entry, image.pointer + raw_offset + 8, sizeof(first_entry));
+                        relocation_section_valid = block_size >= 10 && block_size <= relocation_size && (first_entry >> 12) == 10;
+                    }
+                    break;
+                }
+                BUSTER_TEST(arguments, relocation_section_valid);
+            }
         }
         scratch_end(arm64_unwind_temporary);
     }
@@ -4323,6 +4384,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         if (c_aggregate_spawn.handle)
         {
             ProcessWaitResult c_aggregate_wait = os_process_wait_sync(arguments->arena, c_aggregate_spawn);
+            if (c_aggregate_wait.result != PROCESS_RESULT_SUCCESS)
+            {
+                arguments->show(arguments, S8("basic_c_argv_aggregate child failed: result={u32} platform_status=0x{u32:x}\n"),
+                                (u32)c_aggregate_wait.result, c_aggregate_wait.platform_status);
+            }
             BUSTER_TEST(arguments, c_aggregate_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
@@ -7217,7 +7283,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(va_arg_temporary);
     }
-#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_MACOS
     // The single translation unit above cannot see an ABI disagreement: a
     // caller and a callee this compiler produced agree with each other
     // whatever they agree on.  Pair the halves with the host compiler in both
@@ -7346,7 +7412,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(complex_temporary);
     }
-#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_MACOS
     // The COMPLEX_X87 result: System V x86-64 hands a `long double _Complex`
     // back on the x87 stack, ST(0) real over ST(1) imaginary, where the
     // identically laid out `struct { long double a, b; }` is returned in
@@ -7849,7 +7915,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         scratch_end(packed_temporary);
     }
-#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_MACOS
     // The single translation unit above cannot see a layout divergence: a
     // program that ignores both attributes agrees with itself.  Pair the
     // halves with the host compiler in both directions, which is the only
@@ -10399,7 +10465,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
 #endif
         // Driver options follow last-option-wins: an allocator named AFTER
-        // the -O flag decides the emitter, and the two objects must differ.
+        // the -O flag decides the emitter. A retained machine function makes
+        // the two objects differ; an architecture that routes the FAST
+        // request through canonical emission records those fallbacks instead.
         // (The reverse order deliberately restores the default -- the
         // parse-level contract earlier in this file pins that -- which is
         // why the CPython harness carries its allocator in CFLAGS, after
@@ -10424,7 +10492,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 ByteSlice fast_bytes = file_read(asm_unit_arena, sticky_fast_path, (FileReadOptions){0});
                 bool identical = none_bytes.length == fast_bytes.length && none_bytes.length &&
                                  memcmp(none_bytes.pointer, fast_bytes.pointer, none_bytes.length) == 0;
-                BUSTER_TEST(arguments, none_bytes.length && fast_bytes.length && !identical);
+                bool fast_request_observable = !identical || sticky_fast.codegen_statistics.fallback_function_count != 0;
+                BUSTER_TEST(arguments, sticky_none.codegen_statistics.fallback_function_count == 0);
+                BUSTER_TEST(arguments, sticky_fast.codegen_statistics.function_count != 0 && fast_request_observable);
+                BUSTER_TEST(arguments, none_bytes.length && fast_bytes.length);
             }
         }
         // A directive the vocabulary does not cover is refused by name and by

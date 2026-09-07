@@ -567,7 +567,7 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_section_find(ByteSlice image, String8 name
 }
 #endif
 
-#if BUSTER_CPU_ARCH_X86_64
+#if BUSTER_CPU_ARCH_X86_64 || (BUSTER_CPU_ARCH_AARCH64 && BUSTER_LINUX)
 BUSTER_GLOBAL_LOCAL bool link_test_pe_import_matches(ByteSlice executable, String8 library, String8 symbol)
 {
     if (executable.length >= 0x40 && executable.pointer[0] == 'M' && executable.pointer[1] == 'Z')
@@ -734,7 +734,81 @@ BUSTER_GLOBAL_LOCAL void link_test_runtime_stack_walk_skip(UnitTestArguments* ar
 #if !BUSTER_SANITIZE && !BUSTER_ANDROID && !BUSTER_IOS && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
 BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(Arena* arena)
 {
-#if BUSTER_WINDOWS
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64
+    String8 parts[] = {
+        S8("typedef unsigned long long RuntimeU64;"
+              "typedef unsigned int RuntimeU32;"
+              "extern unsigned short RtlCaptureStackBackTrace(unsigned long skip, unsigned long count, void** buffer, unsigned long* hash);"
+              "typedef struct RuntimeFunction RuntimeFunction;"
+              "struct RuntimeFunction { RuntimeU32 begin_address; RuntimeU32 unwind_data; };"
+              "extern RuntimeFunction* RtlLookupFunctionEntry(RuntimeU64 control_pc, RuntimeU64* image_base, void* history);"
+              "extern void* GetStdHandle(int standard_handle);"
+              "extern int WriteFile(void* handle, void* buffer, unsigned long byte_count, unsigned long* written, void* overlapped);"
+              "int main(void);"
+              "static RuntimeU64 runtime_body_status; static RuntimeU64 runtime_large_body_status;"
+              "static int runtime_unwind_body(void* function)"
+              "{"
+              "    RuntimeU64 image_base = 0;"
+              "    RuntimeFunction* function_entry = RtlLookupFunctionEntry((RuntimeU64)function + 1, &image_base, 0);"
+              "    return function_entry && image_base && function_entry->begin_address == (RuntimeU32)((RuntimeU64)function - image_base);"
+              "}"
+              "static void runtime_touch_bytes(unsigned char* bytes, int size)"
+              "{ bytes[0] ^= 0x5a; bytes[size - 1] ^= 0xa5; }"
+              "typedef void* va_list;"
+              "int stack_walk_normal(void** buffer, int size, int marker, ...)"
+              "{"
+              "    int dynamic_size = marker + 157; unsigned char dynamic_padding[dynamic_size];"
+              "    va_list arguments; __builtin_va_start(arguments, marker); int extra = __builtin_va_arg(arguments, int); __builtin_va_end(arguments);"
+              "    RuntimeU64 pressure = 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 14 + 15 + 16;"
+              "    dynamic_padding[0] = (unsigned char)pressure; dynamic_padding[32] = (unsigned char)(pressure ^ 0x3c);"
+              "    dynamic_padding[dynamic_size - 1] = (unsigned char)(pressure >> 8); runtime_touch_bytes(dynamic_padding, dynamic_size);"
+              "    if (marker != 100 || extra != 23) return -1;"
+              "    runtime_body_status = (RuntimeU64)runtime_unwind_body((void*)stack_walk_normal);"
+              "    int count = (int)RtlCaptureStackBackTrace(0, (unsigned long)size, buffer, 0);"
+              "    if (dynamic_padding[0] != (unsigned char)(pressure ^ 0x5a) || dynamic_padding[32] != (unsigned char)(pressure ^ 0x3c) ||"
+              "        dynamic_padding[dynamic_size - 1] != (unsigned char)((pressure >> 8) ^ 0xa5)) return -2;"
+              "    return count;"
+              "}"),
+        S8("typedef struct RuntimeBig RuntimeBig; struct RuntimeBig { RuntimeU64 first; RuntimeU64 second; RuntimeU64 third; };"
+              "int stack_walk_large(void** buffer, int size, int first, int second, int third, RuntimeBig incoming)"
+              "{"
+              "    unsigned char padding[40000]; int dynamic_size = first + 256; unsigned char dynamic_padding[dynamic_size];"
+              "    RuntimeU64 pressure = 17 + 18 + 19 + 20 + 21 + 22 + 23 + 24;"
+              "    padding[0] = (unsigned char)pressure; padding[39999] = (unsigned char)(pressure >> 8);"
+              "    dynamic_padding[0] = (unsigned char)pressure; dynamic_padding[32] = (unsigned char)(pressure ^ 0x3c);"
+              "    dynamic_padding[dynamic_size - 1] = (unsigned char)(pressure >> 8); runtime_touch_bytes(dynamic_padding, dynamic_size);"
+              "    if (first != 1 || second != 2 || third != 3 || incoming.first != 4 || incoming.second != 5 || incoming.third != 6) return -1;"
+              "    runtime_large_body_status = (RuntimeU64)runtime_unwind_body((void*)stack_walk_large);"
+              "    int count = (int)RtlCaptureStackBackTrace(0, (unsigned long)size, buffer, 0);"
+              "    if (dynamic_padding[0] != (unsigned char)(pressure ^ 0x5a) || dynamic_padding[32] != (unsigned char)(pressure ^ 0x3c) ||"
+              "        dynamic_padding[dynamic_size - 1] != (unsigned char)((pressure >> 8) ^ 0xa5) ||"
+              "        padding[0] != (unsigned char)pressure || padding[39999] != (unsigned char)(pressure >> 8)) return -2;"
+              "    return count;"
+              "}"
+              "typedef struct RuntimeReport RuntimeReport;"
+              "struct RuntimeReport {"
+              "    void* normal_entry; void* large_entry; void* main_entry; RuntimeU64 normal_count; RuntimeU64 large_count;"
+              "    RuntimeU64 semantic_status; RuntimeU64 body_status; RuntimeU64 large_body_status;"
+              "    RuntimeU64 epilog_status; RuntimeU64 epilog_unwind_pc; RuntimeU64 large_epilog_status; RuntimeU64 large_epilog_unwind_pc;"
+              "    void* normal_frames[64]; void* large_frames[64];"
+              "};"
+              "int main(void)"
+              "{"
+              "    RuntimeReport report = {0};"
+              "    report.normal_entry = (void*)stack_walk_normal; report.large_entry = (void*)stack_walk_large; report.main_entry = (void*)main;"
+              "    int normal_count = stack_walk_normal(report.normal_frames, 64, 100, 23);"
+              "    int large_count = stack_walk_large(report.large_frames, 64, 1, 2, 3, (RuntimeBig){4, 5, 6});"
+              "    report.normal_count = normal_count > 0 ? (RuntimeU64)normal_count : 0;"
+              "    report.large_count = large_count > 0 ? (RuntimeU64)large_count : 0;"
+              "    report.semantic_status = large_count > 0 ? 0x535441434b434f50ULL : 0;"
+              "    report.body_status = runtime_body_status; report.large_body_status = runtime_large_body_status;"
+              "    unsigned long written = 0; WriteFile(GetStdHandle(-11), &report, sizeof(report), &written, 0);"
+              "    return normal_count > 0 && large_count > 0 && report.semantic_status != 0 &&"
+              "           report.body_status != 0 && report.large_body_status != 0 ? 0 : 1;"
+              "}"),
+    };
+    return string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+#elif BUSTER_WINDOWS
     String8 parts[] = {
         S8("typedef unsigned long long RuntimeU64;"
               "typedef unsigned int RuntimeU32;"
@@ -1113,6 +1187,126 @@ BUSTER_GLOBAL_LOCAL bool link_test_runtime_symbol_find(ObjectFile* object, Strin
 }
 
 #if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_arm64_xdata(ObjectFile* object, bool* has_frame_register, bool* has_large_allocation)
+{
+    ByteSlice xdata = object->sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+    u32 record_count = 0;
+    for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+    {
+        ObjectRelocation* relocation = object->relocations + relocation_index;
+        if (relocation->section != OBJECT_SECTION_WINDOWS_PDATA || relocation->offset % 8 != 4 || relocation->addend < 0)
+        {
+            continue;
+        }
+        u64 xdata_offset = (u64)relocation->addend;
+        if (xdata_offset % 4 || xdata_offset > xdata.length || xdata.length - xdata_offset < 4)
+        {
+            return false;
+        }
+        u8 const* record = xdata.pointer + xdata_offset;
+        u32 header = 0;
+        memcpy(&header, record, sizeof(header));
+        if (!(header & ((1u << 18) - 1)) || ((header >> 18) & 3) != 0 || (header & (1u << 20)))
+        {
+            return false;
+        }
+        bool epilog_packed = (header & (1u << 21)) != 0;
+        u32 epilog_count = (header >> 22) & 31;
+        u32 code_words = header >> 27;
+        u32 header_size = 4;
+        if (!(header >> 22))
+        {
+            if (xdata.length - xdata_offset < 8)
+            {
+                return false;
+            }
+            u32 extension = 0;
+            memcpy(&extension, record + 4, sizeof(extension));
+            if (extension >> 24)
+            {
+                return false;
+            }
+            epilog_count = extension & 0xffff;
+            code_words = (extension >> 16) & 0xff;
+            header_size = 8;
+        }
+        u64 scope_bytes = epilog_packed ? 0 : (u64)epilog_count * 4;
+        u64 code_bytes = (u64)code_words * 4;
+        u64 record_bytes = (u64)header_size + scope_bytes + code_bytes;
+        if (!code_words || record_bytes > xdata.length - xdata_offset)
+        {
+            return false;
+        }
+        u8 const* codes = record + header_size + scope_bytes;
+        if (!epilog_packed)
+        {
+            for (u32 epilog = 0; epilog < epilog_count; epilog += 1)
+            {
+                u32 scope = 0;
+                memcpy(&scope, record + header_size + (u64)epilog * 4, sizeof(scope));
+                if ((scope & (15u << 18)) || (scope >> 22) >= code_bytes)
+                {
+                    return false;
+                }
+            }
+        }
+        for (u32 cursor = 0; cursor < code_bytes;)
+        {
+            u8 operation = codes[cursor];
+            u32 operation_bytes = 0;
+            if (operation <= 0x1f || operation == 0x81 || operation == 0xe1 || operation == 0xe3 || operation == 0xe4)
+            {
+                operation_bytes = 1;
+            }
+            else if ((operation & 0xf8) == 0xc0 || (operation >= 0xd0 && operation <= 0xd2) || operation == 0xe2)
+            {
+                operation_bytes = 2;
+            }
+            else if (operation == 0xe0)
+            {
+                operation_bytes = 4;
+            }
+            else
+            {
+                return false;
+            }
+            if (operation_bytes > code_bytes - cursor)
+            {
+                return false;
+            }
+            if (operation == 0xe1 || operation == 0xe2)
+            {
+                *has_frame_register = true;
+            }
+            if (operation == 0xe0)
+            {
+                u32 units = (u32)codes[cursor + 1] << 16 | (u32)codes[cursor + 2] << 8 | codes[cursor + 3];
+                *has_large_allocation |= units * 16 > 4096;
+            }
+            else if ((operation & 0xf8) == 0xc0)
+            {
+                u32 units = ((u32)operation & 7) << 8 | codes[cursor + 1];
+                *has_large_allocation |= units * 16 > 4096;
+            }
+            cursor += operation_bytes;
+            if (operation == 0xe4)
+            {
+                bool padding = true;
+                for (u32 tail = cursor; tail < code_bytes; tail += 1)
+                {
+                    padding &= codes[tail] == 0;
+                }
+                if (padding)
+                {
+                    break;
+                }
+            }
+        }
+        record_count += 1;
+    }
+    return record_count != 0 && *has_frame_register && *has_large_allocation;
+}
+
 BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_xdata(ObjectFile* object, bool* has_frame_register, bool* has_large_allocation)
 {
     if (!object || !object->sections || !has_frame_register || !has_large_allocation)
@@ -1121,6 +1315,10 @@ BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_xdata(ObjectFile* object, boo
     }
     *has_frame_register = false;
     *has_large_allocation = false;
+    if (object->target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        return link_test_runtime_windows_arm64_xdata(object, has_frame_register, has_large_allocation);
+    }
     ByteSlice xdata = object->sections[OBJECT_SECTION_WINDOWS_XDATA].data;
     u32 record_count = 0;
     for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
@@ -1331,23 +1529,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk_variant(UnitTest
                     return result;
                 }
                 ProcessWaitResult wait = os_process_wait_sync(arguments->arena, spawn);
-                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
                 ByteSlice output = wait.streams[STANDARD_STREAM_OUTPUT];
-                BUSTER_TEST(arguments, output.length == sizeof(LinkTestRuntimeReport));
-                if (wait.result != PROCESS_RESULT_SUCCESS || output.length != sizeof(LinkTestRuntimeReport))
+                LinkTestRuntimeReport report = {0};
+                bool report_size_valid = output.length == sizeof(report);
+                if (report_size_valid)
+                {
+                    memcpy(&report, output.pointer, sizeof(report));
+                }
+                if (wait.result != PROCESS_RESULT_SUCCESS)
+                {
+#if BUSTER_WINDOWS
+                    arguments->show(arguments, S8("runtime stack-walk child failed: result={u32} platform_status={u32:x} output_bytes={u64} "
+                                                  "normal={u64} large={u64} semantic={u64:x} body={u64} large_body={u64}\n"),
+                                    (u32)wait.result, wait.platform_status, output.length, report.normal_count, report.large_count,
+                                    report.semantic_status, report.body_status, report.large_body_status);
+#else
+                    arguments->show(arguments, S8("runtime stack-walk child failed: result={u32} platform_status={u32:x} output_bytes={u64} "
+                                                  "normal={u64} large={u64}\n"),
+                                    (u32)wait.result, wait.platform_status, output.length, report.normal_count, report.large_count);
+#endif
+                }
+                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
+                BUSTER_TEST(arguments, report_size_valid);
+                if (wait.result != PROCESS_RESULT_SUCCESS || !report_size_valid)
                 {
                     return result;
                 }
-                LinkTestRuntimeReport report = {0};
-                memcpy(&report, output.pointer, sizeof(report));
                 BUSTER_TEST(arguments, report.normal_entry != 0 && report.large_entry != 0 && report.main_entry != 0);
                 BUSTER_TEST(arguments, report.normal_count != 0 && report.normal_count <= BUSTER_ARRAY_LENGTH(report.normal_frames));
                 BUSTER_TEST(arguments, report.large_count != 0 && report.large_count <= BUSTER_ARRAY_LENGTH(report.large_frames));
 #if BUSTER_WINDOWS
                 BUSTER_TEST(arguments, report.semantic_status == UINT64_C(0x535441434b434f50));
                 BUSTER_TEST(arguments, report.body_status == 1 && report.large_body_status == 1);
+#if BUSTER_CPU_ARCH_X86_64
                 BUSTER_TEST(arguments, report.epilog_status == 1 && report.epilog_unwind_pc != 0);
                 BUSTER_TEST(arguments, report.large_epilog_status == 1 && report.large_epilog_unwind_pc != 0);
+#endif
 #endif
                 if (!report.normal_entry || !report.large_entry || !report.main_entry || !report.normal_count || !report.large_count ||
                     report.normal_count > BUSTER_ARRAY_LENGTH(report.normal_frames) || report.large_count > BUSTER_ARRAY_LENGTH(report.large_frames))
@@ -1368,7 +1585,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk_variant(UnitTest
                 u64 normal_begin = normal_base + normal_value;
                 u64 large_begin = normal_base + large_value;
                 u64 main_begin = normal_base + main_value;
-#if BUSTER_WINDOWS
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
                 bool epilog_unwind_reached_main = report.epilog_unwind_pc >= main_begin && report.epilog_unwind_pc < main_begin + main_size;
                 BUSTER_TEST(arguments, epilog_unwind_reached_main);
                 bool large_epilog_unwind_reached_main = report.large_epilog_unwind_pc >= main_begin && report.large_epilog_unwind_pc < main_begin + main_size;
@@ -2470,14 +2687,26 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     u32 a64_pdata_rva = 0;
     u32 a64_pdata_raw = 0;
     u32 a64_xdata_rva = 0;
+    u32 a64_xdata_raw = 0;
     BUSTER_TEST(arguments, link_test_pe_section_find(a64_pe_executable.executable, S8(".pdata"), &a64_pdata_rva, &a64_pdata_raw));
-    BUSTER_TEST(arguments, link_test_pe_section_find(a64_pe_executable.executable, S8(".xdata"), &a64_xdata_rva, 0));
+    BUSTER_TEST(arguments, link_test_pe_section_find(a64_pe_executable.executable, S8(".xdata"), &a64_xdata_rva, &a64_xdata_raw));
     BUSTER_TEST(arguments, a64_pe_executable.executable.length > 0x128 && link_read_u32(a64_pe_executable.executable.pointer, 0x120) == a64_pdata_rva &&
                                link_read_u32(a64_pe_executable.executable.pointer, 0x124) == 16);
+    BUSTER_TEST(arguments, link_test_pe_import_matches(a64_pe_executable.executable, S8("ucrtbase.dll"), S8("_configure_narrow_argv")));
+    BUSTER_TEST(arguments, link_test_pe_import_matches(a64_pe_executable.executable, S8("ucrtbase.dll"), S8("__p___argc")));
+    BUSTER_TEST(arguments, link_test_pe_import_matches(a64_pe_executable.executable, S8("ucrtbase.dll"), S8("__p___argv")));
     if (a64_pdata_raw <= a64_pe_executable.executable.length && 16 <= a64_pe_executable.executable.length - a64_pdata_raw)
     {
         BUSTER_TEST(arguments, link_read_u32(a64_pe_executable.executable.pointer, a64_pdata_raw + 4) == a64_xdata_rva);
         BUSTER_TEST(arguments, link_read_u32(a64_pe_executable.executable.pointer, a64_pdata_raw + 12) == a64_xdata_rva + 8);
+    }
+    if (a64_xdata_raw <= a64_pe_executable.executable.length && 8 <= a64_pe_executable.executable.length - a64_xdata_raw)
+    {
+        BUSTER_TEST(arguments, link_read_u32(a64_pe_executable.executable.pointer, a64_xdata_raw) == (12u | (1u << 27)));
+        BUSTER_TEST(arguments, a64_pe_executable.executable.pointer[a64_xdata_raw + 4] == 0x81 &&
+                                   a64_pe_executable.executable.pointer[a64_xdata_raw + 5] == 0xcc &&
+                                   a64_pe_executable.executable.pointer[a64_xdata_raw + 6] == 0x01 &&
+                                   a64_pe_executable.executable.pointer[a64_xdata_raw + 7] == 0xe4);
     }
 #endif
     LinkObjectResult linked = link_objects(arguments->arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
@@ -3713,7 +3942,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                                       .dynamic_library_count = 1,
                                                                                   });
     BUSTER_TEST(arguments, aarch64_data_executable.error == LINK_ERROR_NONE);
-    u64 aarch64_data_text_offset = 0x400 + align_forward(20, 16);
+    // The hosted ARM64 stub is twelve words: its two-pair frame, three UCRT
+    // argv queries, main/exit and the terminating trap.
+    u64 aarch64_data_text_offset = 0x400 + align_forward(12 * sizeof(u32), 16);
     BUSTER_TEST(arguments, aarch64_data_executable.executable.length > aarch64_data_text_offset + 12 &&
                            link_read_u32(aarch64_data_executable.executable.pointer, aarch64_data_text_offset + 8) == UINT32_C(0x14000002));
     // An undefined weak symbol is worth address zero, not a dynamic import.
