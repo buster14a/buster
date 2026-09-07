@@ -27,6 +27,7 @@ jobs:
         run: |
           @'
           from pathlib import Path
+          import re
 
           test_path = Path("src/buster/tests/compiler/frontend/c/c_test.c")
           test_text = test_path.read_text(encoding="utf-8")
@@ -53,7 +54,17 @@ jobs:
           '''
           if test_text.count(anchor) != 1:
               raise SystemExit("sizeof lower-result anchor not found")
-          test_path.write_text(test_text.replace(anchor, anchor + diagnostic, 1), encoding="utf-8")
+          test_text = test_text.replace(anchor, anchor + diagnostic, 1)
+          call_pattern = re.compile(r'^(\s*)c_test_result_add\(&result, (c_test_[A-Za-z0-9_]+)\(arguments\)\);$', re.MULTILINE)
+          def trace_test_call(match):
+              indent, function = match.groups()
+              return (f'{indent}fprintf(stderr, "PR94_TEST begin {function}\\n"); fflush(stderr);\n'
+                      f'{match.group(0)}\n'
+                      f'{indent}fprintf(stderr, "PR94_TEST end {function}\\n"); fflush(stderr);')
+          test_text, traced_call_count = call_pattern.subn(trace_test_call, test_text)
+          if traced_call_count < 20:
+              raise SystemExit(f"only found {traced_call_count} frontend test calls")
+          test_path.write_text(test_text, encoding="utf-8")
 
           gen_path = Path("src/buster/lib/compiler/frontend/c/c_gen.c")
           gen_text = gen_path.read_text(encoding="utf-8")
