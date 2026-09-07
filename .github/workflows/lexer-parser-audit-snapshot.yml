@@ -1,0 +1,30 @@
+name: Lexer parser audit source snapshot
+
+on:
+  push:
+    branches:
+      - audit/lexer-parser-source-20260907
+    paths:
+      - .github/workflows/lexer-parser-audit-snapshot.yml
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 9834a4253c61934a8a253641a84741a25d3717e3
+          persist-credentials: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lexer-parser-audit-source-9834a42
+          path: |
+            .
+            !.git/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
