@@ -1,9 +1,13 @@
-name: Temporary source transport branch
-on: [workflow_dispatch]
+name: Buster CI
+on: [push]
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
   transport-only:
+    if: ${{ false }}
     runs-on: ubuntu-24.04
     steps:
-      - run: echo 'This temporary branch is not an implementation PR; its snapshot workflow transports source only.'
+      - run: echo 'Temporary source transport branch; no implementation CI is claimed.'
