@@ -9735,6 +9735,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     }
                 }
             }
+            if (machine_function_emitted)
+            {
+                result.statistics.mutable_virtual_register_count += selected.mutable_virtual_register_count;
+            }
             scratch_end(machine_scratch);
         }
         if (machine_function_emitted)
