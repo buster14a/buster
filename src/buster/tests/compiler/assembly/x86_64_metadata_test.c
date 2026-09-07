@@ -3132,6 +3132,8 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
                class_counts[3] + class_counts[4] + class_counts[5] == register_only;
 }
 
+#include <buster/tests/compiler/assembly/x86_64_apx_prefix_test.c>
+
 UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4246,6 +4248,9 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, x86_64_metadata_test_source_decorator_reachability(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_memory_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_immediate_skeleton(arguments));
+    UnitTestResult apx_prefix_regressions = x86_64_metadata_apx_prefix_tests(arguments);
+    result.succeeded_test_count += apx_prefix_regressions.succeeded_test_count;
+    result.test_count += apx_prefix_regressions.test_count;
     BUSTER_TEST(arguments, x86_64_metadata_test_source_relative_absolute_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_att_memory_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_register_only_census(arguments));
@@ -11236,7 +11241,9 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 32),
             x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 2, 32),
         };
-        u8 andn_bytes[] = {0x62, 0xf2, 0x7c, 0x08, 0xf2, 0xc2};
+        // GNU as 2.44: {evex} andn %edx, %ecx, %eax. VVVV must encode ECX,
+        // not the reserved/no-source bits that previously selected EAX.
+        u8 andn_bytes[] = {0x62, 0xf2, 0x74, 0x08, 0xf2, 0xc2};
         BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("ANDN"), 731, andn_operands, 3,
                                                                  (BusterX86MetadataPhysicalAttributes){0}, wildcard,
                                                                  BUSTER_ARRAY_LENGTH(wildcard), andn_bytes,
