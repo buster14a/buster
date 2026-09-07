@@ -33,10 +33,16 @@ BUSTER_F_DECL String8 string_slice(String8 slice, u64 start, u64 end);
 BUSTER_F_DECL String8 string_format_va(Arena* arena, String8 format, va_list variable_arguments, u32 gp_register_slots_remaining);
 BUSTER_F_DECL void string_write_to_file_va(OsFileDescriptor* file_handle, String8 format, va_list variable_arguments,
                                                    u32 gp_register_slots_remaining);
+// Duplicate and join accept null-empty slices and fail the process on invalid
+// nonempty slices or size overflow, before allocation or copying.
 BUSTER_F_DECL String8 string_duplicate_arena(Arena* arena, String8 string, bool zero_terminate);
 BUSTER_F_DECL bool string_starts_with_sequence(String8 string, String8 sequence);
 BUSTER_F_DECL String8 string_from_pointer_length(const char8* pointer, u64 length);
 BUSTER_F_DECL String8 string_join_arena(Arena* arena, SliceString8 strings, bool zero_terminate);
+// Recoverable validation: false clears output and leaves the arena untouched.
+// Reserved-capacity exhaustion also returns false; OS commitment failures
+// follow the arena's ordinary fatal allocation policy.
+BUSTER_F_DECL bool string_join_arena_attempt(Arena* arena, SliceString8 strings, bool zero_terminate, String8* output);
 BUSTER_F_DECL String8 string_format_z(Arena* arena, String8 format, ...);
 BUSTER_F_DECL u64 string_array_match(SliceString8 names, String8 name);
 BUSTER_F_DECL bool code_unit_is_decimal(char8 code_unit);
@@ -67,10 +73,14 @@ BUSTER_F_DECL PosixStringList posix_string_list_from_slice_string(Arena* arena, 
 PosixStringList posix_environment_from_keys_and_values(Arena* arena, SliceString8 keys, SliceString8 values);
 WindowsStringList windows_environment_from_keys_and_values(Arena* arena, SliceString8 keys, SliceString8 values);
 
-BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_hexadecimal(const char8* restrict p);
-BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_decimal(const char8* restrict p);
-BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_octal(const char8* restrict p);
-BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_binary(const char8* restrict p);
+// Parse an unsigned digit prefix, without signs or base prefixes, within the
+// slice bounds. length is the complete valid-digit prefix even on overflow;
+// value saturates at UINT64_MAX on overflow and is zero for invalid/empty input.
+// A nonempty null slice is invalid. No terminator or readable padding is needed.
+BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_hexadecimal(String8 string);
+BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_decimal(String8 string);
+BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_octal(String8 string);
+BUSTER_F_DECL IntegerParsingU64 string8_parse_u64_binary(String8 string);
 BUSTER_F_DECL String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate);
 BUSTER_F_DECL String8 string8_from_string16(Arena* arena, String16 s, bool null_terminate);
 

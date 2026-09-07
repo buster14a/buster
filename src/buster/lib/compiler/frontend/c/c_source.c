@@ -189,7 +189,10 @@ BUSTER_C_SHARED CToken c_space_token(CSpellingSpace* space, String8 text, CToken
     // synthesizes a spelling anywhere near it.
     BUSTER_CHECK(text.length < C_TOKEN_LENGTH_OVERSIZED || kind == C_TOKEN_STRING_LITERAL || kind == C_TOKEN_CHARACTER_LITERAL);
     char8* copy = c_space_allocate(space, text.length);
-    memcpy(copy, text.pointer, text.length);
+    if (text.length)
+    {
+        memcpy(copy, text.pointer, text.length);
+    }
     return (CToken){
         .offset = c_space_offset(space, copy),
         .length = c_token_length_field(text.length),
@@ -463,6 +466,14 @@ BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_avx512(String
 #endif
 
 #if BUSTER_INCLUDE_TESTS
+bool c_test_space_null_empty_tokens(Arena* arena)
+{
+    CSpellingSpace space = c_space_local(arena, 1);
+    CToken token = c_space_token(&space, (String8){0}, C_TOKEN_END_OF_FILE, (CPunctuator)0);
+    CToken copied = c_space_retoken(&space, space.base, token);
+    return !token.length && !copied.length && token.offset == copied.offset;
+}
+
 BUSTER_C_INTERNAL u64 c_translate_plain_run_end_scalar(String8 source, u64 offset)
 {
     while (offset < source.length)
@@ -4136,8 +4147,14 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
             // splice, so relexing it cannot change its bytes and the relex is
             // validation plus kind classification only.
             char8* joined = c_space_allocate(space, joined_length + 1);
-            memcpy(joined, left_spelling.pointer, left_spelling.length);
-            memcpy(joined + left_spelling.length, right_spelling.pointer, right_spelling.length);
+            if (left_spelling.length)
+            {
+                memcpy(joined, left_spelling.pointer, left_spelling.length);
+            }
+            if (right_spelling.length)
+            {
+                memcpy(joined + left_spelling.length, right_spelling.pointer, right_spelling.length);
+            }
             joined[joined_length] = 0;
             TemporalArena paste_temporary = scratch_begin(&arena, 1);
             CLexResult lex = c_lex(paste_temporary.arena, (String8){
@@ -4241,7 +4258,10 @@ BUSTER_C_INTERNAL CPpToken c_macro_pragma_token(CSpellingSpace* space, CMacro* m
             {
                 spelling[output++] = ' ';
             }
-            memcpy(spelling + output, token_spelling.pointer, token_spelling.length);
+            if (token_spelling.length)
+            {
+                memcpy(spelling + output, token_spelling.pointer, token_spelling.length);
+            }
             output += token_spelling.length;
         }
         spelling[output] = 0;
@@ -6576,7 +6596,10 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
         for (u32 index = 1; index + 1 < token_count; index += 1)
         {
             String8 spelling = c_token_spelling(base, tokens[index]);
-            memcpy(name + output, spelling.pointer, spelling.length);
+            if (spelling.length)
+            {
+                memcpy(name + output, spelling.pointer, spelling.length);
+            }
             output += spelling.length;
         }
         name[output] = 0;

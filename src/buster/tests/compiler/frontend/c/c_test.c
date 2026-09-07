@@ -13097,6 +13097,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_null_preprocessing_directives(UnitTest
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
     c_test_result_add(&result, c_test_null_preprocessing_directives(arguments));
     c_test_result_add(&result, c_test_frontend_lex_differential(arguments));
