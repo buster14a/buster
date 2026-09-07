@@ -1098,12 +1098,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_codeview_limit(UnitTestA
     return result;
 }
 
+// Execute LLVM bitcode with an independently compiled oracle. A verifier can
+// accept a switch whose case/default destinations are semantically rotated.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_llvm_switch(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if defined(__clang__) && defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(allocators); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 bitcode_path = buster_test_temporary_path(temporary.arena, S8("buster-llvm-switch"), S8(".bc"));
+        String8 executable_path = buster_test_temporary_path(temporary.arena, S8("buster-llvm-switch"),
+#if BUSTER_WINDOWS
+                                                             S8(".exe"));
+#else
+                                                             S8(""));
+#endif
+        String8 command[] = {
+            S8("-emit-llvm"), S8("-nostdinc"), S8("-o"), bitcode_path,
+            string_format(temporary.arena, S8("-fregister-allocator={S8}"), allocators[index]),
+            S8("tests/basic_c_llvm_switch.c"),
+        };
+        CompilerDriverResult built = compiler_driver_execute_invocation(
+            temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_llvm_bitcode && built.llvm_bitcode.success);
+        if (built.error == COMPILER_DRIVER_ERROR_NONE && built.has_llvm_bitcode && built.llvm_bitcode.success)
+        {
+            OsArgumentBuilder consumer_builder = os_argument_builder_start(temporary.arena);
+            os_argument_builder_append(&consumer_builder, S8(BUSTER_HOST_C_COMPILER));
+            String8 compiler_arg1 = S8(BUSTER_HOST_C_COMPILER_ARG1);
+            if (compiler_arg1.length)
+            {
+                os_argument_builder_append(&consumer_builder, compiler_arg1);
+            }
+            os_argument_builder_append(&consumer_builder, bitcode_path);
+            os_argument_builder_append(&consumer_builder, S8("tests/basic_c_llvm_switch_caller.c"));
+            os_argument_builder_append(&consumer_builder, S8("-o"));
+            os_argument_builder_append(&consumer_builder, executable_path);
+            ProcessSpawnResult consumer = os_process_spawn(os_argument_builder_flush(&consumer_builder), (SliceString8){0},
+                                                           (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, consumer.handle != 0);
+            if (consumer.handle)
+            {
+                ProcessWaitResult compiled = os_process_wait_sync(temporary.arena, consumer);
+                BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                if (compiled.result == PROCESS_RESULT_SUCCESS)
+                {
+                    String8 run[] = {executable_path};
+                    ProcessSpawnResult execution = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
+                                                                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    BUSTER_TEST(arguments, execution.handle != 0);
+                    if (execution.handle)
+                    {
+                        ProcessWaitResult executed = os_process_wait_sync(temporary.arena, execution);
+                        if (executed.result != PROCESS_RESULT_SUCCESS)
+                        {
+                            arguments->show(arguments, S8("LLVM switch oracle failed: allocator={S8} status={u32}\n"),
+                                            allocators[index], executed.platform_status);
+                        }
+                        BUSTER_TEST(arguments, executed.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+#else
+    arguments->show(arguments, S8("LLVM switch external-consumer test requires a desktop Clang host compiler\n"));
+#endif
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
     UnitTestResult codeview_limit = compiler_driver_test_codeview_limit(arguments);
     result.test_count += codeview_limit.test_count;
     result.succeeded_test_count += codeview_limit.succeeded_test_count;
+    UnitTestResult llvm_switch = compiler_driver_test_llvm_switch(arguments);
+    result.test_count += llvm_switch.test_count;
+    result.succeeded_test_count += llvm_switch.succeeded_test_count;
 
     // compiler_prewarm() is the contract that lets a gang compile at all: the
     // frontends' remaining first-use tables are written once and read
