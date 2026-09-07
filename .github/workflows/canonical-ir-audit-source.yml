@@ -21,7 +21,7 @@ jobs:
         run: |
           set -euo pipefail
           git archive 9834a4253c61934a8a253641a84741a25d3717e3 | gzip > "$RUNNER_TEMP/buster-main.tar.gz"
-          git bundle create "$RUNNER_TEMP/buster-main.bundle" main
+          git bundle create "$RUNNER_TEMP/buster-main.bundle" refs/remotes/origin/main
       - uses: actions/upload-artifact@v4
         with:
           name: canonical-ir-audit-main
