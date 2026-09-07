@@ -6984,19 +6984,23 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
             p1 = has_architectural_mask
                      ? (u8)((pattern.w ? 0x80 : 0) | pp)
                      : (u8)(!apx_evex_fixed_width_no_w && apx_width == 64 ? 0x80 : apx_width == 16 ? 0x01 : 0);
+            // Fixed-W promoted forms (ADX/BMI) retain the opcode-selecting pp.
+            // Variable-width NDD rows use pp for operand size instead: their
+            // XED V66/VF2 tokens are not independent mandatory prefixes.
+            if (pattern.has_w || (apx_evex_fixed_width_no_w && !(pattern.has_nd && pattern.nd_value)))
+                p1 |= pp;
+            // A VVVV operand is independent of NDD: BMI forms encode a source
+            // (or destination) there even though EVEX.ND is not present.
             if (pattern.has_scc)
                 p1 |= (u8)(0x04 | ((query.attributes.dfv & 0xf) << 3));
-            else if (pattern.has_nd && pattern.nd_value)
-                p1 |= (u8)((((~vvvv_index) & 0xf) << 3) | 0x04);
             else
-                p1 |= apx_evex_fixed_width_no_w ? (u8)(0x7c | pp) : 0x7c;
+                p1 |= (u8)((((~vvvv_index) & 0xf) << 3) | 0x04);
             if (has_memory && memory.has_index && !memory.vsib && (memory.index.index & 16)) p1 &= (u8)~0x04;
             if (pattern.has_scc)
                 p2 = (u8)pattern.scc_value;
-            else if (pattern.has_nd && pattern.nd_value)
-                p2 = (u8)(0x10 | (requested_nf ? 0x04 : 0) | (vvvv_index < 16 ? 0x08 : 0));
             else
-                p2 = (u8)(0x08 | (requested_nf ? 0x04 : 0));
+                p2 = (u8)((pattern.has_nd && pattern.nd_value ? 0x10 : 0) |
+                          (requested_nf ? 0x04 : 0) | (vvvv_index < 16 ? 0x08 : 0));
         }
         else
         {
