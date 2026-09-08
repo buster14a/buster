@@ -235,6 +235,55 @@ int ssa_dynamic_fallback(int n)
     return sum;
 }
 
+int ssa_entry_definition(int n, int condition)
+{
+    int seed = n + 5;
+    int sum = 0;
+    while (n-- > 0)
+    {
+        if (condition) sum += seed;
+        else sum -= seed;
+    }
+    return sum;
+}
+
+int ssa_entry_reassigned(int n)
+{
+    int value = 7;
+    int sum = 0;
+    while (n-- > 0)
+    {
+        sum += value;
+        value += 2;
+    }
+    return sum;
+}
+
+int ssa_entry_escaped(int n)
+{
+    int value = n + 5;
+    int sum = 0;
+    for (int i = 0; i < 3; ++i) sum += value;
+    ssa_mutate(&value);
+    return sum + value;
+}
+
+int ssa_entry_irreducible(int n, int condition)
+{
+    int seed = n + 3;
+    int sum = 0;
+    if (condition) goto second;
+first:
+    sum += seed;
+    if (--n > 0) goto second;
+    goto done;
+second:
+    sum += seed * 2;
+    if (--n > 0) goto first;
+done:
+    return sum;
+}
+
 int main(void)
 {
     int a = 7, b = 9;
@@ -260,5 +309,9 @@ int main(void)
     else if (ssa_array_parameter(values, 11) != 44) result = 18;
     else if (ssa_bitfields(7) != 180) result = 19;
     else if (ssa_dynamic_fallback(9) != 45) result = 20;
+    else if (ssa_entry_definition(5, 1) != 50 || ssa_entry_definition(5, 0) != -50) result = 21;
+    else if (ssa_entry_reassigned(4) != 40 || ssa_entry_reassigned(5) != 55) result = 22;
+    else if (ssa_entry_escaped(4) != 55 || ssa_entry_escaped(0) != 31) result = 23;
+    else if (ssa_entry_irreducible(5, 0) != 56 || ssa_entry_irreducible(5, 1) != 64) result = 24;
     return result;
 }

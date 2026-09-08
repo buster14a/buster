@@ -4574,6 +4574,7 @@ struct CIrSsaLocal
     u32 last_event;
     bool temporary;
     bool initialized_entry;
+    bool single_entry_definition;
 };
 
 typedef struct CIrSsaEvent CIrSsaEvent;
@@ -4644,14 +4645,20 @@ BUSTER_C_INTERNAL u32 c_ir_ssa_event(CIntegerIrBuilder* builder, u32 local, u32 
     }
     u32 index = ssa->event_count++;
     u32 previous = ssa->locals[local].last_event;
-    if (opcode == IR_OPCODE_STORE && previous != UINT32_MAX && ssa->events[previous].opcode == IR_OPCODE_LOCAL &&
-        builder->current_block.value == builder->function->entry.value)
+    if (opcode == IR_OPCODE_STORE)
     {
-        // The first access initializes this owner before any entry edge.
-        // Every reachable read is initialized; stores' RHS dependencies are
-        // checked separately so copying an uninitialized other local is not
-        // mistaken for a defined value.
-        ssa->locals[local].initialized_entry = true;
+        bool initializes_entry = previous != UINT32_MAX && ssa->events[previous].opcode == IR_OPCODE_LOCAL &&
+                                 builder->current_block.value == builder->function->entry.value;
+        if (initializes_entry)
+        {
+            // The first access initializes this owner before any entry edge.
+            // Every reachable read is initialized; stores' RHS dependencies are
+            // checked separately so copying an uninitialized other local is not
+            // mistaken for a defined value.
+            ssa->locals[local].initialized_entry = true;
+        }
+        // A later write permanently revokes the single-definition shortcut.
+        ssa->locals[local].single_entry_definition = initializes_entry;
     }
     ssa->events[index] = (CIrSsaEvent){
         .source = source, .after = builder->last_instruction, .block = builder->current_block,
@@ -4702,29 +4709,35 @@ BUSTER_C_INTERNAL u32 c_ir_ssa_hash(u32 block_plus_one, u32 local, u32 mask)
     return (u32)((key * 11400714819323198485ULL) >> 32) & mask;
 }
 
+BUSTER_C_INTERNAL void c_ir_ssa_grow_slots(CIntegerIrBuilder* builder)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    u32 capacity = ssa->slot_capacity ? ssa->slot_capacity * 2 : 64;
+    CIrSsaSlot* slots = arena_allocate(builder->scratch_arena, CIrSsaSlot, capacity);
+    memset(slots, 0, sizeof(*slots) * capacity);
+    for (u32 index = 0; index < ssa->slot_capacity; index += 1)
+    {
+        CIrSsaSlot entry = ssa->slots[index];
+        if (entry.block_plus_one)
+        {
+            u32 slot = c_ir_ssa_hash(entry.block_plus_one, entry.local, capacity - 1);
+            while (slots[slot].block_plus_one)
+            {
+                slot = (slot + 1) & (capacity - 1);
+            }
+            slots[slot] = entry;
+        }
+    }
+    ssa->slots = slots;
+    ssa->slot_capacity = capacity;
+}
+
 BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 block, u32 local)
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
-    if ((u64)(ssa->slot_count + 1) * 2 >= ssa->slot_capacity)
+    if (!ssa->slot_capacity)
     {
-        u32 capacity = ssa->slot_capacity ? ssa->slot_capacity * 2 : 64;
-        CIrSsaSlot* slots = arena_allocate(builder->scratch_arena, CIrSsaSlot, capacity);
-        memset(slots, 0, sizeof(*slots) * capacity);
-        for (u32 index = 0; index < ssa->slot_capacity; index += 1)
-        {
-            CIrSsaSlot entry = ssa->slots[index];
-            if (entry.block_plus_one)
-            {
-                u32 slot = c_ir_ssa_hash(entry.block_plus_one, entry.local, capacity - 1);
-                while (slots[slot].block_plus_one)
-                {
-                    slot = (slot + 1) & (capacity - 1);
-                }
-                slots[slot] = entry;
-            }
-        }
-        ssa->slots = slots;
-        ssa->slot_capacity = capacity;
+        c_ir_ssa_grow_slots(builder);
     }
     u32 slot = c_ir_ssa_hash(block + 1, local, ssa->slot_capacity - 1);
     while (ssa->slots[slot].block_plus_one &&
@@ -4734,15 +4747,27 @@ BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 bloc
     }
     if (!ssa->slots[slot].block_plus_one)
     {
+        // Only a new key needs capacity. Reads of existing values must not
+        // rehash a half-full table before finding their unchanged entry.
+        if ((u64)(ssa->slot_count + 1) * 2 >= ssa->slot_capacity)
+        {
+            c_ir_ssa_grow_slots(builder);
+            slot = c_ir_ssa_hash(block + 1, local, ssa->slot_capacity - 1);
+            while (ssa->slots[slot].block_plus_one)
+            {
+                slot = (slot + 1) & (ssa->slot_capacity - 1);
+            }
+        }
         ssa->slots[slot] = (CIrSsaSlot){.block_plus_one = block + 1, .local = local, .value = IR_VALUE_ID_INVALID};
         ssa->slot_count += 1;
     }
     return ssa->slots + slot;
 }
 
-BUSTER_C_INTERNAL IrValueId c_ir_ssa_parameter(CIntegerIrBuilder* builder, u32 block, u32 local_index)
+// Parameter publication does not grow the sparse current-value table, so the
+// caller's resolved slot remains valid across the value and parameter allocations.
+BUSTER_C_INTERNAL IrValueId c_ir_ssa_parameter(CIntegerIrBuilder* builder, u32 block, u32 local_index, CIrSsaSlot* slot)
 {
-    CIrSsaSlot* slot = c_ir_ssa_slot(builder, block, local_index);
     if (slot->value.value == IR_ID_UNDERLYING_INVALID)
     {
         CIrSsaLocal* local = builder->direct_ssa->locals + local_index;
@@ -4785,7 +4810,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 blo
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
     u32 path_count = 0;
-    IrValueId value = c_ir_ssa_slot(builder, block, local)->value;
+    CIrSsaSlot* slot = c_ir_ssa_slot(builder, block, local);
+    IrValueId value = slot->value;
     if (value.value == IR_ID_UNDERLYING_INVALID && ssa->predecessor_offsets)
     {
         ssa->read_stamp += 1;
@@ -4801,12 +4827,13 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 blo
             ssa->read_stamps[block] = ssa->read_stamp;
             ssa->read_blocks[path_count++] = block;
             block = ssa->predecessors[ssa->predecessor_offsets[block]];
-            value = c_ir_ssa_slot(builder, block, local)->value;
+            slot = c_ir_ssa_slot(builder, block, local);
+            value = slot->value;
         }
     }
     if (value.value == IR_ID_UNDERLYING_INVALID)
     {
-        value = c_ir_ssa_parameter(builder, block, local);
+        value = c_ir_ssa_parameter(builder, block, local, slot);
     }
     for (u32 index = 0; index < path_count; index += 1)
     {
@@ -5003,69 +5030,80 @@ BUSTER_C_INTERNAL void c_ir_ssa_classify_initialization(CIntegerIrBuilder* build
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
     IrFunction* function = builder->function;
-    u32 count = function->value_count;
-    u32* work = arena_allocate(builder->scratch_arena, u32, count);
-    u8* seen = arena_allocate(builder->scratch_arena, u8, count);
-    memset(seen, 0, count);
-    u32 work_count = 0;
-    for (u32 local = 0; local < builder->direct_ssa->local_count; local += 1)
+    bool needs_initialization = false;
+    for (u32 local = 0; local < ssa->local_count; local += 1)
     {
         if (memory[local])
         {
             c_ir_ssa_memory_roots(ssa, local, replacements);
         }
-    }
-    // Store operands are also roots: an elided copy can be the only use of
-    // an uninitialized read, including one feeding an entry-initialized owner.
-    // This lets the graph walk stop at that owner's provisional parameters
-    // without revisiting its otherwise identical initialization proof at every
-    // join. It is also conservative for dead, undefined source reads.
-    for (u32 index = 0; index < ssa->event_count; index += 1)
-    {
-        CIrSsaEvent* event = ssa->events + index;
-        if (event->opcode == IR_OPCODE_STORE)
+        else if (!ssa->locals[local].initialized_entry)
         {
-            c_ir_ssa_enqueue(event->value.value, work, seen, &work_count);
+            needs_initialization = true;
         }
     }
-    for (u32 index = 0; index < function->instruction_count; index += 1)
+    // Entry initialization already proves all reachable reads of these owners.
+    // Restored loads still become independent definitions above; only a retained
+    // owner without that proof needs the store/instruction dependency walk.
+    if (needs_initialization)
     {
-        IrInstruction* row = function->instructions + index;
-        for (u32 operand = 0; operand < row->operand_count; operand += 1)
+        u32 count = function->value_count;
+        u32* work = arena_allocate(builder->scratch_arena, u32, count);
+        u8* seen = arena_allocate(builder->scratch_arena, u8, count);
+        memset(seen, 0, count);
+        u32 work_count = 0;
+        // Store operands are also roots: an elided copy can be the only use of
+        // an uninitialized read, including one feeding an entry-initialized owner.
+        // This lets the graph walk stop at that owner's provisional parameters
+        // without revisiting its otherwise identical initialization proof at every
+        // join. It is also conservative for dead, undefined source reads.
+        for (u32 index = 0; index < ssa->event_count; index += 1)
         {
-            c_ir_ssa_enqueue(row->operands[operand].value, work, seen, &work_count);
-        }
-    }
-    for (u32 index = 0; index < work_count; index += 1)
-    {
-        u32 value = work[index];
-        if (replacements[value] != value)
-        {
-            c_ir_ssa_enqueue(replacements[value], work, seen, &work_count);
-        }
-        else
-        {
-            CIrSsaParameter* pending = parameter_by_value[value];
-            if (pending && !memory[pending->local] && !ssa->locals[pending->local].initialized_entry)
+            CIrSsaEvent* event = ssa->events + index;
+            if (event->opcode == IR_OPCODE_STORE)
             {
-                IrBlockParameter* parameter = pending->parameter;
-                if (pending->forwarded.value != IR_ID_UNDERLYING_INVALID)
+                c_ir_ssa_enqueue(event->value.value, work, seen, &work_count);
+            }
+        }
+        for (u32 index = 0; index < function->instruction_count; index += 1)
+        {
+            IrInstruction* row = function->instructions + index;
+            for (u32 operand = 0; operand < row->operand_count; operand += 1)
+            {
+                c_ir_ssa_enqueue(row->operands[operand].value, work, seen, &work_count);
+            }
+        }
+        for (u32 index = 0; index < work_count; index += 1)
+        {
+            u32 value = work[index];
+            if (replacements[value] != value)
+            {
+                c_ir_ssa_enqueue(replacements[value], work, seen, &work_count);
+            }
+            else
+            {
+                CIrSsaParameter* pending = parameter_by_value[value];
+                if (pending && !memory[pending->local] && !ssa->locals[pending->local].initialized_entry)
                 {
-                    c_ir_ssa_enqueue(pending->forwarded.value, work, seen, &work_count);
-                }
-                else if (!parameter->incoming_count && ssa->reachable[pending->block])
-                {
-                    // No reaching definition on at least one CFG path. Keep
-                    // the source's memory semantics; never manufacture zero.
-                    // Its newly restored stores may expose more such reads.
-                    memory[pending->local] = 1;
-                    c_ir_ssa_memory_roots(ssa, pending->local, replacements);
-                }
-                else
-                {
-                    for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+                    IrBlockParameter* parameter = pending->parameter;
+                    if (pending->forwarded.value != IR_ID_UNDERLYING_INVALID)
                     {
-                        c_ir_ssa_enqueue(incoming->value.value, work, seen, &work_count);
+                        c_ir_ssa_enqueue(pending->forwarded.value, work, seen, &work_count);
+                    }
+                    else if (!parameter->incoming_count && ssa->reachable[pending->block])
+                    {
+                        // No reaching definition on at least one CFG path. Keep
+                        // the source's memory semantics; never manufacture zero.
+                        // Its newly restored stores may expose more such reads.
+                        memory[pending->local] = 1;
+                        c_ir_ssa_memory_roots(ssa, pending->local, replacements);
+                    }
+                    else
+                    {
+                        for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+                        {
+                            c_ir_ssa_enqueue(incoming->value.value, work, seen, &work_count);
+                        }
                     }
                 }
             }
@@ -5256,6 +5294,16 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
             IrBlockParameter* parameter = pending->parameter;
             if (memory[pending->local])
             {
+                continue;
+            }
+            CIrSsaLocal* local = ssa->locals + pending->local;
+            if (local->single_entry_definition && ssa->reachable[pending->block])
+            {
+                // With all writes known, one entry definition dominates every
+                // reachable read. Skip predecessor discovery for this owner;
+                // initialization still checks its store RHS before substitution.
+                u32 initializer = ssa->events[local->first_event].next_local;
+                pending->forwarded = ssa->events[initializer].value;
                 continue;
             }
             if (offsets[pending->block + 1] - offsets[pending->block] == 1)

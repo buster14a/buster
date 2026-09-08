@@ -49,6 +49,17 @@ parameters and unused parameter cycles are removed. Disconnected empty label
 blocks have no outgoing edge. Publication includes **every** predecessor edge,
 including parameter-free destinations; selectors must never see a partial CFG.
 
+Existing current-value queries do not grow the sparse table. A missing-key
+insertion owns capacity growth, and parameter creation reuses the slot its
+caller already resolved. Once the journal contains every write, an owner with
+exactly one initializing entry store forwards reachable pending reads straight
+to that definition. A later store revokes this shortcut, and escaped owners
+still follow memory recovery. Every store RHS remains an initialization root
+before alias substitution, including a single entry definition that copies an
+uninitialized owner; disconnected reads keep the ordinary predecessor path.
+The dependency walk is unnecessary when every retained owner already has entry
+initialization; restored loads still become independent definitions first.
+
 Temporary places and read aliases preserve C lvalue/qualifier checks without
 emitting `LOCAL`, `LOAD` or `STORE` rows for promoted owners. Finalization
 resolves aliases and compacts values/operand slices. Debug-local names, types,
