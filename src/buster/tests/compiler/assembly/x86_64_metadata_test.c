@@ -2311,6 +2311,164 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_source_att_memory_skeleton(UnitTes
     return classic && vpslld && vaddps && egpr && segment;
 }
 
+// Independent opcode/tuple facts, checked against Clang 17 and GNU as 2.44.
+// No production tuple helper is used to compute the expected displacement.
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestArguments* arguments)
+{
+    typedef struct X86BroadcastCase X86BroadcastCase;
+    struct X86BroadcastCase
+    {
+        String8 mnemonic;
+        u32 forms[3];
+        u8 prefix[2];
+        u8 opcode;
+        u8 element_bytes;
+        u8 memory_divisor;
+    };
+    X86BroadcastCase const cases[] = {
+        {S8("vaddps"), {5070, 5072, 6940}, {0xf1, 0x74}, 0x58, 4, 1},
+        {S8("vaddpd"), {5066, 5068, 6937}, {0xf1, 0xf5}, 0x58, 8, 1},
+        {S8("vpaddd"), {5742, 5744, 7516}, {0xf1, 0x75}, 0xfe, 4, 1},
+        {S8("vfmadd132ps"), {5352, 5354, 7186}, {0xf2, 0x75}, 0x98, 4, 1},
+        {S8("vcvtps2pd"), {5196, 5198, 7008}, {0xf1, 0x7c}, 0x5a, 4, 2},
+    };
+    String8 const registers[] = {S8("xmm"), S8("ymm"), S8("zmm")};
+    u8 const classes[] = {BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM,
+                         BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM};
+    String8 const addresses[] = {S8("(%rax)"), S8("(%rbp)"), S8("(%rax,%rcx,4)")};
+    String8 const features[] = {S8("avx512f"), S8("avx512vl")};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX, .cpu_features_explicit = true};
+    target.cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+        TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX512F,
+        TARGET_CPU_FEATURE_X86_AVX512VL}, 4);
+    bool valid = true;
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        X86BroadcastCase test_case = cases[case_index];
+        for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(registers); size_index += 1)
+        {
+            u16 vector_bits = (u16)(128u << size_index);
+            u16 memory_bits = vector_bits / test_case.memory_divisor;
+            BusterX86MetadataFormKey key = {0};
+            bool key_ready = buster_x86_metadata_form_key(test_case.forms[size_index], &key);
+            valid &= key_ready;
+            for (u32 broadcast = 0; broadcast < 2; broadcast += 1)
+            {
+                s64 scale = broadcast ? test_case.element_bytes : memory_bits / 8;
+                s64 vector_bytes = vector_bits / 8;
+                s64 displacements[] = {0, 1, -1, scale, -scale, vector_bytes, -vector_bytes,
+                                       127 * scale, -128 * scale, 128 * scale, -129 * scale,
+                                       127 * scale + 1, -128 * scale - 1, 127 * vector_bytes,
+                                       -128 * vector_bytes, 8192, -8192, 64};
+                BusterX86MetadataPhysicalAttributes attributes = {
+                    .decorator_flags = BUSTER_X86_METADATA_DECORATOR_MASK,
+                    .has_mask_register = true, .mask_register = 1,
+                };
+                if (broadcast)
+                {
+                    attributes.decorator_flags |= BUSTER_X86_METADATA_DECORATOR_BROADCAST;
+                    attributes.broadcast_elements = (u8)(memory_bits / (test_case.element_bytes * 8));
+                }
+                for (u32 displacement_index = 0; displacement_index < BUSTER_ARRAY_LENGTH(displacements); displacement_index += 1)
+                {
+                    s64 displacement = displacements[displacement_index];
+                    for (u32 address_index = 0; address_index < BUSTER_ARRAY_LENGTH(addresses); address_index += 1)
+                    {
+                        u16 base = address_index == 1 ? 5 : 0;
+                        u16 width = (u16)(test_case.element_bytes * 8);
+                        BusterX86MetadataPhysicalOperand memory = x86_64_metadata_test_physical_mem_base(base, width, displacement);
+                        if (!broadcast && memory_bits > 64) memory.memory.source_width = memory_bits;
+                        if (address_index == 2)
+                        {
+                            memory.memory.has_index = true;
+                            memory.memory.index = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 64).reg;
+                            memory.memory.scale = 4;
+                        }
+                        BusterX86MetadataPhysicalOperand operands[3] = {
+                            x86_64_metadata_test_physical_reg(classes[size_index], 0, vector_bits),
+                            x86_64_metadata_test_physical_reg(classes[size_index], 1, vector_bits), memory,
+                        };
+                        u32 operand_count = 3;
+                        if (test_case.memory_divisor == 2)
+                        {
+                            operands[1] = memory;
+                            operand_count = 2;
+                        }
+                        u8 expected[16] = {0x62, test_case.prefix[0], test_case.prefix[1],
+                                           (u8)(0x09 | (size_index << 5) | (broadcast << 4)), test_case.opcode};
+                        u32 expected_count = 6;
+                        bool disp8 = displacement % scale == 0 && displacement / scale >= -128 && displacement / scale <= 127;
+                        u8 mod = displacement == 0 && base != 5 ? 0 : disp8 ? 1 : 2;
+                        expected[5] = (u8)((mod << 6) | (address_index == 2 ? 4 : base));
+                        if (address_index == 2) expected[expected_count++] = 0x88;
+                        if (mod == 1)
+                        {
+                            expected[expected_count++] = (u8)(displacement / scale);
+                        }
+                        else if (mod == 2)
+                        {
+                            for (u32 byte_index = 0; byte_index < 4; byte_index += 1)
+                                expected[expected_count++] = (u8)((u32)displacement >> (byte_index * 8));
+                        }
+                        String8 suffix = broadcast ? string_format(arguments->arena, S8("{{1to{u32}}}"),
+                                                                                    (u32)attributes.broadcast_elements) : S8("");
+                        String8 source = test_case.memory_divisor == 2
+                            ? string_format(arguments->arena, S8("{S8} {s64}{S8}{S8}, %{S8}0{{%k1}}\n"), test_case.mnemonic,
+                                            displacement, addresses[address_index], suffix, registers[size_index])
+                            : string_format(arguments->arena, S8("{S8} {s64}{S8}{S8}, %{S8}1, %{S8}0{{%k1}}\n"), test_case.mnemonic,
+                                            displacement, addresses[address_index], suffix, registers[size_index], registers[size_index]);
+                        bool direct_valid = x86_64_metadata_test_emit_exact(test_case.mnemonic, test_case.forms[size_index],
+                            operands, operand_count, attributes, features, BUSTER_ARRAY_LENGTH(features), expected, expected_count);
+                        u8 exact_bytes[16] = {0};
+                        BusterX86MetadataEmitResult exact = x86_64_metadata_test_emit_exact_query(key, operands, operand_count,
+                            attributes, features, BUSTER_ARRAY_LENGTH(features), exact_bytes, sizeof(exact_bytes), 0, 0);
+                        bool exact_valid = key_ready && exact.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && exact.relocation_count == 0 &&
+                                           x86_64_metadata_test_bytes_equal(exact_bytes, exact.byte_count, expected, expected_count);
+                        if (broadcast && displacement_index == 0 && address_index == 0)
+                        {
+                            BusterX86MetadataPhysicalAttributes wrong_count = attributes;
+                            wrong_count.broadcast_elements *= 2;
+                            u8 untouched[16];
+                            memset(untouched, 0xa5, sizeof(untouched));
+                            BusterX86MetadataEmitResult rejected = x86_64_metadata_test_emit_exact_query(key, operands, operand_count,
+                                wrong_count, features, BUSTER_ARRAY_LENGTH(features), untouched, sizeof(untouched), 0, 0);
+                            valid &= rejected.status == BUSTER_X86_METADATA_ENCODE_DECORATOR && rejected.byte_count == 0 && untouched[0] == 0xa5;
+                        }
+                        bool check_source = test_case.memory_divisor == 1 || broadcast;
+                        AssemblySyntax syntax = ASSEMBLY_SYNTAX_ATT;
+                        if (test_case.memory_divisor == 2 && broadcast)
+                        {
+                            // The existing AT&T conversion adapter infers the destination's
+                            // scalar width. Exercise this tuple through the supported explicit
+                            // Intel m32 spelling; full tuples also cover unqualified AT&T input.
+                            String8 const intel_addresses[] = {S8("rax"), S8("rbp"), S8("rax+rcx*4")};
+                            source = string_format(arguments->arena, S8("{S8} {S8}0{{k1}}, dword ptr [{S8}{S8}{s64}]{S8}\n"),
+                                                   test_case.mnemonic, registers[size_index], intel_addresses[address_index],
+                                                   displacement < 0 ? S8("-") : S8("+"), displacement < 0 ? -displacement : displacement, suffix);
+                            syntax = ASSEMBLY_SYNTAX_INTEL;
+                        }
+                        bool source_valid = true;
+                        if (check_source)
+                        {
+                            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source,
+                                (AssemblyEncodeOptions){.target = target, .syntax = syntax});
+                            source_valid = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                                x86_64_metadata_test_bytes_equal(encoded.bytes.pointer, (u32)encoded.bytes.length, expected, expected_count);
+                        }
+                        if (!direct_valid || !exact_valid || !source_valid)
+                        {
+                            arguments->show(arguments, S8("EVEX_DISP form={u32} direct={u32} exact={u32} source={u32} status={u32}: {S8}"),
+                                            key.form_id, direct_valid, exact_valid, source_valid, exact.status, source);
+                        }
+                        valid &= direct_valid && exact_valid && source_valid;
+                    }
+                }
+            }
+        }
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_mask_is_decorator(u32 form_id, u32 operand_index)
 {
     BusterX86MetadataForm form = {0};
@@ -4257,6 +4415,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     result.test_count += rex2_regressions.test_count;
     BUSTER_TEST(arguments, x86_64_metadata_test_source_relative_absolute_skeleton(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_source_att_memory_skeleton(arguments));
+    BUSTER_TEST(arguments, x86_64_metadata_test_broadcast_displacements(arguments));
     BUSTER_TEST(arguments, x86_64_metadata_test_register_only_census(arguments));
 
     {

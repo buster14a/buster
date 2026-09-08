@@ -56,11 +56,13 @@ keep current.
 - [`2026-09-09T000655Z`](docs/performance-audits/2026-09-09T000655Z.md) — Deterministic merged-section bytes: isolated initialization cost (#303)
 - [`2026-09-08T235007Z`](docs/performance-audits/2026-09-08T235007Z.md) — Correct local sanitizer provenance for the frontend SSA audit (#34)
 - [`2026-09-08T230935Z`](docs/performance-audits/2026-09-08T230935Z.md) — Frontend SSA: reuse current values and proven entry definitions (#34)
+- [`2026-09-08T234002Z`](docs/performance-audits/2026-09-08T234002Z.md) — Recover APX, REX2 and EVEX broadcast encoding fixes (#190, #191, #192)
 - [`2026-09-08T143633Z`](docs/performance-audits/2026-09-08T143633Z.md) — Frontend SSA: per-owner escape recovery, expression temporaries and complete CFG construction
 - [`2026-09-08T043530Z`](docs/performance-audits/2026-09-08T043530Z.md) — Direct frontend SSA: bounded construction, differential validation and compile-time measurements
 - [`2026-09-08T022122Z`](docs/performance-audits/2026-09-08T022122Z.md) — forwarding runtime stubs: metadata-derived recipes and fail-closed publication (#267)
 
 - [`2026-09-07T233720Z`](docs/performance-audits/2026-09-07T233720Z.md) — direct old/new ABI service timing on the same scalar and aggregate query traces (#39)
+- [`2026-09-07T233029Z`](docs/performance-audits/2026-09-07T233029Z.md) — Fix EVEX broadcast displacement scaling and half-tuple counts (#191)
 - [`2026-09-07T231507Z`](docs/performance-audits/2026-09-07T231507Z.md) — active-target ABI contexts remove mutable type caches (#39)
 - [`2026-09-07T231146Z`](docs/performance-audits/2026-09-07T231146Z.md) — proven disjoint stack-slot scheduling and conservative unknown-memory ordering (#41)
 - [`2026-09-07T225617Z`](docs/performance-audits/2026-09-07T225617Z.md) — publish scheduler chain membership from immutable machine metadata (#45)
