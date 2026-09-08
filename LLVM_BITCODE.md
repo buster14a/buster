@@ -26,6 +26,8 @@ silently ignored.
 ## Targets
 
 The module records the target triple and data layout selected by the driver.
+macOS metadata uses the `macosx` spelling. Target parsing accepts both `macos`
+and `macosx`, including deployment versions, so ABI planning can read it back.
 The emitter currently provides metadata for x86-64, AArch64, Wasm64, and
 eBPF targets across the operating-system combinations supported by `Target`.
 Wasm64 bitcode uses 64-bit pointers and is distinct from the direct core

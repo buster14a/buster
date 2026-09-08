@@ -761,6 +761,23 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
             OPERATING_SYSTEM_MACOS,
         },
         {
+            S8("x86_64-apple-macosx"),
+            CPU_ARCH_X86_64,
+            OPERATING_SYSTEM_MACOS,
+        },
+        {
+            S8("arm64-apple-macosx14.5.1"),
+            CPU_ARCH_AARCH64,
+            OPERATING_SYSTEM_MACOS,
+            14, 5, 1,
+        },
+        {
+            S8("x86_64-apple-macos14.5.1"),
+            CPU_ARCH_X86_64,
+            OPERATING_SYSTEM_MACOS,
+            14, 5, 1,
+        },
+        {
             S8("arm64-apple-ios17.0-simulator"),
             CPU_ARCH_AARCH64,
             OPERATING_SYSTEM_IOS,
@@ -815,6 +832,9 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         String8 invalid_component;
         TargetParseError error;
     } rejected_component_cases[] = {
+        {S8("x86_64-apple-macosxextra"), S8("macosxextra"), TARGET_PARSE_ERROR_OPERATING_SYSTEM},
+        {S8("x86_64-apple-macosx14."), S8("macosx14."), TARGET_PARSE_ERROR_OPERATING_SYSTEM},
+        {S8("x86_64-apple-macosx14.5.1.2"), S8("macosx14.5.1.2"), TARGET_PARSE_ERROR_OPERATING_SYSTEM},
         {S8("x86_64-unknown-linux-gnu-znver4"), S8("znver4"), TARGET_PARSE_ERROR_CPU_MODEL},
         {S8("x86_64-linux-gnu-znver4"), S8("znver4"), TARGET_PARSE_ERROR_CPU_MODEL},
         {S8("x86_64-linux-baseline"), S8("baseline"), TARGET_PARSE_ERROR_CPU_MODEL},

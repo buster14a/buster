@@ -239,7 +239,10 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_integer(ByteSlice bytes, u64 expected
     u32 code_widths[3] = {2};
     u64 blocks[3] = {0};
     u32 depth = 0;
-    u32 integers = 0;
+    u64 integers[8] = {0};
+    u32 integer_count = 0;
+    u32 functions = 0;
+    u32 returns = 0;
     bool matched = false;
     while (!reader.failed && reader.bit < bytes.length * 8)
     {
@@ -250,7 +253,7 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_integer(ByteSlice bytes, u64 expected
             u64 code_width = llvm_bitcode_test_vbr(&reader, 4);
             reader.bit = (reader.bit + 31) & ~UINT64_C(31);
             u64 words = llvm_bitcode_test_bits(&reader, 32);
-            if ((block == 8 || block == 11) && depth < 2 && code_width > 0 && code_width <= 32)
+            if ((block == 8 || block == 11 || block == 12) && depth < 2 && code_width > 0 && code_width <= 32)
             {
                 depth += 1;
                 blocks[depth] = block;
@@ -274,15 +277,48 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_integer(ByteSlice bytes, u64 expected
         {
             u64 record = llvm_bitcode_test_vbr(&reader, 6);
             u64 count = llvm_bitcode_test_vbr(&reader, 6);
+            if (blocks[depth] == 8 && record == 8) // MODULE_CODE_FUNCTION
+            {
+                functions += 1;
+            }
             for (u64 index = 0; index < count && !reader.failed; index += 1)
             {
                 u64 operand = llvm_bitcode_test_vbr(&reader, 6);
                 if (blocks[depth] == 11 && record == 4 && count == 1) // CST_CODE_INTEGER
                 {
-                    u64 decoded = operand == 1 ? UINT64_C(1) << 63 : (operand & 1) ? 0 - (operand >> 1) : operand >> 1;
-                    u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
-                    matched = (decoded & mask) == (expected & mask);
-                    integers += 1;
+                    if (integer_count < BUSTER_ARRAY_LENGTH(integers))
+                    {
+                        integers[integer_count++] = operand == 1 ? UINT64_C(1) << 63 : (operand & 1) ? 0 - (operand >> 1) : operand >> 1;
+                    }
+                    else
+                    {
+                        reader.failed = true;
+                    }
+                }
+                else if (blocks[depth] == 11 && record != 1) // Only integer constants occur in this fixture.
+                {
+                    reader.failed = true;
+                }
+                else if (blocks[depth] == 12 && record == 10 && count == 1) // FUNC_CODE_INST_RET
+                {
+                    // The fixture has no parameters or value-producing function
+                    // records. Follow its relative return reference so an ABI
+                    // allocation-count constant cannot satisfy the comparison.
+                    returns += 1;
+                    if (operand > 0 && operand <= integer_count)
+                    {
+                        u64 decoded = integers[integer_count - (u32)operand];
+                        u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+                        matched = (decoded & mask) == (expected & mask);
+                    }
+                    else
+                    {
+                        reader.failed = true;
+                    }
+                }
+                else if (blocks[depth] == 12 && (record != 1 || count != 1 || operand != 1)) // DECLAREBLOCKS
+                {
+                    reader.failed = true;
                 }
             }
         }
@@ -291,7 +327,7 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_integer(ByteSlice bytes, u64 expected
             reader.failed = true;
         }
     }
-    return !reader.failed && integers == 1 && matched;
+    return !reader.failed && functions == 1 && returns == 1 && matched;
 }
 
 UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
