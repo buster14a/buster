@@ -68,3 +68,16 @@
   on their own line. Prefer function headers, declarations, statements, and
   similar constructs on one line; split them only when doing so is clearer.
   Match the surrounding file.
+
+## String boundaries
+
+String integer parsers take bounded `String8` input. Callers must check
+`IntegerParsingU64.status == INTEGER_PARSING_SUCCESS` as well as the consumed
+length; overflow consumes the complete digit prefix and saturates the value.
+Null-empty slices are valid for string copies. `string_join_arena_attempt`
+validates slice pointers, aggregate byte counts, and remaining arena capacity
+before allocation, clears its output on failure, and leaves the arena untouched.
+The output may alias an input slice. The join and duplicate convenience wrappers
+fail the process on invalid input or insufficient reserved capacity. Spelling-space
+copies skip empty spans too. String8 characters are single bytes, so joins have
+no character-size multiplication.

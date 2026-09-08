@@ -67,6 +67,29 @@ BUSTER_GLOBAL_LOCAL s128 string_test_s128(u64 low, u64 high)
         BUSTER_TEST_RAW((args), unicode_utf8.pointer[unicode_utf8.length] == 0, S8("string16_to_string8_arena did not write a terminator"));                   \
     } while (0)
 
+BUSTER_GLOBAL_LOCAL IntegerParsingU64 string_test_parse_u64(String8 string, u32 base)
+{
+    IntegerParsingU64 result;
+    switch (base)
+    {
+    case 2:
+        result = string8_parse_u64_binary(string);
+        break;
+    case 8:
+        result = string8_parse_u64_octal(string);
+        break;
+    case 10:
+        result = string8_parse_u64_decimal(string);
+        break;
+    case 16:
+        result = string8_parse_u64_hexadecimal(string);
+        break;
+    default:
+        BUSTER_UNREACHABLE();
+    }
+    return result;
+}
+
 UnitTestResult string_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -97,6 +120,115 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !string16_equal(invalid16, invalid16));
     }
 
+    // Every parser sees the same bounds and status contract, including a
+    // digit occupying the last accessible byte and empty input at the guard.
+    {
+        typedef struct StringIntegerParserCase StringIntegerParserCase;
+        struct StringIntegerParserCase
+        {
+            u32 base;
+            String8 maximum;
+            String8 overflow;
+            String8 mixed_case;
+            u64 mixed_value;
+            String8 invalid;
+        };
+        StringIntegerParserCase parsers[] = {
+            {10, S8("18446744073709551615"), S8("18446744073709551616"), S8("123"), 123, S8("a")},
+            {16, S8("ffffffffffffffff"), S8("10000000000000000"), S8("aBcD"), 43981, S8("g")},
+            {8, S8("1777777777777777777777"), S8("2000000000000000000000"), S8("123"), 83, S8("8")},
+            {2, S8("1111111111111111111111111111111111111111111111111111111111111111"),
+             S8("10000000000000000000000000000000000000000000000000000000000000000"), S8("101"), 5, S8("2")},
+        };
+        u64 page_size = os_get_page_size();
+        // Windows requires a valid protection even for a reservation; leaving
+        // the second page uncommitted keeps it inaccessible. POSIX maps both
+        // pages without access before os_commit enables only the first one.
+        ProtectionFlags reserve_protection = {.read = BUSTER_WINDOWS, .write = BUSTER_WINDOWS};
+        MapFlags reserve_flags = {.priv = 1, .anonymous = 1, .no_reserve = 1};
+        char8* pages = (char8*)os_reserve(0, page_size * 2, reserve_protection, reserve_flags);
+        BUSTER_TEST(arguments, pages != 0);
+        bool committed = pages && os_commit(pages, page_size, (ProtectionFlags){.read = 1, .write = 1}, false);
+        BUSTER_TEST(arguments, committed);
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(parsers); i += 1)
+        {
+            StringIntegerParserCase parser = parsers[i];
+            String8 inputs[] = {
+                (String8){0}, (String8){.length = 1}, parser.invalid, S8("+1"), S8("-1"),
+                S8("0"), S8("000000000000000000000000000000000000000000000000000000000000000000001"),
+                S8("10!11"), parser.mixed_case, parser.maximum, parser.overflow,
+            };
+            u64 expected_values[] = {0, 0, 0, 0, 0, 0, 1, parser.base,
+                                     parser.mixed_value, UINT64_MAX, UINT64_MAX};
+            for (u64 j = 0; j < BUSTER_ARRAY_LENGTH(inputs); j += 1)
+            {
+                String8 input = inputs[j];
+                IntegerParsingStatus status = j < 5 ? INTEGER_PARSING_INVALID : j == 10 ? INTEGER_PARSING_OVERFLOW : INTEGER_PARSING_SUCCESS;
+                u64 length = j < 5 ? 0 : j == 7 ? 2 : input.length;
+                IntegerParsingU64 parsed = string_test_parse_u64(input, parser.base);
+                BUSTER_TEST(arguments, parsed.status == status && parsed.value == expected_values[j] && parsed.length == length);
+                if (committed && input.pointer)
+                {
+                    char8* guarded = pages + page_size - input.length;
+                    memcpy(guarded, input.pointer, input.length);
+                    parsed = string_test_parse_u64((String8){.pointer = guarded, .length = input.length}, parser.base);
+                    BUSTER_TEST(arguments, parsed.status == status && parsed.value == expected_values[j] && parsed.length == length);
+                }
+            }
+            IntegerParsingU64 bounded = string_test_parse_u64((String8){.pointer = "111", .length = 1}, parser.base);
+            BUSTER_TEST(arguments, bounded.status == INTEGER_PARSING_SUCCESS && bounded.value == 1 && bounded.length == 1);
+            if (committed)
+            {
+                IntegerParsingU64 empty_guard = string_test_parse_u64((String8){.pointer = pages + page_size}, parser.base);
+                BUSTER_TEST(arguments, empty_guard.status == INTEGER_PARSING_INVALID && empty_guard.length == 0);
+                // Overflow still consumes the complete digit prefix and stops
+                // before a tail instead of returning a plausible wrapped value.
+                memset(pages + page_size - 100, '1', 99);
+                pages[page_size - 1] = '!';
+                IntegerParsingU64 long_overflow = string_test_parse_u64((String8){.pointer = pages + page_size - 100, .length = 100}, parser.base);
+                BUSTER_TEST(arguments, long_overflow.status == INTEGER_PARSING_OVERFLOW &&
+                                       long_overflow.value == UINT64_MAX && long_overflow.length == 99);
+            }
+        }
+        if (pages)
+        {
+            BUSTER_TEST(arguments, os_unreserve(pages, page_size * 2));
+        }
+    }
+
+    // Synthetic lengths must fail before touching their deliberately tiny
+    // backing storage, and failed validation must leave the arena untouched.
+    {
+        String8 alias = S8("same slice");
+        BUSTER_TEST(arguments, string_join_arena_attempt(arena, (SliceString8){.pointer = &alias, .length = 1}, true, &alias));
+        BUSTER_STRING_TEST(arguments, alias, S8("same slice"));
+        BUSTER_TEST(arguments, alias.pointer[alias.length] == 0);
+        alias = (String8){.pointer = "x", .length = UINT64_MAX};
+        u64 alias_before = arena->position;
+        BUSTER_TEST(arguments, !string_join_arena_attempt(arena, (SliceString8){.pointer = &alias, .length = 1}, true, &alias));
+        BUSTER_TEST(arguments, !alias.pointer && !alias.length && arena->position == alias_before);
+        String8 overflow[] = {{.pointer = "x", .length = UINT64_MAX}, S8("x")};
+        String8 terminator[] = {{.pointer = "x", .length = UINT64_MAX}};
+        String8 malformed[] = {S8("prefix"), {.length = 1}};
+        String8 capacity[] = {{.pointer = "x", .length = arena->reserved_size - arena->position + 1}};
+        SliceString8 invalid[] = {
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(overflow),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(terminator),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(malformed),
+            {.length = 1},
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(terminator),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(capacity),
+        };
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(invalid); i += 1)
+        {
+            u64 before = arena->position;
+            String8 output = S8("old output");
+            bool joined = string_join_arena_attempt(arena, invalid[i], i == 1, &output);
+            BUSTER_TEST(arguments, !joined && !output.pointer && !output.length);
+            BUSTER_TEST(arguments, arena->position == before);
+        }
+    }
+
     // Null-empty strings are valid slices, not valid memcpy arguments. Both
     // termination policies and mixed joins must avoid zero-count null copies.
     for (u32 terminated = 0; terminated < 2; terminated += 1)
@@ -118,12 +250,28 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !terminated || (joined.pointer && joined.pointer[0] == 0));
     }
 
-    // The formatter deliberately terminates the process for malformed input.
+    // Fatal string wrappers deliberately terminate for malformed input.
     // A child-mode hook lets the parent test that behavior without terminating
     // the main test process.
     String8 failure_mode = os_get_environment_variable(S8("BUSTER_STRING_FORMAT_FAILURE"));
     if (failure_mode.length)
     {
+        if (string_equal(failure_mode, S8("string_join_fail_overflow")))
+        {
+            String8 parts[] = {{.pointer = "x", .length = UINT64_MAX}, S8("x")};
+            string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+            os_exit(0);
+        }
+        if (string_equal(failure_mode, S8("string_duplicate_fail_null")))
+        {
+            string_duplicate_arena(arena, (String8){.length = 1}, true);
+            os_exit(0);
+        }
+        if (string_equal(failure_mode, S8("string_format_fail_width_overflow")))
+        {
+            string_format(arena, S8("{u8:width=[0,18446744073709551617]}"), (u8)1);
+            os_exit(0);
+        }
         if (string_equal(failure_mode, S8("string_format_fail_brace")))
         {
             string_format(arena, S8("{"));
@@ -249,6 +397,9 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
                 S8("string_format_fail_brace"),
                 S8("string_format_fail_type"),
                 S8("string_format_fail_modifier"),
+                S8("string_format_fail_width_overflow"),
+                S8("string_join_fail_overflow"),
+                S8("string_duplicate_fail_null"),
             };
             String8 executable = program_state->input.arguments.pointer[0];
             for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(failure_modes); mode_index += 1)

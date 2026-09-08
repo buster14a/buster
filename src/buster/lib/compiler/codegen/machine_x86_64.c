@@ -298,6 +298,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_description = 
     // only through vector virtual registers, which the selector produces
     // only under the AVX512F gate — the same gate that makes ZMM16-31
     // architectural.
+    .vector_register_mask = 0xffffffffull << MACHINE_X64_ZMM0,
     .vector_allocatable_mask = 0xffffffffull << MACHINE_X64_ZMM0,
     .vector_copy_opcode = MACHINE_X64_VMOV_RR,
     .vector_slot_scratch = {MACHINE_X64_ZMM0, MACHINE_X64_ZMM1, MACHINE_X64_ZMM2, MACHINE_X64_ZMM3},
@@ -343,6 +344,7 @@ BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_windows_descri
     .float_bridge_register = MACHINE_X64_RAX,
     .quality_pin_registers = {MACHINE_X64_R15, MACHINE_X64_R14, MACHINE_X64_R13, MACHINE_X64_R12, MACHINE_X64_RDI, MACHINE_X64_RSI, MACHINE_X64_RBX},
     .quality_pin_register_count = 7,
+    .vector_register_mask = 0xffffffffull << MACHINE_X64_ZMM0,
     .vector_allocatable_mask = (0x3full << MACHINE_X64_ZMM0) | (0xffffull << MACHINE_X64_ZMM16),
     .vector_copy_opcode = MACHINE_X64_VMOV_RR,
     .saves_precede_frame_pointer = 1,
@@ -5063,6 +5065,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         return result;
     }
+    result.signature_rejected = true;
     if (function_type->is_variadic)
     {
         // The machine selector models the System V register sequence.  A
@@ -5102,6 +5105,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         machine_x64_place_argument(signature_parameter_shapes + parameter_index, windows_abi, &signature_integer_count, &signature_float_count,
                                    &signature_stack_count, signature_parameter_placements + parameter_index);
     }
+    result.signature_rejected = false;
     if (!module)
     {
         // The unvalidated entry point carries no module context; one
@@ -10649,20 +10653,23 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     return true;
 }
 
-// A fixed instruction sequence copied in verbatim. The only caller is the
-// general-dynamic thread-local pair, whose prefixes are part of the sequence a
-// linker matches on rather than an encoding the metadata tables would choose;
-// everything else goes through the encoder so its form stays the audited one.
-BUSTER_GLOBAL_LOCAL bool machine_x64_emit_literal_bytes(MachineX64Encoder* encoder, u8 const* literal, u32 byte_count)
+// TLS is an ABI recipe in the metadata authority, not a literal-byte escape.
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_tls_general_dynamic(MachineX64Encoder* encoder)
 {
-    if (encoder->count > encoder->capacity || byte_count > encoder->capacity - encoder->count)
+    bool result = false;
+    if (encoder->count <= encoder->capacity && BUSTER_X86_METADATA_TLS_GD_SIZE <= encoder->capacity - encoder->count)
+    {
+        result = buster_x86_metadata_emit_tls_general_dynamic(encoder->bytes + encoder->count, BUSTER_X86_METADATA_TLS_GD_SIZE);
+    }
+    if (result)
+    {
+        encoder->count += BUSTER_X86_METADATA_TLS_GD_SIZE;
+    }
+    else
     {
         encoder->overflow = true;
-        return false;
     }
-    memcpy(encoder->bytes + encoder->count, literal, byte_count);
-    encoder->count += byte_count;
-    return true;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_pointer_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 base, u32 offset, u32 chunk,
@@ -11809,28 +11816,18 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     }
                     break; case MACHINE_X64_TLS_GENERAL_DYNAMIC:
                     {
-                        // Sixteen bytes whose prefixes are the sequence rather
-                        // than an encoding choice: a linker relaxing
-                        // general-dynamic to a cheaper model matches on
-                        // exactly these bytes and overwrites all sixteen, so
-                        // they are written directly instead of through the
-                        // encoder, which would pick each instruction's
-                        // shortest form.
-                        //   66 48 8d 3d <r32>  data16 lea rdi, [rip + sym@TLSGD]
-                        //   66 66 48 e8 <r32>  data16 data16 rex.W call __tls_get_addr
-                        static u8 const general_dynamic_bytes[] = {0x66, 0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0x66, 0x66, 0x48, 0xe8, 0, 0, 0, 0};
                         u32 sequence_offset = encoder.count;
-                        (void)machine_x64_emit_literal_bytes(&encoder, general_dynamic_bytes, (u32)BUSTER_ARRAY_LENGTH(general_dynamic_bytes));
+                        (void)machine_x64_emit_tls_general_dynamic(&encoder);
                         MachineCallSite* address_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                         *address_site = (MachineCallSite){
-                            .code_offset = sequence_offset + 4,
+                            .code_offset = sequence_offset + BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET,
                             .target = instruction->payload,
                             .is_thread_local = 1,
                             .thread_local_site = MACHINE_THREAD_LOCAL_SITE_GENERAL_DYNAMIC,
                         };
                         MachineCallSite* helper_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                         *helper_site = (MachineCallSite){
-                            .code_offset = sequence_offset + 12,
+                            .code_offset = sequence_offset + BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET,
                             .target = instruction->payload,
                             .thread_local_site = MACHINE_THREAD_LOCAL_SITE_TLS_GET_ADDR,
                         };
@@ -11917,8 +11914,9 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         u32 source = operand_registers[1];
                         u32 destination = operand_registers[0];
                         (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 0, source, 128, 64, 0);
+                        // IEEE encodings of 2^63 in binary64 and binary32.
                         (void)machine_x64_emit_exact_immediate_value(&encoder, destination,
-                                from_f64 ? UINT64_C(0x43e0000000000000) : UINT64_C(0x4f000000), 0);
+                                from_f64 ? UINT64_C(0x43e0000000000000) : UINT64_C(0x5f000000), 0);
                         (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 1, destination, 128, 64, 0);
                         (void)machine_x64_emit_metadata_xmm_registers(&encoder, from_f64 ? S8("UCOMISD") : S8("UCOMISS"), 0, 1,
                                 from_f64 ? 64 : 32, 0);
