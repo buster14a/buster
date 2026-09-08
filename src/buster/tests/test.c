@@ -71,6 +71,7 @@
 #include <buster/tests/compiler/assembly/x86_64_forwarding_test.h>
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.h>
 #include <buster/tests/compiler/assembly/x86_64_tls_test.h>
+#include <buster/tests/compiler/assembly/x86_64_got_test.h>
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.h>
 #include <buster/tests/compiler/ir/ir_test.h>
 #include <buster/tests/compiler/llvm/bitcode_test.h>
@@ -118,6 +119,7 @@
 #include <buster/tests/compiler/assembly/x86_64_forwarding_test.c>
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.c>
 #include <buster/tests/compiler/assembly/x86_64_tls_test.c>
+#include <buster/tests/compiler/assembly/x86_64_got_test.c>
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.c>
 #include <buster/tests/compiler/ir/ir_test.c>
 #include <buster/tests/compiler/llvm/bitcode_test.c>
@@ -276,6 +278,7 @@ typedef enum TestId
     TEST_ID_X86_64_FORWARDING,
     TEST_ID_X86_64_METADATA,
     TEST_ID_X86_64_TLS,
+    TEST_ID_X86_64_GOT,
 #if BUSTER_CPU_ARCH_X86_64
     TEST_ID_X86_64_COMPLETION_CENSUS,
 #endif
@@ -326,6 +329,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_X86_64_FORWARDING] = {S8_INITIALIZER("x86_64_forwarding_tests"), &x86_64_forwarding_tests},
     [TEST_ID_X86_64_METADATA] = {S8_INITIALIZER("x86_64_metadata_tests"), &x86_64_metadata_tests},
     [TEST_ID_X86_64_TLS] = {S8_INITIALIZER("x86_64_tls_tests"), &x86_64_tls_tests},
+    [TEST_ID_X86_64_GOT] = {S8_INITIALIZER("x86_64_got_tests"), &x86_64_got_tests},
 #if BUSTER_CPU_ARCH_X86_64
     [TEST_ID_X86_64_COMPLETION_CENSUS] = {S8_INITIALIZER("x86_64_completion_census_tests"), &x86_64_completion_census_tests, false,
                                           TEST_DESCRIPTOR_PARALLEL_NONE, true},

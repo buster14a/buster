@@ -2064,25 +2064,18 @@ BUSTER_GLOBAL_LOCAL bool link_address_addend(u64 address, s64 addend, u64* resul
     return true;
 }
 
-// -fPIC's GOT load, resolved for an image this linker binds whole. Nothing
-// in that image can be interposed -- one file, every name bound inside it --
-// so the slot a `mov` would read can only ever hold the address the matching
-// `lea` computes, and rewriting the opcode byte is the relaxation `ld`
-// performs for a GOTPCRELX it can resolve. The instruction is `REX.W 8b /r`
-// over a rip-relative ModRM, which puts its three bytes immediately ahead of
-// the patched displacement and leaves that displacement and everything after
-// it exactly where the PC32 arithmetic expects them. Anything else under a
-// GOT relocation is a shape this linker did not emit, and it fails rather
-// than rewriting a byte it cannot account for.
-BUSTER_GLOBAL_LOCAL bool link_x86_relax_got_load(u8* bytes, u64 output_offset, u64 available)
+// The object writer binds GOT references to this image's definitions. The
+// metadata authority validates and rewrites the bounded instruction shape;
+// this adapter owns section bounds only. Both ELF image writers consume it.
+// This remains the MOV-r64 family, not broader GOTPCRELX conversion (#78).
+BUSTER_GLOBAL_LOCAL bool link_x86_relax_got_load(u8* bytes, u64 field_offset, u64 section_start, u64 section_end)
 {
-    bool relaxed = bytes && output_offset >= 3 && output_offset <= available && (bytes[output_offset - 3] & 0xf8) == 0x48 &&
-                   bytes[output_offset - 2] == 0x8b && (bytes[output_offset - 1] & 0xc7) == 0x05;
-    if (relaxed)
+    bool result = false;
+    if (bytes && section_start <= field_offset && field_offset <= section_end)
     {
-        bytes[output_offset - 2] = 0x8d;
+        result = buster_x86_metadata_relax_got_load(bytes + section_start, field_offset - section_start, section_end - section_start);
     }
-    return relaxed;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool link_absolute32s_value(u64 address, s64 addend, s32* result)
@@ -3440,7 +3433,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         u64 place_address = image_base + section_offsets[relocation->section] + relocation->offset;
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL && !link_x86_relax_got_load(bytes, output_offset, file_size))
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL && !link_x86_relax_got_load(bytes, output_offset, section_offsets[relocation->section],
+                                      section_offsets[relocation->section] + section->data.length))
         {
             result.error = LINK_ERROR_RELOCATION;
             result.symbol = symbol->name;
@@ -4563,7 +4557,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         u64 place_address = image_base + section_offsets[relocation->section] + relocation->offset;
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
-        if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL && !link_x86_relax_got_load(bytes, output_offset, file_size))
+        if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL && !link_x86_relax_got_load(bytes, output_offset, section_offsets[relocation->section],
+                                      section_offsets[relocation->section] + section->data.length))
         {
             result.error = LINK_ERROR_RELOCATION;
             result.symbol = symbol->name;
