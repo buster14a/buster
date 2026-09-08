@@ -1,29 +1,25 @@
-name: Issue 267 validation tools
+name: Issue 267 verified publication
 on:
   push:
     branches: [work/issue-267-encoding-snapshot]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  tools:
+  publish:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
-      - name: Download distribution validation tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          mkdir -p "$RUNNER_TEMP/validation-tools/packages"
-          cd "$RUNNER_TEMP/validation-tools/packages"
-          apt-get download tcc libtcc-dev qemu-user-static
-          sha256sum *.deb > SHA256SUMS
-          apt-cache policy tcc libtcc-dev qemu-user-static > versions.txt
-          cd "$RUNNER_TEMP"
-          tar czf validation-tools.tar.gz validation-tools
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Publish exact tested trees
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .issue267/publish.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-267-validation-tools
-          path: ${{ runner.temp }}/validation-tools.tar.gz
-          retention-days: 1
+          name: issue-267-published
+          path: ${{ runner.temp }}/published.json
+          retention-days: 7
           if-no-files-found: error
