@@ -66,8 +66,11 @@
   selectors must not reintroduce a MOV plus mutable USE_DEFINE result.
 - QUALITY scheduling remains pressure-first and deterministic. Pressure is
   counted per register class; metadata supplies barriers, memory membership,
-  and vector scheduling membership while compatibility opcode classifiers
-  cover legacy rows during migration.
+  and implicit vector-state chain membership through the published
+  `MachineOpcodeRow.schedule_flags` byte. There are no parallel scheduler
+  opcode classifiers. The [metadata ownership inventory](../machine-metadata-ownership.md)
+  documents producers, consumers, publication, invalidation, and remaining
+  dormant fields; incomplete descriptor fields are not a hazard model.
 - Memory scheduling uses whole-stack-object alias classes only when the
   selector's existing canonical walk certifies no volatile access in the
   function. Unknown/manual/structural-replay functions default to the original
