@@ -1,27 +1,29 @@
-name: Issue 267 source
+name: Issue 267 validation tools
 on:
   push:
     branches: [work/issue-267-encoding-snapshot]
 permissions:
   contents: read
 jobs:
-  source:
+  tools:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Capture baseline
+      - name: Download distribution validation tools
+        shell: bash
         run: |
-          git archive --format=tar.gz cfe58e298fcfc13781b7b3f2ae50d2e1e2556bc2 -o "$RUNNER_TEMP/issue-267-source.tar.gz"
-          git bundle create "$RUNNER_TEMP/issue-267-history.bundle" --all
+          set -euo pipefail
+          sudo apt-get update -qq
+          mkdir -p "$RUNNER_TEMP/validation-tools/packages"
+          cd "$RUNNER_TEMP/validation-tools/packages"
+          apt-get download tcc libtcc-dev qemu-user-static
+          sha256sum *.deb > SHA256SUMS
+          apt-cache policy tcc libtcc-dev qemu-user-static > versions.txt
+          cd "$RUNNER_TEMP"
+          tar czf validation-tools.tar.gz validation-tools
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-267-source
-          path: |
-            ${{ runner.temp }}/issue-267-source.tar.gz
-            ${{ runner.temp }}/issue-267-history.bundle
+          name: issue-267-validation-tools
+          path: ${{ runner.temp }}/validation-tools.tar.gz
           retention-days: 1
           if-no-files-found: error
