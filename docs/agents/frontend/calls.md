@@ -105,6 +105,9 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   to reserve and materialize dynamically aligned storage. The parameter
   alignment tests inspect IR on all six native targets and use an opaque,
   separately host-compiled observer for native x86-64 callee addresses.
+  The driver regression crosses all seven optimization presets with all four
+  explicit allocators, tests simultaneous integer/vector register exhaustion,
+  and observes mutations of the callee copies without changing caller objects.
 - The generic JIT loads already-produced host-native objects and resolves
   explicit bindings. It is not a second source-language compiler and must stay
   independent of frontend semantic structures.
