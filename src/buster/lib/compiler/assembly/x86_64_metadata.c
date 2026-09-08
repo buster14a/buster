@@ -5866,7 +5866,8 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_emit_tuple_memory_width(BusterX86Met
 }
 
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_tuple_scale(BusterX86MetadataForm const* form,
-                                                              BusterX86MetadataPatternSemantics const* pattern)
+                                                              BusterX86MetadataPatternSemantics const* pattern,
+                                                              bool broadcast)
 {
     if (!form->displacement_scale) return 1;
     if (pattern->tuple_control_kind == BUSTER_X86_METADATA_PATTERN_TUPLE_MEM128) return 16;
@@ -5878,8 +5879,10 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_tuple_scale(BusterX86MetadataFor
     u32 result = 0;
     switch (form->tuple_kind)
     {
-    case BUSTER_X86_METADATA_TUPLE_FULL: result = vector; break;
-    case BUSTER_X86_METADATA_TUPLE_HALF: result = vector / 2; break;
+    // EVEX.b broadcasts one memory element, even when the destination is a
+    // full vector or the unbroadcast memory operand is a half vector.
+    case BUSTER_X86_METADATA_TUPLE_FULL: result = broadcast ? element : vector; break;
+    case BUSTER_X86_METADATA_TUPLE_HALF: result = broadcast ? element : vector / 2; break;
     case BUSTER_X86_METADATA_TUPLE_QUARTER: result = vector / 4; break;
     case BUSTER_X86_METADATA_TUPLE_EIGHTH: result = vector / 8; break;
     case BUSTER_X86_METADATA_TUPLE_SCALAR:
@@ -5907,15 +5910,18 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_broadcast_elements(BusterX86Meta
     if (pattern.tuple_control_kind == BUSTER_X86_METADATA_TUPLE_SCALAR) return 1;
     u16 element_size_bits = pattern.has_element_size_control ? pattern.element_size_bits
                                                               : buster_x86_metadata_emit_element_size_bits(form);
-    if (!element_size_bits || pattern.vector_length < element_size_bits || pattern.vector_length % element_size_bits) return 0;
-    u32 elements = pattern.vector_length / element_size_bits;
+    // The count describes the source memory tuple, not the destination.
+    // For example, VCVTPS2PD zmm broadcasts m32 to eight inputs, not sixteen.
+    u16 memory_bits = form.tuple_kind == BUSTER_X86_METADATA_TUPLE_HALF ? pattern.vector_length / 2 : pattern.vector_length;
+    if (!element_size_bits || memory_bits < element_size_bits || memory_bits % element_size_bits) return 0;
+    u32 elements = memory_bits / element_size_bits;
     return elements <= UINT8_MAX ? (u8)elements : 0;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_address(BusterX86MetadataPhysicalMemory memory,
                                                            BusterX86MetadataForm const* form,
                                                            BusterX86MetadataPatternSemantics const* pattern,
-                                                           bool force_disp32,
+                                                           bool broadcast, bool force_disp32,
                                                            BusterX86MetadataAddressEncoding* result)
 {
     BusterX86MetadataAddressEncoding address = {0};
@@ -6026,7 +6032,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_address(BusterX86MetadataPhysi
         else
         {
             u8 forced_width = form->displacement_width && !form->relocation_base ? form->displacement_width : 0;
-            u8 tuple_scale = buster_x86_metadata_emit_tuple_scale(form, pattern);
+            u8 tuple_scale = buster_x86_metadata_emit_tuple_scale(form, pattern, broadcast);
             if (form->displacement_scale && !tuple_scale) return false;
             bool compressed_displacement = form->displacement_scale && tuple_scale > 1;
             if (forced_width == 1 || compressed_displacement)
@@ -6557,7 +6563,8 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
                         : buster_x86_metadata_feature_input_allows_apx(query.features)))
         return BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
     BusterX86MetadataAddressEncoding address = {0};
-    if (has_memory && !moffs_form && !buster_x86_metadata_emit_address(memory, &form, &pattern, force_disp32, &address))
+    if (has_memory && !moffs_form && !buster_x86_metadata_emit_address(memory, &form, &pattern,
+                                                                     query.attributes.broadcast_elements != 0, force_disp32, &address))
         return BUSTER_X86_METADATA_ENCODE_ADDRESSING;
 
     // The register-register 0x87 XCHG form is schema-proven symmetric:
@@ -7854,7 +7861,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
                 address_ready = false;
         }
         if (!address_ready)
-            address_ready = buster_x86_metadata_emit_address(memory, form, plan->pattern, force_disp32, &address);
+            address_ready = buster_x86_metadata_emit_address(memory, form, plan->pattern, false, force_disp32, &address);
     }
     if (has_memory && !address_ready)
     {
