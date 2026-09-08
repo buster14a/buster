@@ -18,6 +18,7 @@
 // (AGENTS.md).
 
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/compiler/driver/codegen_configurations.h>
 
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/ir/ir.h>
@@ -1173,6 +1174,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.entry_symbol = value;
             continue;
         }
+        if (string_equal(argument, S8("-fverify-codegen")))
+        {
+            invocation.verify_codegen = true;
+            continue;
+        }
         value = compiler_driver_option_value(argument, S8("-fsource-metrics="));
         if (value.length)
         {
@@ -1195,22 +1201,28 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         // FAST on a measured corpus; callers can still name it explicitly.
         if (string_starts_with_sequence(argument, S8("-O")))
         {
-            String8 level = string_slice(argument, 2, argument.length);
-            if (!level.length || string_equal(level, S8("0")))
+            struct { String8 flag; u8 level; } levels[] = {
+#define BUSTER_DRIVER_OPTIMIZATION(flag, level) {S8(flag), level},
+                BUSTER_CODEGEN_OPTIMIZATIONS(BUSTER_DRIVER_OPTIMIZATION)
+#undef BUSTER_DRIVER_OPTIMIZATION
+            };
+            bool found = false;
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(levels); index += 1)
             {
-                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST;
-                invocation.optimization_level = 0;
-                continue;
+                if (string_equal(argument, levels[index].flag))
+                {
+                    invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST;
+                    invocation.optimization_level = levels[index].level;
+                    found = true;
+                    break;
+                }
             }
-            if (string_equal(level, S8("1")) || string_equal(level, S8("2")) || string_equal(level, S8("3")) || string_equal(level, S8("s")) ||
-                string_equal(level, S8("z")) || string_equal(level, S8("fast")))
+            if (!found)
             {
-                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST;
-                invocation.optimization_level = string_equal(level, S8("1")) ? 1 : string_equal(level, S8("3")) ? 3 : 2;
-                continue;
+                compiler_driver_argument_error(arena, &invocation, S8("unsupported optimization level: {S8}"), argument);
+                break;
             }
-            compiler_driver_argument_error(arena, &invocation, S8("unsupported optimization level: {S8}"), argument);
-            break;
+            continue;
         }
         if (string_equal(argument, S8("-fno-register-allocator")))
         {
@@ -1221,24 +1233,24 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         value = compiler_driver_option_value(argument, S8("-fregister-allocator="));
         if (value.length)
         {
-            invocation.register_allocator_explicit = true;
-            if (string_equal(value, S8("none")))
+            struct { String8 name; u8 mode; } modes[] = {
+#define BUSTER_DRIVER_ALLOCATOR(name, mode) {S8(name), mode},
+                BUSTER_CODEGEN_ALLOCATORS(BUSTER_DRIVER_ALLOCATOR)
+#undef BUSTER_DRIVER_ALLOCATOR
+            };
+            BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(modes) == CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT);
+            bool found = false;
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
             {
-                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE;
+                if (string_equal(value, modes[index].name))
+                {
+                    invocation.register_allocator = modes[index].mode;
+                    invocation.register_allocator_explicit = true;
+                    found = true;
+                    break;
+                }
             }
-            else if (string_equal(value, S8("mir-stack")))
-            {
-                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK;
-            }
-            else if (string_equal(value, S8("fast")))
-            {
-                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST;
-            }
-            else if (string_equal(value, S8("quality")))
-            {
-                invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_QUALITY;
-            }
-            else
+            if (!found)
             {
                 compiler_driver_argument_error(arena, &invocation, S8("unsupported register allocator: {S8}"), value);
                 break;
@@ -3234,7 +3246,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     IrModule* module = &lowered.program->modules[0];
     lowered.program->disable_local_promotion = invocation.disable_local_promotion;
     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion;
-    IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module, lowered.canonical_ir_certified);
+    IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module, lowered.canonical_ir_certified && !invocation.verify_codegen);
     result.local_promotion = module->local_promotion;
     if (validation.error != IR_VALIDATION_NONE)
     {
@@ -3278,6 +3290,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                            (CodegenModuleOptions){
                                                                .debug_info = invocation.debug_info,
                                                                .assume_validated = true,
+                                                               .verify_invariants = invocation.verify_codegen,
                                                                .position_independent = invocation.position_independent,
                                                                .register_allocator = invocation.register_allocator,
                                                                .assembly_syntax = (u8)invocation.assembly_syntax,
@@ -3847,6 +3860,9 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.codegen_statistics.exact_successes += unit.codegen_statistics.exact_successes;
         result.codegen_statistics.exact_failures += unit.codegen_statistics.exact_failures;
         result.codegen_statistics.mutable_virtual_register_count += unit.codegen_statistics.mutable_virtual_register_count;
+        result.codegen_statistics.verified_ir_module_count += unit.codegen_statistics.verified_ir_module_count;
+        result.codegen_statistics.verified_mir_function_count += unit.codegen_statistics.verified_mir_function_count;
+        result.codegen_statistics.verified_scheduled_function_count += unit.codegen_statistics.verified_scheduled_function_count;
         if (unit.error != COMPILER_DRIVER_ERROR_NONE)
         {
             if (unit.diagnostic.length)

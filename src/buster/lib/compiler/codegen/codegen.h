@@ -380,6 +380,9 @@ struct CodegenStatistics
     // Explicit mutable machine virtual registers emitted by selected
     // functions. Zero means the native machine path is fully SSA.
     u64 mutable_virtual_register_count;
+    u32 verified_ir_module_count;
+    u32 verified_mir_function_count;
+    u32 verified_scheduled_function_count;
 };
 
 struct CodegenModule
@@ -484,6 +487,9 @@ struct CodegenModuleOptions
 {
     bool debug_info;
     bool assume_validated;
+    // Test/audit mode: validate certified IR and selected/scheduled MIR too;
+    // verifier/placement failures must not disappear into canonical fallback.
+    bool verify_invariants;
     // -fPIC/-fpic: this object may end up in a shared library. No
     // thread-local definition it names can be assumed to sit in the initial
     // thread-local block, and a symbol another object could interpose is

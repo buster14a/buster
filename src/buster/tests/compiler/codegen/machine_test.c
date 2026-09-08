@@ -30,10 +30,10 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlockParameter) == 40);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrIncoming) == 16);
-// Four bytes of flags plus the code-model byte -fPIC sets. The record is
+// Five bytes of flags plus the code-model byte -fPIC sets. The record is
 // passed by value on every module generation, so it stays a handful of bytes
 // and this check is what says so.
-BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 5);
+BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 6);
 
 // Compiles one C source through the C frontend into a canonical IrProgram
 // for machine-selection tests. Diagnostics fail the caller's assertions.

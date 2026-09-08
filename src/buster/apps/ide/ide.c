@@ -838,6 +838,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     {
         string_print(S8("{S8}"), compile.output);
     }
+    if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verify_codegen)
+    {
+        string_print(S8("CODEGEN_VERIFY version=1 ir={u32} mir={u32} scheduled={u32} allocator={S8}\n"),
+                     compile.codegen_statistics.verified_ir_module_count, compile.codegen_statistics.verified_mir_function_count,
+                     compile.codegen_statistics.verified_scheduled_function_count,
+                     codegen_register_allocator_mode_string((CodegenRegisterAllocatorMode)invocation.register_allocator));
+    }
     if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose)
     {
         if (invocation.has_gpu_target)

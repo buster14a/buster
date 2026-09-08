@@ -733,9 +733,66 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_x64_vector_frame_lea_count(ByteSlice code, 
     return result;
 }
 
+// Natural alignment and an explicit request for that same alignment must
+// produce identical canonical storage. This catches #238 without executing
+// target code, so x86-64 and AArch64 are both covered on every test host.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_natural_parameter_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    String8 source = S8("struct __attribute__((aligned(64))) S { unsigned long long v[8]; };\n"
+                        "extern int observe(void const *);\n"
+                        "int check(struct S value) { return observe(&value) || value.v[0] != 7; }\n");
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        CPreprocessResult tokens = c_preprocess(arguments->arena, source, (CPreprocessOptions){.target = target});
+        CParseResult parse = c_parse(arguments->arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(arguments->arena, S8("natural-parameter-alignment.c"), tokens, parse, target);
+        BUSTER_TEST(arguments, tokens.error_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
+        if (lowered.program)
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            CodegenModuleOptions options = {.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE, .verify_invariants = true};
+            CodegenModule natural = codegen_generate_canonical_module(arguments->arena, program, module, target, options);
+            u32 changed = 0;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+                {
+                    IrValue* value = function->values + value_index;
+                    IrType* type = ir_type_from_id(&program->types, value->canonical_type);
+                    if (type && type->layout.alignment == 64 && !value->alignment && value->definition.value < function->instruction_count &&
+                        function->instructions[value->definition.value].opcode == IR_OPCODE_LOCAL)
+                    {
+                        value->alignment = type->layout.alignment;
+                        changed += 1;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, changed > 0);
+            CodegenModule explicit = codegen_generate_canonical_module(arguments->arena, program, module, target, options);
+            BUSTER_TEST(arguments, natural.error == CODEGEN_ERROR_NONE && explicit.error == CODEGEN_ERROR_NONE);
+            BUSTER_TEST(arguments, natural.statistics.verified_ir_module_count == 1 && explicit.statistics.verified_ir_module_count == 1);
+            BUSTER_TEST(arguments, natural.code.length == explicit.code.length);
+            BUSTER_TEST(arguments, natural.code.length == explicit.code.length &&
+                memcmp(natural.code.pointer, explicit.code.pointer, (size_t)natural.code.length) == 0);
+        }
+    }
+    return result;
+}
+
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_scalars(arguments);
+    UnitTestResult alignment = codegen_test_natural_parameter_alignment(arguments);
+    result.test_count += alignment.test_count;
+    result.succeeded_test_count += alignment.succeeded_test_count;
     u8 negative_rsp_store_bytes[] = {0x48, 0x89, 0x44, 0x24, 0xf8, 0x5d, 0xc3};
     CodegenTestX64BodyScan negative_rsp_store_scan =
         codegen_test_x64_scan_body((ByteSlice){.pointer = negative_rsp_store_bytes, .length = sizeof(negative_rsp_store_bytes)}, 0,

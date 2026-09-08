@@ -8523,6 +8523,17 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_is_read_only(IrGlobal* global)
     return global->is_read_only && !global->relocation_count && global->initializer_kind != IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS;
 }
 
+// A zero requested alignment means the type's natural alignment, not byte
+// alignment. Keep canonical local storage and every address consumer on the
+// same effective alignment. In particular, parameter locals carry no explicit
+// request, but an aligned aggregate still needs an aligned callee-owned copy.
+BUSTER_GLOBAL_LOCAL u32 codegen_canonical_value_alignment(IrProgram* program, IrValue const* value)
+{
+    IrType* type = ir_type_from_id(&program->types, value->canonical_type);
+    u32 alignment = BUSTER_MAX(value->alignment, type ? type->layout.alignment : 0);
+    return alignment;
+}
+
 // What one canonical value of a type costs the frame, read by the capacity
 // estimate's walk over every value of every function in place of the type
 // record itself: the record is ~152 bytes and the walk wants 13 of them, so
@@ -8884,10 +8895,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // function.
             function_value_bytes = align_forward(function_value_bytes, slot_alignment);
             function_value_bytes += slot_size & slot_after_align;
-            if (value.alignment > 16 && value.definition.value < function_instruction_count &&
+            if (slot_alignment > 16 && value.definition.value < function_instruction_count &&
                 instructions[value.definition.value].opcode == IR_OPCODE_LOCAL)
             {
-                function_value_bytes += ir_type_from_id(&program->types, value.canonical_type)->layout.size + value.alignment - 1;
+                function_value_bytes += ir_type_from_id(&program->types, value.canonical_type)->layout.size + slot_alignment - 1;
             }
             // A value this wide can be handed to a call on the stack, and an
             // area aligned for it is filled an eightbyte at a time rather than
@@ -9206,18 +9217,23 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
         {
             IrValue* value = function->values + value_index;
-            if (value->alignment <= 16 || value->definition.value >= function->instruction_count ||
+            if (value->definition.value >= function->instruction_count ||
                 function->instructions[value->definition.value].opcode != IR_OPCODE_LOCAL)
             {
                 continue;
             }
+            u32 local_alignment = codegen_canonical_value_alignment(program, value);
+            if (local_alignment <= 16)
+            {
+                continue;
+            }
             IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
-            if (!value_type || !value_type->layout.resolved || value_type->layout.size > UINT32_MAX - (value->alignment - 1))
+            if (!value_type || !value_type->layout.resolved || value_type->layout.size > UINT32_MAX - (local_alignment - 1))
             {
                 result.error = CODEGEN_ERROR_INVALID_IR;
                 return result;
             }
-            u64 raw_size = value_type->layout.size + value->alignment - 1;
+            u64 raw_size = value_type->layout.size + local_alignment - 1;
             if (target.cpu_arch == CPU_ARCH_AARCH64)
             {
                 aligned_local_offsets[value_index] = (u32)value_bytes;
@@ -9501,8 +9517,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // Keep the verifier as the authority for replayed/manual machine
             // IR, but do not reread every freshly selected row before its
             // immediate allocator consumer.
-            MachineVerifyError verify_error = selected.supported && !selected.selector_certified ? machine_verify_function(&selected.function).error
-                                                                                                  : MACHINE_VERIFY_NONE;
+            MachineVerifyError verify_error = selected.supported && (options.verify_invariants || !selected.selector_certified)
+                                                    ? machine_verify_function(&selected.function).error : MACHINE_VERIFY_NONE;
+            if (options.verify_invariants && selected.supported)
+            {
+                result.statistics.verified_mir_function_count += 1;
+                if (verify_error != MACHINE_VERIFY_NONE)
+                {
+                    scratch_end(machine_scratch);
+                    result.error = CODEGEN_ERROR_INVALID_IR;
+                    return result;
+                }
+            }
             if (selected.supported && verify_error != MACHINE_VERIFY_NONE)
             {
                 result.statistics.fallback_verify_count += 1;
@@ -9537,6 +9563,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     MachineScheduleResult scheduled = machine_schedule_function(machine_scratch.arena, &selected.function);
                     if (scheduled.moved)
                     {
+                        if (options.verify_invariants)
+                        {
+                            result.statistics.verified_scheduled_function_count += 1;
+                            if (machine_verify_function(&scheduled.function).error != MACHINE_VERIFY_NONE)
+                            {
+                                scratch_end(machine_scratch);
+                                result.error = CODEGEN_ERROR_INVALID_IR;
+                                return result;
+                            }
+                        }
                         result.statistics.allocator_scheduled_function_count += 1;
                         MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_scratch.arena, &scheduled.function);
                         u32 placement_saved_registers = 0;
@@ -9559,6 +9595,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 if (!placement.valid)
                 {
                     result.statistics.fallback_placement_count += 1;
+                    if (options.verify_invariants)
+                    {
+                        scratch_end(machine_scratch);
+                        result.error = CODEGEN_ERROR_INVALID_IR;
+                        return result;
+                    }
                 }
                 if (placement.valid)
                 {
@@ -10187,7 +10229,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     result.error = CODEGEN_ERROR_INVALID_IR;
                     return result;
                 }
-                if (instruction->opcode == IR_OPCODE_LOCAL && function->values[instruction->result.value].alignment <= 16)
+                if (instruction->opcode == IR_OPCODE_LOCAL && codegen_canonical_value_alignment(program, function->values + instruction->result.value) <= 16)
                 {
                     instruction_id = instruction->next;
                     continue;
@@ -10235,7 +10277,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     if (instruction->opcode == IR_OPCODE_LOCAL)
                     {
                         IrValue* local = function->values + instruction->result.value;
-                        u32 local_alignment = local->alignment;
+                        u32 local_alignment = codegen_canonical_value_alignment(program, local);
                         if (!local_alignment || local_alignment > INT32_MAX)
                         {
                             result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
@@ -11159,7 +11201,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         IrType* aggregate_type = aggregate ? ir_type_from_id(&program->types, instruction->canonical_type) : 0;
                         bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                         definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE ||
-                                        (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
+                                        (definition->opcode == IR_OPCODE_LOCAL && codegen_canonical_value_alignment(program, place) > 16);
                         IrType* loaded_value_type = ir_type_from_id(&program->types, instruction->canonical_type);
                         bool loaded_f80_opaque = codegen_canonical_x64_type_is_f80_bytes_cached(f80_cache, program, instruction->canonical_type) &&
                                                  instruction->opcode != IR_OPCODE_ATOMIC_LOAD && result.abi == CODEGEN_ABI_X86_64_SYSTEM_V;
@@ -11421,7 +11463,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             (function->values[base.value].category == IR_VALUE_VALUE && base_type &&
                              (base_type->kind == IR_TYPE_ARRAY || base_type->kind == IR_TYPE_VECTOR)))
                         {
-                            if (base_definition && base_definition->opcode == IR_OPCODE_LOCAL && function->values[base.value].alignment > 16)
+                            if (base_definition && base_definition->opcode == IR_OPCODE_LOCAL && codegen_canonical_value_alignment(program, function->values + base.value) > 16)
                             {
                                 c_x64_load(&emitter, 0x85, base);
                             }
@@ -11511,7 +11553,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         IrInstruction* definition = function->instructions + function->values[object.value].definition.value;
                         if (definition->opcode == IR_OPCODE_LOCAL)
                         {
-                            if (function->values[object.value].alignment > 16)
+                            if (codegen_canonical_value_alignment(program, function->values + object.value) > 16)
                             {
                                 c_x64_load(&emitter, 0x85, object);
                             }
@@ -11547,7 +11589,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         IrInstruction* definition = function->instructions + function->values[base.value].definition.value;
                         if (definition->opcode == IR_OPCODE_LOCAL)
                         {
-                            if (function->values[base.value].alignment > 16)
+                            if (codegen_canonical_value_alignment(program, function->values + base.value) > 16)
                             {
                                 c_x64_load(&emitter, 0x85, base);
                             }
@@ -12344,7 +12386,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                         definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE ||
-                                        (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
+                                        (definition->opcode == IR_OPCODE_LOCAL && codegen_canonical_value_alignment(program, place) > 16);
                         bool stored_f80_opaque = codegen_canonical_x64_type_is_f80_bytes_cached(
                                                      f80_cache, program, function->values[instruction->operands[1].value].canonical_type) &&
                                                  instruction->opcode != IR_OPCODE_ATOMIC_STORE && result.abi == CODEGEN_ABI_X86_64_SYSTEM_V;
@@ -12610,7 +12652,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         IrType* value_type = ir_type_from_id(&program->types, instruction->canonical_type);
                         bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                         definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE ||
-                                        (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
+                                        (definition->opcode == IR_OPCODE_LOCAL && codegen_canonical_value_alignment(program, place) > 16);
                         bool pointer_arithmetic = value_type && value_type->kind == IR_TYPE_POINTER &&
                                                   (instruction->atomic_operation == IR_ATOMIC_ADD || instruction->atomic_operation == IR_ATOMIC_SUBTRACT);
                         if (value_type && value_type->kind == IR_TYPE_INTEGER && value_type->layout.resolved && value_type->layout.size == 16 &&
@@ -12848,7 +12890,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         IrType* value_type = ir_type_from_id(&program->types, instruction->canonical_type);
                         bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                         definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE ||
-                                        (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
+                                        (definition->opcode == IR_OPCODE_LOCAL && codegen_canonical_value_alignment(program, place) > 16);
                         if (value_type && value_type->kind == IR_TYPE_INTEGER && value_type->layout.resolved && value_type->layout.size == 16)
                         {
                             if (!target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_CX16))
@@ -17068,7 +17110,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     if (instruction->opcode == IR_OPCODE_LOCAL)
                     {
                         IrValue* local = function->values + instruction->result.value;
-                        u32 local_alignment = local->alignment;
+                        u32 local_alignment = codegen_canonical_value_alignment(program, local);
                         codegen_canonical_a64_base_address(&buffer, 9, 28, aligned_local_offsets[instruction->result.value]);
                         a64_emit_constant(&buffer, 10, local_alignment - 1);
                         codegen_emit_u32(&buffer, 0x8b0a0129);
@@ -17502,7 +17544,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
                         bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                         definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE ||
-                                        (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
+                                        (definition->opcode == IR_OPCODE_LOCAL && codegen_canonical_value_alignment(program, place) > 16);
                         if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD && aggregate)
                         {
                             // The access width is the place's promoted size (#731),
@@ -17651,7 +17693,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             (function->values[base.value].category == IR_VALUE_VALUE && base_type &&
                              (base_type->kind == IR_TYPE_ARRAY || base_type->kind == IR_TYPE_VECTOR)))
                         {
-                            if (base_definition && base_definition->opcode == IR_OPCODE_LOCAL && function->values[base.value].alignment > 16)
+                            if (base_definition && base_definition->opcode == IR_OPCODE_LOCAL && codegen_canonical_value_alignment(program, function->values + base.value) > 16)
                             {
                                 c_a64_load(&emitter, 9, base);
                             }
@@ -17700,7 +17742,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 object_offset = value_offsets[object.value];
                         if (definition->opcode == IR_OPCODE_LOCAL)
                         {
-                            if (function->values[object.value].alignment > 16)
+                            if (codegen_canonical_value_alignment(program, function->values + object.value) > 16)
                             {
                                 c_a64_load(&emitter, 9, object);
                             }
@@ -17727,7 +17769,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 base_offset = value_offsets[base.value];
                         if (definition->opcode == IR_OPCODE_LOCAL)
                         {
-                            if (function->values[base.value].alignment > 16)
+                            if (codegen_canonical_value_alignment(program, function->values + base.value) > 16)
                             {
                                 c_a64_load(&emitter, 9, base);
                             }
@@ -17949,7 +17991,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                         definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE ||
-                                        (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
+                                        (definition->opcode == IR_OPCODE_LOCAL && codegen_canonical_value_alignment(program, place) > 16);
                         if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && aggregate)
                         {
                             // See the atomic load above for the width. x10 carries the
@@ -18097,7 +18139,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         IrType* value_type = ir_type_from_id(&program->types, instruction->canonical_type);
                         bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                         definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE ||
-                                        (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
+                                        (definition->opcode == IR_OPCODE_LOCAL && codegen_canonical_value_alignment(program, place) > 16);
                         bool pointer_arithmetic = value_type && value_type->kind == IR_TYPE_POINTER &&
                                                   (instruction->atomic_operation == IR_ATOMIC_ADD || instruction->atomic_operation == IR_ATOMIC_SUBTRACT);
                         if (value_type && value_type->kind == IR_TYPE_INTEGER && value_type->layout.resolved && value_type->bit_width == 128 &&
@@ -18232,7 +18274,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         IrType* value_type = ir_type_from_id(&program->types, instruction->canonical_type);
                         bool indirect = definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
                                         definition->opcode == IR_OPCODE_FIELD || definition->opcode == IR_OPCODE_DEREFERENCE ||
-                                        (definition->opcode == IR_OPCODE_LOCAL && place->alignment > 16);
+                                        (definition->opcode == IR_OPCODE_LOCAL && codegen_canonical_value_alignment(program, place) > 16);
                         if (value_type && value_type->kind == IR_TYPE_INTEGER && value_type->layout.resolved && value_type->bit_width == 128 &&
                             value_type->layout.size == 16)
                         {
@@ -20213,7 +20255,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     // attempt must not be the thing that fills a cache the next attempt reads.
     // Freezing both here also keeps them out of the rewind below.
     ir_prepare_program_abi(program, codegen_canonical_ir_abi_convention(result.abi));
-    IrValidationResult validation = ir_prepare_canonical_module(program, module, options.assume_validated);
+    IrValidationResult validation = ir_prepare_canonical_module(program, module, options.assume_validated && !options.verify_invariants);
     if (validation.error != IR_VALIDATION_NONE)
     {
         result.error = CODEGEN_ERROR_INVALID_IR;
@@ -20277,6 +20319,7 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         // more room cannot fix, and is reported as it stands.
         if (!code_buffer_exhausted)
         {
+            result.statistics.verified_ir_module_count = options.verify_invariants ? 1 : 0;
             return result;
         }
         scratch_end(attempt_scope);

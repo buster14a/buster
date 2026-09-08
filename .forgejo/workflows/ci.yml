@@ -109,6 +109,8 @@ jobs:
         run: |
           set -euo pipefail
           ./build.sh test_mode_matrix --config Release
+          ./build.sh test_differential --self-test
+          ./build.sh test_differential --ide build/Release/ide --cc clang --out build/differential-ci --sanitize-oracle
       - name: Test (macOS)
         shell: bash
         if: ${{ contains(matrix.runner, 'macos') }}
@@ -127,6 +129,8 @@ jobs:
         run: |
           set -euo pipefail
           ./build.sh test_mode_matrix --config Release
+          ./build.sh test_differential --self-test
+          ./build.sh test_differential --ide build/Release/ide --cc clang --out build/differential-ci --sanitize-oracle
       - name: Test (Windows)
         shell: powershell
         if: ${{ contains(matrix.runner, 'windows') }}
