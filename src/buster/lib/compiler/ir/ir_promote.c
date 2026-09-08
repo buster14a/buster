@@ -35,7 +35,7 @@ struct IrPromoteCfg
     u32* queue;
 };
 
-BUSTER_GLOBAL_LOCAL bool ir_promote_type(IrProgram* program, IrTypeId id)
+bool ir_local_type_promotable(IrProgram* program, IrTypeId id)
 {
     IrType* type = ir_type_from_id(&program->types, id);
     bool result = false;
@@ -62,7 +62,7 @@ BUSTER_GLOBAL_LOCAL bool ir_promote_type(IrProgram* program, IrTypeId id)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_promote_call_barrier(IrProgram* program, IrInstruction* row)
+bool ir_local_promotion_call_barrier(IrProgram* program, IrInstruction const* row)
 {
     IrSymbol* symbol = ir_symbol_from_id(&program->symbols, row->symbol);
     // The canonical call contract does not yet carry returns_twice. Indirect
@@ -149,7 +149,8 @@ BUSTER_GLOBAL_LOCAL bool ir_promote_cfg(Arena* arena, IrProgram* program, IrFunc
                 stamps[cfg->predecessors[index]] = block + 1;
             }
             IrBlock* destination = function->blocks + block;
-            // The C builder publishes terminators but no predecessor lists.
+            // The memory-form C builder may publish terminators without
+            // predecessor lists; direct SSA publishes the complete graph.
             // Empty lists without parameters are unmaterialized, not a claim
             // that the block has no incoming CFG edges.
             if (!destination->predecessor_count && !destination->first_predecessor && !destination->parameter_count)
@@ -677,14 +678,18 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
     statistics->values_before += function->value_count;
     u32 local_count = 0;
     bool barrier = function->label_metadata_count != 0;
-    for (u32 index = 0; index < function->instruction_count && !barrier; index += 1)
+    // Direct frontend SSA emits no LOCAL rows for promoted owners. Use the
+    // producer's conservative opcode summary to avoid a redundant FAST-path
+    // discovery scan. Hand-built/uncertified functions still scan normally.
+    bool may_have_locals = ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_LOCAL));
+    for (u32 index = 0; may_have_locals && index < function->instruction_count && !barrier; index += 1)
     {
         IrInstruction* row = function->instructions + index;
         local_count += row->opcode == IR_OPCODE_LOCAL;
         barrier = row->opcode == IR_OPCODE_INLINE_ASSEMBLY || row->opcode == IR_OPCODE_INDIRECT_BRANCH ||
                   row->opcode == IR_OPCODE_LABEL_ADDRESS || row->opcode == IR_OPCODE_STACK_ALLOCATE ||
                   row->opcode == IR_OPCODE_STACK_SAVE || row->opcode == IR_OPCODE_STACK_RESTORE ||
-                  (row->opcode == IR_OPCODE_CALL && ir_promote_call_barrier(program, row));
+                  (row->opcode == IR_OPCODE_CALL && ir_local_promotion_call_barrier(program, row));
     }
     if (barrier)
     {
@@ -716,7 +721,7 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
                 locals[local_index] = (IrPromoteLocal){
                     .value = row->result.value, .first = IR_PROMOTE_NONE, .last = IR_PROMOTE_NONE,
                     .eligible = value->category == IR_VALUE_PLACE && !value->is_volatile && !row->volatile_access &&
-                                row->operand_count == 0 && ir_promote_type(program, row->canonical_type),
+                                row->operand_count == 0 && ir_local_type_promotable(program, row->canonical_type),
                 };
                 local_by_value[row->result.value] = local_index++;
             }

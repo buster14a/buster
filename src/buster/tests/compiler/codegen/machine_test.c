@@ -35,7 +35,7 @@ BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 5);
 
 // Compiles one C source through the C frontend into a canonical IrProgram
 // for machine-selection tests. Diagnostics fail the caller's assertions.
-BUSTER_GLOBAL_LOCAL IrProgram* machine_test_compile_c(Arena* arena, String8 name, String8 source, Target target)
+BUSTER_GLOBAL_LOCAL IrProgram* machine_test_compile_c_with_options(Arena* arena, String8 name, String8 source, Target target, CIRLowerOptions options)
 {
     CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){0});
     if (tokens.error_count)
@@ -47,7 +47,7 @@ BUSTER_GLOBAL_LOCAL IrProgram* machine_test_compile_c(Arena* arena, String8 name
     {
         return 0;
     }
-    CIRLowerResult lowered = c_lower_to_ir(arena, name, tokens, parse, target);
+    CIRLowerResult lowered = c_lower_to_ir_with_options(arena, name, tokens, parse, target, options);
     IrProgram* result;
     if (lowered.diagnostic_count)
     {
@@ -59,6 +59,11 @@ BUSTER_GLOBAL_LOCAL IrProgram* machine_test_compile_c(Arena* arena, String8 name
     }
 
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrProgram* machine_test_compile_c(Arena* arena, String8 name, String8 source, Target target)
+{
+    return machine_test_compile_c_with_options(arena, name, source, target, (CIRLowerOptions){0});
 }
 
 BUSTER_GLOBAL_LOCAL IrFunction* machine_test_ir_function_find(IrModule* module, String8 name)
@@ -2567,31 +2572,34 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     };
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(definition_contract_targets); target_index += 1)
     {
-        IrProgram* contract_program = machine_test_compile_c(arguments->arena, S8("machine-definition-contract.c"), definition_contract_source,
-                                                              definition_contract_targets[target_index]);
-        BUSTER_TEST(arguments, contract_program && contract_program->module_count);
-        if (!contract_program || !contract_program->module_count)
+        for (u32 reference = 0; reference < 2; reference += 1)
         {
-            continue;
+            IrProgram* contract_program = machine_test_compile_c_with_options(arguments->arena, S8("machine-definition-contract.c"), definition_contract_source,
+                                                           definition_contract_targets[target_index], (CIRLowerOptions){.disable_direct_ssa = reference != 0});
+            BUSTER_TEST(arguments, contract_program && contract_program->module_count);
+            if (!contract_program || !contract_program->module_count)
+            {
+                continue;
+            }
+            IrFunction* contract_function = machine_test_ir_function_find(contract_program->modules, S8("mir_contract"));
+            BUSTER_TEST(arguments, contract_function != 0);
+            if (!contract_function)
+            {
+                continue;
+            }
+            MachineSelectResult contract_selected =
+                machine_select_canonical_function(arguments->arena, contract_program, contract_function, definition_contract_targets[target_index]);
+            BUSTER_TEST(arguments, contract_selected.supported && contract_selected.selector_certified);
+            if (!contract_selected.supported)
+            {
+                continue;
+            }
+            MachineVerifyResult contract_verified = machine_verify_function(&contract_selected.function);
+            BUSTER_TEST(arguments, contract_verified.error == MACHINE_VERIFY_NONE);
+            BUSTER_TEST(arguments, (contract_selected.mutable_virtual_register_count != 0) == (reference != 0));
+            BUSTER_TEST(arguments,
+                        contract_selected.mutable_virtual_register_count == contract_verified.mutable_virtual_register_count);
         }
-        IrFunction* contract_function = machine_test_ir_function_find(contract_program->modules, S8("mir_contract"));
-        BUSTER_TEST(arguments, contract_function != 0);
-        if (!contract_function)
-        {
-            continue;
-        }
-        MachineSelectResult contract_selected =
-            machine_select_canonical_function(arguments->arena, contract_program, contract_function, definition_contract_targets[target_index]);
-        BUSTER_TEST(arguments, contract_selected.supported && contract_selected.selector_certified);
-        if (!contract_selected.supported)
-        {
-            continue;
-        }
-        MachineVerifyResult contract_verified = machine_verify_function(&contract_selected.function);
-        BUSTER_TEST(arguments, contract_verified.error == MACHINE_VERIFY_NONE);
-        BUSTER_TEST(arguments, contract_selected.mutable_virtual_register_count != 0);
-        BUSTER_TEST(arguments,
-                    contract_selected.mutable_virtual_register_count == contract_verified.mutable_virtual_register_count);
     }
 
     // A ternary assignment defines its destination address before splitting
@@ -2689,7 +2697,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(schedule_targets); target_index += 1)
         {
             IrProgram* schedule_program =
-                machine_test_compile_c(arguments->arena, S8("machine-schedule.c"), schedule_source, schedule_targets[target_index]);
+                machine_test_compile_c_with_options(arguments->arena, S8("machine-schedule.c"), schedule_source, schedule_targets[target_index],
+                                                   (CIRLowerOptions){.disable_direct_ssa = true});
             BUSTER_TEST(arguments, schedule_program && schedule_program->module_count);
             if (!schedule_program || !schedule_program->module_count)
             {
@@ -5236,6 +5245,30 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             // bracket round-trips through RSP exactly as before.
             if (string_equal(vector_names[name_index], S8("vspill")))
             {
+                // Keep the original mutable-local pressure census independent
+                // of SSA edge copies. The direct-SSA selection and execution
+                // checks above/below continue to use machine_vector_program.
+                IrProgram* pressure_program = machine_test_compile_c_with_options(arguments->arena, S8("vector-pressure-reference.c"),
+                    machine_vector_source, machine_vector_target, (CIRLowerOptions){.disable_direct_ssa = true});
+                BUSTER_TEST(arguments, pressure_program && pressure_program->module_count);
+                if (!pressure_program || !pressure_program->module_count)
+                {
+                    continue;
+                }
+                IrFunction* pressure_function = machine_test_ir_function_find(pressure_program->modules, S8("vspill"));
+                BUSTER_TEST(arguments, pressure_function != 0);
+                if (!pressure_function)
+                {
+                    continue;
+                }
+                selected = machine_select_canonical_function(arguments->arena, pressure_program, pressure_function, machine_vector_target);
+                BUSTER_TEST(arguments, selected.supported);
+                if (!selected.supported)
+                {
+                    continue;
+                }
+                vector_fast = machine_fast_placement_build(arguments->arena, &selected.function);
+                BUSTER_TEST(arguments, vector_fast.valid);
                 u32 fast_vector_edits = 0;
                 for (u32 edit_index = 0; edit_index < vector_fast.edit_count; edit_index += 1)
                 {
