@@ -6,6 +6,8 @@
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_system_registers.h>
 #include <buster/lib/compiler/assembly/aarch64_syntax.h>
+#include <buster/lib/compiler/assembly/assembly_unit.h>
+#include <buster/lib/compiler/jit/jit.h>
 
 BUSTER_GLOBAL_LOCAL bool assembly_test_bytes_equal(ByteSlice actual, u8 const* expected, u32 expected_count)
 {
@@ -1781,9 +1783,99 @@ static AssemblyA64M1GprCorpusCase const assembly_a64_m1_gpr_corpus[] = {
     {S8_INITIALIZER("xpaci x1\n"), {225, 67, 193, 218}},
 };
 
-UnitTestResult assembly_tests(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
+    };
+    String8 directives[] = {S8(".p2align 4"), S8(".balign 16"), S8(".align 16")};
+    u8 aarch64_nop[] = {0x1f, 0x20, 0x03, 0xd5};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 directive_index = 0; directive_index < BUSTER_ARRAY_LENGTH(directives); directive_index += 1)
+        {
+            for (u32 prefix = 1; prefix <= 16; prefix += 1)
+            {
+                String8 source = string_format(arguments->arena, S8(".text\n.zero {u32}\n{S8}\n.byte 85\n"), prefix, directives[directive_index]);
+                AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = targets[target_index]});
+                BUSTER_TEST(arguments, !unit.diagnostic_count && unit.section_count == 1);
+                if (!unit.diagnostic_count && unit.section_count == 1)
+                {
+                    ByteSlice data = unit.sections[0].data;
+                    BUSTER_TEST(arguments, data.length == 17 && unit.sections[0].alignment == 16);
+                    if (data.length == 17)
+                    {
+                        bool correct = data.pointer[16] == 85;
+                        for (u32 offset = prefix; offset < 16; offset += 1)
+                        {
+                            u8 expected = target_index ? 0x90 : (offset < ((prefix + 3) & ~3u) ? 0 : aarch64_nop[offset & 3]);
+                            correct = correct && data.pointer[offset] == expected;
+                        }
+                        BUSTER_TEST(arguments, correct);
+                    }
+                }
+            }
+        }
+        String8 controls[] = {S8(".text\n.byte 85\n.balign 8, 165\n"), S8(".data\n.byte 85\n.balign 8\n"),
+                              S8(".text\n.byte 85\n.balign 2\n")};
+        for (u32 control = 0; control < BUSTER_ARRAY_LENGTH(controls); control += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, controls[control], (AssemblyEncodeOptions){.target = targets[target_index]});
+            BUSTER_TEST(arguments, !unit.diagnostic_count && unit.section_count == 1);
+            if (!unit.diagnostic_count && unit.section_count == 1)
+            {
+                ByteSlice data = unit.sections[0].data;
+                u64 size = control == 2 ? 2 : 8;
+                BUSTER_TEST(arguments, data.length == size);
+                if (data.length == size)
+                {
+                    bool correct = data.pointer[0] == 85;
+                    u8 expected = control == 0 ? 165 : (control == 2 && target_index ? 0x90 : 0);
+                    for (u64 index = 1; index < size; index += 1)
+                    {
+                        correct = correct && data.pointer[index] == expected;
+                    }
+                    BUSTER_TEST(arguments, correct);
+                }
+            }
+        }
+    }
+    // x16 must survive falling through the alignment gap. These words are
+    // mov x16,#7; [padding]; mov x0,x16; ret, independent of textual aliases.
+    AssemblyUnitResult live = assembly_unit_encode(arguments->arena,
+        S8(".text\n.long 0xd28000f0\n.p2align 4\n.long 0xaa1003e0\nret\n"), (AssemblyEncodeOptions){.target = targets[0]});
+    BUSTER_TEST(arguments, !live.diagnostic_count && live.section_count == 1 && live.sections[0].data.length == 24);
+#if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_SANITIZE && !BUSTER_IOS && !BUSTER_ANDROID
+    if (!live.diagnostic_count && live.section_count == 1 && live.sections[0].data.length == 24)
+    {
+        ObjectSection section = {.name = S8(".text"), .data = live.sections[0].data, .kind = OBJECT_SECTION_TEXT, .alignment = 16};
+        ObjectSymbol symbol = {.name = S8("alignment_live"), .size = 24, .section = 0, .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+        ObjectFile object = {.sections = &section, .symbols = &symbol, .target = target_native, .section_count = 1, .symbol_count = 1};
+        JitProgram program = jit_link_object(&object, (JitOptions){0});
+        BUSTER_TEST(arguments, program.error == JIT_ERROR_NONE);
+        if (program.error == JIT_ERROR_NONE)
+        {
+            void* address = jit_program_symbol(&program, symbol.name);
+            u64 (*entry)(void);
+            BUSTER_CT_CHECK(sizeof(entry) == sizeof(address));
+            memcpy(&entry, &address, sizeof(entry));
+            BUSTER_TEST(arguments, entry != 0);
+            if (entry)
+            {
+                BUSTER_TEST(arguments, entry() == 7);
+            }
+        }
+        jit_program_release(&program);
+    }
+#endif
+    return result;
+}
+
+UnitTestResult assembly_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = assembly_test_unit_alignment(arguments);
 
     /* The generated direct-SIMD owner table is the bounded denominator for
      * the public spelling adapter.  Keep this census independent of the

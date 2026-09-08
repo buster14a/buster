@@ -5268,6 +5268,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         arena_allocate(arena, MachineX64CandidateRow, function->instruction_count ? function->instruction_count : 1);
     u32 candidate_count = 0;
     bool dense_rows = true;
+    bool nonvolatile_memory = true;
     u32 walk_ordinal = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
@@ -5278,6 +5279,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         {
             IrInstruction* instruction = function->instructions + id.value;
             dense_rows &= id.value == block->first_instruction.value + block_row_count;
+            nonvolatile_memory &= !instruction->volatile_access;
             if ((MACHINE_X64_CANDIDATE_OPCODES >> instruction->opcode) & 1)
             {
                 // `walk_ordinal` is still this row's predecessor count here,
@@ -6355,6 +6357,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     result.function.stack_slot_sizes = arena_allocate(arena, u32, selector.stack_slots.total_count);
     result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slots.total_count);
     result.function.stack_slot_count = selector.stack_slots.total_count;
+    result.function.nonvolatile_memory_certified = nonvolatile_memory;
     u32 split_slot = 0;
     for (MachineBuilderChunk* chunk = selector.stack_slots.first; chunk; chunk = chunk->next)
     {

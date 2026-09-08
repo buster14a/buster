@@ -6,16 +6,24 @@ on:
       - 'ios/**'
       - 'android/**'
       - 'tests/*mobile*'
-      - 'tests/ios_launch_monitor_test.sh'
+      - 'tests/*ios*'
+      - 'tests/*android*'
       - '.github/workflows/ios-monitor-tests.yml'
+      - '.github/workflows/ci.yml'
   push:
     branches: [main]
     paths:
       - 'ios/**'
       - 'android/**'
       - 'tests/*mobile*'
-      - 'tests/ios_launch_monitor_test.sh'
+      - 'tests/*ios*'
+      - 'tests/*android*'
       - '.github/workflows/ios-monitor-tests.yml'
+      - '.github/workflows/ci.yml'
+
+concurrency:
+  group: mobile-monitor-${{ github.workflow }}-${{ github.ref }}-${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.run_id || 'latest' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -30,23 +38,42 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
       - name: Ensure mobile test prerequisites are available
         shell: bash
         run: |
+          set -euo pipefail
           if ! command -v timeout >/dev/null && ! command -v gtimeout >/dev/null; then
             brew install coreutils
           fi
           if [[ "$RUNNER_OS" == macOS ]]; then
-            # Existing Android monitor tests use modern Bash features. The
-            # iOS regression still invokes its launcher with /bin/bash.
+            # Android tests need modern Bash; the iOS launcher still uses /bin/bash.
             brew install bash
             echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
           fi
       - name: Exercise mobile script and attached monitor lifecycles
+        id: lifecycle
         shell: bash
         run: |
+          set -euo pipefail
           /bin/bash --version
-          bash tests/mobile_ci_scripts_test.sh
+          bash tests/mobile_ci_scripts_test.sh 2>&1 | tee "$RUNNER_TEMP/mobile-lifecycle.log"
+      - name: Lifecycle result and reproduction
+        if: ${{ always() }}
+        shell: bash
+        env:
+          CI_RESULT: ${{ steps.lifecycle.outcome }}
+        run: |
+          # Backticks delimit literal Markdown code in the summary.
+          # shellcheck disable=SC2016
+          printf '## Mobile lifecycle on %s\n\nCommit: `%s`\n\nSuite: **%s**.\n\nReproduce: `bash tests/mobile_ci_scripts_test.sh` (macOS needs coreutils and modern Bash on PATH).\n' "$RUNNER_OS" "$GITHUB_SHA" "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain lifecycle log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mobile-lifecycle-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mobile-lifecycle.log
+          if-no-files-found: ignore
+          retention-days: 7

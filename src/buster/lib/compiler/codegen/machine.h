@@ -1003,7 +1003,19 @@ BUSTER_CT_CHECK(MACHINE_REGISTER_CLASS_COUNT <= (1u << 3));
 typedef struct MachineOpcodeInfo MachineOpcodeInfo;
 struct MachineOpcodeInfo
 {
-    String8 name;
+    // Operand and allocation constraints occupy the first 32 bytes. Simple
+    // FAST rows use MachineOpcodeRow; full-descriptor consumers keep these
+    // facts together ahead of the diagnostic name and scheduling metadata.
+    // Extra registers the opcode's encoder sequence scribbles on beyond its
+    // declared operands; owners must vacate before the instruction runs.
+    u64 clobber_mask;
+    u16 attributes;
+    u16 fixed_register_set;
+    u16 memory_fold_alternate;
+    // Reserved layout-neutral seam. Recipe lookup is kept in a separate
+    // read-only projection so opcode metadata remains constant and safe to
+    // query concurrently; use machine_opcode_emit_recipe().
+    MachineEmitRecipeId emit_recipe;
     u8 operand_count;
     // Per inline slot: two role bits, three class bits, three shape bits.
     u8 operand_info[4];
@@ -1011,17 +1023,13 @@ struct MachineOpcodeInfo
     // zero means no tie.
     u8 tied_pair;
     u8 early_clobber_mask;
-    u16 fixed_register_set;
-    u16 memory_fold_alternate;
-    // Reserved layout-neutral seam. Recipe lookup is kept in a separate
-    // read-only projection so opcode metadata remains constant and safe to
-    // query concurrently; use machine_opcode_emit_recipe().
-    MachineEmitRecipeId emit_recipe;
-    u16 attributes;
-    // Extra registers the opcode's encoder sequence scribbles on beyond its
-    // declared operands; owners must vacate before the instruction runs.
-    u64 clobber_mask;
-    // Expanded target metadata.  All fields are zero for legacy rows, which
+    u8 fixed_register_mask;
+    // Explicit fixed physical register per operand slot. A set bit in
+    // fixed_register_mask makes the corresponding byte meaningful.
+    u8 fixed_registers[4];
+    u8 reserved_hot;
+
+    // Expanded target metadata. All fields are zero for legacy rows, which
     // preserves aggregate-initializer compatibility; accessors below derive
     // conservative defaults from the old attributes when needed.
     u16 form_set;
@@ -1036,22 +1044,30 @@ struct MachineOpcodeInfo
     u8 latency;
     u8 throughput;
     u8 bundle;
-    u8 fixed_register_mask;
-    // Explicit fixed physical register per operand slot.  A set bit in
-    // fixed_register_mask makes the corresponding byte meaningful.
-    u8 fixed_registers[4];
+    u8 reserved_schedule[4];
+
     u64 implicit_physical_uses;
     u64 implicit_physical_defs;
     u64 implicit_resource_uses;
     u64 implicit_resource_defs;
+
+    // Diagnostic/debug-only identity is cold for allocator and scheduler
+    // classification; placing it last prevents its 16 bytes from occupying
+    // the descriptor prefix read for every row.
+    String8 name;
 };
+BUSTER_CT_CHECK(sizeof(MachineOpcodeInfo) == 96);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, clobber_mask) == 0);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, fixed_registers) + sizeof(((MachineOpcodeInfo*)0)->fixed_registers) <= 32);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, implicit_physical_uses) == 48);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, name) == 80);
 
 #define MACHINE_OPCODE_INFO_HAS_FIXED_REGISTERS 1
 
 // The published row-facts projection of the opcode table: everything a
 // per-instruction-row walk asks of an opcode, in sixteen bytes, so a pass over
-// 1,7 M rows reads a 6 KB table instead of five fields spread over two lines
-// of an 88-byte descriptor it touches for nothing else. The roles are the
+// 1,7 M rows reads a 6 KB table instead of fields in a 96-byte descriptor it
+// touches for nothing else. The roles are the
 // projection that matters — they are a function of the opcode alone, so the
 // per-slot ladder that re-derived them once per operand is table content, not
 // work. Built once by machine_opcode_rows_prewarm() (AGENTS.md's serial
@@ -1251,6 +1267,12 @@ struct MachineFunction
     // exactly the stack pointer a call sees.
     u32 outgoing_bytes;
     u32 outgoing_slot;
+    // Selector proof that no canonical row has volatile memory semantics.
+    // Unknown/manual/structural-replay functions leave this false. Consumers
+    // that introduce volatile accesses must clear it; scheduling and CFG/SSA
+    // rewrites only copy/reorder rows and preserve the proof.
+    bool nonvolatile_memory_certified;
+    u8 reserved[7];
 };
 
 // AArch64 physical general registers in encoding order; 31 encodes SP or

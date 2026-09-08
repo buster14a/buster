@@ -12,6 +12,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
 - Keep the frontend pipeline explicit: source loading and preprocessing,
   parsing and semantic construction, then canonical-IR lowering. Do not add a
   parallel frontend-specific IR or route code generation around canonical IR.
+- Macro placemarkers survive the entire `##` sequence. The replacement loop
+  compacts into its existing materialized buffer and removes placemarkers only
+  when emitting the rescan tokens. Only the explicitly marked GNU
+  `, ## __VA_ARGS__` operator may delete a comma for an empty argument;
+  named parameters and ordinary macros retain it.
+  `tests/basic_c_macro_empty_paste.c` covers empty operands, chained pastes,
+  surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
+- A folded conditional expression converts its selected value to the common
+  type of both arms before any enclosing operator consumes it. Constant and
+  runtime typing share `c_ir_conditional_pointer_type`; arithmetic uses the
+  usual conversion helper. `tests/basic_c_constant_conditional_type.c` pins
+  signed/unsigned widening, mixed floating/integer arithmetic, nested folds,
+  and pointer/null selections under every allocator (GitHub #219).
 - Invalid user input must produce structured C diagnostics and a failed driver
   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
   never ordinary syntax or semantic errors.

@@ -8,6 +8,11 @@
   memory, bundle, fixed-register, tie, early-clobber, implicit-physical, and
   implicit-resource facts in `MachineOpcodeInfo`, accessed through the
   `machine_opcode_*` helpers.
+- `MachineOpcodeInfo` retains a 96-byte stride. Operand and allocation
+  constraints occupy its first 32 bytes; diagnostic names follow scheduling
+  and implicit-effect metadata. Keep opcode initializers designated and the
+  layout checks intact. Simple FAST rows use the separate 16-byte
+  `MachineOpcodeRow` projection instead of loading the full descriptor.
 - `MachineFunction` owns CFG edges, block parameters, and incoming edge
   parallel-copy sources. Edge source `i` maps to destination block parameter
   `i`; keep these copies parallel through allocation so cycles are resolved as
@@ -63,6 +68,20 @@
   counted per register class; metadata supplies barriers, memory membership,
   and vector scheduling membership while compatibility opcode classifiers
   cover legacy rows during migration.
+- Memory scheduling uses whole-stack-object alias classes only when the
+  selector's existing canonical walk certifies no volatile access in the
+  function. Unknown/manual/structural-replay functions default to the original
+  all-memory chain; replay intentionally drops this performance-only proof.
+  A producer adding volatile accesses must clear `nonvolatile_memory_certified`.
+  Known scalar frame forms and x86 512-bit frame transfers qualify only after
+  their slot id and byte range are checked. Overlapping and disjoint ranges
+  within one slot stay ordered. Pointer, aggregate-copy, incoming-argument, and
+  unrecognized memory rows flush all pending slot chains; calls, atomics,
+  fences, and physical-register rows retain their full barriers. Explicit
+  mutable-vreg touch ordering remains necessary for target-promotion fallback.
+  The dependency builder uses epoch-stamped slot tails and a compact pending
+  list, with at most 9N+8 edges for N rows and source-order fallback before a
+  scratch count can overflow. No alias classification runs in the FAST tier.
 - `-fPIC` is a code model, not an accepted flag. It reaches code generation as
   `CodegenModuleOptions.position_independent`, and generation resolves it for
   the target: x86-64 ELF, where the relocations it changes are the ones `ld`

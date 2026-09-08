@@ -1285,9 +1285,46 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
     return result;
 }
 
+// Execute scalar operations in Node instead of trusting the emitter's own
+// opcode table. Keep module compilation covered when the engine is absent.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 output = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-integers"), S8(".wasm"));
+    String8 command[] = {S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), S8("-o"), output,
+                        S8("tests/basic_c_wasm64_integer_ops.c")};
+    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+    BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_wasm64);
+    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+        if (node.length)
+        {
+            String8 node_arguments[] = {node, S8("tests/wasm_integer_execution.js"), output};
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
+                                                       (ProcessSpawnOptions){.use_process_environment = 1});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        else
+        {
+            arguments->show(arguments, S8("Wasm64 integer engine execution skipped: Node is not installed\n"));
+        }
+    }
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
+    UnitTestResult wasm_integers = compiler_driver_test_wasm_integers(arguments);
+    result.test_count += wasm_integers.test_count;
+    result.succeeded_test_count += wasm_integers.succeeded_test_count;
     UnitTestResult fallback = compiler_driver_test_machine_fallback(arguments);
     result.test_count += fallback.test_count;
     result.succeeded_test_count += fallback.succeeded_test_count;
@@ -8361,8 +8398,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // unsigned, and a narrow integer parameter whose register arrives with
     // the caller's leftover high half.  Each source stays separate so a future regression names
     // the exact contract it broke, and each runs under every register
-    // allocator because five of the ten are lowering rather than parsing
-    // defects.
+    // allocator because several are lowering rather than parsing defects.
+    // The audit regressions also pin promotion, constant conditional typing,
+    // and empty macro arguments across the same allocator matrix.
     String8 c_quickjs_regression_paths[] = {
         S8("tests/basic_c_aggregate_attribute.c"),
         S8("tests/basic_c_local_enum_declarator.c"),
@@ -8374,6 +8412,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_bit_field_layout.c"),
         S8("tests/basic_c_shift_operand_types.c"),
         S8("tests/basic_c_narrow_argument_abi.c"),
+        S8("tests/basic_c_bit_field_promotion.c"),
+        S8("tests/basic_c_constant_conditional_type.c"),
+        S8("tests/basic_c_macro_empty_paste.c"),
     };
     String8 c_quickjs_regression_names[] = {
         S8("buster-c-aggregate-attribute"),
@@ -8386,6 +8427,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-bit-field-layout"),
         S8("buster-c-shift-operand-types"),
         S8("buster-c-narrow-argument-abi"),
+        S8("buster-c-bit-field-promotion"),
+        S8("buster-c-constant-conditional-type"),
+        S8("buster-c-macro-empty-paste"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths); fixture_index += 1)
     {
