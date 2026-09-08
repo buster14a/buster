@@ -2,10 +2,8 @@ name: Pipeline audit source snapshot
 
 on:
   push:
-    branches:
-      - audit/pipeline-correctness-ebfdd117
-    paths:
-      - .github/workflows/audit-pipeline-snapshot.yml
+    branches: [audit/pipeline-correctness-ebfdd117]
+    paths: [.github/workflows/audit-pipeline-snapshot.yml]
 
 permissions:
   contents: read
@@ -17,13 +15,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: 88ecc49c1a5c5fef614c388c730babe7686a689a
           fetch-depth: 0
       - name: Pack repository snapshot
         shell: bash
-        run: git bundle create "$RUNNER_TEMP/buster-audit.bundle" HEAD
+        run: git bundle create "$RUNNER_TEMP/buster-main-88ecc49.bundle" HEAD
       - uses: actions/upload-artifact@v4
         with:
-          name: pipeline-audit-source
-          path: ${{ runner.temp }}/buster-audit.bundle
+          name: pipeline-audit-main-88ecc49
+          path: ${{ runner.temp }}/buster-main-88ecc49.bundle
           if-no-files-found: error
           retention-days: 1
