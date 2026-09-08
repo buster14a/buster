@@ -94,6 +94,8 @@ struct CompilerDriverInvocation
     // same numbers as a table for a human; this is the form another program
     // reads, so a build driver can divide its own instruction count by them.
     String8 source_metrics_path;
+    // Opt-in, checked token / canonical IR / selected MIR evidence.
+    String8 bootstrap_trace_prefix;
     String8 gpu_architecture;
     String8 gpu_entry_point;
     String8 gpu_stage;

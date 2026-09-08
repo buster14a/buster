@@ -73,6 +73,8 @@ typedef enum BuildCommand
     BUILD_COMMAND_IMPORT_ARM_A64_METADATA,
     BUILD_COMMAND_IMPORT_ARM_A64_SYSREG,
     BUILD_COMMAND_TEST_SELF_HOST,
+    BUILD_COMMAND_TEST_SELF_HOST_AUDIT,
+    BUILD_COMMAND_SELF_HOST_AUDIT_SELF_TEST,
     BUILD_COMMAND_SELF_HOST_FROM_EXISTING,
     BUILD_COMMAND_X86_64_COMPLETION_CENSUS,
     BUILD_COMMAND_TEST_CJSON,
@@ -2535,9 +2537,9 @@ struct SelfHostSourceMetrics
     u64 sloc;
     // Tokens handed to the parser, and the sum of their spellings. The source
     // counts differ between the two stages because they resolve different
-    // resource headers; these two do not, and everything past preprocessing is
-    // a function of exactly them. Both are needed to compare the stages: equal
-    // counts of differently spelled tokens are still different programs.
+    // resource headers. These counters are a necessary equality check, not
+    // proof of token-stream identity: differently spelled programs can have
+    // the same counts.
     u64 tokens;
     u64 token_bytes;
 };
@@ -2690,64 +2692,63 @@ BUSTER_GLOBAL_LOCAL void build_add(Arena* arena, String8 build_directory, SliceS
     build_run_add(arena, step, build_directory, targets, native_arguments, options);
 }
 
-BUSTER_GLOBAL_LOCAL bool self_host_source_metrics_read(Arena* arena, String8 path, SelfHostSourceMetrics* metrics)
+// Source metrics are evidence, not an optional performance hint. The writer
+// closes every record with a newline; missing fields, duplicate fields,
+// truncated records and overflowing integers must not turn into a successful
+// bootstrap check. Unknown complete fields remain forward-compatible.
+BUSTER_GLOBAL_LOCAL bool self_host_source_metrics_parse(String8 text, SelfHostSourceMetrics* metrics)
 {
-    ByteSlice bytes = file_read(arena, path, (FileReadOptions){0});
-    if (!bytes.length)
-    {
-        return false;
-    }
-
-    String8 text = BYTE_SLICE_TO_STRING(8, bytes);
+    String8 keys[] = {S8("version"), S8("lexed.translated_bytes"), S8("lexed.translated_lines"), S8("lexed.code_lines"),
+                      S8("preprocessed.tokens"), S8("preprocessed.bytes")};
+    u64 values[BUSTER_ARRAY_LENGTH(keys)] = {0};
+    u32 seen = 0;
+    bool valid = text.length && text.pointer[text.length - 1] == '\n';
     String8 line = {0};
-    while (text_next_line(&text, &line))
+    *metrics = (SelfHostSourceMetrics){0};
+    while (valid && text_next_line(&text, &line))
     {
         String8 key = {0};
         String8 value = {0};
-        if (!text_split_field(line, &key, &value))
+        bool field = text_split_field(line, &key, &value);
+        for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(keys); i += 1)
         {
-            continue;
-        }
-
-        if (string_equal(key, S8("lexed.translated_bytes")))
-        {
-            text_parse_u64(value, &metrics->bytes);
-        }
-        else if (string_equal(key, S8("lexed.translated_lines")))
-        {
-            text_parse_u64(value, &metrics->loc);
-        }
-        else if (string_equal(key, S8("lexed.code_lines")))
-        {
-            text_parse_u64(value, &metrics->sloc);
-        }
-        else if (string_equal(key, S8("preprocessed.tokens")))
-        {
-            text_parse_u64(value, &metrics->tokens);
-        }
-        else if (string_equal(key, S8("preprocessed.bytes")))
-        {
-            text_parse_u64(value, &metrics->token_bytes);
+            if (string_equal(field ? key : line, keys[i]))
+            {
+                valid = field && value.length && !(seen & (1u << i));
+                for (u64 j = 0; valid && j < value.length; j += 1)
+                {
+                    u8 digit = (u8)(value.pointer[j] - '0');
+                    valid = digit <= 9 && values[i] <= (UINT64_MAX - digit) / 10;
+                    if (valid)
+                    {
+                        values[i] = values[i] * 10 + digit;
+                    }
+                }
+                seen |= 1u << i;
+            }
         }
     }
-
-    return metrics->bytes && metrics->loc && metrics->sloc && metrics->tokens && metrics->token_bytes;
+    valid = valid && seen == (1u << BUSTER_ARRAY_LENGTH(keys)) - 1 && values[0] == 1 &&
+            values[1] && values[2] && values[3] && values[4] && values[5];
+    if (valid)
+    {
+        *metrics = (SelfHostSourceMetrics){.bytes = values[1], .loc = values[2], .sloc = values[3], .tokens = values[4], .token_bytes = values[5]};
+    }
+    return valid;
 }
 
-// The two stages read different source and are meant to: the bootstrap
-// resolves its host compiler's resource headers, the self-hosted stages the
-// builtin ones, so their bytes, sLOC, comments, #define directives and macro
-// expansions all legitimately differ. Where the two paths must converge is
-// here — the token stream handed to the parser, and what those tokens spell.
-// Everything downstream is a function of exactly that, which is why the
-// executables come out byte-identical.
-//
-// A legitimate divergence trips this too: change what the builtin resource
-// headers declare and the streams part company on purpose. That is the signal
-// rather than a false alarm — the two stages are no longer compiling the same
-// program, and the byte-identical executables that follow would be saying less
-// than they appear to.
-BUSTER_GLOBAL_LOCAL bool self_host_preprocessed_equal(SelfHostSourceMetrics stage1, SelfHostSourceMetrics stage2)
+BUSTER_GLOBAL_LOCAL bool self_host_source_metrics_read(Arena* arena, String8 path, SelfHostSourceMetrics* metrics)
+{
+    ByteSlice bytes = file_read(arena, path, (FileReadOptions){0});
+    return self_host_source_metrics_parse(BYTE_SLICE_TO_STRING(8, bytes), metrics);
+}
+
+// Resource headers legitimately change physical source counts between the
+// host-built compiler and its generated children. Equal token/spelling counts
+// are necessary, but NOT sufficient, for equal preprocessed input. Only the
+// audit's token artifact can establish that; never localize a mismatch from
+// these two counters alone.
+BUSTER_GLOBAL_LOCAL bool self_host_preprocessed_counts_equal(SelfHostSourceMetrics stage1, SelfHostSourceMetrics stage2)
 {
     return stage1.tokens == stage2.tokens && stage1.token_bytes == stage2.token_bytes;
 }
@@ -2785,7 +2786,7 @@ BUSTER_GLOBAL_LOCAL String8 self_host_mb_per_second(Arena* arena, u64 bytes, u64
 // are never compared: the bootstrap resolves its host compiler's resource
 // headers and the self-hosted stages the builtin ones, so bytes, LOC, and sLOC
 // legitimately differ. Only the token counts are held equal, by
-// self_host_preprocessed_equal below.
+// self_host_preprocessed_counts_equal above.
 BUSTER_GLOBAL_LOCAL void self_host_report_throughput(Arena* arena, String8 stage, ProcessRun* run, SelfHostSourceMetrics metrics)
 {
     bool has_instructions = run && run->instructions;
@@ -2813,106 +2814,61 @@ BUSTER_GLOBAL_LOCAL void self_host_report_throughput(Arena* arena, String8 stage
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_compare_action(Arena* arena, void* data)
 {
     SelfHostCompare* compare = data;
-    // Read before the executables are compared: when they differ, which half
-    // of the compiler to look at is the first thing worth printing.
     SelfHostSourceMetrics stage1_metrics = {0};
     SelfHostSourceMetrics stage2_metrics = {0};
-    bool measured = self_host_source_metrics_read(arena, compare->stage1_metrics_path, &stage1_metrics) &&
-                    self_host_source_metrics_read(arena, compare->stage2_metrics_path, &stage2_metrics);
-    String8 stage1_path = compare->stage1;
-    String8 stage2_path = compare->stage2;
+    bool measured1 = self_host_source_metrics_read(arena, compare->stage1_metrics_path, &stage1_metrics);
+    bool measured2 = self_host_source_metrics_read(arena, compare->stage2_metrics_path, &stage2_metrics);
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    if (!measured1 || !measured2)
+    {
+        string_print(S8("error: missing or invalid self-host metrics: {S8}\n"), !measured1 ? compare->stage1_metrics_path : compare->stage2_metrics_path);
+    }
+    else if (!self_host_preprocessed_counts_equal(stage1_metrics, stage2_metrics))
+    {
+        string_print(S8("error: self-host preprocessed counts differ: stage1 {u64} tokens / {u64} spelling bytes, stage2 {u64} / {u64}\n"),
+                     stage1_metrics.tokens, stage1_metrics.token_bytes, stage2_metrics.tokens, stage2_metrics.token_bytes);
+    }
+    else
+    {
+        String8 stage1_path = compare->stage1;
+        String8 stage2_path = compare->stage2;
 #if BUSTER_LINUX || BUSTER_MACOS
-    stage1_path = os_path_absolute(arena, stage1_path, true);
-    stage2_path = os_path_absolute(arena, stage2_path, true);
+        stage1_path = os_path_absolute(arena, stage1_path, true);
+        stage2_path = os_path_absolute(arena, stage2_path, true);
 #endif
-    FileMapRead stage1_map = file_map_read(arena, stage1_path, (FileReadOptions){.map_required = 1});
-    if (!stage1_map.mapped_pointer)
-    {
-        file_map_unmap(stage1_map);
-        string_print(S8("error: could not map self-host outputs\n"));
-        return PROCESS_RESULT_FAILED;
-    }
-    FileMapRead stage2_map = file_map_read(arena, stage2_path, (FileReadOptions){.map_required = 1});
-    if (!stage2_map.mapped_pointer)
-    {
-        file_map_unmap(stage2_map);
-        file_map_unmap(stage1_map);
-        string_print(S8("error: could not map self-host outputs\n"));
-        return PROCESS_RESULT_FAILED;
-    }
-    ByteSlice stage1 = stage1_map.bytes;
-    ByteSlice stage2 = stage2_map.bytes;
-    bool executable_equal = stage1.length == stage2.length && memory_compare(stage1.pointer, stage2.pointer, stage1.length);
+        FileMapRead stage1_map = file_map_read(arena, stage1_path, (FileReadOptions){.map_required = 1});
+        FileMapRead stage2_map = file_map_read(arena, stage2_path, (FileReadOptions){.map_required = 1});
+        ByteSlice stage1 = stage1_map.bytes;
+        ByteSlice stage2 = stage2_map.bytes;
+        bool readable = stage1_map.mapped_pointer && stage2_map.mapped_pointer && stage1.length && stage2.length;
+        bool executable_equal = readable && stage1.length == stage2.length && memory_compare(stage1.pointer, stage2.pointer, stage1.length);
 #if BUSTER_WINDOWS
-    FileMapRead pdb1_map = file_map_read(arena, compare->pdb1, (FileReadOptions){.map_required = 1});
-    if (!pdb1_map.mapped_pointer)
-    {
-        file_map_unmap(pdb1_map);
-        file_map_unmap(stage2_map);
-        file_map_unmap(stage1_map);
-        string_print(S8("error: could not map self-host outputs\n"));
-        return PROCESS_RESULT_FAILED;
-    }
-    FileMapRead pdb2_map = file_map_read(arena, compare->pdb2, (FileReadOptions){.map_required = 1});
-    if (!pdb2_map.mapped_pointer)
-    {
+        FileMapRead pdb1_map = file_map_read(arena, compare->pdb1, (FileReadOptions){.map_required = 1});
+        FileMapRead pdb2_map = file_map_read(arena, compare->pdb2, (FileReadOptions){.map_required = 1});
+        executable_equal = readable && self_host_compare_pe(stage1, stage2);
+        bool pdb_equal = pdb1_map.mapped_pointer && pdb2_map.mapped_pointer && pdb1_map.bytes.length &&
+                         pdb1_map.bytes.length == pdb2_map.bytes.length && memory_compare(pdb1_map.bytes.pointer, pdb2_map.bytes.pointer, pdb1_map.bytes.length);
+        executable_equal = executable_equal && pdb_equal;
         file_map_unmap(pdb2_map);
         file_map_unmap(pdb1_map);
+#endif
+        if (executable_equal)
+        {
+            string_print(S8("SELF_HOST fixed_point bytes={u64} stage1={S8} stage2={S8}\n"), stage1.length, compare->stage1, compare->stage2);
+            self_host_report_throughput(arena, S8("1"), compare->stage1_run, stage1_metrics);
+            self_host_report_throughput(arena, S8("2"), compare->stage2_run, stage2_metrics);
+            result = PROCESS_RESULT_SUCCESS;
+        }
+        else
+        {
+            string_print(S8("error: missing or differing self-host artifacts: {S8} ({u64} bytes), {S8} ({u64} bytes)\n"),
+                         compare->stage1, stage1.length, compare->stage2, stage2.length);
+            string_print(S8("note: matching token counts do not establish equal input; run test_self_host_audit to localize the divergence\n"));
+        }
         file_map_unmap(stage2_map);
         file_map_unmap(stage1_map);
-        string_print(S8("error: could not map self-host outputs\n"));
-        return PROCESS_RESULT_FAILED;
     }
-    executable_equal = self_host_compare_pe(stage1, stage2);
-    bool pdb_equal = pdb1_map.mapped_pointer && pdb2_map.mapped_pointer && pdb1_map.bytes.length == pdb2_map.bytes.length &&
-                     memory_compare(pdb1_map.bytes.pointer, pdb2_map.bytes.pointer, pdb1_map.bytes.length);
-    file_map_unmap(pdb2_map);
-    file_map_unmap(pdb1_map);
-    file_map_unmap(stage2_map);
-    file_map_unmap(stage1_map);
-    if (!executable_equal || !pdb_equal)
-#else
-    file_map_unmap(stage2_map);
-    file_map_unmap(stage1_map);
-    if (!executable_equal)
-#endif
-    {
-        string_print(S8("error: self-host stages differ: {S8} ({u64} bytes) != {S8} ({u64} bytes)\n"), compare->stage1, stage1.length, compare->stage2,
-                     stage2.length);
-        // Halve the search before anyone opens a byte diff of two 26 MB
-        // executables: the parser and everything after it are a function of the
-        // preprocessed token stream, so an identical stream puts the fault
-        // past preprocessing and a differing one puts it at or before.
-        if (measured)
-        {
-            if (self_host_preprocessed_equal(stage1_metrics, stage2_metrics))
-            {
-                string_print(S8("note: both stages preprocessed to the same {u64} tokens / {u64} spelling bytes; the divergence is past preprocessing\n"),
-                             stage1_metrics.tokens, stage1_metrics.token_bytes);
-            }
-            else
-            {
-                string_print(S8("note: the stages preprocessed differently (stage1 {u64} tokens / {u64} spelling bytes, stage2 {u64} / {u64}); the "
-                                "divergence is at or before preprocessing\n"),
-                             stage1_metrics.tokens, stage1_metrics.token_bytes, stage2_metrics.tokens, stage2_metrics.token_bytes);
-            }
-        }
-        return PROCESS_RESULT_FAILED;
-    }
-    string_print(S8("SELF_HOST deterministic bytes={u64} stage1={S8} stage2={S8}\n"), stage1.length, compare->stage1, compare->stage2);
-    self_host_report_throughput(arena, S8("1"), compare->stage1_run, stage1_metrics);
-    self_host_report_throughput(arena, S8("2"), compare->stage2_run, stage2_metrics);
-    // Checked after the throughput lines so the two token counts the error
-    // talks about are already on the page. Byte-identical executables are not
-    // enough on their own: they say the two stages agreed on an answer, not
-    // that they were asked the same question.
-    if (measured && !self_host_preprocessed_equal(stage1_metrics, stage2_metrics))
-    {
-        string_print(S8("error: self-host stages preprocessed to different token streams: stage1 {u64} tokens / {u64} spelling bytes, stage2 {u64} / {u64}\n"),
-                     stage1_metrics.tokens, stage1_metrics.token_bytes, stage2_metrics.tokens, stage2_metrics.token_bytes);
-        return PROCESS_RESULT_FAILED;
-    }
-    return PROCESS_RESULT_SUCCESS;
+    return result;
 }
 
 // The measurement lands beside the executable it measured, so the stale one an
@@ -2942,11 +2898,9 @@ BUSTER_GLOBAL_LOCAL String8 self_host_metrics_path(Arena* arena, String8 output)
 // the buffered output finally reaches the log.
 #define SELF_HOST_TIMEOUT_SECONDS 600
 
-BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
-                                                      String8 timing_description, String8 register_allocator_flag)
+BUSTER_GLOBAL_LOCAL SliceString8 self_host_compile_arguments(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
+                                                            String8 register_allocator_flag)
 {
-    BuildStep* step = step_add(arena);
-    ProcessRun* run = run_add(arena, step);
     String8 generated_include = string_format(arena, S8("-I{S8}/generated"), build_directory);
     // Formatted before the builder starts: the builder owns a contiguous run
     // of String8 in this same arena, and an interleaved allocation of anything
@@ -3029,8 +2983,16 @@ BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 comp
 #endif
     os_argument_builder_append(&builder, S8("-o"));
     os_argument_builder_append(&builder, output);
+    return os_argument_builder_flush(&builder);
+}
+
+BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
+                                                     String8 timing_description, String8 register_allocator_flag)
+{
+    BuildStep* step = step_add(arena);
+    ProcessRun* run = run_add(arena, step);
     *run = (ProcessRun){
-        .arguments = os_argument_builder_flush(&builder),
+        .arguments = self_host_compile_arguments(arena, compiler, build_directory, sysroot, output, register_allocator_flag),
         .working_directory = S8("."),
         .timing_description = timing_description,
         .timeout_seconds = SELF_HOST_TIMEOUT_SECONDS,
@@ -7171,6 +7133,490 @@ BUSTER_GLOBAL_LOCAL bool summary_self_test_claim_directory(Arena* arena, String8
         }
     }
     return false;
+}
+
+// --- bootstrap audit ------------------------------------------------------
+// The ordinary self-host gate remains cross-platform. This stronger Linux
+// x86-64 gate repeats each producer, validates a child before consuming it,
+// and compares phase evidence at every generation boundary. No expected
+// failures, fallback-to-success, retry-on-crash, or stripped executable bytes.
+
+typedef struct SelfHostAudit SelfHostAudit;
+struct SelfHostAudit
+{
+    String8 build_directory;
+    String8 config;
+    String8 compiler;
+};
+
+typedef struct SelfHostAuditRun SelfHostAuditRun;
+struct SelfHostAuditRun
+{
+    ProcessWaitResult wait;
+    bool recorded;
+};
+
+BUSTER_GLOBAL_LOCAL bool self_host_audit_write(Arena* arena, String8 path, String8 text)
+{
+    String8 terminated = string_format_z(arena, S8("{S8}"), path);
+    FILE* file = fopen((char const*)terminated.pointer, "wb");
+    bool valid = file != 0;
+    if (file)
+    {
+        bool written = !text.length || fwrite(text.pointer, 1, (size_t)text.length, file) == text.length;
+        bool closed = fclose(file) == 0;
+        valid = written && closed;
+    }
+    if (!valid)
+    {
+        string_print(S8("error: cannot write bootstrap evidence {S8}\n"), path);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool self_host_audit_contains(String8 text, String8 needle)
+{
+    bool found = false;
+    for (u64 i = 0; !found && i <= text.length && needle.length <= text.length - i; i += 1)
+    {
+        found = memory_compare(text.pointer + i, needle.pointer, needle.length);
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool self_host_audit_process_ok(SelfHostAuditRun run, bool rejection)
+{
+    String8 error = BYTE_SLICE_TO_STRING(8, run.wait.streams[STANDARD_STREAM_ERROR]);
+    String8 output = BYTE_SLICE_TO_STRING(8, run.wait.streams[STANDARD_STREAM_OUTPUT]);
+    bool sanitizer = self_host_audit_contains(error, S8("Sanitizer")) || self_host_audit_contains(error, S8("runtime error:")) ||
+                     self_host_audit_contains(output, S8("Sanitizer")) || self_host_audit_contains(output, S8("runtime error:"));
+    return run.recorded && !run.wait.timed_out && !sanitizer &&
+           run.wait.result == (rejection ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS) && (!rejection || error.length || output.length);
+}
+
+BUSTER_GLOBAL_LOCAL SelfHostAuditRun self_host_audit_run(Arena* arena, String8 prefix, SliceString8 arguments)
+{
+    String8List command = {0};
+    for (u64 i = 0; i < arguments.length; i += 1)
+    {
+        string8_list_push(arena, &command, string_format(arena, S8("{u64}:{S8}\n"), arguments.pointer[i].length, arguments.pointer[i]));
+    }
+    SelfHostAuditRun result = {.wait = {.result = PROCESS_RESULT_NOT_EXISTENT}};
+    result.recorded = self_host_audit_write(arena, string_format_z(arena, S8("{S8}.command"), prefix), string_join_arena(arena, string8_list_to_slice(arena, command), false));
+    string_print(S8("BOOTSTRAP run={S8}\n"), prefix);
+    command_print(arguments);
+    if (result.recorded)
+    {
+        ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0},
+                                                     (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
+                                                                           .use_process_environment = 1});
+        if (spawn.handle)
+        {
+            result.wait = os_process_wait_deadline(arena, spawn, SELF_HOST_TIMEOUT_SECONDS * 1000000ull);
+        }
+        String8 status = string_format(arena, S8("result {u32}\nplatform_status {u32}\ntimed_out {u32}\n"),
+                                       (u32)result.wait.result, result.wait.platform_status, (u32)result.wait.timed_out);
+        bool output_written = self_host_audit_write(arena, string_format_z(arena, S8("{S8}.stdout"), prefix),
+                                                   BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_OUTPUT]));
+        bool error_written = self_host_audit_write(arena, string_format_z(arena, S8("{S8}.stderr"), prefix),
+                                                  BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_ERROR]));
+        bool status_written = self_host_audit_write(arena, string_format_z(arena, S8("{S8}.status"), prefix), status);
+        result.recorded = output_written && error_written && status_written;
+        if (!self_host_audit_process_ok(result, false))
+        {
+            string_print(S8("BOOTSTRAP child status: {S8}{S8}{S8}\n"), status, BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_OUTPUT]),
+                         BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_ERROR]));
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool self_host_audit_trace_complete(ByteSlice bytes, String8 kind)
+{
+    // Shared format contract with bootstrap_trace.h; build.c deliberately
+    // bootstraps without linking the compiler. This validates the envelope;
+    // phase identity still requires comparing every byte of the payload.
+    String8 header = S8("BUSTER bootstrap trace v1");
+    bool valid = bytes.length >= 24 + header.length + kind.length;
+    u64 header_length = 0;
+    u64 kind_length = 0;
+    if (valid)
+    {
+        for (u32 i = 0; i < 8; i += 1)
+        {
+            header_length |= (u64)bytes.pointer[i] << (i * 8);
+            kind_length |= (u64)bytes.pointer[8 + header.length + i] << (i * 8);
+        }
+        valid = header_length == header.length && memory_compare(bytes.pointer + 8, header.pointer, header.length) &&
+                kind_length == kind.length && memory_compare(bytes.pointer + 16 + header.length, kind.pointer, kind.length) &&
+                memory_compare(bytes.pointer + bytes.length - 8, "BSTREND1", 8);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool self_host_audit_artifacts(Arena* arena, String8 prefix)
+{
+    SelfHostSourceMetrics metrics = {0};
+    bool valid = self_host_source_metrics_read(arena, self_host_metrics_path(arena, prefix), &metrics);
+    if (!valid)
+    {
+        string_print(S8("error: bootstrap metrics missing or malformed: {S8}\n"), prefix);
+    }
+    String8 suffixes[] = {S8(".tokens"), S8(".ir"), S8(".mir"), S8("")};
+    String8 kinds[] = {S8("tokens"), S8("canonical IR"), S8("selected MIR")};
+    for (u32 i = 0; valid && i < BUSTER_ARRAY_LENGTH(suffixes); i += 1)
+    {
+        String8 path = string_format_z(arena, S8("{S8}{S8}"), prefix, suffixes[i]);
+        FileMapRead file = file_map_read(arena, path, (FileReadOptions){.map_required = 1});
+        valid = file.mapped_pointer && file.bytes.length && (i == 3 || self_host_audit_trace_complete(file.bytes, kinds[i]));
+        file_map_unmap(file);
+        if (!valid)
+        {
+            string_print(S8("error: missing, empty or incomplete bootstrap artifact: {S8}\n"), path);
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool self_host_audit_compare_file(Arena* arena, String8 left, String8 right, bool allow_empty)
+{
+    // Open explicitly so two absent diagnostics are not mistaken for two
+    // legitimately empty diagnostics. file_read alone cannot distinguish them.
+    OsFileDescriptor* left_fd = os_file_open(left, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    OsFileDescriptor* right_fd = os_file_open(right, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    bool valid = left_fd && right_fd;
+    u64 left_size = left_fd ? os_file_get_size(left_fd) : 0;
+    u64 right_size = right_fd ? os_file_get_size(right_fd) : 0;
+    if (left_fd)
+    {
+        valid = os_file_close(left_fd) && valid;
+    }
+    if (right_fd)
+    {
+        valid = os_file_close(right_fd) && valid;
+    }
+    valid = valid && (allow_empty || (left_size && right_size));
+    u64 offset = 0;
+    if (valid && left_size && right_size)
+    {
+        FileMapRead a = file_map_read(arena, left, (FileReadOptions){.map_required = 1});
+        FileMapRead b = file_map_read(arena, right, (FileReadOptions){.map_required = 1});
+        valid = a.mapped_pointer && b.mapped_pointer && a.bytes.length == left_size && b.bytes.length == right_size;
+        if (valid)
+        {
+            u64 common_size = BUSTER_MIN(left_size, right_size);
+            valid = left_size == right_size && memory_compare(a.bytes.pointer, b.bytes.pointer, common_size);
+            if (!valid)
+            {
+                while (offset < common_size && a.bytes.pointer[offset] == b.bytes.pointer[offset])
+                {
+                    offset += 1;
+                }
+            }
+        }
+        file_map_unmap(b);
+        file_map_unmap(a);
+    }
+    valid = valid && left_size == right_size;
+    if (!valid)
+    {
+        string_print(S8("error: first bootstrap mismatch: {S8} ({u64} bytes) != {S8} ({u64} bytes), offset={u64}\n"),
+                     left, left_size, right, right_size, offset);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool self_host_audit_compare(Arena* arena, String8 left, String8 right, bool physical_metrics_equal)
+{
+    String8 suffixes[] = {S8(".tokens"), S8(".ir"), S8(".mir"), S8(".stdout"), S8(".stderr"), S8(".status"), S8(""), S8(".metrics")};
+    bool valid = true;
+    u32 count = BUSTER_ARRAY_LENGTH(suffixes) - (physical_metrics_equal ? 0u : 1u);
+    for (u32 i = 0; valid && i < count; i += 1)
+    {
+        String8 a = string_format_z(arena, S8("{S8}{S8}"), left, suffixes[i]);
+        String8 b = string_format_z(arena, S8("{S8}{S8}"), right, suffixes[i]);
+        valid = self_host_audit_compare_file(arena, a, b, i == 3 || i == 4);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool self_host_audit_probe(Arena* arena, String8 compiler, String8 prefix, String8 reference)
+{
+    String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    bool valid = true;
+    for (u32 i = 0; valid && i < BUSTER_ARRAY_LENGTH(modes); i += 1)
+    {
+        String8 output = string_format_z(arena, S8("{S8}.probe-{S8}"), prefix, modes[i]);
+        String8 mode = string_format(arena, S8("-fregister-allocator={S8}"), modes[i]);
+        String8 trace = string_format(arena, S8("-fbootstrap-trace={S8}"), output);
+        String8 metrics = string_format(arena, S8("-fsource-metrics={S8}.metrics"), output);
+        String8 compile_arguments[] = {compiler, S8("cc"), mode, trace, metrics, S8("tests/self_host_bootstrap_probe.c"), S8("-o"), output};
+        SelfHostAuditRun compile = self_host_audit_run(arena, string_format_z(arena, S8("{S8}.compile"), output),
+                                                      (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_arguments));
+        valid = self_host_audit_process_ok(compile, false) && self_host_audit_artifacts(arena, output);
+        if (valid)
+        {
+            String8 execute_arguments[] = {output};
+            SelfHostAuditRun execute = self_host_audit_run(arena, string_format_z(arena, S8("{S8}.execute"), output),
+                                                          (SliceString8)BUSTER_ARRAY_TO_SLICE(execute_arguments));
+            valid = self_host_audit_process_ok(execute, false) && !execute.wait.streams[STANDARD_STREAM_ERROR].length &&
+                    string_equal(BYTE_SLICE_TO_STRING(8, execute.wait.streams[STANDARD_STREAM_OUTPUT]), S8("self-host bootstrap probe ok\n"));
+        }
+        if (valid && reference.length)
+        {
+            String8 suffixes[] = {S8(".tokens"), S8(".ir"), S8(".mir"), S8(""), S8(".metrics"),
+                                  S8(".compile.stdout"), S8(".compile.stderr"), S8(".compile.status"),
+                                  S8(".execute.stdout"), S8(".execute.stderr"), S8(".execute.status")};
+            for (u32 j = 0; valid && j < BUSTER_ARRAY_LENGTH(suffixes); j += 1)
+            {
+                String8 a = string_format_z(arena, S8("{S8}.probe-{S8}{S8}"), reference, modes[i], suffixes[j]);
+                String8 b = string_format_z(arena, S8("{S8}{S8}"), output, suffixes[j]);
+                valid = self_host_audit_compare_file(arena, a, b, j == 5 || j == 6 || j == 8 || j == 9);
+            }
+        }
+    }
+    if (valid)
+    {
+        String8 output = string_format_z(arena, S8("{S8}.rejected"), prefix);
+        String8 arguments[] = {compiler, S8("cc"), S8("tests/self_host_bootstrap_invalid.c"), S8("-o"), output};
+        SelfHostAuditRun rejected = self_host_audit_run(arena, output, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments));
+        valid = self_host_audit_process_ok(rejected, true) && !path_exists(arena, output);
+        if (valid && reference.length)
+        {
+            String8 suffixes[] = {S8(".stdout"), S8(".stderr"), S8(".status")};
+            for (u32 i = 0; valid && i < BUSTER_ARRAY_LENGTH(suffixes); i += 1)
+            {
+                String8 a = string_format_z(arena, S8("{S8}.rejected{S8}"), reference, suffixes[i]);
+                String8 b = string_format_z(arena, S8("{S8}{S8}"), output, suffixes[i]);
+                valid = self_host_audit_compare_file(arena, a, b, true);
+            }
+        }
+    }
+    if (!valid)
+    {
+        string_print(S8("error: bootstrap behavioral validation failed: {S8}\n"), prefix);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool self_host_audit_claim(Arena* arena, SelfHostAudit* audit, String8* directory)
+{
+    String8 parent = path_join(arena, path_join(arena, audit->build_directory, S8("self-host-audit")), audit->config);
+    make_directory_recursive(arena, parent);
+    bool claimed = false;
+    u64 timestamp = os_now_microseconds();
+    for (u32 i = 0; !claimed && i < 32; i += 1)
+    {
+        String8 name = string_format(arena, S8("run-{u64}-{u64}-{u32}"), os_get_current_process_id(), timestamp, i);
+        String8 candidate = path_join(arena, parent, name);
+        SummaryDirectoryClaimResult claim = summary_self_test_directory_claim(candidate);
+        if (claim == SUMMARY_DIRECTORY_CLAIMED)
+        {
+            *directory = candidate;
+            claimed = true;
+        }
+        else if (claim == SUMMARY_DIRECTORY_ERROR)
+        {
+            break;
+        }
+    }
+    return claimed;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult self_host_audit_action(Arena* arena, void* data)
+{
+    SelfHostAudit* audit = data;
+    String8 directory = {0};
+    bool valid = self_host_audit_claim(arena, audit, &directory);
+    if (!valid)
+    {
+        string_print(S8("error: cannot claim a fresh bootstrap audit directory\n"));
+    }
+    else
+    {
+        string_print(S8("BOOTSTRAP evidence={S8}\n"), directory);
+        String8 result_path = path_join(arena, directory, S8("result.txt"));
+        valid = self_host_audit_write(arena, result_path, S8("RUNNING\n"));
+        String8 reference = path_join(arena, directory, S8("stage0"));
+        if (valid)
+        {
+            valid = self_host_audit_probe(arena, audit->compiler, reference, (String8){0});
+        }
+        String8 compiler = audit->compiler;
+        String8 previous = {0};
+        String8 current = reference;
+        for (u32 generation = 1; valid && generation <= 3; generation += 1)
+        {
+            String8 first = {0};
+            for (u32 repetition = 0; valid && repetition < 2; repetition += 1)
+            {
+                current = path_join(arena, directory, string_format(arena, S8("stage{u32}-{u32}"), generation, repetition));
+                SliceString8 ordinary = self_host_compile_arguments(arena, compiler, audit->build_directory, (String8){0}, current, (String8){0});
+                String8 trace_flag = string_format(arena, S8("-fbootstrap-trace={S8}"), current);
+                String8* arguments = arena_allocate(arena, String8, ordinary.length + 1);
+                u64 count = 0;
+                for (u64 i = 0; i < ordinary.length; i += 1)
+                {
+                    // Timings and physical resource-header counters in -v
+                    // are observations, not compile-time diagnostics.
+                    if (!string_equal(ordinary.pointer[i], S8("-v")))
+                    {
+                        arguments[count++] = ordinary.pointer[i];
+                    }
+                }
+                arguments[count++] = trace_flag;
+                SelfHostAuditRun run = self_host_audit_run(arena, current, (SliceString8){arguments, count});
+                valid = self_host_audit_process_ok(run, false) && self_host_audit_artifacts(arena, current);
+                if (valid && !repetition && previous.length)
+                {
+                    // Only the host-built compiler uses host resource
+                    // headers; physical metrics must also converge after it.
+                    valid = self_host_audit_compare(arena, previous, current, generation > 2);
+                }
+                if (valid && repetition)
+                {
+                    valid = self_host_audit_compare(arena, first, current, true);
+                }
+                if (valid)
+                {
+                    valid = self_host_audit_probe(arena, current, current, reference);
+                }
+                if (!repetition)
+                {
+                    first = current;
+                }
+            }
+            compiler = first;
+            previous = first;
+        }
+        String8 summary = valid ? S8("PASS generations=3 repetitions=2; tokens, canonical IR, selected MIR, diagnostics, binary fixed point; probes=none,mir-stack,fast,quality\n")
+                                : string_format(arena, S8("FAIL earliest_unvalidated_child={S8}; inspect its command/status/stdout/stderr and phase artifacts\n"), current);
+        bool recorded = self_host_audit_write(arena, result_path, summary);
+        valid = valid && recorded;
+        string_print(S8("BOOTSTRAP {S8}"), summary);
+    }
+    return valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult self_host_audit_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
+{
+    ProcessResult result;
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    String8 config = cmake_build_config(options);
+    String8 cache = path_join(arena, build_directory, S8("CMakeCache.txt"));
+    if (!path_exists(arena, cache))
+    {
+        string_print(S8("error: configure the build tree before test_self_host_audit\n"));
+        result = PROCESS_RESULT_FAILED;
+    }
+    else
+    {
+        String8 targets[] = {S8("ide")};
+        build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
+        SelfHostAudit* audit = arena_allocate(arena, SelfHostAudit, 1);
+        *audit = (SelfHostAudit){.build_directory = build_directory, .config = config,
+                                 .compiler = path_join(arena, path_join(arena, build_directory, config), S8("ide"))};
+        BuildStep* step = step_add(arena);
+        ProcessRun* run = run_add(arena, step);
+        run->callback = self_host_audit_action;
+        run->callback_data = audit;
+        run->timing_description = S8("Three-generation bootstrap audit");
+        result = PROCESS_RESULT_SUCCESS;
+    }
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(build_directory);
+    BUSTER_UNUSED(options);
+    string_print(S8("error: test_self_host_audit currently requires Linux x86-64; test_self_host retains the other native platform gates\n"));
+    result = PROCESS_RESULT_FAILED;
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult self_host_audit_self_test(Arena* arena)
+{
+    String8 valid_text = S8("version=1\nlexed.translated_bytes=20\nlexed.translated_lines=3\nlexed.code_lines=2\npreprocessed.tokens=4\npreprocessed.bytes=8\n");
+    SelfHostSourceMetrics metrics = {0};
+    u32 tests = 0;
+    u32 failures = 0;
+#define SELF_HOST_AUDIT_CHECK(expression) do { tests += 1; if (!(expression)) { failures += 1; string_print(S8("bootstrap self-test failed: " #expression "\n")); } } while (0)
+    SELF_HOST_AUDIT_CHECK(self_host_source_metrics_parse(valid_text, &metrics));
+    SELF_HOST_AUDIT_CHECK(metrics.bytes == 20 && metrics.loc == 3 && metrics.sloc == 2 && metrics.tokens == 4 && metrics.token_bytes == 8);
+    // Every prefix, including a complete five-field prefix, must fail closed.
+    for (u64 i = 0; i < valid_text.length; i += 1)
+    {
+        SELF_HOST_AUDIT_CHECK(!self_host_source_metrics_parse(string_slice(valid_text, 0, i), &metrics));
+        SELF_HOST_AUDIT_CHECK(!metrics.bytes && !metrics.loc && !metrics.sloc && !metrics.tokens && !metrics.token_bytes);
+    }
+    String8 malformed[] = {S8("version=1\n"), S8("version=2\n"), S8("preprocessed.tokens=4\n"), S8("preprocessed.tokens\n"),
+                           S8("preprocessed.tokens=4junk\n"), S8("preprocessed.tokens=-1\n"), S8("preprocessed.tokens=+1\n"),
+                           S8("preprocessed.tokens=18446744073709551616\n")};
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(malformed); i += 1)
+    {
+        String8 duplicate = string_format(arena, S8("{S8}{S8}"), valid_text, malformed[i]);
+        SELF_HOST_AUDIT_CHECK(!self_host_source_metrics_parse(duplicate, &metrics));
+    }
+    String8 fields[] = {S8("4junk"), S8("-1"), S8("+1"), S8("18446744073709551616"), S8("0"), S8("")};
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(fields); i += 1)
+    {
+        String8 text = string_format(arena, S8("version=1\nlexed.translated_bytes=20\nlexed.translated_lines=3\nlexed.code_lines=2\npreprocessed.tokens={S8}\npreprocessed.bytes=8\n"), fields[i]);
+        SELF_HOST_AUDIT_CHECK(!self_host_source_metrics_parse(text, &metrics));
+    }
+    String8 directory = {0};
+    bool claimed = summary_self_test_claim_directory(arena, S8("bootstrap-verifier"), &directory);
+    SELF_HOST_AUDIT_CHECK(claimed);
+    if (claimed)
+    {
+        String8 a = path_join(arena, directory, S8("a"));
+        String8 b = path_join(arena, directory, S8("b"));
+        String8 missing = path_join(arena, directory, S8("missing"));
+        SELF_HOST_AUDIT_CHECK(!self_host_audit_compare_file(arena, a, b, true));
+        SELF_HOST_AUDIT_CHECK(self_host_audit_write(arena, a, S8("")));
+        SELF_HOST_AUDIT_CHECK(self_host_audit_write(arena, b, S8("")));
+        SELF_HOST_AUDIT_CHECK(self_host_audit_compare_file(arena, a, b, true));
+        SELF_HOST_AUDIT_CHECK(!self_host_audit_compare_file(arena, a, b, false));
+        SELF_HOST_AUDIT_CHECK(self_host_audit_write(arena, a, S8("int x=1;")));
+        SELF_HOST_AUDIT_CHECK(self_host_audit_write(arena, b, S8("int x=2;")));
+        SELF_HOST_AUDIT_CHECK(!self_host_audit_compare_file(arena, a, b, false));
+        SELF_HOST_AUDIT_CHECK(self_host_audit_write(arena, b, S8("int x=1;")));
+        SELF_HOST_AUDIT_CHECK(self_host_audit_compare_file(arena, a, b, false));
+        SelfHostCompare compare = {.stage1 = a, .stage2 = b, .stage1_metrics_path = missing, .stage2_metrics_path = missing};
+        SELF_HOST_AUDIT_CHECK(self_host_compare_action(arena, &compare) == PROCESS_RESULT_FAILED);
+        SELF_HOST_AUDIT_CHECK(!self_host_audit_artifacts(arena, a));
+        SELF_HOST_AUDIT_CHECK(!self_host_audit_write(arena, path_join(arena, missing, S8("unwritable")), S8("must fail")));
+        remove_path_recursive(arena, directory);
+    }
+    char8 complete_bytes[] = "\x19\0\0\0\0\0\0\0" "BUSTER bootstrap trace v1" "\x06\0\0\0\0\0\0\0" "tokens" "BSTREND1";
+    String8 complete = {complete_bytes, sizeof(complete_bytes) - 1};
+    SELF_HOST_AUDIT_CHECK(self_host_audit_trace_complete(BUSTER_SLICE_TO_BYTE_SLICE(complete), S8("tokens")));
+    SELF_HOST_AUDIT_CHECK(!self_host_audit_trace_complete(BUSTER_SLICE_TO_BYTE_SLICE(complete), S8("canonical IR")));
+    for (u64 length = 0; length < complete.length; length += 1)
+    {
+        SELF_HOST_AUDIT_CHECK(!self_host_audit_trace_complete((ByteSlice){.pointer = (u8*)complete.pointer, .length = length}, S8("tokens")));
+    }
+    SelfHostAuditRun child = {.recorded = true, .wait = {.result = PROCESS_RESULT_SUCCESS}};
+    SELF_HOST_AUDIT_CHECK(self_host_audit_process_ok(child, false));
+    child.recorded = false;
+    SELF_HOST_AUDIT_CHECK(!self_host_audit_process_ok(child, false));
+    child.recorded = true;
+    child.wait.timed_out = 1;
+    SELF_HOST_AUDIT_CHECK(!self_host_audit_process_ok(child, false));
+    child.wait.timed_out = 0;
+    child.wait.result = PROCESS_RESULT_CRASH;
+    SELF_HOST_AUDIT_CHECK(!self_host_audit_process_ok(child, false) && !self_host_audit_process_ok(child, true));
+    child.wait.result = PROCESS_RESULT_FAILED;
+    SELF_HOST_AUDIT_CHECK(!self_host_audit_process_ok(child, true));
+    child.wait.streams[STANDARD_STREAM_ERROR] = BUSTER_SLICE_TO_BYTE_SLICE(S8("source error\n"));
+    SELF_HOST_AUDIT_CHECK(self_host_audit_process_ok(child, true));
+    child.wait.streams[STANDARD_STREAM_ERROR] = (ByteSlice){0};
+    child.wait.streams[STANDARD_STREAM_OUTPUT] = BUSTER_SLICE_TO_BYTE_SLICE(S8("source error\n"));
+    SELF_HOST_AUDIT_CHECK(self_host_audit_process_ok(child, true));
+    child.wait.result = PROCESS_RESULT_SUCCESS;
+    child.wait.streams[STANDARD_STREAM_ERROR] = BUSTER_SLICE_TO_BYTE_SLICE(S8("runtime error: bad shift\n"));
+    SELF_HOST_AUDIT_CHECK(!self_host_audit_process_ok(child, false));
+#undef SELF_HOST_AUDIT_CHECK
+    string_print(S8("SELF_HOST_AUDIT_SELF_TEST tests={u32} failures={u32}\n"), tests, failures);
+    return failures ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult time_trace_summary_self_test(Arena* arena)
@@ -33432,6 +33878,8 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_IMPORT_ARM_A64_METADATA] = S8_INITIALIZER("import_arm_a64_metadata"),
         [BUILD_COMMAND_IMPORT_ARM_A64_SYSREG] = S8_INITIALIZER("import_arm_a64_sysregs"),
         [BUILD_COMMAND_TEST_SELF_HOST] = S8_INITIALIZER("test_self_host"),
+        [BUILD_COMMAND_TEST_SELF_HOST_AUDIT] = S8_INITIALIZER("test_self_host_audit"),
+        [BUILD_COMMAND_SELF_HOST_AUDIT_SELF_TEST] = S8_INITIALIZER("self_host_audit_self_test"),
         [BUILD_COMMAND_SELF_HOST_FROM_EXISTING] = S8_INITIALIZER("self_host_from_existing"),
         [BUILD_COMMAND_X86_64_COMPLETION_CENSUS] = S8_INITIALIZER("x86_64_completion_census"),
         [BUILD_COMMAND_TEST_CJSON] = S8_INITIALIZER("test_cjson"),
@@ -33954,7 +34402,7 @@ ProcessResult process_arguments(void)
                     string_print(S8("error: invalid configuration => \"{S8}\"\n"), config);
                     result = PROCESS_RESULT_FAILED;
                 }
-                else if (command == BUILD_COMMAND_BUILD || command == BUILD_COMMAND_TEST_SELF_HOST || command == BUILD_COMMAND_SELF_HOST_FROM_EXISTING ||
+                else if (command == BUILD_COMMAND_BUILD || command == BUILD_COMMAND_TEST_SELF_HOST || command == BUILD_COMMAND_TEST_SELF_HOST_AUDIT || command == BUILD_COMMAND_SELF_HOST_FROM_EXISTING ||
                          command == BUILD_COMMAND_TEST_MODE_MATRIX)
                 {
                     options.config = config;
@@ -34535,6 +34983,17 @@ ProcessResult process_arguments(void)
         {
             machine_info_print();
             result = self_host_add(arena, build_directory, options, generate);
+        }
+        break;
+        case BUILD_COMMAND_TEST_SELF_HOST_AUDIT:
+        {
+            machine_info_print();
+            result = self_host_audit_add(arena, build_directory, options);
+        }
+        break;
+        case BUILD_COMMAND_SELF_HOST_AUDIT_SELF_TEST:
+        {
+            result = self_host_audit_self_test(arena);
         }
         break;
         case BUILD_COMMAND_SELF_HOST_FROM_EXISTING:

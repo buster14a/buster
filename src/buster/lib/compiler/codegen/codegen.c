@@ -47,6 +47,7 @@
 //                                                of a machine-emitted function
 
 #include <buster/lib/compiler/codegen/codegen_internal.h>
+#include <buster/lib/compiler/codegen/bootstrap_trace.h>
 
 bool codegen_module_relocation_kind_valid(u8 kind)
 {
@@ -8684,7 +8685,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                            Target target, CodegenModuleOptions options, u64 capacity_scale,
                                                                            bool* code_buffer_exhausted,
                                                                            CodegenX64MetadataCache* x64_metadata_cache,
-                                                                           MachineSelectionModule* machine_module)
+                                                                           MachineSelectionModule* machine_module, BootstrapTrace* bootstrap_trace)
 {
     CodegenModule result = {
         .ir_module = module,
@@ -9554,6 +9555,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             MachineSelectResult selected = {0};
             selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target, position_independent,
                                                                    machine_module);
+            if (bootstrap_trace)
+            {
+                bootstrap_trace_machine(bootstrap_trace, function, &selected);
+                if (bootstrap_trace->invalid_mir)
+                {
+                    // Do not let a selector certificate bypass a failed
+                    // audit verifier and feed invalid MIR to allocation.
+                    buffer.error = CODEGEN_ERROR_INVALID_IR;
+                    scratch_end(machine_scratch);
+                    break;
+                }
+            }
             machine_simd_operation_count = selected.simd_operation_count;
             if (!selected.supported)
             {
@@ -20326,7 +20339,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     return result;
 }
 
-CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options)
+CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options, BootstrapTrace* bootstrap_trace)
 {
     CodegenModule result = {
         .ir_module = module,
@@ -20400,8 +20413,13 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
     for (u64 capacity_scale = 1;; capacity_scale *= 2)
     {
         bool code_buffer_exhausted = false;
+        if (bootstrap_trace)
+        {
+            bootstrap_trace_string(bootstrap_trace, S8("codegen attempt"));
+            bootstrap_trace_u64(bootstrap_trace, capacity_scale);
+        }
         result = codegen_generate_canonical_module_attempt(arena, program, &f80_cache, slot_costs, module, target, options, capacity_scale,
-                                                           &code_buffer_exhausted, x64_metadata_cache, machine_module);
+                                                           &code_buffer_exhausted, x64_metadata_cache, machine_module, bootstrap_trace);
         // Every other capacity failure -- a frame displacement out of range, a
         // frame past `UINT32_MAX`, a reserve that cannot be addressed -- is one
         // more room cannot fix, and is reported as it stands.
@@ -20411,6 +20429,11 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         }
         scratch_end(attempt_scope);
     }
+}
+
+CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options)
+{
+    return codegen_generate_canonical_module_with_trace(arena, program, module, target, options, 0);
 }
 
 CodegenExecutable codegen_make_executable(CodegenFunction function)

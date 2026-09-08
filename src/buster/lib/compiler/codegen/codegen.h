@@ -508,6 +508,7 @@ typedef enum CodegenThreadLocalModel
     CODEGEN_THREAD_LOCAL_GENERAL_DYNAMIC,
 } CodegenThreadLocalModel;
 
+typedef struct BootstrapTrace BootstrapTrace;
 typedef struct CodegenModuleOptions CodegenModuleOptions;
 struct CodegenModuleOptions
 {
@@ -555,5 +556,7 @@ BUSTER_F_DECL void codegen_statistics_add(CodegenStatistics* total, CodegenStati
 BUSTER_F_DECL CodegenThreadLocalModel codegen_thread_local_model(bool position_independent, bool symbol_is_definition);
 BUSTER_F_DECL CodegenAbi codegen_abi_for_target(Target target);
 BUSTER_F_DECL CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options);
+// Tracing is a separate entrypoint: keep the ordinary compact options ABI.
+BUSTER_F_DECL CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options, BootstrapTrace* bootstrap_trace);
 BUSTER_F_DECL CodegenExecutable codegen_make_executable(CodegenFunction function);
 BUSTER_F_DECL void codegen_release_executable(CodegenExecutable executable);

@@ -8,6 +8,8 @@
 #include <buster/lib/string.h>
 
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/codegen/bootstrap_trace.h>
+
 BUSTER_F_DECL void compiler_driver_test_append_environment_includes(Arena* arena, CompilerDriverInvocation* invocation, String8 includes);
 BUSTER_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* arguments);
 #endif

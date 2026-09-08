@@ -2407,6 +2407,50 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     contract_selected.mutable_virtual_register_count == contract_verified.mutable_virtual_register_count);
     }
 
+    // A ternary assignment defines its destination address before splitting
+    // control flow. These valid cross-block uses used to fail verification:
+    // selectors copied optional predecessor lists and published zero CFG edges.
+    String8 bootstrap_edge_source = S8(
+        "struct S { long value; };\n"
+        "struct S bootstrap_edge(long value) { struct S result = {0}; result.value = value == -1 ? 0 : value; return result; }\n"
+        "long bootstrap_switch(long n) { long value = 0; switch(n) { case 1: case 2: value = 7; break; default: value = 9; } return value; }\n");
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(definition_contract_targets); target_index += 1)
+    {
+        IrProgram* edge_program = machine_test_compile_c(arguments->arena, S8("bootstrap-edges.c"), bootstrap_edge_source,
+                                                        definition_contract_targets[target_index]);
+        BUSTER_TEST(arguments, edge_program && edge_program->module_count);
+        if (edge_program && edge_program->module_count)
+        {
+            for (u32 function_index = 0; function_index < edge_program->modules[0].function_count; function_index += 1)
+            {
+                IrFunction* source_function = edge_program->modules[0].functions + function_index;
+                MachineSelectResult selected_edges = machine_select_canonical_function(arguments->arena, edge_program, source_function,
+                                                                                        definition_contract_targets[target_index]);
+                BUSTER_TEST(arguments, selected_edges.supported && selected_edges.selector_certified);
+                if (selected_edges.supported)
+                {
+                    MachineFunction* selected_function = &selected_edges.function;
+                    BUSTER_TEST(arguments, selected_function->edge_count != 0);
+                    BUSTER_TEST(arguments, machine_verify_function(selected_function).error == MACHINE_VERIFY_NONE);
+                    for (u32 source_index = 0; source_index < source_function->block_count; source_index += 1)
+                    {
+                        IrInstruction* terminator = source_function->instructions + source_function->blocks[source_index].last_instruction.value;
+                        for (u32 target_index_in_block = 0; target_index_in_block < terminator->target_count; target_index_in_block += 1)
+                        {
+                            u32 found = 0;
+                            for (u32 edge_index = 0; edge_index < selected_function->edge_count; edge_index += 1)
+                            {
+                                MachineEdge* edge = selected_function->edges + edge_index;
+                                found += edge->source_block == source_index && edge->destination_block == terminator->targets[target_index_in_block].value;
+                            }
+                            BUSTER_TEST(arguments, found == 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Mode plumbing: the driver-facing enum and its report spelling.
     BUSTER_STRING_TEST(arguments, codegen_register_allocator_mode_string(CODEGEN_REGISTER_ALLOCATOR_NONE), S8("none"));
     BUSTER_STRING_TEST(arguments, codegen_register_allocator_mode_string(CODEGEN_REGISTER_ALLOCATOR_MIR_STACK), S8("mir-stack"));
