@@ -631,12 +631,36 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_align(AssemblyUnitBuilder* buil
         return assembly_unit_append(builder, 0, padding);
     }
     u8* bytes = arena_allocate(builder->arena, u8, padding);
-    // A text section pads with one-byte NOPs, which is what runs when the
-    // padding is reached by falling through rather than jumped over.
-    u8 value = part_count == 2 ? (u8)fill : (section->kind == ASSEMBLY_UNIT_SECTION_TEXT ? 0x90 : 0);
-    for (u64 index = 0; index < padding; index += 1)
+    bool aarch64_nops = part_count == 1 && section->kind == ASSEMBLY_UNIT_SECTION_TEXT && builder->target.cpu_arch == CPU_ARCH_AARCH64;
+    if (aarch64_nops)
     {
-        bytes[index] = value;
+        // Reach an instruction boundary with zero bytes, then emit complete
+        // little-endian NOPs. A repeated x86 NOP byte encodes ADRP on AArch64.
+        u64 index = 0;
+        u64 prefix = BUSTER_MIN(padding, (4 - (offset & 3)) & 3);
+        for (; index < prefix; index += 1)
+        {
+            bytes[index] = 0;
+        }
+        for (; index + 4 <= padding; index += 4)
+        {
+            bytes[index] = 0x1f;
+            bytes[index + 1] = 0x20;
+            bytes[index + 2] = 0x03;
+            bytes[index + 3] = 0xd5;
+        }
+        for (; index < padding; index += 1)
+        {
+            bytes[index] = 0;
+        }
+    }
+    else
+    {
+        u8 value = part_count == 2 ? (u8)fill : (section->kind == ASSEMBLY_UNIT_SECTION_TEXT ? 0x90 : 0);
+        for (u64 index = 0; index < padding; index += 1)
+        {
+            bytes[index] = value;
+        }
     }
     return assembly_unit_append(builder, bytes, padding);
 }
