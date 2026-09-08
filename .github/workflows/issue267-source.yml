@@ -1,0 +1,31 @@
+name: Issue 267 source snapshot
+on:
+  push:
+    branches: [work/issue267-source-20260908]
+    paths: [.github/workflows/issue267-source.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 9f6e933aaab6fd95cbe23cd9efa3bcc4b3d0c0d5
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Archive exact source and history
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 9f6e933aaab6fd95cbe23cd9efa3bcc4b3d0c0d5
+          git bundle create "$RUNNER_TEMP/buster-main.bundle" HEAD
+          sha256sum "$RUNNER_TEMP/buster-main.bundle"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue267-pinned-source
+          path: ${{ runner.temp }}/buster-main.bundle
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
