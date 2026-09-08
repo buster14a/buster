@@ -10,39 +10,64 @@ permissions:
 
 jobs:
   publish:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 0d352502151ff15842197ee10aaa90ec03bc58ac
+          ref: d328ec498bee1b3e976a37ecc1fa0ae77b6c8e7a
           fetch-depth: 0
-      - name: Apply and verify locally tested source tree
+      - name: Decode original patches and verify digests
         shell: bash
-        env:
-          PATCH_SHA256: 130da8dc90ecc96e643bb38a61a88dd5534fc8647b556e1994b396f60a9eb189
-          EXPECTED_TREE: 3179b527b2b15f6bd1e13ba12c63f14a0e6673ff
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import base64, gzip, hashlib, os, pathlib, re
-          source = pathlib.Path('.github/workflows/audit-pipeline-publish.yml').read_text()
-          encoded = re.search("encoded = '''([^']+)'''", source).group(1)
-          # Repair a single transcription byte; both the patch and complete
-          # resulting source tree are independently checked before any push.
-          encoded = encoded.replace('KtrXbe7ZbRVmdUX', 'KtrXbe7ZtRVmdUX')
-          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
-          if hashlib.sha256(patch).hexdigest() != os.environ['PATCH_SHA256']:
-              raise SystemExit('Patch transport digest mismatch')
-          pathlib.Path(os.environ['RUNNER_TEMP'], 'alignment.patch').write_bytes(patch)
+          import base64, gzip, hashlib, os, pathlib, re, subprocess
+          first = subprocess.check_output(['git', 'show', '0d352502151ff15842197ee10aaa90ec03bc58ac:.github/workflows/audit-pipeline-publish.yml'], text=True)
+          second = pathlib.Path('.github/workflows/audit-entry-publish.yml').read_text()
+          for name, source, digest in [
+              ('parameter', first, '130da8dc90ecc96e643bb38a61a88dd5534fc8647b556e1994b396f60a9eb189'),
+              ('entry', second, 'd2026ab45b528ca43aab06b5db17bca6eb46a3ec41062a6b26d39d0c656a64cd'),
+          ]:
+              encoded = re.search("encoded = '''([^']+)'''", source).group(1)
+              if name == 'parameter':
+                  encoded = encoded.replace('KtrXbe7ZbRVmdUX', 'KtrXbe7ZtRVmdUX')
+              patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+              if hashlib.sha256(patch).hexdigest() != digest:
+                  raise SystemExit(name + ': patch transport digest mismatch')
+              pathlib.Path(os.environ['RUNNER_TEMP'], name + '.patch').write_bytes(patch)
           PY
-          git checkout --detach ebfdd11705bc470564e726857e498f1c82aa746c
-          git apply --check "$RUNNER_TEMP/alignment.patch"
-          git apply --index "$RUNNER_TEMP/alignment.patch"
-          git diff --cached --check
-          test "$(git write-tree)" = "$EXPECTED_TREE"
+      - name: Publish isolated main-based source trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=88ecc49c1a5c5fef614c388c730babe7686a689a
+          git cat-file -e "$base^{commit}"
           git config user.name 'Buster compiler audit'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          commit=$(printf '%s\n' 'c: preserve natural alignment of by-value parameter locals' | git commit-tree "$EXPECTED_TREE" -p ebfdd11705bc470564e726857e498f1c82aa746c)
-          git push origin "$commit:refs/heads/audit/prepared-parameter-local-alignment"
-          printf 'Published commit: %s\nTree: %s\n' "$commit" "$EXPECTED_TREE"
+          for name in parameter entry; do
+            if test "$name" = parameter; then
+              expected=3a329fea91929ddb73eca6c5afdc84e5e18ea4ce
+              branch=audit/prepared-parameter-local-alignment-main88
+              message='c: preserve natural alignment of by-value parameter locals'
+            else
+              expected=d228142e27031c601b8107bb6049a12f2960e484
+              branch=audit/prepared-canonical-entry-layout-main88
+              message='codegen: honor declared canonical entry blocks in native and eBPF layout'
+            fi
+            git read-tree "$base"
+            git apply --cached --3way "$RUNNER_TEMP/$name.patch"
+            git diff --cached --check
+            tree=$(git write-tree)
+            test "$tree" = "$expected"
+            existing=$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)
+            if test -n "$existing"; then
+              git fetch origin "refs/heads/$branch"
+              test "$(git rev-parse 'FETCH_HEAD^{tree}')" = "$expected"
+              commit=$existing
+            else
+              commit=$(printf '%s\n' "$message" | git commit-tree "$tree" -p "$base")
+              git push origin "$commit:refs/heads/$branch"
+            fi
+            printf 'Prepared %s\nCommit: %s\nTree: %s\nBase: %s\n' "$branch" "$commit" "$tree" "$base"
+          done
