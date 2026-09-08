@@ -8,6 +8,11 @@
   memory, bundle, fixed-register, tie, early-clobber, implicit-physical, and
   implicit-resource facts in `MachineOpcodeInfo`, accessed through the
   `machine_opcode_*` helpers.
+- `MachineOpcodeInfo` retains a 96-byte stride. Operand and allocation
+  constraints occupy its first 32 bytes; diagnostic names follow scheduling
+  and implicit-effect metadata. Keep opcode initializers designated and the
+  layout checks intact. Simple FAST rows use the separate 16-byte
+  `MachineOpcodeRow` projection instead of loading the full descriptor.
 - `MachineFunction` owns CFG edges, block parameters, and incoming edge
   parallel-copy sources. Edge source `i` maps to destination block parameter
   `i`; keep these copies parallel through allocation so cycles are resolved as
