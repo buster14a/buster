@@ -1,4 +1,4 @@
-name: Alignment audit commit transfer
+name: Alignment matrix commit transport
 on:
   push:
     branches: [work/audit-238-source-20260907]
@@ -12,32 +12,19 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      - name: Import verified local commit and rebase without force
+      - name: Import test-only follow-up without updating another worker's branch
         shell: bash
         run: |
           set -euo pipefail
-          base=be0f9054550d05b6366c14307a0b72d3b1592db3
-          git cat-file -e "$base^{commit}"
-          git update-ref refs/audit/base "$base"
-          git bundle create "$RUNNER_TEMP/audit-main.bundle" refs/audit/base
-          cat tools/audit-238.part-0 tools/audit-238.part-1 tools/audit-238.part-2 tools/audit-238.part-3 > "$RUNNER_TEMP/alignment.bundle"
-          printf '%s  %s\n' ebf630949014a9ccd0bccfdd68207e48b683d22ba63e481f818ea152511a4950 "$RUNNER_TEMP/alignment.bundle" | sha256sum --check -
-          git bundle verify "$RUNNER_TEMP/alignment.bundle"
-          git fetch "$RUNNER_TEMP/alignment.bundle" HEAD
-          test "$(git rev-parse FETCH_HEAD)" = 49d62d84a24738c2c3bdac0785c5648c3666eb4c
-          git switch -c audit-238-publish FETCH_HEAD
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git rebase "$base"
-          git diff --check "$base" HEAD
-          git push origin HEAD:refs/heads/fix/parameter-local-alignment-238
-          git bundle create "$RUNNER_TEMP/audit-candidate.bundle" HEAD
-          git log -1 --format='%H %P %s'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: audit-238-rebased-bundles
-          path: ${{ runner.temp }}/audit-*.bundle
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 1
+          parent=d9688bf50ca09f5b59802366b6b2585b7a6de745
+          git cat-file -e "$parent^{commit}"
+          cat tools/audit-238.part-0 tools/audit-238.part-1 > "$RUNNER_TEMP/matrix.bundle"
+          printf '%s  %s\n' 793bf33174dd2117be6530f4605d97fa79977d0fee94c84dd859c7b6315be51d "$RUNNER_TEMP/matrix.bundle" | sha256sum --check -
+          git bundle verify "$RUNNER_TEMP/matrix.bundle"
+          git fetch "$RUNNER_TEMP/matrix.bundle" HEAD
+          test "$(git rev-parse FETCH_HEAD)" = 14ebc9aab9fd8f6cb12043db28a63c120a399a5c
+          test "$(git rev-parse FETCH_HEAD^{tree})" = f52db1975b2cfd62153df2e7494a57930bccc2cc
+          git diff --check "$parent" FETCH_HEAD
+          git diff --exit-code "$parent" FETCH_HEAD -- src/buster/lib/
+          git push origin FETCH_HEAD:refs/heads/audit/parameter-matrix-238-14ebc9aa
+          git log -1 --format='%H %T %P %s' FETCH_HEAD
