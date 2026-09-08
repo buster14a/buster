@@ -82,6 +82,87 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
     return result;
 }
 
+// Keep the expected answers in a separately compiled consumer: valid bitcode
+// can still branch to the wrong case, including in the program's own checker.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_switches(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O1"), S8("-O2"), S8("-O3")};
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    u32 configuration_count = BUSTER_ARRAY_LENGTH(frontends) * BUSTER_ARRAY_LENGTH(optimizations) * BUSTER_ARRAY_LENGTH(allocators);
+    for (u32 configuration = 0; configuration < configuration_count; configuration += 1)
+    {
+        u32 allocator = configuration % BUSTER_ARRAY_LENGTH(allocators);
+        u32 optimization = configuration / BUSTER_ARRAY_LENGTH(allocators) % BUSTER_ARRAY_LENGTH(optimizations);
+        u32 frontend = configuration / (BUSTER_ARRAY_LENGTH(allocators) * BUSTER_ARRAY_LENGTH(optimizations));
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-switch"), S8(".bc"));
+        String8 command[] = {S8("-emit-llvm"), frontends[frontend], optimizations[optimization], allocators[allocator],
+                             S8("-fno-target-local-promotion"), S8("-o"), output, S8("tests/basic_c_llvm_switch.c")};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("LLVM switch {S8} {S8} {S8}: {S8}\n"),
+                            frontends[frontend], optimizations[optimization], allocators[allocator], emitted.diagnostic);
+        }
+        BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-switch"),
+#if BUSTER_WINDOWS
+                                                          S8(".exe"));
+#else
+                                                          S8(""));
+#endif
+            String8 compile[] = {compiler, S8("-O0"), output, S8("tests/basic_c_llvm_switch_main.c"), S8("-o"), executable};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0}, (SliceString8){0},
+                (ProcessSpawnOptions){.use_process_environment = true,
+                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+            BUSTER_TEST(arguments, spawned.handle != 0);
+            if (spawned.handle)
+            {
+                ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                if (compiled.result != PROCESS_RESULT_SUCCESS)
+                {
+                    ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                    arguments->show(arguments, S8("LLVM switch consumer {S8} {S8} {S8}: {S8}\n"),
+                                    frontends[frontend], optimizations[optimization], allocators[allocator],
+                                    (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                }
+                BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                if (compiled.result == PROCESS_RESULT_SUCCESS)
+                {
+                    String8 run[] = {executable};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    BUSTER_TEST(arguments, child.handle != 0);
+                    if (child.handle)
+                    {
+                        bool success = os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS;
+                        if (!success)
+                        {
+                            arguments->show(arguments, S8("LLVM switch answers differ: {S8} {S8} {S8}\n"),
+                                            frontends[frontend], optimizations[optimization], allocators[allocator]);
+                        }
+                        BUSTER_TEST(arguments, success);
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    if (!compiler.length)
+    {
+        arguments->show(arguments, S8("LLVM switch execution skipped: clang is unavailable on PATH\n"));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_abi_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -500,6 +581,9 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult consumers = llvm_bitcode_test_consumers(arguments);
     result.test_count += consumers.test_count;
     result.succeeded_test_count += consumers.succeeded_test_count;
+    UnitTestResult switches = llvm_bitcode_test_switches(arguments);
+    result.test_count += switches.test_count;
+    result.succeeded_test_count += switches.succeeded_test_count;
     UnitTestResult diagnostics = llvm_bitcode_test_abi_diagnostics(arguments);
     result.test_count += diagnostics.test_count;
     result.succeeded_test_count += diagnostics.succeeded_test_count;
