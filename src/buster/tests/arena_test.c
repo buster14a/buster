@@ -191,17 +191,29 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
             u64 retained_position = arena->position;
             u64 expected_os_position = page_size * 2;
             u8* dirty_tail = arena_allocate(arena, u8, page_size * 3);
-            dirty_tail[0] = 0x74;
-            dirty_tail[page_size * 3 - 1] = 0x29;
+            memset(dirty_tail, 0x74, page_size * 3);
             arena_set_position(arena, retained_position);
+#if defined(__APPLE__)
+            u64 expected_dirty_position = arena_dirty_position(arena);
+#else
+            u64 expected_dirty_position = expected_os_position;
+#endif
             BUSTER_TEST(arguments, arena_dirty_position(arena) > expected_os_position);
             BUSTER_TEST(arguments, arena_set_position_and_decommit(arena, retained_position));
             BUSTER_TEST(arguments, arena->position == retained_position);
             BUSTER_TEST(arguments, arena->os_position == expected_os_position);
-            BUSTER_TEST(arguments, arena_dirty_position(arena) == expected_os_position);
+            BUSTER_TEST(arguments, arena_dirty_position(arena) == expected_dirty_position);
             BUSTER_TEST(arguments, retained[0] == 0x3a && retained[retained_size - 1] == 0xc7);
 
-            u8* recommitted = arena_allocate(arena, u8, page_size * 2);
+            // Clear both the retained partial page and the discarded pages.
+            // This uses the real OS path, including Darwin's nonzero reuse.
+            u8* recommitted = arena_allocate_zeroed(arena, u8, page_size * 2);
+            u8 nonzero = 0;
+            for (u64 index = 0; index < page_size * 2; index += 1)
+            {
+                nonzero |= recommitted[index];
+            }
+            BUSTER_TEST(arguments, nonzero == 0);
             recommitted[0] = 0x51;
             recommitted[page_size * 2 - 1] = 0x92;
             BUSTER_TEST(arguments, arena->os_position >= arena->position);
@@ -217,7 +229,17 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, incremental[0] == 0x18 && incremental[page_size - 1] == 0xe4);
             BUSTER_TEST(arguments, arena_set_position_and_decommit(arena, retained_position));
             BUSTER_TEST(arguments, arena->os_position == expected_os_position);
-            BUSTER_TEST(arguments, arena_dirty_position(arena) == expected_os_position);
+            BUSTER_TEST(arguments, arena_dirty_position(arena) == expected_dirty_position);
+            BUSTER_TEST(arguments, retained[0] == 0x3a && retained[retained_size - 1] == 0xc7);
+            // The second cycle reuses the original tail's last partial page
+            // as well as bytes written after the first recommit.
+            u8* zeroed_tail = arena_allocate_zeroed(arena, u8, page_size * 3);
+            nonzero = 0;
+            for (u64 index = 0; index < page_size * 3; index += 1)
+            {
+                nonzero |= zeroed_tail[index];
+            }
+            BUSTER_TEST(arguments, nonzero == 0);
             BUSTER_TEST(arguments, retained[0] == 0x3a && retained[retained_size - 1] == 0xc7);
             BUSTER_TEST(arguments, arena_destroy(arena, 1));
         }

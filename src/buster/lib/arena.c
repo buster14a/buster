@@ -145,11 +145,17 @@ bool arena_set_position_and_decommit(Arena* arena, u64 position)
     }
     if (result)
     {
+#if defined(__APPLE__)
+        // Darwin's MADV_DONTNEED is a paging hint, not a zero-fill contract.
+        // Recommit can expose the old contents, including earlier rewinds.
+        arena_set_position(arena, position);
+#else
         // Bytes beyond the native decommit boundary are freshly zeroed if
         // they are committed again; retain the prefix that can still carry
         // old contents, including a partial page below that boundary.
         arena->dirty_position = BUSTER_MIN(BUSTER_MAX(arena->dirty_position, arena->position), decommit_start);
         arena->position = position;
+#endif
     }
     return result;
 }

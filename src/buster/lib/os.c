@@ -469,10 +469,11 @@ bool os_decommit(void* address, u64 size)
     bool result = true;
 #if defined(__linux__) || defined(__APPLE__)
     // The reservation is already mapped for its lifetime. One syscall keeps
-    // failure atomic with respect to arena accounting: a successful discard
-    // releases the pages, while failure leaves both the protection and the
+    // failure atomic with respect to arena accounting: a successful call
+    // advises that pages are unused, while failure leaves both protection and
     // logical high-water mark unchanged. Retain the old fault guard as a
     // best-effort success-side step; os_commit restores access before reuse.
+    // Unlike Linux, Darwin's MADV_DONTNEED does not promise zeroed contents.
     result = madvise(address, size, MADV_DONTNEED) == 0;
     if (result)
     {
