@@ -4,6 +4,7 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
+#include <buster/lib/compiler/codegen/register_allocator_fast_internal.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/file.h>
 #include <buster/lib/compiler/ir/ir.h>
@@ -1488,6 +1489,47 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     va_arg.parts[0].is_memory = 1;
     slot_size = 24;
     BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+
+    // Each target-file tail, inactive owners equal to the query, duplicate
+    // owners, and all four SIMD tiles must agree with lane membership. The
+    // empty mask deliberately permits a null row, as an empty contract does.
+    BUSTER_TEST(arguments, machine_fast_owner_match_mask_test(0, 0, 0) == 0);
+    u64 owner_page_size = os_get_page_size();
+    u8* owner_pages = os_reserve(0, owner_page_size * 2u, (ProtectionFlags){0}, (MapFlags){.priv = true, .anonymous = true});
+    BUSTER_TEST(arguments, owner_pages != 0);
+    bool owner_page_committed = owner_pages && os_commit(owner_pages, owner_page_size, (ProtectionFlags){.read = true, .write = true}, false);
+    BUSTER_TEST(arguments, owner_page_committed);
+    for (u32 count = 1; owner_page_committed && count <= 64; count += 1)
+    {
+        // Exact logical rows end at an inaccessible page: vector loads over
+        // a partial tile must not borrow padding from the next owner row.
+        u32* owners = (u32*)(owner_pages + owner_page_size) - count;
+        u64 valid = mask64_prefix(count);
+        u64 masks[] = {valid, valid & UINT64_C(0x5555555555555555), valid & UINT64_C(0xffff0000ffff0000), valid & UINT64_C(0x8000800080008000)};
+        for (u32 lane = 0; lane < count; lane += 1)
+        {
+            owners[lane] = lane % 7;
+        }
+        for (u32 mask_index = 0; mask_index < BUSTER_ARRAY_LENGTH(masks); mask_index += 1)
+        {
+            for (u32 value = 0; value <= 7; value += 1)
+            {
+                u64 expected = 0;
+                for (u32 lane = 0; lane < count; lane += 1)
+                {
+                    if (owners[lane] == value && ((masks[mask_index] >> lane) & 1u))
+                    {
+                        expected |= UINT64_C(1) << lane;
+                    }
+                }
+                BUSTER_TEST(arguments, machine_fast_owner_match_mask_test(owners, masks[mask_index], value) == expected);
+            }
+        }
+    }
+    if (owner_pages)
+    {
+        BUSTER_TEST(arguments, os_unreserve(owner_pages, owner_page_size * 2u));
+    }
 
     // Exercise the stateless FAST picker directly on both target register
     // files: preferred free, lowest nonpreferred free, dead-first eviction,
