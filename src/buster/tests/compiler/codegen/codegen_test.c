@@ -67,10 +67,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_promote_canonical_f64_to_f80(IrProgram* pr
                 type->bit_width = 80;
                 type->layout.size = 16;
                 type->layout.alignment = 16;
-                type->abi = 0;
                 promoted = true;
             }
         }
+        ir_program_invalidate_abi(program);
         for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
         {
             IrModule* module = program->modules + module_index;

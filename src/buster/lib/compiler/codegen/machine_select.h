@@ -65,7 +65,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u32 machine_selection_row_i
 
 // A per-type projection of the IrType facts a selector's row path asks,
 // indexed by IrTypeId and built once per codegen module before any function
-// selects (machine_type_classes_build). The IrType record is 136 bytes and a
+// selects (machine_type_classes_build). The IrType record is 128 bytes and a
 // predicate reads two or three lines of it; sixteen of these share a line,
 // and the selectors fetch the record only for what the projection does not
 // carry: field offsets, element sizes and aggregate sizes. An id outside the

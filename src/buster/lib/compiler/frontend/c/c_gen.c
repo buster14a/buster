@@ -41465,7 +41465,6 @@ BUSTER_C_INTERNAL IrTypeId c_ir_flexible_initializer_type(CIntegerIrBuilder* bui
     fields[clone.field_count - 1].type = tail_array;
     clone.fields = fields;
     clone.layout.size = extended_size;
-    clone.abi = 0;
     return ir_program_add_type(program, clone);
 }
 
