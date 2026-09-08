@@ -1372,9 +1372,95 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_alignment(Unit
 }
 #endif
 
+// Writer failures must fail the compilation, and enabling evidence must not
+// change the generated object. Repeat with fresh prefixes, then change a
+// same-length literal so token-count equality cannot masquerade as identity.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bootstrap_trace(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("bootstrap-trace"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("bootstrap-trace"), S8(".o"));
+    String8 prefixes[3];
+    String8 suffixes[] = {S8(".tokens"), S8(".ir"), S8(".mir")};
+    ByteSlice observations[3][3] = {0};
+    String8 source = S8("int bootstrap_trace_probe(int x) { return x + 1; }\n");
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    String8 command[] = {S8("--target=x86_64-linux"), S8("-c"), input, S8("-o"), output, S8("")};
+    CompilerDriverResult control = compiler_driver_execute_invocation(arena,
+        compiler_driver_parse_arguments(arena, (SliceString8){command, BUSTER_ARRAY_LENGTH(command) - 1}));
+    BUSTER_TEST(arguments, control.error == COMPILER_DRIVER_ERROR_NONE && control.has_object);
+    ByteSlice control_bytes = file_read(arena, output, (FileReadOptions){0});
+    BUSTER_TEST(arguments, control_bytes.length != 0);
+    for (u32 repetition = 0; repetition < 3; repetition += 1)
+    {
+        if (repetition == 2)
+        {
+            source = S8("int bootstrap_trace_probe(int x) { return x + 2; }\n");
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        }
+        prefixes[repetition] = buster_test_temporary_path(arena, S8("bootstrap-trace-evidence"), S8(""));
+        command[5] = string_format(arena, S8("-fbootstrap-trace={S8}"), prefixes[repetition]);
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, string_equal(invocation.bootstrap_trace_prefix, prefixes[repetition]));
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object);
+        ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+        bool same_object = bytes.length == control_bytes.length && bytes.length && memory_compare(bytes.pointer, control_bytes.pointer, bytes.length);
+        BUSTER_TEST(arguments, repetition == 2 ? !same_object : same_object);
+        for (u32 phase = 0; phase < 3; phase += 1)
+        {
+            String8 path = string_format_z(arena, S8("{S8}{S8}"), prefixes[repetition], suffixes[phase]);
+            ByteSlice evidence = file_read(arena, path, (FileReadOptions){0});
+            observations[repetition][phase] = evidence;
+            BUSTER_TEST(arguments, evidence.length > 40 && memory_compare(evidence.pointer + evidence.length - 8, "BSTREND1", 8));
+            if (repetition)
+            {
+                ByteSlice first = observations[0][phase];
+                bool equal = first.length == evidence.length && evidence.length && memory_compare(first.pointer, evidence.pointer, evidence.length);
+                BUSTER_TEST(arguments, repetition == 2 ? !equal : equal);
+            }
+        }
+    }
+    // Unsupported combinations fail before producing misleading empty traces.
+    String8 bad_arguments[] = {S8("-fbootstrap-trace=unused"), S8("-E"), input};
+    CompilerDriverResult rejected = compiler_driver_execute_invocation(arena,
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(bad_arguments)));
+    BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    String8 missing = buster_test_temporary_path(arena, S8("bootstrap-trace-missing-directory"), S8(""));
+    command[5] = string_format(arena, S8("-fbootstrap-trace={S8}/trace"), missing);
+    CompilerDriverResult unwritable = compiler_driver_execute_invocation(arena,
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+    BUSTER_TEST(arguments, unwritable.error == COMPILER_DRIVER_ERROR_FILE_READ && !unwritable.has_object);
+    // Rejected MIR may contain missing storage. Diagnostic serialization must
+    // retain the verifier failure without following a null virtual-register
+    // table. Before this guard the trace writer crashed after verification.
+    String8 invalid_path = buster_test_temporary_path(arena, S8("bootstrap-invalid-mir"), S8(".mir"));
+    BootstrapTrace invalid_trace = bootstrap_trace_open(arena, invalid_path, S8("selected MIR"));
+    IrFunction invalid_function = {.name = S8("invalid-bootstrap-function")};
+    MachineSelectResult invalid_selection = {.supported = true, .function = {.virtual_register_count = 1}};
+    bootstrap_trace_machine(&invalid_trace, &invalid_function, &invalid_selection);
+    BUSTER_TEST(arguments, invalid_trace.invalid_mir && invalid_trace.invalid_validation.error != MACHINE_VERIFY_NONE);
+    BUSTER_TEST(arguments, string_equal(invalid_trace.invalid_function, invalid_function.name));
+    BUSTER_TEST(arguments, bootstrap_trace_close(&invalid_trace));
+#if BUSTER_LINUX
+    // Exercise buffered write/close errors, not just fopen failure.
+    BootstrapTrace full = bootstrap_trace_open(arena, S8("/dev/full"), S8("writer-test"));
+    BUSTER_TEST(arguments, !full.failed);
+    bootstrap_trace_u64(&full, UINT64_MAX);
+    BUSTER_TEST(arguments, !bootstrap_trace_close(&full));
+#endif
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
+    UnitTestResult bootstrap = compiler_driver_test_bootstrap_trace(arguments);
+    result.test_count += bootstrap.test_count;
+    result.succeeded_test_count += bootstrap.succeeded_test_count;
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_APPLE && !BUSTER_ANDROID && !BUSTER_IOS
     UnitTestResult parameter_alignment = compiler_driver_test_parameter_alignment(arguments);
     result.test_count += parameter_alignment.test_count;

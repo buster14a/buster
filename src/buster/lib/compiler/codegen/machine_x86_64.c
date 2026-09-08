@@ -4599,75 +4599,6 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_indirect_branch(MachineX64Selector* 
     return selected;
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_selector_edge_exists(MachineFunctionBuilder* builder, u32 source_block, u32 destination_block)
-{
-    for (MachineBuilderChunk* chunk = builder->edges.first; chunk; chunk = chunk->next)
-    {
-        MachineEdge* edges = (MachineEdge*)(chunk + 1);
-        for (u32 index = 0; index < chunk->count; index += 1)
-        {
-            if (edges[index].source_block == source_block && edges[index].destination_block == destination_block)
-            {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-BUSTER_GLOBAL_LOCAL bool machine_x64_select_indirect_edges(MachineX64Selector* selector)
-{
-    IrFunction* function = selector->function;
-    bool valid = true;
-    for (u32 source_block = 0; source_block < function->block_count && valid; source_block += 1)
-    {
-        IrBlock* source = function->blocks + source_block;
-        if (source->last_instruction.value >= function->instruction_count)
-        {
-            continue;
-        }
-        IrInstruction* terminator = function->instructions + source->last_instruction.value;
-        if (terminator->opcode != IR_OPCODE_INDIRECT_BRANCH)
-        {
-            continue;
-        }
-        for (u32 target_index = 0; target_index < terminator->target_count && valid; target_index += 1)
-        {
-            u32 destination_block = terminator->targets[target_index].value;
-            if (destination_block >= function->block_count || machine_x64_selector_edge_exists(&selector->builder, source_block, destination_block))
-            {
-                continue;
-            }
-            IrBlock* destination = function->blocks + destination_block;
-            u32 copy_offset = selector->builder.edge_copy_sources.total_count;
-            for (IrBlockParameter* parameter = destination->first_parameter; parameter; parameter = parameter->next)
-            {
-                IrIncoming* incoming = parameter->first_incoming;
-                while (incoming && incoming->predecessor.value != source_block)
-                {
-                    incoming = incoming->next;
-                }
-                if (!incoming || incoming->value.value >= function->value_count || selector->value_virtual_registers[incoming->value.value] == UINT32_MAX)
-                {
-                    valid = false;
-                    break;
-                }
-                machine_builder_edge_copy_source(
-                    &selector->builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, selector->value_virtual_registers[incoming->value.value]));
-            }
-            if (valid)
-            {
-                machine_builder_edge(&selector->builder,
-                                     (MachineEdge){.source_block = source_block,
-                                                   .destination_block = destination_block,
-                                                   .copy_offset = copy_offset,
-                                                   .copy_count = (u16)destination->parameter_count});
-            }
-        }
-    }
-    return valid;
-}
-
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_atomic_read_modify_write(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
@@ -6320,36 +6251,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         result.failed_opcode = selector.failed_opcode;
         return result;
     }
-    for (u32 destination_block = 0; destination_block < function->block_count; destination_block += 1)
+    if (!machine_builder_canonical_edges(&selector.builder, function, selector.value_virtual_registers))
     {
-        IrBlock* destination = function->blocks + destination_block;
-        for (IrPredecessor* predecessor = destination->first_predecessor; predecessor; predecessor = predecessor->next)
-        {
-            u32 copy_offset = selector.builder.edge_copy_sources.total_count;
-            for (IrBlockParameter* parameter = destination->first_parameter; parameter; parameter = parameter->next)
-            {
-                IrIncoming* incoming = parameter->first_incoming;
-                while (incoming && incoming->predecessor.value != predecessor->block.value)
-                {
-                    incoming = incoming->next;
-                }
-                if (!incoming || incoming->value.value >= function->value_count || selector.value_virtual_registers[incoming->value.value] == UINT32_MAX)
-                {
-                    return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
-                }
-                machine_builder_edge_copy_source(
-                    &selector.builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, selector.value_virtual_registers[incoming->value.value]));
-            }
-            machine_builder_edge(&selector.builder,
-                                 (MachineEdge){.source_block = predecessor->block.value,
-                                               .destination_block = destination_block,
-                                               .copy_offset = copy_offset,
-                                               .copy_count = (u16)destination->parameter_count});
-        }
-    }
-    if (!machine_x64_select_indirect_edges(&selector))
-    {
-        return (MachineSelectResult){.failed_opcode = IR_OPCODE_INDIRECT_BRANCH};
+        return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }
     result.function = machine_function_builder_finish(arena, &selector.builder);
     result.function.target = windows_abi ? &machine_x86_64_windows_description : &machine_x86_64_description;

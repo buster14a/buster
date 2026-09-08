@@ -69,7 +69,7 @@
   above it; and, where the platform exposes a hardware counter, its
   `instructions` row reports the total and the per-byte, per-SLOC and per-token
   ratios. These are the numbers to trend across commits, printed
-  by `self_host_compare_action` beside the `SELF_HOST deterministic` line. `-v`
+  by `self_host_compare_action` beside the `SELF_HOST fixed_point` line. `-v`
   prints the `SOURCE` table for a human;
   `ide cc -fsource-metrics=<path>` writes the same measurement as
   `<group>.<field>=<value>` lines for a program, each self-host stage writes

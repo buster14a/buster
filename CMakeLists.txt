@@ -840,6 +840,7 @@ buster_register_module(compiler_assembly_completion_census "${BUSTER_SOURCE_DIR}
 buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
 buster_register_module(compiler_debug "${BUSTER_SOURCE_DIR}/compiler/debug/debug${COMMON_EXTENSION}")
 buster_register_module(compiler_machine "${BUSTER_SOURCE_DIR}/compiler/codegen/machine${COMMON_EXTENSION}")
+buster_register_module(compiler_bootstrap_trace "${BUSTER_SOURCE_DIR}/compiler/codegen/bootstrap_trace${COMMON_EXTENSION}")
 buster_register_module(compiler_codegen "${BUSTER_SOURCE_DIR}/compiler/codegen/codegen${COMMON_EXTENSION}")
 buster_register_module(compiler_dwarf "${BUSTER_SOURCE_DIR}/compiler/dwarf/dwarf${COMMON_EXTENSION}")
 buster_register_module(compiler_codeview "${BUSTER_SOURCE_DIR}/compiler/codeview/codeview${COMMON_EXTENSION}")
@@ -1770,6 +1771,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_ir
     compiler_debug
     compiler_machine
+    compiler_bootstrap_trace
     compiler_codegen
     compiler_dwarf
     compiler_codeview

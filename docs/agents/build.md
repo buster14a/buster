@@ -42,6 +42,13 @@ and on macOS. Preserve them when changing preprocessing, C semantics, IR, code
 generation, object writing, or linking, and report both self-hosting failures and benchmark
 regressions.
 
+The stronger Linux x86-64 gate is `./build.sh test_self_host_audit --config Release`
+(on an already configured tree). It repeats three generations, compares token,
+IR, MIR, diagnostic and binary evidence, and checks every child in all four
+allocator modes before reuse. `./build.sh self_host_audit_self_test` exercises
+the checker without building the compiler. See [the invariant and evidence
+contract](../self-host-audit.md); this does not replace the ordinary gate.
+
 ## Build
 
 Three layers: `./build.sh` bootstraps `build/build` from `build.c` using

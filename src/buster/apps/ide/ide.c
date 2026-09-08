@@ -98,6 +98,7 @@
 #include <buster/lib/compiler/ir/ir.c>
 #include <buster/lib/compiler/debug/debug.c>
 #include <buster/lib/compiler/codegen/machine.c>
+#include <buster/lib/compiler/codegen/bootstrap_trace.c>
 #include <buster/lib/compiler/codegen/codegen.c>
 #include <buster/lib/compiler/dwarf/dwarf.c>
 #include <buster/lib/compiler/codeview/codeview.c>
