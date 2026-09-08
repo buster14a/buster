@@ -8,6 +8,7 @@
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/file.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/simd.h>
 #include <buster/lib/string.h>
 #include <buster/lib/x86_64.h>
 
