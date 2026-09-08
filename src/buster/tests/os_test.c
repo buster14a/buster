@@ -813,8 +813,8 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 jobs_text = os_get_environment_variable(S8("BUSTER_TEST_JOBS"));
         if (jobs_text.length)
         {
-            IntegerParsingU64 parsed = string8_parse_u64_decimal(jobs_text.pointer);
-            if (parsed.length == jobs_text.length && parsed.value)
+            IntegerParsingU64 parsed = string8_parse_u64_decimal(jobs_text);
+            if (parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == jobs_text.length && parsed.value)
             {
                 lanes = BUSTER_MIN(lanes, parsed.value);
             }

@@ -709,8 +709,8 @@ u64 buster_test_worker_count(u64 requested)
     String8 jobs_text = os_get_environment_variable(S8("BUSTER_TEST_JOBS"));
     if (jobs_text.length)
     {
-        IntegerParsingU64 parsed = string8_parse_u64_decimal(jobs_text.pointer);
-        if (parsed.length == jobs_text.length && parsed.value)
+        IntegerParsingU64 parsed = string8_parse_u64_decimal(jobs_text);
+        if (parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == jobs_text.length && parsed.value)
         {
             result = BUSTER_MIN(result, parsed.value);
         }
