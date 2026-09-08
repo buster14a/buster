@@ -54,150 +54,6 @@
 //   locals, two-address result chains) keeps every touching row in source
 //   order; a single-definition value needs only its def-before-use edges.
 
-// Barrier / memory / vector chain membership beyond what the attribute bits
-// state. Stack-pointer adjustments and outgoing-argument pushes only appear
-// inside call sequences and freeze with them.
-BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_barrier(u16 opcode)
-{
-    bool result;
-    switch (opcode)
-    {
-        case MACHINE_X64_PUSH_FRAME:
-        case MACHINE_X64_PUSH_REGISTER:
-        case MACHINE_X64_SUB_RSP:
-        case MACHINE_X64_ADD_RSP:
-        case MACHINE_X64_STACK_ALLOCATE:
-        case MACHINE_A64_READ_SP:
-            result = true;
-            break;
-        default:
-            result = false;
-            break;
-    }
-
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool machine_schedule_info_is_barrier(u16 opcode, MachineOpcodeInfo const* info)
-{
-    // An opcode with no info is treated as a barrier: nothing may be reordered
-    // across something the scheduler cannot describe.
-    bool result = true;
-    if (info)
-    {
-        MachineScheduleClass schedule_class = machine_opcode_schedule_class(info);
-        MachineMemoryEffect memory_effect = machine_opcode_memory_effect(info);
-        result = schedule_class == MACHINE_SCHEDULE_CLASS_BARRIER || schedule_class == MACHINE_SCHEDULE_CLASS_CALL ||
-                 schedule_class == MACHINE_SCHEDULE_CLASS_ATOMIC || memory_effect == MACHINE_MEMORY_EFFECT_VOLATILE ||
-                 memory_effect == MACHINE_MEMORY_EFFECT_ATOMIC || memory_effect == MACHINE_MEMORY_EFFECT_BARRIER ||
-                 (info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) != 0 ||
-                 machine_schedule_opcode_is_barrier(opcode);
-    }
-
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_memory(u16 opcode)
-{
-    bool result;
-    switch (opcode)
-    {
-        case MACHINE_X64_LOAD_FRAME:
-        case MACHINE_X64_STORE_FRAME8:
-        case MACHINE_X64_STORE_FRAME16:
-        case MACHINE_X64_STORE_FRAME32:
-        case MACHINE_X64_STORE_FRAME64:
-        case MACHINE_X64_LOAD_PTR8:
-        case MACHINE_X64_LOAD_PTR16:
-        case MACHINE_X64_LOAD_PTR32:
-        case MACHINE_X64_LOAD_PTR64:
-        case MACHINE_X64_STORE_PTR8:
-        case MACHINE_X64_STORE_PTR16:
-        case MACHINE_X64_STORE_PTR32:
-        case MACHINE_X64_STORE_PTR64:
-        case MACHINE_X64_COPY_FRAME_FROM_FRAME:
-        case MACHINE_X64_COPY_FRAME_FROM_PTR:
-        case MACHINE_X64_COPY_PTR_FROM_FRAME:
-        case MACHINE_X64_LOAD_INCOMING:
-        case MACHINE_A64_LOAD_FRAME:
-        case MACHINE_A64_LOAD_FRAME32:
-        case MACHINE_A64_STORE_FRAME8:
-        case MACHINE_A64_STORE_FRAME16:
-        case MACHINE_A64_STORE_FRAME32:
-        case MACHINE_A64_STORE_FRAME64:
-        case MACHINE_A64_LOAD_PTR8:
-        case MACHINE_A64_LOAD_PTR16:
-        case MACHINE_A64_LOAD_PTR32:
-        case MACHINE_A64_LOAD_PTR64:
-        case MACHINE_A64_STORE_PTR8:
-        case MACHINE_A64_STORE_PTR16:
-        case MACHINE_A64_STORE_PTR32:
-        case MACHINE_A64_STORE_PTR64:
-        case MACHINE_A64_COPY_FRAME_FROM_FRAME:
-        case MACHINE_A64_COPY_FRAME_FROM_PTR:
-        case MACHINE_A64_COPY_PTR_FROM_FRAME:
-            result = true;
-            break;
-        default:
-            result = false;
-            break;
-    }
-
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool machine_schedule_info_is_memory(u16 opcode, MachineOpcodeInfo const* info)
-{
-    return machine_opcode_is_memory(info) || machine_schedule_opcode_is_memory(opcode);
-}
-
-BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_vector(u16 opcode)
-{
-    bool result;
-    switch (opcode)
-    {
-        case MACHINE_X64_FARITH:
-        case MACHINE_X64_FCMP_SET:
-        case MACHINE_X64_CVT_F32_TO_F64:
-        case MACHINE_X64_CVT_F64_TO_F32:
-        case MACHINE_X64_CVT_I64_TO_F32:
-        case MACHINE_X64_CVT_I64_TO_F64:
-        case MACHINE_X64_CVT_F32_TO_I64:
-        case MACHINE_X64_CVT_F64_TO_I64:
-        case MACHINE_X64_CVT_U64_TO_F32:
-        case MACHINE_X64_CVT_U64_TO_F64:
-        case MACHINE_X64_CVT_F32_TO_U64:
-        case MACHINE_X64_CVT_F64_TO_U64:
-        case MACHINE_X64_MOVQ_TO_XMM:
-        case MACHINE_X64_MOVQ_FROM_XMM:
-        case MACHINE_A64_FMOV_TO_VEC:
-        case MACHINE_A64_FMOV_FROM_VEC:
-        case MACHINE_A64_FARITH:
-        case MACHINE_A64_FCMP_SET:
-        case MACHINE_A64_CVT_F32_TO_F64:
-        case MACHINE_A64_CVT_F64_TO_F32:
-        case MACHINE_A64_CVT_I64_TO_F32:
-        case MACHINE_A64_CVT_I64_TO_F64:
-        case MACHINE_A64_CVT_F32_TO_I64:
-        case MACHINE_A64_CVT_F64_TO_I64:
-        case MACHINE_A64_CVT_U64_TO_F32:
-        case MACHINE_A64_CVT_U64_TO_F64:
-        case MACHINE_A64_CVT_F32_TO_U64:
-        case MACHINE_A64_CVT_F64_TO_U64:
-        case MACHINE_A64_VLOAD_FRAME:
-        case MACHINE_A64_VSTORE_FRAME:
-        case MACHINE_A64_VLOAD_FRAME_SIZED:
-        case MACHINE_A64_VSTORE_FRAME_SIZED:
-        case MACHINE_A64_VARITH:
-            result = true;
-            break;
-        default:
-            result = false;
-            break;
-    }
-
-    return result;
-}
 // A whole-object alias class, represented by its existing stable stack-slot
 // id. UINT32_MAX is UNKNOWN. Only these fixed frame forms prove one bounded
 // access; pointer, aggregate, incoming, and future forms remain conservative.
@@ -251,10 +107,6 @@ BUSTER_GLOBAL_LOCAL MachineRegisterClass machine_schedule_register_class(Machine
 
     return result;
 }
-
-#define MACHINE_SCHEDULE_UNIT_BARRIER (1u << 0)
-#define MACHINE_SCHEDULE_UNIT_MEMORY (1u << 1)
-#define MACHINE_SCHEDULE_UNIT_VECTOR (1u << 2)
 
 // Peak live-window overlap of one block in the walk order given by
 // `block_rows_order` (global row indices, block-local length), clamped to
@@ -455,6 +307,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
             }
             if (base_excess)
             {
+                MachineOpcodeRow const* opcode_rows = machine_opcode_row_table();
                 u32* definition_totals = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
                 for (u32 register_index = 0; register_index < register_count; register_index += 1)
                 {
@@ -591,12 +444,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                     {
                         MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
                         MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-                        u8 flags = 0;
-                        flags |= machine_schedule_info_is_barrier(instruction->opcode, info) ? MACHINE_SCHEDULE_UNIT_BARRIER : 0;
-                        flags |= machine_schedule_info_is_memory(instruction->opcode, info) ? MACHINE_SCHEDULE_UNIT_MEMORY : 0;
-                        flags |= machine_opcode_schedule_class(info) == MACHINE_SCHEDULE_CLASS_VECTOR || machine_schedule_opcode_is_vector(instruction->opcode)
-                                     ? MACHINE_SCHEDULE_UNIT_VECTOR
-                                     : 0;
+                        u8 flags = opcode_rows[instruction->opcode].schedule_flags;
                         for (u32 slot = 0; slot < info->operand_count; slot += 1)
                         {
                             flags |= machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_PHYSICAL_REGISTER ? MACHINE_SCHEDULE_UNIT_BARRIER : 0;

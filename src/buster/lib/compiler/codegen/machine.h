@@ -1029,9 +1029,9 @@ struct MachineOpcodeInfo
     u8 fixed_registers[4];
     u8 reserved_hot;
 
-    // Expanded target metadata. All fields are zero for legacy rows, which
-    // preserves aggregate-initializer compatibility; accessors below derive
-    // conservative defaults from the old attributes when needed.
+    // Expanded target metadata. Some fields are deliberately incomplete or
+    // dormant; docs/machine-metadata-ownership.md names their actual
+    // consumers. Scheduler membership is published into MachineOpcodeRow.
     u16 form_set;
     u8 schedule_class;
     u8 reserved_metadata;
@@ -1065,9 +1065,9 @@ BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, name) == 80);
 #define MACHINE_OPCODE_INFO_HAS_FIXED_REGISTERS 1
 
 // The published row-facts projection of the opcode table: everything a
-// per-instruction-row walk asks of an opcode, in sixteen bytes, so a pass over
-// 1,7 M rows reads a 6 KB table instead of fields in a 96-byte descriptor it
-// touches for nothing else. The roles are the
+// per-instruction-row walk asks of an opcode, in sixteen bytes per opcode
+// instead of fields spread over a 96-byte descriptor on 64-bit hosts.
+// The roles are the
 // projection that matters — they are a function of the opcode alone, so the
 // per-slot ladder that re-derived them once per operand is table content, not
 // work. Built once by machine_opcode_rows_prewarm() (AGENTS.md's serial
@@ -1088,9 +1088,16 @@ struct MachineOpcodeRow
     // and the encoder adds the rest; every other opcode is a flat number, so
     // the capacity pass is a table read instead of a nine-arm switch.
     u16 encode_budget;
-    u16 reserved;
+    // Barrier, memory-order, and implicit vector-state chains used by the
+    // scheduler. Published from immutable descriptors beside the row facts.
+    u8 schedule_flags;
+    u8 reserved;
 };
 BUSTER_CT_CHECK(sizeof(MachineOpcodeRow) == 16);
+
+#define MACHINE_SCHEDULE_UNIT_BARRIER (1u << 0)
+#define MACHINE_SCHEDULE_UNIT_MEMORY (1u << 1)
+#define MACHINE_SCHEDULE_UNIT_VECTOR (1u << 2)
 
 #define MACHINE_OPCODE_ROW_CONSTRAINED (1u << 0)
 #define MACHINE_OPCODE_ROW_CALL (1u << 1)
