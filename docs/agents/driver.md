@@ -76,6 +76,11 @@ does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
 
+Text alignment without an explicit fill uses x86-64 NOP bytes or complete
+little-endian AArch64 NOP instructions. A partial AArch64 instruction boundary
+is zero-filled before the NOPs; explicit fills remain repeated bytes on both
+targets. Data alignment defaults to zero fill.
+
 Three things that layer owns rather than the instruction layer. Local numeric
 labels: `1:` becomes a generated name and `1f`/`1b` resolve to the nearest
 following or preceding definition in source order, and those names leave the
