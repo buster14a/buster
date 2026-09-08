@@ -3127,6 +3127,13 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_location_append(CodegenModule* result
     };
 }
 
+// Block IDs are graph identities, not an execution order. Keep the entry
+// first and every other block in ID order; debug ranges use this same layout.
+BUSTER_GLOBAL_LOCAL u32 codegen_canonical_layout_block(IrFunction* function, u32 ordinal)
+{
+    return ordinal == 0 ? function->entry.value : ordinal <= function->entry.value ? ordinal - 1 : ordinal;
+}
+
 BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* result, IrFunction* function, u32* value_offsets, u32* block_offsets,
                                                              u32 function_start, u32 function_end, Target target, u32 frame_size,
                                                              s32 frame_base_offset, u32 capacity)
@@ -3178,8 +3185,9 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
         }
         if (!emitted && block_offsets)
         {
-            for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+            for (u32 ordinal = 0; ordinal < function->block_count; ordinal += 1)
             {
+                u32 block_index = codegen_canonical_layout_block(function, ordinal);
                 IrBlock* block = function->blocks + block_index;
                 IrValueId value = IR_VALUE_ID_INVALID;
                 if (block->local_values && local->id.value < function->local_count)
@@ -3202,7 +3210,7 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
                     continue;
                 }
                 u32 start = BUSTER_MAX(block_offsets[block_index], function_start);
-                u32 end = block_index + 1 < function->block_count ? block_offsets[block_index + 1] : function_end;
+                u32 end = ordinal + 1 < function->block_count ? block_offsets[codegen_canonical_layout_block(function, ordinal + 1)] : function_end;
                 end = BUSTER_MIN(end, function_end);
                 codegen_canonical_location_append(result, capacity, function->symbol, local->id, start, end,
                                                   codegen_debug_canonical_value_location(value, function, value_offsets, target, frame_size, frame_base_offset));
@@ -10210,8 +10218,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // one live ST0 for a direct f80 return.  Keep the depth explicit so a
         // future path cannot silently leak an x87 stack entry across a call.
         u32 x87_stack_depth = 0;
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        for (u32 ordinal = 0; ordinal < function->block_count; ordinal += 1)
         {
+            u32 block_index = codegen_canonical_layout_block(function, ordinal);
             IrBlock* emitted_block = function->blocks + block_index;
             emitter.current_block = emitted_block->id;
             block_offsets[block_index] = (u32)buffer.count;
@@ -10237,7 +10246,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // canonical counterpart of "capture every incoming argument
             // register at entry" in the machine selectors, which the machine
             // path has always done and this emitter had not.
-            bool entry_block = block_index == 0 && canonical_function_type &&
+            bool entry_block = emitted_block->id.value == function->entry.value && canonical_function_type &&
                                canonical_function_type->kind == IR_TYPE_FUNCTION && canonical_function_type->parameter_count != 0;
             bool argument_pass = entry_block;
             IrInstructionId instruction_id = emitted_block->first_instruction;

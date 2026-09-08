@@ -1820,8 +1820,12 @@ static bool ebpf_emit_function(EbpfContext* context, EbpfFunctionRecord* record)
     record->offset = emitter.section->data.length;
     emitter.section_start = record->offset;
     ebpf_fe_emit_prologue(&emitter);
-    for (u32 block_index = 0; block_index < emitter.function->block_count && !ebpf_failed(context); block_index += 1)
+    // Execution falls through the prologue into the declared entry, which
+    // need not have block ID zero. Branch fixups still use the original IDs.
+    for (u32 ordinal = 0; ordinal < emitter.function->block_count && !ebpf_failed(context); ordinal += 1)
     {
+        u32 entry = emitter.function->entry.value;
+        u32 block_index = ordinal == 0 ? entry : ordinal <= entry ? ordinal - 1 : ordinal;
         IrBlock* block = emitter.function->blocks + block_index;
         if (block->id.value >= emitter.function->block_count)
         {
