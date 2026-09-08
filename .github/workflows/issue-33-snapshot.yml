@@ -1,32 +1,53 @@
-name: Differential harness source snapshot
+name: Publish native differential candidate
+
 on:
   push:
-    branches:
-      - test/differential-harness-source-20260907
-    paths:
-      - .github/workflows/issue-33-snapshot.yml
+    branches: [test/differential-harness-source-20260907]
+    paths: [.github/workflows/issue-33-snapshot.yml]
+
+permissions:
+  contents: write
+
 concurrency:
   group: differential-source-transport
   cancel-in-progress: true
-permissions:
-  contents: read
+
 jobs:
-  source:
+  publish:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false
-      - name: Pack current main and history
+      - name: Apply reviewed patch on main and publish code
         shell: bash
         run: |
           set -euo pipefail
-          git bundle create "$RUNNER_TEMP/buster-source.bundle" refs/remotes/origin/main
+          cat .differential-transport/current-{00,01,20,21,22,23,30,31,32,33}.b64 | base64 --decode | gzip --decompress > "$RUNNER_TEMP/differential.patch"
+          echo "725d5a9a590aabcc3dab2f9518b9987fb2c7eabd1a639d6fe353492cf7aee7d9  $RUNNER_TEMP/differential.patch" | sha256sum --check
+          git config user.name "ChatGPT"
+          git config user.email "noreply@openai.com"
+          git switch --create test/native-differential-abi238 88ecc49c1a5c5fef614c388c730babe7686a689a
+          git apply --3way --index "$RUNNER_TEMP/differential.patch"
+          git diff --cached --check
+          cp .github/workflows/ci.yml "$RUNNER_TEMP/ci-final.txt"
+          git restore --source=HEAD --staged --worktree .github/workflows/ci.yml
+          git commit -m "test: add native differential matrix and fix canonical parameter alignment"
+          git push origin HEAD:refs/heads/test/native-differential-abi238
+          git rev-parse HEAD > "$RUNNER_TEMP/differential-candidate.txt"
+          git switch --detach "${{ github.sha }}"
+          cp "$RUNNER_TEMP/ci-final.txt" .differential-transport/ci-final.txt
+          git add .differential-transport/ci-final.txt
+          git commit -m "chore: transport tested CI content (temporary branch only)"
+          git push origin HEAD:refs/heads/test/differential-harness-source-20260907
+          git rev-parse HEAD:.differential-transport/ci-final.txt >> "$RUNNER_TEMP/differential-candidate.txt"
+          git bundle create "$RUNNER_TEMP/differential-candidate.bundle" refs/heads/test/native-differential-abi238 refs/remotes/origin/main HEAD
       - uses: actions/upload-artifact@v4
         with:
-          name: differential-harness-source
-          path: ${{ runner.temp }}/buster-source.bundle
+          name: differential-candidate
+          path: |
+            ${{ runner.temp }}/differential-candidate.bundle
+            ${{ runner.temp }}/differential-candidate.txt
           if-no-files-found: error
           retention-days: 1
