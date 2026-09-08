@@ -1,0 +1,25 @@
+name: Alignment audit source snapshot
+on:
+  push:
+    branches: [work/audit-238-source-20260907]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 88ecc49c1a5c5fef614c388c730babe7686a689a
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export pinned main
+        run: git bundle create "$RUNNER_TEMP/buster-main.bundle" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: audit-238-main-88ecc49c
+          path: ${{ runner.temp }}/buster-main.bundle
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
