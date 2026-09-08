@@ -1,0 +1,67 @@
+name: Cancelled CI recovery
+
+on:
+  workflow_run:
+    workflows: [Buster CI]
+    types: [completed]
+  pull_request:
+    paths:
+      - '.github/workflows/ci-recovery.yml'
+      - '.github/scripts/recover-ci.py'
+      - 'tests/ci_recovery_test.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ci-recovery.yml'
+      - '.github/scripts/recover-ci.py'
+      - 'tests/ci_recovery_test.py'
+
+permissions: {}
+
+# Duplicate completion deliveries cannot make concurrent retry decisions.
+concurrency:
+  group: ci-recovery-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && github.event_name != 'workflow_run' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Test recovery decisions without network access
+        run: python3 tests/ci_recovery_test.py
+
+  recover:
+    if: >-
+      ${{ github.server_url == 'https://github.com' &&
+          vars.GH_ACTIONS_CI_ENABLED == 'true' &&
+          vars.GH_ACTIONS_CI_RECOVERY_ENABLED != 'false' &&
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.run_attempt == 1 &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          (github.event.workflow_run.conclusion == 'cancelled' ||
+           github.event.workflow_run.conclusion == 'failure') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
+    steps:
+      # workflow_run's github.sha is the trusted default-branch revision.
+      # Never check out the completed run's head, read its artifacts, or run it.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Retry an interrupted current PR once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/recover-ci.py
