@@ -39,6 +39,17 @@
   `MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE` exception is explicit and counted;
   FAST/QUALITY liveness scans all textual touches, the scheduler preserves
   their source order, and SSA-only consumers must reject mutable values.
+- The opcode switches in `machine_select_canonical_function_x86_64` and
+  `machine_a64_select_instruction` are the authoritative machine selections.
+  Add a selection to the target switch and its direct helpers, with MIR and
+  generated-code regressions; do not add a parallel matcher that reports a
+  rule without producing the selected MIR. `machine_select.{c,h}` owns only
+  consumed type/value facts, row layout, and the unvalidated entry's shape
+  check. The canonical IR verifier remains the pipeline validation authority.
+  Unsupported machine selections return `supported = false` and
+  `failed_opcode`; `CodegenStatistics.fallback_opcode_counts` and
+  `fallback_verify_count` expose the actual canonical fallback. There is no
+  declarative pattern-miss category because there is no declarative matcher.
 - Shared canonical-IR facts and the generated FAST/QUALITY rule decision tree
   live in `machine_select.{c,h}`, `machine_select_rules.h`, and
   `machine_select_generated.c`. Target selectors may retain custom ABI and
