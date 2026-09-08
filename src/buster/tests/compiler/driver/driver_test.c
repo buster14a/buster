@@ -6844,12 +6844,25 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 stack_pair_arena, S8("buster-c-overaligned-host"), string_format(stack_pair_arena, S8("-{u32}.o"), source_index));
             // Match the existing mixed-object pairs: no GOT references or
             // host debug sections outside the native object reader's model.
-            String8 host_stack_command[] = {
-                S8(BUSTER_HOST_C_COMPILER), S8("-DOVERALIGNED_STACK_OBSERVE=1"), S8("-O0"), S8("-fno-pic"), S8("-g0"), S8("-c"),
+            String8 host_stack_command[10];
+            u64 host_stack_command_count = 0;
+            host_stack_command[host_stack_command_count++] = S8(BUSTER_HOST_C_COMPILER);
+#if defined(BUSTER_HOST_C_COMPILER_ARG1)
+            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length)
+            {
+                host_stack_command[host_stack_command_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+            }
+#endif
+            String8 host_stack_options[] = {
+                S8("-DOVERALIGNED_STACK_OBSERVE=1"), S8("-O0"), S8("-fno-pic"), S8("-g0"), S8("-c"),
                 S8("-o"), host_stack_objects[source_index], stack_sources[source_index],
             };
+            for (u64 option = 0; option < BUSTER_ARRAY_LENGTH(host_stack_options); option += 1)
+            {
+                host_stack_command[host_stack_command_count++] = host_stack_options[option];
+            }
             ProcessSpawnResult host_stack_spawn = os_process_spawn(
-                (SliceString8)BUSTER_ARRAY_TO_SLICE(host_stack_command), (SliceString8){0}, (SliceString8){0},
+                (SliceString8){.pointer = host_stack_command, .length = host_stack_command_count}, (SliceString8){0}, (SliceString8){0},
                 (ProcessSpawnOptions){
                     .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                     .use_process_environment = true,
