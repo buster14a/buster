@@ -69,13 +69,13 @@ self-hosting. No configuration or test is removed. Both mobile entry points
 are standalone and retain Debug and Release. The existing Intel iOS gate is
 compile/link/bundle-only; Apple Silicon retains simulator execution.
 
-The main workflow retains every push and also permits explicit manual runs.
-It does not add duplicate same-repository PR runs. `fail-fast` is off in both
+The main workflow covers pull requests (including forks), main pushes, tags,
+merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix. `fail-fast` is off in both
 matrices. Unix execution-mode tests still run after a combination failure,
 without allowing that earlier failure to pass. Mobile shards have no desktop
 prerequisite and their results cannot be hidden by a failed desktop build.
 
-Development pushes coalesce per workflow/ref. Default-branch pushes and manual
+PR revisions and merge groups coalesce per PR/ref. Main/tag pushes and manual
 runs have unique run-ID groups so neither active nor pending results are
 superseded. Lifecycle PR updates separately cancel obsolete fake-tool runs.
 The seven-day log artifacts, summaries, cache boundaries, reproduction commands,
@@ -105,7 +105,7 @@ command and the next. Diagnostic transcripts also live outside that tree.
 The combination matrix needs Clang, GCC, Zig and, on Windows, MSVC together.
 The images provide all of those except Zig, so every desktop runner installs a
 **pinned, checksummed** Zig from `ziglang.org` — version and per-target
-SHA-256 both live in the workflow, so a rerun of an old commit cannot pick up
+SHA-256 both live in `.github/zig.json`, so a rerun of an old commit cannot pick up
 a different toolchain. Only the upstream archive is cached, and every cache
 hit is checked again before extraction. Only default-branch push setup saves
 verified archives; no generated compiler or build tree is cached.
@@ -178,3 +178,32 @@ go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/*.yml
 
 Without `.github/actionlint.yaml` every `runs-on` above is reported as an
 unknown label, so keep the two in step when a runner changes.
+
+## Helper validation and timing
+
+`python3 tests/ci_tools_test.py -v` exercises the archive installer, fail-closed
+summaries and timing collector on each desktop platform (`python` on Windows).
+Unix runners also compile a tiny Clang probe to verify that recoverable UBSan
+diagnostics become fatal with `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`.
+The same environment applies to the compiler matrix; no sanitizer is suppressed.
+
+`tools/ci_zig.py` owns download, checksum verification, staging, version checking,
+and PATH publication. The exact archive cache key includes the manifest hash;
+only main pushes save verified archives, before compiler tests run. SDK setup
+for unused Vulkan rendering/shader support is removed; those options are off
+in these configurations. Android and iOS SDK setup and test commands remain.
+
+Desktop and mobile summaries use `tools/ci_summary.py`, explicitly requiring each
+applicable suite. Missing, skipped, cancelled or failed work fails the summary.
+Diagnostic uploads do not start after cancellation. The aggregate `CI complete`
+continues to require all six desktop jobs, three mobile jobs and workflow lint.
+
+Collect timing using `python3 tools/github_ci_time.py collect --branch main --limit 30 --output /tmp/before.json`
+and summarize using `python3 tools/github_ci_time.py summarize /tmp/before.json`.
+For a candidate, replace `--branch main` with `--head-sha COMMIT`. The collector
+accepts both historical six-job workflows and the current eleven-job workflow;
+all applicable suites must succeed on a complete first attempt. Workflow hashes
+and runner labels define separate cohorts. Reports include queue delay, elapsed
+time, execution span and summed runner seconds, including mobile/lint/aggregate
+jobs. Never attribute differences to this PR without matching source/cache state
+and multiple completed observations. No speedup is claimed before that evidence.

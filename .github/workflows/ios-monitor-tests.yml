@@ -70,10 +70,10 @@ jobs:
           # shellcheck disable=SC2016
           printf '## Mobile lifecycle on %s\n\nCommit: `%s`\n\nSuite: **%s**.\n\nReproduce: `bash tests/mobile_ci_scripts_test.sh` (macOS needs coreutils and modern Bash on PATH).\n' "$RUNNER_OS" "$GITHUB_SHA" "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain lifecycle log
-        if: ${{ always() }}
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: mobile-lifecycle-${{ matrix.os }}-${{ github.run_attempt }}
+          name: mobile-lifecycle-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mobile-lifecycle.log
           if-no-files-found: ignore
           retention-days: 7
