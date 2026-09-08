@@ -462,7 +462,9 @@ TargetParseResult target_parse_triple(String8 triple)
         }
         else if (target_component_equal(component, S8("darwin")) || target_component_starts_with(component, S8("macos")))
         {
-            if (target_component_starts_with(component, S8("macos")) && !target_parse_version_suffix(component, S8("macos").length, &result.target))
+            // LLVM metadata uses macosx; both aliases may carry a deployment version.
+            u64 prefix_length = target_component_starts_with(component, S8("macosx")) ? S8("macosx").length : S8("macos").length;
+            if (target_component_starts_with(component, S8("macos")) && !target_parse_version_suffix(component, prefix_length, &result.target))
             {
                 result.invalid_component = component;
                 result.error = TARGET_PARSE_ERROR_OPERATING_SYSTEM;
