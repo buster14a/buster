@@ -11994,6 +11994,42 @@ bool buster_x86_metadata_relax_got_load(u8* section, u64 field_offset, u64 secti
     return result;
 }
 
+// Executable byte padding is a derived single-byte NOP recipe. Do not call
+// the general encoder for every padding byte: prepare once, bulk-fill later.
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_nop_byte;
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_nop_prepared;
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_nop_valid;
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_nop_prepare(void)
+{
+    if (!buster_x86_metadata_nop_prepared)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        buster_x86_metadata_prewarm();
+        u8 byte = 0;
+        BusterX86MetadataEmitResult encoded = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = {.mnemonic = S8("NOP"), .address_size = 64, .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64},
+            .output = &byte, .output_capacity = 1,
+        });
+        bool valid = encoded.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && encoded.byte_count == 1 && !encoded.relocation_count;
+        if (valid) buster_x86_metadata_nop_byte = byte;
+        buster_x86_metadata_nop_valid = valid;
+        buster_x86_metadata_nop_prepared = true;
+    }
+    return buster_x86_metadata_nop_valid;
+}
+
+bool buster_x86_metadata_fill_nops(u8* output, u64 count)
+{
+    bool result = count == 0;
+    if (count && output && buster_x86_metadata_nop_prepare())
+    {
+        memset(output, buster_x86_metadata_nop_byte, count);
+        result = true;
+    }
+    return result;
+}
+
 // The complete walk: every form normalized, pattern-parsed, operand-viewed and
 // fact-filled, for a caller about to run a gang whose lanes may query any
 // form -- the test harness.  A compile never needs it.
@@ -12017,6 +12053,7 @@ void buster_x86_metadata_prewarm_all_forms(void)
         (void)buster_x86_metadata_tls_prepare(BUSTER_X86_TLS_PREPARE_ALL);
         (void)buster_x86_metadata_forwarding_prepare();
         (void)buster_x86_metadata_got_prepare();
+        (void)buster_x86_metadata_nop_prepare();
         buster_x86_metadata_all_forms_prepared = true;
     }
 }
@@ -12038,6 +12075,7 @@ u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void)
     u64 unprepared = (u64)(buster_x86_metadata_tls_prepared != BUSTER_X86_TLS_PREPARE_ALL);
     unprepared += (u64)!buster_x86_metadata_forwarding_prepared;
     unprepared += (u64)!buster_x86_metadata_got_prepared;
+    unprepared += (u64)!buster_x86_metadata_nop_prepared;
     for (u32 form_id = 0; form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
     {
         if (buster_x86_metadata_form_record_validity[form_id] == BUSTER_X86_METADATA_RECORD_UNKNOWN)

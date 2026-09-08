@@ -131,3 +131,10 @@ BUSTER_F_DECL u32 assembly_test_aarch64_direct_simd_spelling_count(void);
 BUSTER_F_DECL bool assembly_test_aarch64_direct_simd_spelling_at(u32 index,
                                                                   AssemblyAarch64DirectSIMDSpellingTest* result);
 #endif
+
+// Fill an implicit executable alignment gap from the target's instruction
+// authority. Offset is the section offset before the gap. Complete AArch64
+// words are NOPs; partial leading/trailing words are zero data. Explicit source
+// fill bytes and non-executable data must not use this policy. Transactional
+// on invalid target/range or failed recipe preparation; count zero is a no-op.
+BUSTER_F_DECL bool assembly_fill_executable_padding(Target target, u8* output, u64 offset, u64 count);

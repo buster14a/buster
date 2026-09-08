@@ -1145,6 +1145,11 @@ BUSTER_F_DECL bool buster_x86_metadata_emit_forwarding(u8* output, u32 capacity,
 // First preparation is serial; prewarm_all_forms prepares worker-lane use.
 BUSTER_F_DECL bool buster_x86_metadata_relax_got_load(u8* section, u64 field_offset, u64 section_size);
 
+// Bulk-fill using the checked metadata-derived one-byte NOP. A zero-length
+// fill succeeds without output or initialization; failure writes nothing.
+// Prepare serially, or use prewarm_all_forms before calling from worker lanes.
+BUSTER_F_DECL bool buster_x86_metadata_fill_nops(u8* output, u64 count);
+
 // Shared semantic proof used by source adapters and the handwritten parser:
 // an explicitly typed EVEX decorator is authoritative only for ordinary
 // 64-bit, non-APX/AMX forms with one ordinary memory broadcast or a
