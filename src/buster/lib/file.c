@@ -226,16 +226,64 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
         OsFileDescriptor* fd = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
         if (fd)
         {
-            u64 file_size = os_file_get_size(fd);
-            u64 allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
-            allocation_size = BUSTER_MAX(allocation_size, 1);
-            u64 allocation_bottom = allocation_size - (file_size + options.start_padding);
+            u64 reported_size = os_file_get_size(fd);
             u64 allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
-            u8* file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
-            if (file_size)
+            u64 file_size;
+            u64 allocation_size;
+            u8* file_buffer;
+            if (reported_size)
             {
-                file_size = os_file_read(fd, (ByteSlice){file_buffer + options.start_padding, file_size}, file_size);
+                allocation_size = align_forward(reported_size + options.start_padding + options.end_padding, options.end_alignment);
+                allocation_size = BUSTER_MAX(allocation_size, 1);
+                file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
+                file_size = os_file_read(fd, (ByteSlice){file_buffer + options.start_padding, reported_size}, reported_size);
             }
+            else
+            {
+                // Pipes, FIFOs, character devices and procfs descriptors report
+                // st_size == 0 even when data is waiting. Probe one byte so a
+                // genuinely empty regular file keeps its tiny allocation, then
+                // grow geometrically and read until the descriptor reaches EOF.
+                u64 allocation_mark = arena->position;
+                u64 capacity = 1;
+                allocation_size = align_forward(capacity + options.start_padding + options.end_padding, options.end_alignment);
+                allocation_size = BUSTER_MAX(allocation_size, 1);
+                file_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
+                file_size = 0;
+                for (;;)
+                {
+                    u64 available = capacity - file_size;
+                    u64 read_size = os_file_read(fd, (ByteSlice){file_buffer + options.start_padding + file_size, available}, available);
+                    file_size += read_size;
+                    if (file_size < capacity)
+                    {
+                        break;
+                    }
+
+                    u64 next_capacity = capacity < BUSTER_KB(64) ? BUSTER_KB(64) : capacity * 2;
+                    if (next_capacity <= capacity)
+                    {
+                        arena_allocation_overflow();
+                    }
+                    capacity = next_capacity;
+                    arena_set_position(arena, allocation_mark);
+                    allocation_size = align_forward(capacity + options.start_padding + options.end_padding, options.end_alignment);
+                    allocation_size = BUSTER_MAX(allocation_size, 1);
+                    u8* grown_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
+                    BUSTER_CHECK(grown_buffer == file_buffer);
+                    file_buffer = grown_buffer;
+                }
+
+                // Return the unused geometric tail to the arena while keeping
+                // the bytes in place. arena_set_position preserves the dirty
+                // high-water mark, so a later zeroed allocation still clears
+                // data read beyond the final logical end.
+                allocation_size = align_forward(file_size + options.start_padding + options.end_padding, options.end_alignment);
+                allocation_size = BUSTER_MAX(allocation_size, 1);
+                u64 allocation_offset = (u64)(file_buffer - (u8*)arena);
+                arena_set_position(arena, allocation_offset + allocation_size);
+            }
+            u64 allocation_bottom = allocation_size - (file_size + options.start_padding);
             memset(file_buffer + options.start_padding + file_size, 0, allocation_bottom);
             os_file_close(fd);
             result = (ByteSlice){file_buffer + options.start_padding, file_size};

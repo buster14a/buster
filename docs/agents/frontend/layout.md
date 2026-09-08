@@ -4,6 +4,14 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- A VLA's declared alignment travels on `IR_OPCODE_STACK_ALLOCATE`. For an
+  alignment above the native stack's sixteen-byte guarantee, both canonical
+  and machine emitters compute `align_down(old_sp - size, alignment)` and
+  probe the complete distance to that address, including alignment padding.
+  Rounding the byte count alone preserves a misaligned incoming stack pointer.
+  Keep the ordinary sixteen-byte path and the existing save/restore lifetime
+  semantics; test real addresses across different incoming stack residues and
+  page-crossing sizes.
 - **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
   representation, so ignoring them is an ABI divergence rather than a missing
   optimization: a Buster-only program agrees with itself whatever it agrees on,
@@ -122,6 +130,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Ordering the members differently does not substitute for it -- a whole-unit
   store loses whichever neighbour ran first, and two overlapping units lose one
   of themselves whatever the order (issue #705).
+  **Integer promotion uses the bit-field width, not its storage width.** An
+  `unsigned int : 3` promotes to `int`, while an `unsigned int : 32` remains
+  unsigned. `c_ir_mark_unsigned_bit_field_value` keeps this distinction in a
+  lazily allocated frontend table; canonical types and field layout retain
+  the declared type. Arithmetic, unary plus, default arguments, and switches
+  consult the promotion fact. Explicit casts discard it, and assignment
+  results retain it after masking to the stored width, without rereading a
+  volatile field. The strict operand type walk receives the promotion context
+  explicitly so `_Generic(+field)` and conditional arms agree with emitted
+  arithmetic while a direct type query still sees the declaration's type.
+  `tests/basic_c_bit_field_promotion.c` covers widths 1, 3, 31, and 32,
+  anonymous members, casts, assignments, and argument promotion under every
+  allocator (GitHub #218).
   A bit-field declarator carries a list of its own in exactly one place, *after*
   the width -- Clang rejects `int b __attribute__((packed)) : 5` -- so
   `c_type_parse_aggregate_segment_step` trims the width's token range with

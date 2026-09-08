@@ -26,16 +26,18 @@
 - CI is defined under `.forgejo/`; Forgejo remains the source of truth. The
   opt-in GitHub-hosted desktop capacity uses the source-free broker template in
   `.forgejo/github-bridge/`, not a repository mirror. `.github/workflows/ci.yml`
-  runs the same steps as the Forgejo matrix — combination matrix, execution-mode
+  runs the same coverage as the Forgejo matrix — combination matrix, execution-mode
   matrix, Android and iOS — on GitHub's standard runners for the migration
-  described in `docs/ci-github-actions.md`, and spends that platform's spare
-  capacity on testing every desktop OS at both x86-64 and AArch64. It is one
-  job whose matrix is exactly one runner per platform and architecture, with
-  per-runner steps as on Forgejo, so nothing there is a second runner for a
-  combination already covered. It stays inert until its repository variable is
-  set, and skips itself outright when Forgejo evaluates it. Changing a
-  `runs-on` label there means changing `.github/actionlint.yaml` too, because
-  actionlint knows only the labels its own release predates. Preserve
+  described in `docs/ci-github-actions.md`. Its six desktop lanes cover every
+  desktop OS at both x86-64 and AArch64; three independent mobile shards retain
+  the Android and iOS suites without repeating desktop work. Require the
+  aggregate `CI complete` result, not just the desktop names. Both matrices
+  disable fail-fast, and a combination failure does not hide Unix mode tests.
+  See `docs/ci-workflow-audit.md` for cache trust boundaries, diagnostics,
+  cancellation, coverage details, and reproduction. Every job stays inert
+  until its repository variable is set, and skips itself outright on Forgejo.
+  Changing a `runs-on` label means changing `.github/actionlint.yaml` too,
+  because actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and
   supported-platform coverage when changing build orchestration or the
   compiler pipeline. Do not add source mirroring, Actions artifacts/caches,

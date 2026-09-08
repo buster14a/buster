@@ -362,3 +362,14 @@ counting the day's existing entries, so two sessions auditing the same day
 always picked the same letter, and three of the four PRs open when the history
 was split had done exactly that. Those older names are historical — entries
 cross-reference each other by them — and stay as written.
+
+## ABI context microbenchmark
+
+Run `BUSTER_ABI_CACHE_BENCH=1 build/Release/ide test --ci=1 --verbose=0` to
+include the `ABI_CACHE_BENCH` record from the canonical IR tests. It uses the
+existing scalar/aggregate classifier corpus and reports reservation, cold-cache,
+warm-cache and uncached-classifier time separately. The warm query count and
+unchanged classification count establish the hit rate; timings never gate tests.
+`bytes` includes page payloads and the TypeId page directories, and `type_bytes`
+is the occupied language-type pool. This small corpus prices the query service;
+use paired same-source compiler runs for end-to-end time and peak RSS.

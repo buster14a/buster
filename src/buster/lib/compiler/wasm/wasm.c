@@ -1616,22 +1616,22 @@ static void wasm64_fe_emit_binary_opcode(Wasm64FunctionEmitter* emitter, IrBinar
         case IR_BINARY_UNSIGNED_DIVIDE: opcode = base + 4; break;
         case IR_BINARY_SIGNED_REMAINDER: opcode = base + 5; break;
         case IR_BINARY_UNSIGNED_REMAINDER: opcode = base + 6; break;
-        case IR_BINARY_SHIFT_LEFT: opcode = base + 8; break;
-        case IR_BINARY_SIGNED_SHIFT_RIGHT: opcode = base + 9; break;
-        case IR_BINARY_UNSIGNED_SHIFT_RIGHT: opcode = base + 10; break;
-        case IR_BINARY_INTEGER_BITWISE_AND: opcode = base + 11; break;
-        case IR_BINARY_INTEGER_BITWISE_OR: opcode = base + 12; break;
-        case IR_BINARY_INTEGER_BITWISE_XOR: opcode = base + 13; break;
+        case IR_BINARY_SHIFT_LEFT: opcode = base + 10; break;
+        case IR_BINARY_SIGNED_SHIFT_RIGHT: opcode = base + 11; break;
+        case IR_BINARY_UNSIGNED_SHIFT_RIGHT: opcode = base + 12; break;
+        case IR_BINARY_INTEGER_BITWISE_AND: opcode = base + 7; break;
+        case IR_BINARY_INTEGER_BITWISE_OR: opcode = base + 8; break;
+        case IR_BINARY_INTEGER_BITWISE_XOR: opcode = base + 9; break;
         case IR_BINARY_INTEGER_EQUAL: opcode = is_i64 ? 0x51 : 0x46; break;
         case IR_BINARY_INTEGER_NOT_EQUAL: opcode = is_i64 ? 0x52 : 0x47; break;
-        case IR_BINARY_SIGNED_LESS: opcode = is_i64 ? 0x54 : 0x48; break;
-        case IR_BINARY_UNSIGNED_LESS: opcode = is_i64 ? 0x55 : 0x49; break;
-        case IR_BINARY_SIGNED_GREATER: opcode = is_i64 ? 0x56 : 0x4a; break;
-        case IR_BINARY_UNSIGNED_GREATER: opcode = is_i64 ? 0x57 : 0x4b; break;
-        case IR_BINARY_SIGNED_LESS_EQUAL: opcode = is_i64 ? 0x58 : 0x4c; break;
-        case IR_BINARY_UNSIGNED_LESS_EQUAL: opcode = is_i64 ? 0x59 : 0x4d; break;
-        case IR_BINARY_SIGNED_GREATER_EQUAL: opcode = is_i64 ? 0x5a : 0x4e; break;
-        case IR_BINARY_UNSIGNED_GREATER_EQUAL: opcode = is_i64 ? 0x5b : 0x4f; break;
+        case IR_BINARY_SIGNED_LESS: opcode = is_i64 ? 0x53 : 0x48; break;
+        case IR_BINARY_UNSIGNED_LESS: opcode = is_i64 ? 0x54 : 0x49; break;
+        case IR_BINARY_SIGNED_GREATER: opcode = is_i64 ? 0x55 : 0x4a; break;
+        case IR_BINARY_UNSIGNED_GREATER: opcode = is_i64 ? 0x56 : 0x4b; break;
+        case IR_BINARY_SIGNED_LESS_EQUAL: opcode = is_i64 ? 0x57 : 0x4c; break;
+        case IR_BINARY_UNSIGNED_LESS_EQUAL: opcode = is_i64 ? 0x58 : 0x4d; break;
+        case IR_BINARY_SIGNED_GREATER_EQUAL: opcode = is_i64 ? 0x59 : 0x4e; break;
+        case IR_BINARY_UNSIGNED_GREATER_EQUAL: opcode = is_i64 ? 0x5a : 0x4f; break;
         case IR_BINARY_POINTER_EQUAL: opcode = 0x51; break;
         case IR_BINARY_POINTER_NOT_EQUAL: opcode = 0x52; break;
         case IR_BINARY_BOOLEAN_AND: opcode = 0x71; break;
@@ -2385,13 +2385,12 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
                 if (wasm64_integer_bits(type) > 32)
                 {
                     wasm64_fe_i64_const(emitter, -1);
-                    wasm64_fe_u8(emitter, 0x83);
                 }
                 else
                 {
                     wasm64_fe_i32_const(emitter, -1);
-                    wasm64_fe_u8(emitter, 0x73);
                 }
+                wasm64_fe_emit_binary_opcode(emitter, IR_BINARY_INTEGER_BITWISE_XOR, type);
             }
             else
             {

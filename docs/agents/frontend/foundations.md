@@ -12,6 +12,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
 - Keep the frontend pipeline explicit: source loading and preprocessing,
   parsing and semantic construction, then canonical-IR lowering. Do not add a
   parallel frontend-specific IR or route code generation around canonical IR.
+- Macro placemarkers survive the entire `##` sequence. The replacement loop
+  compacts into its existing materialized buffer and removes placemarkers only
+  when emitting the rescan tokens. Only the explicitly marked GNU
+  `, ## __VA_ARGS__` operator may delete a comma for an empty argument;
+  named parameters and ordinary macros retain it.
+  `tests/basic_c_macro_empty_paste.c` covers empty operands, chained pastes,
+  surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
+- A folded conditional expression converts its selected value to the common
+  type of both arms before any enclosing operator consumes it. Constant and
+  runtime typing share `c_ir_conditional_pointer_type`; arithmetic uses the
+  usual conversion helper. `tests/basic_c_constant_conditional_type.c` pins
+  signed/unsigned widening, mixed floating/integer arithmetic, nested folds,
+  and pointer/null selections under every allocator (GitHub #219).
 - Invalid user input must produce structured C diagnostics and a failed driver
   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
   never ordinary syntax or semantic errors.
@@ -28,6 +41,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   sentinels.
 - Validate IR before machine selection or Wasm emission. A diagnosed frontend
   failure must not publish an apparently valid partial function to codegen.
+- Constant initialization must preserve the source type and every value limb.
+  The direct aggregate leaf paths in `c_gen.c` use a nonzero test for `_Bool`
+  and `c_ir_constant_integer_to_float` for unsigned integers, with rounding at
+  the destination precision. The general aggregate writer stores both limbs
+  of a 128-bit integer. `c_ir_constant_float_to_integer` decodes binary64 bits,
+  truncates fractions before checking the destination range, and refuses
+  nonfinite or unrepresentable conversions without executing an undefined host
+  cast. Automatic nested initializers recognize a string as its whole array
+  subobject before brace elision. Pin these paths with independent object bytes
+  as well as runtime comparisons: the initializer fixtures also exposed a
+  selected x86-64 float-to-u64 conversion whose binary32 threshold encoded
+  2^31 instead of 2^63. Runtime float-to-128-bit conversion on x86-64 remains
+  unsupported; constant conversion supports both integer limbs.
 - **GNU's `__alignof__` takes an expression; `_Alignof` takes only a type
   name.** Both spellings reach the same fold in `c_gen.c`, and it resolved an
   expression operand only for a compound literal until libc-test's
@@ -203,6 +229,43 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `IR_OPCODE_LOAD` or `IR_OPCODE_STORE` and its place -- the pairing the atomic
   opcodes were always validated with. `tests/basic_c_volatile_aggregate.c` pins
   both directions of the qualifier under all four register allocators.
+- Canonical block IDs are graph identities, not an execution order. A valid
+  `IrFunction.entry` may name any block. Native canonical and eBPF emission
+  place that entry first, then retain ID order for the remaining blocks; branch
+  fixups continue to use original block IDs. Incoming argument capture belongs
+  to the declared entry, and debug-location endpoints follow emitted layout,
+  not the next numeric ID. `canonical_entry_test_internal.h` renumbers valid
+  source-derived graphs before emission and checks arguments, joins, loops,
+  native bytes/execution, eBPF execution, and debug ranges. The ordinary C
+  frontend still creates entry ID zero; these regressions protect the shared
+  canonical-IR API rather than claiming it currently emits nonzero entries.
 - Native lowering is `canonical IR -> machine IR -> scheduling/register
   allocation -> encoding`. Selection patterns and scheduling classes remain
   separate metadata domains even when they share instruction-form IDs.
+
+## ABI decomposition ownership
+
+`IrType` holds language identity and layout only. Each `IrAbiContext` owns one
+calling convention's decomposition cache, keyed by canonical type id and ABI
+use. `IrProgram.abi_contexts` creates contexts only for conventions requested
+by the frontend or a target consumer. Independent contexts may share the same
+immutable language types. `ir_type_abi_value` remains the shared call-lowering
+query used by native consumers and the frontend; explicit contexts use
+`ir_abi_context_value`. Wasm, eBPF and LLVM do not acquire a native cache merely
+by existing; only an actual ABI query creates it.
+
+Cache pages contain 64 types for one use, with a resolution mask; values are
+initialized before their bit is published. Variadic arguments reuse argument
+classification except on Windows AArch64, whose convention distinguishes them.
+Unresolved layouts are not cached. Adding a type under a fresh id is supported;
+changing an existing layout requires `ir_program_invalidate_abi` (or invalidating
+every independent context), because dependent aggregate classifications change
+too. Neither cloning a type nor querying an ABI mutates the type record.
+
+`ir_prepare_program_abi` reserves the requested/default, explicit function, and
+already-used contexts before native code generation opens its retry checkpoint.
+It does not classify unused types. Queries during an attempt fill resident pages
+without retaining arena allocations that a code-buffer retry could discard.
+The type table must not grow beyond the reserved count inside such a checkpoint.
+`allocated_bytes` counts context page/directory bytes; `classified_values` counts
+completed cache misses cumulatively, including misses after invalidation.

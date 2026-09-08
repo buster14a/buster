@@ -709,8 +709,8 @@ typedef enum MachineOpcode
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT (MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT + MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT)
 #define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 29u
 #define MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT 0u
-#define MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT 5u
-#define MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT 15u
+#define MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT 7u
+#define MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT 14u
 
 typedef enum MachineX64EmitProducerStatus
 {
@@ -967,6 +967,21 @@ typedef enum MachineOperandRole
 
 #define MACHINE_OPERAND_ROLE_BITS 2u
 #define MACHINE_OPERAND_CLASS_SHIFT MACHINE_OPERAND_ROLE_BITS
+#define MACHINE_OPERAND_SHAPE_SHIFT 5u
+
+// The high three bits of operand_info describe legal reference kinds.
+// Register roles/classes retain their existing low-five-bit encoding.
+typedef enum MachineOperandShape
+{
+    MACHINE_OPERAND_SHAPE_NONE,
+    MACHINE_OPERAND_SHAPE_REGISTER,
+    MACHINE_OPERAND_SHAPE_IMMEDIATE,
+    MACHINE_OPERAND_SHAPE_FRAME,
+    MACHINE_OPERAND_SHAPE_BLOCK,
+    MACHINE_OPERAND_SHAPE_REGISTER_OR_FRAME,
+    MACHINE_OPERAND_SHAPE_COUNT,
+} MachineOperandShape;
+BUSTER_CT_CHECK(MACHINE_OPERAND_SHAPE_COUNT <= (1u << (8u - MACHINE_OPERAND_SHAPE_SHIFT)));
 BUSTER_CT_CHECK(MACHINE_OPERAND_ROLE_COUNT <= (1u << MACHINE_OPERAND_ROLE_BITS));
 BUSTER_CT_CHECK(MACHINE_REGISTER_CLASS_COUNT <= (1u << 3));
 
@@ -988,27 +1003,35 @@ BUSTER_CT_CHECK(MACHINE_REGISTER_CLASS_COUNT <= (1u << 3));
 typedef struct MachineOpcodeInfo MachineOpcodeInfo;
 struct MachineOpcodeInfo
 {
-    String8 name;
-    u8 operand_count;
-    // Per inline slot: role in the low two bits, register class above them.
-    u8 operand_info[4];
-    // Tied slot pair encoded as (destination + 1) | ((source + 1) << 4);
-    // zero means no tie.
-    u8 tied_pair;
-    u8 early_clobber_mask;
+    // Operand and allocation constraints occupy the first 32 bytes. Simple
+    // FAST rows use MachineOpcodeRow; full-descriptor consumers keep these
+    // facts together ahead of the diagnostic name and scheduling metadata.
+    // Extra registers the opcode's encoder sequence scribbles on beyond its
+    // declared operands; owners must vacate before the instruction runs.
+    u64 clobber_mask;
+    u16 attributes;
     u16 fixed_register_set;
     u16 memory_fold_alternate;
     // Reserved layout-neutral seam. Recipe lookup is kept in a separate
     // read-only projection so opcode metadata remains constant and safe to
     // query concurrently; use machine_opcode_emit_recipe().
     MachineEmitRecipeId emit_recipe;
-    u16 attributes;
-    // Extra registers the opcode's encoder sequence scribbles on beyond its
-    // declared operands; owners must vacate before the instruction runs.
-    u64 clobber_mask;
-    // Expanded target metadata.  All fields are zero for legacy rows, which
-    // preserves aggregate-initializer compatibility; accessors below derive
-    // conservative defaults from the old attributes when needed.
+    u8 operand_count;
+    // Per inline slot: two role bits, three class bits, three shape bits.
+    u8 operand_info[4];
+    // Tied slot pair encoded as (destination + 1) | ((source + 1) << 4);
+    // zero means no tie.
+    u8 tied_pair;
+    u8 early_clobber_mask;
+    u8 fixed_register_mask;
+    // Explicit fixed physical register per operand slot. A set bit in
+    // fixed_register_mask makes the corresponding byte meaningful.
+    u8 fixed_registers[4];
+    u8 reserved_hot;
+
+    // Expanded target metadata. Some fields are deliberately incomplete or
+    // dormant; docs/machine-metadata-ownership.md names their actual
+    // consumers. Scheduler membership is published into MachineOpcodeRow.
     u16 form_set;
     u8 schedule_class;
     u8 reserved_metadata;
@@ -1021,22 +1044,30 @@ struct MachineOpcodeInfo
     u8 latency;
     u8 throughput;
     u8 bundle;
-    u8 fixed_register_mask;
-    // Explicit fixed physical register per operand slot.  A set bit in
-    // fixed_register_mask makes the corresponding byte meaningful.
-    u8 fixed_registers[4];
+    u8 reserved_schedule[4];
+
     u64 implicit_physical_uses;
     u64 implicit_physical_defs;
     u64 implicit_resource_uses;
     u64 implicit_resource_defs;
+
+    // Diagnostic/debug-only identity is cold for allocator and scheduler
+    // classification; placing it last prevents its 16 bytes from occupying
+    // the descriptor prefix read for every row.
+    String8 name;
 };
+BUSTER_CT_CHECK(sizeof(MachineOpcodeInfo) == 96);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, clobber_mask) == 0);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, fixed_registers) + sizeof(((MachineOpcodeInfo*)0)->fixed_registers) <= 32);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, implicit_physical_uses) == 48);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, name) == 80);
 
 #define MACHINE_OPCODE_INFO_HAS_FIXED_REGISTERS 1
 
 // The published row-facts projection of the opcode table: everything a
-// per-instruction-row walk asks of an opcode, in sixteen bytes, so a pass over
-// 1,7 M rows reads a 6 KB table instead of five fields spread over two lines
-// of an 88-byte descriptor it touches for nothing else. The roles are the
+// per-instruction-row walk asks of an opcode, in sixteen bytes per opcode
+// instead of fields spread over a 96-byte descriptor on 64-bit hosts.
+// The roles are the
 // projection that matters — they are a function of the opcode alone, so the
 // per-slot ladder that re-derived them once per operand is table content, not
 // work. Built once by machine_opcode_rows_prewarm() (AGENTS.md's serial
@@ -1057,9 +1088,16 @@ struct MachineOpcodeRow
     // and the encoder adds the rest; every other opcode is a flat number, so
     // the capacity pass is a table read instead of a nine-arm switch.
     u16 encode_budget;
-    u16 reserved;
+    // Barrier, memory-order, and implicit vector-state chains used by the
+    // scheduler. Published from immutable descriptors beside the row facts.
+    u8 schedule_flags;
+    u8 reserved;
 };
 BUSTER_CT_CHECK(sizeof(MachineOpcodeRow) == 16);
+
+#define MACHINE_SCHEDULE_UNIT_BARRIER (1u << 0)
+#define MACHINE_SCHEDULE_UNIT_MEMORY (1u << 1)
+#define MACHINE_SCHEDULE_UNIT_VECTOR (1u << 2)
 
 #define MACHINE_OPCODE_ROW_CONSTRAINED (1u << 0)
 #define MACHINE_OPCODE_ROW_CALL (1u << 1)
@@ -1130,6 +1168,8 @@ struct MachineTargetDescription
     // callee-saved subset is the intersection with `callee_saved_mask`;
     // System V x86-64 has none, so every vector value dies at a call.
     u64 vector_allocatable_mask;
+    // Class membership includes reserved/nonallocatable vector registers.
+    u64 vector_register_mask;
     // Full-width vector register copy, coalescible like `copy_opcode`.
     u16 vector_copy_opcode;
     // Prologue order: the callee-saved pushes precede the frame-pointer
@@ -1234,6 +1274,12 @@ struct MachineFunction
     // exactly the stack pointer a call sees.
     u32 outgoing_bytes;
     u32 outgoing_slot;
+    // Selector proof that no canonical row has volatile memory semantics.
+    // Unknown/manual/structural-replay functions leave this false. Consumers
+    // that introduce volatile accesses must clear it; scheduling and CFG/SSA
+    // rewrites only copy/reorder rows and preserve the proof.
+    bool nonvolatile_memory_certified;
+    u8 reserved[7];
 };
 
 // AArch64 physical general registers in encoding order; 31 encodes SP or
@@ -1370,6 +1416,11 @@ typedef enum MachineSymbolReference
     MACHINE_SYMBOL_REFERENCE_COUNT,
 } MachineSymbolReference;
 
+// Removing these cold words regressed cache/branch misses in the controlled
+// 2026-08-17e audit. Preserve that measured layout independently of selection
+// policy; the old declarative matcher and its telemetry no longer exist.
+#define MACHINE_SELECTION_RESERVED_LAYOUT_WORDS 30u
+
 typedef struct MachineSelectResult MachineSelectResult;
 struct MachineSelectResult
 {
@@ -1381,7 +1432,9 @@ struct MachineSelectResult
     // and side tables. Replayed or manually assembled machine IR keeps this
     // false and must pass the structural verifier before consumption.
     bool selector_certified;
-    u8 reserved;
+    // True only while the target's function-signature gate is rejecting a
+    // parameter, result, variadic ABI, or supported argument-count limit.
+    bool signature_rejected;
     // Selector expansion statistics: typed instructions consumed and machine
     // rows produced. SIMD operations are counted during that same typed-IR
     // walk so accepted machine functions need no source-IR rescan.
@@ -1391,10 +1444,7 @@ struct MachineSelectResult
     // Explicit non-SSA values retained by transitional lowering. This is the
     // selector-side telemetry counterpart of MachineVerifyResult's count.
     u32 mutable_virtual_register_count;
-    // Reserved matcher telemetry storage. Target selectors no longer run the
-    // declarative matcher on their hot path, but retaining this cold block
-    // preserves the measured favorable layout of selection results.
-    MachineSelectionCounters selection_counters;
+    u64 reserved_selection_layout[MACHINE_SELECTION_RESERVED_LAYOUT_WORDS];
 };
 
 // Stage-9 scheduling output: a reordered copy of the input function, or the
@@ -1596,6 +1646,10 @@ typedef enum MachineVerifyError
     MACHINE_VERIFY_EDGE_COPY,
     MACHINE_VERIFY_BLOCK_PARAMETER,
     MACHINE_VERIFY_CONSTRAINT,
+    MACHINE_VERIFY_STORAGE,
+    MACHINE_VERIFY_PAYLOAD,
+    MACHINE_VERIFY_OPERAND_KIND,
+    MACHINE_VERIFY_OPERAND_CLASS,
     MACHINE_VERIFY_COUNT,
 } MachineVerifyError;
 

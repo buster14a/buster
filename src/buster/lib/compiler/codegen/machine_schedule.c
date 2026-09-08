@@ -42,10 +42,11 @@
 //   register operand (argument staging, return-value moves) are barriers:
 //   ordered against every other unit in both directions, which freezes call
 //   sequences and everything the allocators special-case around them.
-// - There is no alias analysis, so memory-touching rows keep their relative
-//   order through a chain: loads, stores, frame ops, the aggregate copies,
-//   and the incoming-argument reads. Atomics and fences are barriers by
-//   their SIDE_EFFECTS attribute.
+// - machine_schedule_stack_alias proves bounded frame accesses belong to
+//   disjoint slot identities only when selection certifies no volatile access.
+//   Same-slot accesses keep source order. Unknown memory flushes every pending
+//   slot chain and precedes every new one. Calls, atomics and fences retain
+//   their barriers; uncertified functions retain the original memory chain.
 // - Rows that pass through the target's float state (XMM / vector registers)
 //   chain the same way: the ABI bridges stage values that live across
 //   neighboring rows, and the float compute rows clobber that state.
@@ -53,150 +54,45 @@
 //   locals, two-address result chains) keeps every touching row in source
 //   order; a single-definition value needs only its def-before-use edges.
 
-// Barrier / memory / vector chain membership beyond what the attribute bits
-// state. Stack-pointer adjustments and outgoing-argument pushes only appear
-// inside call sequences and freeze with them.
-BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_barrier(u16 opcode)
+// A whole-object alias class, represented by its existing stable stack-slot
+// id. UINT32_MAX is UNKNOWN. Only these fixed frame forms prove one bounded
+// access; pointer, aggregate, incoming, and future forms remain conservative.
+// Payloads are unsigned byte offsets into the slot on both native targets.
+BUSTER_GLOBAL_LOCAL u32 machine_schedule_stack_alias(MachineFunction* function, MachineInstruction* instruction)
 {
-    bool result;
-    switch (opcode)
-    {
-        case MACHINE_X64_PUSH_FRAME:
-        case MACHINE_X64_PUSH_REGISTER:
-        case MACHINE_X64_SUB_RSP:
-        case MACHINE_X64_ADD_RSP:
-        case MACHINE_X64_STACK_ALLOCATE:
-        case MACHINE_A64_READ_SP:
-            result = true;
-            break;
-        default:
-            result = false;
-            break;
-    }
-
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool machine_schedule_info_is_barrier(u16 opcode, MachineOpcodeInfo const* info)
-{
-    // An opcode with no info is treated as a barrier: nothing may be reordered
-    // across something the scheduler cannot describe.
-    bool result = true;
-    if (info)
-    {
-        MachineScheduleClass schedule_class = machine_opcode_schedule_class(info);
-        MachineMemoryEffect memory_effect = machine_opcode_memory_effect(info);
-        result = schedule_class == MACHINE_SCHEDULE_CLASS_BARRIER || schedule_class == MACHINE_SCHEDULE_CLASS_CALL ||
-                 schedule_class == MACHINE_SCHEDULE_CLASS_ATOMIC || memory_effect == MACHINE_MEMORY_EFFECT_VOLATILE ||
-                 memory_effect == MACHINE_MEMORY_EFFECT_ATOMIC || memory_effect == MACHINE_MEMORY_EFFECT_BARRIER ||
-                 (info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) != 0 ||
-                 machine_schedule_opcode_is_barrier(opcode);
-    }
-
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_memory(u16 opcode)
-{
-    bool result;
-    switch (opcode)
+    u32 result = UINT32_MAX;
+    u32 width = 0;
+    u32 operand = 0;
+    switch (instruction->opcode)
     {
         case MACHINE_X64_LOAD_FRAME:
+        case MACHINE_A64_LOAD_FRAME: width = 8; operand = 1; break;
+        case MACHINE_A64_LOAD_FRAME32: width = 4; operand = 1; break;
         case MACHINE_X64_STORE_FRAME8:
+        case MACHINE_A64_STORE_FRAME8: width = 1; break;
         case MACHINE_X64_STORE_FRAME16:
+        case MACHINE_A64_STORE_FRAME16: width = 2; break;
         case MACHINE_X64_STORE_FRAME32:
+        case MACHINE_A64_STORE_FRAME32: width = 4; break;
         case MACHINE_X64_STORE_FRAME64:
-        case MACHINE_X64_LOAD_PTR8:
-        case MACHINE_X64_LOAD_PTR16:
-        case MACHINE_X64_LOAD_PTR32:
-        case MACHINE_X64_LOAD_PTR64:
-        case MACHINE_X64_STORE_PTR8:
-        case MACHINE_X64_STORE_PTR16:
-        case MACHINE_X64_STORE_PTR32:
-        case MACHINE_X64_STORE_PTR64:
-        case MACHINE_X64_COPY_FRAME_FROM_FRAME:
-        case MACHINE_X64_COPY_FRAME_FROM_PTR:
-        case MACHINE_X64_COPY_PTR_FROM_FRAME:
-        case MACHINE_X64_LOAD_INCOMING:
-        case MACHINE_A64_LOAD_FRAME:
-        case MACHINE_A64_LOAD_FRAME32:
-        case MACHINE_A64_STORE_FRAME8:
-        case MACHINE_A64_STORE_FRAME16:
-        case MACHINE_A64_STORE_FRAME32:
-        case MACHINE_A64_STORE_FRAME64:
-        case MACHINE_A64_LOAD_PTR8:
-        case MACHINE_A64_LOAD_PTR16:
-        case MACHINE_A64_LOAD_PTR32:
-        case MACHINE_A64_LOAD_PTR64:
-        case MACHINE_A64_STORE_PTR8:
-        case MACHINE_A64_STORE_PTR16:
-        case MACHINE_A64_STORE_PTR32:
-        case MACHINE_A64_STORE_PTR64:
-        case MACHINE_A64_COPY_FRAME_FROM_FRAME:
-        case MACHINE_A64_COPY_FRAME_FROM_PTR:
-        case MACHINE_A64_COPY_PTR_FROM_FRAME:
-            result = true;
-            break;
-        default:
-            result = false;
-            break;
+        case MACHINE_A64_STORE_FRAME64: width = 8; break;
+        case MACHINE_X64_VLOAD_FRAME: width = 64; operand = 1; break;
+        case MACHINE_X64_VSTORE_FRAME: width = 64; break;
+        default: break;
     }
-
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool machine_schedule_info_is_memory(u16 opcode, MachineOpcodeInfo const* info)
-{
-    return machine_opcode_is_memory(info) || machine_schedule_opcode_is_memory(opcode);
-}
-
-BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_vector(u16 opcode)
-{
-    bool result;
-    switch (opcode)
+    MachineRef reference = instruction->operands[operand];
+    u32 slot = machine_ref_payload(reference);
+    if (width && machine_ref_kind(reference) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count && function->stack_slot_sizes)
     {
-        case MACHINE_X64_FARITH:
-        case MACHINE_X64_FCMP_SET:
-        case MACHINE_X64_CVT_F32_TO_F64:
-        case MACHINE_X64_CVT_F64_TO_F32:
-        case MACHINE_X64_CVT_I64_TO_F32:
-        case MACHINE_X64_CVT_I64_TO_F64:
-        case MACHINE_X64_CVT_F32_TO_I64:
-        case MACHINE_X64_CVT_F64_TO_I64:
-        case MACHINE_X64_CVT_U64_TO_F32:
-        case MACHINE_X64_CVT_U64_TO_F64:
-        case MACHINE_X64_CVT_F32_TO_U64:
-        case MACHINE_X64_CVT_F64_TO_U64:
-        case MACHINE_X64_MOVQ_TO_XMM:
-        case MACHINE_X64_MOVQ_FROM_XMM:
-        case MACHINE_A64_FMOV_TO_VEC:
-        case MACHINE_A64_FMOV_FROM_VEC:
-        case MACHINE_A64_FARITH:
-        case MACHINE_A64_FCMP_SET:
-        case MACHINE_A64_CVT_F32_TO_F64:
-        case MACHINE_A64_CVT_F64_TO_F32:
-        case MACHINE_A64_CVT_I64_TO_F32:
-        case MACHINE_A64_CVT_I64_TO_F64:
-        case MACHINE_A64_CVT_F32_TO_I64:
-        case MACHINE_A64_CVT_F64_TO_I64:
-        case MACHINE_A64_CVT_U64_TO_F32:
-        case MACHINE_A64_CVT_U64_TO_F64:
-        case MACHINE_A64_CVT_F32_TO_U64:
-        case MACHINE_A64_CVT_F64_TO_U64:
-        case MACHINE_A64_VLOAD_FRAME:
-        case MACHINE_A64_VSTORE_FRAME:
-        case MACHINE_A64_VLOAD_FRAME_SIZED:
-        case MACHINE_A64_VSTORE_FRAME_SIZED:
-        case MACHINE_A64_VARITH:
-            result = true;
-            break;
-        default:
-            result = false;
-            break;
+        u32 size = function->stack_slot_sizes[slot];
+        if (instruction->payload <= size && width <= size - instruction->payload)
+        {
+            result = slot;
+        }
     }
-
     return result;
 }
+
 BUSTER_GLOBAL_LOCAL MachineRegisterClass machine_schedule_register_class(MachineFunction* function, u32 virtual_register)
 {
     MachineRegisterClass result = MACHINE_REGISTER_CLASS_GENERAL;
@@ -211,10 +107,6 @@ BUSTER_GLOBAL_LOCAL MachineRegisterClass machine_schedule_register_class(Machine
 
     return result;
 }
-
-#define MACHINE_SCHEDULE_UNIT_BARRIER (1u << 0)
-#define MACHINE_SCHEDULE_UNIT_MEMORY (1u << 1)
-#define MACHINE_SCHEDULE_UNIT_VECTOR (1u << 2)
 
 // Peak live-window overlap of one block in the walk order given by
 // `block_rows_order` (global row indices, block-local length), clamped to
@@ -373,7 +265,9 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
         // smaller cannot have excess, and a function of only such blocks is
         // done before anything is allocated. This is the gate almost every
         // function leaves through.
-        if (maximum_block_rows > allocatable_count)
+        // The largest u32 scratch count is the 10N+16 ready queue; the new
+        // dependency bound is 9N+8. Unrepresentable blocks keep source order.
+        if (maximum_block_rows > allocatable_count && maximum_block_rows <= (UINT32_MAX - 16u) / 10u)
         {
             TemporalArena scratch = scratch_begin(&arena, 1);
             u32* touch_epochs = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
@@ -413,6 +307,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
             }
             if (base_excess)
             {
+                MachineOpcodeRow const* opcode_rows = machine_opcode_row_table();
                 u32* definition_totals = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
                 for (u32 register_index = 0; register_index < register_count; register_index += 1)
                 {
@@ -460,8 +355,11 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                 // array is indexed by block-local unit index; edge capacity is a hard
                 // bound — each row contributes at most four operand edges, and each unit
                 // at most a barrier-in edge, one appearance in a barrier's flush list,
-                // and one link in each of the memory and vector chains.
-                u32 edge_capacity = 8 * maximum_block_rows + 8;
+                // and one vector link. Memory contributes at most two edges per
+                // unit: one previous-slot/unknown link and one later unknown
+                // flush appearance. Pending slot tails are cleared by each flush,
+                // so the complete bound is (4 + 2 + 1 + 2)N + 8, not pairwise.
+                u32 edge_capacity = 9 * maximum_block_rows + 8;
                 u32* unit_first_rows = arena_allocate(scratch.arena, u32, maximum_block_rows);
                 u32* unit_row_counts = arena_allocate(scratch.arena, u32, maximum_block_rows);
                 u8* unit_flags = arena_allocate(scratch.arena, u8, maximum_block_rows);
@@ -472,6 +370,15 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                 u32* predecessor_lists = arena_allocate(scratch.arena, u32, edge_capacity);
                 u32* flush_list = arena_allocate(scratch.arena, u32, maximum_block_rows);
                 u32* newly_ready = arena_allocate(scratch.arena, u32, maximum_block_rows);
+                bool stack_aliases = function->nonvolatile_memory_certified && function->stack_slot_count && function->stack_slot_sizes;
+                u32 alias_count = stack_aliases ? function->stack_slot_count : 0;
+                u32* alias_epochs = arena_allocate(scratch.arena, u32, alias_count);
+                u32* alias_tails = arena_allocate(scratch.arena, u32, alias_count);
+                u32* pending_aliases = arena_allocate(scratch.arena, u32, stack_aliases ? maximum_block_rows : 0);
+                for (u32 alias = 0; alias < alias_count; alias += 1)
+                {
+                    alias_epochs[alias] = 0;
+                }
                 u32* demand_epochs = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
                 for (u32 register_index = 0; register_index < register_count; register_index += 1)
                 {
@@ -537,12 +444,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                     {
                         MachineInstruction* instruction = function->instructions + block->first_instruction + offset;
                         MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-                        u8 flags = 0;
-                        flags |= machine_schedule_info_is_barrier(instruction->opcode, info) ? MACHINE_SCHEDULE_UNIT_BARRIER : 0;
-                        flags |= machine_schedule_info_is_memory(instruction->opcode, info) ? MACHINE_SCHEDULE_UNIT_MEMORY : 0;
-                        flags |= machine_opcode_schedule_class(info) == MACHINE_SCHEDULE_CLASS_VECTOR || machine_schedule_opcode_is_vector(instruction->opcode)
-                                     ? MACHINE_SCHEDULE_UNIT_VECTOR
-                                     : 0;
+                        u8 flags = opcode_rows[instruction->opcode].schedule_flags;
                         for (u32 slot = 0; slot < info->operand_count; slot += 1)
                         {
                             flags |= machine_ref_kind(instruction->operands[slot]) == MACHINE_REF_PHYSICAL_REGISTER ? MACHINE_SCHEDULE_UNIT_BARRIER : 0;
@@ -573,6 +475,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                     u32 edge_count = 0;
                     u32 last_barrier = UINT32_MAX;
                     u32 last_memory = UINT32_MAX;
+                    u32 pending_alias_count = 0;
                     u32 last_vector = UINT32_MAX;
                     u32 flush_count = 0;
                     for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
@@ -598,6 +501,11 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                             // already transitive through the flush and barrier-in edges.
                             last_memory = UINT32_MAX;
                             last_vector = UINT32_MAX;
+                            for (u32 pending = 0; pending < pending_alias_count; pending += 1)
+                            {
+                                alias_epochs[pending_aliases[pending]] = 0;
+                            }
+                            pending_alias_count = 0;
                         }
                         else
                         {
@@ -605,13 +513,45 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                             flush_count += 1;
                             if (flags & MACHINE_SCHEDULE_UNIT_MEMORY)
                             {
-                                if (last_memory != UINT32_MAX)
+                                u32 alias = stack_aliases && unit_row_counts[unit_index] == 1
+                                                ? machine_schedule_stack_alias(function, function->instructions + block->first_instruction + unit_first_rows[unit_index])
+                                                : UINT32_MAX;
+                                u32 previous = last_memory;
+                                if (alias != UINT32_MAX && alias_epochs[alias] == epoch)
                                 {
-                                    edge_sources[edge_count] = last_memory;
+                                    previous = alias_tails[alias];
+                                }
+                                if (previous != UINT32_MAX)
+                                {
+                                    edge_sources[edge_count] = previous;
                                     edge_destinations[edge_count] = unit_index;
                                     edge_count += 1;
                                 }
-                                last_memory = unit_index;
+                                if (alias != UINT32_MAX)
+                                {
+                                    if (alias_epochs[alias] != epoch)
+                                    {
+                                        pending_aliases[pending_alias_count++] = alias;
+                                        alias_epochs[alias] = epoch;
+                                    }
+                                    alias_tails[alias] = unit_index;
+                                }
+                                else
+                                {
+                                    // An unknown access may alias every slot. Each
+                                    // pending tail reaches it, and it starts the next
+                                    // memory epoch. Every tail is flushed at most once.
+                                    for (u32 pending = 0; pending < pending_alias_count; pending += 1)
+                                    {
+                                        u32 flushed_alias = pending_aliases[pending];
+                                        edge_sources[edge_count] = alias_tails[flushed_alias];
+                                        edge_destinations[edge_count] = unit_index;
+                                        edge_count += 1;
+                                        alias_epochs[flushed_alias] = 0;
+                                    }
+                                    pending_alias_count = 0;
+                                    last_memory = unit_index;
+                                }
                             }
                             if (flags & MACHINE_SCHEDULE_UNIT_VECTOR)
                             {

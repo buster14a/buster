@@ -67,10 +67,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_promote_canonical_f64_to_f80(IrProgram* pr
                 type->bit_width = 80;
                 type->layout.size = 16;
                 type->layout.alignment = 16;
-                type->abi = 0;
                 promoted = true;
             }
         }
+        ir_program_invalidate_abi(program);
         for (u32 module_index = 0; module_index < program->module_count; module_index += 1)
         {
             IrModule* module = program->modules + module_index;
@@ -733,9 +733,51 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_x64_vector_frame_lea_count(ByteSlice code, 
     return result;
 }
 
+// Exercise executable-image construction under sanitizers without invoking
+// uninstrumented generated code. An absent constant pool is {NULL, 0}.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_executable_data_copy(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    u8 code[] = {0x90, 0x90, 0x90, 0x90};
+    u8 constants[] = {0x12, 0x34, 0x56};
+    for (u32 variant = 0; variant < 2; variant += 1)
+    {
+        ByteSlice data = variant ? (ByteSlice){.pointer = constants, .length = sizeof(constants)} : (ByteSlice){0};
+        CodegenExecutable executable = codegen_make_executable((CodegenFunction){
+            .code = {.pointer = code, .length = sizeof(code)},
+            .read_only_data = data,
+        });
+        BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+        BUSTER_TEST(arguments, executable.address != 0);
+        if (executable.address)
+        {
+            BUSTER_TEST(arguments, memcmp(executable.address, code, sizeof(code)) == 0);
+            if (data.length)
+            {
+                u64 data_offset = (sizeof(code) + 15) & ~(u64)15;
+                BUSTER_TEST(arguments, memcmp((u8*)executable.address + data_offset, data.pointer, data.length) == 0);
+            }
+        }
+        codegen_release_executable(executable);
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+#include <buster/tests/compiler/codegen/canonical_entry_test_internal.h>
+
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_scalars(arguments);
+    UnitTestResult executable_data = codegen_test_executable_data_copy(arguments);
+    result.succeeded_test_count += executable_data.succeeded_test_count;
+    result.test_count += executable_data.test_count;
+    UnitTestResult entry_result = codegen_test_canonical_entry(arguments);
+    result.test_count += entry_result.test_count;
+    result.succeeded_test_count += entry_result.succeeded_test_count;
     u8 negative_rsp_store_bytes[] = {0x48, 0x89, 0x44, 0x24, 0xf8, 0x5d, 0xc3};
     CodegenTestX64BodyScan negative_rsp_store_scan =
         codegen_test_x64_scan_body((ByteSlice){.pointer = negative_rsp_store_bytes, .length = sizeof(negative_rsp_store_bytes)}, 0,

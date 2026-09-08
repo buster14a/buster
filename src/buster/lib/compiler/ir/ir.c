@@ -7,7 +7,7 @@
 // propagation for computed goto (ir_label_provenance_*), the per-target
 // ABI classification the frontend and codegen both consume
 // (ir_abi_unqualified_type, ir_system_v_abi_classes,
-// ir_homogeneous_float_abi, ir_classify_abi_value, ir_prepare_program_abi),
+// ir_homogeneous_float_abi, ir_classify_abi_value, ir_abi_context_value),
 // the shared local-promotion pass (ir_prepare_canonical_module, in
 // ir_promote.c), and the module validator
 // (ir_validate_canonical_module) that every producer runs before machine
@@ -15,6 +15,7 @@
 // half-built function into codegen.
 
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/ir/ir_internal.h>
 
 #include <buster/lib/file.h>
 #include <buster/lib/simd.h>
@@ -3597,61 +3598,189 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
     return value;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_resolve_type_abi(IrProgram* program, IrTypeId type_id, IrAbiConvention convention)
+// Sixty-four types share one resolution mask. Separate use pages let the
+// common argument/result-only conventions omit variadic storage entirely.
+#define IR_ABI_CACHE_PAGE_TYPES 64u
+struct IrAbiCachePage
 {
-    IrType* type = program ? ir_type_from_id(&program->types, type_id) : 0;
-    if (!type || !program->arena || convention >= IR_ABI_CONVENTION_COUNT || !type->layout.resolved)
+    IrAbiValue values[IR_ABI_CACHE_PAGE_TYPES];
+    u64 resolved;
+};
+
+IrAbiContext ir_abi_context_initialize(Arena* arena, IrTypeTable const* types, IrAbiConvention convention)
+{
+    IrAbiContext context = {0};
+    if (arena && types && convention < IR_ABI_CONVENTION_COUNT)
     {
-        return;
+        context.arena = arena;
+        context.type_storage = types->types;
+        u32 type_capacity = BUSTER_MAX(types->capacity, types->count);
+        context.page_capacity = (u32)(((u64)type_capacity + IR_ABI_CACHE_PAGE_TYPES - 1) / IR_ABI_CACHE_PAGE_TYPES);
+        context.convention = convention;
     }
-    if (!type->abi)
+    return context;
+}
+
+BUSTER_GLOBAL_LOCAL IrAbiUse ir_abi_context_use(IrAbiContext const* context, IrAbiUse use)
+{
+    IrAbiUse result = use;
+    if (use == IR_ABI_USE_VARIADIC_ARGUMENT && context->convention != IR_ABI_CONVENTION_WINDOWS_AARCH64)
     {
-        type->abi = arena_allocate(program->arena, IrTypeAbi, 1);
-        *type->abi = (IrTypeAbi){0};
+        result = IR_ABI_USE_ARGUMENT;
     }
-    type->abi->values[convention][IR_ABI_USE_ARGUMENT] = ir_classify_abi_value(program, type_id, convention, false, false);
-    type->abi->values[convention][IR_ABI_USE_RESULT] = ir_classify_abi_value(program, type_id, convention, true, false);
-    type->abi->values[convention][IR_ABI_USE_VARIADIC_ARGUMENT] =
-        convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 ? ir_classify_abi_value(program, type_id, convention, false, true)
-                                                        : type->abi->values[convention][IR_ABI_USE_ARGUMENT];
-    type->abi->resolved[convention] = true;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrAbiCachePage* ir_abi_context_page(IrAbiContext* context, u32 page_index, IrAbiUse use)
+{
+    if (!context->pages[use])
+    {
+        context->pages[use] = arena_allocate(context->arena, IrAbiCachePage*, context->page_capacity);
+        memset(context->pages[use], 0, sizeof(IrAbiCachePage*) * context->page_capacity);
+        context->allocated_bytes += sizeof(IrAbiCachePage*) * context->page_capacity;
+    }
+    IrAbiCachePage* page = context->pages[use][page_index];
+    if (!page)
+    {
+        page = arena_allocate(context->arena, IrAbiCachePage, 1);
+        // Values are written on a miss before their resolution bit is set.
+        page->resolved = 0;
+        context->pages[use][page_index] = page;
+        context->allocated_bytes += sizeof(IrAbiCachePage);
+    }
+    return page;
+}
+
+void ir_abi_context_reserve(IrAbiContext* context, u32 type_count)
+{
+    if (context && context->arena)
+    {
+        u32 page_count = (u32)(((u64)type_count + IR_ABI_CACHE_PAGE_TYPES - 1) / IR_ABI_CACHE_PAGE_TYPES);
+        page_count = BUSTER_MIN(page_count, context->page_capacity);
+        u32 use_count = context->convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 ? IR_ABI_USE_COUNT : IR_ABI_USE_VARIADIC_ARGUMENT;
+        for (u32 use = 0; use < use_count; use += 1)
+        {
+            for (u32 page = 0; page < page_count; page += 1)
+            {
+                ir_abi_context_page(context, page, (IrAbiUse)use);
+            }
+        }
+    }
+}
+
+IrAbiValue ir_abi_context_value(IrProgram* program, IrAbiContext* context, IrTypeId type_id, IrAbiUse use)
+{
+    IrAbiValue result = {0};
+    if (program && context && context->arena && context->type_storage == program->types.types &&
+        context->convention < IR_ABI_CONVENTION_COUNT && use < IR_ABI_USE_COUNT && type_id.value < program->types.count &&
+        type_id.value / IR_ABI_CACHE_PAGE_TYPES < context->page_capacity)
+    {
+        use = ir_abi_context_use(context, use);
+        IrAbiCachePage* page = ir_abi_context_page(context, type_id.value / IR_ABI_CACHE_PAGE_TYPES, use);
+        u32 slot = type_id.value % IR_ABI_CACHE_PAGE_TYPES;
+        u64 mask = (u64)1 << slot;
+        if (!(page->resolved & mask) && program->types.types[type_id.value].layout.resolved)
+        {
+            page->values[slot] = ir_classify_abi_value(program, type_id, context->convention, use == IR_ABI_USE_RESULT,
+                                                      use == IR_ABI_USE_VARIADIC_ARGUMENT);
+            page->resolved |= mask;
+            context->classified_values += 1;
+        }
+        if (page->resolved & mask)
+        {
+            result = page->values[slot];
+        }
+    }
+    return result;
+}
+
+void ir_abi_context_invalidate(IrAbiContext* context)
+{
+    if (context)
+    {
+        for (u32 use = 0; use < IR_ABI_USE_COUNT; use += 1)
+        {
+            if (context->pages[use])
+            {
+                for (u32 page = 0; page < context->page_capacity; page += 1)
+                {
+                    if (context->pages[use][page])
+                    {
+                        context->pages[use][page]->resolved = 0;
+                    }
+                }
+            }
+        }
+    }
+}
+
+void ir_program_invalidate_abi(IrProgram* program)
+{
+    if (program)
+    {
+        for (u32 convention = 0; convention < IR_ABI_CONVENTION_COUNT; convention += 1)
+        {
+            ir_abi_context_invalidate(program->abi_contexts + convention);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL IrAbiContext* ir_program_abi_context(IrProgram* program, IrAbiConvention convention)
+{
+    IrAbiContext* context = program->abi_contexts + convention;
+    if (!context->arena)
+    {
+        *context = ir_abi_context_initialize(program->arena, &program->types, convention);
+    }
+    return context;
 }
 
 void ir_prepare_program_abi(IrProgram* program, IrAbiConvention convention)
 {
-    if (!program || convention >= IR_ABI_CONVENTION_COUNT)
+    if (program && program->arena && convention < IR_ABI_CONVENTION_COUNT)
     {
-        return;
-    }
-    for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
-    {
-        IrType* type = program->types.types + type_index;
-        if (!type->abi || !type->abi->resolved[convention])
+        bool needed[IR_ABI_CONVENTION_COUNT] = {0};
+        needed[convention] = true;
+        // A function can override its module's default convention. Reserve
+        // both sides of those calls before native generation opens its retry
+        // scope; their first lazy query must not retain rewindable storage.
+        for (u32 type = 0; type < program->types.count; type += 1)
         {
-            ir_resolve_type_abi(program, type->id, convention);
+            IrType* value = program->types.types + type;
+            if (value->kind == IR_TYPE_FUNCTION)
+            {
+                needed[IR_ABI_CONVENTION_SYSTEMV_X86_64] |= value->calling_convention == IR_CALLING_CONVENTION_SYSTEMV;
+                needed[IR_ABI_CONVENTION_WIN64_X86_64] |= value->calling_convention == IR_CALLING_CONVENTION_WIN64;
+            }
+        }
+        for (u32 index = 0; index < IR_ABI_CONVENTION_COUNT; index += 1)
+        {
+            if (needed[index] || program->abi_contexts[index].arena)
+            {
+                IrAbiContext* context = ir_program_abi_context(program, (IrAbiConvention)index);
+                ir_abi_context_reserve(context, program->types.count);
+            }
         }
     }
 }
 
 IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, IrAbiUse use)
 {
-    IrType* type = program ? ir_type_from_id(&program->types, type_id) : 0;
-    IrAbiValue result;
-    if (!type || convention >= IR_ABI_CONVENTION_COUNT || use >= IR_ABI_USE_COUNT)
+    IrAbiValue result = {0};
+    if (program && program->arena && convention < IR_ABI_CONVENTION_COUNT && use < IR_ABI_USE_COUNT && type_id.value < program->types.count)
     {
-        result = (IrAbiValue){0};
+        result = ir_abi_context_value(program, ir_program_abi_context(program, convention), type_id, use);
     }
-    else
-    {
-        if (!type->abi || !type->abi->resolved[convention])
-        {
-            ir_resolve_type_abi(program, type_id, convention);
-        }
-        result = type->abi && type->abi->resolved[convention] ? type->abi->values[convention][use] : (IrAbiValue){0};
-    }
-
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+IrAbiValue ir_test_abi_reference(IrProgram* program, IrTypeId type, IrAbiConvention convention, IrAbiUse use)
+{
+    return ir_classify_abi_value(program, type, convention, use == IR_ABI_USE_RESULT,
+                                 convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && use == IR_ABI_USE_VARIADIC_ARGUMENT);
+}
+#endif
 
 bool ir_abi_value_has_x87_part(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, IrAbiUse use)
 {
@@ -4091,31 +4220,44 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* mo
         .instruction = IR_INSTRUCTION_ID_INVALID,
     };
     u32 capacity = 0;
-    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+    for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
         if (function->state == IR_FUNCTION_LOWERED)
         {
-            capacity = BUSTER_MAX(capacity, function->instruction_count);
+            if ((function->block_count && !function->blocks) || (function->instruction_count && !function->instructions) ||
+                (function->value_count && !function->values) ||
+                (function->label_metadata_count && (!function->label_metadata || !function->label_metadata_values)) ||
+                (function->extra_count && (!function->extras || !function->extra_instructions)))
+            {
+                result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+            }
+            else
+            {
+                capacity = BUSTER_MAX(capacity, function->instruction_count);
+            }
         }
     }
-    TemporalArena scratch = scratch_begin(0, 0);
-    IrBlockId* owners = arena_allocate(scratch.arena, IrBlockId, capacity);
-    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+    if (result.error == IR_VALIDATION_NONE)
     {
-        IrFunction* function = module->functions + function_index;
-        if (function->state != IR_FUNCTION_LOWERED)
+        TemporalArena scratch = scratch_begin(0, 0);
+        IrBlockId* owners = arena_allocate(scratch.arena, IrBlockId, capacity);
+        for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
         {
-            continue;
+            IrFunction* function = module->functions + function_index;
+            if (function->state != IR_FUNCTION_LOWERED)
+            {
+                continue;
+            }
+            IrInstructionOwnership ownership = ir_function_instruction_owners(function, owners);
+            if (ownership.error != IR_VALIDATION_NONE)
+            {
+                result = ir_validation_error(ownership.error, function, ownership.block, ownership.instruction);
+                break;
+            }
         }
-        IrInstructionOwnership ownership = ir_function_instruction_owners(function, owners);
-        if (ownership.error != IR_VALIDATION_NONE)
-        {
-            result = ir_validation_error(ownership.error, function, ownership.block, ownership.instruction);
-            break;
-        }
+        scratch_end(scratch);
     }
-    scratch_end(scratch);
     return result;
 }
 
@@ -4685,18 +4827,22 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrType* signature_type = indirect ? ir_type_from_id(&program->types, callee_type->element_type) : callee_type;
         IrInstruction* reference =
             callee && callee->definition.value < function->instruction_count ? function->instructions + callee->definition.value : 0;
-        if (!signature_type || signature_type->kind != IR_TYPE_FUNCTION ||
-            (!signature_type->is_variadic && instruction->operand_count != signature_type->parameter_count + 1) ||
-            (signature_type->is_variadic && instruction->operand_count < signature_type->parameter_count + 1) ||
+        IrType* return_type = signature_type ? ir_type_from_id(&program->types, signature_type->return_type) : 0;
+        // Operand zero is the callee. Adding one to an untrusted parameter
+        // count can wrap, making a malformed variadic signature look valid.
+        u32 argument_count = instruction->operand_count ? instruction->operand_count - 1 : 0;
+        if (!signature_type || signature_type->kind != IR_TYPE_FUNCTION || !return_type ||
+            (signature_type->parameter_count && !signature_type->parameter_types) ||
+            (!signature_type->is_variadic && argument_count != signature_type->parameter_count) ||
+            (signature_type->is_variadic && argument_count < signature_type->parameter_count) ||
             signature_type->return_type.value != instruction->canonical_type.value || !reference ||
             (!indirect && (reference->opcode != IR_OPCODE_FUNCTION || reference->symbol.value != instruction->symbol.value)) ||
             (indirect && instruction->symbol.value != IR_ID_UNDERLYING_INVALID) ||
-            ((ir_type_from_id(&program->types, signature_type->return_type)->kind == IR_TYPE_VOID) !=
-             (instruction->result.value == IR_ID_UNDERLYING_INVALID)))
+            ((return_type->kind == IR_TYPE_VOID) != (instruction->result.value == IR_ID_UNDERLYING_INVALID)))
         {
             error = IR_VALIDATION_CALL_SIGNATURE;
         }
-        for (u32 argument_index = 0; argument_index < signature_type->parameter_count && error == IR_VALIDATION_NONE; argument_index += 1)
+        for (u32 argument_index = 0; error == IR_VALIDATION_NONE && argument_index < signature_type->parameter_count; argument_index += 1)
         {
             if (function->values[instruction->operands[argument_index + 1].value].canonical_type.value !=
                 signature_type->parameter_types[argument_index].value)
@@ -5212,7 +5358,10 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_initializer(IrProgram* program
 IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
 {
     IrValidationResult result = ir_validation_ok();
-    if (!program || !module)
+    if (!program || !module || (program->module_count && !program->modules) ||
+        (program->types.count && !program->types.types) || (program->symbols.count && !program->symbols.symbols) ||
+        (module->function_count && !module->functions) || (module->global_count && !module->globals) ||
+        (module->alias_count && !module->aliases) || (module->initializer_count && !module->initializers))
     {
         result.error = IR_VALIDATION_INVALID_ID;
     }
@@ -5239,7 +5388,9 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                 continue;
             }
             IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
-            if (!signature || signature->kind != IR_TYPE_FUNCTION || function->entry.value >= function->block_count)
+            if (!signature || signature->kind != IR_TYPE_FUNCTION ||
+                (signature->parameter_count && !signature->parameter_types) ||
+                !ir_type_from_id(&program->types, signature->return_type) || function->entry.value >= function->block_count)
             {
                 result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
             }

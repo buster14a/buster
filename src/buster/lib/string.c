@@ -65,40 +65,9 @@ BUSTER_GLOBAL_LOCAL void string_format_va_prepare(va_list* variable_arguments, u
     *variable_arguments = (char8*)pointer;
 }
 #endif
-BUSTER_GLOBAL_LOCAL bool code_unit_is_binary(char8 code_unit)
-{
-    return (code_unit == '1') | (code_unit == '0');
-}
-
 bool code_unit_is_decimal(char8 code_unit)
 {
     return (code_unit >= '0') & (code_unit <= '9');
-}
-
-BUSTER_GLOBAL_LOCAL bool code_unit_is_octal(char8 code_unit)
-{
-    return (code_unit >= '0') & (code_unit <= '7');
-}
-// #define code_unit_is_octal(code_unit) is_between_range_included(ch, '0', '7')
-
-BUSTER_GLOBAL_LOCAL bool code_unit_is_hexadecimal_alpha_upper(char8 code_unit)
-{
-    return (code_unit >= 'A') & (code_unit <= 'F');
-}
-
-BUSTER_GLOBAL_LOCAL bool code_unit_is_hexadecimal_alpha_lower(char8 code_unit)
-{
-    return (code_unit >= 'a') & (code_unit <= 'f');
-}
-
-BUSTER_GLOBAL_LOCAL bool code_unit_is_hexadecimal_alpha(char8 code_unit)
-{
-    return (int)code_unit_is_hexadecimal_alpha_lower(code_unit) | code_unit_is_hexadecimal_alpha_upper(code_unit);
-}
-
-BUSTER_GLOBAL_LOCAL bool code_unit_is_hexadecimal(char8 code_unit)
-{
-    return (int)code_unit_is_decimal(code_unit) | code_unit_is_hexadecimal_alpha(code_unit);
 }
 
 bool code_unit8_is_decimal(char8 code_unit)
@@ -106,136 +75,64 @@ bool code_unit8_is_decimal(char8 code_unit)
     return code_unit_is_decimal(code_unit);
 }
 
-BUSTER_GLOBAL_LOCAL u64 parsing_accumulate_binary(u64 accumulator, char8 code_unit)
-{
-    BUSTER_CHECK(code_unit_is_binary(code_unit));
-    return ((accumulator) * 2) + ((code_unit) - '0');
-}
-
-BUSTER_GLOBAL_LOCAL u64 parsing_accumulate_octal(u64 accumulator, char8 code_unit)
-{
-    BUSTER_CHECK(code_unit_is_octal(code_unit));
-    return ((accumulator) * 8) + ((code_unit) - '0');
-}
-
-BUSTER_GLOBAL_LOCAL u64 parsing_accumulate_decimal(u64 accumulator, char8 code_unit)
-{
-    BUSTER_CHECK(code_unit_is_decimal(code_unit));
-    return accumulator * 10 + ((code_unit) - '0');
-}
-
-BUSTER_GLOBAL_LOCAL u64 parsing_accumulate_hexadecimal(u64 accumulator, char8 code_unit)
-{
-    BUSTER_CHECK(code_unit_is_hexadecimal(code_unit));
-    return ((accumulator) * 16 + (code_unit) -
-            (code_unit_is_decimal(code_unit) ? '0'
-                                             : (code_unit_is_hexadecimal_alpha_upper(code_unit)   ? ('A' - 10)
-                                                : code_unit_is_hexadecimal_alpha_lower(code_unit) ? ('a' - 10)
-                                                                                                  : 0)));
-}
-
-BUSTER_GLOBAL_LOCAL IntegerParsingU64 string_parse_u64_decimal(const char8* restrict p)
+// Each public wrapper supplies a constant base, so optimized builds specialize
+// the digit classification and overflow thresholds without division in the loop.
+BUSTER_GLOBAL_LOCAL IntegerParsingU64 string_parse_u64(String8 string, u32 base)
 {
     u64 value = 0;
-    u64 i = 0;
-
-    while (1)
+    u64 parsed_length = 0;
+    IntegerParsingStatus status = INTEGER_PARSING_INVALID;
+    u64 cutoff = UINT64_MAX / base;
+    u32 cutlim = (u32)(UINT64_MAX % base);
+    u64 length = string.pointer ? string.length : 0;
+    for (u64 i = 0; i < length; i += 1)
     {
-        char8 code_unit = p[i];
-
-        if (!code_unit_is_decimal(code_unit))
+        u32 digit = (u32)(u8)string.pointer[i] - '0';
+        if (base == 16)
+        {
+            u32 alpha = ((u32)(u8)string.pointer[i] | 0x20u) - 'a';
+            digit = alpha < 6 ? alpha + 10 : digit;
+        }
+        if (digit >= base)
         {
             break;
         }
-
-        i += 1;
-        value = parsing_accumulate_decimal(value, code_unit);
-    }
-
-    return (IntegerParsingU64){.value = value, .length = i};
-}
-
-IntegerParsingU64 string_parse_u64_hexadecimal(const char8* restrict p)
-{
-    u64 value = 0;
-    u64 i = 0;
-
-    while (1)
-    {
-        char8 code_unit = p[i];
-
-        if (!code_unit_is_hexadecimal(code_unit))
+        parsed_length += 1;
+        if (value > cutoff || (value == cutoff && digit > cutlim))
         {
-            break;
+            value = UINT64_MAX;
+            status = INTEGER_PARSING_OVERFLOW;
         }
-
-        i += 1;
-        value = parsing_accumulate_hexadecimal(value, code_unit);
-    }
-
-    return (IntegerParsingU64){.value = value, .length = i};
-}
-
-IntegerParsingU64 string_parse_u64_octal(const char8* restrict p)
-{
-    u64 value = 0;
-    u64 i = 0;
-
-    while (1)
-    {
-        char8 code_unit = p[i];
-
-        if (!code_unit_is_octal(code_unit))
+        else
         {
-            break;
+            value = value * base + digit;
         }
-
-        i += 1;
-        value = parsing_accumulate_octal(value, (u8)code_unit);
     }
-
-    return (IntegerParsingU64){.value = value, .length = i};
-}
-
-IntegerParsingU64 string_parse_u64_binary(const char8* restrict p)
-{
-    u64 value = 0;
-    u64 i = 0;
-
-    while (1)
+    if (parsed_length && status != INTEGER_PARSING_OVERFLOW)
     {
-        char8 code_unit = p[i];
-
-        if (!code_unit_is_binary(code_unit))
-        {
-            break;
-        }
-
-        i += 1;
-        value = parsing_accumulate_binary(value, code_unit);
+        status = INTEGER_PARSING_SUCCESS;
     }
-
-    return (IntegerParsingU64){.value = value, .length = i};
+    return (IntegerParsingU64){.value = value, .length = parsed_length, .status = status};
 }
 
-IntegerParsingU64 string8_parse_u64_hexadecimal(const char8* restrict p)
+IntegerParsingU64 string8_parse_u64_hexadecimal(String8 string)
 {
-    return string_parse_u64_hexadecimal(p);
+    return string_parse_u64(string, 16);
 }
 
-IntegerParsingU64 string8_parse_u64_decimal(const char8* restrict p)
+IntegerParsingU64 string8_parse_u64_decimal(String8 string)
 {
-    return string_parse_u64_decimal(p);
+    return string_parse_u64(string, 10);
 }
 
-IntegerParsingU64 string8_parse_u64_octal(const char8* restrict p)
+IntegerParsingU64 string8_parse_u64_octal(String8 string)
 {
-    return string_parse_u64_octal(p);
+    return string_parse_u64(string, 8);
 }
 
-IntegerParsingU64 string8_parse_u64_binary(const char8* restrict p)
+IntegerParsingU64 string8_parse_u64_binary(String8 string)
 {
-    return string_parse_u64_binary(p);
+    return string_parse_u64(string, 2);
 }
 
 String8 string_slice(String8 slice, u64 start, u64 end)
@@ -243,39 +140,61 @@ String8 string_slice(String8 slice, u64 start, u64 end)
     return (String8){.pointer = (slice).pointer + (start), .length = (end) - (start)};
 }
 
-String8 string_join_arena(Arena* arena, SliceString8 strings, bool zero_terminate)
+bool string_join_arena_attempt(Arena* arena, SliceString8 strings, bool zero_terminate, String8* output)
 {
+    String8 joined = {0};
+    bool result = strings.pointer || !strings.length;
     u64 length = 0;
-
-    for (u64 i = 0; i < strings.length; i += 1)
+    for (u64 i = 0; i < strings.length && result; i += 1)
     {
         String8 string = strings.pointer[i];
-        length += string.length;
-    }
-
-    u64 char_size = sizeof(strings.pointer[0].pointer[0]);
-
-    char8* restrict pointer = (char8*)arena_allocate_bytes(arena, (length + zero_terminate) * char_size, BUSTER_ALIGN_OF(char8));
-
-    u64 i = 0;
-
-    for (u64 index = 0; index < strings.length; index += 1)
-    {
-        String8 string = strings.pointer[index];
-        if (string.length)
+        result = (!string.length || string.pointer) && string.length <= UINT64_MAX - length;
+        if (result)
         {
-            memcpy(pointer + i, string.pointer, BUSTER_SLICE_SIZE(string));
+            length += string.length;
         }
-        i += string.length;
     }
-
-    BUSTER_CHECK(i == length);
-    if (zero_terminate)
+    result = result && length <= UINT64_MAX - (u64)zero_terminate;
+    if (result)
     {
-        pointer[i] = 0;
+        u64 size = length + (u64)zero_terminate;
+        result = size <= ARENA_MAX_RESERVATION && arena->position <= arena->reserved_size &&
+                 size <= arena->reserved_size - arena->position;
     }
+    if (result)
+    {
+        // String8 lengths are byte counts: there is no character-size product
+        // to overflow. Keep that invariant explicit if the character type moves.
+        BUSTER_CT_CHECK(sizeof(char8) == 1);
+        char8* pointer = (char8*)arena_allocate_bytes(arena, length + (u64)zero_terminate, BUSTER_ALIGN_OF(char8));
+        u64 offset = 0;
+        for (u64 i = 0; i < strings.length; i += 1)
+        {
+            String8 string = strings.pointer[i];
+            if (string.length)
+            {
+                memcpy(pointer + offset, string.pointer, string.length);
+                offset += string.length;
+            }
+        }
+        if (zero_terminate)
+        {
+            pointer[length] = 0;
+        }
+        joined = (String8){.pointer = pointer, .length = length};
+    }
+    *output = joined;
+    return result;
+}
 
-    return (String8){.pointer = pointer, .length = length};
+String8 string_join_arena(Arena* arena, SliceString8 strings, bool zero_terminate)
+{
+    String8 result;
+    if (!string_join_arena_attempt(arena, strings, zero_terminate, &result))
+    {
+        os_fail_message(S8("invalid string slice or joined string size overflow"));
+    }
+    return result;
 }
 
 bool string_equal(String8 s1, String8 s2)
@@ -1189,8 +1108,8 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
                         }
                         else
                         {
-                            IntegerParsingU64 width_parsing = string_parse_u64_decimal(width_string.pointer);
-                            if (width_string.length == 0 || width_parsing.length != width_string.length || width_parsing.value == 0)
+                            IntegerParsingU64 width_parsing = string8_parse_u64_decimal(width_string);
+                            if (width_parsing.status != INTEGER_PARSING_SUCCESS || width_parsing.length != width_string.length || width_parsing.value == 0)
                             {
                                 os_fail();
                             }
@@ -1501,18 +1420,7 @@ String8 string_format_va(Arena* arena, String8 format, va_list variable_argument
 
 String8 string_duplicate_arena(Arena* arena, String8 string, bool zero_terminate)
 {
-    String8 result = {.pointer = arena_allocate(arena, char8, string.length + zero_terminate), .length = string.length};
-    if (string.length)
-    {
-        memcpy(result.pointer, string.pointer, sizeof(char8) * string.length);
-    }
-
-    if (zero_terminate)
-    {
-        result.pointer[string.length] = 0;
-    }
-
-    return result;
+    return string_join_arena(arena, (SliceString8){.pointer = &string, .length = 1}, zero_terminate);
 }
 
 SliceString8 string16_environment_block_to_slice_string(Arena* arena, const char16* environment_block)

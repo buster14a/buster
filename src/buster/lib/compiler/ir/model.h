@@ -276,19 +276,14 @@ struct IrAbiValue
     u8 reserved[2];
 };
 
-typedef struct IrTypeAbi IrTypeAbi;
-struct IrTypeAbi
-{
-    IrAbiValue values[IR_ABI_CONVENTION_COUNT][IR_ABI_USE_COUNT];
-    bool resolved[IR_ABI_CONVENTION_COUNT];
-    u8 reserved[3];
-};
-
 typedef struct IrTypeLayout IrTypeLayout;
 struct IrTypeLayout
 {
     u64 size;
     u32 alignment;
+    // Legacy descriptive layout class, initialized with the language layout.
+    // ABI decomposition never reads or mutates this field; active convention
+    // decisions belong to IrAbiContext.
     IrAbiClass abi_class;
     bool resolved;
     // The alignment the type would have if nothing had *lowered* it, or zero
@@ -362,7 +357,6 @@ struct IrType
     IrTypeId return_type;
     IrTypeId unqualified_type;
     IrTypeLayout layout;
-    IrTypeAbi* abi;
     IrTypeKind kind;
     IrCallingConvention calling_convention;
     u64 element_count;

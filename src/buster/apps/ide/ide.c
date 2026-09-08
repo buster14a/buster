@@ -900,6 +900,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         string_print(S8("CODEGEN_ENCODER exact_attempts={u64} exact_successes={u64} exact_failures={u64}\n"),
                      compile.codegen_statistics.exact_attempts, compile.codegen_statistics.exact_successes, compile.codegen_statistics.exact_failures);
         string_print(S8("CODEGEN_MIR mutable_virtual_registers={u64}\n"), compile.codegen_statistics.mutable_virtual_register_count);
+        for (u32 reason = 0; reason < CODEGEN_FALLBACK_REASON_COUNT; reason += 1)
+        {
+            if (compile.codegen_statistics.fallback_reason_counts[reason])
+            {
+                string_print(S8("CODEGEN_FALLBACK_REASON target={S8}-{S8} allocator={S8} reason={S8} count={u32}\n"),
+                             cpu_arch_to_string_os(invocation.target.cpu_arch), operating_system_to_string_os(invocation.target.os),
+                             codegen_register_allocator_mode_string((CodegenRegisterAllocatorMode)invocation.register_allocator),
+                             codegen_fallback_reason_string((CodegenFallbackReason)reason), compile.codegen_statistics.fallback_reason_counts[reason]);
+            }
+        }
         for (u32 reason = 0; reason <= IR_OPCODE_COUNT; reason += 1)
         {
             if (compile.codegen_statistics.fallback_opcode_counts[reason])

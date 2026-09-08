@@ -12,6 +12,11 @@
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/target.h>
 
+// IEEE encodings of 2^63, shared by the canonical and machine unsigned
+// eightbyte conversions. Above this threshold a signed conversion needs bias.
+#define CODEGEN_F32_SIGNED64_LIMIT_BITS UINT32_C(0x5f000000)
+#define CODEGEN_F64_SIGNED64_LIMIT_BITS UINT64_C(0x43e0000000000000)
+
 typedef enum CodegenError
 {
     CODEGEN_ERROR_NONE,
@@ -319,6 +324,23 @@ struct CodegenModuleGlobal
 };
 
 typedef struct CodegenModule CodegenModule;
+// Stable census keys. Append new reasons; do not renumber existing reports.
+// SELECTION_OTHER preserves unclassified selector failures without claiming
+// they are unsupported semantics. VERIFICATION is an implementation failure.
+typedef enum CodegenFallbackReason
+{
+    CODEGEN_FALLBACK_TARGET_EXCLUDED,
+    CODEGEN_FALLBACK_SIGNATURE,
+    CODEGEN_FALLBACK_OPCODE,
+    CODEGEN_FALLBACK_SELECTION_OTHER,
+    CODEGEN_FALLBACK_VERIFICATION,
+    CODEGEN_FALLBACK_PLACEMENT,
+    CODEGEN_FALLBACK_ENCODING,
+    CODEGEN_FALLBACK_OUTPUT_CAPACITY,
+    CODEGEN_FALLBACK_UNWIND,
+    CODEGEN_FALLBACK_REASON_COUNT,
+} CodegenFallbackReason;
+
 typedef struct CodegenStatistics CodegenStatistics;
 struct CodegenStatistics
 {
@@ -341,14 +363,14 @@ struct CodegenStatistics
     u32 function_count;
     u32 maximum_stack_frame_bytes;
     // Functions a non-NONE register-allocator mode handed to the canonical
-    // stack path because machine selection does not cover them yet. Zero
-    // under NONE; equal to the lowered function count until the machine
-    // selector lands.
+    // stack path because the machine pipeline could not retain them. Zero
+    // under NONE; exactly the sum of fallback_reason_counts otherwise.
     u32 fallback_function_count;
     u32 reserved;
     // Census of why machine selection rejected each fallback function,
     // keyed by the first unsupported IR opcode; the final bucket counts
-    // rejections with no specific opcode (capacity, verifier, targets).
+    // selection rejections with no specific opcode. Post-selection failures
+    // and deliberate target exclusions have their own reason census below.
     u32 fallback_opcode_counts[IR_OPCODE_COUNT + 1];
     // Fallbacks past selection: rows that failed the structural verifier,
     // placements over the guard-page-probe frame limit, and encodings that
@@ -380,6 +402,7 @@ struct CodegenStatistics
     // Explicit mutable machine virtual registers emitted by selected
     // functions. Zero means the native machine path is fully SSA.
     u64 mutable_virtual_register_count;
+    u32 fallback_reason_counts[CODEGEN_FALLBACK_REASON_COUNT];
 };
 
 struct CodegenModule
@@ -420,6 +443,12 @@ struct CodegenModule
     IrFunctionId failed_function;
     IrInstructionId failed_instruction;
     IrOpcode failed_opcode;
+    // First fallback in source order, valid when fallback_function_count is
+    // nonzero. Retained even when canonical emission succeeds, so strict
+    // driver coverage can identify the function before writing any artifact.
+    IrFunctionId first_fallback_function;
+    IrOpcode first_fallback_opcode;
+    CodegenFallbackReason first_fallback_reason;
     // Where a module-level assembly block failed. `failed_assembly` indexes
     // IrModule.assemblies and `failed_assembly_line` is the one-based line
     // inside that block's own text, both meaningful only while
@@ -519,6 +548,8 @@ BUSTER_F_DECL bool codegen_canonical_integer_aggregate_parts(IrProgram* program,
 // this exact clamp so both emitters count the same padding eightbytes.
 BUSTER_F_DECL u32 codegen_canonical_x64_stack_argument_alignment(IrType* type);
 BUSTER_F_DECL String8 codegen_register_allocator_mode_string(CodegenRegisterAllocatorMode mode);
+BUSTER_F_DECL String8 codegen_fallback_reason_string(CodegenFallbackReason reason);
+BUSTER_F_DECL void codegen_statistics_add(CodegenStatistics* total, CodegenStatistics* unit);
 // The ELF thread-local model for one symbol reference.  Windows and Mach-O
 // have their own sequences and never ask.
 BUSTER_F_DECL CodegenThreadLocalModel codegen_thread_local_model(bool position_independent, bool symbol_is_definition);

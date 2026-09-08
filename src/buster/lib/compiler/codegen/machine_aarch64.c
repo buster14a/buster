@@ -154,7 +154,7 @@ struct MachineA64Selector
     IrProgram* program;
     IrFunction* function;
     MachineFunctionBuilder builder;
-    MachineSelectionCounters selection_counters;
+    u64 reserved_selection_layout[MACHINE_SELECTION_RESERVED_LAYOUT_WORDS];
     Target target;
     MachineBuilderStream immediates;
     MachineBuilderStream stack_slots;
@@ -4178,6 +4178,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         // selection, so the first va_* the subset cannot shape (or any
         // earlier unsupported operation) reports in true IR order.
         bool variadic_darwin = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+        result.signature_rejected = function_type && function_type->kind == IR_TYPE_FUNCTION;
         if (!function_type || function_type->kind != IR_TYPE_FUNCTION || (function_type->is_variadic && variadic_darwin) ||
             function_type->parameter_count > MACHINE_A64_MAX_ARGUMENTS)
         {
@@ -4210,6 +4211,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 return result;
             }
         }
+        result.signature_rejected = false;
         MachineA64Selector selector = {
             .arena = arena,
             .program = program,
@@ -4222,7 +4224,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             .supported = true,
             .failed_opcode = IR_OPCODE_COUNT,
         };
-        if (!assume_validated && !machine_selection_prepass_build_minimal(arena, program, function).valid)
+        if (!assume_validated && machine_selection_validate_function(arena, program, function) != MACHINE_SELECTION_VALIDATION_NONE)
         {
             return result;
         }
@@ -4357,6 +4359,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         u32* candidate_rows = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
         u32 candidate_count = 0;
         bool dense_rows = true;
+        bool nonvolatile_memory = true;
         u32 walk_ordinal = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
@@ -4367,6 +4370,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             {
                 IrInstruction* instruction = function->instructions + id.value;
                 dense_rows &= id.value == block->first_instruction.value + block_row_count;
+                nonvolatile_memory &= !instruction->volatile_access;
                 if ((MACHINE_A64_CANDIDATE_OPCODES >> instruction->opcode) & 1)
                 {
                     candidate_rows[candidate_count] = block_row_count;
@@ -5296,6 +5300,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         machine_stream_flatten(&selector.immediates, result.function.immediates);
         result.function.stack_slot_sizes = arena_allocate(arena, u32, selector.stack_slots.total_count);
         result.function.stack_slot_count = selector.stack_slots.total_count;
+        result.function.nonvolatile_memory_certified = nonvolatile_memory;
         machine_stream_flatten(&selector.stack_slots, result.function.stack_slot_sizes);
         result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slot_alignments.total_count);
         machine_stream_flatten(&selector.stack_slot_alignments, result.function.stack_slot_alignments);
@@ -5340,7 +5345,6 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         result.selected_typed_instructions = typed_instruction_count;
         result.machine_instructions = result.function.instruction_count;
         result.simd_operation_count = simd_operation_count;
-        result.selection_counters = selector.selection_counters;
     }
 
     return result;
@@ -7186,15 +7190,25 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             break;
             case MACHINE_A64_STACK_ALLOCATE:
             {
-                // The canonical page-probed loop verbatim: align the X9
-                // byte count up through the X10 mask, probe and drop SP a
-                // page at a time, take the sub-page tail, and hand the
-                // new stack pointer back in X10.
+                // The canonical page-probed loop: X9 holds the entire
+                // distance to the aligned target, including any padding
+                // beyond the sixteen-aligned incoming stack pointer.
                 u64 alloc_mask = (u64)instruction->payload - 1;
-                machine_a64_emit_immediate(&encoder, MACHINE_A64_X10, alloc_mask);
-                machine_a64_emit(&encoder, 0x8b0a0129u);
+                if (instruction->payload > 16)
+                {
+                    machine_a64_emit(&encoder, 0xcb2963e9u); // sub x9, sp, x9
+                }
+                else
+                {
+                    machine_a64_emit_immediate(&encoder, MACHINE_A64_X10, alloc_mask);
+                    machine_a64_emit(&encoder, 0x8b0a0129u);
+                }
                 machine_a64_emit_immediate(&encoder, MACHINE_A64_X10, ~alloc_mask);
                 machine_a64_emit(&encoder, 0x8a0a0129u);
+                if (instruction->payload > 16)
+                {
+                    machine_a64_emit(&encoder, 0xcb2963e9u); // sub x9, sp, x9
+                }
                 machine_a64_emit(&encoder, 0xf140053fu);
                 machine_a64_emit(&encoder, 0x540000a3u);
                 machine_a64_emit(&encoder, 0xd14007ffu);

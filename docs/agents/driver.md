@@ -34,6 +34,32 @@ reason. Shapes the Win64 subset does not build yet — variadic definitions and
 calls, 128-bit integers, vector signatures, indirect (non 1/2/4/8-byte)
 aggregate arguments, and dynamic stack allocation — fall back per function,
 which `-v`'s `fallback_functions` and `CODEGEN_FALLBACK` lines report.
+`CODEGEN_FALLBACK_REASON` additionally identifies the target, allocator and
+stable reason name for every fallback. Its disjoint counts sum to
+`fallback_functions`: `target-excluded`, `signature`, `opcode`,
+`selection-other`, `verification`, `placement`, `encoding`, `output-capacity`,
+and `unwind`. `signature` means the target's function ABI gate rejected the
+signature; `opcode` retains the first rejected canonical opcode in the legacy
+`CODEGEN_FALLBACK` census. `selection-other` is deliberately unclassified,
+while `verification` identifies an implementation failure. The allocator,
+stage, opcode and reason counters all survive multi-input compilation.
+
+`-fno-machine-fallback` makes native C coverage strict: after code generation
+succeeds, any fallback fails the translation unit before object writing and
+reports its first function, source, target, allocator, opcode and reason.
+`-fmachine-fallback` restores the normal differential-oracle behavior; the last
+of these two flags wins. Strict mode requires a native target and a machine
+allocator (`mir-stack`, `fast` or `quality`); NONE, direct non-native emission,
+preprocessing and syntax-only checks cannot satisfy the gate. Assembly inputs
+and linked prebuilt objects have no canonical C functions to gate.
+For example, `build/Release/ide cc -fregister-allocator=mir-stack -fno-machine-fallback -target aarch64-unknown-linux -c tests/basic_c_call_abi.c -o build/mir-coverage.o`.
+`compiler_driver_test_machine_fallback` runs a curated arithmetic, control-flow
+and call-ABI corpus through this gate for x86-64 and AArch64 Linux under all
+three machine allocators in `test_all`, including CI. Deliberate PE AArch64
+target exclusion and Win64/Darwin AArch64 variadic signatures are separate
+negative tests. This corpus is a coverage floor, not a claim of complete MIR
+lowering or permission to retire the canonical oracle.
+
 A `.s` input, or any input under `-x assembler`, is an assembly translation
 unit rather than a C one. `assembly_unit_encode` (`assembly_unit.c`) is the
 layer above `assembly_encode`: it interprets the directive vocabulary, tracks
@@ -49,6 +75,11 @@ describes unwinding rather than bytes. Anything else -- a directive the table
 does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
+
+Text alignment without an explicit fill uses x86-64 NOP bytes or complete
+little-endian AArch64 NOP instructions. A partial AArch64 instruction boundary
+is zero-filled before the NOPs; explicit fills remain repeated bytes on both
+targets. Data alignment defaults to zero fill.
 
 Three things that layer owns rather than the instruction layer. Local numeric
 labels: `1:` becomes a generated name and `1f`/`1b` resolve to the nearest

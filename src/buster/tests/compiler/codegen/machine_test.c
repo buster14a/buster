@@ -4,9 +4,11 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
+#include <buster/lib/compiler/codegen/register_allocator_fast_internal.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/file.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/simd.h>
 #include <buster/lib/string.h>
 #include <buster/lib/x86_64.h>
 
@@ -487,6 +489,7 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
     // construction through one of the metadata entry points.
     static MachineX64ConsumerSite const consumers[] = {
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_canonical_x64_metadata_emit")},
+        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_canonical_x64_thread_local_general_dynamic")},
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_generate_canonical_module_attempt")},
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_emit_global_assembly")},
         {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), S8_INITIALIZER("assembly_x86_metadata_emit")},
@@ -503,7 +506,6 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
     };
     static MachineX64NeutralSite const neutral_sites[] = {
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_emit_global_assembly"), false},
-        {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_canonical_x64_thread_local_general_dynamic"), true},
         {S8_INITIALIZER("src/buster/lib/compiler/codegen/codegen.c"), S8_INITIALIZER("codegen_generate_canonical_module_attempt")},
         {S8_INITIALIZER("src/buster/lib/compiler/assembly/assembly.c"), S8_INITIALIZER("assembly_x86_metadata_local_relocation")},
         {S8_INITIALIZER("src/buster/lib/compiler/link/link.c"), S8_INITIALIZER("link_address_difference")},
@@ -1002,12 +1004,533 @@ BUSTER_GLOBAL_LOCAL MachineFunction machine_test_build_exact_relative_function(A
     machine_builder_block_end(&builder, (MachineBlock){0});
     MachineFunction function = machine_function_builder_finish(arena, &builder);
     function.target = machine_target_x86_64();
+    function.call_target_count = 2;
+    function.call_targets = arena_allocate(arena, IrSymbolId, function.call_target_count);
+    function.call_targets[0] = (IrSymbolId){.value = 0};
+    function.call_targets[1] = (IrSymbolId){.value = 1};
     return function;
+}
+
+typedef enum MachineAliasTestKind
+{
+    MACHINE_ALIAS_TEST_DISTINCT,
+    MACHINE_ALIAS_TEST_OVERLAPPING,
+    MACHINE_ALIAS_TEST_UNKNOWN_POINTER,
+    MACHINE_ALIAS_TEST_CALL,
+    MACHINE_ALIAS_TEST_ATOMIC,
+    MACHINE_ALIAS_TEST_FENCE,
+    MACHINE_ALIAS_TEST_AGGREGATE,
+    MACHINE_ALIAS_TEST_UNCERTIFIED,
+    MACHINE_ALIAS_TEST_SHORT_SLOT,
+    MACHINE_ALIAS_TEST_INVALID_OFFSET,
+    MACHINE_ALIAS_TEST_VECTOR,
+    MACHINE_ALIAS_TEST_COUNT,
+} MachineAliasTestKind;
+
+// Sixty-four live load results force the real pressure gate on both native
+// targets. Balanced consumers can sink disjoint loads, while the intervening
+// stores and unknown/barrier rows expose missing memory dependencies.
+BUSTER_GLOBAL_LOCAL MachineFunction machine_test_alias_function(Arena* arena, bool aarch64, u32 variant)
+{
+    bool vector = variant == MACHINE_ALIAS_TEST_VECTOR;
+    MachineFunctionBuilder builder = machine_function_builder_begin(arena);
+    u32 pointer = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
+        .definition_point = MACHINE_POINT_INVALID, .register_class = MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID});
+    machine_builder_block_parameter(&builder, (MachineBlockParameter){.virtual_register = pointer});
+    machine_builder_block_begin(&builder);
+    u32 values[64];
+    for (u32 leaf = 0; leaf < BUSTER_ARRAY_LENGTH(values); leaf += 1)
+    {
+        u32 slot = variant == MACHINE_ALIAS_TEST_OVERLAPPING ? leaf / 4 : leaf;
+        u32 offset = variant == MACHINE_ALIAS_TEST_OVERLAPPING ? (leaf & 1u) * 4u : variant == MACHINE_ALIAS_TEST_INVALID_OFFSET ? UINT32_MAX : 0;
+        values[leaf] = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
+            .definition_point = machine_point_make(builder.instructions.total_count, MACHINE_POINT_AFTER),
+            .register_class = vector ? MACHINE_REGISTER_CLASS_VECTOR : MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID});
+        machine_builder_instruction(&builder, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[leaf]), machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
+            .payload = offset, .opcode = vector ? MACHINE_X64_VLOAD_FRAME : aarch64 ? MACHINE_A64_LOAD_FRAME : MACHINE_X64_LOAD_FRAME});
+        machine_builder_instruction(&builder, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[leaf])},
+            .payload = offset, .opcode = vector ? MACHINE_X64_VSTORE_FRAME : aarch64 ? MACHINE_A64_STORE_FRAME64 : MACHINE_X64_STORE_FRAME64});
+        if ((leaf == 15 || leaf == 31 || leaf == 47) && variant >= MACHINE_ALIAS_TEST_UNKNOWN_POINTER && variant <= MACHINE_ALIAS_TEST_AGGREGATE)
+        {
+            MachineInstruction inserted = {0};
+            if (variant == MACHINE_ALIAS_TEST_UNKNOWN_POINTER)
+            {
+                inserted = (MachineInstruction){.opcode = aarch64 ? MACHINE_A64_STORE_PTR64 : MACHINE_X64_STORE_PTR64,
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[leaf])}};
+            }
+            else if (variant == MACHINE_ALIAS_TEST_CALL)
+            {
+                inserted = (MachineInstruction){.opcode = aarch64 ? MACHINE_A64_CALL_INDIRECT : MACHINE_X64_CALL_INDIRECT,
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer)}};
+            }
+            else if (variant == MACHINE_ALIAS_TEST_ATOMIC)
+            {
+                inserted = (MachineInstruction){.opcode = aarch64 ? MACHINE_A64_ATOMIC_STORE : MACHINE_X64_ATOMIC_STORE_XCHG, .payload = 8,
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[leaf])}};
+            }
+            else if (variant == MACHINE_ALIAS_TEST_FENCE)
+            {
+                inserted.opcode = aarch64 ? MACHINE_A64_ATOMIC_FENCE : MACHINE_X64_MFENCE;
+            }
+            else
+            {
+                inserted = (MachineInstruction){.opcode = aarch64 ? MACHINE_A64_COPY_FRAME_FROM_FRAME : MACHINE_X64_COPY_FRAME_FROM_FRAME,
+                    .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, 0), machine_ref_make(MACHINE_REF_STACK_SLOT, 63)}, .payload = 8};
+            }
+            machine_builder_instruction(&builder, inserted);
+        }
+    }
+    // Pair values far apart in the source stream. A source-order memory
+    // chain cannot place these pairs together without retaining other leaves.
+    u32 reordered[64];
+    for (u32 leaf = 0; leaf < 64; leaf += 1)
+    {
+        u32 reverse = 0;
+        for (u32 bit = 0; bit < 6; bit += 1)
+        {
+            reverse = (reverse << 1) | ((leaf >> bit) & 1u);
+        }
+        reordered[leaf] = values[reverse];
+    }
+    memcpy(values, reordered, sizeof(values));
+    for (u32 width = 64; width > 1; width /= 2)
+    {
+        for (u32 pair = 0; pair < width / 2; pair += 1)
+        {
+            u32 value = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
+                .definition_point = machine_point_make(builder.instructions.total_count, MACHINE_POINT_AFTER),
+                .register_class = vector ? MACHINE_REGISTER_CLASS_VECTOR : MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID});
+            machine_builder_instruction(&builder, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[2 * pair]),
+                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[2 * pair + 1])},
+                .opcode = vector ? MACHINE_X64_VBINARY : aarch64 ? MACHINE_A64_ADD64 : MACHINE_X64_ADD64, .payload = vector ? 0xefu : 0});
+            values[pair] = value;
+        }
+    }
+    machine_builder_instruction(&builder, (MachineInstruction){
+        .operands = {machine_ref_make(vector ? MACHINE_REF_STACK_SLOT : MACHINE_REF_PHYSICAL_REGISTER, vector ? 64u : 0u),
+                     machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[0])},
+        .opcode = vector ? MACHINE_X64_VSTORE_FRAME : aarch64 ? MACHINE_A64_MOV_RR : MACHINE_X64_MOV_RR});
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = aarch64 ? MACHINE_A64_RET : MACHINE_X64_RET});
+    machine_builder_block_end(&builder, (MachineBlock){.parameter_count = 1});
+    MachineFunction result = machine_function_builder_finish(arena, &builder);
+    result.target = aarch64 ? machine_target_aarch64() : machine_target_x86_64();
+    result.nonvolatile_memory_certified = variant != MACHINE_ALIAS_TEST_UNCERTIFIED;
+    result.stack_slot_count = 65;
+    result.stack_slot_sizes = arena_allocate(arena, u32, result.stack_slot_count);
+    for (u32 slot = 0; slot < result.stack_slot_count; slot += 1)
+    {
+        result.stack_slot_sizes[slot] = variant == MACHINE_ALIAS_TEST_SHORT_SLOT ? 4u : vector ? 64u : 16u;
+    }
+    result.line_mark_count = result.instruction_count;
+    result.line_marks = arena_allocate(arena, MachineLineMark, result.line_mark_count);
+    for (u32 row = 0; row < result.instruction_count; row += 1)
+    {
+        result.line_marks[row] = (MachineLineMark){.row = row, .instruction = row};
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        for (u32 variant = 0; variant < (architecture ? MACHINE_ALIAS_TEST_VECTOR : MACHINE_ALIAS_TEST_COUNT); variant += 1)
+        {
+            MachineFunction function = machine_test_alias_function(arguments->arena, architecture != 0, variant);
+            BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+            MachineScheduleResult scheduled = machine_schedule_function(arguments->arena, &function);
+            MachineScheduleResult repeated = machine_schedule_function(arguments->arena, &function);
+            BUSTER_TEST(arguments, scheduled.function.nonvolatile_memory_certified == function.nonvolatile_memory_certified);
+            BUSTER_TEST(arguments, scheduled.moved == repeated.moved &&
+                memcmp(scheduled.function.instructions, repeated.function.instructions, function.instruction_count * sizeof(MachineInstruction)) == 0);
+            BUSTER_TEST(arguments, machine_verify_function(&scheduled.function).error == MACHINE_VERIFY_NONE);
+            u32* positions = arena_allocate(arguments->arena, u32, function.instruction_count);
+            for (u32 mark = 0; mark < scheduled.function.line_mark_count; mark += 1)
+            {
+                MachineLineMark line = scheduled.function.line_marks[mark];
+                positions[line.instruction] = line.row;
+            }
+            bool memory_order = true;
+            bool independent_memory_moved = false;
+            for (u32 first = 0; first < function.instruction_count; first += 1)
+            {
+                MachineInstruction* before = function.instructions + first;
+                MachineOpcodeInfo const* before_info = machine_opcode_info(before->opcode);
+                bool before_barrier = (before_info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS |
+                                                                  MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) != 0;
+                bool before_memory = machine_opcode_is_memory(before_info) || before->opcode == MACHINE_X64_COPY_FRAME_FROM_FRAME ||
+                                     before->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME;
+                u32 before_slot = UINT32_MAX;
+                if (machine_ref_kind(before->operands[0]) == MACHINE_REF_STACK_SLOT) before_slot = machine_ref_payload(before->operands[0]);
+                if (machine_ref_kind(before->operands[1]) == MACHINE_REF_STACK_SLOT) before_slot = machine_ref_payload(before->operands[1]);
+                for (u32 second = first + 1; second < function.instruction_count; second += 1)
+                {
+                    MachineInstruction* after = function.instructions + second;
+                    MachineOpcodeInfo const* after_info = machine_opcode_info(after->opcode);
+                    bool after_barrier = (after_info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS |
+                                                                    MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) != 0;
+                    bool after_memory = machine_opcode_is_memory(after_info) || after->opcode == MACHINE_X64_COPY_FRAME_FROM_FRAME ||
+                                        after->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME;
+                    u32 after_slot = UINT32_MAX;
+                    if (machine_ref_kind(after->operands[0]) == MACHINE_REF_STACK_SLOT) after_slot = machine_ref_payload(after->operands[0]);
+                    if (machine_ref_kind(after->operands[1]) == MACHINE_REF_STACK_SLOT) after_slot = machine_ref_payload(after->operands[1]);
+                    bool unknown = before_slot == UINT32_MAX || after_slot == UINT32_MAX ||
+                                   before->opcode == MACHINE_X64_COPY_FRAME_FROM_FRAME || before->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME ||
+                                   after->opcode == MACHINE_X64_COPY_FRAME_FROM_FRAME || after->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME;
+                    bool ordered = before_barrier || after_barrier || (before_memory && after_memory &&
+                                   (unknown || before_slot == after_slot || variant == MACHINE_ALIAS_TEST_UNCERTIFIED || variant == MACHINE_ALIAS_TEST_SHORT_SLOT || variant == MACHINE_ALIAS_TEST_INVALID_OFFSET));
+                    memory_order &= !ordered || positions[first] < positions[second];
+                    independent_memory_moved |= before_memory && after_memory && !ordered && positions[first] > positions[second];
+                }
+            }
+            BUSTER_TEST(arguments, memory_order);
+            if (variant == MACHINE_ALIAS_TEST_DISTINCT || variant == MACHINE_ALIAS_TEST_VECTOR)
+            {
+                BUSTER_TEST(arguments, scheduled.moved && independent_memory_moved);
+                MachineStackPlacement original_placement = machine_fast_placement_build(arguments->arena, &function);
+                MachineStackPlacement new_placement = machine_fast_placement_build(arguments->arena, &scheduled.function);
+                MachineStackPlacement repeated_placement = machine_fast_placement_build(arguments->arena, &repeated.function);
+                BUSTER_TEST(arguments, original_placement.valid && new_placement.valid && repeated_placement.valid);
+                BUSTER_TEST(arguments, new_placement.spill_count + new_placement.reload_count < original_placement.spill_count + original_placement.reload_count);
+                BUSTER_TEST(arguments, new_placement.spill_count == repeated_placement.spill_count && new_placement.reload_count == repeated_placement.reload_count &&
+                    new_placement.edit_count == repeated_placement.edit_count &&
+                    memcmp(new_placement.edits, repeated_placement.edits, new_placement.edit_count * sizeof(MachineEdit)) == 0);
+            }
+            if (variant == MACHINE_ALIAS_TEST_DISTINCT)
+            {
+                ByteSlice replay = machine_replay_serialize(arguments->arena, &function);
+                MachineFunction restored = {.nonvolatile_memory_certified = true};
+                BUSTER_TEST(arguments, machine_replay_deserialize(arguments->arena, replay, &restored));
+                BUSTER_TEST(arguments, !restored.nonvolatile_memory_certified);
+            }
+        }
+        MachineBlock oversized_block = {.instruction_count = UINT32_MAX};
+        MachineFunction oversized = {.instruction_count = UINT32_MAX, .block_count = 1, .blocks = &oversized_block,
+                                    .target = architecture ? machine_target_aarch64() : machine_target_x86_64()};
+        BUSTER_TEST(arguments, !machine_schedule_function(arguments->arena, &oversized).moved);
+        Target target = {.cpu_arch = architecture ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+        ByteSlice source = file_read(arguments->arena, S8("tests/basic_c_machine_alias.c"), (FileReadOptions){0});
+        IrProgram* source_program = source.pointer ? machine_test_compile_c(arguments->arena, S8("machine-alias.c"),
+            (String8){.pointer = (char8*)source.pointer, .length = source.length}, target) : 0;
+        BUSTER_TEST(arguments, source_program && source_program->module_count);
+        if (source_program && source_program->module_count)
+        {
+            IrFunction* source_function = machine_test_ir_function_find(source_program->modules, S8("alias_pressure"));
+            MachineSelectResult selected = machine_select_canonical_function(arguments->arena, source_program, source_function, target);
+            BUSTER_TEST(arguments, selected.supported && selected.function.nonvolatile_memory_certified);
+            if (selected.supported)
+            {
+                MachineScheduleResult scheduled = machine_schedule_function(arguments->arena, &selected.function);
+                MachineFunction conservative = selected.function;
+                conservative.nonvolatile_memory_certified = false;
+                MachineScheduleResult original = machine_schedule_function(arguments->arena, &conservative);
+                MachineStackPlacement improved = machine_fast_placement_build(arguments->arena, &scheduled.function);
+                MachineStackPlacement previous = machine_fast_placement_build(arguments->arena, &original.function);
+                BUSTER_TEST(arguments, improved.valid && previous.valid);
+                BUSTER_TEST(arguments, improved.spill_count + improved.reload_count < previous.spill_count + previous.reload_count);
+            }
+        }
+        IrProgram* volatile_program = machine_test_compile_c(arguments->arena, S8("volatile-alias.c"),
+            S8("unsigned long f(void) { volatile unsigned long a = 1, b = 2; a = b; return a + b; }"), target);
+        BUSTER_TEST(arguments, volatile_program && volatile_program->module_count);
+        if (volatile_program && volatile_program->module_count)
+        {
+            MachineSelectResult selected = machine_select_canonical_function(arguments->arena, volatile_program,
+                machine_test_ir_function_find(volatile_program->modules, S8("f")), target);
+            BUSTER_TEST(arguments, selected.supported && !selected.function.nonvolatile_memory_certified);
+        }
+        IrProgram* asm_program = machine_test_compile_c(arguments->arena, S8("asm-alias.c"),
+            S8("unsigned long f(unsigned long *p) { unsigned long a = *p; __asm__ volatile (\"\" ::: \"memory\"); return a + *p; }"), target);
+        BUSTER_TEST(arguments, asm_program && asm_program->module_count);
+        if (asm_program && asm_program->module_count)
+        {
+            MachineSelectResult selected = machine_select_canonical_function(arguments->arena, asm_program,
+                machine_test_ir_function_find(asm_program->modules, S8("f")), target);
+            // Inline assembly has no machine row yet. It must retain canonical
+            // lowering rather than receiving a schedule without its clobbers.
+            BUSTER_TEST(arguments, !selected.supported);
+        }
+    }
+    return result;
 }
 
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+
+    // Malformed publication inputs must fail before placement or encoding.
+    MachineInstruction storage_rows[2] = {{.opcode = MACHINE_X64_MOV_RI}, {.opcode = MACHINE_X64_RET}};
+    MachineVirtualRegister storage_register = {
+        .definition_point = machine_point_make(0, MACHINE_POINT_AFTER),
+        .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+    };
+    MachineBlock storage_block = {.instruction_count = 2};
+    MachineFunction storage_function = {
+        .instructions = storage_rows, .instruction_count = 2,
+        .virtual_registers = &storage_register, .virtual_register_count = 1,
+        .blocks = &storage_block, .block_count = 1,
+        .target = machine_target_x86_64(),
+    };
+    storage_rows[0].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+    storage_function.immediate_count = 1;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_STORAGE);
+    storage_rows[0].opcode = MACHINE_X64_LOAD_FRAME;
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_STACK_SLOT, 0);
+    storage_function.immediate_count = 0;
+    storage_function.stack_slot_count = 1;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_STORAGE);
+    storage_rows[0].opcode = MACHINE_X64_MOV_RI;
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_BLOCK, 0);
+    storage_function.stack_slot_count = 0;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_OPERAND_KIND);
+    storage_rows[0].opcode = MACHINE_X64_MOV_RR;
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_TARGET_REGISTER_LIMIT);
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_OPERAND_REFERENCE);
+
+    u64 immediate = 19;
+    u32 slot_size = 16;
+    storage_function.immediates = &immediate;
+    storage_function.immediate_count = 1;
+    storage_function.stack_slot_sizes = &slot_size;
+    storage_function.stack_slot_count = 1;
+    storage_rows[0].opcode = MACHINE_X64_MOV_RI;
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 1);
+    MachineVerifyResult missing_immediate = machine_verify_function(&storage_function);
+    BUSTER_TEST(arguments, missing_immediate.error == MACHINE_VERIFY_OPERAND_REFERENCE && missing_immediate.instruction == 0 && missing_immediate.operand == 1);
+    storage_rows[0].opcode = MACHINE_X64_LOAD_FRAME;
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_STACK_SLOT, 0);
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_STACK_SLOT, 1);
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_OPERAND_REFERENCE);
+    storage_rows[0].opcode = MACHINE_X64_MOV_RI;
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+
+#define MACHINE_TEST_ABSENT_STORAGE(member, count_member) \
+    do \
+    { \
+        MachineFunction absent = storage_function; \
+        absent.member = 0; \
+        absent.count_member = 1; \
+        BUSTER_TEST(arguments, machine_verify_function(&absent).error == MACHINE_VERIFY_STORAGE); \
+    } while (0)
+    MACHINE_TEST_ABSENT_STORAGE(instructions, instruction_count);
+    MACHINE_TEST_ABSENT_STORAGE(virtual_registers, virtual_register_count);
+    MACHINE_TEST_ABSENT_STORAGE(blocks, block_count);
+    MACHINE_TEST_ABSENT_STORAGE(edges, edge_count);
+    MACHINE_TEST_ABSENT_STORAGE(block_parameters, block_parameter_count);
+    MACHINE_TEST_ABSENT_STORAGE(edge_copy_sources, edge_copy_source_count);
+    MACHINE_TEST_ABSENT_STORAGE(immediates, immediate_count);
+    MACHINE_TEST_ABSENT_STORAGE(stack_slot_sizes, stack_slot_count);
+    MACHINE_TEST_ABSENT_STORAGE(call_targets, call_target_count);
+    MACHINE_TEST_ABSENT_STORAGE(switch_cases, switch_case_count);
+    MACHINE_TEST_ABSENT_STORAGE(line_marks, line_mark_count);
+    MACHINE_TEST_ABSENT_STORAGE(va_args, va_arg_count);
+#undef MACHINE_TEST_ABSENT_STORAGE
+    BUSTER_TEST(arguments, machine_verify_function(0).error == MACHINE_VERIFY_STORAGE);
+
+    // A reference's own index may be in range while its opcode kind is wrong.
+    MachineRefKind wrong_immediate_kinds[] = {MACHINE_REF_NONE, MACHINE_REF_BLOCK, MACHINE_REF_STACK_SLOT,
+                                             MACHINE_REF_VIRTUAL_REGISTER, MACHINE_REF_PHYSICAL_REGISTER};
+    for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(wrong_immediate_kinds); kind_index += 1)
+    {
+        storage_rows[0].operands[1] = machine_ref_make(wrong_immediate_kinds[kind_index], 0);
+        BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_OPERAND_KIND);
+    }
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+    storage_rows[0].operands[0] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_OPERAND_KIND);
+    storage_rows[0].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+    storage_register.register_class = MACHINE_REGISTER_CLASS_VECTOR;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_OPERAND_CLASS);
+    storage_register.register_class = MACHINE_REGISTER_CLASS_GENERAL;
+    storage_rows[0].opcode = MACHINE_X64_MOV_RR;
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_ZMM0);
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_OPERAND_CLASS);
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_ADDRESS, 0);
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_OPERAND_REFERENCE);
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_EXTRA, 0);
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_OPERAND_REFERENCE);
+
+    MachineTargetDescription const* physical_targets[] = {0, machine_target_x86_64(), machine_target_aarch64()};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(physical_targets); target_index += 1)
+    {
+        MachineTargetDescription const* target = physical_targets[target_index];
+        storage_function.target = target;
+        bool vector_target = target && target->vector_register_mask != 0;
+        storage_register.register_class = vector_target ? MACHINE_REGISTER_CLASS_VECTOR : MACHINE_REGISTER_CLASS_GENERAL;
+        storage_rows[0].opcode = vector_target ? MACHINE_X64_VMOV_RR : MACHINE_OPCODE_SKELETON_COPY;
+        u32 limit = target ? target->register_count : MACHINE_TARGET_REGISTER_LIMIT;
+        storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, limit - 1u);
+        BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+        u32 invalid_registers[] = {limit, limit + 1u, MACHINE_REF_PAYLOAD_LIMIT - 1u};
+        for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_registers); invalid_index += 1)
+        {
+            storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, invalid_registers[invalid_index]);
+            BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_OPERAND_REFERENCE);
+        }
+    }
+    storage_function.target = machine_target_x86_64();
+    storage_register.register_class = MACHINE_REGISTER_CLASS_GENERAL;
+    storage_rows[0].opcode = MACHINE_X64_MOV_RI;
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+
+    u32 slot_alignment = 16;
+    storage_function.stack_slot_alignments = &slot_alignment;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    u32 invalid_alignments[] = {0, 3, 32};
+    for (u32 alignment_index = 0; alignment_index < BUSTER_ARRAY_LENGTH(invalid_alignments); alignment_index += 1)
+    {
+        slot_alignment = invalid_alignments[alignment_index];
+        BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    }
+    storage_function.stack_slot_alignments = 0;
+    storage_function.outgoing_bytes = 16;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    storage_function.outgoing_slot = 1;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    storage_function.outgoing_slot = 0;
+    storage_function.outgoing_bytes = 8;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    storage_function.outgoing_bytes = 0;
+
+    MachineSwitchCase switch_case = {.target_block = 0};
+    storage_function.switch_cases = &switch_case;
+    storage_function.switch_case_count = 1;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    switch_case.target_block = 1;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_EDGE_RANGE);
+    storage_function.switch_case_count = 0;
+    MachineLineMark line_marks[2] = {{.row = 0}, {.row = 2}};
+    storage_function.line_marks = line_marks;
+    storage_function.line_mark_count = 2;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    line_marks[1].row = 3;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    line_marks[0].row = 2;
+    line_marks[1].row = 0;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    storage_function.line_mark_count = 0;
+
+    // Every opcode whose payload becomes a relocation's target index shares
+    // the same table contract, including TLS and symbol-address materialization.
+    IrSymbolId call_target = {.value = 0};
+    storage_function.call_targets = &call_target;
+    storage_function.call_target_count = 1;
+    u8 call_reference = MACHINE_SYMBOL_REFERENCE_PLT;
+    storage_function.call_target_references = &call_reference;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    call_reference = MACHINE_SYMBOL_REFERENCE_COUNT;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    storage_function.call_target_references = 0;
+    u16 symbol_opcodes[] = {MACHINE_X64_CALL_DIRECT, MACHINE_X64_LEA_SYMBOL, MACHINE_X64_LOAD_SYMBOL_GOT, MACHINE_X64_LEA_TLS,
+                           MACHINE_X64_LEA_TLS_INITIAL_EXEC, MACHINE_X64_TLS_GENERAL_DYNAMIC,
+                           MACHINE_A64_CALL_DIRECT, MACHINE_A64_LEA_SYMBOL, MACHINE_A64_LEA_TLS};
+    for (u32 opcode_index = 0; opcode_index < BUSTER_ARRAY_LENGTH(symbol_opcodes); opcode_index += 1)
+    {
+        u16 opcode = symbol_opcodes[opcode_index];
+        storage_rows[0] = (MachineInstruction){.opcode = opcode};
+        bool has_result = machine_opcode_info(opcode)->operand_count != 0;
+        storage_rows[0].operands[0] = has_result ? machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0) : MACHINE_REF_NONE_VALUE;
+        storage_function.virtual_register_count = has_result ? 1u : 0u;
+        BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+        storage_rows[0].payload = 1;
+        BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    }
+    storage_function.virtual_register_count = 1;
+    storage_rows[0] = (MachineInstruction){
+        .opcode = MACHINE_X64_VA_ARG,
+        .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0)},
+    };
+    MachineVaArg va_arg = {
+        .size = 8, .alignment = 8, .stack_size = 8, .part_count = 1,
+        .parts = {{.size = 8}}, .scalar_size = 8,
+    };
+    storage_function.va_args = &va_arg;
+    storage_function.va_arg_count = 1;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    storage_rows[0].payload = 1;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    storage_rows[0].payload = 0;
+    va_arg.part_count = MACHINE_VA_ARG_PART_LIMIT + 1u;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    va_arg.part_count = 1;
+    va_arg.result_is_frame = 1;
+    va_arg.result_slot = 1;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    va_arg.result_slot = 0;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    storage_rows[0].operands[1] = machine_ref_make(MACHINE_REF_STACK_SLOT, 0);
+    storage_function.virtual_register_count = 0;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    va_arg.parts[0].value_offset = 16;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    va_arg.parts[0].value_offset = 0;
+    va_arg.parts[0].save_offset = 8;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    va_arg.parts[0].save_offset = 0;
+    // AArch64 reads a padded eightbyte for a smaller logical scalar/aggregate.
+    storage_rows[0].opcode = MACHINE_A64_VA_ARG;
+    storage_rows[0].operands[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X10);
+    storage_function.target = machine_target_aarch64();
+    va_arg.size = 3;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    // The SysV memory path can transport aggregates larger than two eightbytes.
+    storage_rows[0].opcode = MACHINE_X64_VA_ARG;
+    storage_rows[0].operands[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX);
+    storage_function.target = machine_target_x86_64();
+    va_arg.size = 24;
+    va_arg.stack_size = 24;
+    va_arg.parts[0].is_memory = 1;
+    slot_size = 24;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+
+    // Each target-file tail, inactive owners equal to the query, duplicate
+    // owners, and all four SIMD tiles must agree with lane membership. The
+    // empty mask deliberately permits a null row, as an empty contract does.
+    BUSTER_TEST(arguments, machine_fast_owner_match_mask_test(0, 0, 0) == 0);
+    u64 owner_page_size = os_get_page_size();
+    u8* owner_pages = (u8*)os_reserve(0, owner_page_size * 2u, (ProtectionFlags){0}, (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
+    BUSTER_TEST(arguments, owner_pages != 0);
+    bool owner_page_committed = owner_pages && os_commit(owner_pages, owner_page_size, (ProtectionFlags){.read = true, .write = true}, false);
+    BUSTER_TEST(arguments, owner_page_committed);
+    for (u32 count = 1; owner_page_committed && count <= 64; count += 1)
+    {
+        // Exact logical rows end at an inaccessible page: vector loads over
+        // a partial tile must not borrow padding from the next owner row.
+        u32* owners = (u32*)(owner_pages + owner_page_size) - count;
+        u64 valid = mask64_prefix(count);
+        u64 masks[] = {valid, valid & UINT64_C(0x5555555555555555), valid & UINT64_C(0xffff0000ffff0000), valid & UINT64_C(0x8000800080008000)};
+        for (u32 lane = 0; lane < count; lane += 1)
+        {
+            owners[lane] = lane % 7;
+        }
+        for (u32 mask_index = 0; mask_index < BUSTER_ARRAY_LENGTH(masks); mask_index += 1)
+        {
+            for (u32 value = 0; value <= 7; value += 1)
+            {
+                u64 expected = 0;
+                for (u32 lane = 0; lane < count; lane += 1)
+                {
+                    if (owners[lane] == value && ((masks[mask_index] >> lane) & 1u))
+                    {
+                        expected |= UINT64_C(1) << lane;
+                    }
+                }
+                BUSTER_TEST(arguments, machine_fast_owner_match_mask_test(owners, masks[mask_index], value) == expected);
+            }
+        }
+    }
+    if (owner_pages)
+    {
+        BUSTER_TEST(arguments, os_unreserve(owner_pages, owner_page_size * 2u));
+    }
 
     // Exercise the stateless FAST picker directly on both target register
     // files: preferred free, lowest nonpreferred free, dead-first eviction,
@@ -1035,6 +1558,141 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, machine_point_make(3, MACHINE_POINT_BEFORE) < machine_point_make(3, MACHINE_POINT_EARLY));
     BUSTER_TEST(arguments, machine_point_make(3, MACHINE_POINT_AFTER) < machine_point_make(4, MACHINE_POINT_BEFORE));
 
+    // Frozen ordering contract from ebfdd117, before the opcode switches
+    // were removed. Omitted opcodes belong to none of these three chains;
+    // check the full domain so adding or dropping membership fails locally.
+    // These are scheduler obligations, not a census of hardware memory or
+    // vector instructions: explicit virtual vector dataflow needs no chain.
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 236);
+    u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
+        [MACHINE_OPCODE_SKELETON_RETURN] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_CVT_F32_TO_U64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_CVT_F64_TO_U64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_LOAD_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_STORE_FRAME8] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_STORE_FRAME16] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_STORE_FRAME32] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_STORE_FRAME64] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_LOAD_PTR8] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_LOAD_PTR16] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_LOAD_PTR32] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_LOAD_PTR64] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_STORE_PTR8] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_STORE_PTR16] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_STORE_PTR32] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_STORE_PTR64] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_JMP] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_JCC] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_RET] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_CALL_DIRECT] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_TLS_GENERAL_DYNAMIC] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_SWITCH] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_COPY_FRAME_FROM_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_COPY_FRAME_FROM_PTR] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_COPY_PTR_FROM_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_FARITH] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_FCMP_SET] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_CVT_F32_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_CVT_F64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_CVT_I64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_CVT_I64_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_CVT_F32_TO_I64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_CVT_F64_TO_I64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_MOVQ_TO_XMM] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_MOVQ_FROM_XMM] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_LOAD_INCOMING] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_VA_SAVE] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_VA_ARG] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_PUSH_FRAME] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_PUSH_REGISTER] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_SUB_RSP] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_ADD_RSP] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_STACK_ALLOCATE] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_CALL_INDIRECT] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_ATOMIC_STORE_XCHG] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_ATOMIC_RMW] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_ATOMIC_CMPXCHG] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_ATOMIC_CMPXCHG16] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_MFENCE] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_INT3] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_UD2] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_VLOAD_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_VSTORE_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_VLOAD_PTR] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_VSTORE_PTR] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_VLOAD_PTR_MASKED] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_VSTORE_PTR_MASKED] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_VCOMPRESS_STORE_PTR] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_LOAD_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_LOAD_FRAME32] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_STORE_FRAME8] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_STORE_FRAME16] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_STORE_FRAME32] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_STORE_FRAME64] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_LOAD_PTR8] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_LOAD_PTR16] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_LOAD_PTR32] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_LOAD_PTR64] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_STORE_PTR8] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_STORE_PTR16] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_STORE_PTR32] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_STORE_PTR64] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_COPY_FRAME_FROM_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_COPY_FRAME_FROM_PTR] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_COPY_PTR_FROM_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_B] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_BCC] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_RET] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_FMOV_TO_VEC] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_FMOV_FROM_VEC] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_BRK] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_UDF] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_READ_SP] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_WRITE_SP] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_CALL_DIRECT] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_CALL_INDIRECT] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_FARITH] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_FCMP_SET] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F32_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_I64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_I64_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F32_TO_I64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F64_TO_I64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_U64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_U64_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F32_TO_U64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F64_TO_U64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_VA_SAVE] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_VA_ARG] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_VLOAD_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_VSTORE_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_VARITH] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_ATOMIC_LOAD] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_ATOMIC_STORE] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_ATOMIC_RMW] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_ATOMIC_CAS] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_ATOMIC_FENCE] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_STACK_ALLOCATE] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_SWITCH] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_VLOAD_FRAME_SIZED] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_VSTORE_FRAME_SIZED] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_X64_INDIRECT_BRANCH] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_INDIRECT_BRANCH] = MACHINE_SCHEDULE_UNIT_BARRIER,
+    };
+    MachineOpcodeRow const* opcode_rows = machine_opcode_row_table();
+    for (u16 opcode = 0; opcode < MACHINE_OPCODE_COUNT; opcode += 1)
+    {
+        BUSTER_TEST(arguments, opcode_rows[opcode].schedule_flags == schedule_memberships[opcode]);
+    }
+    // Vector scratch membership is orthogonal to the load class. A frame
+    // read in an implicit V register must participate in both chains.
+    MachineOpcodeInfo const* vector_load_info = machine_opcode_info(MACHINE_A64_VLOAD_FRAME);
+    BUSTER_TEST(arguments, machine_opcode_schedule_class(vector_load_info) == MACHINE_SCHEDULE_CLASS_LOAD);
+    BUSTER_TEST(arguments, vector_load_info && (vector_load_info->implicit_resource_defs & MACHINE_RESOURCE_VECTOR_STATE_MASK));
+
     MachineOpcodeInfo const* copy_info = machine_opcode_info(MACHINE_OPCODE_SKELETON_COPY);
     BUSTER_TEST(arguments, copy_info && copy_info->operand_count == 2);
     BUSTER_TEST(arguments, copy_info && (copy_info->operand_info[0] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u)) == MACHINE_OPERAND_ROLE_DEFINE);
@@ -1046,13 +1704,24 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     MachineOpcodeInfo const* cmpxchg16_info = machine_opcode_info(MACHINE_X64_ATOMIC_CMPXCHG16);
     u64 cmpxchg16_fixed = (1ull << MACHINE_X64_RAX) | (1ull << MACHINE_X64_RDX) | (1ull << MACHINE_X64_RBX) | (1ull << MACHINE_X64_RCX);
     BUSTER_TEST(arguments, cmpxchg16_info && cmpxchg16_info->operand_count == 4);
-    BUSTER_TEST(arguments, cmpxchg16_info && cmpxchg16_info->operand_info[0] == 0 && cmpxchg16_info->operand_info[1] == 0 &&
-                                   cmpxchg16_info->operand_info[2] == 0 &&
+    BUSTER_TEST(arguments, cmpxchg16_info && (cmpxchg16_info->operand_info[0] >> MACHINE_OPERAND_SHAPE_SHIFT) == MACHINE_OPERAND_SHAPE_FRAME &&
+                                   (cmpxchg16_info->operand_info[1] >> MACHINE_OPERAND_SHAPE_SHIFT) == MACHINE_OPERAND_SHAPE_FRAME &&
+                                   (cmpxchg16_info->operand_info[2] >> MACHINE_OPERAND_SHAPE_SHIFT) == MACHINE_OPERAND_SHAPE_FRAME &&
                                    (cmpxchg16_info->operand_info[3] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u)) == MACHINE_OPERAND_ROLE_USE);
     BUSTER_TEST(arguments, cmpxchg16_info && (cmpxchg16_info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) &&
                                    (cmpxchg16_info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) &&
                                    cmpxchg16_info->clobber_mask == cmpxchg16_fixed);
     BUSTER_TEST(arguments, machine_opcode_info(MACHINE_OPCODE_COUNT) == 0);
+
+    for (u16 opcode = MACHINE_OPCODE_SKELETON_NOP; opcode < MACHINE_OPCODE_COUNT; opcode += 1)
+    {
+        MachineOpcodeInfo const* info = machine_opcode_info(opcode);
+        for (u32 slot = 0; slot < info->operand_count; slot += 1)
+        {
+            u32 shape = info->operand_info[slot] >> MACHINE_OPERAND_SHAPE_SHIFT;
+            BUSTER_TEST(arguments, shape > MACHINE_OPERAND_SHAPE_NONE && shape < MACHINE_OPERAND_SHAPE_COUNT);
+        }
+    }
 
     // A metadata-only CMPXCHG16B clobber must preserve RBX in every
     // placement mode, even though this fixture has no virtual value bound to
@@ -1417,9 +2086,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_DISPLACEMENT] != 0);
     BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_DATA] != 0);
     BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_TARGET_PAYLOAD] != 0);
-    // One site, and it should stay one: a fixed sequence is an exception to
-    // the metadata authority, so a second one is a decision, not a detail.
-    BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_FIXED_SEQUENCE] == 1);
+    // TLS is now a metadata-owned ABI recipe, not a neutral literal escape.
+    BUSTER_TEST(arguments, patch_class_counts[MACHINE_X64_NEUTRAL_PATCH_FIXED_SEQUENCE] == 0);
     MachineX64SourceAudit source_audit = machine_test_x86_source_authority_audit(arguments->arena);
     // Packaged runtimes (notably Android) do not carry the repository source
     // tree, so the scanner cannot discover its five audit files there.  Keep
@@ -1429,9 +2097,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     bool source_audit_available = source_audit.files_readable;
     BUSTER_TEST(arguments, !source_audit_available || source_audit.owners_found);
     BUSTER_TEST(arguments, !source_audit_available || source_audit.neutral_patch_count == patch_count);
-    // The source audit is the final authority gate: every handwritten x86
-    // constructor must route through metadata, while AArch64 words, .byte
-    // data, and registered neutral patches remain explicitly classified.
+    // This scanner checks named consumers and byte-writer calls, not every
+    // literal array/opcode rewrite. The complete path inventory and remaining
+    // migration boundaries live in docs/x86-64-encoding-authority.md.
     BUSTER_TEST(arguments, !source_audit_available || source_audit.forbidden_count == 0);
 
     u32 a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
@@ -1655,6 +2323,20 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 machine_verify_function(&edge_function).error == MACHINE_VERIFY_VIRTUAL_REGISTER_USE_BEFORE_DEFINITION);
     edge_function.edge_copy_sources[0] = valid_edge_source;
 
+    edge_function.edge_copy_sources[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_TARGET_REGISTER_LIMIT - 1u);
+    BUSTER_TEST(arguments, machine_verify_function(&edge_function).error == MACHINE_VERIFY_NONE);
+    edge_function.edge_copy_sources[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_TARGET_REGISTER_LIMIT);
+    BUSTER_TEST(arguments, machine_verify_function(&edge_function).error == MACHINE_VERIFY_EDGE_COPY);
+    edge_function.edge_copy_sources[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_REF_PAYLOAD_LIMIT - 1u);
+    BUSTER_TEST(arguments, machine_verify_function(&edge_function).error == MACHINE_VERIFY_EDGE_COPY);
+    edge_function.target = machine_target_x86_64();
+    edge_function.edge_copy_sources[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_ZMM0);
+    BUSTER_TEST(arguments, machine_verify_function(&edge_function).error == MACHINE_VERIFY_EDGE_COPY);
+    edge_function.edge_copy_sources[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX);
+    BUSTER_TEST(arguments, machine_verify_function(&edge_function).error == MACHINE_VERIFY_NONE);
+    edge_function.target = 0;
+    edge_function.edge_copy_sources[0] = valid_edge_source;
+
     ByteSlice edge_replay = machine_replay_serialize(arguments->arena, &edge_function);
     MachineFunction edge_replayed = {0};
     BUSTER_TEST(arguments, machine_replay_deserialize(arguments->arena, edge_replay, &edge_replayed));
@@ -1864,6 +2546,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                        tree_base_placement.reload_count + tree_base_placement.spill_count);
         }
     }
+
+    UnitTestResult alias_tests = machine_test_stack_aliases(arguments);
+    result.test_count += alias_tests.test_count;
+    result.succeeded_test_count += alias_tests.succeeded_test_count;
 
     // Stage 2: x86-64 selection, MIR_STACK placement, and encoding over the
     // scalar subset. Selection and encoding are host-independent; execution
@@ -4089,6 +4775,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, machine_vector_fallback_module.error == CODEGEN_ERROR_NONE);
         BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_function_count == 1);
         BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_opcode_counts[IR_OPCODE_LOAD] == 1);
+        BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 1);
+        BUSTER_TEST(arguments, machine_vector_fallback_module.first_fallback_opcode == IR_OPCODE_LOAD);
+        BUSTER_TEST(arguments, machine_vector_fallback_module.first_fallback_reason == CODEGEN_FALLBACK_OPCODE);
     }
 
     // Stage 10: the 512-bit vector subset. The corpus fixes a znver5 Linux
@@ -4272,6 +4961,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 continue;
             }
             MachineSelectResult selected = machine_select_canonical_function(arguments->arena, machine_vector_program, ir_function, machine_vector_target);
+            if (string_equal(vector_names[name_index], S8("vabi")))
+            {
+                // The ninth ZMM argument needs a 64-aligned outgoing area.
+                // The machine push area guarantees sixteen, so this caller
+                // must use the canonical alignment path; the module execution
+                // differential below still covers its returned vector values.
+                BUSTER_TEST(arguments, !selected.supported && selected.failed_opcode == IR_OPCODE_CALL);
+                continue;
+            }
             BUSTER_TEST_RAW(arguments, selected.supported,
                             string_format(arguments->arena, S8("vector select {S8} failed at opcode {u32}"), vector_names[name_index],
                                           (u32)selected.failed_opcode));

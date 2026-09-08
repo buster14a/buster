@@ -8,7 +8,9 @@
 // function, then MIR_STACK/FAST/QUALITY placement and the machine encoder
 // in machine.c and its included backends), and any function the machine
 // subset cannot express falls back per function to the canonical emitter,
-// counted in statistics.fallback_opcode_counts.
+// counted once in statistics.fallback_reason_counts with selection opcodes
+// retained in fallback_opcode_counts. codegen_statistics_add preserves the
+// full census across driver translation units.
 //
 // Nearly everything here sits under one function:
 // codegen_generate_canonical_module_attempt lays out global data (read-only
@@ -1365,36 +1367,24 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metad
     return result;
 }
 
-// The ELF general-dynamic thread-local pair, sixteen fixed bytes:
-//
-//   66 48 8d 3d <r32>  data16 lea rdi, [rip + sym@TLSGD]
-//   66 66 48 e8 <r32>  data16 data16 rex.W call __tls_get_addr
-//
-// The prefixes are the sequence rather than an encoding of it.  Nothing
-// executes them -- a data16 on a 64-bit lea and two on a rex.W call change
-// nothing -- and they are there so the sixteen bytes have a shape a linker
-// can recognize: relaxing general-dynamic to initial-exec or local-exec
-// replaces all sixteen, and both `ld` and this tree's own linker match on
-// exactly these bytes to do it.  That makes them data whose identity is the
-// contract, which no metadata form can express, since the encoder's job is to
-// choose the shortest encoding of an instruction and the shortest one here is
-// the wrong answer.  The site is registered as a neutral fixed sequence in
-// `machine_x86_64_neutral_patch_sites` so it stays reviewable rather than
-// becoming an unaudited byte writer.
+// The metadata-owned TLS recipe preserves the ABI envelope and supplies both
+// field offsets. Model/symbol policy remains here, not in the ISA encoder.
 BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_thread_local_general_dynamic(CodegenBuffer* buffer, u32* address_offset, u32* helper_offset)
 {
-    codegen_emit_u8(buffer, 0x66);
-    codegen_emit_u8(buffer, 0x48);
-    codegen_emit_u8(buffer, 0x8d);
-    codegen_emit_u8(buffer, 0x3d);
-    *address_offset = (u32)buffer->count;
-    codegen_emit_u32(buffer, 0);
-    codegen_emit_u8(buffer, 0x66);
-    codegen_emit_u8(buffer, 0x66);
-    codegen_emit_u8(buffer, 0x48);
-    codegen_emit_u8(buffer, 0xe8);
-    *helper_offset = (u32)buffer->count;
-    codegen_emit_u32(buffer, 0);
+    if (buffer->count > buffer->capacity || BUSTER_X86_METADATA_TLS_GD_SIZE > buffer->capacity - buffer->count)
+    {
+        codegen_buffer_report_exhausted(buffer);
+    }
+    else if (!buster_x86_metadata_emit_tls_general_dynamic(buffer->bytes + buffer->count, BUSTER_X86_METADATA_TLS_GD_SIZE))
+    {
+        buffer->error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+    }
+    else
+    {
+        *address_offset = (u32)buffer->count + BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET;
+        *helper_offset = (u32)buffer->count + BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET;
+        buffer->count += BUSTER_X86_METADATA_TLS_GD_SIZE;
+    }
 }
 
 BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metadata_segment_memory(
@@ -2249,6 +2239,70 @@ BUSTER_GLOBAL_LOCAL bool codegen_epilog_offset_append(CodegenFunctionDescriptor*
     return result;
 }
 
+// Counters are additive except the maximum frame size. Keep the complete
+// merge here so multi-input drivers retain the same census as single inputs.
+void codegen_statistics_add(CodegenStatistics* total, CodegenStatistics* unit)
+{
+    total->instruction_count += unit->instruction_count;
+    total->value_count += unit->value_count;
+    total->stack_value_bytes += unit->stack_value_bytes;
+    total->stack_frame_bytes += unit->stack_frame_bytes;
+    total->code_bytes += unit->code_bytes;
+    total->native_vector_operation_count += unit->native_vector_operation_count;
+    total->split_vector_operation_count += unit->split_vector_operation_count;
+    total->vzeroupper_count += unit->vzeroupper_count;
+    total->forwarded_wide_vector_load_count += unit->forwarded_wide_vector_load_count;
+    total->simd_operation_count += unit->simd_operation_count;
+    total->function_count += unit->function_count;
+    total->maximum_stack_frame_bytes = BUSTER_MAX(total->maximum_stack_frame_bytes, unit->maximum_stack_frame_bytes);
+    total->fallback_function_count += unit->fallback_function_count;
+    total->fallback_verify_count += unit->fallback_verify_count;
+    total->fallback_placement_count += unit->fallback_placement_count;
+    total->fallback_encode_count += unit->fallback_encode_count;
+    total->allocator_reload_count += unit->allocator_reload_count;
+    total->allocator_spill_count += unit->allocator_spill_count;
+    total->allocator_copy_count += unit->allocator_copy_count;
+    total->allocator_boundary_spill_count += unit->allocator_boundary_spill_count;
+    total->allocator_boundary_reload_count += unit->allocator_boundary_reload_count;
+    total->allocator_boundary_copy_count += unit->allocator_boundary_copy_count;
+    total->allocator_rematerialize_count += unit->allocator_rematerialize_count;
+    total->allocator_pinned_register_count += unit->allocator_pinned_register_count;
+    total->allocator_split_register_count += unit->allocator_split_register_count;
+    total->allocator_scheduled_function_count += unit->allocator_scheduled_function_count;
+    total->allocator_schedule_kept_count += unit->allocator_schedule_kept_count;
+    total->exact_attempts += unit->exact_attempts;
+    total->exact_successes += unit->exact_successes;
+    total->exact_failures += unit->exact_failures;
+    total->mutable_virtual_register_count += unit->mutable_virtual_register_count;
+    for (u32 index = 0; index < IR_OPCODE_COUNT + 1; index += 1)
+    {
+        total->fallback_opcode_counts[index] += unit->fallback_opcode_counts[index];
+    }
+    for (u32 index = 0; index < CODEGEN_FALLBACK_REASON_COUNT; index += 1)
+    {
+        total->fallback_reason_counts[index] += unit->fallback_reason_counts[index];
+    }
+}
+
+String8 codegen_fallback_reason_string(CodegenFallbackReason reason)
+{
+    String8 result = S8("invalid");
+    switch (reason)
+    {
+        break; case CODEGEN_FALLBACK_TARGET_EXCLUDED: result = S8("target-excluded");
+        break; case CODEGEN_FALLBACK_SIGNATURE: result = S8("signature");
+        break; case CODEGEN_FALLBACK_OPCODE: result = S8("opcode");
+        break; case CODEGEN_FALLBACK_SELECTION_OTHER: result = S8("selection-other");
+        break; case CODEGEN_FALLBACK_VERIFICATION: result = S8("verification");
+        break; case CODEGEN_FALLBACK_PLACEMENT: result = S8("placement");
+        break; case CODEGEN_FALLBACK_ENCODING: result = S8("encoding");
+        break; case CODEGEN_FALLBACK_OUTPUT_CAPACITY: result = S8("output-capacity");
+        break; case CODEGEN_FALLBACK_UNWIND: result = S8("unwind");
+        break; case CODEGEN_FALLBACK_REASON_COUNT: break;
+    }
+    return result;
+}
+
 String8 codegen_register_allocator_mode_string(CodegenRegisterAllocatorMode mode)
 {
     switch (mode)
@@ -3073,6 +3127,13 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_location_append(CodegenModule* result
     };
 }
 
+// Block IDs are graph identities, not an execution order. Keep the entry
+// first and every other block in ID order; debug ranges use this same layout.
+BUSTER_GLOBAL_LOCAL u32 codegen_canonical_layout_block(IrFunction* function, u32 ordinal)
+{
+    return ordinal == 0 ? function->entry.value : ordinal <= function->entry.value ? ordinal - 1 : ordinal;
+}
+
 BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* result, IrFunction* function, u32* value_offsets, u32* block_offsets,
                                                              u32 function_start, u32 function_end, Target target, u32 frame_size,
                                                              s32 frame_base_offset, u32 capacity)
@@ -3124,8 +3185,9 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
         }
         if (!emitted && block_offsets)
         {
-            for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+            for (u32 ordinal = 0; ordinal < function->block_count; ordinal += 1)
             {
+                u32 block_index = codegen_canonical_layout_block(function, ordinal);
                 IrBlock* block = function->blocks + block_index;
                 IrValueId value = IR_VALUE_ID_INVALID;
                 if (block->local_values && local->id.value < function->local_count)
@@ -3148,7 +3210,7 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
                     continue;
                 }
                 u32 start = BUSTER_MAX(block_offsets[block_index], function_start);
-                u32 end = block_index + 1 < function->block_count ? block_offsets[block_index + 1] : function_end;
+                u32 end = ordinal + 1 < function->block_count ? block_offsets[codegen_canonical_layout_block(function, ordinal + 1)] : function_end;
                 end = BUSTER_MIN(end, function_end);
                 codegen_canonical_location_append(result, capacity, function->symbol, local->id, start, end,
                                                   codegen_debug_canonical_value_location(value, function, value_offsets, target, frame_size, frame_base_offset));
@@ -9070,6 +9132,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         u32 machine_stack_frame_size = 0;
         u32* machine_block_offsets = 0;
         bool machine_function_emitted = false;
+        CodegenFallbackReason fallback_reason = CODEGEN_FALLBACK_TARGET_EXCLUDED;
+        IrOpcode fallback_opcode = IR_OPCODE_COUNT;
         // Selection is attempted before canonical-only frame, ABI, and call
         // metadata is built. A supported machine function never needs that
         // preparation; the fallback edge below enters it exactly once.
@@ -9493,8 +9557,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             machine_simd_operation_count = selected.simd_operation_count;
             if (!selected.supported)
             {
-                u32 reason = selected.failed_opcode <= IR_OPCODE_COUNT ? (u32)selected.failed_opcode : (u32)IR_OPCODE_COUNT;
-                result.statistics.fallback_opcode_counts[reason] += 1;
+                fallback_opcode = selected.failed_opcode < IR_OPCODE_COUNT ? selected.failed_opcode : IR_OPCODE_COUNT;
+                fallback_reason = selected.signature_rejected ? CODEGEN_FALLBACK_SIGNATURE
+                                  : fallback_opcode < IR_OPCODE_COUNT ? CODEGEN_FALLBACK_OPCODE
+                                                                      : CODEGEN_FALLBACK_SELECTION_OTHER;
             }
             // The target selectors publish a complete machine function only
             // after their typed builder streams and side tables are closed.
@@ -9505,7 +9571,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                                                   : MACHINE_VERIFY_NONE;
             if (selected.supported && verify_error != MACHINE_VERIFY_NONE)
             {
-                result.statistics.fallback_verify_count += 1;
+                fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
             }
             if (selected.supported && verify_error == MACHINE_VERIFY_NONE)
             {
@@ -9558,7 +9624,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 }
                 if (!placement.valid)
                 {
-                    result.statistics.fallback_placement_count += 1;
+                    fallback_reason = CODEGEN_FALLBACK_PLACEMENT;
                 }
                 if (placement.valid)
                 {
@@ -9582,10 +9648,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     {
                         codegen_buffer_report_exhausted(&buffer);
                     }
-                    if (!encoded.valid)
-                    {
-                        result.statistics.fallback_encode_count += 1;
-                    }
+                    // A retained encoding still needs valid unwind metadata.
+                    // Buffer exhaustion keeps the existing whole-module retry;
+                    // abandoned attempts never enter the returned census.
+                    fallback_reason = !encoded.valid ? CODEGEN_FALLBACK_ENCODING
+                                      : !encoded_fits ? CODEGEN_FALLBACK_OUTPUT_CAPACITY
+                                                      : CODEGEN_FALLBACK_UNWIND;
                     if (encoded_fits)
                     {
                         u32 machine_unwind_capacity = 0;
@@ -9711,6 +9779,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             result.statistics.allocator_spill_count += placement.spill_count;
                             result.statistics.allocator_copy_count += placement.copy_count;
                             result.statistics.allocator_boundary_spill_count += placement.boundary_spill_count;
+                            result.statistics.allocator_boundary_reload_count += placement.boundary_reload_count;
+                            result.statistics.allocator_boundary_copy_count += placement.boundary_copy_count;
                             result.statistics.allocator_rematerialize_count += placement.rematerialize_count;
                             result.statistics.allocator_pinned_register_count += placement.pinned_register_count;
                             result.statistics.allocator_split_register_count += placement.split_register_count;
@@ -9887,7 +9957,26 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             result.statistics.maximum_stack_frame_bytes = BUSTER_MAX(result.statistics.maximum_stack_frame_bytes, machine_stack_frame_size);
             continue;
         }
-        result.statistics.fallback_function_count += options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE;
+        if (options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_NONE)
+        {
+            if (!result.statistics.fallback_function_count)
+            {
+                result.first_fallback_function = (IrFunctionId){.value = function_index};
+                result.first_fallback_opcode = fallback_opcode;
+                result.first_fallback_reason = fallback_reason;
+            }
+            result.statistics.fallback_function_count += 1;
+            result.statistics.fallback_reason_counts[fallback_reason] += 1;
+            if (fallback_reason == CODEGEN_FALLBACK_SIGNATURE || fallback_reason == CODEGEN_FALLBACK_OPCODE ||
+                fallback_reason == CODEGEN_FALLBACK_SELECTION_OTHER)
+            {
+                result.statistics.fallback_opcode_counts[fallback_opcode] += 1;
+            }
+            result.statistics.fallback_verify_count += fallback_reason == CODEGEN_FALLBACK_VERIFICATION;
+            result.statistics.fallback_placement_count += fallback_reason == CODEGEN_FALLBACK_PLACEMENT;
+            result.statistics.fallback_encode_count += fallback_reason == CODEGEN_FALLBACK_ENCODING ||
+                                                       fallback_reason == CODEGEN_FALLBACK_OUTPUT_CAPACITY || fallback_reason == CODEGEN_FALLBACK_UNWIND;
+        }
         goto canonical_prep;
 
     canonical_emit:
@@ -10129,8 +10218,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // one live ST0 for a direct f80 return.  Keep the depth explicit so a
         // future path cannot silently leak an x87 stack entry across a call.
         u32 x87_stack_depth = 0;
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        for (u32 ordinal = 0; ordinal < function->block_count; ordinal += 1)
         {
+            u32 block_index = codegen_canonical_layout_block(function, ordinal);
             IrBlock* emitted_block = function->blocks + block_index;
             emitter.current_block = emitted_block->id;
             block_offsets[block_index] = (u32)buffer.count;
@@ -10156,7 +10246,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // canonical counterpart of "capture every incoming argument
             // register at entry" in the machine selectors, which the machine
             // path has always done and this emitter had not.
-            bool entry_block = block_index == 0 && canonical_function_type &&
+            bool entry_block = emitted_block->id.value == function->entry.value && canonical_function_type &&
                                canonical_function_type->kind == IR_TYPE_FUNCTION && canonical_function_type->parameter_count != 0;
             bool argument_pass = entry_block;
             IrInstructionId instruction_id = emitted_block->first_instruction;
@@ -10304,10 +10394,37 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
                         };
-                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), stack_add_operands,
-                                                                  BUSTER_ARRAY_LENGTH(stack_add_operands));
-                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), stack_align_operands,
-                                                                  BUSTER_ARRAY_LENGTH(stack_align_operands));
+                        if (stack_alignment > CODEGEN_X64_STACK_ALIGNMENT)
+                        {
+                            // Round the destination address down, then probe the
+                            // complete distance, including its alignment padding.
+                            BusterX86MetadataPhysicalOperand stack_target_start[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
+                            };
+                            BusterX86MetadataPhysicalOperand stack_target_subtract[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            };
+                            BusterX86MetadataPhysicalOperand stack_target_align[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                codegen_canonical_x64_metadata_immediate(-(s64)stack_alignment, 32),
+                            };
+                            BusterX86MetadataPhysicalOperand stack_target_distance[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                            };
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), stack_target_start, BUSTER_ARRAY_LENGTH(stack_target_start));
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), stack_target_subtract, BUSTER_ARRAY_LENGTH(stack_target_subtract));
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), stack_target_align, BUSTER_ARRAY_LENGTH(stack_target_align));
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), stack_move_rax_rsp_operands, BUSTER_ARRAY_LENGTH(stack_move_rax_rsp_operands));
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), stack_target_distance, BUSTER_ARRAY_LENGTH(stack_target_distance));
+                        }
+                        else
+                        {
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), stack_add_operands, BUSTER_ARRAY_LENGTH(stack_add_operands));
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), stack_align_operands, BUSTER_ARRAY_LENGTH(stack_align_operands));
+                        }
                         u64 stack_probe_compare_offset = buffer.count;
                         (void)codegen_canonical_x64_metadata_emit(&buffer, S8("CMP"), stack_compare_operands,
                                                                   BUSTER_ARRAY_LENGTH(stack_compare_operands));
@@ -12240,7 +12357,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             BusterX86MetadataPhysicalOperand threshold_load[2] = {
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, source_type->bit_width == 32 ? 32 : 64),
                                 codegen_canonical_x64_metadata_unsigned_immediate(
-                                    source_type->bit_width == 32 ? UINT64_C(0x5f000000) : UINT64_C(0x43e0000000000000),
+                                    source_type->bit_width == 32 ? CODEGEN_F32_SIGNED64_LIMIT_BITS : CODEGEN_F64_SIGNED64_LIMIT_BITS,
                                     source_type->bit_width == 32 ? 32 : 64),
                             };
                             BusterX86MetadataPhysicalOperand threshold_vector[2] = {
@@ -17081,10 +17198,22 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 stack_alignment = (u32)instruction->immediates[0];
                         stack_alignment = BUSTER_MAX(stack_alignment, 16);
                         c_a64_load(&emitter, 9, instruction->operands[0]);
-                        a64_emit_constant(&buffer, 10, stack_alignment - 1);
-                        codegen_emit_u32(&buffer, 0x8b0a0129);
+                        if (stack_alignment > 16)
+                        {
+                            codegen_emit_u32(&buffer, 0xcb2963e9); // sub x9, sp, x9
+                        }
+                        else
+                        {
+                            a64_emit_constant(&buffer, 10, stack_alignment - 1);
+                            codegen_emit_u32(&buffer, 0x8b0a0129);
+                        }
                         a64_emit_constant(&buffer, 10, ~(u64)(stack_alignment - 1));
                         codegen_emit_u32(&buffer, 0x8a0a0129);
+                        if (stack_alignment > 16)
+                        {
+                            // The aligned target becomes the full probe distance.
+                            codegen_emit_u32(&buffer, 0xcb2963e9); // sub x9, sp, x9
+                        }
                         codegen_emit_u32(&buffer, 0xf140053f);
                         codegen_emit_u32(&buffer, 0x540000a3);
                         codegen_emit_u32(&buffer, 0xd14007ff);
@@ -20209,9 +20338,10 @@ CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program
         return result;
     }
     codegen_prewarm_for_target(target);
-    // ABI records and the target-for-ABI cache are mutable on first use, and an
-    // attempt must not be the thing that fills a cache the next attempt reads.
-    // Freezing both here also keeps them out of the rewind below.
+    // Reserve the active ABI contexts before retries. Classification stays lazy,
+    // but filling a reserved page retains no allocation from an attempt that
+    // code-buffer growth might rewind. Explicit function conventions reserve
+    // their own contexts too; language type records remain untouched.
     ir_prepare_program_abi(program, codegen_canonical_ir_abi_convention(result.abi));
     IrValidationResult validation = ir_prepare_canonical_module(program, module, options.assume_validated);
     if (validation.error != IR_VALIDATION_NONE)
@@ -20302,7 +20432,10 @@ CodegenExecutable codegen_make_executable(CodegenFunction function)
         return result;
     }
     memcpy(address, function.code.pointer, function.code.length);
-    memcpy((u8*)address + data_offset, function.read_only_data.pointer, function.read_only_data.length);
+    if (function.read_only_data.length)
+    {
+        memcpy((u8*)address + data_offset, function.read_only_data.pointer, function.read_only_data.length);
+    }
     for (CodegenDataRelocation* relocation = function.first_data_relocation; relocation; relocation = relocation->next)
     {
         u8* patch = (u8*)address + relocation->code_offset;

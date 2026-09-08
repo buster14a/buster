@@ -52,6 +52,14 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-07T233720Z`](docs/performance-audits/2026-09-07T233720Z.md) — direct old/new ABI service timing on the same scalar and aggregate query traces (#39)
+- [`2026-09-07T231507Z`](docs/performance-audits/2026-09-07T231507Z.md) — active-target ABI contexts remove mutable type caches (#39)
+- [`2026-09-07T231146Z`](docs/performance-audits/2026-09-07T231146Z.md) — proven disjoint stack-slot scheduling and conservative unknown-memory ordering (#41)
+- [`2026-09-07T225617Z`](docs/performance-audits/2026-09-07T225617Z.md) — publish scheduler chain membership from immutable machine metadata (#45)
+- [`2026-09-07T225141Z`](docs/performance-audits/2026-09-07T225141Z.md) — remove the unused declarative selector and its unconsumed facts (#42)
+- [`2026-09-07T223310Z`](docs/performance-audits/2026-09-07T223310Z.md) — TLS encoding authority: correct redundant REX relaxation; bound cold recipe preparation
+- [`2026-09-07T222813Z`](docs/performance-audits/2026-09-07T222813Z.md) — production selector audit and guarded replay benchmark
+- [`2026-09-07T212739Z`](docs/performance-audits/2026-09-07T212739Z.md) — FAST owner-mask draft rebased onto sparse contracts: guarded dense SIMD, deterministic output, performance gate still open
 - [`2026-09-07T132245Z`](docs/performance-audits/2026-09-07T132245Z.md) — debug-info correctness and linear CodeView scope scratch (#201-#204)
 - [`2026-09-07T013544Z`](docs/performance-audits/2026-09-07T013544Z.md) — five items take the frozen-tree compile from 9.583,33 M to 9.351,43 M Ir (-2,42%) byte-identically, remove 57,9 MB of per-compile zeroing, and put the matching-delimiter query on a 512-bit windowed scan
 - [`2026-09-06T161430Z`](docs/performance-audits/2026-09-06T161430Z.md) — eight parallel subsystem branches take stage 1 from 8.739,6 M to 7.927,6 M instructions (-9,29%) byte-identically, the per-invocation floor from 149,5 M to 91,2 M, and re-price the #embed route out of the ranking
