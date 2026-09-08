@@ -15,6 +15,7 @@
 
 #include <buster/lib/base.h>
 
+// Clearing every access flag makes the pages inaccessible.
 typedef struct ProtectionFlags ProtectionFlags;
 struct ProtectionFlags
 {
