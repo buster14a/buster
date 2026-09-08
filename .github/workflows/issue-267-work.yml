@@ -1,11 +1,12 @@
-name: Issue 267 verified publication
+name: Issue 267 integration snapshot
 on:
   push:
     branches: [work/issue-267-encoding-snapshot]
 permissions:
-  contents: write
+  contents: read
+  actions: write
 jobs:
-  publish:
+  source:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -13,13 +14,22 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Publish exact tested trees
+      - name: Capture refreshed history
+        run: git bundle create "$RUNNER_TEMP/issue-267-refreshed.bundle" --all
+      - name: Dispatch existing CI on the three published branches
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 .issue267/publish.py
+        shell: python
+        run: |
+          import json, os, urllib.request
+          url = 'https://api.github.com/repos/buster14a/buster/actions/workflows/ci.yml/dispatches'
+          for branch in ['fix/267-forwarding-authority', 'fix/267-got-authority', 'fix/267-padding-authority']:
+              request = urllib.request.Request(url, data=json.dumps({'ref': branch}).encode(), method='POST', headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  print(branch, response.status)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-267-published
-          path: ${{ runner.temp }}/published.json
-          retention-days: 7
+          name: issue-267-refreshed
+          path: ${{ runner.temp }}/issue-267-refreshed.bundle
+          retention-days: 1
           if-no-files-found: error
