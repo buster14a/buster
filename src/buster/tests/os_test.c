@@ -163,6 +163,36 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
     UnitTestResult result = {0};
 
+    // Reserve inaccessible pages, commit one, and revoke/restore its access
+    // without discarding its bytes. The other page stays an inaccessible guard.
+    {
+        u64 page_size = os_get_page_size();
+        u8* pages = (u8*)os_reserve(0, page_size * 2u, (ProtectionFlags){0}, (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
+        BUSTER_TEST(arguments, pages != 0);
+        if (pages)
+        {
+            bool committed = os_commit(pages, page_size, (ProtectionFlags){.read = true, .write = true}, false);
+            BUSTER_TEST(arguments, committed);
+            if (committed)
+            {
+                pages[0] = 0x31;
+                pages[page_size - 1] = 0xaf;
+                bool inaccessible = os_protect(pages, page_size, (ProtectionFlags){0});
+                BUSTER_TEST(arguments, inaccessible);
+                if (inaccessible)
+                {
+                    bool restored = os_protect(pages, page_size, (ProtectionFlags){.read = true, .write = true});
+                    BUSTER_TEST(arguments, restored);
+                    if (restored)
+                    {
+                        BUSTER_TEST(arguments, pages[0] == 0x31 && pages[page_size - 1] == 0xaf);
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, os_unreserve(pages, page_size * 2u));
+        }
+    }
+
     // Releasing the selected context must clear TLS before its arenas go
     // away. No scratch-backed operation is valid while TLS is empty, so
     // restore the process's main context immediately after observing it.

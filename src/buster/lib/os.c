@@ -360,6 +360,10 @@ BUSTER_GLOBAL_LOCAL DWORD os_windows_protection_flags(ProtectionFlags flags)
     {
         result = PAGE_EXECUTE;
     }
+    else if (!flags.write)
+    {
+        result = PAGE_NOACCESS;
+    }
     else
     {
         BUSTER_UNREACHABLE();
