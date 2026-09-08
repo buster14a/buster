@@ -203,6 +203,16 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `IR_OPCODE_LOAD` or `IR_OPCODE_STORE` and its place -- the pairing the atomic
   opcodes were always validated with. `tests/basic_c_volatile_aggregate.c` pins
   both directions of the qualifier under all four register allocators.
+- Canonical block IDs are graph identities, not an execution order. A valid
+  `IrFunction.entry` may name any block. Native canonical and eBPF emission
+  place that entry first, then retain ID order for the remaining blocks; branch
+  fixups continue to use original block IDs. Incoming argument capture belongs
+  to the declared entry, and debug-location endpoints follow emitted layout,
+  not the next numeric ID. `canonical_entry_test_internal.h` renumbers valid
+  source-derived graphs before emission and checks arguments, joins, loops,
+  native bytes/execution, eBPF execution, and debug ranges. The ordinary C
+  frontend still creates entry ID zero; these regressions protect the shared
+  canonical-IR API rather than claiming it currently emits nonzero entries.
 - Native lowering is `canonical IR -> machine IR -> scheduling/register
   allocation -> encoding`. Selection patterns and scheduling classes remain
   separate metadata domains even when they share instruction-form IDs.
