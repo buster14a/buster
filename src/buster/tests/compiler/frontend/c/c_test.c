@@ -5904,7 +5904,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
                                                              (CPreprocessOptions){0});
     CParseResult pointer_to_array_parse = c_parse(scalar_arena, pointer_to_array_tokens);
     CIRLowerResult pointer_to_array_ir =
-        c_lower_to_ir(scalar_arena, S8("pointer-to-array.c"), pointer_to_array_tokens, pointer_to_array_parse, lp64_target);
+        c_lower_to_ir_with_options(scalar_arena, S8("pointer-to-array.c"), pointer_to_array_tokens, pointer_to_array_parse, lp64_target,
+                                   (CIRLowerOptions){.disable_direct_ssa = true});
     BUSTER_TEST(arguments, pointer_to_array_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, pointer_to_array_ir.diagnostic_count == 0);
     if (pointer_to_array_ir.program)
@@ -6458,9 +6459,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
             store_count += opcode == IR_OPCODE_STORE;
         }
         BUSTER_TEST(arguments, function->local_count == 1);
-        BUSTER_TEST(arguments, local_count == 1);
-        BUSTER_TEST(arguments, load_count == 2);
-        BUSTER_TEST(arguments, store_count == 2);
+        BUSTER_TEST(arguments, local_count == 0);
+        BUSTER_TEST(arguments, load_count == 0);
+        BUSTER_TEST(arguments, store_count == 0);
         BUSTER_TEST(arguments, ir_validate_canonical_module(local_ir.program, &local_ir.program->modules[0]).error == IR_VALIDATION_NONE);
     }
     {
@@ -6498,7 +6499,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
                 memory_access_count += memory_access;
                 volatile_access_count += memory_access && instruction->volatile_access;
             }
-            BUSTER_TEST(arguments, memory_access_count > volatile_access_count && volatile_access_count == 8);
+            BUSTER_TEST(arguments, memory_access_count == volatile_access_count && volatile_access_count == 8);
             BUSTER_TEST(arguments, ir_validate_canonical_module(volatile_ir.program, &volatile_ir.program->modules[0]).error == IR_VALIDATION_NONE);
             BUSTER_TEST(arguments, volatile_ir.program->modules[0].function_count == 2);
             if (volatile_ir.program->modules[0].function_count == 2)
@@ -6663,7 +6664,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
     BUSTER_TEST(arguments, auto_initializer_token < auto_type_tokens.token_count);
     BUSTER_TEST(arguments, initializer_entity.value == outer_value.value);
     BUSTER_TEST(arguments, initializer_entity.value != inner_value.value);
-    CIRLowerResult auto_type_ir = c_lower_to_ir(arguments->arena, S8("auto-type-frontend.c"), auto_type_tokens, auto_type_parse, target_native);
+    CIRLowerResult auto_type_ir = c_lower_to_ir_with_options(arguments->arena, S8("auto-type-frontend.c"), auto_type_tokens, auto_type_parse, target_native,
+                                                        (CIRLowerOptions){.disable_direct_ssa = true});
     BUSTER_TEST(arguments, auto_type_ir.diagnostic_count == 0);
     if (auto_type_ir.program)
     {
@@ -8170,7 +8172,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
         IrFunction* identity = module->functions;
         IrType* identity_type = ir_type_from_id(&argument_ir.program->types, identity->canonical_type);
         BUSTER_TEST(arguments, identity_type->parameter_count == 1);
-        BUSTER_TEST(arguments, identity->instructions[1].opcode == IR_OPCODE_ARGUMENT);
+        BUSTER_TEST(arguments, identity->instructions[0].opcode == IR_OPCODE_ARGUMENT);
         IrFunction* main_function = module->functions + 1;
         u32 call_count = 0;
         u32 comparison_count = 0;
@@ -8592,7 +8594,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_comma_assignment(UnitTestA
                 store_count += opcode == IR_OPCODE_STORE;
             }
             BUSTER_TEST(arguments, call_count == 1);
-            BUSTER_TEST(arguments, store_count >= 1);
+            BUSTER_TEST(arguments, store_count == 0);
         }
         BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, module).error == IR_VALIDATION_NONE);
         IrFunction* integer_function = c_test_find_ir_function(module, S8("fast_macro_integer_shape"));
@@ -8608,7 +8610,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_comma_assignment(UnitTestA
                 store_count += opcode == IR_OPCODE_STORE;
             }
             BUSTER_TEST(arguments, call_count == 1);
-            BUSTER_TEST(arguments, store_count >= 2);
+            BUSTER_TEST(arguments, store_count == 0);
         }
         IrFunction *control_function = c_test_find_ir_function(module, S8("lex_control_shape"));
         BUSTER_TEST(arguments, control_function != 0);
@@ -9746,7 +9748,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
                                                        " }\n"),
                                                     (CPreprocessOptions){0});
     CParseResult alignas_parse = c_parse(alignas_temporary.arena, alignas_tokens);
-    CIRLowerResult alignas_ir = c_lower_to_ir(alignas_temporary.arena, S8("alignas.c"), alignas_tokens, alignas_parse, target_native);
+    CIRLowerResult alignas_ir = c_lower_to_ir_with_options(alignas_temporary.arena, S8("alignas.c"), alignas_tokens, alignas_parse, target_native,
+                                                      (CIRLowerOptions){.disable_direct_ssa = true});
     BUSTER_TEST(arguments, alignas_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, alignas_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, alignas_ir.diagnostic_count == 0);
@@ -10684,7 +10687,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                        " default: 3); }\n"),
                                                     (CPreprocessOptions){0});
     CParseResult generic_parse = c_parse(generic_temporary.arena, generic_tokens);
-    CIRLowerResult generic_ir = c_lower_to_ir(generic_temporary.arena, S8("generic.c"), generic_tokens, generic_parse, target_native);
+    CIRLowerResult generic_ir = c_lower_to_ir_with_options(generic_temporary.arena, S8("generic.c"), generic_tokens, generic_parse, target_native,
+                                                      (CIRLowerOptions){.disable_direct_ssa = true});
     BUSTER_TEST(arguments, generic_tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, generic_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, generic_ir.diagnostic_count == 0);
@@ -13359,6 +13363,223 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_malformed_initializer_progress_and_ide
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct DirectSsaCase
+    {
+        String8 source;
+        u32 direct_locals;
+        u32 memory_locals;
+        bool pointee_memory;
+    } cases[] = {
+        {S8("int test(int x){int y=x+3;y+=x;return y;}"), 2, 0, false},
+        {S8("int test(int x,int c){if(c)x+=3;else x-=2;return x;}"), 2, 0, false},
+        {S8("int test(int n){int s=0;for(int i=0;i<n;++i)s+=i;return s;}"), 3, 0, false},
+        {S8("int test(int a,int b,int n){while(n-->0){int t=a;a=b;b=t;}return a*10+b;}"), 4, 0, false},
+        {S8("int test(int x){(x)=4;((x))+=2;++(x);(x)++;return x;}"), 1, 0, false},
+        {S8("double test(double x,int c){double y=2.5;if(c)y=x;return y;}"), 3, 0, false},
+        {S8("int* test(int* a,int* b,int c){int* p=a;if(c)p=b;return p;}"), 4, 0, false},
+        {S8("typedef int V __attribute__((vector_size(16)));V test(V a,V b,int c){V v=a;if(c)v=b;return v;}"), 4, 0, false},
+        {S8("int test(int c){int x;if(c)x=3;return x;}"), 1, 1, false},
+        {S8("int test(void){int x=x;return x;}"), 0, 1, false},
+        {S8("int test(int c){int y;int x=y;if(c)x+=1;return x;}"), 2, 1, false},
+        {S8("int test(int c){int y;int x=1;if(c)x=y;return x;}"), 2, 1, false},
+        {S8("int test(signed char x){x+=1;return x;}"), 0, 1, false},
+        {S8("int test(int x){volatile int y=x;y+=2;return y;}"), 1, 1, false},
+        {S8("int test(int x){_Atomic int y=x;return y;}"), 1, 1, false},
+        {S8("void test(int x){}"), 1, 0, false},
+        {S8("int test(int x){return x;x=99;}"), 1, 0, false},
+        {S8("int test(int x){int y=1;while(0)y=x;return y;}"), 2, 0, false},
+        {S8("int test(int x){int y=0;if(x){int x=7;y=x;}return y;}"), 3, 0, false},
+        // Actual place escapes reject only their owner. Ordinary calls,
+        // switches and gotos preserve direct SSA; non-local effects and
+        // dynamic storage retain the independent memory-form contract.
+        {S8("int test(int x){int* p=&x;*p=4;return x;}"), 1, 1, false},
+        {S8("int test(int x){goto done;done:return x;}"), 1, 0, false},
+        {S8("int test(int x){switch(x){case 1:return 2;default:return 3;}}"), 1, 0, false},
+        {S8("int callee(int);int test(int x){return callee(x);}"), 1, 0, false},
+        {S8("int test(int (*p)(int),int x){return p(x);}"), 0, 2, false},
+        {S8("int test(int n){int a[n];a[0]=2;return a[0];}"), 0, 2, false},
+        {S8("int test(int c){int x;if(c)x=3;else x=7;return x;}"), 2, 0, false},
+        {S8("int test(int c){int x;if(c)goto a;x=2;goto end;a:x=7;end:return x;}"), 2, 0, false},
+        {S8("int test(int c){int x=1;switch(c){case 1:x=3;break;case 2:x+=4;default:x+=7;}return x;}"), 2, 0, false},
+        {S8("int test(int c){int x=0;start:if(c-->0){x+=c;goto start;}return x;}"), 2, 0, false},
+        {S8("int test(int x,int y){return x && y;}"), 3, 0, false},
+        {S8("int test(int x,int y,int c){return c ? x : y;}"), 4, 0, false},
+        {S8("int test(void){return (int){7};}"), 1, 0, false},
+        {S8("int test(int x){int y=x+1;int* p=&x;*p=9;return y+x;}"), 2, 1, false},
+        {S8("void sink(int*);int test(int x){int y=x+1;sink(&x);return y+x;}"), 1, 1, false},
+        {S8("int test(int x){_Alignas(64) int y=x;int* p=&y;*p+=1;return y;}"), 2, 1, false},
+        {S8("int test(int a[4],int n){int x=0;for(int i=0;i<n;++i)x+=a[i];return x;}"), 4, 0, true},
+        {S8("int test(int c){int x;if(c)goto done;x=3;done:return x;}"), 1, 1, false},
+        {S8("int setjmp(void*);int test(void* p,int x){x+=1;setjmp(p);return x;}"), 0, 2, false},
+    };
+    String8 targets[] = {
+        S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"),
+        S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TargetParseResult target = target_parse_triple(targets[target_index]);
+        BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            struct DirectSsaCase test = cases[case_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, test.source,
+                (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target)});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("direct-ssa.c"), tokens, parse, target.target);
+            CIRLowerResult reference = c_lower_to_ir_with_options(temporary.arena, S8("direct-ssa.c"), tokens, parse, target.target,
+                (CIRLowerOptions){.disable_direct_ssa = true});
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            BUSTER_TEST_RAW(arguments, direct.program && !direct.diagnostic_count, test.source);
+            BUSTER_TEST(arguments, reference.program && !reference.diagnostic_count);
+            BUSTER_TEST_RAW(arguments, direct.direct_ssa.locals == test.direct_locals, test.source);
+            BUSTER_TEST(arguments, reference.direct_ssa.locals == 0);
+            if (direct.program && reference.program && !direct.diagnostic_count && !reference.diagnostic_count)
+            {
+                IrModule* module = direct.program->modules;
+                IrModule* reference_module = reference.program->modules;
+                IrFunction* function = c_test_find_ir_function(module, S8("test"));
+                IrFunction* reference_function = c_test_find_ir_function(reference_module, S8("test"));
+                BUSTER_TEST(arguments, function && reference_function);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(direct.program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(reference.program, reference_module).error == IR_VALIDATION_NONE);
+                if (function && reference_function)
+                {
+                    u32 memory_locals = 0;
+                    for (u32 index = 0; index < function->instruction_count; index += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + index;
+                        memory_locals += instruction->opcode == IR_OPCODE_LOCAL;
+                        if (instruction->opcode == IR_OPCODE_LOCAL)
+                        {
+                            bool matching_owner = false;
+                            for (u32 old_index = 0; old_index < reference_function->instruction_count; old_index += 1)
+                            {
+                                IrInstruction* old = reference_function->instructions + old_index;
+                                if (old->opcode == IR_OPCODE_LOCAL && old->canonical_local.value == instruction->canonical_local.value)
+                                {
+                                    matching_owner = function->values[instruction->result.value].alignment ==
+                                                     reference_function->values[old->result.value].alignment;
+                                }
+                            }
+                            BUSTER_TEST(arguments, matching_owner);
+                        }
+                        BUSTER_TEST(arguments, function->instruction_canonical_sources[index].source.value != IR_ID_UNDERLYING_INVALID);
+                        if (!test.memory_locals && !test.pointee_memory)
+                        {
+                            BUSTER_TEST(arguments, instruction->opcode != IR_OPCODE_LOAD && instruction->opcode != IR_OPCODE_STORE);
+                        }
+                    }
+                    BUSTER_TEST_RAW(arguments, memory_locals == test.memory_locals, test.source);
+                    BUSTER_TEST(arguments, ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_LOCAL)) == (memory_locals != 0));
+                    if (test.direct_locals)
+                    {
+                        // Selectors consume a complete graph, not only edges
+                        // carrying parameters. Check it before shared preparation
+                        // can reconstruct absent predecessor metadata.
+                        for (u32 block = 0; block < function->block_count; block += 1)
+                        {
+                            IrBlock* destination = function->blocks + block;
+                            u32 predecessor_count = 0;
+                            for (u32 source = 0; source < function->block_count; source += 1)
+                            {
+                                IrInstruction* terminator = function->instructions + function->blocks[source].last_instruction.value;
+                                bool edge = false;
+                                for (u32 target_id = 0; target_id < terminator->target_count; target_id += 1)
+                                {
+                                    edge |= terminator->targets[target_id].value == block;
+                                }
+                                u32 matches = 0;
+                                for (IrPredecessor* predecessor = destination->first_predecessor; predecessor; predecessor = predecessor->next)
+                                {
+                                    matches += predecessor->block.value == source;
+                                }
+                                BUSTER_TEST(arguments, matches == (u32)edge);
+                                predecessor_count += edge;
+                            }
+                            BUSTER_TEST(arguments, destination->sealed && destination->predecessor_count == predecessor_count);
+                        }
+                    }
+                    BUSTER_TEST(arguments, function->local_count == reference_function->local_count);
+                    BUSTER_TEST(arguments, function->debug_local_count == reference_function->debug_local_count);
+                    for (u32 index = 0; index < function->debug_local_count; index += 1)
+                    {
+                        IrDebugLocal* local = function->debug_locals + index;
+                        IrDebugLocal* old = reference_function->debug_locals + index;
+                        BUSTER_STRING_TEST(arguments, local->name, old->name);
+                        BUSTER_TEST(arguments, local->type.value == old->type.value && local->id.value == old->id.value &&
+                                               local->scope_depth == old->scope_depth && local->is_parameter == old->is_parameter);
+                    }
+                    direct.program->disable_target_local_promotion = true;
+                    reference.program->disable_target_local_promotion = true;
+                    BUSTER_TEST(arguments, ir_prepare_canonical_module(direct.program, module, false).error == IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, ir_prepare_canonical_module(reference.program, reference_module, false).error == IR_VALIDATION_NONE);
+                    // Different value numbering is intentional: direct joins
+                    // are created at reads, not appended by a later pass.
+                    // The two fully supported paths must still emit the same
+                    // operation census after the independent reference pass.
+                    if (!test.memory_locals)
+                    {
+                        u32 direct_opcodes[IR_OPCODE_COUNT] = {0};
+                        u32 reference_opcodes[IR_OPCODE_COUNT] = {0};
+                        for (u32 index = 0; index < function->instruction_count; index += 1)
+                        {
+                            direct_opcodes[function->instructions[index].opcode] += 1;
+                        }
+                        for (u32 index = 0; index < reference_function->instruction_count; index += 1)
+                        {
+                            reference_opcodes[reference_function->instructions[index].opcode] += 1;
+                        }
+                        if (!reference_opcodes[IR_OPCODE_LOCAL])
+                        {
+                            BUSTER_TEST_RAW(arguments, memory_compare(direct_opcodes, reference_opcodes, sizeof(direct_opcodes)), test.source);
+                        }
+                        else
+                        {
+                            // The reference conservatively retains locals read in
+                            // unreachable blocks; the frontend already knows their
+                            // initialized definitions and needs no memory rows.
+                            BUSTER_TEST(arguments, function->instruction_count < reference_function->instruction_count);
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    String8 invalid[] = {
+        S8("int test(void){const int x=3;x=4;return x;}"),
+        S8("int test(int x){return not_declared+x;}"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, invalid[index], (CPreprocessOptions){0});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult direct = c_analyze(temporary.arena, S8("direct-ssa-diagnostic.c"), tokens, syntax, target_native);
+        CIRLowerResult reference = c_analyze_with_options(temporary.arena, S8("direct-ssa-diagnostic.c"), tokens, syntax, target_native,
+            (CIRLowerOptions){.disable_direct_ssa = true});
+        BUSTER_TEST(arguments, direct.diagnostic_count && direct.diagnostic_count == reference.diagnostic_count);
+        if (direct.diagnostic_count == reference.diagnostic_count)
+        {
+            for (u32 diagnostic = 0; diagnostic < direct.diagnostic_count; diagnostic += 1)
+            {
+                CDiagnostic* current = direct.diagnostics + diagnostic;
+                CDiagnostic* old = reference.diagnostics + diagnostic;
+                BUSTER_STRING_TEST(arguments, current->message, old->message);
+                BUSTER_TEST(arguments, current->kind == old->kind && current->location.line == old->location.line &&
+                                       current->location.column == old->location.column);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -13385,6 +13606,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_call_arity_diagnostics(arguments));
     c_test_result_add(&result, c_test_function_body_sizeof_expression(arguments));
     c_test_result_add(&result, c_test_frontend_control_flow(arguments));
+    c_test_result_add(&result, c_test_direct_ssa(arguments));
     c_test_result_add(&result, c_test_for_declaration_scopes(arguments));
     c_test_result_add(&result, c_test_then_nested_conditionals(arguments));
     c_test_result_add(&result, c_test_conditional_type_prediction(arguments));
@@ -14092,7 +14314,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             assignment_temporary.arena, (String8){.pointer = assignment_source_pointer, .length = assignment_source_length}, (CPreprocessOptions){0});
         CParseResult assignment_parse = c_parse(assignment_temporary.arena, assignment_tokens);
         CIRLowerResult assignment_lowered =
-            c_lower_to_ir(assignment_temporary.arena, S8("assignment-stress.c"), assignment_tokens, assignment_parse, target_native);
+            c_lower_to_ir_with_options(assignment_temporary.arena, S8("assignment-stress.c"), assignment_tokens, assignment_parse, target_native,
+                                       (CIRLowerOptions){.disable_direct_ssa = true});
         BUSTER_TEST(arguments, assignment_tokens.diagnostic_count == 0);
         BUSTER_TEST(arguments, assignment_parse.diagnostic_count == 0);
         BUSTER_TEST(arguments, assignment_lowered.diagnostic_count == 0);
@@ -14245,8 +14468,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
                 compound_store_count += opcode == IR_OPCODE_STORE;
                 compound_return_count += opcode == IR_OPCODE_RETURN;
             }
-            BUSTER_TEST(arguments, compound_local_count >= C_IR_COMPOUND_LITERAL_STRESS_DEPTH);
-            BUSTER_TEST(arguments, compound_store_count >= C_IR_COMPOUND_LITERAL_STRESS_DEPTH);
+            BUSTER_TEST(arguments, compound_local_count == 0 && compound_stress_lowered.direct_ssa.temporaries == C_IR_COMPOUND_LITERAL_STRESS_DEPTH);
+            BUSTER_TEST(arguments, compound_store_count == 0);
             BUSTER_TEST(arguments, compound_return_count == 1);
             BUSTER_TEST(arguments, ir_validate_canonical_module(compound_stress_lowered.program, compound_stress_lowered.program->modules).error ==
                                        IR_VALIDATION_NONE);

@@ -16080,7 +16080,8 @@ CParseResult c_parse(Arena* arena, CPreprocessResult preprocess)
 }
 
 #if !BUSTER_UNITY_BUILD
-CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target)
+CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target,
+                                     CIRLowerOptions options)
 {
     CIRLowerResult result = {0};
     CAnalysisResult analysis = c_analyze_semantics(arena, preprocess, syntax);
@@ -16088,8 +16089,16 @@ CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult pr
     {
         result.diagnostics = analysis.diagnostics;
         result.diagnostic_count = analysis.diagnostic_count;
-        return result;
     }
-    return c_lower_to_ir(arena, source_path, preprocess, analysis, target);
+    else
+    {
+        result = c_lower_to_ir_with_options(arena, source_path, preprocess, analysis, target, options);
+    }
+    return result;
+}
+
+CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target)
+{
+    return c_analyze_with_options(arena, source_path, preprocess, syntax, target, (CIRLowerOptions){0});
 }
 #endif

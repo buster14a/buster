@@ -1233,9 +1233,31 @@ struct CParseResult
 typedef CParseResult CAnalysisResult;
 
 typedef struct IrProgram IrProgram;
+// Keep the memory-form frontend available as an independent differential
+// reference for direct SSA; the shared canonical promotion pass remains intact.
+typedef struct CIRLowerOptions CIRLowerOptions;
+struct CIRLowerOptions
+{
+    bool disable_direct_ssa;
+};
+
+typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;
+struct CIRDirectSsaStatistics
+{
+    u64 functions;
+    u64 locals;
+    u64 reads;
+    u64 writes;
+    u64 parameters_created;
+    u64 parameters_removed;
+    u64 fallback_locals;
+    u64 temporaries;
+};
+
 typedef struct CIRLowerResult CIRLowerResult;
 struct CIRLowerResult
 {
+    CIRDirectSsaStatistics direct_ssa;
     IrProgram* program;
     CDiagnostic* diagnostics;
     u32 diagnostic_count;
@@ -1323,7 +1345,11 @@ BUSTER_F_DECL CTypeAlignment const* c_parse_type_alignment(CParseResult const* r
 BUSTER_F_DECL CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 BUSTER_F_DECL CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target);
+BUSTER_F_DECL CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target,
+                                                  CIRLowerOptions options);
 BUSTER_F_DECL CParseResult c_parse(Arena* arena, CPreprocessResult preprocess);
 // Compatibility entry point for tests and callers that already own an analyzed model.
 BUSTER_F_DECL CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult analysis, Target target);
+BUSTER_F_DECL CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult analysis,
+                                                      Target target, CIRLowerOptions options);
 BUSTER_F_DECL String8 c_token_kind_name(CTokenKind kind);

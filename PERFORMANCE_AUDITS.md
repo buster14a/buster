@@ -52,6 +52,8 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-08T143633Z`](docs/performance-audits/2026-09-08T143633Z.md) — Frontend SSA: per-owner escape recovery, expression temporaries and complete CFG construction
+- [`2026-09-08T043530Z`](docs/performance-audits/2026-09-08T043530Z.md) — Direct frontend SSA: bounded construction, differential validation and compile-time measurements
 - [`2026-09-07T233720Z`](docs/performance-audits/2026-09-07T233720Z.md) — direct old/new ABI service timing on the same scalar and aggregate query traces (#39)
 - [`2026-09-07T231507Z`](docs/performance-audits/2026-09-07T231507Z.md) — active-target ABI contexts remove mutable type caches (#39)
 - [`2026-09-07T231146Z`](docs/performance-audits/2026-09-07T231146Z.md) — proven disjoint stack-slot scheduling and conservative unknown-memory ordering (#41)

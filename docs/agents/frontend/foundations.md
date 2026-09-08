@@ -4,6 +4,78 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Direct local SSA (GitHub #34)
+
+`c_ir_ssa_*` in `c_gen.c` constructs pruned canonical block-argument SSA for
+supported scalar parameters, automatic locals and compiler-generated scalar
+expression temporaries. The shared `ir_local_type_promotable` predicate keeps
+representation and narrow-integer normalization rules identical to canonical
+promotion. Ordinary pointers, supported integers/floats and fixed vectors are
+eligible. Narrow-normalizing, volatile/atomic, static, thread-local and
+cleanup-managed owners retain memory form.
+
+Eligibility is per owner, not a function-wide token blacklist. Normal calls,
+address-taking, aggregates beside scalar locals, adjusted array parameters,
+field/index expressions, scalar compound literals, statement expressions,
+logical/conditional expressions, switch and ordinary goto do not disqualify
+unrelated locals. Actual lowered place uses determine escapes and subobject or
+mismatched-width accesses. A worklist detects missing reaching definitions;
+a declaration without an initializer is supported when all reads are defined.
+No uninitialized value is invented. Entry-initialized owners need only one
+initialization proof; every journaled store's RHS is an independent root so
+copying another uninitialized owner is still caught.
+
+Each owner is wholly SSA or wholly memory at publication. A compact operation
+journal records elided declaration/load/store sites, source ranges and original
+instruction anchors, not canonical instruction rows or another frontend IR.
+An escaping or may-uninitialized owner is restored at **all** original sites,
+including writes before the escape and across blocks. Restored loads cease to
+be aliases before parameter simplification. Existing instruction IDs, extras,
+source ranges, value alignment, qualifiers and canonical-local IDs remain
+intact. Private temporary owners do not pollute the named debug-local table.
+
+Indirect calls, known non-local-jump calls, dynamic-stack operations, label
+addresses/computed goto and inline assembly retain the conservative shared
+promotion barrier contract. Label-address and assembly syntax are declined
+before lowering where the existing provenance machinery requires memory;
+other barriers restore all journaled owners. Shared promotion remains the
+independent fallback for every retained memory owner.
+
+The current-value table is sparse `(block, owner)` state, not a blocks × locals
+matrix. Unresolved reads create provisional block parameters. Sealing waits
+until all backedges and goto predecessors are known; an iterative queue fills
+incoming values, forwarding through single-predecessor chains. Trivial
+parameters and unused parameter cycles are removed. Disconnected empty label
+blocks have no outgoing edge. Publication includes **every** predecessor edge,
+including parameter-free destinations; selectors must never see a partial CFG.
+
+Temporary places and read aliases preserve C lvalue/qualifier checks without
+emitting `LOCAL`, `LOAD` or `STORE` rows for promoted owners. Finalization
+resolves aliases and compacts values/operand slices. Debug-local names, types,
+IDs, scopes and source ranges are preserved; frontend entity IDs do not escape.
+The existing conservative opcode summary also tracks `LOCAL`, so shared
+promotion skips its discovery scan for certified functions with no memory
+locals. Unknown summaries still scan and the shared algorithm stays independent.
+
+`c_lower_to_ir_with_options` and `c_analyze_with_options` expose the memory-form
+reference through `CIRLowerOptions.disable_direct_ssa`. `ide cc
+-fno-frontend-ssa` selects it; `-ffrontend-ssa` restores the default. Neither
+changes canonical or target-local promotion switches. `-v` reports
+`IR_FRONTEND_SSA` functions, promoted owners (including temporaries), eliminated
+reads/writes, provisional/removed parameters, temporary-owner count and
+restored-owner count. Source locals excluded before journaling are not included
+in `fallback_locals`. Shared-promotion tests explicitly select the reference,
+so direct construction cannot make their coverage vacuous.
+
+`c_test_direct_ssa` checks raw output on x86-64, AArch64, Wasm64 and eBPF layouts,
+complete CFG publication, opcode census, initialization/escape ownership,
+alignment, diagnostics and debug provenance. `tests/basic_c_frontend_ssa.c` is
+registered in the existing native driver matrix for both frontend paths, with
+target-local promotion disabled. It covers irreducible joins, switch fallthrough,
+late escape, scalar temporaries, bitfields and dynamic-stack fallback. Native
+machine tests exercise vector block parameters as well as preserving the
+independent legacy mutable-register and pressure-census contracts.
+
 ## C frontend and canonical IR rules
 
 - The public frontend API is `compiler/frontend/c/c.h`. In non-unity builds the

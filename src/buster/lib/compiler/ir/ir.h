@@ -494,14 +494,13 @@ BUSTER_CT_CHECK((u32)IR_ATOMIC_OPERATION_COUNT <= UINT8_MAX);
 #define IR_OPCODE_BIT(opcode) ((u64)1 << (u32)(opcode))
 #define IR_OPCODE_SUMMARY_KNOWN ((u64)1 << 63)
 BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT < 63);
-// Only these opcodes are recorded, and each one is rare enough that the
-// summary answers for nearly every function without a scan: six of the 3,814
-// functions in a self-compile hold an atomic or an inline-assembly row. The
-// appender's common path is therefore one bit test against this constant and
-// no store at all. An opcode absent from this list is never recorded and must
-// never be queried: add it here in the same change that adds the query.
+// Record the opcodes queried by canonical consumers. LOCAL lets the shared
+// promotion oracle skip its discovery scan for frontend-built SSA functions;
+// the atomic/assembly bits retain the existing rare-operation fast paths.
+// An opcode absent from this list must never be queried: add it here in the
+// same change that adds the query. Unknown summaries remain conservative.
 #define IR_OPCODE_SUMMARY_TRACKED                                                                                                      \
-    (IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) | IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) |          \
+    (IR_OPCODE_BIT(IR_OPCODE_LOCAL) | IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) | IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) |          \
      IR_OPCODE_BIT(IR_OPCODE_ATOMIC_STORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE) |                                       \
      IR_OPCODE_BIT(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) | IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY))
 
@@ -897,4 +896,8 @@ BUSTER_F_DECL IrValidationResult ir_validate_canonical_module(IrProgram* program
 // locals once, and revalidate changed IR before publishing it to a consumer.
 // Mutates only arena-owned canonical rows and their side tables. Unsafe locals
 // remain in memory; there is no implicit zero/undef initialization.
+// Shared storage-normalization contract for canonical and frontend promotion.
+BUSTER_F_DECL bool ir_local_type_promotable(IrProgram* program, IrTypeId type);
+// The direct builder and reference pass share the conservative call-effect boundary.
+BUSTER_F_DECL bool ir_local_promotion_call_barrier(IrProgram* program, IrInstruction const* row);
 BUSTER_F_DECL IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool assume_validated);

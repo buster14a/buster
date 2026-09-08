@@ -125,6 +125,7 @@ struct CompilerDriverInvocation
     bool verbose;
     bool no_standard_includes;
     bool debug_info;
+    bool disable_direct_ssa;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
     // A CodegenRegisterAllocatorMode value. FAST is the driver default;
@@ -151,6 +152,7 @@ typedef struct CompilerDriverResult CompilerDriverResult;
 struct CompilerDriverResult
 {
     IrLocalPromotionStatistics local_promotion;
+    CIRDirectSsaStatistics direct_ssa;
     String8 diagnostic;
     String8 warning;
     String8 output;

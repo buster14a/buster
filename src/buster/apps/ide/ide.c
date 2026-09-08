@@ -896,6 +896,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     }
     if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose)
     {
+        CIRDirectSsaStatistics direct = compile.direct_ssa;
+        string_print(S8("IR_FRONTEND_SSA functions={u64} locals={u64} reads={u64} writes={u64} "
+                        "parameters_created={u64} parameters_removed={u64} temporaries={u64} fallback_locals={u64}\n"),
+                     direct.functions, direct.locals, direct.reads, direct.writes, direct.parameters_created, direct.parameters_removed,
+                     direct.temporaries, direct.fallback_locals);
         IrLocalPromotionStatistics p = compile.local_promotion;
         string_print(S8("IR_LOCAL_PROMOTION candidates={u64} promoted={u64} loads_removed={u64} stores_removed={u64} "
                         "parameters_inserted={u64} parameters_removed={u64} uninitialized={u64} barriers={u64} "
