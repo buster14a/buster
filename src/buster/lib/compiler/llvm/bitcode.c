@@ -3570,11 +3570,13 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         u32 switch_count = 0;
         switch_operands[switch_count++] = llvm_bc_function_value_type_id(context, record, condition_id);
         switch_operands[switch_count++] = (u32)(*current_value_id - llvm_bc_function_value_id(context, record, condition_id));
-        switch_operands[switch_count++] = llvm_bc_function_block_index(context, record, instruction->targets[0]);
+        // Canonical IR pairs each case key with targets[i] and stores default
+        // last; LLVM serializes default before the case pairs.
+        switch_operands[switch_count++] = llvm_bc_function_block_index(context, record, instruction->targets[instruction->immediate_count]);
         for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
         {
             switch_operands[switch_count++] = llvm_bc_scalar_integer_constant(context, condition_type, instruction->immediates[case_index], false);
-            switch_operands[switch_count++] = llvm_bc_function_block_index(context, record, instruction->targets[case_index + 1]);
+            switch_operands[switch_count++] = llvm_bc_function_block_index(context, record, instruction->targets[case_index]);
         }
         llvm_bc_record(&context->stream, LLVM_BC_FUNC_SWITCH, switch_operands, switch_count);
         break;
