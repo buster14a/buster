@@ -3328,7 +3328,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         }
         String8 mir_path = string_format_z(arena, S8("{S8}.mir"), invocation.bootstrap_trace_prefix);
         mir_trace = bootstrap_trace_open(arena, mir_path, S8("selected MIR"));
-        bootstrap_trace_u64(&mir_trace, invocation.target.cpu_arch);
+        bootstrap_trace_u64(&mir_trace, (u64)invocation.target.cpu_arch);
         bootstrap_trace_u64(&mir_trace, invocation.register_allocator);
         bootstrap_trace_u64(&mir_trace, invocation.position_independent);
         if (mir_trace.failed)

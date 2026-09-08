@@ -415,7 +415,7 @@ void bootstrap_trace_machine(BootstrapTrace* trace, IrFunction* function, Machin
     bootstrap_trace_string(trace, function->name);
     bootstrap_trace_u64(trace, function->id.value);
     bootstrap_trace_u64(trace, selected->supported);
-    bootstrap_trace_u64(trace, selected->failed_opcode);
+    bootstrap_trace_u64(trace, (u64)selected->failed_opcode);
     if (selected->supported)
     {
         MachineFunction* machine = &selected->function;
