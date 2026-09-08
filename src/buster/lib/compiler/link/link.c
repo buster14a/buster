@@ -7360,6 +7360,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 };
             }
             PdbModule* pdb_modules = arena_allocate(arena, PdbModule, object->debug_module_count);
+            PdbContribution* pdb_contributions = arena_allocate(arena, PdbContribution, object->debug_module_count);
             u64 identity_size = base_file_size;
             for (u32 module_index = 0; module_index < object->debug_module_count && result.error == LINK_ERROR_NONE; module_index += 1)
             {
@@ -7367,7 +7368,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 ByteSlice symbols =
                     link_pe_resolved_codeview(arena, object, source, object_output_sections, object_section_offsets, pe_section_count);
                 if (!symbols.pointer || source->types_offset > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length ||
-                    source->types_size > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length - source->types_offset)
+                    source->types_size > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length - source->types_offset ||
+                    object_section_offsets[OBJECT_SECTION_TEXT] > UINT32_MAX ||
+                    source->code_offset > UINT32_MAX - object_section_offsets[OBJECT_SECTION_TEXT] || source->code_size > UINT32_MAX)
                 {
                     result.error = LINK_ERROR_OBJECT_WRITE;
                 }
@@ -7384,8 +7387,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                         .codeview_symbols = symbols,
                         .codeview_types = (ByteSlice){.pointer = types, .length = source->types_size},
                         .code_offset = (u32)(object_section_offsets[OBJECT_SECTION_TEXT] + source->code_offset),
-                        .code_size = (u32)BUSTER_MIN(source->code_size, UINT32_MAX),
+                        .code_size = (u32)source->code_size,
                         .code_section = 1,
+                        .contributions = pdb_contributions + module_index,
+                        .contribution_count = source->code_size != 0,
+                    };
+                    pdb_contributions[module_index] = (PdbContribution){
+                        .section = 1,
+                        .offset = pdb_modules[module_index].code_offset,
+                        .size = pdb_modules[module_index].code_size,
                     };
                     identity_size += source->name.length + symbols.length + source->types_size + 16;
                 }
@@ -8496,6 +8506,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
                 };
             }
             PdbModule* pdb_modules = arena_allocate(arena, PdbModule, object->debug_module_count);
+            PdbContribution* pdb_contributions = arena_allocate(arena, PdbContribution, object->debug_module_count);
             u64 identity_size = base_file_size;
             for (u32 module_index = 0; module_index < object->debug_module_count && result.error == LINK_ERROR_NONE; module_index += 1)
             {
@@ -8530,6 +8541,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
                         .code_offset = (u32)source->code_offset,
                         .code_size = (u32)source->code_size,
                         .code_section = sections[PE_SECTION_TEXT].output_index + 1,
+                        .contributions = pdb_contributions + module_index,
+                        .contribution_count = source->code_size != 0,
+                    };
+                    pdb_contributions[module_index] = (PdbContribution){
+                        .section = pdb_modules[module_index].code_section,
+                        .offset = pdb_modules[module_index].code_offset,
+                        .size = pdb_modules[module_index].code_size,
                     };
                 }
             }

@@ -596,7 +596,7 @@ BUSTER_C_INTERNAL bool c_parse_declaration_keyword_at(CParseResult* result, CPre
 
 BUSTER_C_SHARED void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message)
 {
-    BUSTER_CHECK(result->diagnostic_count < result->diagnostic_capacity);
+    BUSTER_VALIDATE(result->diagnostic_count < result->diagnostic_capacity);
     result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
         .message = message,
         .location = location,
@@ -4845,9 +4845,18 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
         .root = true,
     };
     u64 count = 0;
+    u64 progress_budget = ((u64)span + 1) * ((u64)span + 1);
     while (frame_count)
     {
         CParseInitializerInferenceFrame* frame = frames + frame_count - 1;
+        if (BUSTER_UNLIKELY(progress_budget == 0))
+        {
+            u32 diagnostic_token = frame->cursor < preprocess.token_count ? frame->cursor : start;
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[diagnostic_token]),
+                               C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("initializer inference made no progress"));
+            return false;
+        }
+        progress_budget -= 1;
         if (!c_initializer_consume_separator(preprocess.tokens, frame->limit, &frame->cursor, frame->next_index))
         {
             return false;
@@ -4860,7 +4869,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             while (frame_count && frames[frame_count - 1].borrowed)
             {
                 frame_count -= 1;
-                if (frame_count)
+                if (frame_count && designated_cursor > frames[frame_count - 1].cursor)
                 {
                     frames[frame_count - 1].cursor = designated_cursor;
                 }
@@ -4882,12 +4891,18 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
         {
             return false;
         }
+        if (!slots && frame->borrowed && frame->cursor < frame->limit)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[frame->cursor]),
+                               C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("invalid brace-elided initializer for incomplete aggregate type"));
+            return false;
+        }
         if (frame->cursor >= frame->limit)
         {
             u32 cursor = frame->cursor;
             bool borrowed = frame->borrowed;
             frame_count -= 1;
-            if (borrowed && frame_count) frames[frame_count - 1].cursor = cursor;
+            if (borrowed && frame_count && cursor > frames[frame_count - 1].cursor) frames[frame_count - 1].cursor = cursor;
             continue;
         }
         if (frame->next_index >= slots && !designated)
@@ -4896,7 +4911,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
             {
                 u32 cursor = frame->cursor;
                 frame_count -= 1;
-                if (frame_count) frames[frame_count - 1].cursor = cursor;
+                if (frame_count && cursor > frames[frame_count - 1].cursor) frames[frame_count - 1].cursor = cursor;
                 continue;
             }
             return false;
@@ -7352,7 +7367,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         if (frame->declarator_start == frame->end && frame->base_type.value < result->type_count &&
             (result->types[frame->base_type.value].kind == C_TYPE_STRUCT || result->types[frame->base_type.value].kind == C_TYPE_UNION))
         {
-            BUSTER_CHECK(result->member_count < result->member_capacity);
+            BUSTER_VALIDATE(result->member_count < result->member_capacity);
             result->members[result->member_count++] = (CMember){
                 .location = c_preprocess_token_location(&frame->preprocess, frame->first),
                 .type = frame->base_type,
@@ -7591,7 +7606,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
     {
         c_parse_add_noreturn_function_type(result, noreturn_function);
     }
-    BUSTER_CHECK(result->member_count < result->member_capacity);
+    BUSTER_VALIDATE(result->member_count < result->member_capacity);
     result->members[result->member_count++] = (CMember){
         .name = c_token_spelling(preprocess.spelling_base, name),
         .location = c_preprocess_token_location(&preprocess, name),
@@ -9635,7 +9650,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                     value = -1 - (s64)(UINT64_MAX - evaluated);
                 }
             }
-            BUSTER_CHECK(result->enum_member_count < result->enum_member_capacity);
+            BUSTER_VALIDATE(result->enum_member_count < result->enum_member_capacity);
             result->enum_members[result->enum_member_count++] = (CEnumMember){
                 .name = c_token_spelling(preprocess.spelling_base, name),
                 .location = c_preprocess_token_location(&preprocess, name),
@@ -10016,7 +10031,7 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
         c_parse_add_noreturn_function_type(result, noreturn_function);
     }
     type = c_parse_adjust_parameter_type(result, type);
-    BUSTER_CHECK(result->parameter_count < result->parameter_capacity);
+    BUSTER_VALIDATE(result->parameter_count < result->parameter_capacity);
     result->parameters[result->parameter_count++] = (CParameter){
         .name = c_token_spelling(preprocess.spelling_base, name),
         .location = c_preprocess_token_location(&preprocess, name),
@@ -11347,7 +11362,7 @@ BUSTER_C_INTERNAL void c_parse_binding_bind(CParseResult* result, CScopeId scope
         {
             if (scope.value)
             {
-                BUSTER_CHECK(result->binding_undo_count < result->binding_undo_capacity);
+                BUSTER_VALIDATE(result->binding_undo_count < result->binding_undo_capacity);
                 result->binding_undo[result->binding_undo_count++] = (CParseBindingUndo){
                     .symbol = symbol,
                     .previous = result->binding_by_symbol[symbol],
@@ -11728,7 +11743,7 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
                                                       CEntityId entity)
 {
     CToken token = preprocess.tokens[token_index];
-    BUSTER_CHECK(result->identifier_use_count < result->identifier_use_capacity);
+    BUSTER_VALIDATE(result->identifier_use_count < result->identifier_use_capacity);
     u32 use_index = result->identifier_use_count++;
     result->identifier_uses[use_index] = (CIdentifierUse){
         .token_index = token_index,
@@ -12529,7 +12544,7 @@ BUSTER_C_INTERNAL void c_parse_bind_statement_expression_body(CTypeParseMachine*
                                                                 CPreprocessResult preprocess, CScopeId scope, u32 declaration_index,
                                                                 u32 body_start, u32 body_end)
 {
-    BUSTER_CHECK(result->scope_count < result->scope_capacity);
+    BUSTER_VALIDATE(result->scope_count < result->scope_capacity);
     CScopeId child = {
         .value = result->scope_count,
     };
@@ -12725,7 +12740,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         CEntityId entity = {
             .value = result->entity_count,
         };
-        BUSTER_CHECK(result->entity_count < result->entity_capacity);
+        BUSTER_VALIDATE(result->entity_count < result->entity_capacity);
         result->entities[result->entity_count++] = (CEntity){
             .name = member->name,
             .location = member->location,
@@ -13051,7 +13066,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         CEntityId entity = {
             .value = result->entity_count,
         };
-        BUSTER_CHECK(result->entity_count < result->entity_capacity);
+        BUSTER_VALIDATE(result->entity_count < result->entity_capacity);
         result->entities[result->entity_count++] = (CEntity){
             .name = c_token_spelling(preprocess.spelling_base, name),
             .location = c_preprocess_token_location(&preprocess, name),
@@ -13873,7 +13888,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
             CScopeId child = {
                 .value = result->scope_count,
             };
-            BUSTER_CHECK(result->scope_count < result->scope_capacity);
+            BUSTER_VALIDATE(result->scope_count < result->scope_capacity);
             result->scopes[result->scope_count++] = (CScope){
                 .parent = parent,
                 .first_entity = C_ENTITY_ID_INVALID,
@@ -13965,7 +13980,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                     CScopeId loop_scope = {
                         .value = result->scope_count,
                     };
-                    BUSTER_CHECK(result->scope_count < result->scope_capacity);
+                    BUSTER_VALIDATE(result->scope_count < result->scope_capacity);
                     result->scopes[result->scope_count++] = (CScope){
                         .parent = parent,
                         .first_entity = C_ENTITY_ID_INVALID,
@@ -13995,6 +14010,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         // body answers the probe below with a plain compare.
         u32 declaration_type_start = statement_start ? c_parse_skip_attributes(preprocess, index, body_end) : body_end;
         bool declaration_type_word = false;
+        bool declaration_type_identifier_bound = false;
         CEntityId declaration_type_entity = C_ENTITY_ID_INVALID;
         if (declaration_type_start < body_end && c_preprocess_token_shape_at(token_shapes, &preprocess, declaration_type_start) == C_TOKEN_IDENTIFIER &&
             c_parse_type_start_token_lookup(result, preprocess, scope_stack[scope_count - 1], preprocess.tokens[declaration_type_start],
@@ -14006,6 +14022,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
             {
                 c_parse_bind_identifier_entity(result_arena, result, preprocess, scope_stack[scope_count - 1], declaration_type_start,
                                                declaration_type_entity);
+                declaration_type_identifier_bound = true;
             }
             u32 end = index;
             u32 delimiter_depth = 0;
@@ -14060,7 +14077,8 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                                     c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
                                                               C_PARSE_AGGREGATE_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(GOTO));
             bool asm_goto_label = asm_goto_label_start != UINT32_MAX && index >= asm_goto_label_start && index < asm_goto_label_end;
-            if (!member && !previous_keyword && !label && !asm_goto_label && !c_parse_declaration_keyword_at(result, preprocess, index) &&
+            if (!(declaration_type_identifier_bound && index == declaration_type_start) && !member && !previous_keyword && !label && !asm_goto_label &&
+                !c_parse_declaration_keyword_at(result, preprocess, index) &&
                 !(index > body_start &&
                   c_parse_label_address_prefix_with_typedef(result, &preprocess, scope_stack[scope_count - 1], body_start, index - 1)) &&
                 !(asm_operand_range_start != UINT32_MAX &&
@@ -14441,7 +14459,7 @@ BUSTER_C_INTERNAL void c_parser_parse_function_body(Arena* arena, CPreprocessRes
         }
         if (!frame->parenthesis_depth && !frame->bracket_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
-            BUSTER_CHECK(frame_count < declaration->body_token_count + 1);
+            BUSTER_VALIDATE(frame_count < declaration->body_token_count + 1);
             frames[frame_count++] = (CParserBlockFrame){
                 .statement_start = index + 1,
             };
@@ -15494,7 +15512,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     result.token_classes = arena_allocate(arena, u8, result.identifier_use_by_token_capacity);
     memset(result.token_classes, 0, sizeof(*result.token_classes) * result.identifier_use_by_token_capacity);
     result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
-    BUSTER_CHECK(result.scope_count < result.scope_capacity);
+    BUSTER_VALIDATE(result.scope_count < result.scope_capacity);
     result.scopes[result.scope_count++] = (CScope){
         .parent = C_SCOPE_ID_INVALID,
         .first_entity = C_ENTITY_ID_INVALID,
@@ -15534,7 +15552,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         CSourceLocation location = kind == C_DECLARATION_ASSEMBLY   ? c_preprocess_token_location(&preprocess, preprocess.tokens[start])
                                    : kind == C_DECLARATION_FUNCTION ? function_location
                                                                     : object_location;
-        BUSTER_CHECK(result.declaration_count < result.declaration_capacity);
+        BUSTER_VALIDATE(result.declaration_count < result.declaration_capacity);
         CDeclaration* declaration = &result.declarations[result.declaration_count++];
         *declaration = (CDeclaration){
             .name = name,
@@ -15788,7 +15806,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
             }
         }
         declaration->entity = entity;
-        BUSTER_CHECK(result.entity_count < result.entity_capacity);
+        BUSTER_VALIDATE(result.entity_count < result.entity_capacity);
         result.entities[result.entity_count++] = (CEntity){
             .name = declaration->name,
             .location = declaration->location,
@@ -15844,7 +15862,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
             CEntityId entity = {
                 .value = result.entity_count,
             };
-            BUSTER_CHECK(result.entity_count < result.entity_capacity);
+            BUSTER_VALIDATE(result.entity_count < result.entity_capacity);
             result.entities[result.entity_count++] = (CEntity){
                 .name = member->name,
                 .location = member->location,
@@ -15963,7 +15981,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
             .value = result.scope_count,
         };
         declaration->scope = scope;
-        BUSTER_CHECK(result.scope_count < result.scope_capacity);
+        BUSTER_VALIDATE(result.scope_count < result.scope_capacity);
         CScope* function_scope = &result.scopes[result.scope_count++];
         *function_scope = (CScope){
             .parent =
@@ -16019,7 +16037,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
                 .value = result.entity_count,
             };
             parameter->entity = entity;
-            BUSTER_CHECK(result.entity_count < result.entity_capacity);
+            BUSTER_VALIDATE(result.entity_count < result.entity_capacity);
             result.entities[result.entity_count++] = (CEntity){
                 .name = parameter->name,
                 .location = parameter->location,
@@ -16052,7 +16070,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     };
     c_parse_validate_unattached_cleanup_attributes(&result, preprocess);
     scratch_end(machine_temporary);
-    BUSTER_CHECK(arena_destroy(machine_buffer_arena, 1));
+    BUSTER_VALIDATE(arena_destroy(machine_buffer_arena, 1));
     return result;
 }
 CParseResult c_parse(Arena* arena, CPreprocessResult preprocess)

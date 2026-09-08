@@ -80,6 +80,9 @@ BUSTER_F_DECL void arena_reset_to_start(Arena* arena);
 // The commit half of arena_allocate_bytes, outlined so the bump below stays a
 // handful of instructions at each of its ~1.400 call sites.
 BUSTER_F_DECL void arena_allocate_commit(Arena* arena, u64 aligned_size_after);
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL void arena_test_fail_next_commit(void);
+#endif
 BUSTER_F_DECL u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment);
 
 BUSTER_F_DECL TemporalArena arena_begin_temporal(Arena* arena);
@@ -112,14 +115,15 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE u64 arena_array_size(u64 el
 // high-water mark, publish the new position -- and the test fails on the order
 // of once per arena page, so the branch is predicted and the call it used to
 // make was most of the cost of an allocation that never touches the OS. The
-// bounds reasoning the outlined body carried stays with it in arena.c; what is
-// asserted here is the same pair, and both fold away in builds without checks.
+// bounds reasoning the outlined body carried stays with it in arena.c. The
+// caller-controlled reservation bound remains validation in every build; the
+// final committed-position relation is an established invariant.
 BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
 {
-    BUSTER_CHECK(size <= ARENA_MAX_RESERVATION);
+    BUSTER_VALIDATE(size <= ARENA_MAX_RESERVATION);
     u64 aligned_offset = align_forward(arena->position, alignment);
     u64 aligned_size_after = aligned_offset + size;
-    BUSTER_CHECK(aligned_size_after <= arena->reserved_size);
+    BUSTER_VALIDATE(aligned_size_after <= arena->reserved_size);
     if (BUSTER_UNLIKELY(aligned_size_after > arena->os_position))
     {
         arena_allocate_commit(arena, aligned_size_after);

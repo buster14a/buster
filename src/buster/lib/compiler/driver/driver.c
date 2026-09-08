@@ -1179,6 +1179,16 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.source_metrics_path = value;
             continue;
         }
+        if (string_equal(argument, S8("-fno-canonical-local-promotion")) || string_equal(argument, S8("-fcanonical-local-promotion")))
+        {
+            invocation.disable_local_promotion = string_equal(argument, S8("-fno-canonical-local-promotion"));
+            continue;
+        }
+        if (string_equal(argument, S8("-fno-target-local-promotion")) || string_equal(argument, S8("-ftarget-local-promotion")))
+        {
+            invocation.disable_target_local_promotion = string_equal(argument, S8("-fno-target-local-promotion"));
+            continue;
+        }
         // Register allocation is independent of source-level optimization:
         // like LLVM, -O0 still uses the low-latency allocator. QUALITY stays
         // out of the optimization-level mapping because it does not yet beat
@@ -3222,13 +3232,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         goto end;
     }
     IrModule* module = &lowered.program->modules[0];
-    IrValidationResult validation = lowered.canonical_ir_certified
-                                        ? (IrValidationResult){
-                                              .function = IR_FUNCTION_ID_INVALID,
-                                              .block = IR_BLOCK_ID_INVALID,
-                                              .instruction = IR_INSTRUCTION_ID_INVALID,
-                                          }
-                                        : ir_validate_canonical_module(lowered.program, module);
+    lowered.program->disable_local_promotion = invocation.disable_local_promotion;
+    lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion;
+    IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module, lowered.canonical_ir_certified);
+    result.local_promotion = module->local_promotion;
     if (validation.error != IR_VALIDATION_NONE)
     {
         String8 function_name = validation.function.value < module->function_count ? module->functions[validation.function.value].name : S8("<invalid>");
@@ -3811,6 +3818,18 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.preprocessed.spelling_bytes += unit.preprocessed.spelling_bytes;
         result.preprocessed.expansions += unit.preprocessed.expansions;
         result.preprocessed.definitions += unit.preprocessed.definitions;
+        result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
+        result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
+        result.local_promotion.removed_loads += unit.local_promotion.removed_loads;
+        result.local_promotion.removed_stores += unit.local_promotion.removed_stores;
+        result.local_promotion.inserted_parameters += unit.local_promotion.inserted_parameters;
+        result.local_promotion.removed_parameters += unit.local_promotion.removed_parameters;
+        result.local_promotion.uninitialized_locals += unit.local_promotion.uninitialized_locals;
+        result.local_promotion.barrier_functions += unit.local_promotion.barrier_functions;
+        result.local_promotion.instructions_before += unit.local_promotion.instructions_before;
+        result.local_promotion.instructions_after += unit.local_promotion.instructions_after;
+        result.local_promotion.values_before += unit.local_promotion.values_before;
+        result.local_promotion.values_after += unit.local_promotion.values_after;
         result.codegen_statistics.instruction_count += unit.codegen_statistics.instruction_count;
         result.codegen_statistics.value_count += unit.codegen_statistics.value_count;
         result.codegen_statistics.stack_value_bytes += unit.codegen_statistics.stack_value_bytes;

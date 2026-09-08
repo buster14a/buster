@@ -2858,6 +2858,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_normalize(CIntegerIrBuilder* builder, CIrCo
 BUSTER_C_INTERNAL bool c_ir_constant_type_is_integer(IrType* type);
 BUSTER_C_INTERNAL bool c_ir_constant_truth(CIntegerIrBuilder* builder, const CIrConstantValue* value);
 BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrConstantValue* source, IrTypeId target_type, CIrConstantValue* result);
+BUSTER_C_INTERNAL f64 c_ir_constant_integer_to_float(const CIrConstantValue* source_input, IrType* type, u32 precision);
 BUSTER_C_INTERNAL void c_ir_constant_store_bits(IrProgram* program, IrType* type, u8* bytes, u64 offset, u64 bits, bool sign_extend);
 // The same store through an explicit unit width, which is what a bit-field
 // whose packing narrowed its storage unit writes through.
@@ -12493,7 +12494,17 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     IrInstructionId reference_id = c_ir_append_instruction(builder, reference, reference_source);
     builder->function->values[reference_result.value].definition = reference_id;
 
-    IrValueId result = signature.returns_void ? IR_VALUE_ID_INVALID : c_ir_add_result(builder, signature.return_type);
+    // The declaration's attribute is the general answer -- glibc marks exit,
+    // abort and longjmp with it -- and the three names remain because a
+    // platform's headers may declare the assertion helpers without one.
+    bool noreturn = signature.is_noreturn || string_equal(target->name, S8("abort")) || string_equal(target->name, S8("__assert_fail")) ||
+                    string_equal(target->name, S8("__assert_perror_fail"));
+    bool terminates = noreturn && !c_ir_lowering_resumes_after_call(builder);
+    // A void call still needs an expression-machine placeholder. Emit it
+    // before a terminating call so UNREACHABLE follows the call immediately;
+    // ordinary and expression-nested calls materialize it afterwards.
+    IrValueId result = signature.returns_void ? (terminates ? c_ir_emit_integer_value(builder, 0, false, token) : IR_VALUE_ID_INVALID)
+                                              : c_ir_add_result(builder, signature.return_type);
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
     operands[0] = reference_result;
     for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
@@ -12505,23 +12516,18 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_call_target(CIntegerIrBuilder* builder, CT
     call.operands = operands;
     call.operand_count = argument_count + 1;
     call.symbol = target->symbol;
-    call.result = result;
+    call.result = signature.returns_void ? IR_VALUE_ID_INVALID : result;
     IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
-    // A call to a noreturn callee ends control flow, so a direct body must not
-    // fall through after it.  The declaration's attribute is the general
-    // answer -- glibc marks exit, abort and longjmp with it -- and the three
-    // names remain because a platform's headers may declare the assertion
-    // helpers without one, and losing that would silently reintroduce a
-    // fall-through past an assertion failure.
-    bool noreturn = signature.is_noreturn || string_equal(target->name, S8("abort")) || string_equal(target->name, S8("__assert_fail")) ||
-                    string_equal(target->name, S8("__assert_perror_fail"));
-    c_ir_end_control_flow_after_call(builder, noreturn, call_source);
     if (!signature.returns_void)
     {
         builder->function->values[result.value].definition = call_id;
-        return result;
     }
-    return c_ir_emit_integer_value(builder, 0, false, token);
+    else if (!terminates)
+    {
+        result = c_ir_emit_integer_value(builder, 0, false, token);
+    }
+    c_ir_end_control_flow_after_call(builder, noreturn, call_source);
+    return result;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_call_values(CIntegerIrBuilder* builder, CToken token, u32 declaration_index, IrValueId* arguments, u32 argument_count)
@@ -17614,7 +17620,9 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     return false;
                 }
             }
-            IrValueId result = signature.returns_void ? IR_VALUE_ID_INVALID : c_ir_add_result(builder, signature.return_type);
+            bool terminates = signature.is_noreturn && !c_ir_lowering_resumes_after_call(builder);
+            IrValueId result = signature.returns_void ? (terminates ? c_ir_emit_integer_value(builder, 0, false, token) : IR_VALUE_ID_INVALID)
+                                                      : c_ir_add_result(builder, signature.return_type);
             IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
             operands[0] = indirect_callee;
             for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
@@ -17624,9 +17632,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, signature.return_type);
             call.operands = operands;
             call.operand_count = argument_count + 1;
-            call.result = result;
+            call.result = signature.returns_void ? IR_VALUE_ID_INVALID : result;
             IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
-            c_ir_end_control_flow_after_call(builder, signature.is_noreturn, call_source);
             if (!signature.returns_void)
             {
                 builder->function->values[result.value].definition = call_id;
@@ -17634,8 +17641,9 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             else
             {
-                selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+                selected->result = terminates ? result : c_ir_emit_integer_value(builder, 0, false, token);
             }
+            c_ir_end_control_flow_after_call(builder, signature.is_noreturn, call_source);
         }
         else
         {
@@ -20841,6 +20849,10 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 child_type = builder->function->values[child_place.value].canonical_type;
             }
             IrType* child = ir_type_from_id(&builder->program->types, child_type);
+            // A string literal initializes an entire character-array member;
+            // brace elision must not descend into its first character.
+            bool string_initializer = child && child->kind == IR_TYPE_ARRAY &&
+                                      c_ir_tokens_are_string_literals(builder->preprocess, value_start, index);
             // C's brace-elision permits a scalar initializer to reach the
             // first scalar subobject of a nested aggregate (`.ptr = 3` when
             // ptr is a struct whose first member is an integer).  The old
@@ -20864,7 +20876,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 value_is_aggregate = type_close + 1 < index &&
                                      c_token_is_punctuator(&builder->preprocess.tokens[type_close + 1], C_PUNCTUATOR_LEFT_BRACE);
             }
-            while (child && c_ir_initializer_type_is_aggregate(child) && !value_is_aggregate &&
+            while (child && c_ir_initializer_type_is_aggregate(child) && !value_is_aggregate && !string_initializer &&
                    !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE))
             {
                 if ((child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR) && child->element_count)
@@ -20904,7 +20916,16 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                           c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE) &&
                           c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
                           c_ir_matching_delimiter_cached(builder, value_start, index, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == index - 1;
-            if (nested)
+            if (string_initializer)
+            {
+                IrValueId string_value = c_ir_emit_string_range_typed(builder, value_start, index, child_type);
+                if (string_value.value == IR_ID_UNDERLYING_INVALID ||
+                    !c_ir_emit_store_place(builder, child_place, child_type, string_value, source))
+                {
+                    goto c_ir_nested_compound_failed;
+                }
+            }
+            else if (nested)
             {
                 if (frame->as.nested_compound_literal.state->task_count >= frame->as.nested_compound_literal.state->capacity)
                 {
@@ -35259,6 +35280,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                         if (!task.bit_width || task.bit_offset + task.bit_width > unit * 8 || task.bit_width > 64) return false;
                         c_ir_constant_deposit_bit_field(program, bytes, task.offset, unit, task.bit_offset, task.bit_width, bits, false);
                     }
+                    else if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128 && type->layout.size == 16)
+                    {
+                        u64 low_offset = program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? 0 : 8;
+                        c_ir_constant_store_unit_bits(program, 8, bytes, task.offset + low_offset, converted.integer, false);
+                        c_ir_constant_store_unit_bits(program, 8, bytes, task.offset + 8 - low_offset, converted.integer_high, false);
+                    }
                     else
                     {
                         c_ir_constant_store_bits(program, type, bytes, task.offset, bits, sign_extend);
@@ -37786,8 +37813,8 @@ BUSTER_C_INTERNAL u8 c_ir_constant_initializer_leaf_class(CIntegerIrBuilder* bui
     {
         CToken literal = tokens[end - 1];
         u64 size = child->layout.size;
-        // The sizes one u64 of bits fills: a wider member takes the byte
-        // loop's sign-extension bytes and a 128-bit cast.
+        // The sizes one u64 of bits fills: a wider member takes the general
+        // evaluator and the two-limb byte writer.
         bool integer_child = (child->kind == IR_TYPE_INTEGER || child->kind == IR_TYPE_BOOLEAN || child->kind == IR_TYPE_ENUM) &&
                              (size == 1 || size == 2 || size == 4 || size == 8);
         // f32 and f64 only: the x87 element has its own folder ahead of the
@@ -37878,11 +37905,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_leaf_unary(CIntegerIrBuilder* b
 
 // An integer constant of `literal_type` stored into the integer member
 // `child`: c_ir_constant_cast replays a signed source's sign bit before the
-// target mask, and c_ir_constant_store_bits writes the member's size.
+// target mask. A boolean tests nonzero before that narrowing.
 BUSTER_C_INTERNAL void c_ir_constant_initializer_store_integer_leaf(IrType* child, IrType* literal_type, u64 integer, u8* bytes)
 {
     u64 value = literal_type->is_signed ? (u64)c_ir_integer_signed_value(integer, literal_type) : integer;
-    c_ir_constant_store_little_endian(bytes, child->layout.size, value & c_ir_integer_type_mask(child));
+    u64 converted = child->kind == IR_TYPE_BOOLEAN ? value != 0 : value & c_ir_integer_type_mask(child);
+    c_ir_constant_store_little_endian(bytes, child->layout.size, converted);
 }
 
 // A floating value stored into the f32 or f64 member `child`: the cast
@@ -37930,7 +37958,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_fold_integer_leaf(CIntegerIrBui
         }
         else
         {
-            c_ir_constant_initializer_store_float_leaf(child, (f64)c_ir_integer_signed_value(integer, literal_type), bytes);
+            CIrConstantValue source = {.integer = integer, .kind = C_IR_CONSTANT_INTEGER};
+            f64 floating = c_ir_constant_integer_to_float(&source, literal_type, child->bit_width == 32 ? 24 : 53);
+            c_ir_constant_initializer_store_float_leaf(child, floating, bytes);
         }
     }
     return folded;
@@ -39363,6 +39393,61 @@ BUSTER_C_INTERNAL f64 c_ir_constant_integer_to_float(const CIrConstantValue* sou
     return result;
 }
 
+// Decode the stored IEEE binary64 value into integer limbs. A host cast would
+// itself have undefined behavior for negative unsigned inputs, NaNs and values
+// beyond 64 bits. Truncate first, then test the destination range: -128.75 is
+// representable in signed char and -0.75 is representable in unsigned char.
+BUSTER_C_INTERNAL bool c_ir_constant_float_to_integer(f64 floating, IrType* target, CIrWideInteger* result)
+{
+    u64 bits;
+    memcpy(&bits, &floating, sizeof(bits));
+    s32 exponent = (s32)((bits >> 52) & 0x7ff) - 1023;
+    bool negative = (bits >> 63) != 0;
+    bool success = target->bit_width && (target->bit_width <= 64 || target->bit_width == 128) && exponent < 128;
+    if (success)
+    {
+        CIrWideInteger magnitude = {0};
+        if (exponent >= 0)
+        {
+            u64 significand = (bits & UINT64_C(0x000fffffffffffff)) | UINT64_C(0x0010000000000000);
+            if (exponent <= 52)
+                magnitude.low = significand >> (u32)(52 - exponent);
+            else if (exponent < 116)
+            {
+                u32 shift = (u32)(exponent - 52);
+                magnitude.low = significand << shift;
+                magnitude.high = significand >> (64 - shift);
+            }
+            else
+                magnitude.high = significand << (u32)(exponent - 116);
+        }
+        CIrWideInteger limit = {.low = c_ir_integer_type_mask(target), .high = target->bit_width == 128 ? UINT64_MAX : 0};
+        if (target->is_signed)
+        {
+            if (target->bit_width == 128)
+            {
+                limit.high >>= 1;
+                if (negative)
+                {
+                    limit.low = 0;
+                    limit.high += 1;
+                }
+            }
+            else
+                limit.low = (limit.low >> 1) + (u64)negative;
+        }
+        success = !c_ir_wide_less(limit, magnitude) &&
+                  (target->is_signed || !negative || (!magnitude.low && !magnitude.high));
+        if (success)
+        {
+            if (negative)
+                magnitude = c_ir_wide_negate(magnitude);
+            *result = magnitude;
+        }
+    }
+    return success;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrConstantValue* source_input, IrTypeId target_type, CIrConstantValue* result)
 {
     CIrConstantValue source = *source_input;
@@ -39435,25 +39520,37 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
                 }
                 else if (c_ir_constant_type_is_integer(target))
                 {
-                    success = source.kind == C_IR_CONSTANT_INTEGER || source.kind == C_IR_CONSTANT_FLOAT ||
-                              (source.kind == C_IR_CONSTANT_POINTER && source.symbol.value == IR_ID_UNDERLYING_INVALID && source.addend == 0);
-                    if (success)
+                    if (source.kind == C_IR_CONSTANT_FLOAT)
                     {
-                        u64 integer = source.kind == C_IR_CONSTANT_INTEGER ? source.integer
-                                      : source.kind == C_IR_CONSTANT_FLOAT ? (u64)source.floating : 0;
-                        IrType* source_integer_type = source.kind == C_IR_CONSTANT_INTEGER ? source_type : 0;
-                        // Replay a negative narrow source's sign before the
-                        // target mask. Narrowing still discards the high bits.
-                        if (source_integer_type && source_integer_type->is_signed)
-                            integer = (u64)c_ir_integer_signed_value(integer, source_integer_type);
-                        *result = c_ir_constant_integer(target_type, integer & c_ir_integer_type_mask(target));
-                        if (target->kind == IR_TYPE_INTEGER && target->bit_width == 128 && source.kind == C_IR_CONSTANT_INTEGER)
+                        CIrWideInteger integer = {0};
+                        success = c_ir_constant_float_to_integer(source.floating, target, &integer);
+                        if (success)
                         {
-                            result->integer_high = source.integer_high;
-                            if (source_integer_type && source_integer_type->kind == IR_TYPE_INTEGER && source_integer_type->bit_width < 128 &&
-                                source_integer_type->is_signed && source_integer_type->bit_width &&
-                                (source.integer & ((u64)1 << (source_integer_type->bit_width - 1))))
-                                result->integer_high = UINT64_MAX;
+                            *result = c_ir_constant_integer(target_type, integer.low & c_ir_integer_type_mask(target));
+                            result->integer_high = target->bit_width == 128 ? integer.high : 0;
+                        }
+                    }
+                    else
+                    {
+                        success = source.kind == C_IR_CONSTANT_INTEGER ||
+                                  (source.kind == C_IR_CONSTANT_POINTER && source.symbol.value == IR_ID_UNDERLYING_INVALID && source.addend == 0);
+                        if (success)
+                        {
+                            u64 integer = source.kind == C_IR_CONSTANT_INTEGER ? source.integer : 0;
+                            IrType* source_integer_type = source.kind == C_IR_CONSTANT_INTEGER ? source_type : 0;
+                            // Replay a negative narrow source's sign before the
+                            // target mask. Narrowing still discards the high bits.
+                            if (source_integer_type && source_integer_type->is_signed)
+                                integer = (u64)c_ir_integer_signed_value(integer, source_integer_type);
+                            *result = c_ir_constant_integer(target_type, integer & c_ir_integer_type_mask(target));
+                            if (target->kind == IR_TYPE_INTEGER && target->bit_width == 128 && source.kind == C_IR_CONSTANT_INTEGER)
+                            {
+                                result->integer_high = source.integer_high;
+                                if (source_integer_type && source_integer_type->kind == IR_TYPE_INTEGER && source_integer_type->bit_width < 128 &&
+                                    source_integer_type->is_signed && source_integer_type->bit_width &&
+                                    (source.integer & ((u64)1 << (source_integer_type->bit_width - 1))))
+                                    result->integer_high = UINT64_MAX;
+                            }
                         }
                     }
                 }

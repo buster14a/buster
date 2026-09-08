@@ -1,5 +1,6 @@
 #include <buster/tests/compiler/pdb/pdb_test.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/pdb/pdb_internal.h>
 
 // Reassemble one stream out of the MSF container the way a reader would, so
 // the checks below see exactly the bytes a debugger would load.
@@ -244,6 +245,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_checksum_records(UnitTestArguments* 
     };
     input.modules = modules;
     input.module_count = BUSTER_ARRAY_LENGTH(modules);
+    section.virtual_size = 32; // Both modules' sixteen-byte ranges are in the image.
     built = pdb_build(arguments->arena, input);
     BUSTER_TEST(arguments, built.valid);
     if (built.valid)
@@ -492,9 +494,395 @@ BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_continuation_merge(UnitTestArguments
     return result;
 }
 
+// This reader decodes little-endian fields itself; it never calls the writer's
+// layout allocator or assumes consecutive stream/directory blocks.
+BUSTER_GLOBAL_LOCAL u32 pdb_test_load32(u8 const* bytes)
+{
+    return (u32)bytes[0] | ((u32)bytes[1] << 8) | ((u32)bytes[2] << 16) | ((u32)bytes[3] << 24);
+}
+
+BUSTER_GLOBAL_LOCAL bool pdb_test_check_msf(Arena* arena, ByteSlice image)
+{
+    bool valid = image.length >= 56;
+    u32 block_size = valid ? pdb_test_load32(image.pointer + 32) : 0;
+    u32 block_count = valid ? pdb_test_load32(image.pointer + 40) : 0;
+    u32 directory_size = valid ? pdb_test_load32(image.pointer + 44) : 0;
+    u32 block_map = valid ? pdb_test_load32(image.pointer + 52) : 0;
+    valid = valid && block_size == 4096 && (u64)block_count * block_size == image.length &&
+            directory_size >= 4 && block_map < block_count &&
+            ((u64)directory_size + block_size - 1) / block_size <= block_size / 4;
+    if (valid)
+    {
+        u8* owners = arena_allocate_zeroed(arena, u8, block_count);
+        owners[0] = 1;
+        for (u32 block = 1; block < block_count; block += 1)
+        {
+            if (block % block_size == 1 || block % block_size == 2)
+            {
+                owners[block] = 1;
+            }
+        }
+        valid = !owners[block_map];
+        owners[block_map] = 1;
+        u8* directory = arena_allocate(arena, u8, directory_size);
+        for (u64 offset = 0; offset < directory_size && valid; offset += block_size)
+        {
+            u32 block = pdb_test_load32(image.pointer + (u64)block_map * block_size + offset / block_size * 4);
+            valid = block < block_count && !owners[block];
+            if (valid)
+            {
+                owners[block] = 1;
+                memcpy(directory + offset, image.pointer + (u64)block * block_size, BUSTER_MIN((u64)block_size, directory_size - offset));
+            }
+        }
+        u32 stream_count = valid ? pdb_test_load32(directory) : 0;
+        u64 cursor = 4 + (u64)stream_count * 4;
+        valid = valid && cursor <= directory_size;
+        for (u32 stream = 0; stream < stream_count && valid; stream += 1)
+        {
+            u32 size = pdb_test_load32(directory + 4 + (u64)stream * 4);
+            u64 count = ((u64)size + block_size - 1) / block_size;
+            valid = count <= (directory_size - cursor) / 4;
+            for (u64 index = 0; index < count && valid; index += 1)
+            {
+                u32 block = pdb_test_load32(directory + cursor);
+                cursor += 4;
+                valid = block < block_count && !owners[block];
+                if (valid)
+                {
+                    owners[block] = 1;
+                }
+            }
+        }
+        valid = valid && cursor == directory_size;
+        // The FPM is a logical byte stream whose physical blocks are separated
+        // by BlockSize blocks. Its next block describes another 8*BlockSize bits.
+        for (u64 block = 0; block < ((u64)block_count + block_size * 8 - 1) / (block_size * 8) * (block_size * 8) && valid; block += 1)
+        {
+            u64 byte_index = block / 8;
+            u64 page = byte_index / block_size;
+            u64 in_page = byte_index % block_size;
+            bool expected_free = block >= block_count || !owners[block];
+            for (u32 map = 1; map <= 2; map += 1)
+            {
+                u64 address = (map + page * block_size) * block_size + in_page;
+                bool free = ((image.pointer[address] >> (block % 8)) & 1) != 0;
+                valid = valid && free == expected_free;
+            }
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_layout_regressions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = UINT64_C(1) << 30, .flags = {.no_pool = true}});
+    u64 payload_size = 17 * 1024 * 1024;
+    u8* symbols = arena_allocate_zeroed(arena, u8, payload_size + 12);
+    pdb_test_store_u32(symbols, 0, 4);
+    pdb_test_store_u32(symbols, 4, 0x80000000); // Ignored C13 subsection.
+    pdb_test_store_u32(symbols, 8, (u32)payload_size);
+    PdbSection section = {.name = S8(".text"), .virtual_size = 256, .characteristics = 0x60000020};
+    PdbModule modules[] = {
+        {.name = S8_INITIALIZER("first.obj"), .codeview_symbols = {.pointer = symbols, .length = payload_size + 12},
+         .code_section = 1, .code_size = 16},
+        {.name = S8_INITIALIZER("second.obj"), .codeview_symbols = {.pointer = symbols, .length = 4},
+         .code_section = 1, .code_offset = 32, .code_size = 24},
+    };
+    PdbResult built = pdb_build(arena, (PdbInput){.sections = &section, .section_count = 1, .modules = modules, .module_count = 2});
+    BUSTER_TEST(arguments, built.valid);
+    if (built.valid)
+    {
+        BUSTER_TEST(arguments, pdb_test_check_msf(arena, built.bytes));
+        ByteSlice dbi = pdb_test_stream_bytes(arena, built.bytes, 3);
+        BUSTER_TEST(arguments, dbi.length >= 64);
+        if (dbi.length >= 64)
+        {
+            u64 contribution = 64 + pdb_test_load32(dbi.pointer + 24) + 4;
+            BUSTER_TEST(arguments, contribution + 56 <= dbi.length);
+            if (contribution + 56 <= dbi.length)
+            {
+                BUSTER_TEST(arguments, pdb_test_load32(dbi.pointer + contribution + 8) == 16);
+                BUSTER_TEST(arguments, pdb_test_load32(dbi.pointer + contribution + 28 + 4) == 32);
+                BUSTER_TEST(arguments, pdb_test_load32(dbi.pointer + contribution + 28 + 8) == 24);
+                BUSTER_TEST(arguments, pdb_test_load32(dbi.pointer + contribution + 28 + 16) == 1);
+            }
+        }
+    }
+    arena_destroy(arena, 1);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_msf_boundaries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Below/above the first reserved pair; map, directory and stream crossings;
+    // then below/at/above one bitmap block's 32768-bit capacity.
+    u32 sizes[] = {4089, 4090, 4091, 4095, 32717, 32718, 32719};
+    u32 expected_blocks[] = {4097, 4100, 4101, 4106, 32767, 32768, 32769};
+    for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(sizes); fixture += 1)
+    {
+        Arena* arena = arena_create((ArenaCreation){.reserved_size = UINT64_C(1) << 30, .flags = {.no_pool = true}});
+        u64 size = (u64)sizes[fixture] * 4096;
+        u8* payload = arena_allocate(arena, u8, size);
+        memset(payload, 0xa5, size);
+        for (u32 block = 0; block < sizes[fixture]; block += 1)
+        {
+            pdb_test_store_u32(payload, (u64)block * 4096, block);
+        }
+        PdbBuffer stream = {.bytes = payload, .count = size, .capacity = size};
+        PdbResult built = pdb_msf_build(arena, &stream, 1);
+        BUSTER_TEST(arguments, built.valid);
+        if (built.valid)
+        {
+            BUSTER_TEST(arguments, pdb_test_load32(built.bytes.pointer + 40) == expected_blocks[fixture]);
+            BUSTER_TEST(arguments, pdb_test_check_msf(arena, built.bytes));
+            ByteSlice reconstructed = pdb_test_stream_bytes(arena, built.bytes, 0);
+            BUSTER_TEST(arguments, reconstructed.length == size && memcmp(reconstructed.pointer, payload, size) == 0);
+        }
+        arena_destroy(arena, 1);
+    }
+    // Unsupported sizes must fail before attempting to read these deliberately
+    // tiny backing buffers or allocate a multi-gigabyte image.
+    u8 byte = 0;
+    PdbBuffer invalid = {.bytes = &byte, .count = UINT64_MAX};
+    BUSTER_TEST(arguments, !pdb_msf_build(arguments->arena, &invalid, 1).valid);
+    invalid.count = UINT32_MAX;
+    BUSTER_TEST(arguments, !pdb_msf_build(arguments->arena, &invalid, 1).valid);
+    invalid.count = (UINT64_C(1048575) - 100) * 4096;
+    BUSTER_TEST(arguments, !pdb_msf_build(arguments->arena, &invalid, 1).valid);
+    PdbBuffer directory_overflow[] = {
+        {.bytes = &byte, .count = UINT64_C(1048573) * 4096}, {.bytes = &byte, .count = 4096},
+    };
+    BUSTER_TEST(arguments, !pdb_msf_build(arguments->arena, directory_overflow, 2).valid);
+    BUSTER_TEST(arguments, !pdb_msf_build(arguments->arena, &invalid, UINT32_MAX).valid);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL s32 pdb_test_address_owner(ByteSlice dbi, u32 section, u32 offset)
+{
+    s32 owner = -1;
+    u64 start = 64 + pdb_test_load32(dbi.pointer + 24);
+    u64 size = pdb_test_load32(dbi.pointer + 28);
+    for (u64 cursor = start + 4; cursor + 28 <= start + size && cursor + 28 <= dbi.length; cursor += 28)
+    {
+        u8 const* entry = dbi.pointer + cursor;
+        u32 entry_section = pdb_test_load32(entry) & 0xffff;
+        u32 entry_offset = pdb_test_load32(entry + 4);
+        u32 entry_size = pdb_test_load32(entry + 8);
+        if (entry_section == section && offset >= entry_offset && offset - entry_offset < entry_size)
+        {
+            owner = owner == -1 ? (s32)(pdb_test_load32(entry + 16) & 0xffff) : -2;
+        }
+    }
+    return owner;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_contributions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u8 signature[] = {4, 0, 0, 0};
+    PdbSection sections[] = {
+        {.name = S8_INITIALIZER(".text"), .virtual_size = 256, .characteristics = 0x60000020},
+        {.name = S8_INITIALIZER(".data"), .virtual_size = 128, .characteristics = 0xc0000040},
+        {.name = S8_INITIALIZER(".rdata"), .virtual_size = 128, .characteristics = 0x40000040},
+    };
+    PdbContribution first[] = {{.section = 1, .offset = 0, .size = 16}, {.section = 2, .offset = 4, .size = 8}};
+    PdbContribution second[] = {{.section = 1, .offset = 32, .size = 24}, {.section = 1, .offset = 80, .size = 16}};
+    PdbModule modules[] = {
+        {.name = S8_INITIALIZER("first.obj"), .contributions = first, .contribution_count = 2},
+        {.name = S8_INITIALIZER("second.obj"), .contributions = second, .contribution_count = 2},
+        {.name = S8_INITIALIZER("empty.obj")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modules); index += 1)
+    {
+        modules[index].codeview_symbols = (ByteSlice){.pointer = signature, .length = sizeof(signature)};
+    }
+    PdbInput input = {.sections = sections, .section_count = 3, .modules = modules, .module_count = 3};
+    PdbResult built = pdb_build(arguments->arena, input);
+    PdbResult repeated = pdb_build(arguments->arena, input);
+    BUSTER_TEST(arguments, built.valid && repeated.valid);
+    if (built.valid && repeated.valid)
+    {
+        BUSTER_TEST(arguments, built.bytes.length == repeated.bytes.length && memcmp(built.bytes.pointer, repeated.bytes.pointer, built.bytes.length) == 0);
+        ByteSlice dbi = pdb_test_stream_bytes(arguments->arena, built.bytes, 3);
+        BUSTER_TEST(arguments, dbi.length >= 64);
+        if (dbi.length >= 64)
+        {
+            u64 contributions = 64 + pdb_test_load32(dbi.pointer + 24) + 4;
+            BUSTER_TEST(arguments, pdb_test_load32(dbi.pointer + 28) == 4 + 4 * 28);
+            BUSTER_TEST(arguments, contributions + 4 * 28 <= dbi.length);
+            u64 module = 64;
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modules); index += 1)
+            {
+                BUSTER_TEST(arguments, module + 64 <= dbi.length);
+                if (module + 64 <= dbi.length && contributions + 4 * 28 <= dbi.length)
+                {
+                    if (index < 2)
+                    {
+                        BUSTER_TEST(arguments, memcmp(dbi.pointer + module + 4, dbi.pointer + contributions + index * 2 * 28, 28) == 0);
+                        BUSTER_TEST(arguments, (pdb_test_load32(dbi.pointer + module + 20) & 0xffff) == index);
+                    }
+                    else
+                    {
+                        u8 empty[28] = {0};
+                        BUSTER_TEST(arguments, memcmp(dbi.pointer + module + 4, empty, sizeof(empty)) == 0);
+                    }
+                    // Skip the two terminated names and align the descriptor.
+                    module += 64;
+                    for (u32 name = 0; name < 2; name += 1)
+                    {
+                        while (module < dbi.length && dbi.pointer[module])
+                        {
+                            module += 1;
+                        }
+                        module += 1;
+                    }
+                    module = (module + 3) & ~(u64)3;
+                }
+            }
+            BUSTER_TEST(arguments, pdb_test_address_owner(dbi, 1, 0) == 0);
+            BUSTER_TEST(arguments, pdb_test_address_owner(dbi, 1, 15) == 0);
+            BUSTER_TEST(arguments, pdb_test_address_owner(dbi, 1, 16) == -1);
+            BUSTER_TEST(arguments, pdb_test_address_owner(dbi, 1, 32) == 1);
+            BUSTER_TEST(arguments, pdb_test_address_owner(dbi, 1, 55) == 1);
+            BUSTER_TEST(arguments, pdb_test_address_owner(dbi, 1, 56) == -1);
+            BUSTER_TEST(arguments, pdb_test_address_owner(dbi, 1, 79) == -1);
+            BUSTER_TEST(arguments, pdb_test_address_owner(dbi, 1, 80) == 1);
+            BUSTER_TEST(arguments, pdb_test_address_owner(dbi, 1, 95) == 1);
+            BUSTER_TEST(arguments, pdb_test_address_owner(dbi, 2, 4) == 0);
+            BUSTER_TEST(arguments, pdb_test_address_owner(dbi, 2, 12) == -1);
+            BUSTER_TEST(arguments, pdb_test_address_owner(dbi, 3, 0) == -1);
+        }
+    }
+    PdbContribution saved = second[1];
+    second[1].size = UINT32_MAX;
+    BUSTER_TEST(arguments, !pdb_build(arguments->arena, input).valid);
+    second[1] = saved;
+    second[1].offset = UINT32_MAX;
+    BUSTER_TEST(arguments, !pdb_build(arguments->arena, input).valid);
+    second[1] = saved;
+    second[1].section = 4;
+    BUSTER_TEST(arguments, !pdb_build(arguments->arena, input).valid);
+    second[1] = saved;
+    modules[1].contributions = 0;
+    BUSTER_TEST(arguments, !pdb_build(arguments->arena, input).valid);
+    input.module_count = UINT32_MAX;
+    BUSTER_TEST(arguments, !pdb_build(arguments->arena, input).valid);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult pdb_test_large_source_count(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { module_files = 32768, total_files = module_files * 2, name_stride = 8, checksum_stride = 8 };
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = UINT64_C(1) << 28, .flags = {.no_pool = true}});
+    // Both modules use the same short names. Distinct names within each module
+    // avoid making this count-boundary test a hash-collision stress test.
+    u32 string_size = 4 + module_files * name_stride;
+    u32 checksum_header = 12 + string_size;
+    u32 checksum_start = checksum_header + 8;
+    u8* blob = arena_allocate_zeroed(arena, u8, checksum_start + total_files * checksum_stride);
+    pdb_test_store_u32(blob, 0, 4);
+    pdb_test_store_u32(blob, 4, 0xf3);
+    pdb_test_store_u32(blob, 8, string_size);
+    char const digits[] = "0123456789abcdef";
+    for (u32 file = 0; file < module_files; file += 1)
+    {
+        u8* name = blob + 12 + 4 + file * name_stride;
+        for (u32 digit = 0; digit < 4; digit += 1)
+        {
+            name[digit] = (u8)digits[(file >> (digit * 4)) & 15];
+        }
+        memcpy(name + 4, ".c", 2);
+    }
+    pdb_test_store_u32(blob, checksum_header, 0xf4);
+    pdb_test_store_u32(blob, checksum_header + 4, module_files * checksum_stride);
+    for (u32 file = 0; file < total_files; file += 1)
+    {
+        pdb_test_store_u32(blob, checksum_start + file * checksum_stride, 4 + file % module_files * name_stride);
+    }
+    ByteSlice symbols = {.pointer = blob, .length = checksum_start + module_files * checksum_stride};
+    PdbSection section = {.name = S8(".text"), .virtual_size = 16, .characteristics = 0x60000020};
+    PdbModule modules[] = {
+        {.name = S8_INITIALIZER("first.obj"), .codeview_symbols = symbols},
+        {.name = S8_INITIALIZER("second.obj"), .codeview_symbols = symbols},
+    };
+    PdbInput input = {.sections = &section, .section_count = 1, .modules = modules, .module_count = 2};
+    PdbResult built = pdb_build(arena, input);
+    BUSTER_TEST(arguments, built.valid);
+    if (built.valid)
+    {
+        ByteSlice dbi = pdb_test_stream_bytes(arena, built.bytes, PDB_TEST_STREAM_DBI);
+        BUSTER_TEST(arguments, dbi.length >= PDB_TEST_DBI_HEADER_SIZE);
+        if (dbi.length >= PDB_TEST_DBI_HEADER_SIZE)
+        {
+            u64 source_start = PDB_TEST_DBI_HEADER_SIZE + (u64)pdb_read_u32(dbi, 24) + pdb_read_u32(dbi, 28) + pdb_read_u32(dbi, 32);
+            u64 source_size = pdb_read_u32(dbi, 36);
+            bool valid = source_start <= dbi.length && source_size <= dbi.length - source_start &&
+                         source_size >= 12 + (u64)total_files * 4;
+            BUSTER_TEST(arguments, valid);
+            if (valid)
+            {
+                // NumSourceFiles wraps to zero; readers recover the full total
+                // by summing the two 16-bit ModFileCounts instead.
+                BUSTER_TEST(arguments, pdb_read_u32(dbi, source_start) == 2);
+                u32 counts = pdb_read_u32(dbi, source_start + 8);
+                BUSTER_TEST(arguments, (counts & 0xffff) == module_files && (counts >> 16) == module_files);
+                u64 names_start = source_start + 12 + (u64)total_files * 4;
+                u64 names_size = source_start + source_size - names_start;
+                for (u32 file = 0; file < total_files && valid; file += 1)
+                {
+                    u32 offset = pdb_read_u32(dbi, source_start + 12 + (u64)file * 4);
+                    valid = offset <= names_size && 7 <= names_size - offset;
+                    if (valid)
+                    {
+                        u8 const* expected = blob + 12 + 4 + file % module_files * name_stride;
+                        valid = memcmp(dbi.pointer + names_start + offset, expected, 7) == 0;
+                    }
+                }
+                BUSTER_TEST(arguments, valid);
+            }
+        }
+        for (u32 module_index = 0; module_index < BUSTER_ARRAY_LENGTH(modules); module_index += 1)
+        {
+            u32 stream_index = module_index ? PDB_TEST_STREAM_COUNT : PDB_TEST_STREAM_MODULE;
+            ByteSlice module = pdb_test_stream_bytes(arena, built.bytes, stream_index);
+            bool valid = module.length == 16 + module_files * checksum_stride;
+            BUSTER_TEST(arguments, valid);
+            for (u32 file = 0; file < module_files && valid; file += 1)
+            {
+                u32 expected = 1 + (module_index * module_files + file) * 7;
+                valid = pdb_read_u32(module, 12 + (u64)file * checksum_stride) == expected;
+            }
+            BUSTER_TEST(arguments, valid);
+        }
+    }
+    // The total may exceed 16 bits, but one module's ModFileCount may not.
+    pdb_test_store_u32(blob, checksum_header + 4, total_files * checksum_stride);
+    modules[0].codeview_symbols.length = checksum_start + total_files * checksum_stride;
+    input.module_count = 1;
+    BUSTER_TEST(arguments, !pdb_build(arena, input).valid);
+    arena_destroy(arena, 1);
+    return result;
+}
+
 UnitTestResult pdb_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = pdb_test_checksum_records(arguments);
+    UnitTestResult source_count = pdb_test_large_source_count(arguments);
+    result.test_count += source_count.test_count;
+    result.succeeded_test_count += source_count.succeeded_test_count;
+    UnitTestResult layout = pdb_test_layout_regressions(arguments);
+    result.test_count += layout.test_count;
+    result.succeeded_test_count += layout.succeeded_test_count;
+    UnitTestResult boundaries = pdb_test_msf_boundaries(arguments);
+    result.test_count += boundaries.test_count;
+    result.succeeded_test_count += boundaries.succeeded_test_count;
+    UnitTestResult contributions = pdb_test_contributions(arguments);
+    result.test_count += contributions.test_count;
+    result.succeeded_test_count += contributions.succeeded_test_count;
     UnitTestResult continuations = pdb_test_continuation_merge(arguments);
     result.test_count += continuations.test_count;
     result.succeeded_test_count += continuations.succeeded_test_count;

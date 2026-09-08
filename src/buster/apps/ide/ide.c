@@ -873,6 +873,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             result = PROCESS_RESULT_FAILED;
         }
     }
+    if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose)
+    {
+        IrLocalPromotionStatistics p = compile.local_promotion;
+        string_print(S8("IR_LOCAL_PROMOTION candidates={u64} promoted={u64} loads_removed={u64} stores_removed={u64} "
+                        "parameters_inserted={u64} parameters_removed={u64} uninitialized={u64} barriers={u64} "
+                        "instructions_before={u64} instructions_after={u64} values_before={u64} values_after={u64}\n"),
+                     p.candidate_locals, p.promoted_locals, p.removed_loads, p.removed_stores,
+                     p.inserted_parameters, p.removed_parameters, p.uninitialized_locals, p.barrier_functions,
+                     p.instructions_before, p.instructions_after, p.values_before, p.values_after);
+    }
     if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose && compile.codegen_statistics.function_count)
     {
         string_print(S8("CODEGEN cpu={S8} vector_bits={u32} functions={u32} instructions={u64} values={u64} stack_value_bytes={u64} stack_frame_bytes={u64} "

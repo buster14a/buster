@@ -3969,10 +3969,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         {
             read_ok = false;
         }
-        section_kinds = arena_allocate(arena, u32, section_count);
     }
     if (read_ok)
     {
+        section_kinds = arena_allocate(arena, u32, section_count);
         if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(u64), BUSTER_ALIGN_OF(u64)))
         {
             read_ok = false;
@@ -4255,10 +4255,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         {
             read_ok = false;
         }
-        result.symbols = arena_allocate(arena, ObjectSymbol, symbol_count);
     }
     if (read_ok)
     {
+        result.symbols = arena_allocate(arena, ObjectSymbol, symbol_count);
         if (!object_reader_arena_can_allocate_count(arena, symbol_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
         {
             read_ok = false;
@@ -5230,7 +5230,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             {
                                 read_ok = false;
                             }
-                            name = string_format(arena, S8(".Lcoff.{u32}"), source_index);
+                            if (read_ok)
+                            {
+                                name = string_format(arena, S8(".Lcoff.{u32}"), source_index);
+                            }
                         }
                     }
                     if (read_ok)
@@ -6544,13 +6547,16 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                                 {
                                     read_ok = false;
                                 }
-                                destination_symbol = result.symbol_count++;
-                                section_symbol_maps[referenced_section] = destination_symbol;
-                                result.symbols[destination_symbol] = (ObjectSymbol){
-                                    .name = string_format(arena, S8(".Lmach_section.{u32}"), referenced_section),
-                                    .section = section_kinds[referenced_section],
-                                    .kind = OBJECT_SYMBOL_DATA,
-                                };
+                                if (read_ok)
+                                {
+                                    destination_symbol = result.symbol_count++;
+                                    section_symbol_maps[referenced_section] = destination_symbol;
+                                    result.symbols[destination_symbol] = (ObjectSymbol){
+                                        .name = string_format(arena, S8(".Lmach_section.{u32}"), referenced_section),
+                                        .section = section_kinds[referenced_section],
+                                        .kind = OBJECT_SYMBOL_DATA,
+                                    };
+                                }
                             }
                         }
                     }
@@ -6985,16 +6991,22 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                                 {
                                     read_ok = false;
                                 }
-                                function_symbol = result.symbol_count++;
-                                result.symbols[function_symbol] = (ObjectSymbol){
-                                    .name = string_format(arena, S8(".Lmach_unwind.{u32}"), function_count),
-                                    .value = function_offset,
-                                    .size = function_size,
-                                    .section = OBJECT_SECTION_TEXT,
-                                    .kind = OBJECT_SYMBOL_FUNCTION,
-                                };
+                                if (read_ok)
+                                {
+                                    function_symbol = result.symbol_count++;
+                                    result.symbols[function_symbol] = (ObjectSymbol){
+                                        .name = string_format(arena, S8(".Lmach_unwind.{u32}"), function_count),
+                                        .value = function_offset,
+                                        .size = function_size,
+                                        .section = OBJECT_SECTION_TEXT,
+                                        .kind = OBJECT_SYMBOL_FUNCTION,
+                                    };
+                                }
                             }
-                            function_symbols[function_count++] = function_symbol;
+                            if (read_ok)
+                            {
+                                function_symbols[function_count++] = function_symbol;
+                            }
                         }
                     }
                 }

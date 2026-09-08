@@ -188,6 +188,38 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ObjectSymbol* compiler_driver_test_symbol
     return result;
 }
 
+// Read the serialized .data back through the object reader. Literal byte
+// expectations cannot agree accidentally with a broken 128-bit expression.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_wide_initializer_bytes(ObjectFile* object)
+{
+    u8 expected_signed[] = {
+        0,0,0,0,0,0,0,0,0,0,0,0,0x10,0,0,0,
+        255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0xf0,255,255,255,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x80,
+    };
+    u8 expected_unsigned[] = {
+        0,0,0,0,0,0,0,0,0,0,0,0,0x10,0,0,0,
+        255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x80,
+    };
+    struct { String8 name; u8* bytes; } cases[] = {
+        {S8("signed_array"), expected_signed}, {S8("signed_struct"), expected_signed},
+        {S8("unsigned_array"), expected_unsigned}, {S8("unsigned_struct"), expected_unsigned},
+    };
+    bool result = object && object->error == OBJECT_ERROR_NONE && object->sections && object->section_count > OBJECT_SECTION_DATA;
+    for (u32 index = 0; result && index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        ObjectSymbol* symbol = compiler_driver_test_symbol_by_name(object, cases[index].name);
+        ByteSlice data = object->sections[OBJECT_SECTION_DATA].data;
+        result = symbol && symbol->section == OBJECT_SECTION_DATA && symbol->value <= data.length &&
+                 sizeof(expected_signed) <= data.length - symbol->value &&
+                 memory_compare(data.pointer + symbol->value, cases[index].bytes, sizeof(expected_signed));
+    }
+    return result;
+}
+
 // The symbol table __attribute__((weak)) and __attribute__((alias)) have to
 // produce, which is the one Clang produces for the same fixture: an alias
 // takes its target's section, offset, size and kind and contributes only its
@@ -2093,6 +2125,26 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("x86_64-unknown-linux-gnu"),  S8("x86_64-pc-windows-msvc"),  S8("x86_64-apple-macos"),  S8("x86_64-linux-android"),  S8("x86_64-apple-ios"),
         S8("aarch64-unknown-linux-gnu"), S8("aarch64-pc-windows-msvc"), S8("aarch64-apple-macos"), S8("aarch64-linux-android"), S8("aarch64-apple-ios"),
     };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(c_object_targets); target_index += 1)
+    {
+        TemporalArena wide_temporary = arena_begin_temporal(c_object_arena);
+        String8 wide_path = buster_test_temporary_path(wide_temporary.arena, S8("buster-c-wide-initializers"), S8(".o"));
+        String8 wide_command_line[] = {
+            S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), wide_path,
+            S8("tests/basic_c_int128_aggregate_constants.c"),
+        };
+        CompilerDriverResult wide = compiler_driver_execute_invocation(
+            wide_temporary.arena, compiler_driver_parse_arguments(wide_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wide_command_line)));
+        BUSTER_TEST(arguments, wide.error == COMPILER_DRIVER_ERROR_NONE && wide.has_object);
+        if (wide.error == COMPILER_DRIVER_ERROR_NONE && wide.has_object)
+        {
+            FileMapRead wide_map = file_map_read(wide_temporary.arena, wide_path, (FileReadOptions){0});
+            ObjectFile serialized = object_read(wide_temporary.arena, wide_map.bytes, wide.object.target);
+            BUSTER_TEST(arguments, compiler_driver_test_wide_initializer_bytes(&serialized));
+            file_map_unmap(wide_map);
+        }
+        scratch_end(wide_temporary);
+    }
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(c_object_targets); target_index += 1)
     {
         TemporalArena cross_temp = arena_begin_temporal(c_object_arena);
@@ -6646,6 +6698,41 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
+    // Static scalar conversions and automatic nested string initialization
+    // exercise distinct frontend paths and must agree under every allocator.
+    String8 c_initializer_regression_paths[] = {
+        S8("tests/basic_c_bool_aggregate_constants.c"),
+        S8("tests/basic_c_unsigned_float_aggregate_constants.c"),
+        S8("tests/basic_c_int128_aggregate_constants.c"),
+        S8("tests/basic_c_nested_string_initializers.c"),
+        S8("tests/basic_c_float_integer_constants.c"),
+    };
+    for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_initializer_regression_paths); fixture_index += 1)
+    {
+        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+            String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-initializer-regression"), S8(""));
+            String8 fixture_command_line[] = {
+                c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_initializer_regression_paths[fixture_index],
+            };
+            CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+            if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 fixture_arguments[] = {fixture_path};
+                ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                if (fixture_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(fixture_temporary);
+        }
+    }
     // #792: on a PE target that fixture used to be unlinkable.  `atexit` and
     // `at_quick_exit` are not ucrtbase.dll exports -- UCRT keeps them in its
     // import library as one call apiece to `_crt_atexit` and
@@ -8282,8 +8369,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_atomic_byte_assembly.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, string_first_sequence(c_atomic_byte_assembly.output, S8("0x86, 0x02")) != BUSTER_STRING_NO_MATCH);
     BUSTER_TEST(arguments, string_first_sequence(c_atomic_byte_assembly.output, S8("0xf0, 0x40, 0x0f, 0xb0")) != BUSTER_STRING_NO_MATCH);
-    // Nine frontend gaps, each with its own fixture so a regression names the
-    // contract it broke. Seven came from the 2026-08-30 differential harness
+    // Ten frontend and canonical-lowering gaps, each with its own fixture so
+    // a regression names the contract it broke. Seven came from the
+    // 2026-08-30 differential harness
     // run and two from the CPython configure differential: a
     // positional initializer storing into an anonymous bit-field instead of
     // skipping it (#818), a typedef taking an attributed struct definition's
@@ -8296,8 +8384,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // (#829), and the function-pointer conversions that must stay legal beside
     // the incompatible ones now refused (#830), and a read-modify-write on an
     // atomic floating-point object, which lowers to a compare-exchange loop
-    // (#821). All nine run under every register allocator: five are layout or
-    // lowering defects rather than parsing ones, the layout pair has to agree
+    // (#821), and the canonical local-promotion fixture exercises parallel
+    // block-parameter copies without selector-local promotion. All ten run
+    // under every register allocator: six are layout or lowering defects
+    // rather than parsing ones, the layout pair has to agree
     // between the sizeof folding in the parse and the IR layout, and the
     // atomic-float loop has to terminate -- none of which a compile alone
     // proves.
@@ -8311,6 +8401,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_gnu_atomic_builtins.c"),
         S8("tests/basic_c_function_pointer_compatibility.c"),
         S8("tests/basic_c_atomic_float_update.c"),
+        S8("tests/basic_c_local_promotion.c"),
     };
     String8 c_differential_regression_names[] = {
         S8("buster-c-anonymous-bit-field-initializer"),
@@ -8322,6 +8413,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-gnu-atomic-builtins"),
         S8("buster-c-function-pointer-compatibility"),
         S8("buster-c-atomic-float-update"),
+        S8("buster-c-local-promotion"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_differential_regression_paths); fixture_index += 1)
     {
@@ -8332,9 +8424,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 fixture_command_line[] = {
                 c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_differential_regression_paths[fixture_index],
             };
-            CompilerDriverResult fixture = compiler_driver_execute_invocation(
-                differential_temporary.arena,
-                compiler_driver_parse_arguments(differential_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+            CompilerDriverInvocation fixture_invocation =
+                compiler_driver_parse_arguments(differential_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line));
+            // The promotion witness must not depend on the native selectors'
+            // legacy local-to-mutable-register transformation.
+            fixture_invocation.disable_target_local_promotion = string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_local_promotion.c"));
+            CompilerDriverResult fixture = compiler_driver_execute_invocation(differential_temporary.arena, fixture_invocation);
             BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
             if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
             {

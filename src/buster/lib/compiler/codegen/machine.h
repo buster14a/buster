@@ -967,6 +967,21 @@ typedef enum MachineOperandRole
 
 #define MACHINE_OPERAND_ROLE_BITS 2u
 #define MACHINE_OPERAND_CLASS_SHIFT MACHINE_OPERAND_ROLE_BITS
+#define MACHINE_OPERAND_SHAPE_SHIFT 5u
+
+// The high three bits of operand_info describe legal reference kinds.
+// Register roles/classes retain their existing low-five-bit encoding.
+typedef enum MachineOperandShape
+{
+    MACHINE_OPERAND_SHAPE_NONE,
+    MACHINE_OPERAND_SHAPE_REGISTER,
+    MACHINE_OPERAND_SHAPE_IMMEDIATE,
+    MACHINE_OPERAND_SHAPE_FRAME,
+    MACHINE_OPERAND_SHAPE_BLOCK,
+    MACHINE_OPERAND_SHAPE_REGISTER_OR_FRAME,
+    MACHINE_OPERAND_SHAPE_COUNT,
+} MachineOperandShape;
+BUSTER_CT_CHECK(MACHINE_OPERAND_SHAPE_COUNT <= (1u << (8u - MACHINE_OPERAND_SHAPE_SHIFT)));
 BUSTER_CT_CHECK(MACHINE_OPERAND_ROLE_COUNT <= (1u << MACHINE_OPERAND_ROLE_BITS));
 BUSTER_CT_CHECK(MACHINE_REGISTER_CLASS_COUNT <= (1u << 3));
 
@@ -1002,7 +1017,7 @@ struct MachineOpcodeInfo
     // query concurrently; use machine_opcode_emit_recipe().
     MachineEmitRecipeId emit_recipe;
     u8 operand_count;
-    // Per inline slot: role in the low two bits, register class above them.
+    // Per inline slot: two role bits, three class bits, three shape bits.
     u8 operand_info[4];
     // Tied slot pair encoded as (destination + 1) | ((source + 1) << 4);
     // zero means no tie.
@@ -1126,6 +1141,9 @@ struct MachineTargetDescription
     // Indirect call and the fixed register its callee pointer rides in,
     // immune to the argument registers and any variadic setup.
     u16 indirect_call_opcode;
+    // Direct unconditional branch used by the shared CFG normalizer when a
+    // parameterized critical edge needs an edge-local copy block.
+    u16 unconditional_branch_opcode;
     // Table dispatch, or MACHINE_OPCODE_INVALID for a target without one.
     // Its targets cannot host per-edge repairs, so the edge contracts
     // force them cold; every other terminator classifies structurally by
@@ -1143,6 +1161,8 @@ struct MachineTargetDescription
     // callee-saved subset is the intersection with `callee_saved_mask`;
     // System V x86-64 has none, so every vector value dies at a call.
     u64 vector_allocatable_mask;
+    // Class membership includes reserved/nonallocatable vector registers.
+    u64 vector_register_mask;
     // Full-width vector register copy, coalescible like `copy_opcode`.
     u16 vector_copy_opcode;
     // Prologue order: the callee-saved pushes precede the frame-pointer
@@ -1355,6 +1375,11 @@ typedef enum MachineEditKind
     MACHINE_EDIT_RELOAD, // subject vreg loads into location preg at point
     MACHINE_EDIT_SPILL,  // subject vreg stores from location preg at point
     MACHINE_EDIT_COPY,   // subject preg copies into location preg at point
+    // subject is a byte offset within the edge-copy temporary tile. Parallel
+    // block-parameter assignments capture every source there before any
+    // destination home is published.
+    MACHINE_EDIT_TEMP_SPILL,
+    MACHINE_EDIT_TEMP_RELOAD,
     // subject immediate index materializes into location preg at point:
     // the reload of a value whose whole definition is a constant.
     MACHINE_EDIT_REMATERIALIZE,
@@ -1432,6 +1457,9 @@ struct MachineStackPlacement
     u32* stack_slot_offsets;
     u32 edit_count;
     u32 frame_size;
+    // Distance below the frame base immediately before the reusable
+    // edge-copy temporary tile. TEMP edit subjects are relative to this base.
+    u32 edge_copy_temporary_offset;
     // Distance from the frame pointer to the caller's stack frame, beyond the
     // saved frame pointer and return address every x86-64 frame carries. It is
     // the callee-saved save area wherever the prologue pushes those registers
@@ -1601,6 +1629,10 @@ typedef enum MachineVerifyError
     MACHINE_VERIFY_EDGE_COPY,
     MACHINE_VERIFY_BLOCK_PARAMETER,
     MACHINE_VERIFY_CONSTRAINT,
+    MACHINE_VERIFY_STORAGE,
+    MACHINE_VERIFY_PAYLOAD,
+    MACHINE_VERIFY_OPERAND_KIND,
+    MACHINE_VERIFY_OPERAND_CLASS,
     MACHINE_VERIFY_COUNT,
 } MachineVerifyError;
 
@@ -1694,6 +1726,7 @@ BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, Mach
 // re-stamping a scheduled function that shares its blocks array with the
 // original is safe.
 BUSTER_F_DECL void machine_function_stamp_frequency_classes(MachineFunction* function);
+BUSTER_F_DECL bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineVerifyResult machine_verify_function(MachineFunction* function);
 BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* function);
