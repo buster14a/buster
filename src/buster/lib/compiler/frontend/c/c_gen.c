@@ -58,6 +58,8 @@
 //   c_ir_float_parse, c_ir_ieee_from_rational,    literals: exact rational ->
 //   c_ir_ext80_*, c_ir_decode_quoted,             IEEE/x87 conversion, string
 //   c_ir_count_quoted                             and character decoding
+//   c_ir_complex_compose, c_ir_complex_split    immutable complex construction
+//                                                 and scalar projection
 //   c_ir_build_function_name_index                call-target resolution
 //   CIrLowerFrameKind .. c_ir_lower_dispatch      the lowering machines
 //   c_ir_lower_expression_core_step               the expression evaluator
@@ -14188,14 +14190,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
 // --- Complex values -------------------------------------------------------
 //
 // A complex value is an ordinary two-field aggregate by the time it reaches
-// the IR (see c_ir_complex_type), so every operation below is spelled with the
-// scalar float opcodes over field places: extract the two halves of each
-// operand, compute, and store the results into a fresh slot. The canonical IR
-// has no complex opcode and the pipeline runs no optimizer, so this is the
-// whole lowering -- it costs a few more stack round trips than a dedicated
-// pair representation would, and in exchange the backends, the ABI
-// classifier, the debug emitters and the four register allocators never learn
-// that complex exists.
+// the IR (see c_ir_complex_type). Arithmetic uses scalar float opcodes and
+// constructs its result with the existing immutable AGGREGATE operation.
+// Known constructors expose their scalar operands directly; memory objects
+// and non-constructor values retain explicit field loads. Complex lvalues
+// keep their object identity. There is no separate complex opcode or cleanup
+// pass, and native backends keep the existing aggregate representation.
 //
 // Which arithmetic each operator gets is Clang's, checked against
 // `clang -O0 -S -emit-llvm` for every combination rather than derived:
@@ -14376,23 +14376,53 @@ BUSTER_C_INTERNAL IrValueId c_ir_complex_part(CIntegerIrBuilder* builder, IrValu
     return c_ir_emit_load_place(builder, field, element_type, source);
 }
 
-// Both halves of a complex operand, loaded in real-then-imaginary order.
+// A constructed complex value already owns its scalar components. This is
+// a bounded constructor projection, not an address/LOAD recovery or a second
+// representation: the authoritative operands remain on the AGGREGATE row.
+BUSTER_C_INTERNAL bool c_ir_complex_constructed_parts(CIntegerIrBuilder* builder, IrValueId value, IrValueId* real, IrValueId* imaginary)
+{
+    bool result = false;
+    if (value.value < builder->function->value_count)
+    {
+        IrValue* aggregate = builder->function->values + value.value;
+        if (aggregate->category == IR_VALUE_VALUE && aggregate->definition.value < builder->function->instruction_count)
+        {
+            IrInstruction* definition = builder->function->instructions + aggregate->definition.value;
+            if (definition->opcode == IR_OPCODE_AGGREGATE && definition->operand_count == 2 && definition->immediate_count == 2 &&
+                definition->immediates[0] == 0 && definition->immediates[1] == 1)
+            {
+                *real = definition->operands[0];
+                *imaginary = definition->operands[1];
+                result = true;
+            }
+        }
+    }
+    return result;
+}
+
+// Both halves for arithmetic value consumers. Keep this separate from the
+// __real__/__imag__ place path: assignment must still designate its object,
+// not a constructor operand that happens to have supplied the same number.
 BUSTER_C_INTERNAL bool c_ir_complex_split(CIntegerIrBuilder* builder, IrValueId value, IrValueId* real, IrValueId* imaginary, IrSourceRange source)
 {
     IrType* type = c_ir_value_complex_type(builder, value);
-    if (!type)
+    bool result = false;
+    if (type)
     {
-        return false;
+        IrTypeId element = type->element_type;
+        result = c_ir_complex_constructed_parts(builder, value, real, imaginary);
+        if (!result)
+        {
+            IrValueId place = c_ir_complex_operand_place(builder, value, source);
+            if (place.value != IR_ID_UNDERLYING_INVALID)
+            {
+                *real = c_ir_complex_part(builder, place, element, 0, source);
+                *imaginary = c_ir_complex_part(builder, place, element, 1, source);
+                result = real->value != IR_ID_UNDERLYING_INVALID && imaginary->value != IR_ID_UNDERLYING_INVALID;
+            }
+        }
     }
-    IrTypeId element = type->element_type;
-    IrValueId place = c_ir_complex_operand_place(builder, value, source);
-    if (place.value == IR_ID_UNDERLYING_INVALID)
-    {
-        return false;
-    }
-    *real = c_ir_complex_part(builder, place, element, 0, source);
-    *imaginary = c_ir_complex_part(builder, place, element, 1, source);
-    return real->value != IR_ID_UNDERLYING_INVALID && imaginary->value != IR_ID_UNDERLYING_INVALID;
+    return result;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_complex_zero(CIntegerIrBuilder* builder, IrTypeId element_type, IrSourceRange source)
@@ -14415,26 +14445,34 @@ BUSTER_C_INTERNAL IrValueId c_ir_complex_zero(CIntegerIrBuilder* builder, IrType
 BUSTER_C_INTERNAL IrValueId c_ir_complex_compose(CIntegerIrBuilder* builder, IrTypeId complex_type, IrValueId real, IrValueId imaginary,
                                                    IrSourceRange source)
 {
+    IrValueId result = IR_VALUE_ID_INVALID;
     IrType* type = c_ir_complex_type_of(builder, complex_type);
-    if (!type || real.value == IR_ID_UNDERLYING_INVALID || imaginary.value == IR_ID_UNDERLYING_INVALID)
+    if (type && real.value != IR_ID_UNDERLYING_INVALID && imaginary.value != IR_ID_UNDERLYING_INVALID)
     {
-        return IR_VALUE_ID_INVALID;
+        IrTypeId element = type->element_type;
+        real = c_ir_emit_cast(builder, real, element, source);
+        imaginary = c_ir_emit_cast(builder, imaginary, element, source);
+        if (real.value != IR_ID_UNDERLYING_INVALID && imaginary.value != IR_ID_UNDERLYING_INVALID)
+        {
+            // Complex construction is the same immutable aggregate operation
+            // as a struct initializer. Do not introduce a mutable LOCAL plus
+            // two FIELD/STORE pairs and then LOAD it back into a value.
+            result = c_ir_add_result(builder, complex_type);
+            IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_AGGREGATE, complex_type);
+            instruction.operands = arena_allocate(builder->arena, IrValueId, 2);
+            instruction.operands[0] = real;
+            instruction.operands[1] = imaginary;
+            instruction.operand_count = 2;
+            instruction.immediates = arena_allocate(builder->arena, u64, 2);
+            instruction.immediates[0] = 0;
+            instruction.immediates[1] = 1;
+            instruction.immediate_count = 2;
+            instruction.result = result;
+            IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+            builder->function->values[result.value].definition = id;
+        }
     }
-    IrTypeId element = type->element_type;
-    IrValueId place = c_ir_emit_temporary(builder, complex_type, source);
-    if (place.value == IR_ID_UNDERLYING_INVALID)
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    IrValueId real_place = c_ir_emit_field_index_place(builder, place, 0, source);
-    IrValueId imaginary_place = c_ir_emit_field_index_place(builder, place, 1, source);
-    if (real_place.value == IR_ID_UNDERLYING_INVALID || imaginary_place.value == IR_ID_UNDERLYING_INVALID ||
-        !c_ir_emit_store_place(builder, real_place, element, real, source) ||
-        !c_ir_emit_store_place(builder, imaginary_place, element, imaginary, source))
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    return c_ir_emit_load_place(builder, place, complex_type, source);
+    return result;
 }
 
 // Whether a complex value of this type can be computed with here.  Every

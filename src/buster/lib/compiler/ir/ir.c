@@ -5001,11 +5001,13 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrType* aggregate = ir_type_from_id(&program->types, instruction->canonical_type);
         bool valid = aggregate && (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) &&
                      instruction->operand_count == instruction->immediate_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+                     function->values[instruction->result.value].category == IR_VALUE_VALUE &&
                      (aggregate->kind == IR_TYPE_UNION ? instruction->operand_count <= 1 : instruction->operand_count == aggregate->field_count);
         for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
         {
             u64 field_index = instruction->immediates[operand_index];
             valid = field_index < aggregate->field_count &&
+                    function->values[instruction->operands[operand_index].value].category == IR_VALUE_VALUE &&
                     function->values[instruction->operands[operand_index].value].canonical_type.value == aggregate->fields[field_index].type.value;
             for (u32 previous = 0; valid && previous < operand_index; previous += 1)
             {

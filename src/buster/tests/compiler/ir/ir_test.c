@@ -26,6 +26,8 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_binary_operation_count(IrFunction* function, IrB
     return count;
 }
 
+#include <buster/tests/compiler/ir/ir_complex_value_test.c>
+
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_f80_constant(Arena* arena, u64 significand, u64 sign_exponent, u32 immediate_count, u32 target_count,
                                                                       u64 layout_size, u32 layout_alignment)
 {
@@ -876,6 +878,9 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     // the summary stays unknown and every query answers yes.
     IrFunction unbuilt_function = {0};
     BUSTER_TEST(arguments, ir_function_may_contain_opcodes(&unbuilt_function, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)));
+    UnitTestResult complex_values = ir_complex_value_tests(arguments);
+    result.test_count += complex_values.test_count;
+    result.succeeded_test_count += complex_values.succeeded_test_count;
     return result;
 }
 #endif

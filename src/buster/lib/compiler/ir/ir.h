@@ -72,6 +72,8 @@ typedef enum IrOpcode
     IR_OPCODE_UNDEFINED,
     IR_OPCODE_FUNCTION,
     IR_OPCODE_ARRAY,
+    // Immutable construction: each operand is a VALUE at its field type;
+    // no implicit LOAD of a PLACE and no addressable result.
     IR_OPCODE_AGGREGATE,
     IR_OPCODE_LENGTH,
     IR_OPCODE_INDEX,
