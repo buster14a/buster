@@ -338,6 +338,31 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #endif
 
 #if BUSTER_LINUX || BUSTER_MACOS
+    // realpath may write a resolved prefix even on failure. Discarding its
+    // oversized output allocation must not make those bytes look fresh to
+    // arena_allocate_zeroed. Use a fresh mapping so no prior dirty watermark
+    // can accidentally hide the broken rewind.
+    for (u32 terminate = 0; terminate < 2; terminate += 1)
+    {
+        Arena* path_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = 1}});
+        BUSTER_TEST(arguments, path_arena != 0);
+        if (path_arena)
+        {
+            String8 missing = buster_test_temporary_path(arguments->arena, S8("buster-missing-realpath"), S8(""));
+            String8 absolute = os_path_absolute(path_arena, missing, terminate != 0);
+            BUSTER_TEST(arguments, absolute.length == 0);
+            BUSTER_TEST(arguments, arena_dirty_position(path_arena) > path_arena->position);
+            u8* bytes = arena_allocate_zeroed(path_arena, u8, 4096);
+            bool zeroed = true;
+            for (u32 index = 0; index < 4096; index += 1)
+            {
+                zeroed = zeroed && bytes[index] == 0;
+            }
+            BUSTER_TEST(arguments, zeroed);
+            BUSTER_TEST(arguments, arena_destroy(path_arena, 1));
+        }
+    }
+
     // Regression: draining captured stdout/stderr sequentially deadlocked when
     // the child filled one pipe while the parent blocked on the other. The
     // child writes far more than a pipe buffer to stderr before touching
@@ -365,7 +390,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_ERROR].length == 262144);
         }
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Regression: a captured stdin used to leave the parent's write end open
@@ -393,7 +418,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_OUTPUT].length == 2);
         }
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Exit codes past the ProcessResult range must not alias enum values, and
@@ -434,7 +459,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             }
         }
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // A run that stops making progress is killed at its deadline rather than
@@ -487,7 +512,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             }
         }
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     // Regression: executable_resolve_in_path must treat empty PATH components
@@ -524,7 +549,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             *path_value = saved_path;
         }
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 #endif
 
@@ -565,7 +590,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 bool retained = output->position > start;
                 memset(arena_allocate(output, u8, 1024), 0xa5, 1024);
                 bool intact = string_equal(resolved, path) && resolved.pointer[resolved.length] == 0;
-                output->position = start;
+                arena_set_position(output, start);
                 BUSTER_TEST(arguments, retained);
                 BUSTER_TEST(arguments, intact);
 
@@ -573,7 +598,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 retained = output->position > start;
                 memset(arena_allocate(output, u8, 1024), 0x5a, 1024);
                 intact = absolute.length && string_equal(canonical, absolute) && canonical.pointer[canonical.length] == 0;
-                output->position = start;
+                arena_set_position(output, start);
                 BUSTER_TEST(arguments, retained);
                 BUSTER_TEST(arguments, intact);
             }
@@ -646,7 +671,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, file_write(deep_leaf, BUSTER_SLICE_TO_BYTE_SLICE(S8("leaf"))));
         BUSTER_TEST(arguments, os_directory_delete(deep_root));
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
 #if defined(__linux__) || defined(__APPLE__)
@@ -695,7 +720,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
         os_directory_delete(outside_directory);
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 #endif
 
@@ -939,7 +964,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
         thread_context_release(lane_owner_context);
         thread_context_select(main_context);
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     return result;
