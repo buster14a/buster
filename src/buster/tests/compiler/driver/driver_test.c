@@ -1130,9 +1130,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_codeview_limit(UnitTestA
     return result;
 }
 
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_APPLE && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 host_sources[] = {S8("tests/basic_c_parameter_alignment_caller.c"), S8("tests/basic_c_parameter_alignment_observer.c")};
+    String8 host_objects[BUSTER_ARRAY_LENGTH(host_sources)];
+    bool host_compiled = true;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(host_sources); index += 1)
+    {
+        host_objects[index] = buster_test_temporary_path(arena, S8("buster-parameter-alignment-host"), string_format(arena, S8("-{u32}.o"), index));
+        String8 command[] = {S8(BUSTER_HOST_C_COMPILER), S8("-O2"), S8("-fno-pic"), S8("-g0"), S8("-c"), host_sources[index], S8("-o"), host_objects[index]};
+        ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+            (ProcessSpawnOptions){.use_process_environment = true});
+        bool compiled = spawned.handle && os_process_wait_sync(arena, spawned).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, compiled);
+        host_compiled &= compiled;
+    }
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    for (u32 index = 0; host_compiled && index < BUSTER_ARRAY_LENGTH(allocators); index += 1)
+    {
+        String8 object = buster_test_temporary_path(arena, S8("buster-parameter-alignment-callee"), S8(".o"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-parameter-alignment"), S8(""));
+        String8 compile[] = {allocators[index], S8("-c"), S8("tests/basic_c_parameter_alignment_callee.c"), S8("-o"), object};
+        CompilerDriverResult built = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+        BUSTER_TEST(arguments, built.error == COMPILER_DRIVER_ERROR_NONE);
+        if (built.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 link[] = {host_objects[0], host_objects[1], object, S8("-o"), output};
+            CompilerDriverResult linked = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link)));
+            BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 command[] = {output};
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawned.handle != 0);
+                if (spawned.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(arena, spawned).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+#endif
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_APPLE && !BUSTER_ANDROID && !BUSTER_IOS
+    UnitTestResult parameter_alignment = compiler_driver_test_parameter_alignment(arguments);
+    result.test_count += parameter_alignment.test_count;
+    result.succeeded_test_count += parameter_alignment.succeeded_test_count;
+#endif
     UnitTestResult codeview_limit = compiler_driver_test_codeview_limit(arguments);
     result.test_count += codeview_limit.test_count;
     result.succeeded_test_count += codeview_limit.succeeded_test_count;
