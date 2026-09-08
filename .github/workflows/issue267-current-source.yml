@@ -1,0 +1,31 @@
+name: Issue 267 updated source snapshot
+on:
+  push:
+    branches: [work/issue267-source-20260908]
+    paths: [.github/workflows/issue267-current-source.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 59a01c950fbad2b20423ab1c23e0c49bd3e1ba5b
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Archive exact source and history
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 59a01c950fbad2b20423ab1c23e0c49bd3e1ba5b
+          git bundle create "$RUNNER_TEMP/buster-current.bundle" HEAD
+          sha256sum "$RUNNER_TEMP/buster-current.bundle"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue267-updated-source
+          path: ${{ runner.temp }}/buster-current.bundle
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
