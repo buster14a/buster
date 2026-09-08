@@ -7190,15 +7190,25 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             break;
             case MACHINE_A64_STACK_ALLOCATE:
             {
-                // The canonical page-probed loop verbatim: align the X9
-                // byte count up through the X10 mask, probe and drop SP a
-                // page at a time, take the sub-page tail, and hand the
-                // new stack pointer back in X10.
+                // The canonical page-probed loop: X9 holds the entire
+                // distance to the aligned target, including any padding
+                // beyond the sixteen-aligned incoming stack pointer.
                 u64 alloc_mask = (u64)instruction->payload - 1;
-                machine_a64_emit_immediate(&encoder, MACHINE_A64_X10, alloc_mask);
-                machine_a64_emit(&encoder, 0x8b0a0129u);
+                if (instruction->payload > 16)
+                {
+                    machine_a64_emit(&encoder, 0xcb2963e9u); // sub x9, sp, x9
+                }
+                else
+                {
+                    machine_a64_emit_immediate(&encoder, MACHINE_A64_X10, alloc_mask);
+                    machine_a64_emit(&encoder, 0x8b0a0129u);
+                }
                 machine_a64_emit_immediate(&encoder, MACHINE_A64_X10, ~alloc_mask);
                 machine_a64_emit(&encoder, 0x8a0a0129u);
+                if (instruction->payload > 16)
+                {
+                    machine_a64_emit(&encoder, 0xcb2963e9u); // sub x9, sp, x9
+                }
                 machine_a64_emit(&encoder, 0xf140053fu);
                 machine_a64_emit(&encoder, 0x540000a3u);
                 machine_a64_emit(&encoder, 0xd14007ffu);

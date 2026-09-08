@@ -4783,6 +4783,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 continue;
             }
             MachineSelectResult selected = machine_select_canonical_function(arguments->arena, machine_vector_program, ir_function, machine_vector_target);
+            if (string_equal(vector_names[name_index], S8("vabi")))
+            {
+                // The ninth ZMM argument needs a 64-aligned outgoing area.
+                // The machine push area guarantees sixteen, so this caller
+                // must use the canonical alignment path; the module execution
+                // differential below still covers its returned vector values.
+                BUSTER_TEST(arguments, !selected.supported && selected.failed_opcode == IR_OPCODE_CALL);
+                continue;
+            }
             BUSTER_TEST_RAW(arguments, selected.supported,
                             string_format(arguments->arena, S8("vector select {S8} failed at opcode {u32}"), vector_names[name_index],
                                           (u32)selected.failed_opcode));

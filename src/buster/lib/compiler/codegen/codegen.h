@@ -12,6 +12,11 @@
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/target.h>
 
+// IEEE encodings of 2^63, shared by the canonical and machine unsigned
+// eightbyte conversions. Above this threshold a signed conversion needs bias.
+#define CODEGEN_F32_SIGNED64_LIMIT_BITS UINT32_C(0x5f000000)
+#define CODEGEN_F64_SIGNED64_LIMIT_BITS UINT64_C(0x43e0000000000000)
+
 typedef enum CodegenError
 {
     CODEGEN_ERROR_NONE,

@@ -4000,8 +4000,11 @@ BUSTER_GLOBAL_LOCAL MachineX64SignaturePlan const* machine_x64_signature_plan(Ma
                 // padding eightbytes the push machinery cannot produce; the
                 // canonical caller keeps that call. Vectors opened such gaps
                 // first, and the sixteen-aligned __int128 pair and
-                // memory-class aggregates open them the same way.
-                arguments_supported = !(placement->on_stack && placement->first_stack_part != tight_stack_parts);
+                // memory-class aggregates open them the same way. The push
+                // area itself is only sixteen-aligned, so a larger alignment
+                // also needs the canonical caller even at offset zero.
+                arguments_supported = !(placement->on_stack &&
+                                        (placement->first_stack_part != tight_stack_parts || shape->stack_alignment > 16));
             }
         }
         plan->arguments_supported = arguments_supported;
@@ -4140,7 +4143,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
                     u32 tight_stack_parts = plan->stack_part_count;
                     machine_x64_place_argument(tail_shapes + argument_index, plan->windows_call, &plan->integer_count, &plan->float_count,
                                                &plan->stack_part_count, tail_placements + argument_index);
-                    planned = !(tail_placements[argument_index].on_stack && tail_placements[argument_index].first_stack_part != tight_stack_parts);
+                    planned = !(tail_placements[argument_index].on_stack &&
+                                (tail_placements[argument_index].first_stack_part != tight_stack_parts ||
+                                 tail_shapes[argument_index].stack_alignment > 16));
                 }
             }
             plan->argument_shapes = tail_shapes;
@@ -11915,7 +11920,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 0, source, 128, 64, 0);
                         // IEEE encodings of 2^63 in binary64 and binary32.
                         (void)machine_x64_emit_exact_immediate_value(&encoder, destination,
-                                from_f64 ? UINT64_C(0x43e0000000000000) : UINT64_C(0x5f000000), 0);
+                                from_f64 ? CODEGEN_F64_SIGNED64_LIMIT_BITS : CODEGEN_F32_SIGNED64_LIMIT_BITS, 0);
                         (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 1, destination, 128, 64, 0);
                         (void)machine_x64_emit_metadata_xmm_registers(&encoder, from_f64 ? S8("UCOMISD") : S8("UCOMISS"), 0, 1,
                                 from_f64 ? 64 : 32, 0);
@@ -12107,14 +12112,25 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                     break; case MACHINE_X64_STACK_ALLOCATE:
                     {
                         // The constrained row places the runtime byte count in RCX
-                        // and receives the resulting RSP in RAX. Keep the count
-                        // unsigned, round it exactly as the canonical emitter does,
-                        // and touch every page before the final residual subtract so
-                        // guard-page stacks cannot be skipped.
+                        // and receives the resulting RSP in RAX. An over-aligned
+                        // allocation probes the full distance to align_down(RSP-size),
+                        // including the padding the incoming RSP needs.
                         u32 stack_alignment = instruction->payload;
-                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RCX, stack_alignment - 1, 64, 32, 0);
-                        (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("AND"), MACHINE_X64_RCX,
-                                (u64)(-(s64)stack_alignment), 64, 32, 0);
+                        if (stack_alignment > 16)
+                        {
+                            (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RSP, 64, 0);
+                            (void)machine_x64_emit_metadata_registers(&encoder, S8("SUB"), MACHINE_X64_RAX, MACHINE_X64_RCX, 64, 0);
+                            (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("AND"), MACHINE_X64_RAX,
+                                    (u64)(-(s64)stack_alignment), 64, 32, 0);
+                            (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RCX, MACHINE_X64_RSP, 64, 0);
+                            (void)machine_x64_emit_metadata_registers(&encoder, S8("SUB"), MACHINE_X64_RCX, MACHINE_X64_RAX, 64, 0);
+                        }
+                        else
+                        {
+                            (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RCX, stack_alignment - 1, 64, 32, 0);
+                            (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("AND"), MACHINE_X64_RCX,
+                                    (u64)(-(s64)stack_alignment), 64, 32, 0);
+                        }
 
                         u32 compare_offset = encoder.count;
                         (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("CMP"), MACHINE_X64_RCX, 4096, 64, 32, 0);
