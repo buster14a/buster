@@ -6498,38 +6498,38 @@ BUSTER_C_INTERNAL bool c_ir_emit_parameter(CIntegerIrBuilder* builder, CToken na
     u32 alignment = parameter_type ? parameter_type->layout.alignment : 0;
     IrValueId place = c_ir_emit_local(builder, name, type, entity, alignment);
     CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-    bool stored = false;
-    if (place.value != IR_ID_UNDERLYING_INVALID && local)
+    if (place.value == IR_ID_UNDERLYING_INVALID || !local)
     {
-        local->is_parameter = true;
-        // The pointer an array parameter was adjusted to points at the element
-        // type, qualifiers included: `const struct timespec times[2]` yields a
-        // modifiable pointer to constant elements, so the read-only answer moves
-        // from the object to what it points to.
-        if (entity.value < builder->parse.entity_count)
+        return false;
+    }
+    local->is_parameter = true;
+    // The pointer an array parameter was adjusted to points at the element
+    // type, qualifiers included: `const struct timespec times[2]` yields a
+    // modifiable pointer to constant elements, so the read-only answer moves
+    // from the object to what it points to.
+    if (entity.value < builder->parse.entity_count)
+    {
+        CTypeId declared = builder->parse.entities[entity.value].type;
+        if (declared.value < builder->parse.type_count && builder->parse.types[declared.value].kind == C_TYPE_ARRAY &&
+            c_ir_c_type_is_read_only(builder, builder->parse.types[declared.value].element_type))
         {
-            CTypeId declared = builder->parse.entities[entity.value].type;
-            if (declared.value < builder->parse.type_count && builder->parse.types[declared.value].kind == C_TYPE_ARRAY &&
-                c_ir_c_type_is_read_only(builder, builder->parse.types[declared.value].element_type))
-            {
-                builder->function->values[place.value].points_to_read_only = true;
-            }
+            builder->function->values[place.value].points_to_read_only = true;
         }
-        IrValueId value = c_ir_add_result(builder, type);
-        u64* immediate = arena_allocate(builder->arena, u64, 1);
-        immediate[0] = argument_index;
-        IrSourceRange argument_source = c_ir_token_source_range(builder, name);
-        IrInstruction argument = c_ir_instruction_initialize(IR_OPCODE_ARGUMENT, type);
-        argument.immediates = immediate;
-        argument.immediate_count = 1;
-        argument.result = value;
-        IrInstructionId id = c_ir_append_instruction(builder, argument, argument_source);
-        builder->function->values[value.value].definition = id;
-        stored = c_ir_emit_store(builder, local, value, argument_source);
-        if (stored)
-        {
-            c_ir_mark_local_read_only(builder, local);
-        }
+    }
+    IrValueId value = c_ir_add_result(builder, type);
+    u64* immediate = arena_allocate(builder->arena, u64, 1);
+    immediate[0] = argument_index;
+    IrSourceRange argument_source = c_ir_token_source_range(builder, name);
+    IrInstruction argument = c_ir_instruction_initialize(IR_OPCODE_ARGUMENT, type);
+    argument.immediates = immediate;
+    argument.immediate_count = 1;
+    argument.result = value;
+    IrInstructionId id = c_ir_append_instruction(builder, argument, argument_source);
+    builder->function->values[value.value].definition = id;
+    bool stored = c_ir_emit_store(builder, local, value, argument_source);
+    if (stored)
+    {
+        c_ir_mark_local_read_only(builder, local);
     }
     return stored;
 }
