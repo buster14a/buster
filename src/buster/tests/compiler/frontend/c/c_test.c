@@ -12361,6 +12361,60 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
 // Compare the indexed probe with the historical ascending entity-table scan
 // while forcing the probe through local names, including a nested shadow, and
 // through a hand-built collision bucket with two different spellings.
+// Parameter objects need the same effective alignment as ordinary local
+// declarations. Checking IR on every native target catches the frontend loss
+// even when a machine backend independently recovers the type's alignment.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parameter_local_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("struct __attribute__((aligned(32))) A { long long values[4]; };"
+                        " struct __attribute__((aligned(64))) B { long long values[8]; };"
+                        " void observe(void const*);"
+                        " void test(struct A a, struct B b) { observe(&a); observe(&b); }");
+    String8 triples[] = {
+        S8("x86_64-unknown-linux-gnu"), S8("x86_64-pc-windows-msvc"), S8("x86_64-apple-macos"),
+        S8("aarch64-unknown-linux-gnu"), S8("aarch64-pc-windows-msvc"), S8("aarch64-apple-macos"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(triples); target_index += 1)
+    {
+        TargetParseResult target = target_parse_triple(triples[target_index]);
+        BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("parameter-alignment.c"), target.target, &preprocess, &parse);
+        BUSTER_TEST(arguments, !preprocess.diagnostic_count && !parse.diagnostic_count && !lowered.diagnostic_count && lowered.program);
+        u32 aligned_parameters = 0;
+        if (lowered.program && lowered.program->module_count)
+        {
+            IrModule* module = lowered.program->modules;
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 index = 0; index < function->instruction_count; index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + index;
+                    if (instruction->opcode == IR_OPCODE_LOCAL)
+                    {
+                        IrValue* local = function->values + instruction->result.value;
+                        IrType* type = ir_type_from_id(&lowered.program->types, local->canonical_type);
+                        BUSTER_TEST(arguments, type && type->layout.resolved);
+                        if (type && type->layout.resolved)
+                        {
+                            BUSTER_TEST(arguments, local->alignment == type->layout.alignment);
+                            BUSTER_TEST(arguments, local->alignment == 32 || local->alignment == 64);
+                            aligned_parameters += 1;
+                        }
+                    }
+                }
+            }
+        }
+        BUSTER_TEST(arguments, aligned_parameters == 2);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_and_aligned_layout(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -13958,6 +14012,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_repeated_incomplete_arrays(arguments));
 
     c_test_result_add(&result, c_test_packed_and_aligned_layout(arguments));
+    c_test_result_add(&result, c_test_parameter_local_alignment(arguments));
 
     TemporalArena nested_temporary = scratch_begin(0, 0);
     String8 nested_prefix = S8("static int identity(int value)"

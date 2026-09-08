@@ -97,6 +97,14 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   is never set in that dialect and the call is refused as an arity error --
   which every dialect now reports by naming the callee and its parameter
   count rather than as "could not prepare C calls" (issue #666).
+- A by-value parameter's local copy retains its type's natural alignment.
+  `c_ir_emit_parameter` must pass the resolved layout alignment to
+  `c_ir_emit_local`, just as an ordinary declaration does. Rounding a slot's
+  frame-relative offset alone cannot honor alignment greater than the frame
+  pointer guarantee; the canonical native emitter uses the place's alignment
+  to reserve and materialize dynamically aligned storage. The parameter
+  alignment tests inspect IR on all six native targets and use an opaque,
+  separately host-compiled observer for native x86-64 callee addresses.
 - The generic JIT loads already-produced host-native objects and resolves
   explicit bindings. It is not a second source-language compiler and must stay
   independent of frontend semantic structures.
