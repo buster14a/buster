@@ -228,7 +228,7 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
         {
             u64 reported_size = os_file_get_size(fd);
             u64 allocation_alignment = BUSTER_MAX(options.start_alignment, 1);
-            u64 file_size = reported_size;
+            u64 file_size;
             u64 allocation_size;
             u8* file_buffer;
             if (reported_size)
