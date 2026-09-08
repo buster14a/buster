@@ -1139,6 +1139,12 @@ enum
 BUSTER_F_DECL bool buster_x86_metadata_emit_forwarding(u8* output, u32 capacity, BusterX86MetadataForwardingKind kind,
                                                      BusterX86MetadataRelocation* branch);
 
+// Rewrite the existing MOV-r64 RIP-relative GOT load to its metadata-derived
+// LEA shape. The relocation field is section-relative, remains PC32, and is
+// not patched here. Reject truncated/unrecognized shapes without any write.
+// First preparation is serial; prewarm_all_forms prepares worker-lane use.
+BUSTER_F_DECL bool buster_x86_metadata_relax_got_load(u8* section, u64 field_offset, u64 section_size);
+
 // Shared semantic proof used by source adapters and the handwritten parser:
 // an explicitly typed EVEX decorator is authoritative only for ordinary
 // 64-bit, non-APX/AMX forms with one ordinary memory broadcast or a

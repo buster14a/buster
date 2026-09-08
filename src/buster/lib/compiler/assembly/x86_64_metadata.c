@@ -2,7 +2,7 @@
 // selection/emission, and derived exact-machine specializations live here.
 // Map: buster_x86_metadata_encode (checked request), emit_form_to_scratch
 // (general packing), emit_machine_fast (derived hot plans), tls_prepare
-// and forwarding_prepare (fixed-envelope ABI recipes), prewarm_all_forms
+// and forwarding_prepare/got_prepare (fixed-envelope recipes), prewarm_all_forms
 // (worker publication).
 // Parsing, allocation, scheduling and object-format relocation policy remain
 // consumers. See docs/x86-64-encoding-authority.md for the remaining escapes.
@@ -11905,6 +11905,95 @@ bool buster_x86_metadata_emit_forwarding(u8* output, u32 capacity, BusterX86Meta
     return result;
 }
 
+// The closed GOT-load relaxation family: MOV r64,[RIP+disp32] -> LEA.
+// Derive both shapes and their field contracts from checked metadata. Linkers
+// supply only a bounded section and the relocation offset, never opcode bits.
+// Broader immediate/branch GOTPCRELX conversions remain a separate policy (#78).
+enum { BUSTER_X86_GOT_LOAD_SIZE = 7, BUSTER_X86_GOT_LOAD_REGISTERS = 16 };
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_got_load[BUSTER_X86_GOT_LOAD_REGISTERS][BUSTER_X86_GOT_LOAD_SIZE];
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_got_address[BUSTER_X86_GOT_LOAD_REGISTERS][BUSTER_X86_GOT_LOAD_SIZE];
+BUSTER_GLOBAL_LOCAL BusterX86MetadataRelocation buster_x86_metadata_got_field;
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_got_prepared;
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_got_valid;
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_got_prepare(void)
+{
+    if (!buster_x86_metadata_got_prepared)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        buster_x86_metadata_prewarm();
+        bool valid = true;
+        BusterX86MetadataRelocation field = {0};
+        for (u16 reg = 0; valid && reg < BUSTER_X86_GOT_LOAD_REGISTERS; reg += 1)
+        {
+            BusterX86MetadataPhysicalOperand operands[2] = {
+                {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 64,
+                 .reg = {.index = reg, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}},
+                {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                 .memory = {.has_symbol = true, .symbol = S8("got_target"), .rip_relative = true,
+                            .has_displacement = true, .address_size = 64, .scale = 1}},
+            };
+            for (u32 output = 0; valid && output < 2; output += 1)
+            {
+                BusterX86MetadataRelocation relocation = {0};
+                BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+                    .physical = {.mnemonic = output ? S8("LEA") : S8("MOV"), .operands = operands, .operand_count = 2,
+                                 .address_size = 64, .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64},
+                    .output = output ? buster_x86_metadata_got_address[reg] : buster_x86_metadata_got_load[reg],
+                    .output_capacity = BUSTER_X86_GOT_LOAD_SIZE, .relocations = &relocation, .relocation_capacity = 1,
+                });
+                valid = emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.byte_count == BUSTER_X86_GOT_LOAD_SIZE &&
+                        emitted.relocation_count == 1 && relocation.kind == BUSTER_X86_METADATA_RELOCATION_PC32 &&
+                        relocation.width == sizeof(s32) && relocation.offset == emitted.byte_count - relocation.width &&
+                        relocation.addend == -(s64)relocation.width;
+                if (valid && (reg || output))
+                {
+                    valid = relocation.offset == field.offset && relocation.width == field.width &&
+                            relocation.kind == field.kind && relocation.addend == field.addend;
+                }
+                field = relocation;
+            }
+        }
+        if (valid)
+        {
+            field.symbol = (String8){0};
+            buster_x86_metadata_got_field = field;
+        }
+        buster_x86_metadata_got_valid = valid;
+        buster_x86_metadata_got_prepared = true;
+    }
+    return buster_x86_metadata_got_valid;
+}
+
+bool buster_x86_metadata_relax_got_load(u8* section, u64 field_offset, u64 section_size)
+{
+    bool result = false;
+    if (section && field_offset <= section_size && buster_x86_metadata_got_prepare())
+    {
+        BusterX86MetadataRelocation field = buster_x86_metadata_got_field;
+        if (field.offset <= field_offset && field.width <= section_size - field_offset)
+        {
+            u8* sequence = section + field_offset - field.offset;
+            for (u32 reg = 0; !result && reg < BUSTER_X86_GOT_LOAD_REGISTERS; reg += 1)
+            {
+                // REX.X/B are ignored by both RIP-relative forms. Accept the
+                // historical redundant bits but never transfer them to an
+                // operand with another role; the replacement is canonical.
+                bool matched = (sequence[0] & 0xfcu) == buster_x86_metadata_got_load[reg][0] &&
+                               memcmp(sequence + 1, buster_x86_metadata_got_load[reg] + 1, field.offset - 1) == 0;
+                if (matched)
+                {
+                    // Leave the displacement untouched for the object-format
+                    // relocation writer. No byte is changed before validation.
+                    memcpy(sequence, buster_x86_metadata_got_address[reg], field.offset);
+                    result = true;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 // The complete walk: every form normalized, pattern-parsed, operand-viewed and
 // fact-filled, for a caller about to run a gang whose lanes may query any
 // form -- the test harness.  A compile never needs it.
@@ -11927,6 +12016,7 @@ void buster_x86_metadata_prewarm_all_forms(void)
         }
         (void)buster_x86_metadata_tls_prepare(BUSTER_X86_TLS_PREPARE_ALL);
         (void)buster_x86_metadata_forwarding_prepare();
+        (void)buster_x86_metadata_got_prepare();
         buster_x86_metadata_all_forms_prepared = true;
     }
 }
@@ -11947,6 +12037,7 @@ u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void)
     buster_x86_metadata_prewarm_all_forms();
     u64 unprepared = (u64)(buster_x86_metadata_tls_prepared != BUSTER_X86_TLS_PREPARE_ALL);
     unprepared += (u64)!buster_x86_metadata_forwarding_prepared;
+    unprepared += (u64)!buster_x86_metadata_got_prepared;
     for (u32 form_id = 0; form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
     {
         if (buster_x86_metadata_form_record_validity[form_id] == BUSTER_X86_METADATA_RECORD_UNKNOWN)
