@@ -1,4 +1,5 @@
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/codegen/register_allocator_fast_internal.h>
 #include <buster/lib/os.h>
 
 // FRA stage 4: local fast register allocation over the compact machine IR.
@@ -21,7 +22,8 @@
 // iterate the lanes that can matter, which a stage-1 census puts at 2,75 of
 // sixteen held at a block's exit and 0,60 promised by its contract. The
 // per-block owner rows carry no free sentinel at all: a row is readable only
-// where its block's held mask says so.
+// where its block's held mask says so. `machine_fast_owner_match_mask` compares
+// fully held sixteen-lane tiles with SIMD and walks other held lanes scalarly.
 
 #define MACHINE_FAST_OPERAND_PHYSICAL_SHIFT 0u
 #define MACHINE_FAST_OPERAND_VIRTUAL_SHIFT 4u
@@ -366,6 +368,49 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_append(MachineFastState* state, Ma
     };
 }
 
+// Only held lanes have initialized owner rows. Full sixteen-lane tiles can
+// use one AVX-512 dword compare; sparse tiles keep the existing set-bit walk.
+// The active mask also bounds partial target files, including lane 63, so no
+// padded owner storage or inactive-row reads are required.
+BUSTER_GLOBAL_LOCAL u64 machine_fast_owner_match_mask(u32 const* owner, u64 active, u32 value)
+{
+    u64 matches = 0;
+#if BUSTER_SIMD_512
+    if (mask64_count(active) >= 16)
+    {
+        u64 dense = active & (active >> 1);
+        dense &= dense >> 2;
+        dense &= dense >> 4;
+        dense &= dense >> 8;
+        dense &= UINT64_C(0x0001000100010001);
+        if (dense)
+        {
+            Simd512 needle = simd512_splat_word(value);
+            for (; dense; dense &= dense - 1u)
+            {
+                u32 base = machine_fast_first_set(dense);
+                Simd512 owners = simd512_load(owner + base);
+                matches |= (u64)simd512_equal_word(owners, needle) << base;
+                active &= ~(UINT64_C(0xffff) << base);
+            }
+        }
+    }
+#endif
+    for (; active; active &= active - 1u)
+    {
+        u32 physical_register = machine_fast_first_set(active);
+        matches |= owner[physical_register] == value ? machine_fast_lane(physical_register) : 0;
+    }
+    return matches;
+}
+
+#if BUSTER_INCLUDE_TESTS
+u64 machine_fast_owner_match_mask_test(u32 const* owner, u64 active, u32 value)
+{
+    return machine_fast_owner_match_mask(owner, active, value);
+}
+#endif
+
 // Rewrites one edge's delivered register file into the shape a successor's
 // contract promises. Values the contract leaves in memory write back (the
 // boundary spills the old write-back emitted for every boundary), and the
@@ -405,12 +450,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
     {
         u32 physical_register = machine_fast_first_set(remaining);
         u32 resident = owner[physical_register];
-        bool kept = false;
-        for (u64 contract_remaining = contract_held; contract_remaining; contract_remaining &= contract_remaining - 1u)
-        {
-            kept |= contract_owner[machine_fast_first_set(contract_remaining)] == resident;
-        }
-        if (kept)
+        if (machine_fast_owner_match_mask(contract_owner, contract_held, resident))
         {
             continue;
         }
@@ -460,12 +500,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
                 // pending value's single dirty copy; a clean occupant
                 // reloads at its own turn, its slot current by the
                 // clean-implies-stored invariant.
-                bool resident_pending = false;
-                for (u64 other_remaining = pending; other_remaining; other_remaining &= other_remaining - 1u)
-                {
-                    resident_pending |= contract_owner[machine_fast_first_set(other_remaining)] == resident;
-                }
-                if (resident_pending)
+                if (machine_fast_owner_match_mask(contract_owner, pending, resident))
                 {
                     continue;
                 }
@@ -1622,13 +1657,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                             }
                             else if (repairs_fully && !((repair_pin_active >> contract_register) & 1u))
                             {
-                                // Only a dirty lane of the edge can dirty the
-                                // entry, so the retention probe walks the
-                                // edge's dirty mask rather than its file.
-                                for (u64 other_remaining = edge_dirty; other_remaining; other_remaining &= other_remaining - 1u)
-                                {
-                                    entry_dirty |= edge_owner[machine_fast_first_set(other_remaining)] == value ? machine_fast_lane(contract_register) : 0u;
-                                }
+                                entry_dirty |= machine_fast_owner_match_mask(edge_owner, edge_dirty, value) ? machine_fast_lane(contract_register) : 0u;
                             }
                             else
                             {
@@ -1659,15 +1688,12 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                 }
                 u32 split_value = state.split_entries[split_index].virtual_register;
                 u32 split_register = state.pinned_registers[split_value];
-                for (u64 remaining = entry_held; remaining; remaining &= remaining - 1u)
+                for (u64 remaining = machine_fast_owner_match_mask(entry_owner, entry_held, split_value); remaining; remaining &= remaining - 1u)
                 {
                     u32 contract_register = machine_fast_first_set(remaining);
-                    if (entry_owner[contract_register] == split_value)
-                    {
-                        entry_owner[contract_register] = UINT32_MAX;
-                        entry_held &= ~machine_fast_lane(contract_register);
-                        entry_dirty &= ~machine_fast_lane(contract_register);
-                    }
+                    entry_owner[contract_register] = UINT32_MAX;
+                    entry_held &= ~machine_fast_lane(contract_register);
+                    entry_dirty &= ~machine_fast_lane(contract_register);
                 }
                 entry_owner[split_register] = split_value;
                 entry_held |= machine_fast_lane(split_register);
