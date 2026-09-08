@@ -1495,7 +1495,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // empty mask deliberately permits a null row, as an empty contract does.
     BUSTER_TEST(arguments, machine_fast_owner_match_mask_test(0, 0, 0) == 0);
     u64 owner_page_size = os_get_page_size();
-    u8* owner_pages = os_reserve(0, owner_page_size * 2u, (ProtectionFlags){0}, (MapFlags){.priv = true, .anonymous = true});
+    u8* owner_pages = (u8*)os_reserve(0, owner_page_size * 2u, (ProtectionFlags){0}, (MapFlags){.priv = true, .anonymous = true});
     BUSTER_TEST(arguments, owner_pages != 0);
     bool owner_page_committed = owner_pages && os_commit(owner_pages, owner_page_size, (ProtectionFlags){.read = true, .write = true}, false);
     BUSTER_TEST(arguments, owner_page_committed);
