@@ -3,8 +3,8 @@
 // rather than in per-platform files, so the contract stays in one place:
 // virtual memory (os_reserve/os_commit/os_decommit and protection flags),
 // threads, mutexes, and TLS, file IO, process spawn/wait with deadlines,
-// dynamic libraries, and the crash/failure printers. The lane model's
-// implementation lives at the bottom — lane_run dispatches through a
+// executable lookup, dynamic libraries, and the crash/failure printers.
+// The lane model's implementation lives at the bottom — lane_run dispatches through a
 // persistent LaneGang of workers that survives across phases
 // (lane_persistent_worker_entry_point); creating threads per phase is the
 // shape it exists to avoid.
@@ -338,35 +338,36 @@ int generic_fd_to_posix(OsFileDescriptor* fd)
 #elif defined(_WIN32)
 BUSTER_GLOBAL_LOCAL DWORD os_windows_protection_flags(ProtectionFlags flags)
 {
-    DWORD result = 0;
+    DWORD result;
 
-    if (flags.read & flags.write & flags.execute)
+    // Windows has no write-only protection. A writable request necessarily
+    // grants read access too; an empty request is a valid no-access page.
+    if (flags.execute)
     {
-        result = PAGE_EXECUTE_READWRITE;
+        if (flags.write)
+        {
+            result = PAGE_EXECUTE_READWRITE;
+        }
+        else if (flags.read)
+        {
+            result = PAGE_EXECUTE_READ;
+        }
+        else
+        {
+            result = PAGE_EXECUTE;
+        }
     }
-    else if (flags.read & flags.write)
+    else if (flags.write)
     {
         result = PAGE_READWRITE;
-    }
-    else if (flags.read & flags.execute)
-    {
-        result = PAGE_EXECUTE_READ;
     }
     else if (flags.read)
     {
         result = PAGE_READONLY;
     }
-    else if (flags.execute)
-    {
-        result = PAGE_EXECUTE;
-    }
-    else if (!flags.write)
-    {
-        result = PAGE_NOACCESS;
-    }
     else
     {
-        BUSTER_UNREACHABLE();
+        result = PAGE_NOACCESS;
     }
 
     return result;
@@ -2952,33 +2953,62 @@ bool program_flag_get(ProgramFlag flag)
     return flag_get(program_state->input.flags, PROGRAM_FLAG_COUNT, flag);
 }
 
+#if defined(_WIN32)
+// Only ASCII environment keys and executable suffixes use this comparison.
+// Do not case-fold paths: directory case-sensitivity is a filesystem property.
+BUSTER_GLOBAL_LOCAL bool os_windows_ascii_equal_ignore_case(String8 a, String8 b)
+{
+    bool result = a.length == b.length;
+    for (u64 i = 0; result && i < a.length; i += 1)
+    {
+        u32 left = (u8)a.pointer[i];
+        u32 right = (u8)b.pointer[i];
+        if (left >= 'A' && left <= 'Z')
+        {
+            left += 'a' - 'A';
+        }
+        if (right >= 'A' && right <= 'Z')
+        {
+            right += 'a' - 'A';
+        }
+        result = left == right;
+    }
+    return result;
+}
+#endif
+
 String8 executable_resolve_in_path(Arena* arena, String8 file)
 {
     TemporalArena temp = scratch_begin(&arena, 1);
 
     String8 result = {0};
     String8 path_value = {0};
+    bool path_present = false;
     String8* key_pointer = program_state->input.environment_keys.pointer;
     u64 key_length = program_state->input.environment_keys.length;
-#if defined(_WIN32)
-    String8 path_key = S8("Path");
-#else
     String8 path_key = S8("PATH");
-#endif
 
     for (u64 i = 0; i < key_length; i += 1)
     {
         String8 candidate_key = key_pointer[i];
-        if (string_equal(path_key, candidate_key))
+#if defined(_WIN32)
+        bool matches = os_windows_ascii_equal_ignore_case(path_key, candidate_key);
+#else
+        bool matches = string_equal(path_key, candidate_key);
+#endif
+        if (matches)
         {
             path_value = program_state->input.environment_values.pointer[i];
+            path_present = true;
             break;
         }
     }
 
-    if (path_value.pointer && path_value.length)
+    if (path_present && file.length)
     {
-        String8 path_it = path_value;
+        // An explicitly empty PATH is one empty component, not a missing
+        // variable. Use a non-null slice for the existing slicing helpers.
+        String8 path_it = path_value.length ? path_value : S8("");
 
 #if defined(_WIN32)
         char8 path_separator = ';';
@@ -2987,7 +3017,9 @@ String8 executable_resolve_in_path(Arena* arena, String8 file)
 #endif
 
 #if defined(_WIN32)
-        String8 exe_part = string_ends_with_sequence(file, S8(".exe")) ? S8("") : S8(".exe");
+        bool has_exe_suffix = file.length >= 4 &&
+            os_windows_ascii_equal_ignore_case(string_slice(file, file.length - 4, file.length), S8(".exe"));
+        String8 exe_part = has_exe_suffix ? S8("") : S8(".exe");
 #endif
 
         while (true)
@@ -3002,9 +3034,17 @@ String8 executable_resolve_in_path(Arena* arena, String8 file)
                 // directory, not the filesystem root.
                 it = S8(".");
             }
+            String8 directory_separator = S8("/");
+#if defined(_WIN32)
+            // Extended-length Win32 paths bypass slash normalization.
+            if (string_starts_with_sequence(it, S8("\\\\?\\")))
+            {
+                directory_separator = S8("\\");
+            }
+#endif
             String8 parts[] = {
                 it,
-                S8("/"),
+                directory_separator,
                 file,
 #if defined(_WIN32)
                 exe_part,

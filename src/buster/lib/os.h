@@ -398,4 +398,8 @@ BUSTER_F_DECL BooleanArgumentProcessResult boolean_argument_process(String8* fla
                                                                     u64 flag_count, String8 argument);
 
 BUSTER_F_DECL bool program_flag_get(ProgramFlag flag);
+// Resolve using the captured PATH. An explicitly empty value searches the
+// current directory; a missing PATH does not. Windows matches ASCII PATH keys
+// and .exe suffixes without case, preserving the spelling of directory paths.
+// A successful, zero-terminated result belongs to arena; an empty file fails.
 BUSTER_F_DECL String8 executable_resolve_in_path(Arena* arena, String8 file);
