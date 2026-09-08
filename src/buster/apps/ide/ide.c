@@ -286,7 +286,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_run_tests(void)
 
     u64 position = arena->position;
     BatchTestResult batch = library_tests(&arguments);
-    arena->position = position;
+    arena_set_position(arena, position);
 
     thread_context_release(test_context);
     (void)arena_pool_release_thread();
@@ -294,7 +294,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_run_tests(void)
 
     position = arena->position;
     ProcessResult result = batch_test_report(&arguments, batch) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
-    arena->position = position;
+    arena_set_position(arena, position);
     arena_destroy(arena, 1);
     return result;
 #else

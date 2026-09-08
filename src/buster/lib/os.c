@@ -853,7 +853,7 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
         BUSTER_VALIDATE(result.length <= length);
     }
 
-    arena->position = position + result.length + null_terminate;
+    arena_set_position(arena, position + result.length + null_terminate);
 #elif defined(_WIN32)
     TemporalArena temp = scratch_begin(&arena, 1);
     String16 relative_file_path_w = string16_from_string8(temp.arena, relative_file_path, true);

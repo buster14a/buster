@@ -1431,7 +1431,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, lanes_agree);
 
-        arena->position = position;
+        arena_set_position(arena, position);
     }
 
     Target wasm64_target = {
