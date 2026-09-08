@@ -1119,6 +1119,26 @@ enum
 BUSTER_F_DECL bool buster_x86_metadata_emit_tls_general_dynamic(u8* output, u32 capacity);
 BUSTER_F_DECL bool buster_x86_metadata_relax_tls(u8* sequence, u32 capacity, BusterX86MetadataTlsModel model, s32 thread_pointer_offset);
 
+// Fixed forwarding envelopes shared by ELF/UCRT runtime-object producers.
+// Ordinary XOR/JMP forms own the bytes. The symbolic branch is always PC32,
+// including when its eventual displacement fits in eight bits. The returned
+// descriptor is relative to output; its symbol is empty because the object
+// producer owns symbol identity. Both outputs are unchanged on failure and
+// must not overlap. First use is serial; prewarm_all_forms prepares worker use.
+typedef enum BusterX86MetadataForwardingKind
+{
+    BUSTER_X86_METADATA_FORWARDING_JUMP,
+    BUSTER_X86_METADATA_FORWARDING_ZERO_ARGUMENTS,
+    BUSTER_X86_METADATA_FORWARDING_KIND_COUNT,
+} BusterX86MetadataForwardingKind;
+enum
+{
+    BUSTER_X86_METADATA_FORWARDING_JUMP_SIZE = 5,
+    BUSTER_X86_METADATA_FORWARDING_ZERO_SIZE = 9,
+};
+BUSTER_F_DECL bool buster_x86_metadata_emit_forwarding(u8* output, u32 capacity, BusterX86MetadataForwardingKind kind,
+                                                     BusterX86MetadataRelocation* branch);
+
 // Shared semantic proof used by source adapters and the handwritten parser:
 // an explicitly typed EVEX decorator is authoritative only for ordinary
 // 64-bit, non-APX/AMX forms with one ordinary memory broadcast or a

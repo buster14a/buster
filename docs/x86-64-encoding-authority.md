@@ -48,7 +48,7 @@ not just function names containing `encode`.
 | `machine_x86_64.c:MACHINE_X64_TLS_GENERAL_DYNAMIC`, via `machine_x64_emit_literal_bytes` | Migrated: same recipe; literal helper removed. |
 | `link.c:link_elf_relax_thread_local`, general-dynamic arm | Migrated: metadata-derived FS MOV + fixed-displacement LEA replacement. |
 | The same function, initial-exec arm | Migrated: metadata-derived ADD input/output forms, not manual REX/ModRM surgery. |
-| `link.c:link_forwarding_runtime_object` | Deferred: literal XOR ESI/EDX and JMP rel32 forwarding stubs. |
+| `link.c:link_forwarding_runtime_object` | Migrated in the [forwarding follow-up](x86-64-forwarding-authority.md): metadata-prepared XOR/JMP recipes; object ABI policy stays in the linker. |
 | `link.c:link_x86_relax_got_load` | Deferred: raw MOV-to-LEA opcode recognition/rewrite. |
 | `assembly_unit.c:assembly_unit_directive_align` | Deferred: implicit executable-section padding uses literal `0x90`. Explicit user fill bytes are data and must remain literal. |
 | `codegen.c:codegen_generate_canonical_module_attempt` | Deferred: x86 function-entry padding uses `memset(..., 0x90, ...)`. A shared padding policy must preserve the measured bulk-fill fast path, not call the generic encoder per byte. |
