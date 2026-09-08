@@ -6788,6 +6788,121 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
+    // The native backend audit regressions need executed runtime operands:
+    // f32-to-u64 thresholds and VLA addresses with alignment above sixteen.
+    String8 c_native_regression_paths[] = {
+        S8("tests/basic_c_f32_u64.c"),
+        S8("tests/basic_c_aligned_vla.c"),
+    };
+    String8 c_native_regression_names[] = {
+        S8("buster-c-f32-u64"),
+        S8("buster-c-aligned-vla"),
+    };
+    for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_native_regression_paths); fixture_index += 1)
+    {
+        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            TemporalArena native_temporary = scratch_begin(&arguments->arena, 1);
+            String8 native_path = buster_test_temporary_path(native_temporary.arena, c_native_regression_names[fixture_index], S8(""));
+            String8 native_command[] = {
+                c_lz4_regression_allocators[allocator_index], S8("-o"), native_path, c_native_regression_paths[fixture_index],
+            };
+            CompilerDriverResult native = compiler_driver_execute_invocation(
+                native_temporary.arena, compiler_driver_parse_arguments(native_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command)));
+            BUSTER_TEST(arguments, native.error == COMPILER_DRIVER_ERROR_NONE);
+            if (native.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 native_arguments[] = {native_path};
+                ProcessSpawnResult native_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(native_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                  (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, native_spawn.handle != 0);
+                if (native_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(native_temporary.arena, native_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(native_temporary);
+        }
+    }
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_APPLE && !BUSTER_ANDROID && !BUSTER_IOS
+    // Cross both compiler directions so agreeing on an incorrect stack layout
+    // cannot pass. The third translation unit observes parameter addresses
+    // without letting the host fold checks from its ABI alignment assumptions.
+    {
+        TemporalArena stack_pair_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* stack_pair_arena = stack_pair_temporary.arena;
+        String8 stack_sources[] = {
+            S8("tests/basic_c_overaligned_stack_caller.c"),
+            S8("tests/basic_c_overaligned_stack_callee.c"),
+            S8("tests/basic_c_overaligned_stack_observe.c"),
+        };
+        String8 host_stack_objects[BUSTER_ARRAY_LENGTH(stack_sources)];
+        bool host_stack_compiled = true;
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(stack_sources); source_index += 1)
+        {
+            host_stack_objects[source_index] = buster_test_temporary_path(
+                stack_pair_arena, S8("buster-c-overaligned-host"), string_format(stack_pair_arena, S8("-{u32}.o"), source_index));
+            // Match the existing mixed-object pairs: no GOT references or
+            // host debug sections outside the native object reader's model.
+            String8 host_stack_command[] = {
+                S8(BUSTER_HOST_C_COMPILER), S8("-DOVERALIGNED_STACK_OBSERVE=1"), S8("-O0"), S8("-fno-pic"), S8("-g0"), S8("-c"),
+                S8("-o"), host_stack_objects[source_index], stack_sources[source_index],
+            };
+            ProcessSpawnResult host_stack_spawn = os_process_spawn(
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(host_stack_command), (SliceString8){0}, (SliceString8){0},
+                (ProcessSpawnOptions){
+                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                    .use_process_environment = true,
+                });
+            bool compiled = host_stack_spawn.handle && os_process_wait_sync(stack_pair_arena, host_stack_spawn).result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST(arguments, compiled);
+            host_stack_compiled &= compiled;
+        }
+        for (u64 allocator_index = 0; host_stack_compiled && allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            String8 buster_stack_objects[2];
+            bool buster_stack_compiled = true;
+            for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(buster_stack_objects); source_index += 1)
+            {
+                buster_stack_objects[source_index] = buster_test_temporary_path(
+                    stack_pair_arena, S8("buster-c-overaligned-object"), string_format(stack_pair_arena, S8("-{u32}-{u32}.o"), (u32)allocator_index, source_index));
+                String8 buster_stack_command[] = {
+                    c_lz4_regression_allocators[allocator_index], S8("-c"), S8("-o"), buster_stack_objects[source_index], stack_sources[source_index],
+                };
+                CompilerDriverResult buster_stack = compiler_driver_execute_invocation(
+                    stack_pair_arena, compiler_driver_parse_arguments(stack_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_stack_command)));
+                BUSTER_TEST(arguments, buster_stack.error == COMPILER_DRIVER_ERROR_NONE);
+                buster_stack_compiled &= buster_stack.error == COMPILER_DRIVER_ERROR_NONE;
+            }
+            for (u32 direction = 0; buster_stack_compiled && direction < 2; direction += 1)
+            {
+                String8 stack_mixed_path = buster_test_temporary_path(
+                    stack_pair_arena, S8("buster-c-overaligned-pair"), string_format(stack_pair_arena, S8("-{u32}-{u32}"), (u32)allocator_index, direction));
+                String8 stack_link_command[] = {
+                    S8("-o"), stack_mixed_path,
+                    direction == 0 ? buster_stack_objects[0] : host_stack_objects[0],
+                    direction == 0 ? host_stack_objects[1] : buster_stack_objects[1],
+                    host_stack_objects[2],
+                };
+                CompilerDriverResult stack_link = compiler_driver_execute_invocation(
+                    stack_pair_arena, compiler_driver_parse_arguments(stack_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(stack_link_command)));
+                BUSTER_TEST(arguments, stack_link.error == COMPILER_DRIVER_ERROR_NONE);
+                if (stack_link.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 stack_arguments[] = {stack_mixed_path};
+                    ProcessSpawnResult stack_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(stack_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                     (ProcessSpawnOptions){.use_process_environment = true});
+                    BUSTER_TEST(arguments, stack_spawn.handle != 0);
+                    if (stack_spawn.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+            }
+        }
+        scratch_end(stack_pair_temporary);
+    }
+#endif
     // A call through a noreturn function pointer type ends control flow, and
     // nothing after it in the block is emitted.  The defect that motivated the
     // fixture only ever produced dead code, so running the program cannot see

@@ -4,6 +4,14 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- A VLA's declared alignment travels on `IR_OPCODE_STACK_ALLOCATE`. For an
+  alignment above the native stack's sixteen-byte guarantee, both canonical
+  and machine emitters compute `align_down(old_sp - size, alignment)` and
+  probe the complete distance to that address, including alignment padding.
+  Rounding the byte count alone preserves a misaligned incoming stack pointer.
+  Keep the ordinary sixteen-byte path and the existing save/restore lifetime
+  semantics; test real addresses across different incoming stack residues and
+  page-crossing sizes.
 - **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
   representation, so ignoring them is an ABI divergence rather than a missing
   optimization: a Buster-only program agrees with itself whatever it agrees on,

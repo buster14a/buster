@@ -10385,10 +10385,37 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
                             codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
                         };
-                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), stack_add_operands,
-                                                                  BUSTER_ARRAY_LENGTH(stack_add_operands));
-                        (void)codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), stack_align_operands,
-                                                                  BUSTER_ARRAY_LENGTH(stack_align_operands));
+                        if (stack_alignment > CODEGEN_X64_STACK_ALIGNMENT)
+                        {
+                            // Round the destination address down, then probe the
+                            // complete distance, including its alignment padding.
+                            BusterX86MetadataPhysicalOperand stack_target_start[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
+                            };
+                            BusterX86MetadataPhysicalOperand stack_target_subtract[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                            };
+                            BusterX86MetadataPhysicalOperand stack_target_align[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                                codegen_canonical_x64_metadata_immediate(-(s64)stack_alignment, 32),
+                            };
+                            BusterX86MetadataPhysicalOperand stack_target_distance[2] = {
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 64),
+                                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RCX, 64),
+                            };
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), stack_target_start, BUSTER_ARRAY_LENGTH(stack_target_start));
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), stack_target_subtract, BUSTER_ARRAY_LENGTH(stack_target_subtract));
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), stack_target_align, BUSTER_ARRAY_LENGTH(stack_target_align));
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), stack_move_rax_rsp_operands, BUSTER_ARRAY_LENGTH(stack_move_rax_rsp_operands));
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("SUB"), stack_target_distance, BUSTER_ARRAY_LENGTH(stack_target_distance));
+                        }
+                        else
+                        {
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("ADD"), stack_add_operands, BUSTER_ARRAY_LENGTH(stack_add_operands));
+                            (void)codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), stack_align_operands, BUSTER_ARRAY_LENGTH(stack_align_operands));
+                        }
                         u64 stack_probe_compare_offset = buffer.count;
                         (void)codegen_canonical_x64_metadata_emit(&buffer, S8("CMP"), stack_compare_operands,
                                                                   BUSTER_ARRAY_LENGTH(stack_compare_operands));
@@ -12321,7 +12348,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             BusterX86MetadataPhysicalOperand threshold_load[2] = {
                                 codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, source_type->bit_width == 32 ? 32 : 64),
                                 codegen_canonical_x64_metadata_unsigned_immediate(
-                                    source_type->bit_width == 32 ? UINT64_C(0x5f000000) : UINT64_C(0x43e0000000000000),
+                                    source_type->bit_width == 32 ? CODEGEN_F32_SIGNED64_LIMIT_BITS : CODEGEN_F64_SIGNED64_LIMIT_BITS,
                                     source_type->bit_width == 32 ? 32 : 64),
                             };
                             BusterX86MetadataPhysicalOperand threshold_vector[2] = {
@@ -17162,10 +17189,22 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 stack_alignment = (u32)instruction->immediates[0];
                         stack_alignment = BUSTER_MAX(stack_alignment, 16);
                         c_a64_load(&emitter, 9, instruction->operands[0]);
-                        a64_emit_constant(&buffer, 10, stack_alignment - 1);
-                        codegen_emit_u32(&buffer, 0x8b0a0129);
+                        if (stack_alignment > 16)
+                        {
+                            codegen_emit_u32(&buffer, 0xcb2963e9); // sub x9, sp, x9
+                        }
+                        else
+                        {
+                            a64_emit_constant(&buffer, 10, stack_alignment - 1);
+                            codegen_emit_u32(&buffer, 0x8b0a0129);
+                        }
                         a64_emit_constant(&buffer, 10, ~(u64)(stack_alignment - 1));
                         codegen_emit_u32(&buffer, 0x8a0a0129);
+                        if (stack_alignment > 16)
+                        {
+                            // The aligned target becomes the full probe distance.
+                            codegen_emit_u32(&buffer, 0xcb2963e9); // sub x9, sp, x9
+                        }
                         codegen_emit_u32(&buffer, 0xf140053f);
                         codegen_emit_u32(&buffer, 0x540000a3);
                         codegen_emit_u32(&buffer, 0xd14007ff);

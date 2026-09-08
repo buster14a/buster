@@ -82,6 +82,17 @@
   The dependency builder uses epoch-stamped slot tails and a compact pending
   list, with at most 9N+8 edges for N rows and source-order fallback before a
   scratch count can overflow. No alias classification runs in the FAST tier.
+- System V x86-64 machine callers use a sixteen-aligned push area. A stack
+  argument needing greater alignment falls back per function to the canonical
+  caller, even when its offset is zero: an aligned offset does not align the
+  area's base. Apply this check to both cached fixed parameters and variadic
+  tails. The canonical caller saves and realigns RSP, then restores it after
+  the call. Cross-link alignment tests with another compiler; a Buster caller
+  and callee can otherwise share the same wrong assumption.
+- The f32/f64-to-u64 biased conversions compare against **2^63 in the source
+  format**. Both x86 emitters use `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
+  `CODEGEN_F64_SIGNED64_LIMIT_BITS`; the source width does not change which
+  integer bit the final bias restores.
 - `-fPIC` is a code model, not an accepted flag. It reaches code generation as
   `CodegenModuleOptions.position_independent`, and generation resolves it for
   the target: x86-64 ELF, where the relocations it changes are the ones `ld`
