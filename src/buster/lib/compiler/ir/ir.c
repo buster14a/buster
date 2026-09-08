@@ -4220,31 +4220,44 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* mo
         .instruction = IR_INSTRUCTION_ID_INVALID,
     };
     u32 capacity = 0;
-    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+    for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
         if (function->state == IR_FUNCTION_LOWERED)
         {
-            capacity = BUSTER_MAX(capacity, function->instruction_count);
+            if ((function->block_count && !function->blocks) || (function->instruction_count && !function->instructions) ||
+                (function->value_count && !function->values) ||
+                (function->label_metadata_count && (!function->label_metadata || !function->label_metadata_values)) ||
+                (function->extra_count && (!function->extras || !function->extra_instructions)))
+            {
+                result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+            }
+            else
+            {
+                capacity = BUSTER_MAX(capacity, function->instruction_count);
+            }
         }
     }
-    TemporalArena scratch = scratch_begin(0, 0);
-    IrBlockId* owners = arena_allocate(scratch.arena, IrBlockId, capacity);
-    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+    if (result.error == IR_VALIDATION_NONE)
     {
-        IrFunction* function = module->functions + function_index;
-        if (function->state != IR_FUNCTION_LOWERED)
+        TemporalArena scratch = scratch_begin(0, 0);
+        IrBlockId* owners = arena_allocate(scratch.arena, IrBlockId, capacity);
+        for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
         {
-            continue;
+            IrFunction* function = module->functions + function_index;
+            if (function->state != IR_FUNCTION_LOWERED)
+            {
+                continue;
+            }
+            IrInstructionOwnership ownership = ir_function_instruction_owners(function, owners);
+            if (ownership.error != IR_VALIDATION_NONE)
+            {
+                result = ir_validation_error(ownership.error, function, ownership.block, ownership.instruction);
+                break;
+            }
         }
-        IrInstructionOwnership ownership = ir_function_instruction_owners(function, owners);
-        if (ownership.error != IR_VALIDATION_NONE)
-        {
-            result = ir_validation_error(ownership.error, function, ownership.block, ownership.instruction);
-            break;
-        }
+        scratch_end(scratch);
     }
-    scratch_end(scratch);
     return result;
 }
 
@@ -4814,18 +4827,22 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrType* signature_type = indirect ? ir_type_from_id(&program->types, callee_type->element_type) : callee_type;
         IrInstruction* reference =
             callee && callee->definition.value < function->instruction_count ? function->instructions + callee->definition.value : 0;
-        if (!signature_type || signature_type->kind != IR_TYPE_FUNCTION ||
-            (!signature_type->is_variadic && instruction->operand_count != signature_type->parameter_count + 1) ||
-            (signature_type->is_variadic && instruction->operand_count < signature_type->parameter_count + 1) ||
+        IrType* return_type = signature_type ? ir_type_from_id(&program->types, signature_type->return_type) : 0;
+        // Operand zero is the callee. Adding one to an untrusted parameter
+        // count can wrap, making a malformed variadic signature look valid.
+        u32 argument_count = instruction->operand_count ? instruction->operand_count - 1 : 0;
+        if (!signature_type || signature_type->kind != IR_TYPE_FUNCTION || !return_type ||
+            (signature_type->parameter_count && !signature_type->parameter_types) ||
+            (!signature_type->is_variadic && argument_count != signature_type->parameter_count) ||
+            (signature_type->is_variadic && argument_count < signature_type->parameter_count) ||
             signature_type->return_type.value != instruction->canonical_type.value || !reference ||
             (!indirect && (reference->opcode != IR_OPCODE_FUNCTION || reference->symbol.value != instruction->symbol.value)) ||
             (indirect && instruction->symbol.value != IR_ID_UNDERLYING_INVALID) ||
-            ((ir_type_from_id(&program->types, signature_type->return_type)->kind == IR_TYPE_VOID) !=
-             (instruction->result.value == IR_ID_UNDERLYING_INVALID)))
+            ((return_type->kind == IR_TYPE_VOID) != (instruction->result.value == IR_ID_UNDERLYING_INVALID)))
         {
             error = IR_VALIDATION_CALL_SIGNATURE;
         }
-        for (u32 argument_index = 0; argument_index < signature_type->parameter_count && error == IR_VALIDATION_NONE; argument_index += 1)
+        for (u32 argument_index = 0; error == IR_VALIDATION_NONE && argument_index < signature_type->parameter_count; argument_index += 1)
         {
             if (function->values[instruction->operands[argument_index + 1].value].canonical_type.value !=
                 signature_type->parameter_types[argument_index].value)
@@ -5341,7 +5358,10 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_initializer(IrProgram* program
 IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
 {
     IrValidationResult result = ir_validation_ok();
-    if (!program || !module)
+    if (!program || !module || (program->module_count && !program->modules) ||
+        (program->types.count && !program->types.types) || (program->symbols.count && !program->symbols.symbols) ||
+        (module->function_count && !module->functions) || (module->global_count && !module->globals) ||
+        (module->alias_count && !module->aliases) || (module->initializer_count && !module->initializers))
     {
         result.error = IR_VALIDATION_INVALID_ID;
     }
@@ -5368,7 +5388,9 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
                 continue;
             }
             IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
-            if (!signature || signature->kind != IR_TYPE_FUNCTION || function->entry.value >= function->block_count)
+            if (!signature || signature->kind != IR_TYPE_FUNCTION ||
+                (signature->parameter_count && !signature->parameter_types) ||
+                !ir_type_from_id(&program->types, signature->return_type) || function->entry.value >= function->block_count)
             {
                 result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
             }

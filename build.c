@@ -527,8 +527,8 @@ BUSTER_GLOBAL_LOCAL u64 environment_positive_u64_or(String8 name, u64 fallback)
     String8 value = os_get_environment_variable(name);
     if (value.pointer)
     {
-        IntegerParsingU64 parsed = string8_parse_u64_decimal(value.pointer);
-        if (parsed.length == value.length && parsed.value > 0)
+        IntegerParsingU64 parsed = string8_parse_u64_decimal(value);
+        if (parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == value.length && parsed.value > 0)
         {
             result = parsed.value;
         }
@@ -2119,8 +2119,8 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_provenance_record_read_u64(String
     {
         return false;
     }
-    IntegerParsingU64 parsed = string8_parse_u64_decimal(line.pointer);
-    if (parsed.length != line.length)
+    IntegerParsingU64 parsed = string8_parse_u64_decimal(line);
+    if (parsed.status != INTEGER_PARSING_SUCCESS || parsed.length != line.length)
     {
         return false;
     }
@@ -2172,8 +2172,8 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_provenance_record_payload(String8
     {
         return false;
     }
-    IntegerParsingU64 parsed = string8_parse_u64_hexadecimal(checksum_digits.pointer);
-    if (parsed.length != checksum_digits.length)
+    IntegerParsingU64 parsed = string8_parse_u64_hexadecimal(checksum_digits);
+    if (parsed.status != INTEGER_PARSING_SUCCESS || parsed.length != checksum_digits.length)
     {
         return false;
     }
@@ -2506,8 +2506,8 @@ BUSTER_GLOBAL_LOCAL bool text_parse_u64(String8 value, u64* result)
         return false;
     }
 
-    IntegerParsingU64 parsed = string8_parse_u64_decimal(value.pointer);
-    if (parsed.length != value.length)
+    IntegerParsingU64 parsed = string8_parse_u64_decimal(value);
+    if (parsed.status != INTEGER_PARSING_SUCCESS || parsed.length != value.length)
     {
         return false;
     }
@@ -5962,9 +5962,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult ninja_log_summary_run(Arena* arena, NinjaLogSu
             continue;
         }
 
-        IntegerParsingU64 start_ms = string8_parse_u64_decimal(start_field.pointer);
-        IntegerParsingU64 end_ms = string8_parse_u64_decimal(end_field.pointer);
-        if (!start_ms.length || !end_ms.length)
+        IntegerParsingU64 start_ms = string8_parse_u64_decimal(start_field);
+        IntegerParsingU64 end_ms = string8_parse_u64_decimal(end_field);
+        if (start_ms.status != INTEGER_PARSING_SUCCESS || end_ms.status != INTEGER_PARSING_SUCCESS ||
+            start_ms.length != start_field.length || end_ms.length != end_field.length ||
+            start_ms.value > INT64_MAX || end_ms.value > INT64_MAX)
         {
             continue;
         }
@@ -34040,8 +34042,8 @@ ProcessResult process_arguments(void)
                                       command == BUILD_COMMAND_TIME_TRACE_SUMMARY || command == BUILD_COMMAND_TEST_TIMING_SUMMARY;
             if (is_summary_command && build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &candidate_limit))
             {
-                IntegerParsingU64 parsed_limit = string8_parse_u64_decimal(candidate_limit.pointer);
-                if (parsed_limit.length == candidate_limit.length && parsed_limit.value > 0)
+                IntegerParsingU64 parsed_limit = string8_parse_u64_decimal(candidate_limit);
+                if (parsed_limit.status == INTEGER_PARSING_SUCCESS && parsed_limit.length == candidate_limit.length && parsed_limit.value > 0)
                 {
                     switch (command)
                     {
@@ -34148,8 +34150,8 @@ ProcessResult process_arguments(void)
             if (command == BUILD_COMMAND_GENERATE &&
                 build_argument_read_required_value(arguments, &argument_i, argument_has_value, argument_value, &candidate_limit))
             {
-                IntegerParsingU64 parsed_limit = string8_parse_u64_decimal(candidate_limit.pointer);
-                if (parsed_limit.length == candidate_limit.length && parsed_limit.value > 0)
+                IntegerParsingU64 parsed_limit = string8_parse_u64_decimal(candidate_limit);
+                if (parsed_limit.status == INTEGER_PARSING_SUCCESS && parsed_limit.length == candidate_limit.length && parsed_limit.value > 0)
                 {
                     generate.cmake_profile_summary_limit = parsed_limit.value;
                 }

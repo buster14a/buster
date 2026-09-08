@@ -141,6 +141,9 @@ struct CompilerDriverInvocation
     bool has_gpu_target;
     bool save_gpu_temporaries;
     bool register_allocator_explicit;
+    // -fno-machine-fallback: fail native C compilation before writing its
+    // object if any function needed the canonical differential oracle.
+    bool reject_machine_fallback;
     bool c_dialect_explicit;
 };
 

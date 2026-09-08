@@ -149,9 +149,124 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_float_global(Arena* are
     return result;
 }
 
+// Keep every backing object local and vary one structural fault at a time.
+// Rejection must precede pointer arithmetic and signature-dependent iteration.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_call_validation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrValidationError expected[] = {
+        IR_VALIDATION_NONE,
+        IR_VALIDATION_CALL_SIGNATURE, IR_VALIDATION_CALL_SIGNATURE,
+        IR_VALIDATION_CALL_SIGNATURE, IR_VALIDATION_CALL_SIGNATURE,
+        IR_VALIDATION_CALL_SIGNATURE, IR_VALIDATION_CALL_SIGNATURE,
+        IR_VALIDATION_INVALID_ID, IR_VALIDATION_INVALID_ID,
+        IR_VALIDATION_INVALID_ID, IR_VALIDATION_INVALID_ID,
+        IR_VALIDATION_INVALID_ID, IR_VALIDATION_INVALID_ID,
+        IR_VALIDATION_OPERATION, IR_VALIDATION_OPERATION,
+        IR_VALIDATION_INVALID_ID, IR_VALIDATION_INVALID_ID,
+        IR_VALIDATION_INVALID_ID,
+        IR_VALIDATION_INVALID_ID, IR_VALIDATION_INVALID_ID,
+        IR_VALIDATION_INVALID_ID, IR_VALIDATION_INVALID_ID,
+        IR_VALIDATION_INVALID_ID, IR_VALIDATION_INVALID_ID,
+        IR_VALIDATION_INVALID_ID,
+        IR_VALIDATION_NONE, IR_VALIDATION_NONE, IR_VALIDATION_NONE,
+        IR_VALIDATION_CALL_SIGNATURE, IR_VALIDATION_CALL_SIGNATURE,
+        IR_VALIDATION_INVALID_ID, IR_VALIDATION_INVALID_ID,
+    };
+    for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(expected); variant += 1)
+    {
+        IrTypeId pointer_type = {.value = 1};
+        IrType types[] = {
+            {.id = {.value = 0}, .kind = IR_TYPE_VOID, .layout = {.alignment = 1, .resolved = true}},
+            {.id = {.value = 1}, .kind = IR_TYPE_POINTER, .element_type = {.value = 3},
+             .layout = {.size = 8, .alignment = 8, .resolved = true}},
+            {.id = {.value = 2}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 0},
+             .parameter_types = &pointer_type, .parameter_count = 1},
+            {.id = {.value = 3}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 0}},
+        };
+        u64 argument_index = 0;
+        IrValueId operands[] = {{.value = 0}, {.value = 0}};
+        IrValue value = {.canonical_type = {.value = 1}, .definition = {.value = 0}, .category = IR_VALUE_VALUE};
+        IrInstruction instructions[] = {
+            {.opcode = IR_OPCODE_ARGUMENT, .canonical_type = {.value = 1}, .result = {.value = 0},
+             .immediates = &argument_index, .immediate_count = 1, .next = {.value = 1}},
+            {.opcode = IR_OPCODE_CALL, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+             .symbol = IR_SYMBOL_ID_INVALID, .operands = operands, .operand_count = 1, .next = {.value = 2}},
+            {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+             .next = IR_INSTRUCTION_ID_INVALID},
+        };
+        IrBlock block = {.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = 2},
+                         .sealed = true, .terminated = true};
+        IrFunction function = {.canonical_type = {.value = 2}, .state = IR_FUNCTION_LOWERED, .entry = {.value = 0},
+                               .blocks = &block, .block_count = 1, .instructions = instructions, .instruction_count = 3,
+                               .values = &value, .value_count = 1};
+        IrModule module = {.functions = &function, .function_count = 1};
+        IrProgram program = {.modules = &module, .module_count = 1,
+                             .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+        switch (variant)
+        {
+            case 0: break;
+            case 1: types[1].element_type = IR_TYPE_ID_INVALID; break;
+            case 2: types[1].element_type.value = 0; break;
+            case 3: instructions[1].operand_count = 0; break;
+            case 4:
+                types[3].parameter_count = 1;
+                instructions[1].operand_count = 2;
+                break;
+            case 5:
+                types[3].parameter_count = UINT32_MAX;
+                types[3].parameter_types = &pointer_type;
+                types[3].is_variadic = true;
+                break;
+            case 6: types[3].return_type = IR_TYPE_ID_INVALID; break;
+            case 7: module.functions = 0; break;
+            case 8: program.types.types = 0; break;
+            case 9: function.blocks = 0; break;
+            case 10: function.instructions = 0; break;
+            case 11: function.values = 0; break;
+            case 12: types[2].parameter_types = 0; break;
+            case 13: instructions[1].operands = 0; break;
+            case 14: instructions[0].immediates = 0; break;
+            case 15: operands[0] = IR_VALUE_ID_INVALID; break;
+            case 16: function.entry = IR_BLOCK_ID_INVALID; break;
+            case 17: instructions[0].next.value = function.instruction_count; break;
+            case 18: program.modules = 0; break;
+            case 19: program.symbols.count = 1; break;
+            case 20: module.global_count = 1; break;
+            case 21: module.alias_count = 1; break;
+            case 22: module.initializer_count = 1; break;
+            case 23: function.label_metadata_count = 1; break;
+            case 24: function.extra_count = 1; break;
+            case 25: types[3].is_variadic = true; break;
+            case 26:
+            case 27:
+            case 28:
+                types[3].parameter_count = 1;
+                types[3].parameter_types = &pointer_type;
+                types[3].is_variadic = variant == 27;
+                instructions[1].operand_count = variant == 28 ? 1 : 2;
+                break;
+            case 29:
+                types[3].parameter_count = UINT32_MAX;
+                types[3].parameter_types = &pointer_type;
+                break;
+            case 30:
+            case 31: break;
+            default: BUSTER_TODO();
+        }
+        IrValidationResult validation = ir_validate_canonical_module(variant == 30 ? 0 : &program, variant == 31 ? 0 : &module);
+        BUSTER_TEST(arguments, validation.error == expected[variant]);
+    }
+    return result;
+}
+
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_promotion_tests(arguments);
+
+    UnitTestResult call_validation = ir_test_canonical_call_validation(arguments);
+    result.succeeded_test_count += call_validation.succeeded_test_count;
+    result.test_count += call_validation.test_count;
 
     IrProgram abi_program = ir_program_initialize(arguments->arena, 0, 32, 0, 0);
     IrTypeId abi_f32 = ir_program_add_type(&abi_program, (IrType){
