@@ -68,6 +68,7 @@
 #include <buster/tests/compiler/assembly/aarch64_memory_semantics_test.h>
 #include <buster/tests/compiler/assembly/aarch64_alias_projection_test.h>
 #include <buster/tests/compiler/assembly/assembly_test.h>
+#include <buster/tests/compiler/assembly/x86_64_forwarding_test.h>
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.h>
 #include <buster/tests/compiler/assembly/x86_64_tls_test.h>
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.h>
@@ -114,6 +115,7 @@
 #include <buster/tests/compiler/assembly/aarch64_memory_semantics_test.c>
 #include <buster/tests/compiler/assembly/aarch64_alias_projection_test.c>
 #include <buster/tests/compiler/assembly/assembly_test.c>
+#include <buster/tests/compiler/assembly/x86_64_forwarding_test.c>
 #include <buster/tests/compiler/assembly/x86_64_metadata_test.c>
 #include <buster/tests/compiler/assembly/x86_64_tls_test.c>
 #include <buster/tests/compiler/assembly/x86_64_completion_census_test.c>
@@ -271,6 +273,7 @@ typedef enum TestId
     TEST_ID_AARCH64_MEMORY_SEMANTICS,
     TEST_ID_AARCH64_ALIAS_PROJECTION,
     TEST_ID_ASSEMBLY,
+    TEST_ID_X86_64_FORWARDING,
     TEST_ID_X86_64_METADATA,
     TEST_ID_X86_64_TLS,
 #if BUSTER_CPU_ARCH_X86_64
@@ -320,6 +323,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_AARCH64_MEMORY_SEMANTICS] = {S8_INITIALIZER("aarch64_memory_semantics_tests"), &aarch64_memory_semantics_tests, false, TEST_DESCRIPTOR_PARALLEL_AARCH64_MEMORY_SEMANTICS},
     [TEST_ID_AARCH64_ALIAS_PROJECTION] = {S8_INITIALIZER("aarch64_alias_projection_tests"), &aarch64_alias_projection_tests},
     [TEST_ID_ASSEMBLY] = {S8_INITIALIZER("assembly_tests"), &assembly_tests},
+    [TEST_ID_X86_64_FORWARDING] = {S8_INITIALIZER("x86_64_forwarding_tests"), &x86_64_forwarding_tests},
     [TEST_ID_X86_64_METADATA] = {S8_INITIALIZER("x86_64_metadata_tests"), &x86_64_metadata_tests},
     [TEST_ID_X86_64_TLS] = {S8_INITIALIZER("x86_64_tls_tests"), &x86_64_tls_tests},
 #if BUSTER_CPU_ARCH_X86_64

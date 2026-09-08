@@ -2,7 +2,8 @@
 // selection/emission, and derived exact-machine specializations live here.
 // Map: buster_x86_metadata_encode (checked request), emit_form_to_scratch
 // (general packing), emit_machine_fast (derived hot plans), tls_prepare
-// (fixed-envelope ABI recipes), prewarm_all_forms (worker publication).
+// and forwarding_prepare (fixed-envelope ABI recipes), prewarm_all_forms
+// (worker publication).
 // Parsing, allocation, scheduling and object-format relocation policy remain
 // consumers. See docs/x86-64-encoding-authority.md for the remaining escapes.
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
@@ -11811,6 +11812,99 @@ bool buster_x86_metadata_relax_tls(u8* sequence, u32 capacity, BusterX86Metadata
     return result;
 }
 
+// Forwarding ABI recipes: derive the two 32-bit zero idioms and a symbolic
+// near branch once, then copy the fixed envelope per object, not per stub.
+// No opcode, form ID, register-field or relocation-offset table lives here.
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_forwarding_bytes[BUSTER_X86_METADATA_FORWARDING_ZERO_SIZE];
+BUSTER_GLOBAL_LOCAL BusterX86MetadataRelocation buster_x86_metadata_forwarding_branch;
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_forwarding_prepared;
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_forwarding_valid;
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_forwarding_prepare(void)
+{
+    if (!buster_x86_metadata_forwarding_prepared)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        buster_x86_metadata_prewarm();
+        u8 candidate[BUSTER_X86_METADATA_FORWARDING_ZERO_SIZE] = {0};
+        BusterX86MetadataRelocation branch = {0};
+        BusterX86MetadataPhysicalOperand operands[2] = {0};
+        BusterX86MetadataPhysicalQuery physical = {
+            .mnemonic = S8("XOR"), .operands = operands, .operand_count = 2,
+            .address_size = 64, .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+        };
+        u16 const zero_registers[] = {6, 2}; // SysV's second and third arguments, written at width 32.
+        u32 count = 0;
+        bool valid = true;
+        for (u32 index = 0; valid && index < BUSTER_ARRAY_LENGTH(zero_registers); index += 1)
+        {
+            operands[0] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 32,
+                .reg = {.index = zero_registers[index], .width = 32, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+            };
+            operands[1] = operands[0];
+            BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+                .physical = physical, .output = candidate + count, .output_capacity = (u32)sizeof(candidate) - count,
+            });
+            valid = emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.byte_count == 2 && emitted.relocation_count == 0;
+            if (valid) count += emitted.byte_count;
+        }
+        if (valid)
+        {
+            operands[0] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE, .width = 32,
+                .has_symbol = true, .symbol = S8("forwarding_target"),
+            };
+            physical.mnemonic = S8("JMP");
+            physical.operand_count = 1;
+            BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+                .physical = physical, .output = candidate + count, .output_capacity = (u32)sizeof(candidate) - count,
+                .relocations = &branch, .relocation_capacity = 1,
+            });
+            // This is an ABI envelope check, not another encoding decision.
+            // The descriptor's field must end exactly at the near-branch end.
+            valid = emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                    emitted.byte_count == BUSTER_X86_METADATA_FORWARDING_JUMP_SIZE && emitted.relocation_count == 1 &&
+                    branch.kind == BUSTER_X86_METADATA_RELOCATION_PC32 && branch.width == sizeof(s32) &&
+                    branch.offset == emitted.byte_count - branch.width && branch.addend == -(s64)branch.width &&
+                    count + emitted.byte_count == sizeof(candidate);
+            if (valid)
+            {
+                branch.offset += count;
+                branch.symbol = (String8){0};
+                memcpy(buster_x86_metadata_forwarding_bytes, candidate, sizeof(candidate));
+                buster_x86_metadata_forwarding_branch = branch;
+            }
+        }
+        buster_x86_metadata_forwarding_valid = valid;
+        // Cache failure too. No partial candidate is ever published or used
+        // as a raw-byte fallback when the checked metadata shape changes.
+        buster_x86_metadata_forwarding_prepared = true;
+    }
+    return buster_x86_metadata_forwarding_valid;
+}
+
+bool buster_x86_metadata_emit_forwarding(u8* output, u32 capacity, BusterX86MetadataForwardingKind kind,
+                                        BusterX86MetadataRelocation* branch)
+{
+    bool result = false;
+    if (output && branch && (kind == BUSTER_X86_METADATA_FORWARDING_JUMP || kind == BUSTER_X86_METADATA_FORWARDING_ZERO_ARGUMENTS))
+    {
+        u32 size = kind == BUSTER_X86_METADATA_FORWARDING_JUMP ? BUSTER_X86_METADATA_FORWARDING_JUMP_SIZE
+                                                              : BUSTER_X86_METADATA_FORWARDING_ZERO_SIZE;
+        if (capacity >= size && buster_x86_metadata_forwarding_prepare())
+        {
+            u32 start = BUSTER_X86_METADATA_FORWARDING_ZERO_SIZE - size;
+            BusterX86MetadataRelocation field = buster_x86_metadata_forwarding_branch;
+            field.offset -= start;
+            memcpy(output, buster_x86_metadata_forwarding_bytes + start, size);
+            *branch = field;
+            result = true;
+        }
+    }
+    return result;
+}
+
 // The complete walk: every form normalized, pattern-parsed, operand-viewed and
 // fact-filled, for a caller about to run a gang whose lanes may query any
 // form -- the test harness.  A compile never needs it.
@@ -11832,6 +11926,7 @@ void buster_x86_metadata_prewarm_all_forms(void)
             buster_x86_metadata_coverage_record_valid(coverage_id);
         }
         (void)buster_x86_metadata_tls_prepare(BUSTER_X86_TLS_PREPARE_ALL);
+        (void)buster_x86_metadata_forwarding_prepare();
         buster_x86_metadata_all_forms_prepared = true;
     }
 }
@@ -11851,6 +11946,7 @@ u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void)
 {
     buster_x86_metadata_prewarm_all_forms();
     u64 unprepared = (u64)(buster_x86_metadata_tls_prepared != BUSTER_X86_TLS_PREPARE_ALL);
+    unprepared += (u64)!buster_x86_metadata_forwarding_prepared;
     for (u32 form_id = 0; form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
     {
         if (buster_x86_metadata_form_record_validity[form_id] == BUSTER_X86_METADATA_RECORD_UNKNOWN)

@@ -1748,20 +1748,13 @@ ObjectFile link_windows_runtime_object(Arena* arena, Target target)
 // the stub does -- `__cxa_atexit` takes the handler, a null argument and a
 // null DSO handle where `atexit` takes only the handler -- which is exactly
 // what an executable's own glibc stub passes.  The branch is the last
-// instruction of the body, so the relocated field sits a fixed distance from
-// its start; the caller has already checked the target.
+// instruction of the body; x86 metadata returns its checked field descriptor
+// and prepared bytes. The caller has already checked the target.
 BUSTER_GLOBAL_LOCAL ObjectFile link_forwarding_runtime_object(Arena* arena, Target target, String8 const* stub_names, String8 const* target_names,
                                                               u64 stub_count, bool zero_trailing_arguments)
 {
     ObjectFile result = {
         .target = target,
-    };
-    static u8 const x86_64_zero_arguments[] = {
-        0x31, 0xf6, // xor esi, esi
-        0x31, 0xd2, // xor edx, edx
-    };
-    static u8 const x86_64_branch[] = {
-        0xe9, 0x00, 0x00, 0x00, 0x00, // jmp rel32
     };
     static u8 const aarch64_zero_arguments[] = {
         0x01, 0x00, 0x80, 0xd2, // mov x1, #0
@@ -1771,62 +1764,84 @@ BUSTER_GLOBAL_LOCAL ObjectFile link_forwarding_runtime_object(Arena* arena, Targ
         0x00, 0x00, 0x00, 0x14, // b
     };
     bool x86_64 = target.cpu_arch == CPU_ARCH_X86_64;
-    u8 const* zero_arguments = x86_64 ? x86_64_zero_arguments : aarch64_zero_arguments;
-    u64 zero_arguments_size = !zero_trailing_arguments ? 0 : x86_64 ? sizeof(x86_64_zero_arguments) : sizeof(aarch64_zero_arguments);
-    u8 const* branch = x86_64 ? x86_64_branch : aarch64_branch;
-    u64 branch_size = x86_64 ? sizeof(x86_64_branch) : sizeof(aarch64_branch);
-    // The displacement field starts one opcode byte into the x86-64 branch and
-    // is the whole AArch64 instruction word; the x86-64 field is measured from
-    // its own end, which is where the -4 addend comes from.
-    u64 branch_field = x86_64 ? 1 : 0;
-    u64 thunk_size = zero_arguments_size + branch_size;
-    result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
-    result.section_count = OBJECT_SECTION_COUNT;
-    for (u32 section_index = 0; section_index < OBJECT_SECTION_COUNT; section_index += 1)
+    u8 recipe[BUSTER_X86_METADATA_FORWARDING_ZERO_SIZE];
+    BusterX86MetadataRelocation branch = {0};
+    u64 thunk_size = zero_trailing_arguments ? sizeof(aarch64_zero_arguments) + sizeof(aarch64_branch) : sizeof(aarch64_branch);
+    bool valid = true;
+    if (x86_64)
     {
-        ObjectSectionKind kind = (ObjectSectionKind)section_index;
-        result.sections[section_index] = (ObjectSection){
-            .name = object_section_name_for_kind(kind),
-            .kind = kind,
-            .alignment = object_section_default_alignment(kind),
-        };
+        BusterX86MetadataForwardingKind kind = zero_trailing_arguments ? BUSTER_X86_METADATA_FORWARDING_ZERO_ARGUMENTS
+                                                                     : BUSTER_X86_METADATA_FORWARDING_JUMP;
+        thunk_size = zero_trailing_arguments ? BUSTER_X86_METADATA_FORWARDING_ZERO_SIZE : BUSTER_X86_METADATA_FORWARDING_JUMP_SIZE;
+        valid = buster_x86_metadata_emit_forwarding(recipe, sizeof(recipe), kind, &branch);
     }
-    // One thunk per stub, laid out back to back in the same section.
-    u8* thunks = arena_allocate(arena, u8, thunk_size * stub_count);
-    result.symbols = arena_allocate(arena, ObjectSymbol, stub_count * 2);
-    result.relocations = arena_allocate(arena, ObjectRelocation, stub_count);
-    for (u64 index = 0; index < stub_count; index += 1)
+    else
     {
-        u64 offset = thunk_size * index;
-        memcpy(thunks + offset, zero_arguments, zero_arguments_size);
-        memcpy(thunks + offset + zero_arguments_size, branch, branch_size);
-        result.symbols[index * 2] = (ObjectSymbol){
-            .name = stub_names[index],
-            .value = offset,
-            .size = thunk_size,
-            .section = OBJECT_SECTION_TEXT,
-            .kind = OBJECT_SYMBOL_FUNCTION,
-            .global = true,
-            .weak = true,
-        };
-        result.symbols[index * 2 + 1] = (ObjectSymbol){
-            .name = target_names[index],
-            .section = OBJECT_SECTION_UNDEFINED,
-            .kind = OBJECT_SYMBOL_FUNCTION,
-            .global = true,
-        };
-        result.relocations[index] = (ObjectRelocation){
-            .addend = x86_64 ? -4 : 0,
-            .offset = offset + zero_arguments_size + branch_field,
-            .section = OBJECT_SECTION_TEXT,
-            .symbol = (u32)(index * 2 + 1),
-            .kind = x86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_JUMP26,
-        };
+        branch.offset = zero_trailing_arguments ? sizeof(aarch64_zero_arguments) : 0;
     }
-    result.symbol_count = (u32)(stub_count * 2);
-    result.relocation_count = (u32)stub_count;
-    result.sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = thunks, .length = thunk_size * stub_count};
-    result.sections[OBJECT_SECTION_TEXT].virtual_size = thunk_size * stub_count;
+    // Derive before allocating or publishing an object. A changed metadata
+    // envelope cannot leave an apparently valid object with missing stubs.
+    if (!valid)
+    {
+        result.error = OBJECT_ERROR_INVALID_INPUT;
+    }
+    else
+    {
+        result.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
+        result.section_count = OBJECT_SECTION_COUNT;
+        for (u32 section_index = 0; section_index < OBJECT_SECTION_COUNT; section_index += 1)
+        {
+            ObjectSectionKind kind = (ObjectSectionKind)section_index;
+            result.sections[section_index] = (ObjectSection){
+                .name = object_section_name_for_kind(kind),
+                .kind = kind,
+                .alignment = object_section_default_alignment(kind),
+            };
+        }
+        // One thunk per stub, laid out back to back in the same section.
+        u8* thunks = arena_allocate(arena, u8, thunk_size * stub_count);
+        result.symbols = arena_allocate(arena, ObjectSymbol, stub_count * 2);
+        result.relocations = arena_allocate(arena, ObjectRelocation, stub_count);
+        for (u64 index = 0; index < stub_count; index += 1)
+        {
+            u64 offset = thunk_size * index;
+            if (x86_64)
+            {
+                memcpy(thunks + offset, recipe, thunk_size);
+            }
+            else
+            {
+                if (zero_trailing_arguments) memcpy(thunks + offset, aarch64_zero_arguments, sizeof(aarch64_zero_arguments));
+                memcpy(thunks + offset + branch.offset, aarch64_branch, sizeof(aarch64_branch));
+            }
+            result.symbols[index * 2] = (ObjectSymbol){
+                .name = stub_names[index],
+                .value = offset,
+                .size = thunk_size,
+                .section = OBJECT_SECTION_TEXT,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+                .weak = true,
+            };
+            result.symbols[index * 2 + 1] = (ObjectSymbol){
+                .name = target_names[index],
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            };
+            result.relocations[index] = (ObjectRelocation){
+                .addend = branch.addend,
+                .offset = offset + branch.offset,
+                .section = OBJECT_SECTION_TEXT,
+                .symbol = (u32)(index * 2 + 1),
+                .kind = x86_64 ? OBJECT_RELOCATION_X86_64_PC32 : OBJECT_RELOCATION_AARCH64_JUMP26,
+            };
+        }
+        result.symbol_count = (u32)(stub_count * 2);
+        result.relocation_count = (u32)stub_count;
+        result.sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = thunks, .length = thunk_size * stub_count};
+        result.sections[OBJECT_SECTION_TEXT].virtual_size = thunk_size * stub_count;
+    }
 
     return result;
 }
