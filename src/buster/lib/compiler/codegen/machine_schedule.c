@@ -42,10 +42,11 @@
 //   register operand (argument staging, return-value moves) are barriers:
 //   ordered against every other unit in both directions, which freezes call
 //   sequences and everything the allocators special-case around them.
-// - There is no alias analysis, so memory-touching rows keep their relative
-//   order through a chain: loads, stores, frame ops, the aggregate copies,
-//   and the incoming-argument reads. Atomics and fences are barriers by
-//   their SIDE_EFFECTS attribute.
+// - machine_schedule_stack_alias proves bounded frame accesses belong to
+//   disjoint slot identities only when selection certifies no volatile access.
+//   Same-slot accesses keep source order. Unknown memory flushes every pending
+//   slot chain and precedes every new one. Calls, atomics and fences retain
+//   their barriers; uncertified functions retain the original memory chain.
 // - Rows that pass through the target's float state (XMM / vector registers)
 //   chain the same way: the ABI bridges stage values that live across
 //   neighboring rows, and the float compute rows clobber that state.
@@ -197,6 +198,45 @@ BUSTER_GLOBAL_LOCAL bool machine_schedule_opcode_is_vector(u16 opcode)
 
     return result;
 }
+// A whole-object alias class, represented by its existing stable stack-slot
+// id. UINT32_MAX is UNKNOWN. Only these fixed frame forms prove one bounded
+// access; pointer, aggregate, incoming, and future forms remain conservative.
+// Payloads are unsigned byte offsets into the slot on both native targets.
+BUSTER_GLOBAL_LOCAL u32 machine_schedule_stack_alias(MachineFunction* function, MachineInstruction* instruction)
+{
+    u32 result = UINT32_MAX;
+    u32 width = 0;
+    u32 operand = 0;
+    switch (instruction->opcode)
+    {
+        case MACHINE_X64_LOAD_FRAME:
+        case MACHINE_A64_LOAD_FRAME: width = 8; operand = 1; break;
+        case MACHINE_A64_LOAD_FRAME32: width = 4; operand = 1; break;
+        case MACHINE_X64_STORE_FRAME8:
+        case MACHINE_A64_STORE_FRAME8: width = 1; break;
+        case MACHINE_X64_STORE_FRAME16:
+        case MACHINE_A64_STORE_FRAME16: width = 2; break;
+        case MACHINE_X64_STORE_FRAME32:
+        case MACHINE_A64_STORE_FRAME32: width = 4; break;
+        case MACHINE_X64_STORE_FRAME64:
+        case MACHINE_A64_STORE_FRAME64: width = 8; break;
+        case MACHINE_X64_VLOAD_FRAME: width = 64; operand = 1; break;
+        case MACHINE_X64_VSTORE_FRAME: width = 64; break;
+        default: break;
+    }
+    MachineRef reference = instruction->operands[operand];
+    u32 slot = machine_ref_payload(reference);
+    if (width && machine_ref_kind(reference) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count && function->stack_slot_sizes)
+    {
+        u32 size = function->stack_slot_sizes[slot];
+        if (instruction->payload <= size && width <= size - instruction->payload)
+        {
+            result = slot;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL MachineRegisterClass machine_schedule_register_class(MachineFunction* function, u32 virtual_register)
 {
     MachineRegisterClass result = MACHINE_REGISTER_CLASS_GENERAL;
@@ -373,7 +413,9 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
         // smaller cannot have excess, and a function of only such blocks is
         // done before anything is allocated. This is the gate almost every
         // function leaves through.
-        if (maximum_block_rows > allocatable_count)
+        // The largest u32 scratch count is the 10N+16 ready queue; the new
+        // dependency bound is 9N+8. Unrepresentable blocks keep source order.
+        if (maximum_block_rows > allocatable_count && maximum_block_rows <= (UINT32_MAX - 16u) / 10u)
         {
             TemporalArena scratch = scratch_begin(&arena, 1);
             u32* touch_epochs = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
@@ -460,8 +502,11 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                 // array is indexed by block-local unit index; edge capacity is a hard
                 // bound — each row contributes at most four operand edges, and each unit
                 // at most a barrier-in edge, one appearance in a barrier's flush list,
-                // and one link in each of the memory and vector chains.
-                u32 edge_capacity = 8 * maximum_block_rows + 8;
+                // and one vector link. Memory contributes at most two edges per
+                // unit: one previous-slot/unknown link and one later unknown
+                // flush appearance. Pending slot tails are cleared by each flush,
+                // so the complete bound is (4 + 2 + 1 + 2)N + 8, not pairwise.
+                u32 edge_capacity = 9 * maximum_block_rows + 8;
                 u32* unit_first_rows = arena_allocate(scratch.arena, u32, maximum_block_rows);
                 u32* unit_row_counts = arena_allocate(scratch.arena, u32, maximum_block_rows);
                 u8* unit_flags = arena_allocate(scratch.arena, u8, maximum_block_rows);
@@ -472,6 +517,15 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                 u32* predecessor_lists = arena_allocate(scratch.arena, u32, edge_capacity);
                 u32* flush_list = arena_allocate(scratch.arena, u32, maximum_block_rows);
                 u32* newly_ready = arena_allocate(scratch.arena, u32, maximum_block_rows);
+                bool stack_aliases = function->nonvolatile_memory_certified && function->stack_slot_count && function->stack_slot_sizes;
+                u32 alias_count = stack_aliases ? function->stack_slot_count : 0;
+                u32* alias_epochs = arena_allocate(scratch.arena, u32, alias_count);
+                u32* alias_tails = arena_allocate(scratch.arena, u32, alias_count);
+                u32* pending_aliases = arena_allocate(scratch.arena, u32, stack_aliases ? maximum_block_rows : 0);
+                for (u32 alias = 0; alias < alias_count; alias += 1)
+                {
+                    alias_epochs[alias] = 0;
+                }
                 u32* demand_epochs = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
                 for (u32 register_index = 0; register_index < register_count; register_index += 1)
                 {
@@ -573,6 +627,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                     u32 edge_count = 0;
                     u32 last_barrier = UINT32_MAX;
                     u32 last_memory = UINT32_MAX;
+                    u32 pending_alias_count = 0;
                     u32 last_vector = UINT32_MAX;
                     u32 flush_count = 0;
                     for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
@@ -598,6 +653,11 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                             // already transitive through the flush and barrier-in edges.
                             last_memory = UINT32_MAX;
                             last_vector = UINT32_MAX;
+                            for (u32 pending = 0; pending < pending_alias_count; pending += 1)
+                            {
+                                alias_epochs[pending_aliases[pending]] = 0;
+                            }
+                            pending_alias_count = 0;
                         }
                         else
                         {
@@ -605,13 +665,45 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                             flush_count += 1;
                             if (flags & MACHINE_SCHEDULE_UNIT_MEMORY)
                             {
-                                if (last_memory != UINT32_MAX)
+                                u32 alias = stack_aliases && unit_row_counts[unit_index] == 1
+                                                ? machine_schedule_stack_alias(function, function->instructions + block->first_instruction + unit_first_rows[unit_index])
+                                                : UINT32_MAX;
+                                u32 previous = last_memory;
+                                if (alias != UINT32_MAX && alias_epochs[alias] == epoch)
                                 {
-                                    edge_sources[edge_count] = last_memory;
+                                    previous = alias_tails[alias];
+                                }
+                                if (previous != UINT32_MAX)
+                                {
+                                    edge_sources[edge_count] = previous;
                                     edge_destinations[edge_count] = unit_index;
                                     edge_count += 1;
                                 }
-                                last_memory = unit_index;
+                                if (alias != UINT32_MAX)
+                                {
+                                    if (alias_epochs[alias] != epoch)
+                                    {
+                                        pending_aliases[pending_alias_count++] = alias;
+                                        alias_epochs[alias] = epoch;
+                                    }
+                                    alias_tails[alias] = unit_index;
+                                }
+                                else
+                                {
+                                    // An unknown access may alias every slot. Each
+                                    // pending tail reaches it, and it starts the next
+                                    // memory epoch. Every tail is flushed at most once.
+                                    for (u32 pending = 0; pending < pending_alias_count; pending += 1)
+                                    {
+                                        u32 flushed_alias = pending_aliases[pending];
+                                        edge_sources[edge_count] = alias_tails[flushed_alias];
+                                        edge_destinations[edge_count] = unit_index;
+                                        edge_count += 1;
+                                        alias_epochs[flushed_alias] = 0;
+                                    }
+                                    pending_alias_count = 0;
+                                    last_memory = unit_index;
+                                }
                             }
                             if (flags & MACHINE_SCHEDULE_UNIT_VECTOR)
                             {

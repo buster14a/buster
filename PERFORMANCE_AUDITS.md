@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-07T231146Z`](docs/performance-audits/2026-09-07T231146Z.md) — proven disjoint stack-slot scheduling and conservative unknown-memory ordering (#41)
 - [`2026-09-07T223310Z`](docs/performance-audits/2026-09-07T223310Z.md) — TLS encoding authority: correct redundant REX relaxation; bound cold recipe preparation
 - [`2026-09-07T222813Z`](docs/performance-audits/2026-09-07T222813Z.md) — production selector audit and guarded replay benchmark
 - [`2026-09-07T132245Z`](docs/performance-audits/2026-09-07T132245Z.md) — debug-info correctness and linear CodeView scope scratch (#201-#204)

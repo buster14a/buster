@@ -1267,6 +1267,12 @@ struct MachineFunction
     // exactly the stack pointer a call sees.
     u32 outgoing_bytes;
     u32 outgoing_slot;
+    // Selector proof that no canonical row has volatile memory semantics.
+    // Unknown/manual/structural-replay functions leave this false. Consumers
+    // that introduce volatile accesses must clear it; scheduling and CFG/SSA
+    // rewrites only copy/reorder rows and preserve the proof.
+    bool nonvolatile_memory_certified;
+    u8 reserved[7];
 };
 
 // AArch64 physical general registers in encoding order; 31 encodes SP or
