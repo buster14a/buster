@@ -147,7 +147,7 @@ struct MachineX64Selector
     IrProgram* program;
     IrFunction* function;
     MachineFunctionBuilder builder;
-    MachineSelectionCounters selection_counters;
+    u64 reserved_selection_layout[MACHINE_SELECTION_RESERVED_LAYOUT_WORDS];
     // The side streams rows append to, each through a typed cursor/end pair
     // in the machine_stream_cursor_* shape: the hot append is a pointer bump
     // and the row store, and only a full chunk reaches the refill.
@@ -5126,7 +5126,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .supported = true,
         .failed_opcode = IR_OPCODE_COUNT,
     };
-    if (!assume_validated && !machine_selection_prepass_build_minimal(arena, program, function).valid)
+    if (!assume_validated && machine_selection_validate_function(arena, program, function) != MACHINE_SELECTION_VALIDATION_NONE)
     {
         return result;
     }
@@ -5268,6 +5268,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         arena_allocate(arena, MachineX64CandidateRow, function->instruction_count ? function->instruction_count : 1);
     u32 candidate_count = 0;
     bool dense_rows = true;
+    bool nonvolatile_memory = true;
     u32 walk_ordinal = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
@@ -5278,6 +5279,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         {
             IrInstruction* instruction = function->instructions + id.value;
             dense_rows &= id.value == block->first_instruction.value + block_row_count;
+            nonvolatile_memory &= !instruction->volatile_access;
             if ((MACHINE_X64_CANDIDATE_OPCODES >> instruction->opcode) & 1)
             {
                 // `walk_ordinal` is still this row's predecessor count here,
@@ -6355,6 +6357,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     result.function.stack_slot_sizes = arena_allocate(arena, u32, selector.stack_slots.total_count);
     result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slots.total_count);
     result.function.stack_slot_count = selector.stack_slots.total_count;
+    result.function.nonvolatile_memory_certified = nonvolatile_memory;
     u32 split_slot = 0;
     for (MachineBuilderChunk* chunk = selector.stack_slots.first; chunk; chunk = chunk->next)
     {
@@ -6413,7 +6416,6 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     result.selected_typed_instructions = typed_instruction_count;
     result.machine_instructions = result.function.instruction_count;
     result.simd_operation_count = simd_operation_count;
-    result.selection_counters = selector.selection_counters;
     return result;
 }
 

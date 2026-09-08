@@ -23,7 +23,7 @@ validates `runs-on` against a list baked into its own release.
 
 ## Two gates
 
-The job carries:
+Every CI job carries:
 
 ```yaml
 if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
@@ -49,38 +49,37 @@ gh variable set GH_ACTIONS_CI_ENABLED --body true --repo OWNER/REPOSITORY
 
 ## What runs
 
-There is one job, `test`, and its matrix is the six runners above — **one
-runner per platform and architecture, and no more.** Each runs the work its
-platform can carry:
+The `test` matrix retains the six desktop runners and names above. The `mobile`
+matrix runs three independent suite-level shards, so desktop build/test work is
+not repeated to obtain earlier mobile results. `lint` validates every GitHub
+workflow. **Require the aggregate `CI complete` check**, which fails unless
+lint, all desktop lanes and all mobile lanes succeed; the six desktop names
+alone no longer include mobile results.
 
-| Step | Runners | Command |
+| Work | Runners | Command |
 |---|---|---|
-| Combination matrix | all six | `test_all_combinations_ci` |
-| Execution-mode matrix | the four Unix runners | `test_mode_matrix --config Release` |
-| Android | `ubuntu-26.04` | `android/start_emulator_ci.sh start`, then `android/test_ci.sh --all` |
-| iOS simulator | `macos-26-intel`, `macos-26` | `ios/test_ci.sh --all` |
+| Combination matrix | all six desktop lanes | `test_all_combinations_ci` |
+| Execution-mode matrix | the four Unix desktop lanes | `test_mode_matrix --config Release` |
+| Android shard | `ubuntu-26.04` | `android/start_emulator_ci.sh start`, then `android/test_ci.sh --all` |
+| iOS shards | `macos-26-intel`, `macos-26` | `ios/test_ci.sh --all` |
 
-That is the same set of steps `.forgejo/workflows/ci.yml` runs, on twice as
-many desktop configurations and in the same shape: a runner matrix with
-per-runner steps, rather than a job per concern.
+The native build driver still owns the complete compiler/configuration matrix,
+including sanitized Debug/Release, fuzz policy, static analysis and supported
+self-hosting. No configuration or test is removed. Both mobile entry points
+are standalone and retain Debug and Release. The existing Intel iOS gate is
+compile/link/bundle-only; Apple Silicon retains simulator execution.
 
-The workflow triggers on `push` alone, as Forgejo's does. Adding
-`pull_request` only duplicates every check on a branch that already gets a push
-run, and the two do not even cancel each other, because `concurrency` keys on
-`github.ref` and the events see different refs.
+The main workflow retains every push and also permits explicit manual runs.
+It does not add duplicate same-repository PR runs. `fail-fast` is off in both
+matrices. Unix execution-mode tests still run after a combination failure,
+without allowing that earlier failure to pass. Mobile shards have no desktop
+prerequisite and their results cannot be hidden by a failed desktop build.
 
-The six runners work in parallel, but a runner's own steps are sequential and
-the first failure stops the rest of that runner's work. They are ordered
-broadest signal first — combination matrix, then execution-mode matrix, then
-the mobile suite — because a compiler problem surfaces in the combination
-matrix and the narrower suites after it would only repeat the news. Its cost is
-that a run reports the Linux Android result only after that runner's
-combination matrix has passed; on Forgejo those live on two different machines.
-
-`fail-fast` is off, so a failure on one platform is not a reason to hide the
-others when the whole point is cross-platform coverage. `concurrency` cancels
-an in-flight run when a newer commit lands on the same ref, which is what keeps
-latency flat when several pushes arrive together.
+Development pushes coalesce per workflow/ref. Default-branch pushes and manual
+runs have unique run-ID groups so neither active nor pending results are
+superseded. Lifecycle PR updates separately cancel obsolete fake-tool runs.
+The seven-day log artifacts, summaries, cache boundaries, reproduction commands,
+and timing methodology are documented in [the workflow audit](ci-workflow-audit.md).
 
 Both architectures of both Unix platforms run the execution-mode matrix because
 that is what makes its legs *execute* rather than fall back to the disassembly
@@ -101,26 +100,29 @@ the driver survives its own run.
 The execution-mode matrix is the exception: it bootstraps a second driver into
 `RUNNER_TEMP`, because its `generate` targets the default tree — `build/`
 itself — and removes it, which would delete a driver inside between that
-command and the next.
+command and the next. Diagnostic transcripts also live outside that tree.
 
 The combination matrix needs Clang, GCC, Zig and, on Windows, MSVC together.
-The images provide all of those except Zig, so every runner installs a
+The images provide all of those except Zig, so every desktop runner installs a
 **pinned, checksummed** Zig from `ziglang.org` — version and per-target
 SHA-256 both live in the workflow, so a rerun of an old commit cannot pick up
-a different toolchain. Three more image gaps are filled in place:
+a different toolchain. Only the upstream archive is cached, and every cache
+hit is checked again before extraction. Only default-branch push setup saves
+verified archives; no generated compiler or build tree is cached.
+Three more image gaps are filled in place:
 
 - **mold.** On Linux `build.c` defaults every non-Zig tree to `CMAKE_LINKER_TYPE=MOLD`
-  and the images carry no mold, so the Linux runners install the distribution's
+  and the images carry no mold, so the Linux desktop runners install the distribution's
   own package. The execution-mode matrix keeps its own `generate` spelled out
   with `--linker DEFAULT` regardless, so its tree is pinned rather than
   inherited: the matrix would otherwise generate one itself, and `--linker` is
   accepted by the `generate` command alone.
 - **`gtimeout`.** The iOS simulator launcher bounds every step with
-  `timeout(1)`, which macOS ships under neither name, so the macOS runners
+  `timeout(1)`, which macOS ships under neither name, so the iOS shards
   install Homebrew's `coreutils`.
 - **The Android emulator system image.** The Linux image ships the SDK, the
   platform and the NDK but no system image, and it leaves `/dev/kvm` owned by
-  root. The x86-64 Linux runner installs
+  root. The Android shard installs
   `system-images;android-35;google_apis;x86_64` and adds the udev rule that
   lets the unprivileged runner user accelerate the emulator; unaccelerated, an
   x86-64 system image boots far past the emulator's own timeout.
@@ -157,7 +159,8 @@ AArch64 desktop rows build and test without it.
   workflow does not run the execution-mode matrix on Windows.
 - **The performance series.** Hosted virtual machines expose no performance
   counters, and their wall times are too noisy to trend. `STEP_INSTRUCTIONS`
-  needs hardware under your control.
+  needs hardware under your control. CI elapsed time and total job seconds
+  are distinct operational metrics, not compiler-throughput measurements.
 - **A trusted compiler artifact.** Nothing here bootstraps through TCC, so
   nothing it produces is a reusable toolchain.
 
@@ -170,7 +173,7 @@ network it does not need.
 ## Local verification
 
 ```sh
-actionlint .github/workflows/ci.yml
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/*.yml
 ```
 
 Without `.github/actionlint.yaml` every `runs-on` above is reported as an

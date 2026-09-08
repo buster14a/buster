@@ -10,7 +10,7 @@ BUSTER_F_DECL void debug_variable_add_location(Arena* arena, DebugModelInput* in
                                                     IrLocalId local, u32 start, u32 end);
 BUSTER_F_DECL DebugScopeId debug_scope_add(Arena* arena, DebugModel* model, DebugScopeId parent, DebugScopeKind kind,
                                                  DebugSourceLocation declaration, u32 start, u32 end, u32 variable_capacity);
-BUSTER_F_DECL DebugVariableId debug_variable_add(Arena* arena, DebugModel* model, DebugModelInput* input, DebugScope* scope,
+BUSTER_F_DECL DebugVariableId debug_variable_add(Arena* arena, DebugModel* model, DebugModelInput* input, DebugScopeId scope_id,
                                                        String8 name, DebugTypeId type, DebugSourceLocation declaration,
                                                        DebugVariableKind kind, IrSymbolId symbol, IrLocalId local, u32 start, u32 end);
 BUSTER_F_DECL UnitTestResult debug_model_tests(UnitTestArguments* arguments);

@@ -154,7 +154,7 @@ struct MachineA64Selector
     IrProgram* program;
     IrFunction* function;
     MachineFunctionBuilder builder;
-    MachineSelectionCounters selection_counters;
+    u64 reserved_selection_layout[MACHINE_SELECTION_RESERVED_LAYOUT_WORDS];
     Target target;
     MachineBuilderStream immediates;
     MachineBuilderStream stack_slots;
@@ -4224,7 +4224,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             .supported = true,
             .failed_opcode = IR_OPCODE_COUNT,
         };
-        if (!assume_validated && !machine_selection_prepass_build_minimal(arena, program, function).valid)
+        if (!assume_validated && machine_selection_validate_function(arena, program, function) != MACHINE_SELECTION_VALIDATION_NONE)
         {
             return result;
         }
@@ -4359,6 +4359,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         u32* candidate_rows = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
         u32 candidate_count = 0;
         bool dense_rows = true;
+        bool nonvolatile_memory = true;
         u32 walk_ordinal = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
@@ -4369,6 +4370,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             {
                 IrInstruction* instruction = function->instructions + id.value;
                 dense_rows &= id.value == block->first_instruction.value + block_row_count;
+                nonvolatile_memory &= !instruction->volatile_access;
                 if ((MACHINE_A64_CANDIDATE_OPCODES >> instruction->opcode) & 1)
                 {
                     candidate_rows[candidate_count] = block_row_count;
@@ -5298,6 +5300,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         machine_stream_flatten(&selector.immediates, result.function.immediates);
         result.function.stack_slot_sizes = arena_allocate(arena, u32, selector.stack_slots.total_count);
         result.function.stack_slot_count = selector.stack_slots.total_count;
+        result.function.nonvolatile_memory_certified = nonvolatile_memory;
         machine_stream_flatten(&selector.stack_slots, result.function.stack_slot_sizes);
         result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slot_alignments.total_count);
         machine_stream_flatten(&selector.stack_slot_alignments, result.function.stack_slot_alignments);
@@ -5342,7 +5345,6 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         result.selected_typed_instructions = typed_instruction_count;
         result.machine_instructions = result.function.instruction_count;
         result.simd_operation_count = simd_operation_count;
-        result.selection_counters = selector.selection_counters;
     }
 
     return result;
