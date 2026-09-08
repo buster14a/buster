@@ -51,6 +51,8 @@
 //   CIntegerIrBuilder                             per-module lowering state
 //   c_ir_label_metadata_*                         label provenance needed by
 //                                                 computed goto
+//   c_ir_ssa_*                                    sparse sealed-block local SSA
+//                                                 and memory-form fallback
 //   c_ir_emit_local .. c_ir_emit_parameter        place/value emission
 //                                                 primitives
 //   c_ir_float_parse, c_ir_ieee_from_rational,    literals: exact rational ->
@@ -1615,7 +1617,7 @@ struct CIntegerIrLocal
     bool is_variable_length_array;
     bool is_vla_parameter;
     bool is_parameter;
-    u8 reserved;
+    bool direct_ssa;
 };
 
 BUSTER_C_INTERNAL u32 c_ir_debug_scope_depth(CParseResult* parse, CEntityId entity)
@@ -1640,6 +1642,7 @@ BUSTER_C_INTERNAL u32 c_ir_debug_scope_depth(CParseResult* parse, CEntityId enti
     return result;
 }
 
+typedef struct CIrDirectSsa CIrDirectSsa;
 typedef struct CIntegerIrBuilder CIntegerIrBuilder;
 typedef struct CIrConstantEntityIndex CIrConstantEntityIndex;
 
@@ -2305,6 +2308,8 @@ struct CIrOverAlignedArrayName
 
 struct CIntegerIrBuilder
 {
+    CIrDirectSsa* direct_ssa;
+    bool direct_ssa_enabled;
     Arena* arena;
     Arena* scratch_arena;
     Arena* temporary_arena;
@@ -4518,6 +4523,1062 @@ BUSTER_C_INTERNAL bool c_ir_entity_is_read_only(CIntegerIrBuilder* builder, CEnt
     return entity->is_constexpr || c_ir_c_type_is_read_only(builder, entity->type);
 }
 
+// Direct local SSA. Canonical scalar locals start as sparse (block, local)
+// values. An operation journal retains only the elided local/read/write sites,
+// not another instruction representation. At publication, real place uses and
+// may-uninitialized reads determine which locals must instead own memory. Those
+// locals are replayed wholly at their original positions; unrelated locals keep
+// SSA. The shared promotion pass remains an independent oracle and fallback.
+// Places and read aliases exist only while checking C lvalue semantics. They
+// emit no instruction, and c_ir_ssa_finish removes them before publication.
+// Current values are sparse (block, local) slots, not a blocks*locals matrix.
+// All blocks remain open until the body's backedges are known; unresolved reads
+// enqueue parameters, and sealing walks that queue without C recursion.
+
+typedef struct CIrSsaSlot CIrSsaSlot;
+struct CIrSsaSlot
+{
+    u32 block_plus_one;
+    u32 local;
+    IrValueId value;
+};
+
+typedef struct CIrSsaRead CIrSsaRead;
+struct CIrSsaRead
+{
+    IrValueId value;
+    IrValueId replacement;
+    IrValueId place;
+    u32 instruction_count;
+    IrBlockId block;
+    u32 event;
+};
+
+typedef struct CIrSsaParameter CIrSsaParameter;
+struct CIrSsaParameter
+{
+    CIrSsaParameter* next;
+    IrBlockParameter* parameter;
+    u32 block;
+    u32 local;
+    IrValueId forwarded;
+};
+
+typedef struct CIrSsaLocal CIrSsaLocal;
+struct CIrSsaLocal
+{
+    IrValueId place;
+    IrTypeId type;
+    IrLocalId id;
+    u32 first_event;
+    u32 last_event;
+    bool temporary;
+    bool initialized_entry;
+};
+
+typedef struct CIrSsaEvent CIrSsaEvent;
+struct CIrSsaEvent
+{
+    IrSourceRange source;
+    IrInstructionId after;
+    IrBlockId block;
+    IrValueId value;
+    u32 local;
+    u32 next_local;
+    u32 previous_local;
+    u8 opcode;
+    bool named_load;
+};
+
+struct CIrDirectSsa
+{
+    CIrSsaSlot* slots;
+    CIrSsaRead* reads;
+    CIrSsaEvent* events;
+    CIrSsaLocal* locals;
+    u32 local_count;
+    u32 local_capacity;
+    u32 event_count;
+    u32 event_capacity;
+    u32* predecessor_offsets;
+    u32* predecessors;
+    u32* read_blocks;
+    u32* read_stamps;
+    u8* reachable;
+    u32 read_stamp;
+    CIrSsaParameter* first_parameter;
+    CIrSsaParameter* last_parameter;
+    u32 slot_count;
+    u32 slot_capacity;
+    u32 read_count;
+    u32 read_capacity;
+    CIRDirectSsaStatistics statistics;
+};
+
+BUSTER_C_INTERNAL bool c_ir_ssa_local_eligible(CIntegerIrBuilder* builder, CEntityId id, IrTypeId type)
+{
+    bool eligible = builder->direct_ssa_enabled && id.value < builder->parse.entity_count &&
+                    ir_local_type_promotable(builder->program, type);
+    if (eligible)
+    {
+        CEntity* entity = builder->parse.entities + id.value;
+        eligible = (entity->kind == C_ENTITY_LOCAL || entity->kind == C_ENTITY_PARAMETER) &&
+                   !entity->is_static_storage && !entity->is_thread_local && !entity->has_cleanup;
+    }
+    return eligible;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_ssa_event(CIntegerIrBuilder* builder, u32 local, u32 opcode, IrValueId value, IrSourceRange source)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    if (ssa->event_count == ssa->event_capacity)
+    {
+        u32 capacity = ssa->event_capacity ? ssa->event_capacity * 2 : 32;
+        CIrSsaEvent* events = arena_allocate(builder->scratch_arena, CIrSsaEvent, capacity);
+        if (ssa->event_count)
+        {
+            memcpy(events, ssa->events, sizeof(*events) * ssa->event_count);
+        }
+        ssa->events = events;
+        ssa->event_capacity = capacity;
+    }
+    u32 index = ssa->event_count++;
+    u32 previous = ssa->locals[local].last_event;
+    if (opcode == IR_OPCODE_STORE && previous != UINT32_MAX && ssa->events[previous].opcode == IR_OPCODE_LOCAL &&
+        builder->current_block.value == builder->function->entry.value)
+    {
+        // The first access initializes this owner before any entry edge.
+        // Every reachable read is initialized; stores' RHS dependencies are
+        // checked separately so copying an uninitialized other local is not
+        // mistaken for a defined value.
+        ssa->locals[local].initialized_entry = true;
+    }
+    ssa->events[index] = (CIrSsaEvent){
+        .source = source, .after = builder->last_instruction, .block = builder->current_block,
+        .value = value, .local = local, .next_local = UINT32_MAX, .previous_local = ssa->locals[local].last_event, .opcode = (u8)opcode,
+    };
+    if (ssa->locals[local].last_event != UINT32_MAX)
+    {
+        ssa->events[ssa->locals[local].last_event].next_local = index;
+    }
+    else
+    {
+        ssa->locals[local].first_event = index;
+    }
+    ssa->locals[local].last_event = index;
+    return index;
+}
+
+BUSTER_C_INTERNAL void c_ir_ssa_add_local(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrLocalId id,
+                                         IrSourceRange source, bool temporary)
+{
+    if (!builder->direct_ssa)
+    {
+        builder->direct_ssa = arena_allocate(builder->scratch_arena, CIrDirectSsa, 1);
+        *builder->direct_ssa = (CIrDirectSsa){0};
+    }
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    if (ssa->local_count == ssa->local_capacity)
+    {
+        u32 capacity = ssa->local_capacity ? ssa->local_capacity * 2 : 16;
+        CIrSsaLocal* locals = arena_allocate(builder->scratch_arena, CIrSsaLocal, capacity);
+        if (ssa->local_count)
+        {
+            memcpy(locals, ssa->locals, sizeof(*locals) * ssa->local_count);
+        }
+        ssa->locals = locals;
+        ssa->local_capacity = capacity;
+    }
+    u32 local = ssa->local_count++;
+    ssa->locals[local] = (CIrSsaLocal){
+        .place = place, .type = type, .id = id, .first_event = UINT32_MAX, .last_event = UINT32_MAX, .temporary = temporary,
+    };
+    c_ir_ssa_event(builder, local, IR_OPCODE_LOCAL, place, source);
+}
+
+BUSTER_C_INTERNAL u32 c_ir_ssa_hash(u32 block_plus_one, u32 local, u32 mask)
+{
+    u64 key = ((u64)block_plus_one << 32) | local;
+    return (u32)((key * 11400714819323198485ULL) >> 32) & mask;
+}
+
+BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 block, u32 local)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    if ((u64)(ssa->slot_count + 1) * 2 >= ssa->slot_capacity)
+    {
+        u32 capacity = ssa->slot_capacity ? ssa->slot_capacity * 2 : 64;
+        CIrSsaSlot* slots = arena_allocate(builder->scratch_arena, CIrSsaSlot, capacity);
+        memset(slots, 0, sizeof(*slots) * capacity);
+        for (u32 index = 0; index < ssa->slot_capacity; index += 1)
+        {
+            CIrSsaSlot entry = ssa->slots[index];
+            if (entry.block_plus_one)
+            {
+                u32 slot = c_ir_ssa_hash(entry.block_plus_one, entry.local, capacity - 1);
+                while (slots[slot].block_plus_one)
+                {
+                    slot = (slot + 1) & (capacity - 1);
+                }
+                slots[slot] = entry;
+            }
+        }
+        ssa->slots = slots;
+        ssa->slot_capacity = capacity;
+    }
+    u32 slot = c_ir_ssa_hash(block + 1, local, ssa->slot_capacity - 1);
+    while (ssa->slots[slot].block_plus_one &&
+           (ssa->slots[slot].block_plus_one != block + 1 || ssa->slots[slot].local != local))
+    {
+        slot = (slot + 1) & (ssa->slot_capacity - 1);
+    }
+    if (!ssa->slots[slot].block_plus_one)
+    {
+        ssa->slots[slot] = (CIrSsaSlot){.block_plus_one = block + 1, .local = local, .value = IR_VALUE_ID_INVALID};
+        ssa->slot_count += 1;
+    }
+    return ssa->slots + slot;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_ssa_parameter(CIntegerIrBuilder* builder, u32 block, u32 local_index)
+{
+    CIrSsaSlot* slot = c_ir_ssa_slot(builder, block, local_index);
+    if (slot->value.value == IR_ID_UNDERLYING_INVALID)
+    {
+        CIrSsaLocal* local = builder->direct_ssa->locals + local_index;
+        IrBlock* destination = builder->function->blocks + block;
+        IrValueId value = c_ir_add_result(builder, local->type);
+        IrBlockParameter* parameter = arena_allocate(builder->arena, IrBlockParameter, 1);
+        *parameter = (IrBlockParameter){.value = value, .canonical_type = local->type, .canonical_local = local->id};
+        if (destination->last_parameter)
+        {
+            destination->last_parameter->next = parameter;
+        }
+        else
+        {
+            destination->first_parameter = parameter;
+        }
+        destination->last_parameter = parameter;
+        destination->parameter_count += 1;
+        CIrSsaParameter* pending = arena_allocate(builder->scratch_arena, CIrSsaParameter, 1);
+        *pending = (CIrSsaParameter){.parameter = parameter, .block = block, .local = local_index, .forwarded = IR_VALUE_ID_INVALID};
+        if (builder->direct_ssa->last_parameter)
+        {
+            builder->direct_ssa->last_parameter->next = pending;
+        }
+        else
+        {
+            builder->direct_ssa->first_parameter = pending;
+        }
+        builder->direct_ssa->last_parameter = pending;
+        builder->direct_ssa->statistics.parameters_created += 1;
+        slot->value = value;
+    }
+    return slot->value;
+}
+
+// Once predecessor discovery is complete, forward through single-predecessor
+// blocks instead of allocating a parameter at every intervening block. Cache
+// the answer on the traversed path. A stamped cycle still creates one pending
+// parameter, so loop backedges terminate without C recursion.
+BUSTER_C_INTERNAL IrValueId c_ir_ssa_current(CIntegerIrBuilder* builder, u32 block, u32 local)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    u32 path_count = 0;
+    IrValueId value = c_ir_ssa_slot(builder, block, local)->value;
+    if (value.value == IR_ID_UNDERLYING_INVALID && ssa->predecessor_offsets)
+    {
+        ssa->read_stamp += 1;
+        if (!ssa->read_stamp)
+        {
+            memset(ssa->read_stamps, 0, sizeof(u32) * builder->function->block_count);
+            ssa->read_stamp = 1;
+        }
+        while (value.value == IR_ID_UNDERLYING_INVALID &&
+               ssa->predecessor_offsets[block + 1] - ssa->predecessor_offsets[block] == 1 &&
+               ssa->read_stamps[block] != ssa->read_stamp)
+        {
+            ssa->read_stamps[block] = ssa->read_stamp;
+            ssa->read_blocks[path_count++] = block;
+            block = ssa->predecessors[ssa->predecessor_offsets[block]];
+            value = c_ir_ssa_slot(builder, block, local)->value;
+        }
+    }
+    if (value.value == IR_ID_UNDERLYING_INVALID)
+    {
+        value = c_ir_ssa_parameter(builder, block, local);
+    }
+    for (u32 index = 0; index < path_count; index += 1)
+    {
+        c_ir_ssa_slot(builder, ssa->read_blocks[index], local)->value = value;
+    }
+    return value;
+}
+
+BUSTER_C_INTERNAL CIrSsaLocal* c_ir_ssa_place_local(CIntegerIrBuilder* builder, IrValueId place)
+{
+    CIrSsaLocal* result = 0;
+    if (builder->direct_ssa && place.value < builder->function->value_count &&
+        builder->function->values[place.value].category == IR_VALUE_PLACE &&
+        builder->function->values[place.value].definition.value == IR_ID_UNDERLYING_INVALID)
+    {
+        // Local places are allocated in declaration order, even when values
+        // and temporaries intervene. No function-sized place-to-local map.
+        u32 begin = 0;
+        u32 end = builder->direct_ssa->local_count;
+        while (begin < end)
+        {
+            u32 middle = begin + (end - begin) / 2;
+            if (builder->direct_ssa->locals[middle].place.value < place.value)
+            {
+                begin = middle + 1;
+            }
+            else
+            {
+                end = middle;
+            }
+        }
+        if (begin < builder->direct_ssa->local_count && builder->direct_ssa->locals[begin].place.value == place.value)
+        {
+            result = builder->direct_ssa->locals + begin;
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_ssa_read(CIntegerIrBuilder* builder, CIrSsaLocal* local, IrSourceRange source, bool named_load)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    IrValueId current = c_ir_ssa_current(builder, builder->current_block.value, (u32)(local - builder->direct_ssa->locals));
+    IrValueId value = c_ir_add_result(builder, local->type);
+    builder->function->values[value.value].points_to_read_only = builder->function->values[local->place.value].points_to_read_only;
+    if (ssa->read_count == ssa->read_capacity)
+    {
+        u32 capacity = ssa->read_capacity ? ssa->read_capacity * 2 : 32;
+        CIrSsaRead* reads = arena_allocate(builder->scratch_arena, CIrSsaRead, capacity);
+        if (ssa->read_count)
+        {
+            memcpy(reads, ssa->reads, sizeof(*reads) * ssa->read_count);
+        }
+        ssa->reads = reads;
+        ssa->read_capacity = capacity;
+    }
+    u32 event = c_ir_ssa_event(builder, (u32)(local - ssa->locals), IR_OPCODE_LOAD, value, source);
+    ssa->events[event].named_load = named_load;
+    ssa->reads[ssa->read_count++] = (CIrSsaRead){
+        .value = value, .replacement = current, .place = local->place,
+        .instruction_count = builder->function->instruction_count, .block = builder->current_block,
+        .event = event,
+    };
+    return value;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_ssa_read_place(CIntegerIrBuilder* builder, IrValueId value, bool recover)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    if (ssa && ssa->read_count)
+    {
+        u32 begin = 0;
+        u32 end = ssa->read_count;
+        while (begin < end)
+        {
+            u32 middle = begin + (end - begin) / 2;
+            if (ssa->reads[middle].value.value < value.value)
+            {
+                begin = middle + 1;
+            }
+            else
+            {
+                end = middle;
+            }
+        }
+        if (begin < ssa->read_count && ssa->reads[begin].value.value == value.value)
+        {
+            CIrSsaRead* read = ssa->reads + begin;
+            if (!recover)
+            {
+                result = read->place;
+            }
+            else if (begin + 1 == ssa->read_count && value.value + 1 == builder->function->value_count &&
+                     read->instruction_count == builder->function->instruction_count && read->block.value == builder->current_block.value &&
+                     read->event + 1 == ssa->event_count)
+            {
+                result = read->place;
+                u32 local = ssa->events[read->event].local;
+                u32 previous = ssa->events[read->event].previous_local;
+                if (previous == UINT32_MAX)
+                {
+                    ssa->locals[local].first_event = UINT32_MAX;
+                }
+                else
+                {
+                    ssa->events[previous].next_local = UINT32_MAX;
+                }
+                ssa->locals[local].last_event = previous;
+                ssa->event_count -= 1;
+                ssa->read_count -= 1;
+                builder->function->value_count -= 1;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL u32 c_ir_ssa_root(u32* replacements, u32 value)
+{
+    u32 root = value;
+    while (replacements[root] != root)
+    {
+        root = replacements[root];
+    }
+    while (replacements[value] != value)
+    {
+        u32 next = replacements[value];
+        replacements[value] = root;
+        value = next;
+    }
+    return root;
+}
+
+// Queue a value at most once. This traversal proves definite initialization
+// through provisional parameters without recursion or a blocks*locals table.
+BUSTER_C_INTERNAL void c_ir_ssa_enqueue(u32 value, u32* work, u8* seen, u32* count)
+{
+    if (!seen[value])
+    {
+        seen[value] = 1;
+        work[(*count)++] = value;
+    }
+}
+
+BUSTER_C_INTERNAL void c_ir_ssa_memory_roots(CIrDirectSsa* ssa, u32 local, u32* replacements)
+{
+    for (u32 index = ssa->locals[local].first_event; index != UINT32_MAX; index = ssa->events[index].next_local)
+    {
+        CIrSsaEvent* event = ssa->events + index;
+        if (event->opcode == IR_OPCODE_LOAD)
+        {
+            // A restored load is a definition, not an alias of the old SSA
+            // state. Decide this before any trivial-parameter substitution.
+            replacements[event->value.value] = event->value.value;
+        }
+    }
+}
+
+BUSTER_C_INTERNAL void c_ir_ssa_classify_places(CIntegerIrBuilder* builder, u8* memory)
+{
+    IrFunction* function = builder->function;
+    bool barrier = function->label_metadata_count != 0;
+    for (u32 index = 0; index < function->instruction_count && !barrier; index += 1)
+    {
+        IrInstruction* row = function->instructions + index;
+        barrier = row->opcode == IR_OPCODE_INLINE_ASSEMBLY || row->opcode == IR_OPCODE_INDIRECT_BRANCH ||
+                  row->opcode == IR_OPCODE_LABEL_ADDRESS || row->opcode == IR_OPCODE_STACK_ALLOCATE ||
+                  row->opcode == IR_OPCODE_STACK_SAVE || row->opcode == IR_OPCODE_STACK_RESTORE ||
+                  (row->opcode == IR_OPCODE_CALL && ir_local_promotion_call_barrier(builder->program, row));
+        for (u32 operand = 0; operand < row->operand_count; operand += 1)
+        {
+            CIrSsaLocal* local = c_ir_ssa_place_local(builder, row->operands[operand]);
+            if (local)
+            {
+                // An exact scalar load/store is journaled, not emitted. Any
+                // remaining use of its place is an escape, subobject access,
+                // mismatched-width access or another memory-only operation.
+                memory[local - builder->direct_ssa->locals] = 1;
+            }
+        }
+    }
+    if (barrier)
+    {
+        for (u32 local = 0; local < builder->direct_ssa->local_count; local += 1)
+        {
+            memory[local] = 1;
+        }
+    }
+}
+
+BUSTER_C_INTERNAL void c_ir_ssa_classify_initialization(CIntegerIrBuilder* builder, u8* memory, u32* replacements,
+                                                       CIrSsaParameter** parameter_by_value)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    IrFunction* function = builder->function;
+    u32 count = function->value_count;
+    u32* work = arena_allocate(builder->scratch_arena, u32, count);
+    u8* seen = arena_allocate(builder->scratch_arena, u8, count);
+    memset(seen, 0, count);
+    u32 work_count = 0;
+    for (u32 local = 0; local < builder->direct_ssa->local_count; local += 1)
+    {
+        if (memory[local])
+        {
+            c_ir_ssa_memory_roots(ssa, local, replacements);
+        }
+    }
+    // Store operands are also roots: an elided copy can be the only use of
+    // an uninitialized read, including one feeding an entry-initialized owner.
+    // This lets the graph walk stop at that owner's provisional parameters
+    // without revisiting its otherwise identical initialization proof at every
+    // join. It is also conservative for dead, undefined source reads.
+    for (u32 index = 0; index < ssa->event_count; index += 1)
+    {
+        CIrSsaEvent* event = ssa->events + index;
+        if (event->opcode == IR_OPCODE_STORE)
+        {
+            c_ir_ssa_enqueue(event->value.value, work, seen, &work_count);
+        }
+    }
+    for (u32 index = 0; index < function->instruction_count; index += 1)
+    {
+        IrInstruction* row = function->instructions + index;
+        for (u32 operand = 0; operand < row->operand_count; operand += 1)
+        {
+            c_ir_ssa_enqueue(row->operands[operand].value, work, seen, &work_count);
+        }
+    }
+    for (u32 index = 0; index < work_count; index += 1)
+    {
+        u32 value = work[index];
+        if (replacements[value] != value)
+        {
+            c_ir_ssa_enqueue(replacements[value], work, seen, &work_count);
+        }
+        else
+        {
+            CIrSsaParameter* pending = parameter_by_value[value];
+            if (pending && !memory[pending->local] && !ssa->locals[pending->local].initialized_entry)
+            {
+                IrBlockParameter* parameter = pending->parameter;
+                if (pending->forwarded.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    c_ir_ssa_enqueue(pending->forwarded.value, work, seen, &work_count);
+                }
+                else if (!parameter->incoming_count && ssa->reachable[pending->block])
+                {
+                    // No reaching definition on at least one CFG path. Keep
+                    // the source's memory semantics; never manufacture zero.
+                    // Its newly restored stores may expose more such reads.
+                    memory[pending->local] = 1;
+                    c_ir_ssa_memory_roots(ssa, pending->local, replacements);
+                }
+                else
+                {
+                    for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+                    {
+                        c_ir_ssa_enqueue(incoming->value.value, work, seen, &work_count);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Reify only the rejected locals, splicing at the exact operation sites. New
+// rows append to the canonical array; the block's next links carry execution
+// order. Original instruction IDs, extras and source rows therefore stay put.
+BUSTER_C_INTERNAL bool c_ir_ssa_restore_memory(CIntegerIrBuilder* builder, u8* memory)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    IrFunction* function = builder->function;
+    u32 old_count = function->instruction_count;
+    u32* tails = 0;
+    bool valid = true;
+    for (u32 index = 0; index < ssa->event_count && valid; index += 1)
+    {
+        CIrSsaEvent* event = ssa->events + index;
+        if (!memory[event->local])
+        {
+            continue;
+        }
+        if (!tails)
+        {
+            tails = arena_allocate(builder->scratch_arena, u32, (u64)old_count + function->block_count);
+            memset(tails, 0xff, sizeof(u32) * ((u64)old_count + function->block_count));
+        }
+        CIrSsaLocal* local = ssa->locals + event->local;
+        bool has_after = event->after.value != IR_ID_UNDERLYING_INVALID;
+        valid = event->block.value < function->block_count && (!has_after || event->after.value < old_count);
+        if (valid)
+        {
+            IrBlock* block = function->blocks + event->block.value;
+            u64 key = has_after ? (u64)event->after.value : (u64)old_count + event->block.value;
+            u32 after = tails[key] != UINT32_MAX ? tails[key] : event->after.value;
+            IrInstruction instruction = c_ir_instruction_initialize((IrOpcode)event->opcode,
+                event->opcode == IR_OPCODE_STORE ? builder->void_type : local->type);
+            instruction.next = after != UINT32_MAX ? function->instructions[after].next : block->first_instruction;
+            if (event->opcode == IR_OPCODE_LOCAL)
+            {
+                instruction.result = local->place;
+                instruction.canonical_local = local->id;
+            }
+            else
+            {
+                instruction.operand_count = event->opcode == IR_OPCODE_STORE ? 2 : 1;
+                instruction.operands = arena_allocate(builder->arena, IrValueId, instruction.operand_count);
+                instruction.operands[0] = local->place;
+                if (event->opcode == IR_OPCODE_STORE)
+                {
+                    instruction.operands[1] = event->value;
+                }
+                else
+                {
+                    instruction.result = event->value;
+                    instruction.canonical_local = event->named_load ? local->id : IR_LOCAL_ID_INVALID;
+                }
+            }
+            IrInstructionId added = ir_function_add_instruction(builder->arena, function, instruction, event->source);
+            valid = added.value != IR_ID_UNDERLYING_INVALID;
+            if (valid)
+            {
+                if (after == UINT32_MAX)
+                {
+                    block->first_instruction = added;
+                }
+                else
+                {
+                    function->instructions[after].next = added;
+                }
+                if (block->last_instruction.value == after)
+                {
+                    block->last_instruction = added;
+                }
+                if (instruction.result.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    function->values[instruction.result.value].definition = added;
+                }
+                tails[key] = added.value;
+            }
+        }
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaStatistics* statistics)
+{
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    bool valid = true;
+    if (!ssa && builder->direct_ssa_enabled)
+    {
+        for (u32 block = 0; block < builder->function->block_count; block += 1)
+        {
+            builder->function->blocks[block].sealed = true;
+        }
+    }
+    if (ssa)
+    {
+        IrFunction* function = builder->function;
+        u32 block_count = function->block_count;
+        u8* memory = arena_allocate(builder->scratch_arena, u8, builder->direct_ssa->local_count);
+        memset(memory, 0, builder->direct_ssa->local_count);
+        c_ir_ssa_classify_places(builder, memory);
+        u32* offsets = arena_allocate(builder->scratch_arena, u32, (u64)block_count + 1);
+        u32* cursor = arena_allocate(builder->scratch_arena, u32, block_count);
+        u32* stamps = arena_allocate(builder->scratch_arena, u32, block_count);
+        memset(offsets, 0, sizeof(*offsets) * ((u64)block_count + 1));
+        memset(stamps, 0, sizeof(*stamps) * block_count);
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            // The body builder can retain a disconnected empty label block.
+            // It has no outgoing edges; do not form a row at the invalid ID.
+            if (function->blocks[block].last_instruction.value == IR_ID_UNDERLYING_INVALID)
+            {
+                continue;
+            }
+            IrInstruction* terminator = function->instructions + function->blocks[block].last_instruction.value;
+            for (u32 index = 0; index < terminator->target_count; index += 1)
+            {
+                u32 target = terminator->targets[index].value;
+                if (stamps[target] != block + 1)
+                {
+                    offsets[target + 1] += 1;
+                    stamps[target] = block + 1;
+                }
+            }
+        }
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            offsets[block + 1] += offsets[block];
+        }
+        u32* predecessors = arena_allocate(builder->scratch_arena, u32, offsets[block_count]);
+        memcpy(cursor, offsets, sizeof(*cursor) * block_count);
+        memset(stamps, 0, sizeof(*stamps) * block_count);
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            // The body builder can retain a disconnected empty label block.
+            // It has no outgoing edges; do not form a row at the invalid ID.
+            if (function->blocks[block].last_instruction.value == IR_ID_UNDERLYING_INVALID)
+            {
+                continue;
+            }
+            IrInstruction* terminator = function->instructions + function->blocks[block].last_instruction.value;
+            for (u32 index = 0; index < terminator->target_count; index += 1)
+            {
+                u32 target = terminator->targets[index].value;
+                if (stamps[target] != block + 1)
+                {
+                    predecessors[cursor[target]++] = block;
+                    stamps[target] = block + 1;
+                }
+            }
+        }
+        ssa->predecessor_offsets = offsets;
+        ssa->predecessors = predecessors;
+        ssa->read_blocks = cursor;
+        ssa->read_stamps = stamps;
+        memset(stamps, 0, sizeof(*stamps) * block_count);
+        ssa->reachable = arena_allocate(builder->scratch_arena, u8, block_count);
+        memset(ssa->reachable, 0, block_count);
+        u32 reachable_count = 1;
+        cursor[0] = function->entry.value;
+        ssa->reachable[function->entry.value] = 1;
+        for (u32 index = 0; index < reachable_count; index += 1)
+        {
+            IrBlock* block = function->blocks + cursor[index];
+            if (block->last_instruction.value == IR_ID_UNDERLYING_INVALID)
+            {
+                continue;
+            }
+            IrInstruction* terminator = function->instructions + block->last_instruction.value;
+            for (u32 target = 0; target < terminator->target_count; target += 1)
+            {
+                u32 successor = terminator->targets[target].value;
+                if (!ssa->reachable[successor])
+                {
+                    ssa->reachable[successor] = 1;
+                    cursor[reachable_count++] = successor;
+                }
+            }
+        }
+        // Reads of predecessors may append more unresolved parameters. The
+        // linked work queue stays valid when the sparse current-value map grows.
+        for (CIrSsaParameter* pending = ssa->first_parameter; pending; pending = pending->next)
+        {
+            IrBlockParameter* parameter = pending->parameter;
+            if (memory[pending->local])
+            {
+                continue;
+            }
+            if (offsets[pending->block + 1] - offsets[pending->block] == 1)
+            {
+                // Forward an initially unresolved read through a completed
+                // single-predecessor block without allocating an incoming row.
+                // Do not substitute yet: an eventual memory owner must retain
+                // its load identities before any alias path compression.
+                pending->forwarded = c_ir_ssa_current(builder, predecessors[offsets[pending->block]], pending->local);
+                continue;
+            }
+            for (u32 index = offsets[pending->block]; index < offsets[pending->block + 1]; index += 1)
+            {
+                IrBlockId predecessor = {.value = predecessors[index]};
+                IrValueId value = c_ir_ssa_current(builder, predecessor.value, pending->local);
+                IrIncoming* incoming = arena_allocate(builder->arena, IrIncoming, 1);
+                *incoming = (IrIncoming){.predecessor = predecessor, .value = value};
+                if (parameter->last_incoming)
+                {
+                    parameter->last_incoming->next = incoming;
+                }
+                else
+                {
+                    parameter->first_incoming = incoming;
+                }
+                parameter->last_incoming = incoming;
+                parameter->incoming_count += 1;
+            }
+        }
+        u32 count = function->value_count;
+        u32* replacements = arena_allocate(builder->scratch_arena, u32, count);
+        u32* value_map = arena_allocate(builder->scratch_arena, u32, count);
+        for (u32 value = 0; value < count; value += 1)
+        {
+            replacements[value] = value;
+        }
+        for (u32 index = 0; index < ssa->read_count; index += 1)
+        {
+            replacements[ssa->reads[index].value.value] = ssa->reads[index].replacement.value;
+        }
+        CIrSsaParameter** pending_by_value = arena_allocate(builder->scratch_arena, CIrSsaParameter*, count);
+        memset(pending_by_value, 0, sizeof(*pending_by_value) * count);
+        for (CIrSsaParameter* pending = ssa->first_parameter; pending; pending = pending->next)
+        {
+            pending_by_value[pending->parameter->value.value] = pending;
+        }
+        c_ir_ssa_classify_initialization(builder, memory, replacements, pending_by_value);
+        valid = c_ir_ssa_restore_memory(builder, memory);
+        for (CIrSsaParameter* pending = ssa->first_parameter; pending; pending = pending->next)
+        {
+            if (!memory[pending->local] && pending->forwarded.value != IR_ID_UNDERLYING_INVALID)
+            {
+                u32 value = pending->parameter->value.value;
+                u32 root = c_ir_ssa_root(replacements, pending->forwarded.value);
+                if (root != value)
+                {
+                    replacements[value] = root;
+                }
+                else
+                {
+                    // Keep one representative of an otherwise closed cycle.
+                    // Dead-cycle pruning decides whether it is observable.
+                    IrIncoming* incoming = arena_allocate(builder->arena, IrIncoming, 1);
+                    *incoming = (IrIncoming){.predecessor = {.value = predecessors[offsets[pending->block]]}, .value = {.value = root}};
+                    pending->parameter->first_incoming = incoming;
+                    pending->parameter->last_incoming = incoming;
+                    pending->parameter->incoming_count = 1;
+                }
+            }
+        }
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (u32 block = 0; block < block_count; block += 1)
+            {
+                IrBlock* destination = function->blocks + block;
+                IrBlockParameter** link = &destination->first_parameter;
+                destination->last_parameter = 0;
+                while (*link)
+                {
+                    IrBlockParameter* parameter = *link;
+                    CIrSsaParameter* pending = pending_by_value[parameter->value.value];
+                    if ((pending && memory[pending->local]) || replacements[parameter->value.value] != parameter->value.value)
+                    {
+                        *link = parameter->next;
+                        destination->parameter_count -= 1;
+                        ssa->statistics.parameters_removed += 1;
+                        continue;
+                    }
+                    u32 same = UINT32_MAX;
+                    bool trivial = true;
+                    for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
+                    {
+                        u32 value = c_ir_ssa_root(replacements, incoming->value.value);
+                        if (value != parameter->value.value)
+                        {
+                            trivial = same == UINT32_MAX || value == same;
+                            same = value;
+                        }
+                    }
+                    if (trivial && same != UINT32_MAX)
+                    {
+                        replacements[parameter->value.value] = same;
+                        *link = parameter->next;
+                        destination->parameter_count -= 1;
+                        ssa->statistics.parameters_removed += 1;
+                        changed = true;
+                    }
+                    else
+                    {
+                        destination->last_parameter = parameter;
+                        link = &parameter->next;
+                    }
+                }
+            }
+        }
+        // A parenthesized assignment can recover a read's place without ever
+        // consuming its provisional value. Prune such parameters (including
+        // unused cyclic groups), starting only at actual instruction operands.
+        IrBlockParameter** parameter_by_value = arena_allocate(builder->scratch_arena, IrBlockParameter*, count);
+        memset(parameter_by_value, 0, sizeof(*parameter_by_value) * count);
+        memset(value_map, 0xff, sizeof(*value_map) * count);
+        u32* work = arena_allocate(builder->scratch_arena, u32, count);
+        u32 work_count = 0;
+        u64 operand_count = 0;
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
+            {
+                parameter_by_value[parameter->value.value] = parameter;
+            }
+        }
+        for (u32 index = 0; index < function->instruction_count; index += 1)
+        {
+            IrInstruction* instruction = function->instructions + index;
+            operand_count += instruction->operand_count;
+            if (instruction->result.value < count)
+            {
+                value_map[instruction->result.value] = 0;
+            }
+            for (u32 operand = 0; operand < instruction->operand_count; operand += 1)
+            {
+                u32 value = c_ir_ssa_root(replacements, instruction->operands[operand].value);
+                if (parameter_by_value[value] && value_map[value] == UINT32_MAX)
+                {
+                    value_map[value] = 0;
+                    work[work_count++] = value;
+                }
+            }
+        }
+        for (u32 index = 0; index < work_count; index += 1)
+        {
+            for (IrIncoming* incoming = parameter_by_value[work[index]]->first_incoming; incoming; incoming = incoming->next)
+            {
+                u32 value = c_ir_ssa_root(replacements, incoming->value.value);
+                if (parameter_by_value[value] && value_map[value] == UINT32_MAX)
+                {
+                    value_map[value] = 0;
+                    work[work_count++] = value;
+                }
+            }
+        }
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            IrBlock* destination = function->blocks + block;
+            IrBlockParameter** link = &destination->first_parameter;
+            destination->last_parameter = 0;
+            while (*link)
+            {
+                IrBlockParameter* parameter = *link;
+                if (value_map[parameter->value.value] == UINT32_MAX)
+                {
+                    *link = parameter->next;
+                    destination->parameter_count -= 1;
+                    ssa->statistics.parameters_removed += 1;
+                }
+                else
+                {
+                    destination->last_parameter = parameter;
+                    link = &parameter->next;
+                }
+            }
+            // Once any SSA parameters exist, selectors consume explicit CFG
+            // edges. Publish every predecessor, including parameter-free
+            // successors, so dominance never sees a partial graph.
+            {
+                for (u32 index = offsets[block]; index < offsets[block + 1]; index += 1)
+                {
+                    IrPredecessor* predecessor = arena_allocate(builder->arena, IrPredecessor, 1);
+                    *predecessor = (IrPredecessor){.block = {.value = predecessors[index]}};
+                    if (destination->last_predecessor)
+                    {
+                        destination->last_predecessor->next = predecessor;
+                    }
+                    else
+                    {
+                        destination->first_predecessor = predecessor;
+                    }
+                    destination->last_predecessor = predecessor;
+                    destination->predecessor_count += 1;
+                }
+            }
+            destination->sealed = true;
+        }
+        u32 value_count = 0;
+        for (u32 value = 0; value < count; value += 1)
+        {
+            if (value_map[value] != UINT32_MAX)
+            {
+                value_map[value] = value_count++;
+            }
+        }
+        for (u32 value = 0; value < count; value += 1)
+        {
+            if (replacements[value] == value && value_map[value] != UINT32_MAX)
+            {
+                function->values[value_map[value]] = function->values[value];
+            }
+        }
+        for (u32 value = 0; value < count; value += 1)
+        {
+            u32 root = c_ir_ssa_root(replacements, value);
+            if (root != value)
+            {
+                value_map[value] = value_map[root];
+            }
+        }
+        // Some canonical rows share operand slices. Write a fresh dense pool
+        // so each old ID is remapped exactly once, never through an updated ID.
+        IrValueId* operands = arena_allocate(builder->arena, IrValueId, operand_count);
+        u64 operand_cursor = 0;
+        for (u32 index = 0; index < function->instruction_count; index += 1)
+        {
+            IrInstruction* instruction = function->instructions + index;
+            for (u32 operand = 0; operand < instruction->operand_count; operand += 1)
+            {
+                u32 value = value_map[instruction->operands[operand].value];
+                valid &= value != UINT32_MAX;
+                operands[operand_cursor + operand].value = value;
+            }
+            if (instruction->operand_count)
+            {
+                instruction->operands = operands + operand_cursor;
+                operand_cursor += instruction->operand_count;
+            }
+            if (instruction->result.value < count)
+            {
+                instruction->result.value = value_map[instruction->result.value];
+            }
+        }
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
+            {
+                parameter->value.value = value_map[parameter->value.value];
+                for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+                {
+                    incoming->value.value = value_map[incoming->value.value];
+                    valid &= incoming->value.value != UINT32_MAX;
+                }
+            }
+        }
+        for (u32 block = 0; block < block_count; block += 1)
+        {
+            IrBlock* destination = function->blocks + block;
+            if (destination->local_values)
+            {
+                for (u32 local = 0; local < function->local_count; local += 1)
+                {
+                    u32 old = destination->local_values[local].value;
+                    destination->local_values[local].value = old < count ? value_map[old] : UINT32_MAX;
+                }
+            }
+        }
+        if (function->local_places)
+        {
+            for (u32 local = 0; local < function->local_count; local += 1)
+            {
+                u32 old = function->local_places[local].value;
+                function->local_places[local].value = old < count ? value_map[old] : UINT32_MAX;
+            }
+        }
+        u32 label_count = 0;
+        for (u32 index = 0; index < function->label_metadata_count; index += 1)
+        {
+            u32 mapped = value_map[function->label_metadata_values[index].value];
+            if (mapped != UINT32_MAX)
+            {
+                function->label_metadata_values[label_count].value = mapped;
+                function->label_metadata[label_count++] = function->label_metadata[index];
+            }
+        }
+        function->label_metadata_count = label_count;
+        function->value_count = value_count;
+        u32 promoted = 0;
+        for (u32 local = 0; local < builder->direct_ssa->local_count; local += 1)
+        {
+            promoted += !memory[local];
+            statistics->temporaries += !memory[local] && ssa->locals[local].temporary;
+            statistics->fallback_locals += memory[local] != 0;
+        }
+        statistics->functions += promoted != 0;
+        statistics->locals += promoted;
+        for (u32 index = 0; index < ssa->event_count; index += 1)
+        {
+            CIrSsaEvent* event = ssa->events + index;
+            if (!memory[event->local])
+            {
+                statistics->reads += event->opcode == IR_OPCODE_LOAD;
+                statistics->writes += event->opcode == IR_OPCODE_STORE;
+            }
+        }
+        statistics->parameters_created += ssa->statistics.parameters_created;
+        statistics->parameters_removed += ssa->statistics.parameters_removed;
+        if (!valid)
+        {
+            builder->failure_message = S8("direct SSA lowering could not resolve a local value");
+        }
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL void c_ir_mark_local_read_only(CIntegerIrBuilder* builder, CIntegerIrLocal* local)
 {
     if (!local || local->place.value >= builder->function->value_count)
@@ -4573,15 +5634,24 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken n
                                                 .points_to_read_only = entity.value < builder->parse.entity_count &&
                                                                        c_ir_c_type_points_to_read_only(builder, builder->parse.entities[entity.value].type),
                                             });
-    IrSourceRange instruction_source = c_ir_token_source_range(builder, name);
-    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_LOCAL, type);
-    instruction.canonical_local = local_id;
-    instruction.result = place;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[place.value].definition = id;
+    bool direct_ssa = c_ir_ssa_local_eligible(builder, entity, type) && !builder->function->values[place.value].is_volatile;
+    if (direct_ssa)
+    {
+        c_ir_ssa_add_local(builder, place, type, local_id, c_ir_token_source_range(builder, name), false);
+    }
+    else
+    {
+        IrSourceRange instruction_source = c_ir_token_source_range(builder, name);
+        IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_LOCAL, type);
+        instruction.canonical_local = local_id;
+        instruction.result = place;
+        IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+        builder->function->values[place.value].definition = id;
+    }
     builder->local_entities[builder->local_count] = entity.value;
     builder->local_symbols[builder->local_count] = name.symbol;
     builder->locals[builder->local_count++] = (CIntegerIrLocal){
+        .direct_ssa = direct_ssa,
         .name = c_token_spelling(builder->preprocess.spelling_base, name),
         .source = c_ir_token_source_range(builder, name),
         .place = place,
@@ -4739,12 +5809,18 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_temporary(CIntegerIrBuilder* builder, IrTy
                                                 .definition = IR_INSTRUCTION_ID_INVALID,
                                                 .category = IR_VALUE_PLACE,
                                             });
-    IrSourceRange instruction_source = source;
-    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_LOCAL, type);
-    instruction.canonical_local = local_id;
-    instruction.result = place;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[place.value].definition = id;
+    if (builder->direct_ssa_enabled && ir_local_type_promotable(builder->program, type))
+    {
+        c_ir_ssa_add_local(builder, place, type, local_id, source, true);
+    }
+    else
+    {
+        IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_LOCAL, type);
+        instruction.canonical_local = local_id;
+        instruction.result = place;
+        IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+        builder->function->values[place.value].definition = id;
+    }
     return place;
 }
 
@@ -4839,7 +5915,7 @@ BUSTER_C_INTERNAL bool c_ir_atomic_aggregate_accesses_lowerable(CIntegerIrBuilde
     return supported;
 }
 
-BUSTER_C_INTERNAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntegerIrLocal* local, CToken token)
+BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_load(CIntegerIrBuilder* builder, CIntegerIrLocal* local, CToken token)
 {
     IrType* place_type = ir_type_from_id(&builder->program->types, local->type);
     bool atomic = place_type && place_type->is_atomic;
@@ -4869,6 +5945,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntegerI
     instruction.volatile_access = local->place.value < builder->function->value_count && builder->function->values[local->place.value].is_volatile;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[result.value].definition = id;
+    return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntegerIrLocal* local, CToken token)
+{
+    CIrSsaLocal* direct = local->direct_ssa ? c_ir_ssa_place_local(builder, local->place) : 0;
+    IrValueId result = direct ? c_ir_ssa_read(builder, direct, c_ir_token_source_range(builder, token), true)
+                             : c_ir_emit_memory_load(builder, local, token);
     return result;
 }
 
@@ -4945,7 +6029,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_unsigned_type_of_size(CIntegerIrBuilder* builder
     return result;
 }
 
-BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrSourceRange source)
+BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_load_place_raw(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrSourceRange source)
 {
     IrType* place_type = ir_type_from_id(&builder->program->types, type);
     bool atomic = place_type && place_type->is_atomic;
@@ -4984,6 +6068,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builder,
     instruction.volatile_access = place.value < builder->function->value_count && builder->function->values[place.value].is_volatile;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[result.value].definition = id;
+    return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrSourceRange source)
+{
+    CIrSsaLocal* local = c_ir_ssa_place_local(builder, place);
+    IrValueId result = local && local->type.value == type.value ? c_ir_ssa_read(builder, local, source, false)
+                                                            : c_ir_emit_memory_load_place_raw(builder, place, type, source);
     return result;
 }
 
@@ -5958,16 +7050,28 @@ BUSTER_C_INTERNAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrValue
         current = c_ir_emit_binary_value(builder, current, clear_mask, access_type, IR_BINARY_INTEGER_BITWISE_AND, source);
         value = c_ir_emit_binary_value(builder, current, packed, access_type, IR_BINARY_INTEGER_BITWISE_OR, source);
     }
-    IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
-    operands[0] = place;
-    operands[1] = value;
-    IrSourceRange instruction_source = source;
-    IrInstruction instruction = c_ir_instruction_initialize(atomic ? IR_OPCODE_ATOMIC_STORE : IR_OPCODE_STORE, builder->void_type);
-    instruction.operands = operands;
-    instruction.operand_count = 2;
-    instruction.memory_order = atomic ? IR_MEMORY_ORDER_SEQUENTIAL : IR_MEMORY_ORDER_COUNT;
-    instruction.volatile_access = builder->function->values[place.value].is_volatile;
-    c_ir_append_instruction(builder, instruction, instruction_source);
+    CIrSsaLocal* local = c_ir_ssa_place_local(builder, place);
+    if (local && !atomic && stored_type.value == local->type.value &&
+        builder->function->values[value.value].canonical_type.value == local->type.value &&
+        builder->function->values[value.value].category == IR_VALUE_VALUE)
+    {
+        c_ir_ssa_slot(builder, builder->current_block.value, (u32)(local - builder->direct_ssa->locals))->value = value;
+        c_ir_ssa_event(builder, (u32)(local - builder->direct_ssa->locals), IR_OPCODE_STORE, value, source);
+        builder->direct_ssa->statistics.writes += 1;
+    }
+    else
+    {
+        IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
+        operands[0] = place;
+        operands[1] = value;
+        IrSourceRange instruction_source = source;
+        IrInstruction instruction = c_ir_instruction_initialize(atomic ? IR_OPCODE_ATOMIC_STORE : IR_OPCODE_STORE, builder->void_type);
+        instruction.operands = operands;
+        instruction.operand_count = 2;
+        instruction.memory_order = atomic ? IR_MEMORY_ORDER_SEQUENTIAL : IR_MEMORY_ORDER_COUNT;
+        instruction.volatile_access = builder->function->values[place.value].is_volatile;
+        c_ir_append_instruction(builder, instruction, instruction_source);
+    }
     return true;
 }
 
@@ -11816,6 +12920,11 @@ c_ir_place_base_resolved:
         else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_EXPRESSION)
         {
             IrValueId place = machine->child_result.value;
+            IrValueId direct_place = c_ir_ssa_read_place(builder, place, false);
+            if (direct_place.value != IR_ID_UNDERLYING_INVALID)
+            {
+                place = direct_place;
+            }
             // Expression lowering normally returns a loaded value.  Recover
             // the addressable source from that load for complex postfix
             // operands such as `(ptr - 2)[index]++`; plain arithmetic values
@@ -18677,9 +19786,24 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
             {
                 result = c_ir_emit_address_of_place(builder, operand, operand_type, pointer_source);
             }
+            else if (c_ir_ssa_read_place(builder, operand, false).value != IR_ID_UNDERLYING_INVALID)
+            {
+                IrValueId place = c_ir_ssa_read_place(builder, operand, false);
+                IrValueId recovered = c_ir_recover_place_from_value(builder, operand);
+                if (recovered.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    place = recovered;
+                }
+                result = c_ir_emit_address_of_place(builder, place, builder->function->values[place.value].canonical_type, pointer_source);
+            }
             else
             {
-                IrInstruction* materialization = &builder->function->instructions[builder->function->values[operand.value].definition.value];
+                IrInstructionId definition = builder->function->values[operand.value].definition;
+                if (definition.value >= builder->function->instruction_count)
+                {
+                    return false;
+                }
+                IrInstruction* materialization = builder->function->instructions + definition.value;
                 IrType* address_element_type = operand_type_value && operand_type_value->kind == IR_TYPE_POINTER
                                                    ? ir_type_from_id(&builder->program->types, operand_type_value->element_type)
                                                    : 0;
@@ -24704,7 +25828,7 @@ BUSTER_C_INTERNAL IrBlockId c_ir_block_create(CIntegerIrBuilder* builder)
                                            (IrBlock){
                                                .first_instruction = IR_INSTRUCTION_ID_INVALID,
                                                .last_instruction = IR_INSTRUCTION_ID_INVALID,
-                                               .sealed = true,
+                                               .sealed = !builder->direct_ssa_enabled,
                                            });
     return block ? block->id : IR_BLOCK_ID_INVALID;
 }
@@ -25688,7 +26812,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_request_place(CIntegerIrB
 // assignment statements and nested parenthesized assignment expressions use
 // this when their left operand was lowered as a value first (for example an
 // address-of/member chain in Lua's setnilvalue macro).
-BUSTER_C_INTERNAL IrValueId c_ir_recover_place_from_value(CIntegerIrBuilder* builder, IrValueId value)
+BUSTER_C_INTERNAL IrValueId c_ir_recover_memory_place_from_value(CIntegerIrBuilder* builder, IrValueId value)
 {
     if (value.value >= builder->function->value_count)
     {
@@ -25705,7 +26829,9 @@ BUSTER_C_INTERNAL IrValueId c_ir_recover_place_from_value(CIntegerIrBuilder* bui
         return IR_VALUE_ID_INVALID;
     }
     IrInstruction* definition = builder->function->instructions + definition_id.value;
-    if ((definition->opcode != IR_OPCODE_LOAD && definition->opcode != IR_OPCODE_ATOMIC_LOAD) || definition->operand_count != 1 ||
+    CIrDirectSsa* ssa = builder->direct_ssa;
+    bool has_later_event = ssa && ssa->event_count && ssa->events[ssa->event_count - 1].after.value == definition_id.value;
+    if (has_later_event || (definition->opcode != IR_OPCODE_LOAD && definition->opcode != IR_OPCODE_ATOMIC_LOAD) || definition->operand_count != 1 ||
         definition_id.value + 1 != builder->function->instruction_count || value.value + 1 != builder->function->value_count ||
         builder->function->blocks[builder->current_block.value].last_instruction.value != definition_id.value ||
         builder->last_instruction.value != definition_id.value)
@@ -25756,6 +26882,16 @@ BUSTER_C_INTERNAL IrValueId c_ir_recover_place_from_value(CIntegerIrBuilder* bui
     builder->function->instruction_count -= 1;
     builder->function->value_count -= 1;
     return place;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_recover_place_from_value(CIntegerIrBuilder* builder, IrValueId value)
+{
+    IrValueId result = c_ir_ssa_read_place(builder, value, true);
+    if (result.value == IR_ID_UNDERLYING_INVALID)
+    {
+        result = c_ir_recover_memory_place_from_value(builder, value);
+    }
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder* builder)
@@ -42332,7 +43468,8 @@ BUSTER_C_INTERNAL bool c_ir_type_mapping_pending(CParseResult* parse, IrProgram*
     return false;
 }
 
-CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target)
+CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target,
+                                         CIRLowerOptions options)
 {
     CIRLowerResult result = {0};
     if (!arena || parse.diagnostic_count)
@@ -44671,6 +45808,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             CType* parameter_type = c_type_from_id(&parse, signatures[declaration_index].parameters[parameter_index].type);
             array_parameter = parameter_type && parameter_type->kind == C_TYPE_ARRAY;
         }
+        bool direct_ssa_enabled = !options.disable_direct_ssa && local_capacity < UINT16_MAX;
         u32 declaration_start = array_parameter ? BUSTER_MIN(declaration.token_start, declaration.body_start) : declaration.body_start;
         for (u32 token_index = declaration_start; token_index < body_end; token_index += 1)
         {
@@ -44678,6 +45816,19 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             bool open_parenthesis = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS);
             prepared_call_capacity += open_parenthesis;
             prepared_control_expression_capacity += open_parenthesis || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET);
+            if (direct_ssa_enabled)
+            {
+                // Label provenance is checked while lowering, before publication.
+                // Keep its existing memory owner; ordinary logical &&, calls,
+                // field access, arrays and switches are not function barriers.
+                bool label_address = c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+                                     token_index + 1 < body_end && preprocess.tokens[token_index + 1].kind == C_TOKEN_IDENTIFIER &&
+                                     token_entities[token_index + 1].value == C_ID_UNDERLYING_INVALID;
+                direct_ssa_enabled = !label_address &&
+                                     !(token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("asm")) ||
+                                       string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm")) ||
+                                       string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__asm__"))));
+            }
         }
         u64 lowering_capacity = (u64)declaration.body_token_count * 3 + (u64)signatures[declaration_index].parameter_count * 4 + 16;
         // The frame stack is the one lowering capacity a parameter bound draws
@@ -44715,11 +45866,12 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
                                                (IrBlock){
                                                    .first_instruction = IR_INSTRUCTION_ID_INVALID,
                                                    .last_instruction = IR_INSTRUCTION_ID_INVALID,
-                                                   .sealed = true,
+                                                   .sealed = !direct_ssa_enabled,
                                                });
         function->entry = block->id;
         CIntegerIrBuilder builder = {
-        .location_cursor = {.memo_offset = UINT32_MAX},
+            .direct_ssa_enabled = direct_ssa_enabled,
+            .location_cursor = {.memo_offset = UINT32_MAX},
             .arena = arena,
             .slot_cache = &slot_cache,
             .over_aligned_array_name = &over_aligned_array_name,
@@ -44918,7 +46070,7 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
             builder.failure_message = S8("could not initialize cleanup state");
         }
         if (!parameters_lowered || !delimiters_valid || !cleanup_flags_initialized || !c_ir_lower_body(&builder, declaration, false, 0) ||
-            !c_ir_atomic_aggregate_accesses_lowerable(&builder))
+            !c_ir_atomic_aggregate_accesses_lowerable(&builder) || !c_ir_ssa_finish(&builder, &result.direct_ssa))
         {
             CSourceLocation failure_location = declaration.location;
             String8 failure_token = {0};
@@ -45083,4 +46235,9 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
     result.canonical_ir_certified = result.program && !result.diagnostic_count &&
                                     !program->rejected_function_count && !module->rejected_function_count;
     return result;
+}
+
+CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult analysis, Target target)
+{
+    return c_lower_to_ir_with_options(arena, source_path, preprocess, analysis, target, (CIRLowerOptions){0});
 }

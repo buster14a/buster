@@ -5127,15 +5127,16 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
         {
             MachineTypeClass parameter_class = machine_x64_type_class(&selector, parameter->canonical_type);
+            bool vector = selector.vector_registers_supported && (parameter_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER);
             if (parameter->value.value >= function->value_count ||
-                !(parameter_class.flags & (MACHINE_TYPE_CLASS_SCALAR_REGISTER | MACHINE_TYPE_CLASS_FLOAT_SCALAR)))
+                (!vector && !(parameter_class.flags & (MACHINE_TYPE_CLASS_SCALAR_REGISTER | MACHINE_TYPE_CLASS_FLOAT_SCALAR))))
             {
                 return result;
             }
             selector.value_virtual_registers[parameter->value.value] =
                 machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
                                                                          .definition_point = MACHINE_POINT_INVALID,
-                                                                         .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                         .register_class = vector ? MACHINE_REGISTER_CLASS_VECTOR : MACHINE_REGISTER_CLASS_GENERAL,
                                                                          .typed_origin = parameter->value.value,
                                                                      });
             value_def_blocks[parameter->value.value] = function->blocks[block_index].id.value;

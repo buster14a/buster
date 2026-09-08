@@ -44,6 +44,15 @@ signature; `opcode` retains the first rejected canonical opcode in the legacy
 while `verification` identifies an implementation failure. The allocator,
 stage, opcode and reason counters all survive multi-input compilation.
 
+`-fno-frontend-ssa` selects the original memory-form C lowering;
+`-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last
+flag wins. These controls are independent of `-fno-canonical-local-promotion`
+and `-fno-target-local-promotion`: disabling shared promotion does not undo
+SSA already built by the frontend. For a fully memory-form differential input,
+disable frontend SSA as well. Verbose compilation reports `IR_FRONTEND_SSA`
+counters beside `IR_LOCAL_PROMOTION`; see the
+[frontend ownership contract](frontend/foundations.md#direct-local-ssa-github-34).
+
 `-fno-machine-fallback` makes native C coverage strict: after code generation
 succeeds, any fallback fails the translation unit before object writing and
 reports its first function, source, target, allocator, opcode and reason.

@@ -52,6 +52,8 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-08T143633Z`](docs/performance-audits/2026-09-08T143633Z.md) — Frontend SSA: per-owner escape recovery, expression temporaries and complete CFG construction
+- [`2026-09-08T043530Z`](docs/performance-audits/2026-09-08T043530Z.md) — Direct frontend SSA: bounded construction, differential validation and compile-time measurements
 - [`2026-09-08T022122Z`](docs/performance-audits/2026-09-08T022122Z.md) — forwarding runtime stubs: metadata-derived recipes and fail-closed publication (#267)
 
 - [`2026-09-07T233720Z`](docs/performance-audits/2026-09-07T233720Z.md) — direct old/new ABI service timing on the same scalar and aggregate query traces (#39)

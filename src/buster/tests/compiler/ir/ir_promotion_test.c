@@ -7,7 +7,9 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult ir_promotion_lower(Arena* arena, String8 sour
     CIRLowerResult result = {0};
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {
-        result = c_lower_to_ir(arena, S8("local-promotion.c"), preprocess, analysis, target);
+        // Keep this pass's reference tests independent of direct frontend SSA.
+        result = c_lower_to_ir_with_options(arena, S8("local-promotion.c"), preprocess, analysis, target,
+                                           (CIRLowerOptions){.disable_direct_ssa = true});
     }
     return result;
 }

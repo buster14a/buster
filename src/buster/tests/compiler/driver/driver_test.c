@@ -2034,6 +2034,20 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_STRING_TEST(arguments, invocation.source_metrics_path, S8("metrics.txt"));
     BUSTER_TEST(arguments, invocation.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST);
 
+    String8 direct_ssa_command_lines[][4] = {
+        {S8("source.c"), S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fno-target-local-promotion")},
+        {S8("source.c"), S8("-fno-frontend-ssa"), S8("-ffrontend-ssa"), S8("-fno-canonical-local-promotion")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(direct_ssa_command_lines); index += 1)
+    {
+        CompilerDriverInvocation direct_ssa_options = compiler_driver_parse_arguments(arguments->arena,
+            (SliceString8){.pointer = direct_ssa_command_lines[index], .length = 4});
+        BUSTER_TEST(arguments, direct_ssa_options.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, direct_ssa_options.disable_direct_ssa == (index == 0));
+        BUSTER_TEST(arguments, direct_ssa_options.disable_target_local_promotion == (index == 0));
+        BUSTER_TEST(arguments, direct_ssa_options.disable_local_promotion == (index == 1));
+    }
+
     String8 register_allocator_default_command_line[] = {S8("source.c")};
     CompilerDriverInvocation register_allocator_default = compiler_driver_parse_arguments(
         arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(register_allocator_default_command_line));
@@ -9116,7 +9130,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // the incompatible ones now refused (#830), and a read-modify-write on an
     // atomic floating-point object, which lowers to a compare-exchange loop
     // (#821), and the canonical local-promotion fixture exercises parallel
-    // block-parameter copies without selector-local promotion. All ten run
+    // block-parameter copies without selector-local promotion. These fixtures run
     // under every register allocator: six are layout or lowering defects
     // rather than parsing ones, the layout pair has to agree
     // between the sizeof folding in the parse and the IR layout, and the
@@ -9133,6 +9147,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_function_pointer_compatibility.c"),
         S8("tests/basic_c_atomic_float_update.c"),
         S8("tests/basic_c_local_promotion.c"),
+        S8("tests/basic_c_frontend_ssa.c"),
+        S8("tests/basic_c_frontend_ssa.c"),
     };
     String8 c_differential_regression_names[] = {
         S8("buster-c-anonymous-bit-field-initializer"),
@@ -9145,6 +9161,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-function-pointer-compatibility"),
         S8("buster-c-atomic-float-update"),
         S8("buster-c-local-promotion"),
+        S8("buster-c-frontend-ssa"),
+        S8("buster-c-frontend-ssa-reference"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_differential_regression_paths); fixture_index += 1)
     {
@@ -9159,9 +9177,16 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 compiler_driver_parse_arguments(differential_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line));
             // The promotion witness must not depend on the native selectors'
             // legacy local-to-mutable-register transformation.
-            fixture_invocation.disable_target_local_promotion = string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_local_promotion.c"));
+            bool frontend_ssa = string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_frontend_ssa.c"));
+            fixture_invocation.disable_target_local_promotion = frontend_ssa ||
+                string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_local_promotion.c"));
+            fixture_invocation.disable_direct_ssa = string_equal(c_differential_regression_names[fixture_index], S8("buster-c-frontend-ssa-reference"));
             CompilerDriverResult fixture = compiler_driver_execute_invocation(differential_temporary.arena, fixture_invocation);
             BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+            if (frontend_ssa && fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                BUSTER_TEST(arguments, (fixture.direct_ssa.locals != 0) == !fixture_invocation.disable_direct_ssa);
+            }
             if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
             {
                 String8 fixture_arguments[] = {fixture_path};

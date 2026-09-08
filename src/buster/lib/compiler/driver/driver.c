@@ -1186,6 +1186,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.source_metrics_path = value;
             continue;
         }
+        if (string_equal(argument, S8("-fno-frontend-ssa")) || string_equal(argument, S8("-ffrontend-ssa")))
+        {
+            invocation.disable_direct_ssa = string_equal(argument, S8("-fno-frontend-ssa"));
+            continue;
+        }
         if (string_equal(argument, S8("-fno-canonical-local-promotion")) || string_equal(argument, S8("-fcanonical-local-promotion")))
         {
             invocation.disable_local_promotion = string_equal(argument, S8("-fno-canonical-local-promotion"));
@@ -3243,7 +3248,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
-        CIRLowerResult semantic = c_analyze(arena, invocation.input_paths[0], preprocess, syntax, invocation.target);
+        CIRLowerResult semantic = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
+                                                       (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa});
         result.analysis_diagnostic_count = semantic.diagnostic_count;
         if (semantic.diagnostic_count || !semantic.program)
         {
@@ -3261,8 +3267,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         }
         goto end;
     }
-    CIRLowerResult lowered = c_analyze(arena, invocation.input_paths[0], preprocess, syntax, invocation.target);
+    CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
+                                                  (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
+    result.direct_ssa = lowered.direct_ssa;
     if (!lowered.program || lowered.diagnostic_count)
     {
         result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
@@ -3927,6 +3935,14 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.preprocessed.spelling_bytes += unit.preprocessed.spelling_bytes;
         result.preprocessed.expansions += unit.preprocessed.expansions;
         result.preprocessed.definitions += unit.preprocessed.definitions;
+        result.direct_ssa.functions += unit.direct_ssa.functions;
+        result.direct_ssa.locals += unit.direct_ssa.locals;
+        result.direct_ssa.fallback_locals += unit.direct_ssa.fallback_locals;
+        result.direct_ssa.temporaries += unit.direct_ssa.temporaries;
+        result.direct_ssa.reads += unit.direct_ssa.reads;
+        result.direct_ssa.writes += unit.direct_ssa.writes;
+        result.direct_ssa.parameters_created += unit.direct_ssa.parameters_created;
+        result.direct_ssa.parameters_removed += unit.direct_ssa.parameters_removed;
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
         result.local_promotion.removed_loads += unit.local_promotion.removed_loads;
