@@ -3,6 +3,10 @@
 #include <buster/lib/file.h>
 #include <buster/lib/time.h>
 
+// Compile-only GCC/MSVC matrix rows must also enforce the host byte contract.
+BUSTER_CT_CHECK((char8)0xff == 0xff);
+BUSTER_CT_CHECK(sizeof(u32) == 4 && sizeof(u64) == 8);
+
 enum
 {
     OS_TEST_LANE_MAX_COUNT = 8,
@@ -163,33 +167,89 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
     UnitTestResult result = {0};
 
-    // Reserve inaccessible pages, commit one, and revoke/restore its access
-    // without discarding its bytes. The other page stays an inaccessible guard.
+    // Reservations start inaccessible, a committed interior page is writable,
+    // and protecting it must not discard its contents. Do not conflate the
+    // Windows allocation granularity with the commit/protection page size.
     {
         u64 page_size = os_get_page_size();
-        u8* pages = (u8*)os_reserve(0, page_size * 2u, (ProtectionFlags){0}, (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
-        BUSTER_TEST(arguments, pages != 0);
-        if (pages)
+        u64 size = 3 * page_size;
+        u8* reservation = (u8*)os_reserve(0, size, (ProtectionFlags){0},
+                                         (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
+        BUSTER_TEST(arguments, reservation != 0);
+        if (reservation)
         {
-            bool committed = os_commit(pages, page_size, (ProtectionFlags){.read = true, .write = true}, false);
+            BUSTER_TEST(arguments, (u64)reservation % page_size == 0);
+            u8* page = reservation + page_size;
+            bool committed = os_commit(page, page_size, (ProtectionFlags){.read = true, .write = true}, false);
             BUSTER_TEST(arguments, committed);
             if (committed)
             {
-                pages[0] = 0x31;
-                pages[page_size - 1] = 0xaf;
-                bool inaccessible = os_protect(pages, page_size, (ProtectionFlags){0});
-                BUSTER_TEST(arguments, inaccessible);
-                if (inaccessible)
+                bool zeroed = true;
+                for (u64 i = 0; i < page_size; i += 1)
                 {
-                    bool restored = os_protect(pages, page_size, (ProtectionFlags){.read = true, .write = true});
-                    BUSTER_TEST(arguments, restored);
-                    if (restored)
+                    zeroed = zeroed && page[i] == 0;
+                }
+                BUSTER_TEST(arguments, zeroed);
+                page[0] = 0xa5;
+                page[page_size - 1] = 0x5a;
+                bool inaccessible = os_protect(page, page_size, (ProtectionFlags){0});
+                BUSTER_TEST(arguments, inaccessible);
+#if defined(_WIN32)
+                MEMORY_BASIC_INFORMATION information;
+                SIZE_T queried = VirtualQuery(page, &information, sizeof(information));
+                BUSTER_TEST(arguments, queried == sizeof(information));
+                if (queried == sizeof(information))
+                {
+                    BUSTER_TEST(arguments, information.State == MEM_COMMIT);
+                    BUSTER_TEST(arguments, information.Protect == PAGE_NOACCESS);
+                    BUSTER_TEST(arguments, information.AllocationBase == reservation);
+                }
+#endif
+                bool accessible = os_protect(page, page_size, (ProtectionFlags){.read = true, .write = true});
+                BUSTER_TEST(arguments, accessible);
+                if (accessible)
+                {
+                    BUSTER_TEST(arguments, page[0] == 0xa5 && page[page_size - 1] == 0x5a);
+                }
+#if defined(_WIN32)
+                ProtectionFlags requested[] = {
+                    {0}, {.read = true}, {.write = true}, {.read = true, .write = true},
+                    {.execute = true}, {.read = true, .execute = true}, {.write = true, .execute = true},
+                    {.read = true, .write = true, .execute = true},
+                };
+                DWORD expected[] = {
+                    PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_READWRITE,
+                    PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_READWRITE,
+                };
+                BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(requested) == BUSTER_ARRAY_LENGTH(expected));
+                for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(requested); i += 1)
+                {
+                    bool protected = os_protect(page, page_size, requested[i]);
+                    BUSTER_TEST(arguments, protected);
+                    queried = VirtualQuery(page, &information, sizeof(information));
+                    BUSTER_TEST(arguments, queried == sizeof(information));
+                    if (queried == sizeof(information))
                     {
-                        BUSTER_TEST(arguments, pages[0] == 0x31 && pages[page_size - 1] == 0xaf);
+                        BUSTER_TEST(arguments, information.Protect == expected[i]);
+                    }
+                }
+#endif
+                bool decommitted = os_decommit(page, page_size);
+                BUSTER_TEST(arguments, decommitted);
+                if (decommitted)
+                {
+                    bool recommitted = os_commit(page, page_size, (ProtectionFlags){.read = true, .write = true}, false);
+                    BUSTER_TEST(arguments, recommitted);
+                    if (recommitted)
+                    {
+                        // Darwin MADV_DONTNEED is not a promise of zero-fill.
+                        // Only fresh commitment was tested for zeroes above.
+                        page[page_size - 1] = 0xc3;
+                        BUSTER_TEST(arguments, page[page_size - 1] == 0xc3);
                     }
                 }
             }
-            BUSTER_TEST(arguments, os_unreserve(pages, page_size * 2u));
+            BUSTER_TEST(arguments, os_unreserve(reservation, size));
         }
     }
 
@@ -576,6 +636,14 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             String8 directory_resolved = executable_resolve_in_path(arena, S8("cmake"));
             BUSTER_TEST(arguments, directory_resolved.length == 0);
 
+            *path_value = S8("");
+            resolved = executable_resolve_in_path(arena, S8("build.sh"));
+            BUSTER_TEST(arguments, string_ends_with_sequence(resolved, S8("/build.sh")));
+            *path_value = (String8){0};
+            resolved = executable_resolve_in_path(arena, S8("build.sh"));
+            BUSTER_TEST(arguments, string_ends_with_sequence(resolved, S8("/build.sh")));
+            BUSTER_TEST(arguments, executable_resolve_in_path(arena, S8("")).length == 0);
+
             *path_value = saved_path;
         }
 
@@ -590,7 +658,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     // cannot race other tests. The fixture is ours, not a host-installed tool.
     {
         Arena* arena = arguments->arena;
-        String8 root = buster_test_temporary_path(arena, S8("buster-path-lifetime"), S8(""));
+        String8 root = buster_test_temporary_path(arena, S8("buster-path-lifetime space \xc3\xa9"), S8(""));
         os_make_directory(root);
         String8 path = string_format_z(arena, S8("{S8}/probe.exe"), root);
         OsFileDescriptor* file = os_file_open(path, (OpenFlags){.create = true, .write = true, .truncate = true},
@@ -632,6 +700,63 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, retained);
                 BUSTER_TEST(arguments, intact);
             }
+            String8 key_spellings[] = {S8("Path"), S8("PATH"), S8("path"), S8("pAtH"), S8("PATHX")};
+            for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(key_spellings); i += 1)
+            {
+                keys[0] = key_spellings[i];
+#if defined(_WIN32)
+                bool expected = i < 4;
+#else
+                bool expected = string_equal(keys[0], S8("PATH"));
+#endif
+                String8 resolved = executable_resolve_in_path(arena, S8("probe.exe"));
+                BUSTER_TEST(arguments, expected ? string_equal(resolved, path) : resolved.length == 0);
+            }
+            keys[0] = S8("PATH");
+#if defined(_WIN32)
+            String8 spellings[] = {S8("upper.EXE"), S8("mixed.ExE")};
+#else
+            // A backslash is a filename byte on POSIX, not a separator.
+            String8 spellings[] = {S8("back\\slash")};
+#endif
+            for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(spellings); i += 1)
+            {
+                String8 spelled_path = string_format_z(arena, S8("{S8}/{S8}"), root, spellings[i]);
+                OsFileDescriptor* spelled = os_file_open(spelled_path, (OpenFlags){.create = true, .write = true, .truncate = true},
+                                                       (OpenPermissions){.read = true, .write = true, .execute = true});
+                BUSTER_TEST(arguments, spelled != 0);
+                if (spelled)
+                {
+                    os_file_close(spelled);
+                    String8 resolved = executable_resolve_in_path(arena, spellings[i]);
+                    BUSTER_TEST(arguments, string_equal(resolved, spelled_path));
+                }
+            }
+#if defined(_WIN32)
+            String8 native_root = os_path_absolute(arena, root, true);
+            BUSTER_TEST(arguments, native_root.length != 0);
+            if (native_root.length)
+            {
+                for (u64 i = 0; i < native_root.length; i += 1)
+                {
+                    if (native_root.pointer[i] == '/')
+                    {
+                        native_root.pointer[i] = '\\';
+                    }
+                }
+                values[0] = native_root;
+                String8 resolved = executable_resolve_in_path(arena, S8("probe.exe"));
+                BUSTER_TEST(arguments, resolved.length != 0);
+                String8 extended_root = string_format_z(arena, S8("\\\\?\\{S8}"), native_root);
+                values[0] = extended_root;
+                resolved = executable_resolve_in_path(arena, S8("probe.exe"));
+                String8 expected = string_format_z(arena, S8("{S8}\\probe.exe"), extended_root);
+                BUSTER_TEST(arguments, string_equal(resolved, expected));
+            }
+#endif
+            program_state->input.environment_keys = (SliceString8){0};
+            program_state->input.environment_values = (SliceString8){0};
+            BUSTER_TEST(arguments, executable_resolve_in_path(arena, S8("probe.exe")).length == 0);
             program_state->input.environment_keys = saved_keys;
             program_state->input.environment_values = saved_values;
         }

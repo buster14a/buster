@@ -1095,7 +1095,9 @@ if (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     list(APPEND GNU_FAMILY_NATIVE_TARGET -mno-avx)
 endif()
 
-set(MSVC_FAMILY_OPTIONS )
+# Match the unsigned plain-char contract of GNU_FAMILY_OPTIONS. /J changes
+# the compiler's type semantics; defining _CHAR_UNSIGNED alone is not enough.
+set(MSVC_FAMILY_OPTIONS /J)
 set(MSVC_FAMILY_WARNINGS )
 set(MSVC_FAMILY_DISABLE_WARNINGS )
 
