@@ -12,6 +12,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
 - Keep the frontend pipeline explicit: source loading and preprocessing,
   parsing and semantic construction, then canonical-IR lowering. Do not add a
   parallel frontend-specific IR or route code generation around canonical IR.
+- Macro placemarkers survive the entire `##` sequence. The replacement loop
+  compacts into its existing materialized buffer and removes placemarkers only
+  when emitting the rescan tokens. Only the explicitly marked GNU
+  `, ## __VA_ARGS__` operator may delete a comma for an empty argument;
+  named parameters and ordinary macros retain it.
+  `tests/basic_c_macro_empty_paste.c` covers empty operands, chained pastes,
+  surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
+- A folded conditional expression converts its selected value to the common
+  type of both arms before any enclosing operator consumes it. Constant and
+  runtime typing share `c_ir_conditional_pointer_type`; arithmetic uses the
+  usual conversion helper. `tests/basic_c_constant_conditional_type.c` pins
+  signed/unsigned widening, mixed floating/integer arithmetic, nested folds,
+  and pointer/null selections under every allocator (GitHub #219).
 - Invalid user input must produce structured C diagnostics and a failed driver
   result. Assertions and `BUSTER_TODO()` are for violated internal invariants,
   never ordinary syntax or semantic errors.
@@ -28,6 +41,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   sentinels.
 - Validate IR before machine selection or Wasm emission. A diagnosed frontend
   failure must not publish an apparently valid partial function to codegen.
+- Constant initialization must preserve the source type and every value limb.
+  The direct aggregate leaf paths in `c_gen.c` use a nonzero test for `_Bool`
+  and `c_ir_constant_integer_to_float` for unsigned integers, with rounding at
+  the destination precision. The general aggregate writer stores both limbs
+  of a 128-bit integer. `c_ir_constant_float_to_integer` decodes binary64 bits,
+  truncates fractions before checking the destination range, and refuses
+  nonfinite or unrepresentable conversions without executing an undefined host
+  cast. Automatic nested initializers recognize a string as its whole array
+  subobject before brace elision. Pin these paths with independent object bytes
+  as well as runtime comparisons: the initializer fixtures also exposed a
+  selected x86-64 float-to-u64 conversion whose binary32 threshold encoded
+  2^31 instead of 2^63. Runtime float-to-128-bit conversion on x86-64 remains
+  unsupported; constant conversion supports both integer limbs.
 - **GNU's `__alignof__` takes an expression; `_Alignof` takes only a type
   name.** Both spellings reach the same fold in `c_gen.c`, and it resolved an
   expression operand only for a compound literal until libc-test's

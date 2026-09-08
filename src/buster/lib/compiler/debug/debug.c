@@ -216,23 +216,79 @@ DebugLocationIndex debug_location_index_build(Arena* arena, DebugLocationSeed* l
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL DebugLocationIndex* debug_location_index_for(DebugModelInput* input)
+// Only model construction accepts a caller-populated index. Prove its
+// complete partition, bucket membership and stable seed order once; the
+// per-variable lookup below remains constant-time plus its matching bucket.
+BUSTER_GLOBAL_LOCAL bool debug_location_index_valid(DebugLocationIndex* index)
 {
-    if (!input || !input->location_index)
+    bool valid = index->locations && index->location_count && index->bucket_count &&
+                 !(index->bucket_count & (index->bucket_count - 1)) && index->bucket_ends && index->order;
+    u32 first = 0;
+    for (u32 bucket = 0; valid && bucket < index->bucket_count; bucket += 1)
     {
-        return 0;
+        u32 end = index->bucket_ends[bucket];
+        valid = first <= end && end <= index->location_count;
+        u32 previous = 0;
+        for (u32 scan = first; valid && scan < end; scan += 1)
+        {
+            u32 seed = index->order[scan];
+            valid = seed < index->location_count && (scan == first || previous < seed);
+            if (valid)
+            {
+                valid = debug_location_bucket(index->locations[seed].function_symbol, index->bucket_count - 1) == bucket;
+            }
+            previous = seed;
+        }
+        first = end;
     }
-    DebugLocationIndex* index = input->location_index;
-    DebugLocationIndex* result;
-    if (index->locations != input->locations || index->location_count != input->location_count || !index->bucket_count || !index->bucket_ends || !index->order)
+    valid = valid && first == index->location_count;
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool debug_model_locations_prepare(Arena* arena, DebugModelInput* input, DebugLocationIndex* storage)
+{
+    bool valid = (!input->location_count || input->locations) && (!input->inline_site_count || input->inline_sites);
+    for (u32 seed = 0; valid && seed < input->location_count; seed += 1)
     {
-        result = 0;
+        DebugLocation* location = &input->locations[seed].location;
+        valid = !location->piece_count || location->pieces;
+    }
+    if (valid && input->location_count)
+    {
+        DebugLocationIndex* index = input->location_index;
+        if (index && index->locations == input->locations && index->location_count == input->location_count)
+        {
+            valid = debug_location_index_valid(index);
+        }
+        else
+        {
+            // An index for a different slice is stale, not a reason to omit
+            // locations. Rebuild it without reading its bucket/order arrays.
+            *storage = debug_location_index_build(arena, input->locations, input->location_count);
+            input->location_index = storage;
+        }
     }
     else
     {
-        result = index;
+        input->location_index = 0;
     }
+    return valid;
+}
 
+BUSTER_GLOBAL_LOCAL DebugLocationIndex* debug_location_index_for(DebugModelInput* input)
+{
+    DebugLocationIndex* result = 0;
+    if (input && input->locations && input->location_index)
+    {
+        DebugLocationIndex* index = input->location_index;
+        if (index->locations == input->locations && index->location_count == input->location_count &&
+            index->bucket_count && index->bucket_ends && index->order)
+        {
+            // The model boundary has already validated matching indexes.
+            // Test-only direct calls may still provide a stale index.
+            result = index;
+        }
+    }
     return result;
 }
 
@@ -313,40 +369,35 @@ DebugScopeId debug_scope_add(Arena* arena, DebugModel* model, DebugScopeId paren
     return id;
 }
 
-DebugVariableId debug_variable_add(Arena* arena, DebugModel* model, DebugModelInput* input, DebugScope* scope,
+DebugVariableId debug_variable_add(Arena* arena, DebugModel* model, DebugModelInput* input, DebugScopeId scope_id,
                                                        String8 name, DebugTypeId type, DebugSourceLocation declaration, DebugVariableKind kind,
                                                        IrSymbolId symbol, IrLocalId local, u32 start, u32 end)
 {
-    // Rejects a scope that does not belong to this model without scanning it:
-    // debug info is built for every function by default, so an O(scope_count)
-    // check here would be quadratic across a translation unit.
-    DebugScopeId scope_id = DEBUG_SCOPE_INVALID;
-    if (scope && model->scopes && scope >= model->scopes && scope < model->scopes + model->scope_count &&
-        (u64)((u8*)scope - (u8*)model->scopes) % sizeof(*model->scopes) == 0)
+    // Scope ownership is a dense ID, not a relational comparison between a
+    // possibly unrelated pointer and the model's storage. Validate before
+    // forming the pointer, without a linear scan on each variable.
+    DebugVariableId result = DEBUG_ID_INVALID;
+    if (name.length && model->variable_count < UINT32_MAX && model->scopes && scope_id < model->scope_count)
     {
-        scope_id = (DebugScopeId)(scope - model->scopes);
+        DebugScope* scope = model->scopes + scope_id;
+        result = model->variable_count++;
+        DebugVariable* variable = model->variables + result;
+        *variable = (DebugVariable){
+            .name = debug_string(arena, name),
+            .type = type,
+            .declaration = declaration,
+            .symbol = symbol,
+            .local = local,
+            .scope = scope_id,
+            .kind = kind,
+        };
+        debug_variable_add_location(arena, input, variable, symbol, local, start, end);
+        if (scope->variable_count < UINT32_MAX)
+        {
+            scope->variables[scope->variable_count++] = result;
+        }
     }
-    if (!name.length || model->variable_count == UINT32_MAX || scope_id == DEBUG_SCOPE_INVALID)
-    {
-        return DEBUG_ID_INVALID;
-    }
-    DebugVariableId id = model->variable_count++;
-    DebugVariable* variable = model->variables + id;
-    *variable = (DebugVariable){
-        .name = debug_string(arena, name),
-        .type = type,
-        .declaration = declaration,
-        .symbol = symbol,
-        .local = local,
-        .scope = scope_id,
-        .kind = kind,
-    };
-    debug_variable_add_location(arena, input, variable, symbol, local, start, end);
-    if (scope->variable_count < UINT32_MAX)
-    {
-        scope->variables[scope->variable_count++] = id;
-    }
-    return id;
+    return result;
 }
 
 
@@ -378,9 +429,8 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* mo
             scopes[scope_depth] = debug_scope_add(arena, model, scopes[scope_depth - 1], DEBUG_SCOPE_LEXICAL, debug_source_from_ir(arena, input->program, local->source),
                                                   function->code_offset, function->code_offset + function->code_size, scope_variable_capacity);
         }
-        DebugScope* scope = model->scopes + scopes[desired_depth];
         DebugVariableKind kind = local->is_parameter ? DEBUG_VARIABLE_PARAMETER : DEBUG_VARIABLE_LOCAL;
-        DebugVariableId variable = debug_variable_add(arena, model, input, scope, local->name,
+        DebugVariableId variable = debug_variable_add(arena, model, input, scopes[desired_depth], local->name,
                                                       debug_canonical_type_id(model, local->type), debug_source_from_ir(arena, input->program, local->source),
                                                       kind, seed->symbol, local->id, function->code_offset,
                                                       function->code_offset + function->code_size);
@@ -410,7 +460,7 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_globals(Arena* arena, DebugModel* m
         {
             continue;
         }
-        DebugVariableId variable = debug_variable_add(arena, model, input, scope, symbol->name, debug_canonical_type_id(model, global->type),
+        DebugVariableId variable = debug_variable_add(arena, model, input, model->root_scope, symbol->name, debug_canonical_type_id(model, global->type),
                                                       debug_source_from_ir(arena, input->program, global->source), DEBUG_VARIABLE_GLOBAL, global->symbol,
                                                       IR_LOCAL_ID_INVALID, 0, 1);
         if (variable != DEBUG_ID_INVALID)
@@ -465,15 +515,10 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
         .comp_dir = debug_string(arena, input.comp_dir),
         .root_scope = DEBUG_SCOPE_INVALID,
     };
-    if (arena && input.program && (!input.function_count || input.functions))
+    DebugLocationIndex location_index = {0};
+    if (arena && input.program && (!input.function_count || input.functions) &&
+        debug_model_locations_prepare(arena, &input, &location_index))
     {
-        DebugLocationIndex location_index = {0};
-        if (!input.location_index)
-        {
-            location_index = debug_location_index_build(arena, input.locations, input.location_count);
-            input.location_index = &location_index;
-        }
-
         result.type_count = input.program->types.count;
         result.function_count = input.function_count;
         result.inline_site_count = input.inline_site_count;

@@ -189,7 +189,10 @@ BUSTER_C_SHARED CToken c_space_token(CSpellingSpace* space, String8 text, CToken
     // synthesizes a spelling anywhere near it.
     BUSTER_CHECK(text.length < C_TOKEN_LENGTH_OVERSIZED || kind == C_TOKEN_STRING_LITERAL || kind == C_TOKEN_CHARACTER_LITERAL);
     char8* copy = c_space_allocate(space, text.length);
-    memcpy(copy, text.pointer, text.length);
+    if (text.length)
+    {
+        memcpy(copy, text.pointer, text.length);
+    }
     return (CToken){
         .offset = c_space_offset(space, copy),
         .length = c_token_length_field(text.length),
@@ -463,6 +466,14 @@ BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_avx512(String
 #endif
 
 #if BUSTER_INCLUDE_TESTS
+bool c_test_space_null_empty_tokens(Arena* arena)
+{
+    CSpellingSpace space = c_space_local(arena, 1);
+    CToken token = c_space_token(&space, (String8){0}, C_TOKEN_END_OF_FILE, (CPunctuator)0);
+    CToken copied = c_space_retoken(&space, space.base, token);
+    return !token.length && !copied.length && token.offset == copied.offset;
+}
+
 BUSTER_C_INTERNAL u64 c_translate_plain_run_end_scalar(String8 source, u64 offset)
 {
     while (offset < source.length)
@@ -4089,20 +4100,19 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 };
             }
         }
-        CPpToken* output = arena_allocate(arena, CPpToken, materialized_count);
-        u32 output_count = 0;
+        // Compact into the materialized buffer so placemarkers survive every
+        // paste in a chain. Removing an empty left operand early lets `##`
+        // consume an unrelated preceding token or appear to be at an edge.
+        u32 pasted_count = 0;
         for (u32 index = 0; index < materialized_count && ok; index += 1)
         {
             CMacroReplacementToken item = materialized[index];
             if (!c_macro_is_paste(item.token.token))
             {
-                if (!item.placemarker)
-                {
-                    output[output_count++] = item.token;
-                }
+                materialized[pasted_count++] = item;
                 continue;
             }
-            if (!output_count || index + 1 >= materialized_count)
+            if (!pasted_count || index + 1 >= materialized_count)
             {
                 c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_TOKEN_PASTE,
                                              string_format(arena, S8("'##' appears at the edge of macro '{S8}'"), macro->name));
@@ -4110,25 +4120,31 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 continue;
             }
             CMacroReplacementToken right = materialized[++index];
+            CMacroReplacementToken* left = &materialized[pasted_count - 1];
             if (right.placemarker)
             {
-                if (macro->definition.variadic && c_token_is_punctuator(&output[output_count - 1].token, C_PUNCTUATOR_COMMA))
+                if (item.comma_paste)
                 {
-                    output_count -= 1;
+                    left->placemarker = true;
                 }
+                continue;
+            }
+            if (left->placemarker)
+            {
+                right.token.preceded_by_space = left->token.preceded_by_space;
+                *left = right;
                 continue;
             }
             if (item.comma_paste)
             {
                 // Varargs present: GNU performs no paste here at all.  The comma
-                // already stands in the output; the argument's first token
+                // already stands in the buffer; the argument's first token
                 // follows it as itself, and the rest of the argument flows
                 // through the loop as ordinary tokens.
-                output[output_count++] = right.token;
+                materialized[pasted_count++] = right;
                 continue;
             }
-            CPpToken left = output[--output_count];
-            String8 left_spelling = c_token_spelling(base, left.token);
+            String8 left_spelling = c_token_spelling(base, left->token.token);
             String8 right_spelling = c_token_spelling(base, right.token.token);
             u64 joined_length = left_spelling.length + right_spelling.length;
             // The joined text lives in the spelling space so the pasted token's
@@ -4136,8 +4152,14 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
             // splice, so relexing it cannot change its bytes and the relex is
             // validation plus kind classification only.
             char8* joined = c_space_allocate(space, joined_length + 1);
-            memcpy(joined, left_spelling.pointer, left_spelling.length);
-            memcpy(joined + left_spelling.length, right_spelling.pointer, right_spelling.length);
+            if (left_spelling.length)
+            {
+                memcpy(joined, left_spelling.pointer, left_spelling.length);
+            }
+            if (right_spelling.length)
+            {
+                memcpy(joined + left_spelling.length, right_spelling.pointer, right_spelling.length);
+            }
             joined[joined_length] = 0;
             TemporalArena paste_temporary = scratch_begin(&arena, 1);
             CLexResult lex = c_lex(paste_temporary.arena, (String8){
@@ -4159,7 +4181,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 ok = false;
                 continue;
             }
-            output[output_count++] = (CPpToken){
+            left->token = (CPpToken){
                 .token =
                     {
                         .offset = c_space_offset(space, joined),
@@ -4172,11 +4194,20 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 // The joined token starts where its left operand started, so it
                 // inherits that operand's spacing; the pasted spelling itself
                 // carries none.
-                .preceded_by_space = left.preceded_by_space,
+                .preceded_by_space = left->token.preceded_by_space,
             };
         }
         if (ok)
         {
+            CPpToken* output = arena_allocate(arena, CPpToken, pasted_count);
+            u32 output_count = 0;
+            for (u32 index = 0; index < pasted_count; index += 1)
+            {
+                if (!materialized[index].placemarker)
+                {
+                    output[output_count++] = materialized[index].token;
+                }
+            }
             *tokens_out = output;
             *token_count_out = output_count;
         }
@@ -4241,7 +4272,10 @@ BUSTER_C_INTERNAL CPpToken c_macro_pragma_token(CSpellingSpace* space, CMacro* m
             {
                 spelling[output++] = ' ';
             }
-            memcpy(spelling + output, token_spelling.pointer, token_spelling.length);
+            if (token_spelling.length)
+            {
+                memcpy(spelling + output, token_spelling.pointer, token_spelling.length);
+            }
             output += token_spelling.length;
         }
         spelling[output] = 0;
@@ -6576,7 +6610,10 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
         for (u32 index = 1; index + 1 < token_count; index += 1)
         {
             String8 spelling = c_token_spelling(base, tokens[index]);
-            memcpy(name + output, spelling.pointer, spelling.length);
+            if (spelling.length)
+            {
+                memcpy(name + output, spelling.pointer, spelling.length);
+            }
             output += spelling.length;
         }
         name[output] = 0;

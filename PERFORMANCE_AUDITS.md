@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-07T223310Z`](docs/performance-audits/2026-09-07T223310Z.md) — TLS encoding authority: correct redundant REX relaxation; bound cold recipe preparation
 - [`2026-09-07T222813Z`](docs/performance-audits/2026-09-07T222813Z.md) — production selector audit and guarded replay benchmark
 - [`2026-09-07T132245Z`](docs/performance-audits/2026-09-07T132245Z.md) — debug-info correctness and linear CodeView scope scratch (#201-#204)
 - [`2026-09-07T013544Z`](docs/performance-audits/2026-09-07T013544Z.md) — five items take the frozen-tree compile from 9.583,33 M to 9.351,43 M Ir (-2,42%) byte-identically, remove 57,9 MB of per-compile zeroing, and put the matching-delimiter query on a 512-bit windowed scan
