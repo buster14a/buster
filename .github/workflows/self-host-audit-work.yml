@@ -21,9 +21,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      - name: Publish the integrated bootstrap PR without dropping main changes
+      - name: Export integrated candidate without replacing the PR before verification
         env:
           IMPLEMENTATION_BRANCH: work/self-host-implementation-transfer-20260907
+          CANDIDATE_BRANCH: work/self-host-final-tree-20260907
           EXPECTED_HEAD: 5fc20fed8685b2d399897d554168cb55ea32e3a4
           MAIN_HEAD: 88ecc49c1a5c5fef614c388c730babe7686a689a
         run: |
@@ -52,7 +53,10 @@ jobs:
           tree=$(git write-tree)
           commit=$(git commit-tree "$tree" -p "$EXPECTED_HEAD" -p "$MAIN_HEAD" -m 'bootstrap: integrate current canonical preparation and stop at invalid MIR')
           git switch --detach "$commit"
-          git push origin "HEAD:refs/heads/$IMPLEMENTATION_BRANCH"
+          # Stage the candidate only. Publishing the PR through the connector
+          # after verification produces a real push event for its required CI;
+          # a workflow-token push alone must not be mistaken for tested CI.
+          git push origin "HEAD:refs/heads/$CANDIDATE_BRANCH"
           git rev-parse HEAD > "$RUNNER_TEMP/implementation-sha.txt"
       - name: Export exact source even when integration needs resolution
         if: ${{ always() }}
