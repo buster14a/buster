@@ -147,3 +147,25 @@ versioned Homebrew GCC would expand coverage and needs its own validated fix.
 Windows execution-mode coverage and cross-host PE emulation remain as defined
 by build.c/current CI. This change does not suppress those gaps, add expected
 failures, alter sanitizer flags, or claim newly executed coverage.
+
+## Rebase and lint repair (2026-09-08)
+
+The original CI run [34164933026](https://github.com/buster14a/buster/actions/runs/34164933026)
+failed workflow lint on eleven SC2016 diagnostics: ShellCheck interpreted the
+literal Markdown backticks in five summary commands as unexpanded shell
+expressions. Those commands intentionally quote Markdown rather than execute
+it. Command-scoped SC2016 annotations now document that intent; all other
+ShellCheck diagnostics and the workflow gate remain enabled.
+
+Local verification reproduced all eleven diagnostics on original revision
+`4a9df654b9396a4d93cce1a1defb2da45a8ee508`, then passed actionlint 1.7.7 with
+ShellCheck 0.10.0 on the repaired workflows. All 21 embedded Bash scripts pass
+`bash -n`, the five edited summaries produce byte-identical output, and the
+aggregate gate accepts only complete success across all 64 combinations of
+success/failure/cancelled/skipped. `bash tests/mobile_ci_scripts_test.sh` and
+`git diff --check` also pass. Six desktop lanes and three mobile lanes remain.
+
+These checks validate workflow behavior, not the hosted compiler/mobile
+matrix. Classic branch-protection settings were inaccessible to the GitHub
+integration (403); the documented requirement for `CI complete` still needs
+to be enforced by the repository's merge policy.

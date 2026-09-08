@@ -26,6 +26,8 @@ jobs:
         run: |
           set -euo pipefail
           tar --exclude=.git --exclude=.github/workflows/issue-33-snapshot.yml -czf "$RUNNER_TEMP/buster-source.tar.gz" .
+          # Backticks delimit literal Markdown code in the summary.
+          # shellcheck disable=SC2016
           printf '## Issue 33 source snapshot\n\nCommit: `%s`\n\nSource only, excluding Git metadata and this recovery workflow; retained for one day. This is not a compiler validation result.\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

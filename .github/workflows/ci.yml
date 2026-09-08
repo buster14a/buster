@@ -46,6 +46,8 @@ jobs:
         env:
           CI_RESULT: ${{ steps.lint.outcome }}
         run: |
+          # Backticks delimit literal Markdown code in the summary.
+          # shellcheck disable=SC2016
           printf '## Workflow lint\n\nResult: **%s**\n\nReproduce: `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/*.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain lint log
         if: ${{ always() }}
@@ -286,6 +288,8 @@ jobs:
           CI_RESULT: ${{ job.status }}
           CI_CACHE_HIT: ${{ steps.zig_cache.outputs.cache-hit }}
         run: |
+          # Backticks delimit literal Markdown code in these summary formats.
+          # shellcheck disable=SC2016
           {
             printf '## %s\n\nCommit: `%s`\n\n' "$CI_NAME" "$GITHUB_SHA"
             printf '| Check | Outcome |\n| --- | --- |\n| Desktop lane | %s |\n| Compiler/configuration matrix | %s |\n| Execution-mode matrix (Unix only) | %s |\n| Zig archive cache hit | %s |\n\n' "$CI_RESULT" "$CI_COMBINATIONS" "$CI_MODES" "$CI_CACHE_HIT"
@@ -430,6 +434,8 @@ jobs:
           CI_SUITE: ${{ matrix.os == 'ios' && steps.ios.outcome || steps.android.outcome }}
           CI_ARCH: ${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}
         run: |
+          # Backticks delimit literal Markdown code in these summary formats.
+          # shellcheck disable=SC2016
           {
             printf '## %s\n\nCommit: `%s`\n\nJob: **%s**; suite: **%s**.\n\n' "$CI_NAME" "$GITHUB_SHA" "$CI_RESULT" "$CI_SUITE"
             printf 'iOS reproduction: `BUSTER_IOS_ARCH=%s ./ios/test_ci.sh --all`.\n\n' "$CI_ARCH"
