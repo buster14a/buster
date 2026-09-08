@@ -733,9 +733,14 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_x64_vector_frame_lea_count(ByteSlice code, 
     return result;
 }
 
+#include <buster/tests/compiler/codegen/canonical_entry_test_internal.h>
+
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_scalars(arguments);
+    UnitTestResult entry_result = codegen_test_canonical_entry(arguments);
+    result.test_count += entry_result.test_count;
+    result.succeeded_test_count += entry_result.succeeded_test_count;
     u8 negative_rsp_store_bytes[] = {0x48, 0x89, 0x44, 0x24, 0xf8, 0x5d, 0xc3};
     CodegenTestX64BodyScan negative_rsp_store_scan =
         codegen_test_x64_scan_body((ByteSlice){.pointer = negative_rsp_store_bytes, .length = sizeof(negative_rsp_store_bytes)}, 0,
