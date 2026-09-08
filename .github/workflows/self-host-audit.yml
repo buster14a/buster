@@ -34,7 +34,7 @@ jobs:
       - name: Run compiler regressions
         run: '"$RUNNER_TEMP/buster-build" build --config Release -t test_all'
       - name: Retain stage evidence even on failure
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
           name: bootstrap-evidence-${{ github.sha }}
