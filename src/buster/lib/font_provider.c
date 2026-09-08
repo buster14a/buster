@@ -558,7 +558,7 @@ FontTextureAtlasDescription font_texture_atlas_create(Arena* arena, FontTextureA
 
                 x += (u32)bitmap.width;
 
-                arena->position = loop_start_position;
+                arena_set_position(arena, loop_start_position);
             }
         }
         else

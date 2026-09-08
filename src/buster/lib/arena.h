@@ -21,6 +21,8 @@ typedef struct Arena Arena;
 struct Arena
 {
     u64 reserved_size;
+    // Read outside this module; rewind through arena_set_position/scratch_end
+    // so discarded allocations remain part of the dirty prefix.
     u64 position;
     u64 os_position;
     u64 granularity;
