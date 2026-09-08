@@ -22,11 +22,7 @@ BUSTER_CT_CHECK(sizeof(MachineInstruction) == 24);
 BUSTER_CT_CHECK(sizeof(MachineVirtualRegister) == 16);
 BUSTER_CT_CHECK(sizeof(MachineBlock) == 32);
 BUSTER_CT_CHECK(sizeof(MachineEdge) == 16);
-BUSTER_CT_CHECK(sizeof(MachineAddress) == 16);
-BUSTER_CT_CHECK(sizeof(MachineSegment) == 8);
-BUSTER_CT_CHECK(sizeof(MachineUse) == 8);
 BUSTER_CT_CHECK(sizeof(MachineEdit) == 16);
-BUSTER_CT_CHECK(sizeof(MachineLocationSegment) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
@@ -2727,6 +2723,16 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, machine_verify_function(&tree_scheduled.function).error == MACHINE_VERIFY_NONE);
             BUSTER_TEST(arguments, tree_scheduled.function.instruction_count == tree_selected.function.instruction_count);
             BUSTER_TEST(arguments, tree_scheduled.function.blocks == tree_selected.function.blocks);
+            // The queue's clamped-growth priorities and sequence tie-breaks
+            // must produce the same complete instruction order on replay.
+            MachineScheduleResult tree_repeated = machine_schedule_function(arguments->arena, &tree_selected.function);
+            BUSTER_TEST(arguments, tree_repeated.moved);
+            BUSTER_TEST(arguments, tree_repeated.function.instruction_count == tree_scheduled.function.instruction_count);
+            if (tree_repeated.function.instruction_count == tree_scheduled.function.instruction_count)
+            {
+                BUSTER_TEST(arguments, memcmp(tree_repeated.function.instructions, tree_scheduled.function.instructions,
+                                             tree_scheduled.function.instruction_count * sizeof(MachineInstruction)) == 0);
+            }
             // Single-definition values must still define above every use.
             u32 schedule_register_count = tree_scheduled.function.virtual_register_count;
             u32* schedule_definition_rows = arena_allocate(arguments->arena, u32, schedule_register_count);

@@ -25,7 +25,7 @@ typedef enum MachineRefKind
     MACHINE_REF_VIRTUAL_REGISTER,
     MACHINE_REF_PHYSICAL_REGISTER,
     MACHINE_REF_IMMEDIATE,
-    MACHINE_REF_ADDRESS,
+    MACHINE_REF_ADDRESS, // Reserved tag; no address side table is currently produced.
     MACHINE_REF_STACK_SLOT,
     MACHINE_REF_BLOCK,
     MACHINE_REF_EXTRA,
@@ -158,36 +158,6 @@ struct MachineBlockParameter
 };
 BUSTER_CT_CHECK(sizeof(MachineBlockParameter) == 8);
 
-typedef struct MachineAddress MachineAddress;
-struct MachineAddress
-{
-    MachineRef base;
-    MachineRef index;
-    s32 displacement;
-    u8 scale_shift;
-    u8 flags;
-    u16 symbol;
-};
-BUSTER_CT_CHECK(sizeof(MachineAddress) == 16);
-
-// A packed [start, end) machine point range.
-typedef struct MachineSegment MachineSegment;
-struct MachineSegment
-{
-    MachinePoint start;
-    MachinePoint end;
-};
-BUSTER_CT_CHECK(sizeof(MachineSegment) == 8);
-
-typedef struct MachineUse MachineUse;
-struct MachineUse
-{
-    MachinePoint point;
-    u16 operand_slot;
-    u16 constraint;
-};
-BUSTER_CT_CHECK(sizeof(MachineUse) == 8);
-
 // Allocation output: sorted edits merged with the instruction stream during
 // encoding instead of physically inserting rows.
 typedef struct MachineEdit MachineEdit;
@@ -200,16 +170,6 @@ struct MachineEdit
     u32 location;
 };
 BUSTER_CT_CHECK(sizeof(MachineEdit) == 16);
-
-typedef struct MachineLocationSegment MachineLocationSegment;
-struct MachineLocationSegment
-{
-    u32 subject;
-    MachinePoint start;
-    MachinePoint end;
-    u32 location;
-};
-BUSTER_CT_CHECK(sizeof(MachineLocationSegment) == 16);
 
 // Emit recipes intentionally identify emission policy, not an architectural
 // encoding form. The two high bits carry the category; the remaining bits
