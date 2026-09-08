@@ -50,8 +50,8 @@ not just function names containing `encode`.
 | The same function, initial-exec arm | Migrated: metadata-derived ADD input/output forms, not manual REX/ModRM surgery. |
 | `link.c:link_forwarding_runtime_object` | Migrated in the [forwarding follow-up](x86-64-forwarding-authority.md): metadata-prepared XOR/JMP recipes; object ABI policy stays in the linker. |
 | `link.c:link_x86_relax_got_load` | Migrated: bounded section adapter; metadata derives and validates the MOV/LEA pair and its PC32 field. Broader GOTPCRELX conversions remain #78. |
-| `assembly_unit.c:assembly_unit_directive_align` | Deferred: implicit executable-section padding uses literal `0x90`. Explicit user fill bytes are data and must remain literal. |
-| `codegen.c:codegen_generate_canonical_module_attempt` | Deferred: x86 function-entry padding uses `memset(..., 0x90, ...)`. A shared padding policy must preserve the measured bulk-fill fast path, not call the generic encoder per byte. |
+| `assembly_unit.c:assembly_unit_directive_align` | Migrated: shared target-aware derived padding. Explicit source fill stays data; #228 partial AArch64-word policy is preserved. |
+| `codegen.c:codegen_generate_canonical_module_attempt` | Migrated: same shared padding helper; x86 NOP is derived once and bulk-filled with one memset per gap. |
 
 The existing five-file writer census does not discover every literal array,
 constant `memset`, or opcode substitution, and does not scan every file above.

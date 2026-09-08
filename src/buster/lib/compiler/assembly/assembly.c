@@ -47,6 +47,52 @@
 
 #include <buster/lib/string.h>
 
+// Shared executable-section padding for source alignment and generated
+// function entry alignment. Explicit source fill operands are data and never
+// call this helper. AArch64 partial words retain #228's zero-fragment policy.
+bool assembly_fill_executable_padding(Target target, u8* output, u64 offset, u64 count)
+{
+    bool result = false;
+    if (!count)
+    {
+        result = true;
+    }
+    else if (output && offset <= UINT64_MAX - count)
+    {
+        if (target.cpu_arch == CPU_ARCH_X86_64)
+        {
+            result = buster_x86_metadata_fill_nops(output, count);
+        }
+        else if (target.cpu_arch == CPU_ARCH_AARCH64)
+        {
+            A64MCInst instruction = {.opcode = A64_OPCODE_NOP};
+            u32 word = 0;
+            if (a64_mc_encode(&instruction, &word))
+            {
+                u64 prefix = BUSTER_MIN(count, (4 - (offset & 3)) & 3);
+                u64 whole = (count - prefix) & ~(u64)3;
+                memset(output, 0, prefix);
+                if (whole)
+                {
+                    for (u32 byte = 0; byte < 4; byte += 1) output[prefix + byte] = (u8)(word >> (byte * 8));
+                    // Geometrically copy a derived complete-word pattern.
+                    // This preserves a bulk path without another ISA table.
+                    u64 filled = 4;
+                    while (filled < whole)
+                    {
+                        u64 copied = BUSTER_MIN(filled, whole - filled);
+                        memcpy(output + prefix + filled, output + prefix, copied);
+                        filled += copied;
+                    }
+                }
+                memset(output + prefix + whole, 0, count - prefix - whole);
+                result = true;
+            }
+        }
+    }
+    return result;
+}
+
 typedef enum AssemblyOpcode
 {
     ASSEMBLY_OPCODE_X86_NOP,

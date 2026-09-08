@@ -9075,17 +9075,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         {
             continue;
         }
-        // The bytes up to this function's aligned start, in one fill: 0x90 on
-        // x86-64, the one-byte `NOP` the metadata tables answered for when
-        // this went through the encoder a byte at a time, and zero on
-        // AArch64. The alignment is a power of two, so the mask is the
-        // distance to it.
+        // Share the target-derived executable padding policy with source
+        // alignment. x86 remains one bulk memset, not one encoding per byte.
         u64 alignment = target.cpu_arch == CPU_ARCH_AARCH64 ? 4 : 16;
         u64 entry_padding = (0 - buffer.count) & (alignment - 1);
         u8* entry_padding_bytes = 0;
         if (buffer.error == CODEGEN_ERROR_NONE && entry_padding && codegen_buffer_reserve(&buffer, entry_padding, &entry_padding_bytes))
         {
-            memset(entry_padding_bytes, target.cpu_arch == CPU_ARCH_X86_64 ? 0x90 : 0, entry_padding);
+            if (!assembly_fill_executable_padding(target, entry_padding_bytes, buffer.count - entry_padding, entry_padding))
+            {
+                buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
+            }
         }
         if (buffer.error != CODEGEN_ERROR_NONE)
         {

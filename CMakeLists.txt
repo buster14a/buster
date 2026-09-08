@@ -893,6 +893,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/assembly/x86_64_forwarding_test.c
     src/buster/tests/compiler/assembly/x86_64_metadata_test.c
     src/buster/tests/compiler/assembly/x86_64_tls_test.c
+    src/buster/tests/compiler/assembly/padding_test.c
     src/buster/tests/compiler/assembly/x86_64_got_test.c
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.c
     src/buster/tests/compiler/ir/ir_test.c
@@ -939,6 +940,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/assembly/x86_64_forwarding_test.h
     src/buster/tests/compiler/assembly/x86_64_metadata_test.h
     src/buster/tests/compiler/assembly/x86_64_tls_test.h
+    src/buster/tests/compiler/assembly/padding_test.h
     src/buster/tests/compiler/assembly/x86_64_got_test.h
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.h
     src/buster/tests/compiler/ir/ir_test.h
