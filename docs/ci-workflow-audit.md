@@ -48,7 +48,7 @@ outer deadline without a broader runtime distribution would be speculative.
 ## Cache and artifact trust boundaries
 
 Only Zig's **upstream compressed archive** is cached. The exact key includes a
-schema version, runner OS/architecture, Zig target, version, and SHA-256. There
+schema version, runner OS/architecture, Zig target, and the hash of `.github/zig.json` (version and all SHA-256 pins). There
 are no fallback restore keys and no cached build trees or compiler outputs.
 Every restore, including an exact hit, is SHA-256 checked before extraction and
 PATH publication. Only successful default-branch push setup writes a cache,
@@ -56,39 +56,37 @@ and it writes immediately after verification, before repository tests run.
 Other branches and manual runs are read-only cache consumers. A corrupt
 archive fails setup rather than executing unverified bytes.
 
-Mutable Android SDK packages, AVD state, Homebrew prefixes, and Vulkan SDK
-installations are deliberately not cached. Their present installation commands
+Mutable Android SDK packages, AVD state, and Homebrew prefixes are deliberately not cached. Their present installation commands
 do not provide immutable per-package revisions/checksums suitable for portable
 cache keys. Caching those directories by a coarse OS key would create stale or
-cross-toolchain state. No dependency installation or SDK coverage was removed.
+cross-toolchain state. Unused Vulkan SDK setup is removed because these jobs
+leave renderer/shader options disabled; mobile SDK coverage remains.
 
 Actions are pinned to full commit IDs. Checkout credentials are not persisted.
 Workflow tokens request `contents: read` only; no job consumes repository
 secrets or uses `pull_request_target`. No broad environment dump is uploaded.
 Desktop, mobile, lifecycle, and lint transcripts are retained for seven days,
-with unique lane/attempt names. They live outside `build/`, because `generate`
+with unique lane/run/attempt names. They live outside `build/`, because `generate`
 deletes that tree. There is no compiler artifact promoted for downstream use.
 
 The issue-33 recovery workflow remains scoped to its original branch and keeps
 its one-day source archive. It now has pinned actions, shallow checkout,
 non-persisted credentials, a GitHub-only guard, and cancellation of obsolete
-snapshots. Its gzip file is uploaded without redundant ZIP compression.
+snapshots. `git archive` includes tracked source only. Its gzip file is uploaded without redundant ZIP compression.
 
 ## Cancellation and duplicate work
 
-Development pushes for the same workflow/ref supersede old runs. Default-branch
-pushes and explicit manual runs have per-run concurrency groups, so GitHub's
-pending-run replacement cannot silently discard a baseline or default-branch
-validation. The main workflow remains push-triggered, with manual dispatch
-added for controlled measurements; it does not add a duplicate same-repository
-pull-request run. Fork-only PR coverage remains a separate follow-up, not a
-reason to use privileged PR triggers. Mobile lifecycle PR updates cancel only
-their own stale runs; default-branch lifecycle results are retained.
+PR revisions and merge groups supersede their own obsolete runs. Main and tag
+pushes and explicit manual runs have unique run-ID groups so pending-run
+replacement cannot discard measurements. PR triggers include forks with read-only
+permissions; feature pushes do not create duplicate matrices. Mobile lifecycle
+PR updates cancel only their own stale runs; main lifecycle results are retained.
 
 Android INT/TERM handlers retain nonzero cancellation status and use the
 existing bounded lifecycle stop command through the EXIT cleanup handler.
 Cleanup failure after otherwise successful tests still fails the shard.
-Diagnostic steps use `always()` but do not launch more compiler/test work.
+Bounded summaries use `always()`; uploads use `!cancelled()` and do not start
+after cancellation. Required-suite summaries fail closed through `ci_summary.py`.
 
 ## Reproduction
 

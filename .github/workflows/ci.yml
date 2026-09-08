@@ -5,20 +5,25 @@ name: Buster CI
 # Mobile suites are independent shards, not duplicate desktop builds. See
 # docs/ci-workflow-audit.md for coverage, cache boundaries and reproduction.
 on:
+  pull_request:
   push:
+    branches: [main]
+    tags: ['**']
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
-# Coalesce development pushes, but keep every main/explicit measurement run.
-# Merely setting cancel-in-progress:false would still replace pending main runs.
+# Supersede only the same PR/merge-group. Main, tags and deliberate manual
+# measurements get unique groups, so neither active nor pending runs are lost.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.event_name == 'workflow_dispatch') && github.run_id || 'latest' }}
-  cancel-in-progress: ${{ github.event_name == 'push' && github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'merge_group' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 permissions:
   contents: read
 
 env:
-  ZIG_VERSION: 0.16.0
+  UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
   BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
 
 jobs:
@@ -50,15 +55,17 @@ jobs:
           # shellcheck disable=SC2016
           printf '## Workflow lint\n\nResult: **%s**\n\nReproduce: `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/*.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain lint log
-        if: ${{ always() }}
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: workflow-lint-${{ github.run_attempt }}
+          name: workflow-lint-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/actionlint.log
           if-no-files-found: ignore
           retention-days: 7
 
   test:
+    env:
+      BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: ${{ matrix.name }}
     timeout-minutes: 300
@@ -72,35 +79,30 @@ jobs:
             os: linux
             arch: x86_64
             zig_target: x86_64-linux
-            zig_sha256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
           - name: Linux AArch64
             runner: ubuntu-26.04-arm
             platform: unix
             os: linux
             arch: aarch64
             zig_target: aarch64-linux
-            zig_sha256: ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
           - name: macOS x86-64
             runner: macos-26-intel
             platform: unix
             os: macos
             arch: x86_64
             zig_target: x86_64-macos
-            zig_sha256: 0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7
           - name: macOS AArch64
             runner: macos-26
             platform: unix
             os: macos
             arch: aarch64
             zig_target: aarch64-macos
-            zig_sha256: b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
           - name: Windows x86-64
             runner: windows-2025
             platform: windows
             os: windows
             arch: x86_64
             zig_target: x86_64-windows
-            zig_sha256: 68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e
             vs_arch: amd64
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
             clang_arch: x86_64
@@ -110,7 +112,6 @@ jobs:
             os: windows
             arch: aarch64
             zig_target: aarch64-windows
-            zig_sha256: aee38316ee4111717900f45dd3130145c39289e105541d737eb8c5ed653c78ef
             vs_arch: arm64
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.ARM64
             clang_arch: aarch64
@@ -122,87 +123,57 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Vulkan SDK
-        if: ${{ matrix.platform == 'unix' }}
+      - name: Workflow tool regression tests
+        id: workflow_tools
+        timeout-minutes: 2
         shell: bash
-        run: bash .github/scripts/install-vulkan-sdk.sh
-
-      - name: Install Vulkan SDK (Windows)
-        if: ${{ matrix.platform == 'windows' }}
-        shell: powershell
-        run: . .github/scripts/install-vulkan-sdk.ps1
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          "$BUSTER_CI_PYTHON" tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/workflow-tools.log"
 
       - name: Install mold
-        if: ${{ matrix.os == 'linux' }}
+        id: mold
+        if: ${{ !cancelled() && matrix.os == 'linux' && steps.checkout.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes mold
 
-      # Cache only the upstream archive. Never cache build/, generated code,
-      # mutable SDK installations, credentials or an extracted executable.
-      # Every hit is authenticated again before extraction/execution.
+      # Exact-key archive cache only: no restore prefixes, CMake state, object
+      # files, extracted compilers, credentials, or previous test verdicts.
       - name: Restore Zig archive
         id: zig_cache
-        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: ${{ runner.temp }}/zig-download
-          key: zig-archive-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.ZIG_VERSION }}-${{ matrix.zig_target }}-${{ matrix.zig_sha256 }}
+          path: ${{ runner.temp }}/zig-archive/archive
+          key: zig-archive-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.zig_target }}-${{ hashFiles('.github/zig.json') }}
 
-      - name: Install Zig (Unix)
-        if: ${{ matrix.platform == 'unix' }}
+      - name: Install verified Zig
+        id: zig
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 10
         shell: bash
         env:
           ZIG_TARGET: ${{ matrix.zig_target }}
-          ZIG_SHA256: ${{ matrix.zig_sha256 }}
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/zig-download" "$RUNNER_TEMP/zig"
-          archive="$RUNNER_TEMP/zig-download/zig.tar.xz"
-          if [[ ! -f "$archive" ]]; then
-            curl --fail --silent --show-error --location --retry 3 --output "$archive" \
-              "https://ziglang.org/download/$ZIG_VERSION/zig-$ZIG_TARGET-$ZIG_VERSION.tar.xz"
-          fi
-          printf '%s  %s\n' "$ZIG_SHA256" "$archive" | shasum --algorithm 256 --check -
-          tar -xJf "$archive" -C "$RUNNER_TEMP/zig" --strip-components=1
-          printf '%s\n' "$RUNNER_TEMP/zig" >>"$GITHUB_PATH"
+          "$BUSTER_CI_PYTHON" tools/ci_zig.py --target "$ZIG_TARGET" --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig.log"
 
-      - name: Install Zig (Windows)
-        if: ${{ matrix.platform == 'windows' }}
-        shell: powershell
-        env:
-          ZIG_TARGET: ${{ matrix.zig_target }}
-          ZIG_SHA256: ${{ matrix.zig_sha256 }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $Download = Join-Path $env:RUNNER_TEMP 'zig-download'
-          New-Item -ItemType Directory -Force -Path $Download | Out-Null
-          $Archive = Join-Path $Download 'zig.zip'
-          if (-not (Test-Path -LiteralPath $Archive)) {
-            $Url = "https://ziglang.org/download/${env:ZIG_VERSION}/zig-${env:ZIG_TARGET}-${env:ZIG_VERSION}.zip"
-            curl.exe --fail --silent --show-error --location --retry 3 --output $Archive $Url
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          $Actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Archive).Hash.ToLower()
-          if ($Actual -ne $env:ZIG_SHA256) { throw "Zig archive checksum is $Actual, expected ${env:ZIG_SHA256}" }
-          $Root = Join-Path $env:RUNNER_TEMP 'zig'
-          New-Item -ItemType Directory -Force -Path $Root | Out-Null
-          tar.exe -x -f $Archive -C $Root --strip-components=1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Add-Content -Path $env:GITHUB_PATH -Value $Root
-
-      # Save verified bytes before repository tests can modify them. Only the
-      # default branch writes reusable caches; branch builds only restore.
-      - name: Save Zig archive
-        if: ${{ success() && steps.zig_cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      # Publish immediately after verification, before compiler build/tests.
+      # A corrupt hit is a hard failure and is never silently republished.
+      - name: Save verified Zig archive
+        if: ${{ !cancelled() && steps.zig.outcome == 'success' && steps.zig_cache.outputs.cache-hit != 'true' && steps.zig_cache.outputs.cache-primary-key != '' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: ${{ runner.temp }}/zig-download
+          path: ${{ runner.temp }}/zig-archive/archive
           key: ${{ steps.zig_cache.outputs.cache-primary-key }}
 
       - name: Application compilers
-        if: ${{ matrix.platform == 'unix' }}
+        id: tools_unix
+        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.zig.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -212,7 +183,7 @@ jobs:
 
       - name: Combination matrix (Linux, macOS)
         id: combinations_unix
-        if: ${{ matrix.platform == 'unix' }}
+        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -224,7 +195,7 @@ jobs:
 
       - name: Combination matrix (Windows)
         id: combinations_windows
-        if: ${{ matrix.platform == 'windows' }}
+        if: ${{ !cancelled() && matrix.platform == 'windows' && steps.zig.outcome == 'success' }}
         shell: powershell
         env:
           VS_ARCH: ${{ matrix.vs_arch }}
@@ -279,31 +250,20 @@ jobs:
           "$driver" test_mode_matrix --config Release
 
       - name: Desktop result and reproduction
-        if: ${{ always() }}
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
-          CI_NAME: ${{ matrix.name }}
-          CI_COMBINATIONS: ${{ matrix.platform == 'unix' && steps.combinations_unix.outcome || steps.combinations_windows.outcome }}
-          CI_MODES: ${{ steps.modes.outcome }}
-          CI_RESULT: ${{ job.status }}
-          CI_CACHE_HIT: ${{ steps.zig_cache.outputs.cache-hit }}
-        run: |
-          # Backticks delimit literal Markdown code in these summary formats.
-          # shellcheck disable=SC2016
-          {
-            printf '## %s\n\nCommit: `%s`\n\n' "$CI_NAME" "$GITHUB_SHA"
-            printf '| Check | Outcome |\n| --- | --- |\n| Desktop lane | %s |\n| Compiler/configuration matrix | %s |\n| Execution-mode matrix (Unix only) | %s |\n| Zig archive cache hit | %s |\n\n' "$CI_RESULT" "$CI_COMBINATIONS" "$CI_MODES" "$CI_CACHE_HIT"
-            printf 'No failing suite is allowed to pass. Mobile results are separate shards; require **CI complete**.\n\n'
-            printf 'Reproduce with the matching host/toolchains: `./build.sh test_all_combinations_ci --verbose=1` (Windows: `./build.ps1 test_all_combinations_ci --verbose=1`).\n\n'
-            printf 'Unix allocator modes: `./build.sh generate --cc clang --config Release --linker DEFAULT` then `./build.sh test_mode_matrix --config Release`. Do not regenerate an in-use build tree.\n\n'
-            printf 'Hosted Clang bootstrap, prerequisites, and exact CI commands: `docs/ci-workflow-audit.md` and this workflow.\n'
-          } >> "$GITHUB_STEP_SUMMARY"
+          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+          BUSTER_CI_RUNNER: ${{ matrix.runner }}
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'unix' && 'workflow_tools zig combinations_unix modes' || 'workflow_tools zig combinations_windows' }}
+          BUSTER_CI_REPRO: See docs/ci-github-actions.md for the matching hosted bootstrap and full matrix commands.
+        run: '"$BUSTER_CI_PYTHON" tools/ci_summary.py'
 
       - name: Retain desktop logs
-        if: ${{ always() }}
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_attempt }}
+          name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/
           if-no-files-found: ignore
           retention-days: 7
@@ -331,13 +291,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-
-      - name: Install Vulkan SDK
-        shell: bash
-        run: bash .github/scripts/install-vulkan-sdk.sh
 
       - name: Install coreutils
         if: ${{ matrix.os == 'ios' }}
@@ -426,29 +383,21 @@ jobs:
           ./ios/test_ci.sh --all
 
       - name: Mobile result and reproduction
-        if: ${{ always() }}
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
-          CI_NAME: ${{ matrix.name }}
-          CI_RESULT: ${{ job.status }}
-          CI_SUITE: ${{ matrix.os == 'ios' && steps.ios.outcome || steps.android.outcome }}
-          CI_ARCH: ${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}
-        run: |
-          # Backticks delimit literal Markdown code in these summary formats.
-          # shellcheck disable=SC2016
-          {
-            printf '## %s\n\nCommit: `%s`\n\nJob: **%s**; suite: **%s**.\n\n' "$CI_NAME" "$GITHUB_SHA" "$CI_RESULT" "$CI_SUITE"
-            printf 'iOS reproduction: `BUSTER_IOS_ARCH=%s ./ios/test_ci.sh --all`.\n\n' "$CI_ARCH"
-            printf 'Android reproduction: `bash ./android/start_emulator_ci.sh start` then `./android/test_ci.sh --all`; always finish with `bash ./android/start_emulator_ci.sh stop`, preserving any earlier failure.\n\n'
-            printf 'Use the matching SDK/system image and environment from this workflow. All configurations remain enabled through `--all`.\n'
-          } >> "$GITHUB_STEP_SUMMARY"
+          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+          BUSTER_CI_RUNNER: ${{ matrix.runner }}
+          BUSTER_CI_REQUIRED: ${{ matrix.os == 'ios' && 'ios' || 'android' }}
+          BUSTER_CI_REPRO: See docs/ci-github-actions.md for the matching mobile SDK and lifecycle commands.
+        run: python3 tools/ci_summary.py
 
       - name: Retain mobile logs
-        if: ${{ always() }}
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: mobile-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/buster-ci/*.log
+          name: mobile-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/buster-ci/
           if-no-files-found: ignore
           retention-days: 7
 
