@@ -36,6 +36,8 @@
   See `docs/ci-workflow-audit.md` for cache trust boundaries, diagnostics,
   cancellation, coverage details, and reproduction. Every job stays inert
   until its repository variable is set, and skips itself outright on Forgejo.
+  For cancelled current-PR validation, see [bounded CI recovery](../ci-cancellation-recovery.md)
+  and its offline checks: `python3 tests/ci_recovery_test.py`.
   Changing a `runs-on` label means changing `.github/actionlint.yaml` too,
   because actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and
