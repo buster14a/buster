@@ -13,6 +13,9 @@
   and implicit-effect metadata. Keep opcode initializers designated and the
   layout checks intact. Simple FAST rows use the separate 16-byte
   `MachineOpcodeRow` projection instead of loading the full descriptor.
+- Address expressions remain canonical IR / selector-owned; no
+  `MachineAddress` side table is produced. Keep the reserved
+  `MACHINE_REF_ADDRESS` tag stable for encoded references.
 - `MachineFunction` owns CFG edges, block parameters, and incoming edge
   parallel-copy sources. Edge source `i` maps to destination block parameter
   `i`; keep these copies parallel through allocation so cycles are resolved as

@@ -229,7 +229,9 @@ BUSTER_GLOBAL_LOCAL void machine_schedule_queue_push(MachineScheduleQueue* queue
         queue->overflow = true;
         return;
     }
-    u32 bucket = (u32)(BUSTER_MAX(BUSTER_MIN(machine_schedule_queue_growth(queue, pushed_unit), 16), -16) + 16);
+    // MIN/MAX may evaluate their operands more than once; scan the unit once.
+    s32 growth = machine_schedule_queue_growth(queue, pushed_unit);
+    u32 bucket = (u32)(BUSTER_MAX(BUSTER_MIN(growth, 16), -16) + 16);
     queue->unit_seqs[pushed_unit] += 1;
     queue->entry_units[queue->entry_count] = pushed_unit;
     queue->entry_seqs[queue->entry_count] = queue->unit_seqs[pushed_unit];
