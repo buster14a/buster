@@ -77,6 +77,8 @@ BUSTER_F_DECL u64 arena_dirty_position(Arena* arena);
 BUSTER_F_DECL void arena_set_position(Arena* arena, u64 position);
 // Resets the logical position and releases only complete native pages beyond
 // it. This remains safe for legal arenas whose granularity is sub-page.
+// Apple retains the dirty watermark because its discard can preserve bytes;
+// use zeroed allocation when recommitted storage must be initialized.
 BUSTER_F_DECL bool arena_set_position_and_decommit(Arena* arena, u64 position);
 BUSTER_F_DECL void arena_reset_to_start(Arena* arena);
 // The commit half of arena_allocate_bytes, outlined so the bump below stays a
