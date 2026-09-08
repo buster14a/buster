@@ -578,11 +578,19 @@ struct Sliceu64
 #define BUSTER_MB(x) ((u64)(1024) * BUSTER_KB(x))
 #define BUSTER_KB(x) ((u64)(1024) * (x))
 
+typedef enum IntegerParsingStatus
+{
+    INTEGER_PARSING_INVALID,
+    INTEGER_PARSING_SUCCESS,
+    INTEGER_PARSING_OVERFLOW,
+} IntegerParsingStatus;
+
 typedef struct IntegerParsingU64 IntegerParsingU64;
 struct IntegerParsingU64
 {
     u64 value;
     u64 length;
+    IntegerParsingStatus status;
 };
 
 typedef enum IntegerFormat

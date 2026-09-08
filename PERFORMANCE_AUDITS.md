@@ -53,6 +53,7 @@ keep current.
 ## Audits, newest first
 
 - [`2026-09-07T225141Z`](docs/performance-audits/2026-09-07T225141Z.md) — remove the unused declarative selector and its unconsumed facts (#42)
+- [`2026-09-07T223310Z`](docs/performance-audits/2026-09-07T223310Z.md) — TLS encoding authority: correct redundant REX relaxation; bound cold recipe preparation
 - [`2026-09-07T132245Z`](docs/performance-audits/2026-09-07T132245Z.md) — debug-info correctness and linear CodeView scope scratch (#201-#204)
 - [`2026-09-07T013544Z`](docs/performance-audits/2026-09-07T013544Z.md) — five items take the frozen-tree compile from 9.583,33 M to 9.351,43 M Ir (-2,42%) byte-identically, remove 57,9 MB of per-compile zeroing, and put the matching-delimiter query on a 512-bit windowed scan
 - [`2026-09-06T161430Z`](docs/performance-audits/2026-09-06T161430Z.md) — eight parallel subsystem branches take stage 1 from 8.739,6 M to 7.927,6 M instructions (-9,29%) byte-identically, the per-invocation floor from 149,5 M to 91,2 M, and re-price the #embed route out of the ranking

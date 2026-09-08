@@ -4178,6 +4178,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         // selection, so the first va_* the subset cannot shape (or any
         // earlier unsupported operation) reports in true IR order.
         bool variadic_darwin = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+        result.signature_rejected = function_type && function_type->kind == IR_TYPE_FUNCTION;
         if (!function_type || function_type->kind != IR_TYPE_FUNCTION || (function_type->is_variadic && variadic_darwin) ||
             function_type->parameter_count > MACHINE_A64_MAX_ARGUMENTS)
         {
@@ -4210,6 +4211,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 return result;
             }
         }
+        result.signature_rejected = false;
         MachineA64Selector selector = {
             .arena = arena,
             .program = program,

@@ -1,3 +1,10 @@
+// x86 instruction-byte authority: generated form normalization, checked
+// selection/emission, and derived exact-machine specializations live here.
+// Map: buster_x86_metadata_encode (checked request), emit_form_to_scratch
+// (general packing), emit_machine_fast (derived hot plans), tls_prepare
+// (fixed-envelope ABI recipes), prewarm_all_forms (worker publication).
+// Parsing, allocation, scheduling and object-format relocation policy remain
+// consumers. See docs/x86-64-encoding-authority.md for the remaining escapes.
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/os.h>
@@ -11604,6 +11611,206 @@ void buster_x86_metadata_prewarm(void)
     }
 }
 
+// TLS ABI recipes. Ordinary MOV/LEA/ADD/CALL forms remain the only authority
+// for opcodes, register fields and addresses. The recipe owns only the ABI's
+// redundant prefix padding, fixed envelope sizes and relocation contracts.
+// Templates are derived once, then immutable: no selection work per TLS site.
+// Unlike prewarm_all_forms, an ordinary non-TLS compile never prepares them.
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_gd[BUSTER_X86_METADATA_TLS_GD_SIZE];
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_le[BUSTER_X86_METADATA_TLS_GD_SIZE];
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_ie[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_add[16][BUSTER_X86_METADATA_TLS_IE_SIZE];
+enum
+{
+    BUSTER_X86_TLS_PREPARE_GD = 1,
+    BUSTER_X86_TLS_PREPARE_LE = 2,
+    BUSTER_X86_TLS_PREPARE_IE = 4,
+    BUSTER_X86_TLS_PREPARE_ALL = 7,
+};
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_prepared;
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_tls_valid;
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand buster_x86_metadata_tls_register(u16 index)
+{
+    BusterX86MetadataPhysicalOperand result = {
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+        .width = 64,
+        .reg = {.index = index, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tls_form(u8* output, u32 size, String8 mnemonic,
+                                                    BusterX86MetadataPhysicalOperand* operands, u32 count,
+                                                    u32 field_offset, BusterX86MetadataRelocationKind kind)
+{
+    // A symbolic operand forces a stable 32-bit field even for zero/small
+    // offsets. Check the emitted fixup, not a guessed opcode-specific offset.
+    // KIND_COUNT means this particular instruction has no symbolic field.
+    BusterX86MetadataRelocation relocation = {0};
+    BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+        .physical = {.mnemonic = mnemonic, .operands = operands, .operand_count = count,
+                     .address_size = 64, .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64},
+        .output = output, .output_capacity = size, .relocations = &relocation, .relocation_capacity = 1,
+    });
+    bool symbolic = kind != BUSTER_X86_METADATA_RELOCATION_KIND_COUNT;
+    bool result = emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.byte_count == size &&
+                  emitted.relocation_count == (u32)symbolic;
+    if (result && symbolic)
+    {
+        result = relocation.offset == field_offset && relocation.width == BUSTER_X86_METADATA_TLS_FIELD_SIZE &&
+                 relocation.kind == kind && relocation.addend == (kind == BUSTER_X86_METADATA_RELOCATION_PC32 ? -4 : 0);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tls_prepare(u8 requested)
+{
+    if ((buster_x86_metadata_tls_prepared & requested) != requested)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        buster_x86_metadata_prewarm();
+        BusterX86MetadataPhysicalOperand operands[2] = {0};
+        u8 missing = (u8)(requested & (u8)~buster_x86_metadata_tls_prepared);
+        if (missing & BUSTER_X86_TLS_PREPARE_GD)
+        {
+            operands[0] = buster_x86_metadata_tls_register(7);
+            operands[1] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                .memory = {.symbol = S8("tls"), .has_symbol = true, .has_displacement = true,
+                           .rip_relative = true, .address_size = 64, .scale = 1},
+            };
+            // psABI padding: data16 before LEA; data16, data16, rex.W before
+            // CALL. The recipe, not another opcode table, owns this padding.
+            buster_x86_metadata_tls_gd[0] = 0x66;
+            buster_x86_metadata_tls_gd[8] = 0x66;
+            buster_x86_metadata_tls_gd[9] = 0x66;
+            buster_x86_metadata_tls_gd[10] = 0x48;
+            bool valid = buster_x86_metadata_tls_form(buster_x86_metadata_tls_gd + 1, 7, S8("LEA"), operands, 2,
+                                                     BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET - 1, BUSTER_X86_METADATA_RELOCATION_PC32);
+            operands[0] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE, .width = 32, .has_symbol = true, .symbol = S8("helper"),
+            };
+            valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_gd + 11, 5, S8("CALL"), operands, 1,
+                                                  BUSTER_X86_METADATA_TLS_GD_HELPER_OFFSET - 11, BUSTER_X86_METADATA_RELOCATION_PC32);
+            if (valid) buster_x86_metadata_tls_valid |= BUSTER_X86_TLS_PREPARE_GD;
+        }
+        if (missing & BUSTER_X86_TLS_PREPARE_LE)
+        {
+            operands[0] = buster_x86_metadata_tls_register(0);
+            operands[1] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                .memory = {.has_displacement = true, .has_segment = true, .segment = BUSTER_X86_METADATA_SEGMENT_FS,
+                           .address_size = 64, .scale = 1},
+            };
+            bool valid = buster_x86_metadata_tls_form(buster_x86_metadata_tls_le, 9, S8("MOV"), operands, 2,
+                                                     0, BUSTER_X86_METADATA_RELOCATION_KIND_COUNT);
+            operands[1].memory = (BusterX86MetadataPhysicalMemory){
+                .base = operands[0].reg, .has_base = true, .has_symbol = true, .symbol = S8("tls"), .address_size = 64, .scale = 1,
+            };
+            valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_le + 9, 7, S8("LEA"), operands, 2,
+                                                  3, BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED);
+            if (valid) buster_x86_metadata_tls_valid |= BUSTER_X86_TLS_PREPARE_LE;
+        }
+        if (missing & BUSTER_X86_TLS_PREPARE_IE)
+        {
+            bool valid = true;
+            for (u16 reg = 0; reg < 16; reg += 1)
+            {
+                operands[0] = buster_x86_metadata_tls_register(reg);
+                operands[1] = (BusterX86MetadataPhysicalOperand){
+                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                    .memory = {.symbol = S8("tls"), .has_symbol = true, .has_displacement = true,
+                               .rip_relative = true, .address_size = 64, .scale = 1},
+                };
+                valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_ie[reg], BUSTER_X86_METADATA_TLS_IE_SIZE,
+                                                      S8("ADD"), operands, 2, BUSTER_X86_METADATA_TLS_IE_OFFSET,
+                                                      BUSTER_X86_METADATA_RELOCATION_PC32);
+                operands[1] = (BusterX86MetadataPhysicalOperand){
+                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE, .width = 32, .has_symbol = true, .symbol = S8("tls"),
+                };
+                valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_add[reg], BUSTER_X86_METADATA_TLS_IE_SIZE,
+                                                      S8("ADD"), operands, 2, BUSTER_X86_METADATA_TLS_IE_OFFSET,
+                                                      BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32);
+            }
+            if (valid) buster_x86_metadata_tls_valid |= BUSTER_X86_TLS_PREPARE_IE;
+        }
+        // Publish readiness last, including a cached failure. A changed
+        // metadata shape must fail closed rather than using partial templates.
+        buster_x86_metadata_tls_prepared |= missing;
+    }
+    bool result = (buster_x86_metadata_tls_valid & requested) == requested;
+    return result;
+}
+
+bool buster_x86_metadata_emit_tls_general_dynamic(u8* output, u32 capacity)
+{
+    bool result = false;
+    if (output && capacity >= BUSTER_X86_METADATA_TLS_GD_SIZE)
+    {
+        if (buster_x86_metadata_tls_prepare(BUSTER_X86_TLS_PREPARE_GD))
+        {
+            memcpy(output, buster_x86_metadata_tls_gd, BUSTER_X86_METADATA_TLS_GD_SIZE);
+            result = true;
+        }
+    }
+    return result;
+}
+
+bool buster_x86_metadata_relax_tls(u8* sequence, u32 capacity, BusterX86MetadataTlsModel model, s32 thread_pointer_offset)
+{
+    bool result = false;
+    u8 const* replacement = 0;
+    u32 size = 0;
+    if (sequence && ((model == BUSTER_X86_METADATA_TLS_GENERAL_DYNAMIC && capacity >= BUSTER_X86_METADATA_TLS_GD_SIZE) ||
+                     (model == BUSTER_X86_METADATA_TLS_INITIAL_EXEC && capacity >= BUSTER_X86_METADATA_TLS_IE_SIZE)))
+    {
+        u8 requested = model == BUSTER_X86_METADATA_TLS_GENERAL_DYNAMIC ? BUSTER_X86_TLS_PREPARE_GD | BUSTER_X86_TLS_PREPARE_LE
+                                                                          : BUSTER_X86_TLS_PREPARE_IE;
+        if (buster_x86_metadata_tls_prepare(requested))
+        {
+            if (model == BUSTER_X86_METADATA_TLS_GENERAL_DYNAMIC)
+            {
+                // Both relocation fields are arbitrary; every other byte is
+                // part of the ABI envelope and must match before any write.
+                if (memcmp(sequence, buster_x86_metadata_tls_gd, BUSTER_X86_METADATA_TLS_GD_ADDRESS_OFFSET) == 0 &&
+                    memcmp(sequence + 8, buster_x86_metadata_tls_gd + 8, 4) == 0)
+                {
+                    replacement = buster_x86_metadata_tls_le;
+                    size = BUSTER_X86_METADATA_TLS_GD_SIZE;
+                }
+            }
+            else
+            {
+                for (u32 reg = 0; reg < 16; reg += 1)
+                {
+                    // REX.X/B are ignored for this RIP-relative input, but B
+                    // selects the output register in ADD reg,imm32. Never
+                    // carry ignored input bits into a different operand role.
+                    if ((sequence[0] & 0xfcu) == buster_x86_metadata_tls_ie[reg][0] &&
+                        memcmp(sequence + 1, buster_x86_metadata_tls_ie[reg] + 1, BUSTER_X86_METADATA_TLS_IE_OFFSET - 1) == 0)
+                    {
+                        replacement = buster_x86_metadata_tls_add[reg];
+                        size = BUSTER_X86_METADATA_TLS_IE_SIZE;
+                        break;
+                    }
+                }
+            }
+        }
+        if (replacement)
+        {
+            memcpy(sequence, replacement, size);
+            u32 bits = (u32)thread_pointer_offset;
+            for (u32 byte = 0; byte < BUSTER_X86_METADATA_TLS_FIELD_SIZE; byte += 1)
+            {
+                sequence[size - BUSTER_X86_METADATA_TLS_FIELD_SIZE + byte] = (u8)(bits >> (byte * 8));
+            }
+            result = true;
+        }
+    }
+    return result;
+}
+
 // The complete walk: every form normalized, pattern-parsed, operand-viewed and
 // fact-filled, for a caller about to run a gang whose lanes may query any
 // form -- the test harness.  A compile never needs it.
@@ -11624,6 +11831,7 @@ void buster_x86_metadata_prewarm_all_forms(void)
         {
             buster_x86_metadata_coverage_record_valid(coverage_id);
         }
+        (void)buster_x86_metadata_tls_prepare(BUSTER_X86_TLS_PREPARE_ALL);
         buster_x86_metadata_all_forms_prepared = true;
     }
 }
@@ -11642,7 +11850,7 @@ void buster_x86_metadata_prewarm_all_forms(void)
 u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void)
 {
     buster_x86_metadata_prewarm_all_forms();
-    u64 unprepared = 0;
+    u64 unprepared = (u64)(buster_x86_metadata_tls_prepared != BUSTER_X86_TLS_PREPARE_ALL);
     for (u32 form_id = 0; form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
     {
         if (buster_x86_metadata_form_record_validity[form_id] == BUSTER_X86_METADATA_RECORD_UNKNOWN)

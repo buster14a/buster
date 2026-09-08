@@ -709,8 +709,8 @@ typedef enum MachineOpcode
 #define MACHINE_X86_64_EMIT_REGISTRY_EXACT_COUNT (MACHINE_X86_64_EMIT_REGISTRY_EXACT_FORM_COUNT + MACHINE_X86_64_EMIT_REGISTRY_EXACT_SEQUENCE_COUNT)
 #define MACHINE_X86_64_EMIT_REGISTRY_EXPANSION_POLICY_COUNT 29u
 #define MACHINE_X86_64_EMIT_REGISTRY_LEGACY_RAW_COUNT 0u
-#define MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT 5u
-#define MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT 15u
+#define MACHINE_X86_64_CANONICAL_AUTHORITY_SITE_COUNT 7u
+#define MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT 14u
 
 typedef enum MachineX64EmitProducerStatus
 {
@@ -967,6 +967,21 @@ typedef enum MachineOperandRole
 
 #define MACHINE_OPERAND_ROLE_BITS 2u
 #define MACHINE_OPERAND_CLASS_SHIFT MACHINE_OPERAND_ROLE_BITS
+#define MACHINE_OPERAND_SHAPE_SHIFT 5u
+
+// The high three bits of operand_info describe legal reference kinds.
+// Register roles/classes retain their existing low-five-bit encoding.
+typedef enum MachineOperandShape
+{
+    MACHINE_OPERAND_SHAPE_NONE,
+    MACHINE_OPERAND_SHAPE_REGISTER,
+    MACHINE_OPERAND_SHAPE_IMMEDIATE,
+    MACHINE_OPERAND_SHAPE_FRAME,
+    MACHINE_OPERAND_SHAPE_BLOCK,
+    MACHINE_OPERAND_SHAPE_REGISTER_OR_FRAME,
+    MACHINE_OPERAND_SHAPE_COUNT,
+} MachineOperandShape;
+BUSTER_CT_CHECK(MACHINE_OPERAND_SHAPE_COUNT <= (1u << (8u - MACHINE_OPERAND_SHAPE_SHIFT)));
 BUSTER_CT_CHECK(MACHINE_OPERAND_ROLE_COUNT <= (1u << MACHINE_OPERAND_ROLE_BITS));
 BUSTER_CT_CHECK(MACHINE_REGISTER_CLASS_COUNT <= (1u << 3));
 
@@ -990,7 +1005,7 @@ struct MachineOpcodeInfo
 {
     String8 name;
     u8 operand_count;
-    // Per inline slot: role in the low two bits, register class above them.
+    // Per inline slot: two role bits, three class bits, three shape bits.
     u8 operand_info[4];
     // Tied slot pair encoded as (destination + 1) | ((source + 1) << 4);
     // zero means no tie.
@@ -1130,6 +1145,8 @@ struct MachineTargetDescription
     // callee-saved subset is the intersection with `callee_saved_mask`;
     // System V x86-64 has none, so every vector value dies at a call.
     u64 vector_allocatable_mask;
+    // Class membership includes reserved/nonallocatable vector registers.
+    u64 vector_register_mask;
     // Full-width vector register copy, coalescible like `copy_opcode`.
     u16 vector_copy_opcode;
     // Prologue order: the callee-saved pushes precede the frame-pointer
@@ -1386,7 +1403,9 @@ struct MachineSelectResult
     // and side tables. Replayed or manually assembled machine IR keeps this
     // false and must pass the structural verifier before consumption.
     bool selector_certified;
-    u8 reserved;
+    // True only while the target's function-signature gate is rejecting a
+    // parameter, result, variadic ABI, or supported argument-count limit.
+    bool signature_rejected;
     // Selector expansion statistics: typed instructions consumed and machine
     // rows produced. SIMD operations are counted during that same typed-IR
     // walk so accepted machine functions need no source-IR rescan.
@@ -1598,6 +1617,10 @@ typedef enum MachineVerifyError
     MACHINE_VERIFY_EDGE_COPY,
     MACHINE_VERIFY_BLOCK_PARAMETER,
     MACHINE_VERIFY_CONSTRAINT,
+    MACHINE_VERIFY_STORAGE,
+    MACHINE_VERIFY_PAYLOAD,
+    MACHINE_VERIFY_OPERAND_KIND,
+    MACHINE_VERIFY_OPERAND_CLASS,
     MACHINE_VERIFY_COUNT,
 } MachineVerifyError;
 
