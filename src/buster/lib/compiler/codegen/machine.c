@@ -346,6 +346,26 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("x64_ret"),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_TERMINATOR,
     },
+    [MACHINE_X64_CPUID] = {
+        .name = S8_INITIALIZER("x64_cpuid"),
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_FRAME},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .implicit_resource_defs = MACHINE_RESOURCE_FLAGS_MASK,
+        .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
+        .clobber_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RBX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX),
+        .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_X64_RAX, MACHINE_X64_RCX},
+    },
+    [MACHINE_X64_XGETBV] = {
+        .name = S8_INITIALIZER("x64_xgetbv"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_FRAME},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .implicit_resource_defs = MACHINE_RESOURCE_FLAGS_MASK,
+        .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
+        .clobber_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RDX),
+        .fixed_register_mask = 0x1, .fixed_registers = {MACHINE_X64_RCX},
+    },
     [MACHINE_X64_SHL32] = MACHINE_INFO_SHIFT("x64_shl32"),
     [MACHINE_X64_SHL64] = MACHINE_INFO_SHIFT("x64_shl64"),
     [MACHINE_X64_SAR32] = MACHINE_INFO_SHIFT("x64_sar32"),
@@ -1336,6 +1356,8 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_INDIRECT_BRANCH] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 50,
     [MACHINE_X64_LOAD_SYMBOL_GOT] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 51,
     [MACHINE_A64_CLEAR_INSTRUCTION_CACHE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 52,
+    [MACHINE_X64_CPUID] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 53,
+    [MACHINE_X64_XGETBV] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 54,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)
@@ -1428,6 +1450,7 @@ BUSTER_GLOBAL_LOCAL void machine_opcode_rows_once(void)
             encode_budget = 640;
             break;
         case MACHINE_X64_FCMP_SET:
+        case MACHINE_X64_CPUID:
             encode_budget = 40;
             break;
         case MACHINE_X64_ATOMIC_RMW:
@@ -2484,6 +2507,16 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
     bool valid = true;
     switch (instruction->opcode)
     {
+        case MACHINE_X64_CPUID:
+        case MACHINE_X64_XGETBV:
+        {
+            u32 result_operand = instruction->opcode == MACHINE_X64_CPUID ? 2u : 1u;
+            u32 required_bytes = instruction->opcode == MACHINE_X64_CPUID ? 32u : 16u;
+            MachineRef result_ref = instruction->operands[result_operand];
+            u32 slot = machine_ref_payload(result_ref);
+            valid = machine_ref_kind(result_ref) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count &&
+                    function->stack_slot_sizes[slot] >= required_bytes;
+        } break;
         case MACHINE_X64_CALL_DIRECT:
         case MACHINE_X64_LEA_SYMBOL:
         case MACHINE_X64_LOAD_SYMBOL_GOT:

@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-09T141413Z`](docs/performance-audits/2026-09-09T141413Z.md) — Select fixed CPU queries in MIR without self-host fallback (#36)
 - [`2026-09-09T131918Z`](docs/performance-audits/2026-09-09T131918Z.md) — Select instruction-cache clearing in MIR and align AArch64 ranges (#36)
 - [`2026-09-09T121713Z`](docs/performance-audits/2026-09-09T121713Z.md) — Preserve unsigned 32-bit switch immediates without native fallback (#36)
 - [`2026-09-09T024511Z`](docs/performance-audits/2026-09-09T024511Z.md) — Pointer block parameters: native coverage, verification and migration cost (#36)

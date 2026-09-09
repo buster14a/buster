@@ -3545,12 +3545,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_vector_store(MachineX64Selector* sel
 
 // The scalar form: a promoted local takes a register copy, a direct local a
 // full-slot frame store, and anything address-shaped a sized pointer store.
-BUSTER_GLOBAL_LOCAL bool machine_x64_select_scalar_store(MachineX64Selector* selector, IrInstruction* instruction, u8 place_kind, u64 size, u32 slot,
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_scalar_store(MachineX64Selector* selector, IrValueId place, u8 place_kind, u64 size, u32 slot,
                                                          u32 value_register)
 {
     bool selected = false;
     u32 size_index = size == 1 ? 0 : size == 2 ? 1 : size == 4 ? 2 : size == 8 ? 3 : UINT32_MAX;
-    u32 place_register = machine_x64_promoted_local_register(selector, instruction->operands[0], place_kind);
+    u32 place_register = machine_x64_promoted_local_register(selector, place, place_kind);
     if (size_index != UINT32_MAX)
     {
         if (place_register != UINT32_MAX)
@@ -3580,10 +3580,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_scalar_store(MachineX64Selector* sel
                                              });
             selected = true;
         }
-        else if (machine_x64_place_is_addressed(selector, instruction->operands[0], place_kind))
+        else if (machine_x64_place_is_addressed(selector, place, place_kind))
         {
             u32 address_register;
-            selected = machine_x64_operand_register(selector, instruction->operands[0], &address_register);
+            selected = machine_x64_operand_register(selector, place, &address_register);
             if (selected)
             {
                 machine_x64_select_row(selector, (MachineInstruction){
@@ -3591,6 +3591,96 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_scalar_store(MachineX64Selector* sel
                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
                                                      .opcode = (u16)(MACHINE_X64_STORE_PTR8 + size_index),
                                                  });
+            }
+        }
+    }
+    return selected;
+}
+
+// These fixed literal forms have more architectural results than the hot
+// row has inline operand slots. One constrained row snapshots all results
+// into a private frame object; ordinary stores then publish the C outputs.
+// Keeping both CPUID inputs on that row lets placement resolve them in
+// parallel, including RAX/RCX swaps, and preserves every live clobbered value.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_cpu_query(MachineX64Selector* selector, IrInstruction* instruction)
+{
+    IrFunction* function = selector->function;
+    IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
+    bool cpuid = string_equal(extra.literal, S8("cpuid"));
+    bool xgetbv = string_equal(extra.literal, S8("xgetbv"));
+    bool selected = (cpuid || xgetbv) && instruction->operand_count == (cpuid ? 6u : 3u) &&
+                    instruction->immediate_count == instruction->operand_count && !instruction->target_count &&
+                    (!xgetbv || target_cpu_feature_has(selector->target, TARGET_CPU_FEATURE_X86_XSAVE));
+    u32 inputs[4] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
+    u32 input_mask = 0;
+    u32 output_mask = 0;
+    for (u32 index = 0; selected && index < extra.clobber_count; index += 1)
+    {
+        selected = string_equal(extra.clobbers[index], S8("memory")) || string_equal(extra.clobbers[index], S8("cc"));
+    }
+    for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+    {
+        IrValueId operand = instruction->operands[index];
+        u64 constraint = instruction->immediates[index];
+        u32 role = (u32)(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
+        bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+        bool matching = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0;
+        selected = operand.value < function->value_count && role <= IR_INLINE_ASSEMBLY_CONSTRAINT_D &&
+                    !(constraint & (IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE | ~IR_INLINE_ASSEMBLY_CONSTRAINT_KNOWN_MASK));
+        if (selected)
+        {
+            IrType* type = ir_type_from_id(&selector->program->types, function->values[operand.value].canonical_type);
+            // Partial-register and read/write forms retain their existing
+            // fallback until their input and output semantics are selected.
+            selected = type && type->kind == IR_TYPE_INTEGER && type->bit_width == 32 && type->layout.resolved && type->layout.size == 4;
+        }
+        if (selected && matching)
+        {
+            u32 match = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
+            selected = !output && match < instruction->operand_count &&
+                        instruction->immediates[match] == (IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | role);
+        }
+        if (selected && output)
+        {
+            selected = !(output_mask & (1u << role)) && selector->place_kinds[operand.value] != MACHINE_X64_PLACE_NONE;
+            output_mask |= 1u << role;
+        }
+        else if (selected)
+        {
+            selected = !(input_mask & (1u << role)) && machine_x64_operand_register(selector, operand, inputs + role);
+            input_mask |= 1u << role;
+        }
+    }
+    selected = selected && output_mask == (cpuid ? 0xfu : (1u << IR_INLINE_ASSEMBLY_CONSTRAINT_A) | (1u << IR_INLINE_ASSEMBLY_CONSTRAINT_D)) &&
+               input_mask == (cpuid ? (1u << IR_INLINE_ASSEMBLY_CONSTRAINT_A) | (1u << IR_INLINE_ASSEMBLY_CONSTRAINT_C)
+                                   : (1u << IR_INLINE_ASSEMBLY_CONSTRAINT_C));
+    if (selected)
+    {
+        u32 result_slot = machine_x64_append_slot(selector, cpuid ? 32u : 16u, 8);
+        MachineInstruction row = {.opcode = (u16)(cpuid ? MACHINE_X64_CPUID : MACHINE_X64_XGETBV)};
+        if (cpuid)
+        {
+            row.operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, inputs[IR_INLINE_ASSEMBLY_CONSTRAINT_A]);
+            row.operands[1] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, inputs[IR_INLINE_ASSEMBLY_CONSTRAINT_C]);
+            row.operands[2] = machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot);
+        }
+        else
+        {
+            row.operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, inputs[IR_INLINE_ASSEMBLY_CONSTRAINT_C]);
+            row.operands[1] = machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot);
+        }
+        machine_x64_select_row(selector, row);
+        for (u32 index = 0; selected && index < instruction->operand_count; index += 1)
+        {
+            u64 constraint = instruction->immediates[index];
+            if (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT)
+            {
+                u32 role = (u32)(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
+                u32 result_offset = cpuid ? role * 8u : (role == IR_INLINE_ASSEMBLY_CONSTRAINT_D ? 8u : 0u);
+                u32 value = machine_x64_select_frame_load64(selector, result_slot, result_offset);
+                IrValueId place = instruction->operands[index];
+                selected = machine_x64_select_scalar_store(selector, place, selector->place_kinds[place.value], 4,
+                                                           selector->value_stack_slots[place.value], value);
             }
         }
     }
@@ -3687,7 +3777,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_store(MachineX64Selector* selector, 
                     }
                     else
                     {
-                        selected = machine_x64_select_scalar_store(selector, instruction, place_kind, size, slot, value_register);
+                        selected = machine_x64_select_scalar_store(selector, instruction->operands[0], place_kind, size, slot, value_register);
                     }
                 }
             }
@@ -6227,6 +6317,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     // side effects have already been lowered independently.
                     instruction_selected = true;
                     break;
+                case IR_OPCODE_INLINE_ASSEMBLY:
+                    instruction_selected = machine_x64_select_cpu_query(&selector, instruction);
+                    break;
                 case IR_OPCODE_ATOMIC_FENCE:
                     instruction_selected = machine_x64_select_atomic_fence(&selector, instruction);
                     break;
@@ -6431,6 +6524,7 @@ enum
 // architectural baseline gate.  INT3 is BASE and deliberately carries no
 // optional feature names.
 BUSTER_GLOBAL_LOCAL String8 const machine_x64_sse2_features[] = {S8_INITIALIZER("sse2")};
+BUSTER_GLOBAL_LOCAL String8 const machine_x64_xsave_features[] = {S8_INITIALIZER("xsave")};
 BUSTER_GLOBAL_LOCAL String8 const machine_x64_sse_features[] = {S8_INITIALIZER("sse")};
 BUSTER_GLOBAL_LOCAL String8 const machine_x64_avx_features[] = {S8_INITIALIZER("avx")};
 BUSTER_GLOBAL_LOCAL String8 const machine_x64_popcnt_features[] = {S8_INITIALIZER("popcnt")};
@@ -9419,6 +9513,11 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_zero(void)
     (void)machine_x64_metadata_shape_cache_add(S8("CQO"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("RET"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("UD2"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("CPUID"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("XGETBV"), 0, 0,
+                                               (BusterX86MetadataFeatureInput){.names = machine_x64_xsave_features,
+                                                                                .count = BUSTER_ARRAY_LENGTH(machine_x64_xsave_features)},
+                                               attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("VZEROUPPER"), 0, 0,
                                                (BusterX86MetadataFeatureInput){.names = machine_x64_avx_features,
                                                                                 .count = BUSTER_ARRAY_LENGTH(machine_x64_avx_features)},
@@ -11638,6 +11737,35 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         machine_x64_emit_fixed_register(&encoder,
                                                         machine_x64_fixed_template_family_row(MACHINE_X64_FIXED_TEMPLATE_JMP_REGISTER, target_register),
                                                         S8("JMP"), target_register, 64);
+                    }
+                    break; case MACHINE_X64_CPUID:
+                    case MACHINE_X64_XGETBV:
+                    {
+                        bool cpuid = instruction->opcode == MACHINE_X64_CPUID;
+                        u32 result_slot = machine_ref_payload(instruction->operands[cpuid ? 2u : 1u]);
+                        u32 result_count = cpuid ? 4u : 2u;
+                        if (result_slot >= function->stack_slot_count || function->stack_slot_sizes[result_slot] < result_count * 8u)
+                        {
+                            (void)machine_x64_exact_reject(&encoder, 0);
+                        }
+                        else
+                        {
+                            BusterX86MetadataFeatureInput features = {0};
+                            if (!cpuid)
+                            {
+                                features.names = machine_x64_xsave_features;
+                                features.count = BUSTER_ARRAY_LENGTH(machine_x64_xsave_features);
+                            }
+                            (void)machine_x64_emit_metadata_instruction(&encoder, cpuid ? S8("CPUID") : S8("XGETBV"), 0, 0, features,
+                                                                         (BusterX86MetadataPhysicalAttributes){0}, 0);
+                            u32 registers[] = {MACHINE_X64_RAX, cpuid ? MACHINE_X64_RBX : MACHINE_X64_RDX, MACHINE_X64_RCX, MACHINE_X64_RDX};
+                            for (u32 index = 0; index < result_count; index += 1)
+                            {
+                                s64 displacement = -(s64)placement->stack_slot_offsets[result_slot] + (s64)(index * 8u);
+                                (void)machine_x64_emit_metadata_memory_register(&encoder, S8("MOV"), MACHINE_X64_RBP, displacement,
+                                                                                registers[index], 64, 64, 0);
+                            }
+                        }
                     }
                     break; case MACHINE_X64_LOAD_SYMBOL_GOT:
                     {

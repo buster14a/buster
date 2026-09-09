@@ -1251,8 +1251,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
         {
             MachineSelectResult selected = machine_select_canonical_function(arguments->arena, asm_program,
                 machine_test_ir_function_find(asm_program->modules, S8("f")), target);
-            // Inline assembly has no machine row yet. It must retain canonical
-            // lowering rather than receiving a schedule without its clobbers.
+            // This unrestricted template still needs canonical lowering;
+            // the fixed CPU-query rows do not describe its clobbers.
             BUSTER_TEST(arguments, !selected.supported);
         }
     }
@@ -1847,9 +1847,140 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_clear_instruction_cache(UnitTest
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_cpu_queries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice input = file_read(arguments->arena, S8("tests/differential/cpu_queries.c"), (FileReadOptions){0});
+    String8 source = string_format(arguments->arena, S8("#define BUSTER_CPU_QUERY_TEST 1\n{S8}"),
+                                  (String8){.pointer = (char8*)input.pointer, .length = input.length});
+    BUSTER_TEST(arguments, input.length != 0);
+    String8 names[] = {S8("query_four"), S8("query_tied"), S8("query_places"), S8("query_xcr")};
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_INTEL_HASWELL, .os = systems[system]};
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("cpu-queries.c"), source, target,
+                                                                     (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                {
+                    IrFunction* function = machine_test_ir_function_find(module, names[name]);
+                    BUSTER_TEST(arguments, function != 0);
+                    if (function)
+                    {
+                        MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                        BUSTER_TEST_RAW(arguments, selected.supported, names[name]);
+                        if (selected.supported)
+                        {
+                            BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                            MachineStackPlacement placement = machine_stack_placement_build(temporary.arena, &selected.function);
+                            BUSTER_TEST(arguments, placement.valid);
+                            if (name != 3) { BUSTER_TEST(arguments, (placement.callee_saved_mask & (1u << MACHINE_X64_RBX)) != 0); }
+                            u32 queries = 0;
+                            for (u32 index = 0; index < selected.function.instruction_count; index += 1)
+                            {
+                                MachineInstruction* row = selected.function.instructions + index;
+                                if (row->opcode == MACHINE_X64_CPUID || row->opcode == MACHINE_X64_XGETBV)
+                                {
+                                    bool cpuid = row->opcode == MACHINE_X64_CPUID;
+                                    u32 slot = machine_ref_payload(row->operands[cpuid ? 2u : 1u]);
+                                    u32 size = selected.function.stack_slot_sizes[slot];
+                                    selected.function.stack_slot_sizes[slot] = cpuid ? 31u : 15u;
+                                    BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_PAYLOAD);
+                                    selected.function.stack_slot_sizes[slot] = size;
+                                    queries += 1;
+                                }
+                            }
+                            BUSTER_TEST(arguments, queries == 1);
+                        }
+                        if (name == 3)
+                        {
+                            Target baseline = target;
+                            baseline.cpu_model = CPU_MODEL_BASELINE;
+                            MachineSelectResult rejected = machine_select_canonical_function(temporary.arena, program, function, baseline);
+                            BUSTER_TEST(arguments, !rejected.supported && rejected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY);
+                        }
+                    }
+                }
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                    BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                    if (system == 0 && generated.error == CODEGEN_ERROR_NONE)
+                    {
+                        CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                        BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                        if (executable.address)
+                        {
+                            u32 expected[4];
+                            __asm__ volatile("cpuid" : "=a"(expected[0]), "=b"(expected[1]), "=c"(expected[2]), "=d"(expected[3]) : "a"(0), "c"(0));
+                            for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                            {
+                                u32 offset = machine_test_module_offset(&generated, module, names[name]);
+                                BUSTER_TEST(arguments, offset != UINT32_MAX);
+                                if (offset != UINT32_MAX)
+                                {
+                                    void* address = (u8*)executable.address + offset;
+                                    if (name == 0 || name == 2)
+                                    {
+                                        typedef void QueryFour(u32, u32, u32*);
+                                        QueryFour* call = 0;
+                                        memcpy(&call, &address, sizeof(call));
+                                        u32 actual[4] = {0};
+                                        call(0, 0, actual);
+                                        BUSTER_TEST(arguments, memcmp(actual, expected, sizeof(actual)) == 0);
+                                    }
+                                    else if (name == 1)
+                                    {
+                                        typedef u64 QueryTied(u32, u32, u32);
+                                        QueryTied* call = 0;
+                                        memcpy(&call, &address, sizeof(call));
+                                        u64 expected_value = (u64)expected[0] + 3ull*expected[1] + 5ull*expected[2] + 7ull*expected[3] + 17ull*UINT32_MAX;
+                                        BUSTER_TEST(arguments, call(0, 0, UINT32_MAX) == expected_value);
+                                    }
+                                    else
+                                    {
+                                        u32 capabilities[4];
+                                        __asm__ volatile("cpuid" : "=a"(capabilities[0]), "=b"(capabilities[1]), "=c"(capabilities[2]), "=d"(capabilities[3]) : "a"(1), "c"(0));
+                                        if (capabilities[2] & (1u << 27))
+                                        {
+                                            u32 low, high;
+                                            __asm__ volatile("xgetbv" : "=a"(low), "=d"(high) : "c"(0));
+                                            typedef u64 QueryXcr(u32);
+                                            QueryXcr* call = 0;
+                                            memcpy(&call, &address, sizeof(call));
+                                            BUSTER_TEST(arguments, call(0) == ((u64)low | ((u64)high << 32)));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        codegen_release_executable(executable);
+                    }
+#endif
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult query_result = machine_test_cpu_queries(arguments);
+    result.test_count += query_result.test_count;
+    result.succeeded_test_count += query_result.succeeded_test_count;
     UnitTestResult cache_result = machine_test_clear_instruction_cache(arguments);
     result.test_count += cache_result.test_count;
     result.succeeded_test_count += cache_result.succeeded_test_count;
@@ -2167,7 +2298,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 237);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 239);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_OPCODE_SKELETON_RETURN] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
@@ -2190,6 +2321,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_X64_JMP] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_JCC] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_RET] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_X64_CPUID] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_XGETBV] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_CALL_DIRECT] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_TLS_GENERAL_DYNAMIC] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_SWITCH] = MACHINE_SCHEDULE_UNIT_BARRIER,
@@ -2403,7 +2536,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 82);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 84);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
@@ -2632,7 +2765,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
-    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 171);
+    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 173);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
 
     // Canonical metadata authorities and neutral patch helpers are separate

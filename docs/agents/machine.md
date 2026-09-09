@@ -111,6 +111,15 @@
   data-clean and instruction-invalidate walks cover aligned four-byte granules
   through the exclusive end, with DSB/ISB barriers. The direct AArch64 oracle
   uses the same alignment rule; an unaligned start must not skip a final line.
+- x86 CPUID/XGETBV literal assembly with complete 32-bit pure outputs and
+  separate fixed inputs selects constrained machine rows. Numeric/named ties
+  retain the input's fixed register. CPUID consumes RAX/RCX together and
+  clobbers RAX/RBX/RCX/RDX, so placement preserves RBX and resolves input moves
+  in parallel. Each row snapshots zero-extended results to a private frame
+  object before ordinary stores publish output places. XGETBV requires XSAVE
+  on the compile target. Partial-width, read/write, partial-output and other
+  assembly shapes retain their existing fallback; these rows do not implement
+  unrestricted inline assembly.
 - The x86 exact-emission bridge represents a full-width 32-bit immediate as
   its signed low-32-bit pattern. Normalize only when both register and
   immediate widths are 32; narrower immediates and 64-bit destinations retain
