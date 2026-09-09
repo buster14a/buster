@@ -50,7 +50,7 @@ jobs:
           if (-not $VsPath) { throw 'Visual Studio C++ toolchain not found' }
           & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
           New-Item -ItemType Directory -Force build | Out-Null
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build.exe
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference build.c -lws2_32 -o build/build.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./build/build.exe bench_throughput self-test
           exit $LASTEXITCODE

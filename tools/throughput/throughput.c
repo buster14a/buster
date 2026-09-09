@@ -571,6 +571,8 @@ static int tp_measure(TpConfig const* config, TpJob const* job, char const* comp
     return ok;
 }
 
+// Only Linux metadata snapshots copy procfs/sysfs capability files.
+#ifdef __linux__
 static int tp_copy_file(char const* source, char const* target)
 {
     FILE* input = fopen(source, "rb");
@@ -590,6 +592,8 @@ static int tp_copy_file(char const* source, char const* target)
     if (output && fclose(output) != 0) ok = 0;
     return ok;
 }
+
+#endif
 
 static int tp_metadata(TpConfig const* config, char const* root, char const* baseline, char const* candidate,
                        TpJob const* jobs, unsigned job_count)
