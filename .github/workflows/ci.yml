@@ -36,6 +36,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Validate approved action references
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .forgejo/scripts/check_action_pins.py
+          python3 tests/action_pins_test.py
       - name: Validate every GitHub workflow
         id: lint
         shell: bash

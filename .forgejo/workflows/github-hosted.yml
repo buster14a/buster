@@ -15,6 +15,12 @@ jobs:
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Validate approved action references
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .forgejo/scripts/check_action_pins.py
+          python3 tests/action_pins_test.py
       - name: Dispatch and wait for GitHub-hosted runners
         shell: bash
         env:
