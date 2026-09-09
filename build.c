@@ -34064,9 +34064,12 @@ BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 argumen
 #else
     String8 executable = self_test ? S8("build/throughput-tools/throughput-tests") : S8("build/throughput-tools/throughput");
 #endif
+    // Resolve before opening the arena-backed argument builder: lookup also
+    // allocates. Windows CreateProcess does not search PATH for this argument.
+    String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
     ProcessRun* compile = run_add(arena, step_add(arena));
     OsArgumentBuilder builder = os_argument_builder_start(arena);
-    os_argument_builder_append(&builder, S8("clang"));
+    os_argument_builder_append(&builder, compiler);
     os_argument_builder_append(&builder, S8("-std=c11"));
     os_argument_builder_append(&builder, S8("-O2"));
     os_argument_builder_append(&builder, S8("-Wall"));
