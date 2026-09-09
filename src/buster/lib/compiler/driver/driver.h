@@ -1,5 +1,6 @@
 #pragma once
 
+#include <buster/lib/compiler/diagnostic.h>
 #include <buster/lib/compiler/assembly/assembly_unit.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/link/link.h>
@@ -94,6 +95,9 @@ struct CompilerDriverInvocation
     // same numbers as a table for a human; this is the form another program
     // reads, so a build driver can divide its own instruction count by them.
     String8 source_metrics_path;
+    // API-only opt-out from retaining structured records. Legacy diagnostic
+    // text and warnings remain available; clean compilation allocates neither.
+    bool suppress_diagnostic_records;
     // Opt-in, checked token / canonical IR / selected MIR evidence.
     String8 bootstrap_trace_prefix;
     String8 gpu_architecture;
@@ -157,6 +161,10 @@ struct CompilerDriverResult
     CIRDirectSsaStatistics direct_ssa;
     String8 diagnostic;
     String8 warning;
+    // Published in input/stage order, owned by the result arena. Empty on a
+    // diagnostic-free compile; grammar-specific construction stays upstream.
+    CompilerDiagnostic* diagnostics;
+    u32 diagnostic_count;
     String8 output;
     NativeExecutableLinkResult native_link;
     Wasm64Artifact wasm64;

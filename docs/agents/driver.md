@@ -104,13 +104,18 @@ hand-written section gets alignment 1, because `crti.o` and `crtn.o`
 contribute one and two bytes to `.init` and any padding between them would
 run as code.
 
-One deviation from GNU as, and one refusal. A forward branch to a label is
-always the near form, because the instruction layer sizes a statement before
-the label is known and this assembler does not relax; the bytes are correct
-and a few longer than GNU as writes. And a `.S` -- assembly the C
-preprocessor runs over first -- is refused by name: this frontend's
-preprocessor hands back C tokens, and `%rax`, `$1` and `1f` do not survive
-that round trip, so the input is reported rather than mis-assembled.
+A forward branch to a label always uses the near form: the instruction layer
+sizes a statement before the label is known and this assembler does not relax.
+`.S` inputs run through C preprocessing with assembly comment-line handling.
+The printer preserves line structure and token adjacency; the root input splits
+unquoted dollar prefixes before lexing. Assembly errors resolve lazily back to
+originating tokens and physical positions, including `#line` identities.
+
+C, assembly and backend failures publish the shared
+[diagnostic contract](../diagnostics.md). Strict fallback uses symbolic opcode
+names and `not-applicable` for signature/target exclusions, while tooling retains
+internal IDs in the optional backend context. Source locations name the resolved
+file, including remapped or included source, rather than always the top-level input.
 
 `-emit-llvm` emits binary LLVM bitcode directly from canonical typed IR for C
 inputs. It writes `<input>.bc` by default, accepts `-o` for a single

@@ -837,6 +837,7 @@ buster_register_module(compiler_assembly "${BUSTER_SOURCE_DIR}/compiler/assembly
 buster_register_module(compiler_assembly_unit "${BUSTER_SOURCE_DIR}/compiler/assembly/assembly_unit${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly_metadata "${BUSTER_SOURCE_DIR}/compiler/assembly/x86_64_metadata${COMMON_EXTENSION}")
 buster_register_module(compiler_assembly_completion_census "${BUSTER_SOURCE_DIR}/compiler/assembly/x86_64_completion_census${COMMON_EXTENSION}")
+buster_register_module(compiler_diagnostic "${BUSTER_SOURCE_DIR}/compiler/diagnostic${COMMON_EXTENSION}")
 buster_register_module(compiler_ir "${BUSTER_SOURCE_DIR}/compiler/ir/ir${COMMON_EXTENSION}")
 buster_register_module(compiler_debug "${BUSTER_SOURCE_DIR}/compiler/debug/debug${COMMON_EXTENSION}")
 buster_register_module(compiler_machine "${BUSTER_SOURCE_DIR}/compiler/codegen/machine${COMMON_EXTENSION}")
@@ -896,6 +897,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/assembly/padding_test.c
     src/buster/tests/compiler/assembly/x86_64_got_test.c
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.c
+    src/buster/tests/compiler/diagnostic_test.c
     src/buster/tests/compiler/ir/ir_test.c
     src/buster/tests/compiler/llvm/bitcode_test.c
     src/buster/tests/compiler/codegen/machine_select_test.c
@@ -943,6 +945,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/assembly/padding_test.h
     src/buster/tests/compiler/assembly/x86_64_got_test.h
     src/buster/tests/compiler/assembly/x86_64_completion_census_test.h
+    src/buster/tests/compiler/diagnostic_test.h
     src/buster/tests/compiler/ir/ir_test.h
     src/buster/tests/compiler/llvm/bitcode_test.h
     src/buster/tests/compiler/codegen/machine_select_test.h
@@ -1775,6 +1778,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_assembly_metadata
     compiler_assembly_completion_census
     compiler_ir
+    compiler_diagnostic
     compiler_debug
     compiler_machine
     compiler_bootstrap_trace

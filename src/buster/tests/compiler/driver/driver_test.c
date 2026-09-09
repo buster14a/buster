@@ -1193,6 +1193,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
             CompilerDriverResult strict = compiler_driver_execute_invocation(temporary.arena, invocation);
             BUSTER_TEST(arguments, strict.error == COMPILER_DRIVER_ERROR_CODEGEN && !strict.has_object);
             BUSTER_TEST(arguments, strict.codegen_statistics.fallback_function_count == 1);
+            BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, S8("opcode=not-applicable")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, strict.diagnostic_count == 1);
+            if (strict.diagnostic_count == 1)
+            {
+                CompilerDiagnostic diagnostic = strict.diagnostics[0];
+                BUSTER_TEST(arguments, string_equal(diagnostic.code, S8("codegen.machine-fallback")));
+                BUSTER_TEST(arguments, diagnostic.backend != 0 && diagnostic.primary.has_range);
+                if (diagnostic.backend)
+                {
+                    BUSTER_TEST(arguments, diagnostic.backend->opcode_id == UINT32_MAX && diagnostic.backend->instruction_id == UINT32_MAX);
+                    BUSTER_TEST(arguments, string_equal(diagnostic.backend->reason, codegen_fallback_reason_string(reason)));
+                    BUSTER_TEST(arguments, string_equal(diagnostic.backend->allocator, codegen_register_allocator_mode_string((CodegenRegisterAllocatorMode)invocation.register_allocator)));
+                }
+            }
             BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, codegen_fallback_reason_string(reason)) < strict.diagnostic.length);
             BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, S8("function='machine_fallback_signature'")) < strict.diagnostic.length);
             BUSTER_TEST(arguments, string_first_sequence(strict.diagnostic, S8("tests/basic_c_machine_fallback_signature.c:")) < strict.diagnostic.length);
@@ -4413,6 +4427,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_undefined_reference_command_line)));
     BUSTER_TEST(arguments, c_undefined_reference.error == COMPILER_DRIVER_ERROR_LINK);
     BUSTER_TEST(arguments, string_ends_with_sequence(c_undefined_reference.diagnostic, S8("unresolved symbol: buster_no_such_function")));
+    BUSTER_TEST(arguments, c_undefined_reference.diagnostic_count == 1);
+    if (c_undefined_reference.diagnostic_count == 1)
+    {
+        BUSTER_STRING_TEST(arguments, c_undefined_reference.diagnostics[0].code, S8("link.unresolved-symbol"));
+        BUSTER_STRING_TEST(arguments, c_undefined_reference.diagnostics[0].symbol, S8("buster_no_such_function"));
+        BUSTER_TEST(arguments, !c_undefined_reference.diagnostics[0].primary.has_range && c_undefined_reference.diagnostics[0].primary.position.line == 0);
+    }
     // A hosted dynamic link must also resolve an imported function used as a
     // data initializer.  This is the relocation shape cJSON uses for its
     // global allocator hooks (R_X86_64_64 -> the generated PLT entry).
@@ -5383,7 +5404,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invalid_asm_jump.parser_diagnostic_count == 0);
     BUSTER_TEST(arguments, invalid_asm_jump.analysis_diagnostic_count == 0);
     BUSTER_TEST(arguments, !invalid_asm_jump.has_object && invalid_asm_jump.diagnostic.length != 0);
-    BUSTER_TEST(arguments, string_starts_with_sequence(invalid_asm_jump.diagnostic, S8("C code generation failed with error 2, function 0 ('main'")));
+    BUSTER_TEST(arguments, string_first_sequence(invalid_asm_jump.diagnostic, S8("label references (%l) are unsupported")) != BUSTER_STRING_NO_MATCH);
+    BUSTER_TEST(arguments, string_first_sequence(invalid_asm_jump.diagnostic, S8("in function 'main'")) != BUSTER_STRING_NO_MATCH);
     {
         String8 unsupported_template_source_path = buster_test_temporary_path(arguments->arena, S8("buster-invalid-asm-conditional"), S8(".c"));
         String8 unsupported_template_source = S8("int conditional_asm_goto(int value) {"
@@ -5400,8 +5422,24 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, unsupported_template.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
         BUSTER_TEST(arguments, unsupported_template.tokenizer_error_count == 0 && unsupported_template.parser_diagnostic_count == 0 &&
                                unsupported_template.analysis_diagnostic_count == 0);
-        BUSTER_TEST(arguments, string_starts_with_sequence(unsupported_template.diagnostic,
-                                                           S8("C code generation failed with error 2, function 0 ('conditional_asm_goto'")));
+        BUSTER_TEST(arguments, string_first_sequence(unsupported_template.diagnostic,
+            S8("inline assembly label references (%l) are unsupported in this template form")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, unsupported_template.diagnostic_count == 1);
+        if (unsupported_template.diagnostic_count == 1)
+        {
+            CompilerDiagnostic diagnostic = unsupported_template.diagnostics[0];
+            BUSTER_TEST(arguments, string_equal(diagnostic.code, S8("codegen.unsupported-instruction")));
+            BUSTER_TEST(arguments, diagnostic.backend != 0 && diagnostic.primary.has_range);
+            if (diagnostic.backend)
+            {
+                BUSTER_TEST(arguments, string_equal(diagnostic.backend->opcode, S8("inline-assembly")));
+                BUSTER_TEST(arguments, string_equal(diagnostic.backend->operation, S8("not-applicable")));
+                BUSTER_TEST(arguments, string_equal(diagnostic.backend->function, S8("conditional_asm_goto")));
+                BUSTER_TEST(arguments, diagnostic.backend->opcode_id == IR_OPCODE_INLINE_ASSEMBLY);
+                BUSTER_TEST(arguments, diagnostic.backend->operation_id == UINT32_MAX);
+                BUSTER_TEST(arguments, diagnostic.backend->error_id == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
+            }
+        }
     }
     {
         // What an inline-assembly operand class refuses, each case named where

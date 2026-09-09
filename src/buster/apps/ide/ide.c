@@ -96,6 +96,7 @@
 #include <buster/lib/compiler/assembly/x86_64_metadata.c>
 #include <buster/lib/compiler/assembly/x86_64_completion_census.c>
 #include <buster/lib/compiler/ir/ir.c>
+#include <buster/lib/compiler/diagnostic.c>
 #include <buster/lib/compiler/debug/debug.c>
 #include <buster/lib/compiler/codegen/machine.c>
 #include <buster/lib/compiler/codegen/bootstrap_trace.c>

@@ -411,6 +411,34 @@ IrSourcePosition ir_source_map_position(IrSourceMap const* map, u32 offset, IrSo
     return position;
 }
 
+IrSourcePosition ir_source_map_original_position(IrSourceMap const* map, u32 offset)
+{
+    IrSourcePosition result = {0};
+    bool done = false;
+    for (u32 step = 0; map && map->keys && step < map->count && !done; step += 1)
+    {
+        u32 index = ir_source_map_find(map, offset);
+        IrSourceRegion const* region = map->regions + index;
+        if (!region->origin_plus_one)
+        {
+            done = true;
+        }
+        else if (region->kind == IR_SOURCE_REGION_TEXT)
+        {
+            IrSourceRegion original = *region;
+            original.source = region->origin_plus_one - 1;
+            original.line_delta = 0;
+            result = ir_source_region_position(&original, offset, 0);
+            done = true;
+        }
+        else
+        {
+            offset = region->origin_plus_one - 1;
+        }
+    }
+    return result;
+}
+
 IrSourcePosition ir_source_text_position(String8 text, u32 source, u32 offset, IrSourceMapCursor* cursor)
 {
     IrSourcePosition result;

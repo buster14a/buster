@@ -53,6 +53,8 @@ keep current.
 ## Audits, newest first
 
 - [`2026-09-09T000655Z`](docs/performance-audits/2026-09-09T000655Z.md) — Deterministic merged-section bytes: isolated initialization cost (#303)
+- [`2026-09-09T002543Z`](docs/performance-audits/2026-09-09T002543Z.md) — Shared compiler diagnostics: source provenance, symbolic refusals and publication cost (#35, #315)
+- [`2026-09-08T235007Z`](docs/performance-audits/2026-09-08T235007Z.md) — Correct local sanitizer provenance for the frontend SSA audit (#34)
 - [`2026-09-08T230935Z`](docs/performance-audits/2026-09-08T230935Z.md) — Frontend SSA: reuse current values and proven entry definitions (#34)
 - [`2026-09-08T143633Z`](docs/performance-audits/2026-09-08T143633Z.md) — Frontend SSA: per-owner escape recovery, expression temporaries and complete CFG construction
 - [`2026-09-08T043530Z`](docs/performance-audits/2026-09-08T043530Z.md) — Direct frontend SSA: bounded construction, differential validation and compile-time measurements
