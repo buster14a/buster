@@ -4,6 +4,13 @@
 
 ## Benchmarking and diagnostics
 
+- **`./build.sh bench_throughput`** provides deterministic startup, scaling,
+  symbol, CFG, backend and frozen-source self-host workloads with raw paired
+  timing/RSS, separate PMU/allocation probes and a conservative CI guard.
+  See [`tools/throughput/README.md`](../../tools/throughput/README.md) for the
+  experiment contract, reproducible commands, statistical assumptions and limits.
+  This does not replace the canonical self-host/correctness gates below.
+
 - **`test_self_host` is the most trustworthy and complete compiler benchmark.**
   It exercises the full self-hosting IDE pipeline, including the trusted
   bootstrap, two complete unity-build IDE compilations, byte-identical stage

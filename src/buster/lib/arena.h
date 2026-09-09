@@ -114,6 +114,20 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE u64 arena_array_size(u64 el
     return element_size * count;
 }
 
+#if BUSTER_BENCH_ALLOCATIONS
+// Diagnostic builds only. These are calling-thread bump requests, not malloc
+// calls, live bytes, reserved virtual memory, or process RSS. Snapshot before
+// formatting a report, so the report does not count its own allocations.
+typedef struct ArenaBenchmarkCounters ArenaBenchmarkCounters;
+struct ArenaBenchmarkCounters
+{
+    u64 calls;
+    u64 requested_bytes;
+};
+BUSTER_F_DECL void arena_benchmark_record(u64 size);
+BUSTER_F_DECL ArenaBenchmarkCounters arena_benchmark_counters(void);
+#endif
+
 // The bump is inline and the commit is not. Every allocation performs the same
 // four operations -- align the position, add the size, test the committed
 // high-water mark, publish the new position -- and the test fails on the order
@@ -134,6 +148,9 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_bytes(
     }
     void* result = (u8*)arena + aligned_offset;
     arena->position = aligned_size_after;
+#if BUSTER_BENCH_ALLOCATIONS
+    arena_benchmark_record(size);
+#endif
     BUSTER_CHECK(arena->position <= arena->os_position);
     return result;
 }
