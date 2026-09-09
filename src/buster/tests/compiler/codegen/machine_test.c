@@ -711,19 +711,10 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
     return audit;
 }
 
-// Every caller sits inside the executing-differential sections below, so
-// the definition carries their guard: configurations that compile those
-// out (other architectures, or the sanitized and fuzzing builds) do not pass
-// -Wno-unused-function and would reject an unreferenced helper.
-//
-// Those sections call the emitted bytes through a native function pointer,
-// and the bytes are generated for a Linux target on the native architecture.
-// The x86 corpus uses System V; the AArch64 pointer corpus uses the shared
-// fixed scalar argument convention. A Microsoft-ABI x86 host passes arguments in the wrong
-// registers and both paths read whatever the callee-side registers happen
-// to hold, so Windows is excluded from executing — it still selects,
-// verifies, places, encodes and checks fallback accounting above.
-#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+// Native tests resolve function entries by symbol. Each execution site
+// chooses the matching host ABI: Windows variadic tests use Win64, while
+// the System V and AArch64 fixtures keep their Unix execution guards.
+#if (BUSTER_CPU_ARCH_X86_64 || (BUSTER_CPU_ARCH_AARCH64 && !BUSTER_WINDOWS)) && !BUSTER_SANITIZE
 BUSTER_GLOBAL_LOCAL u32 machine_test_module_offset(CodegenModule* module, IrModule* ir_module, String8 name)
 {
     IrFunction* ir_function = machine_test_ir_function_find(ir_module, name);
