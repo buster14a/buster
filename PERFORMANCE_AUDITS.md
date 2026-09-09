@@ -53,6 +53,8 @@ keep current.
 ## Audits, newest first
 
 - [`2026-09-09T024511Z`](docs/performance-audits/2026-09-09T024511Z.md) — Pointer block parameters: native coverage, verification and migration cost (#36)
+- [`2026-09-09T002849Z`](docs/performance-audits/2026-09-09T002849Z.md) — Bound SysV aggregate classification scratch to the active frontier (#301)
+- [`2026-09-09T011927Z`](docs/performance-audits/2026-09-09T011927Z.md) — Recover per-site allocation census through the existing optional observer
 - [`2026-09-09T004223Z`](docs/performance-audits/2026-09-09T004223Z.md) — Recover the native compiler-throughput harness and diagnostic allocation observer
 - [`2026-09-09T002849Z`](docs/performance-audits/2026-09-09T002849Z.md) — Bound SysV aggregate classification scratch to the active frontier (#301)
 - [`2026-09-09T002543Z`](docs/performance-audits/2026-09-09T002543Z.md) — Shared compiler diagnostics: source provenance, symbolic refusals and publication cost (#35, #315)

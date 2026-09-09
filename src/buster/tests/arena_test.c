@@ -9,17 +9,58 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
 
 #if BUSTER_BENCH_ALLOCATIONS
     {
-        Arena* measured = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1)});
+        Arena* measured = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(64), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
         ArenaBenchmarkCounters before = arena_benchmark_counters();
-        arena_allocate_bytes(measured, 3, 1);
-        arena_allocate_bytes(measured, 5, 64);
+        arena_allocate_bytes(measured, 0, 1);
+        u8* first = arena_allocate(measured, u8, 3);
+        arena_allocate_bytes(measured, 5, 16);
+        arena_allocate_zeroed(measured, u8, 17);
+        memset(first, 0xa5, (size_t)(measured->position - arena_minimum_position));
         arena_reset_to_start(measured);
-        arena_allocate_zeroed_bytes(measured, 7, 1);
-        arena_allocate_bytes(measured, 0, 8);
+        u8* reused = (u8*)arena_allocate_zeroed_bytes(measured, 9, 16);
+        u8* partly_fresh = arena_allocate_zeroed(measured, u8, 31);
         ArenaBenchmarkCounters after = arena_benchmark_counters();
-        BUSTER_TEST(arguments, after.calls - before.calls == 4);
-        BUSTER_TEST(arguments, after.requested_bytes - before.requested_bytes == 15);
+        BUSTER_TEST(arguments, after.calls - before.calls == 6);
+        BUSTER_TEST(arguments, after.requested_bytes - before.requested_bytes == 65);
+        BUSTER_TEST(arguments, after.padding - before.padding == 13);
+        BUSTER_TEST(arguments, after.empty - before.empty == 1);
+        BUSTER_TEST(arguments, after.small - before.small == 5);
+        BUSTER_TEST(arguments, after.zero_requested - before.zero_requested == 57);
+        BUSTER_TEST(arguments, after.zero_written - before.zero_written == 38);
+        BUSTER_TEST(arguments, after.maximum == BUSTER_MAX(before.maximum, 31));
+        for (u32 index = 0; index < 9; index += 1)
+        {
+            BUSTER_TEST(arguments, reused[index] == 0);
+        }
+        for (u32 index = 0; index < 31; index += 1)
+        {
+            BUSTER_TEST(arguments, partly_fresh[index] == 0);
+        }
+        // Addressed/parenthesized calls remain counted, including the zeroed
+        // wrapper's underlying bump exactly once.
+        before = arena_benchmark_counters();
+        void* (*raw_allocate)(Arena*, u64, u64) = &arena_allocate_bytes;
+        raw_allocate(measured, 2, 1);
+        (arena_allocate_zeroed_bytes)(measured, 4, 1);
+        after = arena_benchmark_counters();
+        BUSTER_TEST(arguments, after.calls - before.calls == 2);
+        BUSTER_TEST(arguments, after.requested_bytes - before.requested_bytes == 6);
+        BUSTER_TEST(arguments, after.zero_requested - before.zero_requested == 4);
         arena_destroy(measured, 1);
+    }
+    {
+        // Exercise failure accounting through the recorder, without issuing a
+        // deliberately failing native memory operation. OS traffic stays out
+        // of logical arena totals.
+        ArenaBenchmarkCounters arena_before = arena_benchmark_counters();
+        ArenaBenchmarkCounters before = arena_benchmark_kind_counters(ARENA_BENCHMARK_OS_COMMIT);
+        arena_benchmark_event(ARENA_BENCHMARK_OS_COMMIT, S8(__FILE__), S8(__func__), __LINE__, 17, 0, 0, 0, false);
+        ArenaBenchmarkCounters after = arena_benchmark_kind_counters(ARENA_BENCHMARK_OS_COMMIT);
+        BUSTER_TEST(arguments, after.calls - before.calls == 1);
+        BUSTER_TEST(arguments, after.requested_bytes - before.requested_bytes == 17);
+        BUSTER_TEST(arguments, after.failures - before.failures == 1);
+        BUSTER_TEST(arguments, after.failed_bytes - before.failed_bytes == 17);
+        BUSTER_TEST(arguments, arena_benchmark_counters().calls == arena_before.calls);
     }
 #endif
 

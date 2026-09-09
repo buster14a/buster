@@ -10,6 +10,8 @@
   See [`tools/throughput/README.md`](../../tools/throughput/README.md) for the
   experiment contract, reproducible commands, statistical assumptions and limits.
   This does not replace the canonical self-host/correctness gates below.
+  The same optional allocation observer can emit a [per-site census](../allocation-census.md)
+  with separate zeroing, alignment and OS request totals for offline analysis.
 
 - **`test_self_host` is the most trustworthy and complete compiler benchmark.**
   It exercises the full self-hosting IDE pipeline, including the trusted

@@ -308,6 +308,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
     program_state->input.environment_values = environment_values;
     program_state->input.raw_arguments = argv;
     program_state->input.raw_environment = envp;
+#if BUSTER_BENCH_ALLOCATIONS && !BUSTER_IOS && !BUSTER_ANDROID
+    arena_benchmark_report_enable(string_equal(os_get_environment_variable(S8("BUSTER_ALLOCATION_CENSUS")), S8("1")));
+#endif
 
     ProcessResult result = process_arguments();
 
@@ -342,6 +345,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
     {
         WSACleanup();
     }
+#endif
+#if BUSTER_BENCH_ALLOCATIONS
+    arena_pool_release_thread();
+    arena_benchmark_flush(true);
 #endif
 #endif
 
