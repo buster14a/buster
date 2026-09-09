@@ -1957,9 +1957,121 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_data_alignment(UnitTestArgument
     return result;
 }
 
+// Merged file-backed bytes must not depend on previous arena users. Check
+// whole section contents and serialized artifacts, including both kinds of
+// unwritten span: alignment gaps and virtual bytes past an input's data.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_section_initialization(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
+    ObjectSectionKind kinds[] = {OBJECT_SECTION_TEXT, OBJECT_SECTION_DATA, OBJECT_SECTION_READ_ONLY_DATA};
+    u8 first_bytes[] = {0x11, 0x22, 0x33};
+    u8 second_bytes[] = {0x44, 0x55};
+    u8 expected[43] = {0};
+    memcpy(expected, first_bytes, sizeof(first_bytes));
+    memcpy(expected + 32, second_bytes, sizeof(second_bytes));
+    u8 poison_values[] = {0, 0xa5, 0x3c};
+    for (u32 arch = 0; arch < BUSTER_ARRAY_LENGTH(architectures); arch += 1)
+    {
+        for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+        {
+            Target target = {.cpu_arch = architectures[arch], .os = systems[system]};
+            ObjectSymbol first_symbol = {.name = S8("first"), .section = OBJECT_SECTION_TEXT, .size = sizeof(first_bytes),
+                                         .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+            ObjectSymbol second_symbol = {.name = S8("second"), .section = OBJECT_SECTION_TEXT, .size = sizeof(second_bytes),
+                                          .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+            ObjectFile objects[] = {
+                link_test_object_make(arguments->arena, target, (ByteSlice){0}, &first_symbol, 1, 0, 0),
+                link_test_object_make(arguments->arena, target, (ByteSlice){0}, &second_symbol, 1, 0, 0),
+            };
+            for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(kinds); kind_index += 1)
+            {
+                ObjectSectionKind kind = kinds[kind_index];
+                objects[0].sections[kind].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(first_bytes);
+                objects[0].sections[kind].virtual_size = 7;
+                objects[0].sections[kind].alignment = 8;
+                objects[1].sections[kind].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(second_bytes);
+                objects[1].sections[kind].virtual_size = 11;
+                objects[1].sections[kind].alignment = 32;
+            }
+            objects[0].sections[OBJECT_SECTION_ZERO].virtual_size = 7;
+            objects[0].sections[OBJECT_SECTION_ZERO].alignment = 8;
+            objects[1].sections[OBJECT_SECTION_ZERO].virtual_size = 11;
+            objects[1].sections[OBJECT_SECTION_ZERO].alignment = 32;
+            Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = 1}});
+            BUSTER_TEST(arguments, arena != 0);
+            if (arena)
+            {
+                ByteSlice reference = {0};
+                for (u32 run = 0; run < BUSTER_ARRAY_LENGTH(poison_values); run += 1)
+                {
+                    arena_reset_to_start(arena);
+                    if (run)
+                    {
+                        memset(arena_allocate(arena, u8, BUSTER_KB(64)), poison_values[run], BUSTER_KB(64));
+                        arena_reset_to_start(arena);
+                    }
+                    LinkObjectResult merged = link_objects(arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
+                    BUSTER_TEST(arguments, merged.error == LINK_ERROR_NONE);
+                    if (merged.error == LINK_ERROR_NONE)
+                    {
+                        for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(kinds); kind_index += 1)
+                        {
+                            ObjectSection* section = merged.object.sections + kinds[kind_index];
+                            BUSTER_TEST(arguments, section->data.length == sizeof(expected));
+                            BUSTER_TEST(arguments, section->virtual_size == sizeof(expected));
+                            BUSTER_TEST(arguments, section->alignment == 32);
+                            BUSTER_TEST(arguments, section->data.length == sizeof(expected) &&
+                                                       memcmp(section->data.pointer, expected, sizeof(expected)) == 0);
+                        }
+                        ObjectSection* zero = merged.object.sections + OBJECT_SECTION_ZERO;
+                        BUSTER_TEST(arguments, zero->data.pointer == 0 && zero->data.length == 0 && zero->virtual_size == sizeof(expected));
+                        BUSTER_TEST(arguments, merged.object.symbol_count == 2 && merged.object.symbols[0].value == 0 &&
+                                                   merged.object.symbols[1].value == 32);
+                        ObjectArtifact artifact = object_write(arena, &merged.object, object_format_for_target(target));
+                        BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE);
+                        if (artifact.error == OBJECT_ERROR_NONE)
+                        {
+                            if (!run)
+                            {
+                                reference.length = artifact.bytes.length;
+                                reference.pointer = arena_allocate(arguments->arena, u8, reference.length);
+                                memcpy(reference.pointer, artifact.bytes.pointer, reference.length);
+                            }
+                            else
+                            {
+                                BUSTER_TEST(arguments, artifact.bytes.length == reference.length &&
+                                                           memcmp(artifact.bytes.pointer, reference.pointer, reference.length) == 0);
+                            }
+                            ObjectFile decoded = object_read(arena, artifact.bytes, target);
+                            BUSTER_TEST(arguments, decoded.error == OBJECT_ERROR_NONE);
+                            if (decoded.error == OBJECT_ERROR_NONE)
+                            {
+                                for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(kinds); kind_index += 1)
+                                {
+                                    ObjectSection* section = decoded.sections + kinds[kind_index];
+                                    BUSTER_TEST(arguments, section->data.length >= sizeof(expected) &&
+                                                               memcmp(section->data.pointer, expected, sizeof(expected)) == 0);
+                                }
+                            }
+                        }
+                        BUSTER_TEST(arguments, arena->position <= arena_minimum_position + BUSTER_KB(64));
+                    }
+                }
+                BUSTER_TEST(arguments, arena_destroy(arena, 1));
+            }
+        }
+    }
+    return result;
+}
+
 UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult initialized = link_test_merged_section_initialization(arguments);
+    result.succeeded_test_count += initialized.succeeded_test_count;
+    result.test_count += initialized.test_count;
     UnitTestResult alignment = link_test_elf_data_alignment(arguments);
     result.succeeded_test_count += alignment.succeeded_test_count;
     result.test_count += alignment.test_count;

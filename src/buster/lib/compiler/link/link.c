@@ -1493,7 +1493,9 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
     {
         bool zero_fill = object_section_kind_is_zero_fill((ObjectSectionKind)kind);
-        u8* data = zero_fill ? 0 : arena_allocate(arena, u8, section_sizes[kind]);
+        // Source copies cover neither alignment gaps nor file-backed virtual
+        // tails. Define those bytes even when the output arena is reused.
+        u8* data = zero_fill ? 0 : arena_allocate_zeroed(arena, u8, section_sizes[kind]);
         result.object.sections[kind] = (ObjectSection){
             .name = object_section_name_for_kind((ObjectSectionKind)kind),
             .data =

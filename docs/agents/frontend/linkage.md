@@ -4,6 +4,11 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- **Merged file-backed sections have zeroed background bytes.** `link_objects`
+  initializes alignment gaps and each input's virtual tail before copying its
+  data, so reused arenas produce the same bytes as fresh mappings. The zeroed
+  arena allocation clears only the dirty overlap. BSS and thread-local BSS
+  keep their virtual sizes without allocating serialized storage (GitHub #303).
 - **A read-only object that carries a relocation is laid out with the writable
   data.** `const` is the frontend's answer and the object writer's read-only
   section is where it usually goes, but those bytes are written when the
