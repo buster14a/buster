@@ -1873,9 +1873,85 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_alignment(UnitTestArgument
     return result;
 }
 
+// GNU as 2.47 byte/rejection oracles. Unsized bit-test operands may be
+// diagnosed, but an accepted BTS/BTR/BTC must never become another operation.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_att_suffix_aliases(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct AssemblyAttSuffixCase
+    {
+        String8 source;
+        u8 byte_count;
+        u8 bytes[12];
+        bool may_reject;
+    } const cases[] = {
+        {S8("addb $3,(%rax)\n"), 3, {0x80, 0x00, 0x03}, false},
+        {S8("addw $3,(%rax)\n"), 4, {0x66, 0x83, 0x00, 0x03}, false},
+        {S8("addl $3,(%rax)\n"), 3, {0x83, 0x00, 0x03}, false},
+        {S8("addq $3,(%rax)\n"), 4, {0x48, 0x83, 0x00, 0x03}, false},
+        {S8("movq %rax,8(%rbx)\n"), 4, {0x48, 0x89, 0x43, 0x08}, false},
+        {S8("movq %rax,8(%r16)\n"), 5, {0xd5, 0x18, 0x89, 0x40, 0x08}, false},
+        {S8("movq %mm0,%mm1\n"), 3, {0x0f, 0x6f, 0xc8}, false},
+        {S8("btsl $3,(%r23)\n"), 5, {0xd5, 0x90, 0xba, 0x2f, 0x03}, false},
+        {S8("btrl $3,(%r23)\n"), 5, {0xd5, 0x90, 0xba, 0x37, 0x03}, false},
+        {S8("btcl $3,(%r23)\n"), 5, {0xd5, 0x90, 0xba, 0x3f, 0x03}, false},
+        {S8("fadds (%rax)\n"), 2, {0xd8, 0x00}, false},
+        {S8("faddl (%rax)\n"), 2, {0xdc, 0x00}, false},
+        {S8("flds (%rax)\n"), 2, {0xd9, 0x00}, false},
+        {S8("fldt (%rax)\n"), 2, {0xdb, 0x28}, false},
+        {S8("fstps (%rax)\n"), 2, {0xd9, 0x18}, false},
+        {S8("fstpt (%rax)\n"), 2, {0xdb, 0x38}, false},
+        {S8("fiadds (%rax)\n"), 2, {0xde, 0x00}, false},
+        {S8("fiaddl (%rax)\n"), 2, {0xda, 0x00}, false},
+        {S8("filds (%rax)\n"), 2, {0xdf, 0x00}, false},
+        {S8("fildl (%rax)\n"), 2, {0xdb, 0x00}, false},
+        {S8("fildll (%rax)\n"), 2, {0xdf, 0x28}, false},
+        {S8("fistps (%rax)\n"), 2, {0xdf, 0x18}, false},
+        {S8("fistpll (%rax)\n"), 2, {0xdf, 0x38}, false},
+        {S8("FIADDS (%rax)\n"), 2, {0xde, 0x00}, false},
+        {S8("adds $3,(%rax)\n"), 0, {0}, true},
+        {S8("cmps $3,(%rax)\n"), 0, {0}, true},
+        {S8("movs $3,(%rax)\n"), 0, {0}, true},
+        {S8("addt $3,(%rax)\n"), 0, {0}, true},
+        {S8("cmpt $3,(%rax)\n"), 0, {0}, true},
+        {S8("movt $3,(%rax)\n"), 0, {0}, true},
+        {S8("ADDS $3,(%rax)\n"), 0, {0}, true},
+        {S8("faddt (%rax)\n"), 0, {0}, true},
+        {S8("bts $3,(%r23)\n"), 5, {0xd5, 0x90, 0xba, 0x2f, 0x03}, true},
+        {S8("bts $3,(%r16)\n"), 5, {0xd5, 0x90, 0xba, 0x28, 0x03}, true},
+        {S8("bts $3,16(%r23)\n"), 6, {0xd5, 0x90, 0xba, 0x6f, 0x10, 0x03}, true},
+        {S8("bts $3,(%rax,%r23,4)\n"), 6, {0xd5, 0xa0, 0xba, 0x2c, 0xb8, 0x03}, true},
+        {S8("bts $65,(%r23)\n"), 5, {0xd5, 0x90, 0xba, 0x2f, 0x41}, true},
+        {S8("BTS $3,(%r23)\n"), 5, {0xd5, 0x90, 0xba, 0x2f, 0x03}, true},
+        {S8("btr $3,(%r23)\n"), 5, {0xd5, 0x90, 0xba, 0x37, 0x03}, true},
+        {S8("btc $3,(%r23)\n"), 5, {0xd5, 0x90, 0xba, 0x3f, 0x03}, true},
+        {S8("bts $3,(%rax)\n"), 4, {0x0f, 0xba, 0x28, 0x03}, true},
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX,
+                     .cpu_model = CPU_MODEL_INTEL_DIAMOND_RAPIDS};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        struct AssemblyAttSuffixCase const* fixture = cases + index;
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, fixture->source,
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        bool accepted = fixture->byte_count && !encoded.diagnostic_count && !encoded.relocation_count &&
+                        assembly_test_bytes_equal(encoded.bytes, fixture->bytes, fixture->byte_count);
+        bool rejected = fixture->may_reject && encoded.diagnostic_count == 1 && !encoded.bytes.length;
+        BUSTER_TEST(arguments, accepted || rejected);
+        if (!accepted && !rejected)
+        {
+            arguments->show(arguments, S8("X86_ATT_SUFFIX_REGRESSION case={u32} input={S8}"), index, fixture->source);
+        }
+    }
+    return result;
+}
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
+    UnitTestResult suffix_aliases = assembly_test_att_suffix_aliases(arguments);
+    result.succeeded_test_count += suffix_aliases.succeeded_test_count;
+    result.test_count += suffix_aliases.test_count;
 
     /* The generated direct-SIMD owner table is the bounded denominator for
      * the public spelling adapter.  Keep this census independent of the

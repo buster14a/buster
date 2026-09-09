@@ -2815,9 +2815,25 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                              source.intel_alias_equivalent_count == 226 && source.intel_unresolved_count == 3956 &&
                              source.intel_byte_mismatch_count == 768 && source.intel_relocation_mismatch_count == 0 &&
                              source.intel_policy_rejected_count == 542 && source.intel_different_encoding_count == 17);
+    // Literal VCVTTSS2SIS/VCVTTSS2USIS memory forms previously lost their
+    // final S and emitted another instruction through the generic suffix
+    // fallback. They now reject the census operands instead of emitting
+    // wrong bytes; no exact AT&T row leaves the exact bucket.
+    static BusterX86MetadataFormKey const literal_suffix_forms[] = {
+        {4405, UINT64_C(0x9af889b056df9703)},
+        {4414, UINT64_C(0x2ba3c95989be18db)},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(literal_suffix_forms); index += 1)
+    {
+        BusterX86CompletionCensusRecord record = records[literal_suffix_forms[index].form_id];
+        BUSTER_TEST(arguments, record.stable_hash == literal_suffix_forms[index].stable_hash &&
+                                 record.att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED &&
+                                 record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS &&
+                                 record.att_byte_count == 0);
+    }
     BUSTER_TEST(arguments, source.att_exact_count == 5737 && source.att_normalized_relocation_count == 26 &&
-                             source.att_alias_equivalent_count == 47 && source.att_unresolved_count == 3733 &&
-                             source.att_byte_mismatch_count == 1064 && source.att_relocation_mismatch_count == 0 &&
+                             source.att_alias_equivalent_count == 47 && source.att_unresolved_count == 3735 &&
+                             source.att_byte_mismatch_count == 1062 && source.att_relocation_mismatch_count == 0 &&
                              source.att_policy_rejected_count == 551 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
@@ -2830,11 +2846,11 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 542);
-    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6891 &&
+    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6889 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL] == 1915 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY] == 4 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR] == 60 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1149 &&
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 1151 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 37 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 551);
     // Every baseline POLICY_FEATURE row must become byte-exact when the

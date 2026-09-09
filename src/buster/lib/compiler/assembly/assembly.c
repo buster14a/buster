@@ -11198,22 +11198,27 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_suffix_alias(Target target, Assem
         return false;
     }
     char8 suffix = assembly_ascii_lower(mnemonic.pointer[mnemonic.length - 1]);
-    u8 suffix_width = suffix == 'b' ? 8 : suffix == 'w' ? 16 : suffix == 'l' ? 32 : suffix == 'q' ? 64
-                     : suffix == 's' ? 32
-                     : suffix == 't' ? 80
-                                      : 0;
-    if (!suffix_width)
+    u8 suffix_width = suffix == 'b' ? 8 : suffix == 'w' ? 16 : suffix == 'l' ? 32 : suffix == 'q' ? 64 : 0;
+    if (!suffix_width && suffix != 's' && suffix != 't')
     {
         return false;
     }
     // The full AT&T mnemonic is present in the x87 typed alias table (for
     // example `fiadds`), while the base candidate below is the unsuffixed
     // `fiadd` entry and therefore has no suffix_width metadata of its own.
-    // Capture the typed width before stripping the suffix.
+    // The typed source alias is the sole width authority for `s` and `t`.
     AssemblyInstructionInfo suffixed_info = {.opcode = ASSEMBLY_OPCODE_COUNT};
-    if (assembly_instruction_lookup(target, syntax, mnemonic, &suffixed_info) && suffixed_info.suffix_width)
+    bool has_typed_suffix = assembly_instruction_lookup(target, syntax, mnemonic, &suffixed_info) && suffixed_info.suffix_width;
+    if (has_typed_suffix)
     {
         suffix_width = suffixed_info.suffix_width;
+    }
+    // A complete literal mnemonic must retain its identity after operand
+    // rejection. Typed aliases such as scalar `movq` may still select MOV
+    // when the separate metadata MOVQ family does not match their operands.
+    if (!suffix_width || (!has_typed_suffix && buster_x86_metadata_lookup_mnemonic(mnemonic).count))
+    {
+        return false;
     }
     // GNU spells the 64-bit x87 integer forms with a doubled `l` -- `fistpll`,
     // `fildll`, `fisttpll` -- which is one suffix character more than the
