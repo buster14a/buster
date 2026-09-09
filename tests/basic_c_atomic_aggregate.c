@@ -8,10 +8,9 @@
    `signed char` is spelled out because plain `char` is unsigned on AArch64,
    which would make the baked answers disagree with themselves across targets.
 
-   Widths one through eight run everywhere.  Sixteen is x86-64 only: it is the
-   CMPXCHG16B pair, and AArch64 has no 128-bit lock-free access here (nor for
-   `_Atomic __int128`), where the frontend refuses it with a diagnostic
-   instead. */
+   Widths one through eight run everywhere. Sixteen uses CMPXCHG16B on x86-64
+   with cx16 and exclusive-pair loops on AArch64. The wide fixture is enabled
+   for both targets and is exercised under every allocator. */
 
 typedef struct
 {
@@ -53,6 +52,7 @@ static _Atomic two global_two;
 static _Atomic six global_six;
 static _Atomic eight global_eight;
 static _Atomic narrow_union global_union;
+static volatile _Atomic six global_volatile_six;
 
 typedef struct
 {
@@ -133,6 +133,49 @@ static int local_round_trip(void)
     three read = local;
     local = read;
     return bytes_are(&local, expected, sizeof(expected)) && read.a == 4 && read.b == 5 && read.c == 6;
+}
+
+static int narrow_compare_exchange_round_trip(void)
+{
+    three initial = {1, 2, 3};
+    three desired = {4, 5, 6};
+    three replacement = {7, 8, 9};
+    three expected = initial;
+    __c11_atomic_store(&global_three, initial, __ATOMIC_SEQ_CST);
+    int changed = __c11_atomic_compare_exchange_strong(
+        &global_three, &expected, desired, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    three stale = initial;
+    int stale_changed = __c11_atomic_compare_exchange_strong(
+        &global_three, &stale, replacement, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    three previous = __c11_atomic_exchange(&global_three, replacement, __ATOMIC_ACQ_REL);
+    unsigned char bytes[4] = {7, 8, 9, 0};
+    return changed && !stale_changed && stale.a == 4 && stale.b == 5 && stale.c == 6 &&
+           previous.a == 4 && previous.b == 5 && previous.c == 6 && bytes_are(&global_three, bytes, sizeof(bytes));
+}
+
+static int qualified_and_union_exchange_round_trip(void)
+{
+    six initial = {0x11223344, 0x5566};
+    six desired = {0x22334455, 0x6677};
+    six expected = initial;
+    __c11_atomic_store(&global_volatile_six, initial, __ATOMIC_SEQ_CST);
+    int changed = __c11_atomic_compare_exchange_strong(
+        &global_volatile_six, &expected, desired, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    six previous = __c11_atomic_exchange(&global_volatile_six, initial, __ATOMIC_SEQ_CST);
+    six loaded = __c11_atomic_load(&global_volatile_six, __ATOMIC_ACQUIRE);
+
+    narrow_union union_initial;
+    narrow_union union_desired;
+    union_initial.word = 0x11223344;
+    union_desired.word = 0x556677;
+    narrow_union union_expected = union_initial;
+    __c11_atomic_store(&global_union, union_initial, __ATOMIC_SEQ_CST);
+    int union_changed = __c11_atomic_compare_exchange_strong(
+        &global_union, &union_expected, union_desired, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    narrow_union union_previous = __c11_atomic_exchange(&global_union, union_initial, __ATOMIC_ACQ_REL);
+    narrow_union union_loaded = __c11_atomic_load(&global_union, __ATOMIC_RELAXED);
+    return changed && previous.a == desired.a && previous.b == desired.b && loaded.a == initial.a && loaded.b == initial.b &&
+           union_changed && union_previous.word == union_desired.word && union_loaded.word == union_initial.word;
 }
 
 static int pointer_round_trip(void)
@@ -315,14 +358,32 @@ typedef struct
 
 typedef struct
 {
+    int a, b, c, d;
+} four_ints;
+
+typedef struct
+{
+    void* pointer;
+    unsigned long long counter;
+} pointer_counter;
+
+typedef struct
+{
     long long a;
     signed char b;
 } nine;
 
+typedef _Atomic sixteen atomic_sixteen;
+typedef _Atomic four_ints atomic_four_ints;
+typedef _Atomic pointer_counter atomic_pointer_counter;
 typedef _Atomic nine atomic_nine;
 
-static _Atomic sixteen global_sixteen;
+static atomic_sixteen global_sixteen;
+static atomic_four_ints global_four_ints;
+static atomic_pointer_counter global_pointer_counter;
 static atomic_nine global_nine;
+static int pointer_anchor_a;
+static int pointer_anchor_b;
 
 static int wide_round_trip(void)
 {
@@ -338,6 +399,51 @@ static int wide_round_trip(void)
     return read_sixteen.a == 0x1122334455667788LL && read_sixteen.b == 0x0102030405060708LL && sizeof(global_sixteen) == 16 &&
            bytes_are(&global_nine, nine_bytes, sizeof(nine_bytes)) && read_nine.a == 0x1122334455667788LL && read_nine.b == 0x5a &&
            sizeof(global_nine) == 16 && _Alignof(atomic_nine) == 16;
+}
+
+static int wide_compare_exchange_round_trip(void)
+{
+    sixteen initial = {1, 2};
+    sixteen desired = {3, 4};
+    sixteen replacement = {5, 6};
+    sixteen expected = initial;
+    __c11_atomic_store(&global_sixteen, initial, __ATOMIC_SEQ_CST);
+    int strong_succeeded = __c11_atomic_compare_exchange_strong(
+        &global_sixteen, &expected, desired, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    sixteen stale = initial;
+    int stale_succeeded = __c11_atomic_compare_exchange_strong(
+        &global_sixteen, &stale, replacement, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    sixteen loaded = __c11_atomic_load(&global_sixteen, __ATOMIC_ACQUIRE);
+
+    four_ints four_initial = {7, 8, 9, 10};
+    four_ints four_desired = {11, 12, 13, 14};
+    four_ints four_expected = four_initial;
+    __c11_atomic_store(&global_four_ints, four_initial, __ATOMIC_RELEASE);
+    int weak_succeeded = 0;
+    for (unsigned attempt = 0; attempt < 64 && !weak_succeeded; attempt += 1)
+    {
+        four_expected = four_initial;
+        weak_succeeded = __c11_atomic_compare_exchange_weak(
+            &global_four_ints, &four_expected, four_desired, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    }
+    four_ints four_loaded = __c11_atomic_load(&global_four_ints, __ATOMIC_RELAXED);
+
+    pointer_counter pointer_initial = {&pointer_anchor_a, 15};
+    pointer_counter pointer_desired = {&pointer_anchor_b, 16};
+    __c11_atomic_store(&global_pointer_counter, pointer_initial, __ATOMIC_SEQ_CST);
+    pointer_counter pointer_previous = __c11_atomic_exchange(
+        &global_pointer_counter, pointer_desired, __ATOMIC_ACQ_REL);
+    pointer_counter pointer_loaded = __c11_atomic_load(&global_pointer_counter, __ATOMIC_ACQUIRE);
+
+    return strong_succeeded && !stale_succeeded && stale.a == desired.a && stale.b == desired.b &&
+           loaded.a == desired.a && loaded.b == desired.b && weak_succeeded &&
+           four_loaded.a == four_desired.a && four_loaded.b == four_desired.b &&
+           four_loaded.c == four_desired.c && four_loaded.d == four_desired.d &&
+           pointer_previous.pointer == pointer_initial.pointer && pointer_previous.counter == pointer_initial.counter &&
+           pointer_loaded.pointer == pointer_desired.pointer && pointer_loaded.counter == pointer_desired.counter &&
+           sizeof(atomic_sixteen) == 16 && _Alignof(atomic_sixteen) == 16 &&
+           sizeof(atomic_four_ints) == 16 && _Alignof(atomic_four_ints) == 16 &&
+           sizeof(atomic_pointer_counter) == 16 && _Alignof(atomic_pointer_counter) == 16;
 }
 
 /* Sixteen bytes ride two eightbytes rather than one, and the seven bytes the
@@ -370,10 +476,16 @@ static int wide_argument_round_trip(void)
 {
     return 1;
 }
+
+static int wide_compare_exchange_round_trip(void)
+{
+    return 1;
+}
 #endif
 
 int main(void)
 {
     return !(sizes_are_promoted() && global_round_trip() && local_round_trip() && pointer_round_trip() && member_round_trip() && union_round_trip() &&
-             leading_round_trip() && argument_round_trip() && wide_round_trip() && wide_argument_round_trip());
+             leading_round_trip() && argument_round_trip() && wide_round_trip() && wide_argument_round_trip() &&
+                       wide_compare_exchange_round_trip() && narrow_compare_exchange_round_trip() && qualified_and_union_exchange_round_trip());
 }
