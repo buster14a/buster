@@ -143,6 +143,14 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `tests/basic_c_bit_field_promotion.c` covers widths 1, 3, 31, and 32,
   anonymous members, casts, assignments, and argument promotion under every
   allocator (GitHub #218).
+  Automatic nested initializers select known fields by index, preserving the
+  initializer expression's source range without inventing a token for an
+  anonymous member. Positional cursors and brace-elided descent skip unnamed
+  bit-fields, including zero-width fields, while anonymous structs and unions
+  remain initializable subobjects. Indexed places inherit both the enclosing
+  place's volatility and the field type's volatility. The frontend IR check
+  and `tests/basic_c_unnamed_initializer_members.c` cover these rules under all
+  four allocators (GitHub #323).
   A bit-field declarator carries a list of its own in exactly one place, *after*
   the width -- Clang rejects `int b __attribute__((packed)) : 5` -- so
   `c_type_parse_aggregate_segment_step` trims the width's token range with

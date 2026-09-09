@@ -14298,39 +14298,40 @@ BUSTER_C_INTERNAL IrTypeId c_ir_complex_type_for_element(CIntegerIrBuilder* buil
     return kind == C_TYPE_INVALID ? IR_TYPE_ID_INVALID : c_ir_builder_scalar_type(builder, kind);
 }
 
-// The field place for one half of an aggregate place, by index rather than by
-// member name: the complex halves have no C designator to look up.
+// A field whose index is already known. Complex halves and anonymous aggregate
+// members have no C name to turn into a source token or look up again.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_field_index_place(CIntegerIrBuilder* builder, IrValueId place, u32 field_index, IrSourceRange source)
 {
-    if (place.value >= builder->function->value_count)
+    IrValueId next = IR_VALUE_ID_INVALID;
+    if (place.value < builder->function->value_count)
     {
-        return IR_VALUE_ID_INVALID;
+        IrTypeId owner_type = builder->function->values[place.value].canonical_type;
+        IrType* owner = ir_type_from_id(&builder->program->types, owner_type);
+        if (owner && field_index < owner->field_count)
+        {
+            IrTypeId field_type = owner->fields[field_index].type;
+            IrType* field_value_type = ir_type_from_id(&builder->program->types, field_type);
+            next = ir_function_add_value(
+                builder->arena, builder->function,
+                (IrValue){
+                    .canonical_type = field_type,
+                    .definition = IR_INSTRUCTION_ID_INVALID,
+                    .category = IR_VALUE_PLACE,
+                    .is_read_only = builder->function->values[place.value].is_read_only,
+                    .is_volatile = builder->function->values[place.value].is_volatile || (field_value_type && field_value_type->is_volatile),
+                });
+            IrInstruction field = c_ir_instruction_initialize(IR_OPCODE_FIELD, field_type);
+            field.operands = arena_allocate(builder->arena, IrValueId, 1);
+            field.operands[0] = place;
+            field.operand_count = 1;
+            field.immediates = arena_allocate(builder->arena, u64, 1);
+            field.immediates[0] = field_index;
+            field.immediate_count = 1;
+            field.result = next;
+            IrInstructionId field_id = c_ir_append_instruction(builder, field, source);
+            builder->function->values[next.value].definition = field_id;
+        }
     }
-    IrTypeId owner_type = builder->function->values[place.value].canonical_type;
-    IrType* owner = ir_type_from_id(&builder->program->types, owner_type);
-    if (!owner || field_index >= owner->field_count)
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    IrTypeId field_type = owner->fields[field_index].type;
-    IrValueId next = ir_function_add_value(builder->arena, builder->function,
-                                           (IrValue){
-                                               .canonical_type = field_type,
-                                               .definition = IR_INSTRUCTION_ID_INVALID,
-                                               .category = IR_VALUE_PLACE,
-                                               .is_read_only = builder->function->values[place.value].is_read_only,
-                                               .is_volatile = builder->function->values[place.value].is_volatile,
-                                           });
-    IrInstruction field = c_ir_instruction_initialize(IR_OPCODE_FIELD, field_type);
-    field.operands = arena_allocate(builder->arena, IrValueId, 1);
-    field.operands[0] = place;
-    field.operand_count = 1;
-    field.immediates = arena_allocate(builder->arena, u64, 1);
-    field.immediates[0] = field_index;
-    field.immediate_count = 1;
-    field.result = next;
-    IrInstructionId field_id = c_ir_append_instruction(builder, field, source);
-    builder->function->values[next.value].definition = field_id;
     return next;
 }
 
@@ -21844,6 +21845,18 @@ BUSTER_C_INTERNAL bool c_ir_array_designator_has_range(CIntegerIrBuilder* builde
 
 BUSTER_C_INTERNAL bool c_ir_string_array_element_compatible(CIntegerIrBuilder* builder, IrTypeId element_type, CIrDecodedString decoded);
 
+// Unnamed bit-fields are padding, while anonymous structs/unions still consume
+// an initializer. Keep the cursor in field indices so each padding field is
+// skipped once as a positional initializer advances.
+BUSTER_C_INTERNAL u32 c_ir_initializer_next_field_index(IrType* type, u32 index)
+{
+    while (index < type->field_count && type->fields[index].is_bit_field && !type->fields[index].name.length)
+    {
+        index += 1;
+    }
+    return index;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -21999,6 +22012,10 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 goto c_ir_nested_compound_failed;
             }
             u32 selected_index = next_index;
+            if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
+            {
+                selected_index = c_ir_initializer_next_field_index(type, selected_index);
+            }
             u32 value_start = item_start;
             u32 nested_designator_start = UINT32_MAX;
             u32 designator_equals = UINT32_MAX;
@@ -22110,14 +22127,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             }
             else
             {
-                CToken access = {
-                    .offset = C_SPELLING_DOT,
-                    .length = 1,
-                    .kind = C_TOKEN_PUNCTUATOR,
-                    .punctuator = C_PUNCTUATOR_DOT,
-                };
-                CToken member = c_ir_space_name_token(builder, type->fields[selected_index].name);
-                child_place = c_ir_emit_field_place_from_value(builder, task.place, access, member);
+                child_place = c_ir_emit_field_index_place(builder, task.place, selected_index, source);
             }
             if (child_place.value == IR_ID_UNDERLYING_INVALID)
             {
@@ -22191,15 +22201,12 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 }
                 else if ((child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) && child->field_count)
                 {
-                    CToken access = {
-                        .offset = C_SPELLING_DOT,
-                        .length = 1,
-                        .kind = C_TOKEN_PUNCTUATOR,
-                        .punctuator = C_PUNCTUATOR_DOT,
-                    };
-                    CToken member = c_ir_space_name_token(builder, child->fields[0].name);
-                    child_place = c_ir_emit_field_place_from_value(builder, child_place, access, member);
-                    child_type = child->fields[0].type;
+                    u32 first_field = c_ir_initializer_next_field_index(child, 0);
+                    child_place = c_ir_emit_field_index_place(builder, child_place, first_field, source);
+                    if (child_place.value != IR_ID_UNDERLYING_INVALID)
+                    {
+                        child_type = child->fields[first_field].type;
+                    }
                 }
                 else
                 {

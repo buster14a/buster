@@ -2050,6 +2050,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_invalid_designators(UnitTestArguments*
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unnamed_initializer_places(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 prefix = S8("int initialize(int input) { struct S object = {{");
+    String8 parts[] = {S8("struct S { unsigned : 1; struct { unsigned : 2; volatile unsigned value : 3; }; };\n"),
+                       prefix, S8("input}}; return 0; }")};
+    String8 source = string_join_arena(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true);
+    CPreprocessResult preprocess = {0};
+    CParseResult parse = {0};
+    CIRLowerResult lower = c_test_lower_source(temporary.arena, source, S8("unnamed-initializer.c"), target_native, &preprocess, &parse);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0 && lower.diagnostic_count == 0 && lower.program);
+    if (lower.program)
+    {
+        IrModule* module = lower.program->modules;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(lower.program, module).error == IR_VALIDATION_NONE);
+        BUSTER_TEST(arguments, module->function_count == 1);
+        if (module->function_count == 1)
+        {
+            IrFunction* function = module->functions;
+            u32 fields = 0;
+            u32 volatile_fields = 0;
+            u32 volatile_stores = 0;
+            for (u32 index = 0; index < function->instruction_count; index += 1)
+            {
+                IrInstruction* instruction = function->instructions + index;
+                volatile_stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
+                if (instruction->opcode == IR_OPCODE_FIELD)
+                {
+                    fields += 1;
+                    BUSTER_TEST(arguments, instruction->result.value < function->value_count);
+                    if (instruction->result.value < function->value_count)
+                    {
+                        volatile_fields += function->values[instruction->result.value].is_volatile;
+                    }
+                    IrSourceRange location = ir_instruction_canonical_source(function, ir_instruction_self_id(function, instruction));
+                    BUSTER_TEST(arguments, location.source.value != IR_ID_UNDERLYING_INVALID);
+                    IrSourcePosition position = ir_source_position(lower.program, location);
+                    // The anonymous aggregate begins at its brace; the scalar
+                    // inside it begins at the input expression, one byte later.
+                    u64 column = prefix.length + (fields == 1 ? 0 : 1);
+                    u64 length = fields == 1 ? S8("{").length : S8("input").length;
+                    BUSTER_TEST(arguments, position.line == 2 && position.column == column && location.length == length);
+                }
+            }
+            BUSTER_TEST(arguments, fields == 2 && volatile_fields == 1 && volatile_stores == 1);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // A file-scope compound literal has static storage duration (C11 6.5.2.5p5),
 // so its address is an address constant a static initializer may hold. The
 // four refusals here are what the folder still cannot reduce, and each one has
@@ -13834,6 +13886,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_invalid_designators(arguments));
 
     c_test_result_add(&result, c_test_invalid_root_designators(arguments));
+
+    c_test_result_add(&result, c_test_unnamed_initializer_places(arguments));
 
     c_test_result_add(&result, c_test_static_compound_literal(arguments));
 

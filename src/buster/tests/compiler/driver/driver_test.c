@@ -8981,6 +8981,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_shift_operand_types.c"),
         S8("tests/basic_c_narrow_argument_abi.c"),
         S8("tests/basic_c_bit_field_promotion.c"),
+        S8("tests/basic_c_unnamed_initializer_members.c"),
         S8("tests/basic_c_constant_conditional_type.c"),
         S8("tests/basic_c_macro_empty_paste.c"),
     };
@@ -8996,6 +8997,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-shift-operand-types"),
         S8("buster-c-narrow-argument-abi"),
         S8("buster-c-bit-field-promotion"),
+        S8("buster-c-unnamed-initializer-members"),
         S8("buster-c-constant-conditional-type"),
         S8("buster-c-macro-empty-paste"),
     };
