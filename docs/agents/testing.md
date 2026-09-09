@@ -77,3 +77,12 @@ allocator/optimization discovery. See [differential-testing.md](../differential-
 for ABI fixtures, diagnostics, opt-in IR/MIR validation, sanitizer controls,
 reduction limits and evidence format. This supplements all existing gates;
 it does not replace target-matrix execution or the seeded differential corpus.
+
+## Source-equivalence campaigns
+
+`ide test` also runs a bounded source-equivalence smoke campaign under all native
+allocator modes. `ide metamorphic` exposes the wider native/LLVM/Wasm64/eBPF
+matrix, optional engine discovery, explicit unexecuted rows, and grammar-aware
+failure reduction. See [metamorphic testing](../metamorphic-testing.md) for the
+transformation preconditions, reproducible seeds, strict execution mode and
+failure bundles. Cross-target compilation is not a behavioral pass.

@@ -3,7 +3,8 @@
 // (`ide test` -> compiler_run_tests -> library_tests), benchmark driver
 // (`ide bench`, the BENCH_C_FRONTEND line; `ide bench-select`, BENCH_SELECT),
 // fuzz entrypoint, and x86-64
-// completion census. The name is retained for build-script compatibility.
+// completion census. `ide metamorphic` runs source-equivalence campaigns.
+// The name is retained for build-script compatibility.
 // The BUSTER_UNITY_BUILD include block below is the list AGENTS.md's
 // module-adding rule appends to; forgetting a module there breaks
 // optimized Release builds.
@@ -48,6 +49,7 @@
 #include <buster/lib/target.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/tests/test.h>
+#include <buster/tests/compiler/metamorphic/metamorphic_test.h>
 #endif
 
 #if BUSTER_UNITY_BUILD
@@ -119,6 +121,7 @@ typedef enum CompilerCommand
 {
     COMPILER_COMMAND_HELP,
     COMPILER_COMMAND_TEST,
+    COMPILER_COMMAND_METAMORPHIC,
     COMPILER_COMMAND_BENCH,
     COMPILER_COMMAND_BENCH_SELECT,
     COMPILER_COMMAND_CC,
@@ -145,6 +148,7 @@ BUSTER_GLOBAL_LOCAL void compiler_print_usage(void)
     string_print(S8("usage:\n"
                     "  ide cc <C compiler options and inputs>\n"
                     "  ide test [--verbose=0|1] [--ci=0|1]\n"
+                    "  ide metamorphic (configure through BUSTER_METAMORPHIC_* environment variables)\n"
                     "  ide bench\n"
                     "  ide bench-select <self-contained-source.c>\n"
                     "  ide x86_64_completion_census [--output=<path>]\n"
@@ -181,9 +185,9 @@ ProcessResult process_arguments(void)
         compiler_state.cc_arguments = (SliceString8){.pointer = arguments.pointer + 2, .length = arguments.length - 2};
         return PROCESS_RESULT_SUCCESS;
     }
-    if (string_equal(command, S8("test")))
+    if (string_equal(command, S8("test")) || string_equal(command, S8("metamorphic")))
     {
-        compiler_state.command = COMPILER_COMMAND_TEST;
+        compiler_state.command = string_equal(command, S8("metamorphic")) ? COMPILER_COMMAND_METAMORPHIC : COMPILER_COMMAND_TEST;
         for (u64 index = 2; index < arguments.length; index += 1)
         {
             if (!compiler_process_common_argument(index))
@@ -985,6 +989,13 @@ ProcessResult entry_point(void)
             return PROCESS_RESULT_SUCCESS;
         case COMPILER_COMMAND_TEST:
             return compiler_run_tests();
+        case COMPILER_COMMAND_METAMORPHIC:
+#if BUSTER_INCLUDE_TESTS
+            return metamorphic_campaign(program_state->arena);
+#else
+            string_print(S8("metamorphic: rebuild with BUSTER_INCLUDE_TESTS=1\n"));
+            return PROCESS_RESULT_FAILED;
+#endif
         case COMPILER_COMMAND_BENCH:
             return compiler_run_benchmarks();
         case COMPILER_COMMAND_BENCH_SELECT:
