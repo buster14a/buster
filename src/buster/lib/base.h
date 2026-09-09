@@ -32,6 +32,10 @@
 #define BUSTER_OPTIMIZE 0
 #endif
 
+#ifndef BUSTER_BENCH_ALLOCATIONS
+#define BUSTER_BENCH_ALLOCATIONS 0
+#endif
+
 #ifndef BUSTER_SANITIZE
 #define BUSTER_SANITIZE 0
 #endif

@@ -7,6 +7,22 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {0};
 
+#if BUSTER_BENCH_ALLOCATIONS
+    {
+        Arena* measured = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1)});
+        ArenaBenchmarkCounters before = arena_benchmark_counters();
+        arena_allocate_bytes(measured, 3, 1);
+        arena_allocate_bytes(measured, 5, 64);
+        arena_reset_to_start(measured);
+        arena_allocate_zeroed_bytes(measured, 7, 1);
+        arena_allocate_bytes(measured, 0, 8);
+        ArenaBenchmarkCounters after = arena_benchmark_counters();
+        BUSTER_TEST(arguments, after.calls - before.calls == 4);
+        BUSTER_TEST(arguments, after.requested_bytes - before.requested_bytes == 15);
+        arena_destroy(measured, 1);
+    }
+#endif
+
 #if BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS
     String8 failure_mode = os_get_environment_variable(S8("BUSTER_ARENA_FAILURE_MODE"));
     if (string_equal(failure_mode, S8("commit")) || string_equal(failure_mode, S8("bound")))

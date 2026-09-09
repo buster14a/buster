@@ -124,6 +124,7 @@ option(BUSTER_UNITY_BUILD "Enable unity builds for optimized non-sanitized Clang
 option(BUSTER_INCLUDE_TESTS "Enable tests" ON)
 option(BUSTER_SANITIZE "Enable sanitizers" OFF)
 option(BUSTER_TIME_TRACE "Enable time tracing" OFF)
+option(BUSTER_BENCH_ALLOCATIONS "Count calling-thread arena requests in diagnostic compiler builds" OFF)
 option(BUSTER_INSTRUMENT "Enable fine-grained timing instrumentation for ide bench" OFF)
 option(BUSTER_FUZZ_AVAILABLE "Build with runtime fuzzing support" OFF)
 option(BUSTER_LTO "Enable LTO" OFF)
@@ -1484,6 +1485,7 @@ function(executable_add name is_buster_program main_file)
         BUSTER_HOST_C_COMPILER_ARG1="${CMAKE_C_COMPILER_ARG1}"
         BUSTER_HOST_C_RESOURCE_INCLUDE="${BUSTER_HOST_C_RESOURCE_INCLUDE}"
         BUSTER_HOST_C_COMPILER_MSVC=$<IF:$<BOOL:${C_COMPILER_MSVC}>,1,0>
+        BUSTER_BENCH_ALLOCATIONS=$<IF:$<BOOL:${BUSTER_BENCH_ALLOCATIONS}>,1,0>
         BUSTER_INSTRUMENT=$<IF:$<BOOL:${BUSTER_INSTRUMENT}>,1,0>
     )
 

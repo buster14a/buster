@@ -2,6 +2,21 @@
 #include <buster/lib/os.h>
 #include <buster/lib/integer.h>
 
+#if BUSTER_BENCH_ALLOCATIONS
+BUSTER_THREAD_LOCAL_DECL ArenaBenchmarkCounters arena_benchmark_thread;
+
+void arena_benchmark_record(u64 size)
+{
+    arena_benchmark_thread.calls += 1;
+    arena_benchmark_thread.requested_bytes += size;
+}
+
+ArenaBenchmarkCounters arena_benchmark_counters(void)
+{
+    return arena_benchmark_thread;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);

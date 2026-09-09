@@ -1,0 +1,117 @@
+name: Compiler throughput
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: Baseline commit or ref (PRs always use their immutable base SHA)
+        default: main
+        required: true
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: throughput-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  harness:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, macos-26, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Native harness tests (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
+          ./build/build bench_throughput self-test
+      - name: Native harness tests (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPath = (& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1).Trim()
+          if (-not $VsPath) { throw 'Visual Studio C++ toolchain not found' }
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          New-Item -ItemType Directory -Force build | Out-Null
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./build/build.exe bench_throughput self-test
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: throughput-harness-${{ matrix.os }}
+          path: build/throughput-tool-tests
+          retention-days: 7
+          if-no-files-found: warn
+
+  regression-guard:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    needs: harness
+    timeout-minutes: 35
+    steps:
+      # Neither fork code nor compiler output receives credentials or a shared
+      # cache. Both compilers are built sequentially, before any measurement.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.base.sha || inputs.baseline_ref || github.sha }}
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Record checked-out revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'BUSTER_THROUGHPUT_BASE_SHA=%s\n' "$(git -C baseline rev-parse HEAD)" >> "$GITHUB_ENV"
+          printf 'BUSTER_THROUGHPUT_HEAD_SHA=%s\n' "$(git -C candidate rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Build and compare on this runner
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
+          ./build/build bench_throughput_ci ../baseline
+      - name: Publish comparison
+        if: always()
+        shell: bash
+        run: |
+          if test -f candidate/build/throughput-ci-results/summary.md; then
+            cat candidate/build/throughput-ci-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Benchmark incomplete. Inspect the build and compiler logs; no performance verdict was produced.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: compiler-throughput-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            candidate/build/throughput-ci-results
+            candidate/build/throughput-ci-compiler/CMakeCache.txt
+            candidate/build/throughput-ci-compiler/compile_commands.json
+            baseline/build/throughput-ci-compiler/CMakeCache.txt
+            baseline/build/throughput-ci-compiler/compile_commands.json
+          retention-days: 14
+          if-no-files-found: warn
