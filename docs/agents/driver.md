@@ -30,8 +30,10 @@ into a fixed area at the bottom of the frame instead of pushed, because the
 stack pointer must not move inside the body of a function whose unwind data
 can only carry a frame-pointer offset up to 240 bytes. Its prologue pushes the
 callee-saved registers before establishing the frame pointer for the same
-reason. Shapes the Win64 subset does not build yet — variadic definitions and
-calls, 128-bit integers, vector signatures, indirect (non 1/2/4/8-byte)
+reason. Windows/UEFI variadic definitions and calls use the positional home
+area and float-register duplication described in the [machine guide](machine.md).
+Shapes the Win64 subset does not build yet — 128-bit integer signatures,
+vector signatures, indirect (non 1/2/4/8-byte)
 aggregate arguments, and dynamic stack allocation — fall back per function,
 which `-v`'s `fallback_functions` and `CODEGEN_FALLBACK` lines report.
 `CODEGEN_FALLBACK_REASON` additionally identifies the target, allocator and
@@ -65,7 +67,8 @@ For example, `build/Release/ide cc -fregister-allocator=mir-stack -fno-machine-f
 `compiler_driver_test_machine_fallback` runs a curated arithmetic, control-flow
 and call-ABI corpus through this gate for x86-64 and AArch64 Linux under all
 three machine allocators in `test_all`, including CI. Deliberate PE AArch64
-target exclusion and Win64/Darwin AArch64 variadic signatures are separate
+target exclusion, Win64 indirect aggregate parameters, and Darwin AArch64
+variadic signatures are separate
 negative tests. This corpus is a coverage floor, not a claim of complete MIR
 lowering or permission to retire the canonical oracle.
 

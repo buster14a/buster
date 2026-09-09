@@ -1,7 +1,15 @@
-// The named argument is legal on every native ABI. Win64 and Darwin AArch64
-// deliberately keep variadic definitions on the canonical path, even when
-// the body never reads the anonymous arguments.
+// Win64 still excludes indirect aggregate parameters from machine selection.
+// Darwin AArch64 still excludes variadic definitions. Keep both signature
+// failures explicit as supported shapes move into the machine backend.
+#if defined(_WIN32) && defined(__x86_64__)
+struct MachineFallbackParameter { long long first; long long second; };
+int machine_fallback_signature(struct MachineFallbackParameter value, ...)
+{
+    return (int)value.first;
+}
+#else
 int machine_fallback_signature(int value, ...)
 {
     return value;
 }
+#endif

@@ -658,6 +658,8 @@ typedef enum MachineOpcode
     MACHINE_A64_CLEAR_INSTRUCTION_CACHE, // use begin/end; fixed X9/X10; clobber X9/X11/NZCV
     MACHINE_X64_CPUID,                  // use leaf/subleaf in RAX/RCX; frame receives RAX/RBX/RCX/RDX
     MACHINE_X64_XGETBV,                 // use index in RCX; frame receives RAX/RDX
+    MACHINE_X64_WIN_VA_SAVE,            // use RCX/RDX/R8/R9; store caller-owned argument homes
+    MACHINE_X64_LEA_INCOMING,           // def general; payload = byte offset into incoming arguments
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -1167,7 +1169,11 @@ typedef struct MachineFunction MachineFunction;
 // save-area/overflow-area sequence without consulting IR or calling back into
 // the canonical emitter.  A memory-class part has `is_memory` set and makes
 // the row use the overflow path directly.
-#define MACHINE_VA_ARG_PART_LIMIT 2
+// System V x86-64 needs two parts; an AArch64 HFA can contain four.
+#define MACHINE_VA_ARG_PART_LIMIT 4
+#define MACHINE_A64_VA_GP_SAVE_BYTES 64u
+#define MACHINE_A64_VA_FP_SAVE_BYTES 128u
+#define MACHINE_A64_VA_SAVE_BYTES (MACHINE_A64_VA_GP_SAVE_BYTES + MACHINE_A64_VA_FP_SAVE_BYTES)
 typedef struct MachineVaArgPart MachineVaArgPart;
 struct MachineVaArgPart
 {

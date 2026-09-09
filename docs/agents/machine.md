@@ -111,6 +111,31 @@
   data-clean and instruction-invalidate walks cover aligned four-byte granules
   through the exclusive end, with DSB/ISB barriers. The direct AArch64 oracle
   uses the same alignment rule; an unaligned start must not skip a final line.
+- Windows/UEFI x86-64 variadic definitions home RCX/RDX/R8/R9 before any
+  argument capture can reuse those registers. The caller-owned homes adjoin
+  the overflow arguments; both homing and `LEA_INCOMING` include placement's
+  `incoming_base` for callee-save pushes preceding RBP. Each supported named
+  parameter consumes one slot, and a hidden return pointer consumes the first.
+  Pointer-sized `va_list` copies use eight bytes and `va_end` emits no write.
+  Scalar and aggregate `va_arg` reads advance one slot, dereferencing indirect
+  aggregates according to the canonical ABI classification. Existing indirect
+  argument/vector signature exclusions still apply to callers.
+  Variadic callers duplicate scalar float bits into positional GPRs during the
+  integer staging pass, after all XMM bridges, and omit the System V AL count.
+  Cross-compiler regressions cover both call directions, register exhaustion,
+  copied lists, small/indirect aggregates, and hidden result pointers.
+- ELF AArch64 variadic definitions capture X0-X7 and Q0-Q7 into a 192-byte
+  save area before argument capture. Named parameters consume their ABI's
+  independent integer and floating-point register files. The existing private
+  four-word list stores the integer cursor, overflow pointer, save pointer,
+  and floating-point cursor; `va_copy` copies all four words and `va_end`
+  emits no write. Scalar and homogeneous floating aggregates advance the Q
+  cursor, while integer reads advance the X cursor; both use the shared overflow pointer after
+  register exhaustion. A composite that cannot fit closes its register file
+  before smaller following arguments. The direct oracle and MIR use the same
+  image. Passing lists between Buster and another compiler still requires the
+  public AAPCS64 `va_list` representation; that work is
+  tracked in [#360](https://github.com/buster14a/buster/issues/360).
 - x86 CPUID/XGETBV literal assembly with complete 32-bit pure outputs and
   separate fixed inputs selects constrained machine rows. Numeric/named ties
   retain the input's fixed register. CPUID consumes RAX/RCX together and

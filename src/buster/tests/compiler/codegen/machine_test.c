@@ -711,19 +711,10 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
     return audit;
 }
 
-// Every caller sits inside the executing-differential sections below, so
-// the definition carries their guard: configurations that compile those
-// out (other architectures, or the sanitized and fuzzing builds) do not pass
-// -Wno-unused-function and would reject an unreferenced helper.
-//
-// Those sections call the emitted bytes through a native function pointer,
-// and the bytes are generated for a Linux target on the native architecture.
-// The x86 corpus uses System V; the AArch64 pointer corpus uses the shared
-// fixed scalar argument convention. A Microsoft-ABI x86 host passes arguments in the wrong
-// registers and both paths read whatever the callee-side registers happen
-// to hold, so Windows is excluded from executing — it still selects,
-// verifies, places, encodes and checks fallback accounting above.
-#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+// Native tests resolve function entries by symbol. Each execution site
+// chooses the matching host ABI: Windows variadic tests use Win64, while
+// the System V and AArch64 fixtures keep their Unix execution guards.
+#if (BUSTER_CPU_ARCH_X86_64 || (BUSTER_CPU_ARCH_AARCH64 && !BUSTER_WINDOWS)) && !BUSTER_SANITIZE
 BUSTER_GLOBAL_LOCAL u32 machine_test_module_offset(CodegenModule* module, IrModule* ir_module, String8 name)
 {
     IrFunction* ir_function = machine_test_ir_function_find(ir_module, name);
@@ -1975,9 +1966,206 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_cpu_queries(UnitTestArguments* a
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_variadic(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice input = file_read(arguments->arena, S8("tests/differential/native_variadic.c"), (FileReadOptions){0});
+    String8 source = string_format(arguments->arena, S8("#define BUSTER_MACHINE_VA_TEST 1\n{S8}"),
+                                  (String8){.pointer = (char8*)input.pointer, .length = input.length});
+    BUSTER_TEST(arguments, input.length != 0);
+    String8 names[] = {S8("native_va_ints"), S8("native_va_floats"), S8("native_va_named"), S8("native_va_result"),
+                       S8("native_va_small"), S8("native_va_indirect"), S8("native_va_hfa"), S8("native_va_hfa_overflow")};
+    u32 named_bytes[] = {8, 16, 48, 16, 8, 8, 8, 64};
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+                        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_UEFI},
+                        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    MachineOpcodeInfo const* save = machine_opcode_info(MACHINE_X64_WIN_VA_SAVE);
+    u32 saved_registers[] = {MACHINE_X64_RCX, MACHINE_X64_RDX, MACHINE_X64_R8, MACHINE_X64_R9};
+    BUSTER_TEST(arguments, save->operand_count == 4 && save->memory_effect == MACHINE_MEMORY_EFFECT_WRITE);
+    for (u32 index = 0; index < 4; index += 1)
+    {
+        BUSTER_TEST(arguments, machine_opcode_fixed_register(save, index) == saved_registers[index]);
+    }
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(targets); system += 1)
+    {
+        bool windows = system < 2;
+        Target target = targets[system];
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("native-variadic.c"), source, target,
+                                                                     (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                {
+                    IrFunction* function = machine_test_ir_function_find(module, names[name]);
+                    BUSTER_TEST(arguments, function != 0);
+                    if (function)
+                    {
+                        MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                        BUSTER_TEST_RAW(arguments, selected.supported, names[name]);
+                        if (selected.supported)
+                        {
+                            BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                            if (target.cpu_arch == CPU_ARCH_AARCH64)
+                            {
+                                u32 homes = 0;
+                                for (u32 index = 0; index < selected.function.instruction_count; index += 1)
+                                {
+                                    MachineInstruction* row = selected.function.instructions + index;
+                                    if (row->opcode == MACHINE_A64_VA_SAVE)
+                                    {
+                                        u32 slot = machine_ref_payload(row->operands[0]);
+                                        u32 size = selected.function.stack_slot_sizes[slot];
+                                        BUSTER_TEST(arguments, size == 192);
+                                        selected.function.stack_slot_sizes[slot] = 191;
+                                        BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_PAYLOAD);
+                                        selected.function.stack_slot_sizes[slot] = size;
+                                        homes += 1;
+                                    }
+                                }
+                                BUSTER_TEST(arguments, homes == 1);
+                            }
+                            if (windows)
+                            {
+                                u32 homes = 0;
+                                u32 starts = 0;
+                                for (u32 index = 0; index < selected.function.instruction_count; index += 1)
+                                {
+                                    MachineInstruction* row = selected.function.instructions + index;
+                                    homes += row->opcode == MACHINE_X64_WIN_VA_SAVE;
+                                    if (row->opcode == MACHINE_X64_LEA_INCOMING)
+                                    {
+                                        starts += 1;
+                                        BUSTER_TEST(arguments, row->payload == named_bytes[name]);
+                                    }
+                                    BUSTER_TEST(arguments, row->opcode != MACHINE_X64_VA_ARG && row->opcode != MACHINE_X64_VA_SAVE);
+                                }
+                                BUSTER_TEST(arguments, homes == 1 && starts == 1);
+                            }
+                        }
+                    }
+                }
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                    BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+#if (BUSTER_CPU_ARCH_X86_64 || (BUSTER_CPU_ARCH_AARCH64 && !BUSTER_WINDOWS)) && !BUSTER_SANITIZE
+                    bool native_abi = BUSTER_WINDOWS ? windows : !windows;
+                    bool native_arch = BUSTER_CPU_ARCH_X86_64 ? target.cpu_arch == CPU_ARCH_X86_64
+                                                              : target.cpu_arch == CPU_ARCH_AARCH64 && BUSTER_LINUX;
+                    if (native_abi && native_arch && generated.error == CODEGEN_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, generated.relocation_count == 0);
+                        CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                        BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                        if (executable.address)
+                        {
+                            struct VaResult { s64 sum; s64 count; };
+                            struct VaSmall1 { s8 value; };
+                            struct VaSmall2 { s16 value; };
+                            struct VaSmall4 { s32 value; };
+                            struct VaSmall8 { s64 value; };
+                            struct VaIndirect { s64 first; s64 second; };
+                            typedef s64 VaInts(s32, ...);
+                            typedef f64 VaFloats(f64, s32, ...);
+                            typedef s64 VaNamed(s64, f64, s64, f64, s64, s32, ...);
+                            typedef struct VaResult VaResultCall(s32, ...);
+                            for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                            {
+                                u32 offset = machine_test_module_offset(&generated, module, names[name]);
+                                BUSTER_TEST(arguments, offset != UINT32_MAX);
+                                if (offset != UINT32_MAX)
+                                {
+                                    void* address = (u8*)executable.address + offset;
+                                    VaInts* integers = 0;
+                                    memcpy(&integers, &address, sizeof(integers));
+                                    if (name == 0)
+                                    {
+                                        BUSTER_TEST(arguments, integers(0) == 0);
+                                        BUSTER_TEST(arguments, integers(7, 1ll, 2ll, 3ll, 4ll, 5ll, 6ll, 7ll) == 140);
+                                    }
+                                    else if (name == 1)
+                                    {
+                                        VaFloats* floats = 0;
+                                        memcpy(&floats, &address, sizeof(floats));
+                                        BUSTER_TEST(arguments, floats(1.5, 4, 2.5, 3.5, 4.5, 5.5) == 62.0);
+                                        BUSTER_TEST(arguments, floats(1.5, 10, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0) == 394.5);
+                                    }
+                                    else if (name == 2)
+                                    {
+                                        VaNamed* named = 0;
+                                        memcpy(&named, &address, sizeof(named));
+                                        BUSTER_TEST(arguments, named(1ll, 2.0, 3ll, 4.0, 5ll, 5, 6ll, 7ll, 8ll, 9ll, 10ll) == 55);
+                                    }
+                                    else if (name == 3)
+                                    {
+                                        VaResultCall* aggregate = 0;
+                                        memcpy(&aggregate, &address, sizeof(aggregate));
+                                        struct VaResult actual = aggregate(5, 1ll, 2ll, 3ll, 4ll, 5ll);
+                                        BUSTER_TEST(arguments, actual.sum == 15 && actual.count == 5);
+                                    }
+                                    else if (name == 4)
+                                    {
+                                        struct VaSmall1 a = {-3};
+                                        struct VaSmall2 b = {-301};
+                                        struct VaSmall4 c = {-70001};
+                                        struct VaSmall8 d = {-0x123456789ll};
+                                        BUSTER_TEST(arguments, integers(17, a, b, c, d, 99ll) == (17ll - 3 - 301 - 70001 - 0x123456789ll + 99));
+                                    }
+                                    else if (name == 5)
+                                    {
+                                        struct VaIndirect a = {2, 3};
+                                        struct VaIndirect b = {5, 6};
+                                        struct VaIndirect c = {7, 8};
+                                        BUSTER_TEST(arguments, integers(1, a, 4ll, b, c, 9ll) == 144);
+                                    }
+                                    else
+                                    {
+                                        struct Hfa4 { f32 a; f32 b; f32 c; f32 d; } hfa4 = {1, 2, 3, 4};
+                                        struct Hfa2 { f64 a; f64 b; } hfa2 = {5, 6};
+                                        if (name == 6)
+                                        {
+                                            typedef f64 HfaCall(s32, ...);
+                                            HfaCall* hfa = 0;
+                                            memcpy(&hfa, &address, sizeof(hfa));
+                                            BUSTER_TEST(arguments, hfa(1, hfa4, hfa2, 7.0) == 99.0);
+                                        }
+                                        else
+                                        {
+                                            typedef f64 HfaOverflow(f64, f64, f64, f64, f64, f64, f64, s32, ...);
+                                            HfaOverflow* hfa = 0;
+                                            memcpy(&hfa, &address, sizeof(hfa));
+                                            BUSTER_TEST(arguments, hfa(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 1, hfa4, hfa2, 7.0) == 77.0);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        codegen_release_executable(executable);
+                    }
+#endif
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult variadic_result = machine_test_native_variadic(arguments);
+    result.test_count += variadic_result.test_count;
+    result.succeeded_test_count += variadic_result.succeeded_test_count;
     UnitTestResult query_result = machine_test_cpu_queries(arguments);
     result.test_count += query_result.test_count;
     result.succeeded_test_count += query_result.succeeded_test_count;
@@ -2298,7 +2486,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 239);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 241);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_OPCODE_SKELETON_RETURN] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
@@ -2323,6 +2511,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_X64_RET] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_CPUID] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_XGETBV] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_WIN_VA_SAVE] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_CALL_DIRECT] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_TLS_GENERAL_DYNAMIC] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_SWITCH] = MACHINE_SCHEDULE_UNIT_BARRIER,
@@ -2536,7 +2725,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 84);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 86);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
@@ -4237,8 +4426,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, va_save_rows == 1);
                 BUSTER_TEST(arguments, va_arg_rows == variadic_observe_selected.function.va_arg_count && va_arg_rows == 16);
             }
-            // The Windows x86-64 variadic definition ABI is intentionally
-            // outside this SysV machine subset and must stay on fallback.
+            // A SysV-lowered va_list has the wrong layout for Windows.
+            // Refuse this mixed-target IR instead of treating it as a pointer.
             Target windows_machine_target = machine_target;
             windows_machine_target.os = OPERATING_SYSTEM_WINDOWS;
             MachineSelectResult windows_variadic_selected =

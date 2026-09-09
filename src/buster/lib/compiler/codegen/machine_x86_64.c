@@ -1478,6 +1478,66 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_member_write(MachineX64Selector* sel
     return true;
 }
 
+// Win64's cursor walks one contiguous eightbyte sequence: register homes
+// followed by stack arguments. Indirect aggregates occupy a pointer slot.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_windows_va_arg(MachineX64Selector* selector, IrType* type, u32 list_register,
+                                                           u32 result_register, u32 result_slot, bool aggregate)
+{
+    bool selected = false;
+    if (type && type->layout.resolved && type->layout.size && type->layout.size <= 16)
+    {
+        IrTypeId type_id = {.value = (u32)(type - selector->program->types.types)};
+        IrAbiValue abi = ir_type_abi_value(selector->program, type_id, IR_ABI_CONVENTION_WIN64_X86_64, IR_ABI_USE_VARIADIC_ARGUMENT);
+        if (abi.part_count == 1 && !abi.memory && (aggregate || type->layout.size <= 8))
+        {
+            u32 cursor = machine_x64_synthesize_register(selector);
+            machine_x64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, list_register)},
+                .opcode = MACHINE_X64_LOAD_PTR64,
+            });
+            u32 next = machine_x64_synthesize_register(selector);
+            machine_x64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, next), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
+                .payload = 8,
+                .opcode = MACHINE_X64_LEA_OFFSET,
+            });
+            machine_x64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, list_register), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, next)},
+                .opcode = MACHINE_X64_STORE_PTR64,
+            });
+            u32 address = cursor;
+            if (abi.indirect)
+            {
+                address = machine_x64_synthesize_register(selector);
+                machine_x64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
+                    .opcode = MACHINE_X64_LOAD_PTR64,
+                });
+            }
+            if (aggregate)
+            {
+                machine_x64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address)},
+                    .payload = (u32)type->layout.size,
+                    .opcode = MACHINE_X64_COPY_FRAME_FROM_PTR,
+                });
+            }
+            else
+            {
+                u16 opcode = type->layout.size == 1 ? MACHINE_X64_LOAD_PTR8 : type->layout.size == 2 ? MACHINE_X64_LOAD_PTR16
+                             : type->layout.size == 4 ? MACHINE_X64_LOAD_PTR32 : MACHINE_X64_LOAD_PTR64;
+                u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, address)},
+                    .opcode = opcode,
+                });
+                machine_x64_define(selector, result_register, row);
+            }
+            selected = true;
+        }
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_arg(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
@@ -1497,7 +1557,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_arg(MachineX64Selector* selector,
                          (value_type->kind == IR_TYPE_STRUCT || value_type->kind == IR_TYPE_UNION || value_type->kind == IR_TYPE_SLICE ||
                           value_type->kind == IR_TYPE_ARRAY || (value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128));
         MachineVaArg metadata;
-        if ((scalar || aggregate) && result_is_frame == aggregate &&
+        if (machine_x64_target_is_windows(selector->target) && (scalar || aggregate) && result_is_frame == aggregate)
+        {
+            selected = machine_x64_select_windows_va_arg(selector, value_type, source_register, result_register, result_slot, aggregate);
+        }
+        else if ((scalar || aggregate) && result_is_frame == aggregate &&
             machine_x64_va_arg_metadata(selector, value_type, result_slot, result_is_frame, &metadata))
         {
             u32 metadata_index = selector->va_args.total_count;
@@ -1527,7 +1591,28 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_start(MachineX64Selector* selecto
 
     u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
     bool selected = false;
-    if (result_slot != UINT32_MAX && selector->va_register_save_slot != UINT32_MAX)
+    bool windows = machine_x64_target_is_windows(selector->target);
+    IrType* list_type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
+    if (result_slot != UINT32_MAX && windows && list_type && list_type->kind == IR_TYPE_VA_LIST && list_type->layout.size == 8)
+    {
+        IrType* function_type = ir_type_from_id(&selector->program->types, function->canonical_type);
+        // Every supported named Win64 shape occupies one positional slot;
+        // the hidden result pointer precedes them. Placement rebases this
+        // incoming address past any callee-save pushes before RBP.
+        u32 named_slots = function_type->parameter_count + (selector->return_shape.indirect ? 1u : 0u);
+        u32 cursor = machine_x64_synthesize_register(selector);
+        machine_x64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
+            .payload = named_slots * 8u,
+            .opcode = MACHINE_X64_LEA_INCOMING,
+        });
+        machine_x64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cursor)},
+            .opcode = MACHINE_X64_STORE_FRAME64,
+        });
+        selected = true;
+    }
+    else if (result_slot != UINT32_MAX && !windows && selector->va_register_save_slot != UINT32_MAX)
     {
         u32 integer_count;
         u32 float_count;
@@ -1597,12 +1682,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_copy(MachineX64Selector* selector
     u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
     u32 source_register;
     bool selected = false;
-    if (result_slot != UINT32_MAX && instruction->operand_count >= 1 && machine_x64_operand_register(selector, instruction->operands[0], &source_register))
+    IrType* list_type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
+    u32 bytes = machine_x64_target_is_windows(selector->target) ? 8u : 32u;
+    if (result_slot != UINT32_MAX && list_type && list_type->kind == IR_TYPE_VA_LIST && list_type->layout.size == bytes &&
+        instruction->operand_count >= 1 && machine_x64_operand_register(selector, instruction->operands[0], &source_register))
     {
         machine_x64_select_row(selector, (MachineInstruction){
                                              .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
                                                           machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                             .payload = 32,
+                                             .payload = bytes,
                                              .opcode = MACHINE_X64_COPY_FRAME_FROM_PTR,
                                          });
         selected = true;
@@ -1616,19 +1704,22 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_va_end(MachineX64Selector* selector,
     bool selected = false;
     if (instruction->operand_count >= 1 && machine_x64_operand_register(selector, instruction->operands[0], &source_register))
     {
-        u32 value_register = machine_x64_synthesize_register(selector);
-        u32 value_immediate = machine_x64_append_immediate(selector, 1);
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register),
-                                                          machine_ref_make(MACHINE_REF_IMMEDIATE, value_immediate)},
-                                             .opcode = MACHINE_X64_MOV_RI,
-                                         });
-        machine_x64_select_row(selector, (MachineInstruction){
-                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register),
-                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
-                                             .payload = 24,
-                                             .opcode = MACHINE_X64_STORE_PTR64,
-                                         });
+        if (!machine_x64_target_is_windows(selector->target))
+        {
+            u32 value_register = machine_x64_synthesize_register(selector);
+            u32 value_immediate = machine_x64_append_immediate(selector, 1);
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register),
+                                                              machine_ref_make(MACHINE_REF_IMMEDIATE, value_immediate)},
+                                                 .opcode = MACHINE_X64_MOV_RI,
+                                             });
+            machine_x64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_register)},
+                                                 .payload = 24,
+                                                 .opcode = MACHINE_X64_STORE_PTR64,
+                                             });
+        }
         selected = true;
     }
     return selected;
@@ -4164,13 +4255,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
         plan->argument_count = instruction->operand_count - 1;
         plan->variadic_call = callee_type && callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic;
         plan->windows_call = machine_x64_target_is_windows(selector->target);
-        // Win64's variadic protocol duplicates float arguments into the
-        // integer registers and has no AL count; the subset keeps those
-        // calls canonical, matching the definition-side rule.
         planned = callee_type && callee_type->kind == IR_TYPE_FUNCTION &&
                   (plan->variadic_call ? plan->argument_count >= callee_type->parameter_count
                                        : callee_type->parameter_count == plan->argument_count) &&
-                  plan->argument_count <= MACHINE_X64_MAX_ARGUMENTS && !(plan->windows_call && plan->variadic_call);
+                  plan->argument_count <= MACHINE_X64_MAX_ARGUMENTS;
     }
     MachineX64SignaturePlan const* signature = 0;
     if (planned)
@@ -4462,6 +4550,14 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
                                                          .opcode = MACHINE_X64_MOVQ_TO_XMM,
                                                      });
                 }
+                else if (plan->windows_call && plan->variadic_call)
+                {
+                    machine_x64_select_row(selector, (MachineInstruction){
+                        .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, machine_x64_argument_register(true, next_integer)),
+                                     machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan->argument_registers[argument_index])},
+                        .opcode = MACHINE_X64_MOV_RR,
+                    });
+                }
                 continue;
             }
             if (!float_pass)
@@ -4488,7 +4584,7 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
             }
         }
     }
-    return (u16)((plan->variadic_call ? (1u | (plan->float_count << 1)) : 0) |
+    return (u16)((plan->variadic_call && !plan->windows_call ? (1u | (plan->float_count << 1)) : 0) |
                  (call_vector_registers ? MACHINE_X64_INSTRUCTION_FLAG_VECTOR_LIVE : 0));
 }
 
@@ -5092,18 +5188,6 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         return result;
     }
     result.signature_rejected = true;
-    if (function_type->is_variadic)
-    {
-        // The machine selector models the System V register sequence.  A
-        // Windows target has a different variadic definition ABI and stays
-        // on the canonical path even when the body ignores its tail.  SysV
-        // bodies continue through ordinary selection: the first va_* (or any
-        // earlier unsupported operation) is then reported in true IR order.
-        if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
-        {
-            return result;
-        }
-    }
     if (function_type->parameter_count > MACHINE_X64_MAX_ARGUMENTS)
     {
         return result;
@@ -5200,7 +5284,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         selector.hidden_return_slot = machine_x64_append_slot(&selector, 8, 8);
     }
-    if (function_type->is_variadic)
+    if (function_type->is_variadic && !windows_abi)
     {
         // SysV's va_list points at a fixed 176-byte register save area.  A
         // dedicated frame slot keeps its displacement in ordinary placement
@@ -5918,7 +6002,19 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         }
         if (block_index == 0)
         {
-            if (selector.va_register_save_slot != UINT32_MAX)
+            if (function_type->is_variadic && windows_abi)
+            {
+                // Home all four incoming GPRs before argument captures can
+                // reuse them. The caller's homes adjoin the overflow tail.
+                machine_x64_select_row(&selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RCX),
+                                 machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RDX),
+                                 machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_R8),
+                                 machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_R9)},
+                    .opcode = MACHINE_X64_WIN_VA_SAVE,
+                });
+            }
+            else if (selector.va_register_save_slot != UINT32_MAX)
             {
                 machine_x64_select_row(&selector, (MachineInstruction){
                                                           .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector.va_register_save_slot)},
@@ -11995,6 +12091,21 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         bool from_f64 = instruction->opcode == MACHINE_X64_CVT_F64_TO_I64;
                         (void)machine_x64_emit_metadata_xmm_gpr(&encoder, S8("MOVQ"), 0, operand_registers[1], 64, 64, 0);
                         (void)machine_x64_emit_metadata_gpr_xmm(&encoder, from_f64 ? S8("CVTTSD2SI") : S8("CVTTSS2SI"), operand_registers[0], 0, 64, 128, 0);
+                    }
+                    break; case MACHINE_X64_WIN_VA_SAVE:
+                    {
+                        for (u32 index = 0; index < 4; index += 1)
+                        {
+                            s64 displacement = 16 + (s64)placement->incoming_base + (s64)index * 8;
+                            (void)machine_x64_emit_metadata_memory_register(&encoder, S8("MOV"), MACHINE_X64_RBP, displacement,
+                                                                            operand_registers[index], 64, 64, 0);
+                        }
+                    }
+                    break; case MACHINE_X64_LEA_INCOMING:
+                    {
+                        s64 displacement = 16 + (s64)placement->incoming_base + (s64)instruction->payload;
+                        (void)machine_x64_emit_metadata_register_memory(&encoder, S8("LEA"), operand_registers[0], MACHINE_X64_RBP,
+                                                                        displacement, 64, 64, 0);
                     }
                     break; case MACHINE_X64_VA_SAVE:
                     {
