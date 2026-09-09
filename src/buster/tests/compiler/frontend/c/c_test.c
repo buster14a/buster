@@ -1,5 +1,6 @@
 #include <buster/tests/compiler/frontend/c/c_test.h>
 #include <buster/lib/time.h>
+#include <buster/lib/compiler/frontend/c/c_gen_internal.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResult* outer_result, CLexResult lex, u64 index, CTokenKind kind, String8 spelling)
@@ -813,6 +814,158 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_range_designators(UnitTestArgum
         C_PREPROCESS_DIALECT_C17, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
         S8("in function 'strict_initializer_range_c17': GNU initializer ranges are only available in GNU dialects"));
     scratch_end(temporary);
+    return result;
+}
+
+// Exercise the production search directly with unrelated types already in the
+// program. A fresh, separate arena makes its dirty high-water mark observable
+// even after the helper correctly rewinds every success and failure path.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_search_scratch(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { MEMBER_SMALL, MEMBER_WIDE, MEMBER_DEEP, MEMBER_DIRECT_FIRST, MEMBER_DIRECT_LAST,
+           MEMBER_AMBIGUOUS, MEMBER_MISSING, MEMBER_CYCLIC, MEMBER_INVALID_ROOT, MEMBER_CASE_COUNT };
+    for (u32 test = 0; test < MEMBER_CASE_COUNT; test += 1)
+    {
+        TemporalArena persistent = scratch_begin(&arguments->arena, 1);
+        Arena* temporary = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
+        BUSTER_TEST(arguments, temporary != 0);
+        if (temporary)
+        {
+            IrProgram program = ir_program_initialize(persistent.arena, 0, 4096, 0, 0);
+            IrTypeId scalar = ir_program_add_type(&program, (IrType){
+                .kind = IR_TYPE_INTEGER, .bit_width = 32,
+                .is_volatile = test == MEMBER_DEEP,
+                .layout = {.size = 4, .alignment = 4, .resolved = true},
+            });
+            IrField* root_fields = arena_allocate(persistent.arena, IrField, 82);
+            memset(root_fields, 0, sizeof(*root_fields) * 82);
+            IrTypeId root = ir_program_add_type(&program, (IrType){
+                .kind = IR_TYPE_STRUCT, .name = S8("root"), .fields = root_fields, .field_count = 1,
+                .layout = {.size = 328, .alignment = 4, .resolved = true},
+            });
+            root_fields[0] = (IrField){.name = S8("target"), .type = scalar};
+            u32 expected_path = 1;
+            u32 expected_first = 0;
+            bool expected_success = test != MEMBER_AMBIGUOUS && test != MEMBER_MISSING &&
+                                    test != MEMBER_CYCLIC && test != MEMBER_INVALID_ROOT;
+            if (test == MEMBER_WIDE || test == MEMBER_DIRECT_FIRST || test == MEMBER_DIRECT_LAST ||
+                test == MEMBER_AMBIGUOUS || test == MEMBER_MISSING)
+            {
+                bool direct = test == MEMBER_DIRECT_FIRST || test == MEMBER_DIRECT_LAST;
+                u32 first = test == MEMBER_DIRECT_FIRST ? 1 : 0;
+                for (u32 index = 0; index < 80; index += 1)
+                {
+                    IrField* leaf = arena_allocate(persistent.arena, IrField, 1);
+                    *leaf = (IrField){.type = scalar,
+                        .name = index == 79 || (index == 0 && test == MEMBER_AMBIGUOUS) ? S8("target") : S8("other")};
+                    IrTypeId nested = ir_program_add_type(&program, (IrType){
+                        .kind = IR_TYPE_STRUCT, .fields = leaf, .field_count = 1,
+                        .layout = {.size = 4, .alignment = 4, .resolved = true},
+                    });
+                    root_fields[first + index] = (IrField){.type = nested, .offset = (first + index) * 4};
+                }
+                if (direct)
+                {
+                    expected_first = test == MEMBER_DIRECT_FIRST ? 0 : 80;
+                    root_fields[expected_first] = (IrField){.name = S8("target"), .type = scalar, .offset = expected_first * 4};
+                }
+                else
+                {
+                    expected_first = 79;
+                    expected_path = 2;
+                }
+                program.types.types[root.value].field_count = 80 + direct;
+            }
+            else if (test == MEMBER_DEEP)
+            {
+                IrField* parent = root_fields;
+                for (u32 depth = 0; depth < 40; depth += 1)
+                {
+                    IrField* leaf = arena_allocate(persistent.arena, IrField, 1);
+                    *leaf = (IrField){.name = S8("target"), .type = scalar};
+                    IrTypeId nested = ir_program_add_type(&program, (IrType){
+                        .kind = depth % 2 ? IR_TYPE_UNION : IR_TYPE_STRUCT, .fields = leaf, .field_count = 1,
+                        .layout = {.size = 4, .alignment = 4, .resolved = true},
+                    });
+                    *parent = (IrField){.type = nested};
+                    parent = leaf;
+                }
+                expected_path = 41;
+            }
+            else if (test == MEMBER_CYCLIC)
+            {
+                root_fields[0] = (IrField){.type = root};
+                root_fields[1] = (IrField){.type = IR_TYPE_ID_INVALID};
+                program.types.types[root.value].field_count = 2;
+            }
+            // These rows are real members of the canonical table, but no
+            // anonymous path from root can reach them.
+            while (program.types.count < 4096)
+            {
+                ir_program_add_type(&program, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 32});
+            }
+            IrFunction function = {.entry = {.value = 0}};
+            ir_function_add_block(persistent.arena, &function, (IrBlock){
+                .first_instruction = IR_INSTRUCTION_ID_INVALID, .last_instruction = IR_INSTRUCTION_ID_INVALID,
+            });
+            IrValueId operand = ir_function_add_value(persistent.arena, &function, (IrValue){
+                .canonical_type = test == MEMBER_INVALID_ROOT ? IR_TYPE_ID_INVALID : root,
+                .definition = IR_INSTRUCTION_ID_INVALID, .category = IR_VALUE_PLACE,
+                .is_read_only = test == MEMBER_WIDE || test == MEMBER_DEEP,
+                .is_volatile = test == MEMBER_WIDE,
+            });
+            String8 name = test == MEMBER_MISSING || test == MEMBER_CYCLIC ? S8("absent") : S8("target");
+            String8 failure = {0};
+            u64 before = temporary->position;
+            IrValueId place = c_test_ir_member_place(persistent.arena, temporary, &program, &function, operand, name,
+                                                    C_PUNCTUATOR_DOT, &failure);
+            BUSTER_TEST(arguments, temporary->position == before);
+            u64 dirty_bytes = arena_dirty_position(temporary) - before;
+            bool local = test == MEMBER_SMALL || test == MEMBER_DIRECT_FIRST || test == MEMBER_CYCLIC || test == MEMBER_INVALID_ROOT;
+            BUSTER_TEST(arguments, local ? dirty_bytes == 0 : dirty_bytes > 0 && dirty_bytes < 4096);
+            BUSTER_TEST(arguments, (place.value != IR_ID_UNDERLYING_INVALID) == expected_success);
+            // A later consumer deliberately reuses every byte of the scratch
+            // prefix. The emitted field chain and allocated diagnostic must
+            // remain readable from the persistent arena.
+            u8* overwrite = arena_allocate(temporary, u8, 8192);
+            memset(overwrite, 0xa5, 8192);
+            if (expected_success && place.value < function.value_count)
+            {
+                BUSTER_TEST(arguments, !failure.length);
+                BUSTER_TEST(arguments, function.instruction_count == expected_path);
+                BUSTER_TEST(arguments, function.values[place.value].canonical_type.value == scalar.value);
+                BUSTER_TEST(arguments, function.values[place.value].is_read_only == (test == MEMBER_WIDE || test == MEMBER_DEEP));
+                BUSTER_TEST(arguments, function.values[place.value].is_volatile == (test == MEMBER_WIDE || test == MEMBER_DEEP));
+                IrValueId previous = operand;
+                for (u32 index = 0; index < function.instruction_count; index += 1)
+                {
+                    IrInstruction* field = function.instructions + index;
+                    BUSTER_TEST(arguments, field->opcode == IR_OPCODE_FIELD && field->operand_count == 1 && field->immediate_count == 1);
+                    BUSTER_TEST(arguments, field->operands[0].value == previous.value);
+                    BUSTER_TEST(arguments, field->immediates[0] == (index ? 0 : expected_first));
+                    previous = field->result;
+                }
+                BUSTER_TEST(arguments, previous.value == place.value);
+            }
+            else if (!expected_success)
+            {
+                BUSTER_TEST(arguments, function.instruction_count == 0);
+                if (test == MEMBER_AMBIGUOUS)
+                {
+                    BUSTER_STRING_TEST(arguments, failure, S8("ambiguous promoted member designator"));
+                }
+                else if (test == MEMBER_MISSING || test == MEMBER_CYCLIC)
+                {
+                    String8 expected = string_format(persistent.arena, S8("type 'root' has no member named 'absent' ({u32} fields available)"),
+                                                     test == MEMBER_MISSING ? 80 : 2);
+                    BUSTER_STRING_TEST(arguments, failure, expected);
+                }
+            }
+            BUSTER_TEST(arguments, arena_destroy(temporary, 1));
+        }
+        scratch_end(persistent);
+    }
     return result;
 }
 
@@ -14019,6 +14172,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 
     c_test_result_add(&result, c_test_static_range_designators(arguments));
 
+    c_test_result_add(&result, c_test_member_search_scratch(arguments));
     c_test_result_add(&result, c_test_u64_initializer_slots(arguments));
 
     c_test_result_add(&result, c_test_parse_storage_growth(arguments));

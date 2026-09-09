@@ -1683,6 +1683,49 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_unwind_link(UnitTes
 }
 #endif
 
+#if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SANITIZE
+// Compile and execute after each complete pipeline has consumed its scratch.
+// Running all allocators also exercises the returned canonical IR independently
+// of the frontend member-search and ABI worklist lifetimes.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_allocation_lifetimes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes) * 2; index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-allocation-lifetimes"),
+#if BUSTER_WINDOWS
+                                                   S8(".exe"));
+#else
+                                                   S8(""));
+#endif
+        String8 command[] = {string_format(temporary.arena, S8("-fregister-allocator={S8}"), modes[index / 2]),
+                            index % 2 ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
+                            S8("-o"), output, S8("tests/basic_c_allocation_lifetimes.c")};
+        CompilerDriverResult compilation = compiler_driver_execute_invocation(
+            temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, compilation.error == COMPILER_DRIVER_ERROR_NONE);
+        if (compilation.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 child_arguments[] = {output};
+            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), (SliceString8){0}, (SliceString8){0},
+                                                        (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, child.handle != 0);
+            if (child.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(temporary.arena, child, 30000000);
+                BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+#endif
+
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
@@ -3308,6 +3351,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     scratch_end(c_object_temporary);
 #endif
 #if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SANITIZE
+    UnitTestResult allocation_lifetimes = compiler_driver_allocation_lifetimes(arguments);
+    result.test_count += allocation_lifetimes.test_count;
+    result.succeeded_test_count += allocation_lifetimes.succeeded_test_count;
+
     String8 c_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-driver"),
 #if BUSTER_WINDOWS
                                                            S8(".exe"));

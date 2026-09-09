@@ -48,6 +48,7 @@
 //   c_ir_scalar_type .. c_ir_add_qualified_type   C type -> IrType mapping
 //                                                 and derived-type interning
 //   c_ir_function_signature                       signatures and ABI limits
+//   c_ir_emit_field_place_from_value              local/scratch member-search frontiers
 //   CIntegerIrBuilder                             per-module lowering state
 //   c_ir_label_metadata_*                         label provenance needed by
 //                                                 computed goto
@@ -7247,12 +7248,22 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
     {
         return IR_VALUE_ID_INVALID;
     }
-    u32 capacity = builder->program->types.count + 1;
+    // Member lookup visits only this aggregate's anonymous descendants, not
+    // every type in the translation unit. Keep the common small frontier on
+    // the C stack; growth copies only initialized rows, preserving BFS order
+    // and index-valued parents. No result points into these search arrays.
+    enum { C_IR_MEMBER_SEARCH_LOCAL_CAPACITY = 32 };
+    u32 limit = builder->program->types.count + 1;
+    u32 capacity = BUSTER_MIN(limit, C_IR_MEMBER_SEARCH_LOCAL_CAPACITY);
     TemporalArena field_search = arena_begin_temporal(builder->temporary_arena);
-    IrTypeId* work_types = arena_allocate(field_search.arena, IrTypeId, capacity);
-    u32* work_parents = arena_allocate(field_search.arena, u32, capacity);
-    u32* work_parent_fields = arena_allocate(field_search.arena, u32, capacity);
-    u32* work_depths = arena_allocate(field_search.arena, u32, capacity);
+    IrTypeId local_types[C_IR_MEMBER_SEARCH_LOCAL_CAPACITY];
+    u32 local_parents[C_IR_MEMBER_SEARCH_LOCAL_CAPACITY];
+    u32 local_parent_fields[C_IR_MEMBER_SEARCH_LOCAL_CAPACITY];
+    u32 local_depths[C_IR_MEMBER_SEARCH_LOCAL_CAPACITY];
+    IrTypeId* work_types = local_types;
+    u32* work_parents = local_parents;
+    u32* work_parent_fields = local_parent_fields;
+    u32* work_depths = local_depths;
     u32 work_count = 1;
     u32 work_index = 0;
     u32 found_node = UINT32_MAX;
@@ -7299,8 +7310,25 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
             }
             IrType* nested = ir_type_from_id(&builder->program->types, candidate_field->type);
             if (!candidate_field->name.length && nested && (nested->kind == IR_TYPE_STRUCT || nested->kind == IR_TYPE_UNION) &&
-                candidate_field->type.value < capacity && work_count < capacity && !c_ir_type_queued(work_types, work_count, candidate_field->type))
+                candidate_field->type.value < limit && work_count < limit && !c_ir_type_queued(work_types, work_count, candidate_field->type))
             {
+                if (work_count == capacity)
+                {
+                    u32 grown = (u32)BUSTER_MIN((u64)limit, (u64)capacity * 2);
+                    IrTypeId* grown_types = arena_allocate(field_search.arena, IrTypeId, grown);
+                    u32* grown_parents = arena_allocate(field_search.arena, u32, grown);
+                    u32* grown_parent_fields = arena_allocate(field_search.arena, u32, grown);
+                    u32* grown_depths = arena_allocate(field_search.arena, u32, grown);
+                    memcpy(grown_types, work_types, sizeof(*work_types) * work_count);
+                    memcpy(grown_parents, work_parents, sizeof(*work_parents) * work_count);
+                    memcpy(grown_parent_fields, work_parent_fields, sizeof(*work_parent_fields) * work_count);
+                    memcpy(grown_depths, work_depths, sizeof(*work_depths) * work_count);
+                    work_types = grown_types;
+                    work_parents = grown_parents;
+                    work_parent_fields = grown_parent_fields;
+                    work_depths = grown_depths;
+                    capacity = grown;
+                }
                 work_types[work_count] = candidate_field->type;
                 work_parents[work_count] = work_index;
                 work_parent_fields[work_count] = index;
@@ -7323,11 +7351,16 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* 
         scratch_end(field_search);
         return IR_VALUE_ID_INVALID;
     }
-    u32* reversed_path = arena_allocate(field_search.arena, u32, work_count + 1);
+    // The parent chain has depth + 1 fields; a broad search need not reserve
+    // a path slot for every sibling it visited.
+    u32 local_path[C_IR_MEMBER_SEARCH_LOCAL_CAPACITY];
+    u64 path_capacity = (u64)found_depth + 1;
+    u32* reversed_path = path_capacity <= C_IR_MEMBER_SEARCH_LOCAL_CAPACITY ? local_path : arena_allocate(field_search.arena, u32, path_capacity);
     u32 path_count = 1;
     reversed_path[0] = found_field;
     while (found_node != 0)
     {
+        BUSTER_CHECK(path_count < path_capacity);
         reversed_path[path_count++] = work_parent_fields[found_node];
         found_node = work_parents[found_node];
     }
@@ -37660,6 +37693,26 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_relocation_capacity(CIntegerIrB
 
 
 #if BUSTER_INCLUDE_TESTS
+IrValueId c_test_ir_member_place(Arena* arena, Arena* temporary_arena, IrProgram* program,
+                                 IrFunction* function, IrValueId operand, String8 member, CPunctuator access,
+                                 String8* failure_message)
+{
+    CIntegerIrBuilder builder = {
+        .arena = arena,
+        .temporary_arena = temporary_arena,
+        .program = program,
+        .function = function,
+        .current_block = function->entry,
+        .last_instruction = function->blocks[function->entry.value].last_instruction,
+        .preprocess = {.spelling_base = member.pointer},
+    };
+    IrValueId result = c_ir_emit_field_place_from_value(
+        &builder, operand, (CToken){.kind = C_TOKEN_PUNCTUATOR, .punctuator = (u8)access},
+        (CToken){.kind = C_TOKEN_IDENTIFIER, .length = (u16)member.length});
+    *failure_message = builder.failure_message;
+    return result;
+}
+
 BUSTER_C_INTERNAL CEntityId c_ir_constant_entity_at(CIntegerIrBuilder* builder, u32 token_index);
 
 u64 c_test_ir_initializer_slot_count(IrType* type)
