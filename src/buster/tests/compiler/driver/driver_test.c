@@ -1625,9 +1625,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_link_boundaries(Unit
 }
 #endif
 
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_unwind_link(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+    {
+        for (u32 ssa = 0; ssa < 2; ssa += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 object = buster_test_temporary_path(arena, S8("buster-mach-unwind"), S8(".o"));
+            String8 executable = buster_test_temporary_path(arena, S8("buster-mach-unwind"), S8(""));
+            String8 compile[] = {
+                S8("-c"), S8("-o"), object, ssa ? S8("-ffrontend-ssa") : S8("-fno-frontend-ssa"),
+                string_format(arena, S8("-fregister-allocator={S8}"), allocators[mode]), S8("tests/basic_c_mach_unwind_subject.c"),
+            };
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+            BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 link[12] = {0};
+                u32 count = 0;
+                link[count++] = S8(BUSTER_HOST_C_COMPILER);
+                if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) link[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+                link[count++] = S8("-O0");
+                link[count++] = S8("-fwrapv");
+                link[count++] = S8("-fno-strict-aliasing");
+                link[count++] = S8("-funsigned-char");
+                link[count++] = S8("tests/basic_c_mach_unwind_host.c");
+                link[count++] = object;
+                link[count++] = S8("-o");
+                link[count++] = executable;
+                ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                               .use_process_environment = true};
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8){link, count}, (SliceString8){0}, (SliceString8){0}, capture);
+                ProcessWaitResult linked = spawned.handle ? os_process_wait_deadline(arena, spawned, 30000000) : (ProcessWaitResult){0};
+                bool linked_ok = spawned.handle && !linked.timed_out && linked.result == PROCESS_RESULT_SUCCESS;
+                BUSTER_TEST(arguments, linked_ok);
+                if (!linked_ok)
+                    arguments->show(arguments, S8("Mach-O host link failed: {S8}\n"),
+                                    (String8){(char8*)linked.streams[STANDARD_STREAM_ERROR].pointer, linked.streams[STANDARD_STREAM_ERROR].length});
+                if (linked_ok)
+                {
+                    ProcessSpawnResult child = os_process_spawn((SliceString8){&executable, 1}, (SliceString8){0}, (SliceString8){0}, capture);
+                    ProcessWaitResult ran = child.handle ? os_process_wait_deadline(arena, child, 30000000) : (ProcessWaitResult){0};
+                    BUSTER_TEST(arguments, child.handle && !ran.timed_out && ran.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+#endif
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
+    UnitTestResult mach_unwind = compiler_driver_test_mach_unwind_link(arguments);
+    result.test_count += mach_unwind.test_count;
+    result.succeeded_test_count += mach_unwind.succeeded_test_count;
+#endif
     UnitTestResult bootstrap = compiler_driver_test_bootstrap_trace(arguments);
     result.test_count += bootstrap.test_count;
     result.succeeded_test_count += bootstrap.succeeded_test_count;
