@@ -233,12 +233,22 @@ BUSTER_C_SHARED CSpellingSpace c_space_local(Arena* arena, u64 capacity)
 // end. Only #line splits append out of order, so the finalize sort is a
 // nearly-linear insertion pass.
 typedef struct CSourceMap CSourceMap;
+typedef struct CSourceRegionNames CSourceRegionNames;
+struct CSourceRegionNames
+{
+    String8 physical;
+    String8 logical;
+};
+
 struct CSourceMap
 {
     Arena* arena;
     IrSourceRegion* regions;
     u32 count;
     u32 capacity;
+    CSourceRegionNames* names;
+    u32 name_count;
+    u32 name_capacity;
 };
 
 BUSTER_C_INTERNAL void c_source_map_append(CSourceMap* map, IrSourceRegion region)
@@ -255,6 +265,26 @@ BUSTER_C_INTERNAL void c_source_map_append(CSourceMap* map, IrSourceRegion regio
         map->capacity = capacity;
     }
     map->regions[map->count++] = region;
+}
+
+// TEXT origins temporarily index these names. Finalization registers physical
+// source IDs only for token-bearing or diagnosed regions, preserving the
+// self-host rule that unused host-resource headers never enter the file table.
+BUSTER_C_INTERNAL void c_source_map_name(CSourceMap* map, String8 physical, String8 logical)
+{
+    if (map->name_count == map->name_capacity)
+    {
+        u32 capacity = map->name_capacity ? map->name_capacity * 2 : 8;
+        CSourceRegionNames* names = arena_allocate(map->arena, CSourceRegionNames, capacity);
+        if (map->name_count)
+        {
+            memcpy(names, map->names, sizeof(*names) * map->name_count);
+        }
+        map->names = names;
+        map->name_capacity = capacity;
+    }
+    map->names[map->name_count++] = (CSourceRegionNames){.physical = physical, .logical = logical};
+    map->regions[map->count - 1].origin_plus_one = map->name_count;
 }
 
 // Hand the finished regions to the map every lookup reads, deriving the key
@@ -6011,6 +6041,7 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
                                              .source = location.file,
                                              .stamp = c_position_from_source_location(location),
                                              .kind = IR_SOURCE_REGION_STAMP,
+                                             .origin_plus_one = location.map_offset + 1,
                                          });
                 run_open = true;
                 run_stamp = item.stamp;
@@ -6222,6 +6253,65 @@ BUSTER_C_INTERNAL u32 c_preprocess_file_index(Arena* arena, CPreprocessFileTable
     }
 
     return result;
+}
+
+// Regions are sorted before this cold publication step. Error locations may
+// belong to a directive-only header, so register those names before resolving
+// the compact original-source metadata. Successful token-free headers remain
+// absent from the canonical file table.
+BUSTER_C_INTERNAL void c_source_map_finish_origins(Arena* arena, CSourceMap* map, CPreprocessFileTable* files, CPreprocessResult* result)
+{
+    for (u64 diagnostic = 0; diagnostic < result->diagnostic_count; diagnostic += 1)
+    {
+        CDiagnostic* item = result->diagnostics + diagnostic;
+        u32 offset = item->location.map_offset;
+        bool done = false;
+        for (u32 step = 0; step < map->count && !done; step += 1)
+        {
+            u32 low = 0;
+            u32 high = map->count;
+            while (low < high)
+            {
+                u32 middle = low + (high - low) / 2;
+                if (map->regions[middle].start <= offset) low = middle + 1;
+                else high = middle;
+            }
+            IrSourceRegion* region = map->regions + (low ? low - 1 : 0);
+            if (!region->origin_plus_one)
+            {
+                done = true;
+            }
+            else if (region->kind == IR_SOURCE_REGION_TEXT)
+            {
+                CSourceRegionNames names = map->names[region->origin_plus_one - 1];
+                if (region->source == UINT32_MAX)
+                {
+                    region->source = c_preprocess_file_index(arena, files, names.logical);
+                }
+                item->location.file = region->source;
+                item->location.map_offset = offset;
+                done = true;
+            }
+            else
+            {
+                offset = region->origin_plus_one - 1;
+            }
+        }
+    }
+    for (u32 index = 0; index < map->count; index += 1)
+    {
+        IrSourceRegion* region = map->regions + index;
+        if (region->kind == IR_SOURCE_REGION_TEXT && region->origin_plus_one)
+        {
+            CSourceRegionNames names = map->names[region->origin_plus_one - 1];
+            region->origin_plus_one = 0;
+            if (region->source != UINT32_MAX)
+            {
+                u32 physical = string_equal(names.physical, names.logical) ? region->source : c_preprocess_file_index(arena, files, names.physical);
+                region->origin_plus_one = physical + 1;
+            }
+        }
+    }
 }
 
 BUSTER_C_INTERNAL String8 c_path_directory(String8 path)
@@ -6918,6 +7008,7 @@ BUSTER_C_INTERNAL void c_preprocess_respell_c23(CSpellingSpace* space, CSourceMa
                                          .source = location.file,
                                          .stamp = c_position_from_source_location(location),
                                          .kind = IR_SOURCE_REGION_STAMP,
+                                         .origin_plus_one = location.map_offset + 1,
                                      });
             // Appends can move the region array; keep the result's view (the
             // recovery above reads through it) current. The new region is at
@@ -7547,6 +7638,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                   .base = root_lex.translated_offset,
                                   .kind = IR_SOURCE_REGION_TEXT,
                               });
+    c_source_map_name(&map, root_frame.path, root_frame.logical_path);
     u32 include_depth_limit = options.include_depth_limit ? options.include_depth_limit : 256;
     c_preprocess_builtins(arena, symbol_table, &first_macro, &last_macro, root_frame.logical_path,
                           (CSourceLocation){.line = 1, .column = 1});
@@ -7853,6 +7945,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                                       .line_delta = source_frame->line_delta,
                                                       .kind = IR_SOURCE_REGION_TEXT,
                                                   });
+                        c_source_map_name(&map, source_frame->path, source_frame->logical_path);
                     }
                 }
                 else if (active && c_token_spelling_equal(base, directive, S8("define")))
@@ -7971,7 +8064,6 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                             for (u64 index = 0; index < include_lex.diagnostic_count; index += 1)
                             {
                                 CDiagnostic diagnostic = include_lex.diagnostics[index];
-                                diagnostic.message = string_format(arena, S8("{S8}: {S8}"), include_path, diagnostic.message);
                                 c_preprocess_diagnostic_copy(arena, &result, diagnostic);
                             }
                             if (!include_once)
@@ -8001,6 +8093,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                                                               .base = include_lex.translated_offset,
                                                               .kind = IR_SOURCE_REGION_TEXT,
                                                           });
+                                c_source_map_name(&map, include_path, include_path);
                             }
                             else
                             {
@@ -8280,8 +8373,6 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         result.detail->preprocessed.bytes += spelled_bytes;
     }
     result.detail->preprocessed.spelling_bytes = space->used;
-    result.files = file_table.files;
-    result.file_count = file_table.count;
     result.detail->lexed_files = metrics_files.rows;
     result.detail->lexed_file_count = metrics_files.count;
     // The map was append-only while the stream was built; sort it once so
@@ -8298,6 +8389,9 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         }
         map.regions[probe] = region;
     }
+    c_source_map_finish_origins(arena, &map, &file_table, &result);
+    result.files = file_table.files;
+    result.file_count = file_table.count;
     c_source_map_publish(arena, recovery, &map);
     // Respelling appends regions at the tail of the space, in order, and
     // queries the map as it goes; publish once so those queries land, and
@@ -8318,6 +8412,15 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     }
     recovery->map.pages = pages;
     recovery->map.page_count = page_count;
+    for (u64 index = 0; index < result.diagnostic_count; index += 1)
+    {
+        CDiagnostic* diagnostic = result.diagnostics + index;
+        IrSourcePosition position = ir_source_map_position(&recovery->map, diagnostic->location.map_offset, 0);
+        if (position.line)
+        {
+            diagnostic->location = c_source_location_from_position(diagnostic->location.map_offset, position);
+        }
+    }
     return result;
 }
 

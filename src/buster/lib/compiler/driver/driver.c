@@ -15,7 +15,9 @@
 // compiler_driver_execute_gpu isolates the external shader-toolchain
 // orchestration in gpu.h. compiler_prewarm at the top fills every lazily
 // built compile-path table on one thread before parallel lanes run
-// (AGENTS.md).
+// (AGENTS.md). CompilerDriverDiagnosticCollector and the private adapters in
+// driver_diagnostic.c publish stable records into the result arena;
+// compiler_driver_publish_c_diagnostics preserves producer/stage ordering.
 
 #include <buster/lib/compiler/driver/driver.h>
 
@@ -2397,7 +2399,7 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
 // location, where the column arithmetic does not hold; they keep the single
 // space, which is also what a hand-built result with no recovery map
 // degrades to for every token.
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPreprocessResult preprocess)
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPreprocessResult preprocess, u64 lookup_offset, CSourceLocation* lookup)
 {
     enum { compiler_driver_preprocess_line_gap_cap = 8 };
     u64 capacity = 2;
@@ -2442,6 +2444,10 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
             }
         }
         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        if (lookup && lookup_offset >= length && lookup_offset - length < spelling.length)
+        {
+            *lookup = location;
+        }
         memcpy(text + length, spelling.pointer, spelling.length);
         length += spelling.length;
         previous_line = location.line;
@@ -2463,16 +2469,22 @@ struct CompilerDriverWarningChunk
     String8 text;
 };
 
-typedef struct CompilerDriverWarningCollector CompilerDriverWarningCollector;
-struct CompilerDriverWarningCollector
+typedef struct CompilerDriverDiagnosticCollector CompilerDriverDiagnosticCollector;
+struct CompilerDriverDiagnosticCollector
 {
     Arena* arena;
     CompilerDriverWarningChunk* first;
     CompilerDriverWarningChunk* last;
     u64 length;
+    CompilerDiagnostic* records;
+    u32 record_count;
+    u32 record_capacity;
+    bool suppress_records;
 };
 
-BUSTER_GLOBAL_LOCAL void compiler_driver_warning_append_text(CompilerDriverWarningCollector* collector, String8 text)
+#include <buster/lib/compiler/driver/driver_diagnostic.c>
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_warning_append_text(CompilerDriverDiagnosticCollector* collector, String8 text)
 {
     if (!collector || !collector->arena || !text.length)
     {
@@ -2494,18 +2506,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_warning_append_text(CompilerDriverWarni
     collector->length += text.length;
 }
 
-BUSTER_GLOBAL_LOCAL void compiler_driver_append_warning(CompilerDriverWarningCollector* collector, String8 path, CDiagnostic diagnostic)
-{
-    if (!collector || !collector->arena || diagnostic.severity != C_DIAGNOSTIC_WARNING)
-    {
-        return;
-    }
-    String8 formatted = string_format(collector->arena, S8("{S8}:{u32}:{u32}: warning: {S8}\n"), path, diagnostic.location.line, diagnostic.location.column,
-                                      diagnostic.message);
-    compiler_driver_warning_append_text(collector, formatted);
-}
-
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_warning_flatten(CompilerDriverWarningCollector collector)
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_warning_flatten(CompilerDriverDiagnosticCollector collector)
 {
     if (!collector.arena || !collector.length)
     {
@@ -2525,17 +2526,27 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_warning_flatten(CompilerDriverWarnin
     };
 }
 
-BUSTER_GLOBAL_LOCAL CDiagnostic* compiler_driver_first_preprocess_error(CPreprocessResult preprocess)
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_publish_c_diagnostics(Arena* arena, CompilerDriverDiagnosticCollector* collector,
+                                                                   CPreprocessResult const* preprocess, CDiagnostic* diagnostics, u64 count, String8 path, String8 split_source)
 {
-    for (u64 diagnostic_index = 0; diagnostic_index < preprocess.diagnostic_count; diagnostic_index += 1)
+    String8 first_error = {0};
+    for (u64 index = 0; index < count; index += 1)
     {
-        CDiagnostic* diagnostic = preprocess.diagnostics + diagnostic_index;
-        if (diagnostic->severity != C_DIAGNOSTIC_WARNING)
+        CompilerDiagnostic diagnostic = compiler_driver_c_diagnostic(preprocess, diagnostics[index], path);
+        if (split_source.length) diagnostic.primary = compiler_driver_assembly_unsplit_location(split_source, path, diagnostic.primary);
+        compiler_driver_collect_diagnostic(collector, diagnostic);
+        if (diagnostic.severity == COMPILER_DIAGNOSTIC_WARNING)
         {
-            return diagnostic;
+            String8 rendered = compiler_diagnostic_render(collector->arena, diagnostic);
+            compiler_driver_warning_append_text(collector, rendered);
+            compiler_driver_warning_append_text(collector, S8("\n"));
+        }
+        else if (!first_error.length)
+        {
+            first_error = compiler_diagnostic_render(arena, diagnostic);
         }
     }
-    return 0;
+    return first_error;
 }
 
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_object_path(Arena* arena, String8 input);
@@ -2825,6 +2836,8 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     if (linked.error != LINK_ERROR_NONE)
     {
         result->error = COMPILER_DRIVER_ERROR_LINK;
+        result->native_link.error = linked.error;
+        result->native_link.symbol = linked.symbol;
         result->diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with error {u32} on symbol '{S8}'"), (u32)linked.error, linked.symbol)
                                                  : string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
         return;
@@ -2913,7 +2926,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(AssemblyReloca
 // one: the caller owns the source text's lifetime, and the encoder keeps
 // nothing that points into it.
 BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source(Arena* arena, CompilerDriverInvocation invocation, String8 source,
-                                                                                  String8 path, bool suppress_object_write)
+                                                                                  String8 path, bool suppress_object_write, CompilerDriverDiagnosticCollector* diagnostics,
+                                                                                  CPreprocessResult* preprocess, String8 split_source)
 {
     CompilerDriverResult result = {0};
     if (invocation.emit_llvm_bitcode || invocation.target.cpu_arch == CPU_ARCH_WASM64 || invocation.target.cpu_arch == CPU_ARCH_BPFEL)
@@ -2930,9 +2944,17 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
                                                    });
     if (unit.diagnostic_count)
     {
-        AssemblyDiagnostic diagnostic = unit.diagnostics[0];
         result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
-        result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), path, diagnostic.line, diagnostic.column, diagnostic.message);
+        for (u32 index = 0; index < unit.diagnostic_count; index += 1)
+        {
+            CompilerDiagnostic diagnostic = compiler_driver_assembly_diagnostic(source, path, unit.diagnostics[index]);
+            if (preprocess)
+            {
+                diagnostic = compiler_driver_preprocessed_assembly_diagnostic(arena, preprocess, split_source, path, diagnostic);
+            }
+            compiler_driver_collect_diagnostic(diagnostics, diagnostic);
+            if (!index) result.diagnostic = compiler_diagnostic_render(arena, diagnostic);
+        }
         return result;
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
@@ -3000,7 +3022,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
 }
 
 BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_single(Arena* arena, CompilerDriverInvocation invocation,
-                                                                                  bool suppress_object_write)
+                                                                                  bool suppress_object_write, CompilerDriverDiagnosticCollector* diagnostics)
 {
     CompilerDriverResult result = {0};
     String8 path = invocation.input_paths[0];
@@ -3026,7 +3048,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_single
         file_map_unmap(source_file);
         return result;
     }
-    result = compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write);
+    result = compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write, diagnostics, 0, (String8){0});
     file_map_unmap(source_file);
     return result;
 }
@@ -3039,7 +3061,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_single
 // Python/asm_trampoline.S is the load-bearing case -- one trampoline body
 // selected by #ifdef per architecture.
 BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_assembly_single(Arena* arena, CompilerDriverInvocation invocation,
-                                                                                               bool suppress_object_write)
+                                                                                               bool suppress_object_write, CompilerDriverDiagnosticCollector* diagnostics)
 {
     CompilerDriverResult result = {0};
     String8 path = invocation.input_paths[0];
@@ -3108,16 +3130,16 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .assembly_comment_lines = true,
                                                 });
     file_map_unmap(source_file);
+    String8 preprocessing_error = compiler_driver_publish_c_diagnostics(arena, diagnostics, &preprocess, preprocess.diagnostics,
+                                                                          preprocess.diagnostic_count, path, (String8){.pointer = split, .length = split_length});
     if (preprocess.error_count)
     {
-        CDiagnostic* diagnostic = compiler_driver_first_preprocess_error(preprocess);
         result.error = COMPILER_DRIVER_ERROR_TOKENIZE;
         result.tokenizer_error_count = (u32)preprocess.error_count;
-        result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), path, diagnostic->location.line, diagnostic->location.column,
-                                          diagnostic->message);
+        result.diagnostic = preprocessing_error;
         return result;
     }
-    String8 source = compiler_driver_preprocess_text(arena, preprocess);
+    String8 source = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         result.output = source;
@@ -3128,11 +3150,11 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
         }
         return result;
     }
-    return compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write);
+    return compiler_driver_execute_assembly_source(arena, invocation, source, path, suppress_object_write, diagnostics, &preprocess, (String8){.pointer = split, .length = split_length});
 }
 
 static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, CompilerDriverInvocation invocation, bool suppress_object_write,
-                                                             CompilerDriverWarningCollector* warnings)
+                                                             CompilerDriverDiagnosticCollector* warnings)
 {
     CompilerDriverResult result = {
         .error = invocation.error,
@@ -3145,11 +3167,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     if (invocation.input_count == 1 && compiler_driver_preprocessed_assembly_input(invocation.input_paths[0]))
     {
-        return compiler_driver_execute_preprocessed_assembly_single(arena, invocation, suppress_object_write);
+        return compiler_driver_execute_preprocessed_assembly_single(arena, invocation, suppress_object_write, warnings);
     }
     if (invocation.input_count == 1 && compiler_driver_assembly_input(invocation, invocation.input_paths[0]))
     {
-        return compiler_driver_execute_assembly_single(arena, invocation, suppress_object_write);
+        return compiler_driver_execute_assembly_single(arena, invocation, suppress_object_write, warnings);
     }
     if (invocation.input_count != 1 || !compiler_driver_c_input(invocation, invocation.input_paths[0]))
     {
@@ -3194,23 +3216,19 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     result.lexed_files = preprocess_detail->lexed_files;
     result.lexed_file_count = preprocess_detail->lexed_file_count;
     result.preprocessed = preprocess_detail->preprocessed;
-    for (u64 diagnostic_index = 0; diagnostic_index < preprocess.diagnostic_count; diagnostic_index += 1)
-    {
-        compiler_driver_append_warning(warnings, invocation.input_paths[0], preprocess.diagnostics[diagnostic_index]);
-    }
+    String8 preprocessing_error = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, preprocess.diagnostics,
+                                                                          preprocess.diagnostic_count, invocation.input_paths[0], (String8){0});
     result.tokenizer_warning_count = (u32)preprocess.warning_count;
     if (preprocess.error_count)
     {
-        CDiagnostic* diagnostic = compiler_driver_first_preprocess_error(preprocess);
         result.error = COMPILER_DRIVER_ERROR_TOKENIZE;
         result.tokenizer_error_count = (u32)preprocess.error_count;
-        result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), invocation.input_paths[0], diagnostic->location.line, diagnostic->location.column,
-                                          diagnostic->message);
+        result.diagnostic = preprocessing_error;
         goto end;
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
-        result.output = compiler_driver_preprocess_text(arena, preprocess);
+        result.output = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
         if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
         {
             result.error = COMPILER_DRIVER_ERROR_FILE_READ;
@@ -3240,10 +3258,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     result.parser_diagnostic_count = syntax.diagnostic_count;
     if (syntax.diagnostic_count)
     {
-        CDiagnostic diagnostic = syntax.diagnostics[0];
         result.error = COMPILER_DRIVER_ERROR_PARSE;
-        result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), invocation.input_paths[0], diagnostic.location.line, diagnostic.location.column,
-                                          diagnostic.message);
+        result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, syntax.diagnostics,
+                                                                  syntax.diagnostic_count, invocation.input_paths[0], (String8){0});
         goto end;
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
@@ -3256,9 +3273,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
             if (semantic.diagnostic_count)
             {
-                CDiagnostic diagnostic = semantic.diagnostics[0];
-                result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), invocation.input_paths[0], diagnostic.location.line,
-                                                  diagnostic.location.column, diagnostic.message);
+                result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, semantic.diagnostics,
+                                                                          semantic.diagnostic_count, invocation.input_paths[0], (String8){0});
             }
             else
             {
@@ -3276,9 +3292,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
         if (lowered.diagnostic_count)
         {
-            CDiagnostic diagnostic = lowered.diagnostics[0];
-            result.diagnostic = string_format(arena, S8("{S8}:{u32}:{u32}: {S8}"), invocation.input_paths[0], diagnostic.location.line,
-                                              diagnostic.location.column, diagnostic.message);
+            result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, lowered.diagnostics,
+                                                                      lowered.diagnostic_count, invocation.input_paths[0], (String8){0});
         }
         goto end;
     }
@@ -3403,81 +3418,63 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             };
             line_start = line_end < assembly.source.length ? line_end + 1 : assembly.source.length;
         }
+        CodegenModule context = code;
+        context.failed_function = IR_FUNCTION_ID_INVALID;
+        context.failed_instruction = IR_INSTRUCTION_ID_INVALID;
+        context.failed_opcode = IR_OPCODE_COUNT;
+        CompilerDiagnosticBackend backend = compiler_driver_backend_context(arena, invocation, lowered.program, module, context);
+        backend.opcode = S8("module-assembly");
+        IrSource* source = ir_source_from_id(&lowered.program->sources, (IrSourceId){.value = position.source});
+        CompilerDiagnostic diagnostic = {
+            .code = compiler_driver_codegen_error_name(code.error), .backend = &backend,
+            .primary = {.path = source ? source->path : (String8){0}, .range = assembly.source_range,
+                        .position = position, .has_range = position.line != 0},
+            .message = string_format(arena, S8("C module assembly refused: kind={S8}, block {u32}, block line {u32} ('{S8}')"),
+                                     compiler_driver_codegen_error_name(code.error), code.failed_assembly, code.failed_assembly_line, line),
+        };
+        diagnostic.primary.original_position = ir_source_map_original_position(&lowered.program->source_map, assembly.source_range.offset);
+        IrSource* original = ir_source_from_id(&lowered.program->sources, (IrSourceId){.value = diagnostic.primary.original_position.source});
+        if (diagnostic.primary.original_position.line && original) diagnostic.primary.original_path = original->path;
+        compiler_driver_collect_diagnostic(warnings, diagnostic);
         result.error = COMPILER_DRIVER_ERROR_CODEGEN;
-        result.diagnostic =
-            string_format(arena, S8("C module assembly generation failed with error {u32}, block {u32}, block line {u32} ('{S8}'), source {u32}:{u32}"),
-                          (u32)code.error, code.failed_assembly, code.failed_assembly_line, line, position.line, position.column);
+        result.diagnostic = compiler_diagnostic_render(arena, diagnostic);
         goto end;
     }
     if (code.error != CODEGEN_ERROR_NONE)
     {
-        String8 function_name = code.failed_function.value < module->function_count ? module->functions[code.failed_function.value].name : S8("<none>");
-        u32 operation = IR_BINARY_COUNT;
-        u32 source_line = 0;
-        u32 source_column = 0;
-        u32 function_state = IR_FUNCTION_STATE_COUNT;
-        u32 function_block_count = 0;
-        u32 function_instruction_count = 0;
-        String8 referenced_symbol = S8("<none>");
-        if (code.failed_function.value < module->function_count)
-        {
-            IrFunction* failed_function = &module->functions[code.failed_function.value];
-            function_state = (u32)failed_function->state;
-            function_block_count = failed_function->block_count;
-            function_instruction_count = failed_function->instruction_count;
-            if (code.failed_instruction.value < failed_function->instruction_count)
-            {
-                IrInstruction* failed_instruction = &failed_function->instructions[code.failed_instruction.value];
-                IrSourceRange failed_source = failed_function->instruction_canonical_sources[code.failed_instruction.value];
-                IrSourcePosition failed_position = ir_source_position(lowered.program, failed_source);
-                source_line = failed_position.line;
-                source_column = failed_position.column;
-                operation = failed_instruction->opcode == IR_OPCODE_BINARY  ? (u32)failed_instruction->binary_operation
-                            : failed_instruction->opcode == IR_OPCODE_UNARY ? (u32)failed_instruction->unary_operation
-                                                                            : (u32)IR_BINARY_COUNT;
-                if (failed_instruction->opcode == IR_OPCODE_CALL && failed_instruction->operand_count &&
-                    failed_instruction->operands[0].value < failed_function->value_count)
-                {
-                    IrInstructionId definition = failed_function->values[failed_instruction->operands[0].value].definition;
-                    if (definition.value < failed_function->instruction_count)
-                    {
-                        IrInstruction* reference = &failed_function->instructions[definition.value];
-                        IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, reference->symbol);
-                        if (reference->opcode == IR_OPCODE_FUNCTION && symbol)
-                        {
-                            referenced_symbol = symbol->link_name;
-                        }
-                    }
-                }
-            }
-        }
+        CompilerDiagnosticBackend backend = compiler_driver_backend_context(arena, invocation, lowered.program, module, code);
+        CompilerDiagnostic diagnostic = {
+            .code = compiler_driver_codegen_error_name(code.error), .backend = &backend,
+            .primary = compiler_driver_backend_location(lowered.program, module, code.failed_function, code.failed_instruction),
+        };
+        diagnostic.message = backend.reason.length
+            ? string_format(arena, S8("{S8} (in function '{S8}')"), backend.reason, backend.function)
+            : string_format(arena,
+                S8("C code generation refused: kind={S8} target={S8} allocator={S8} function='{S8}' opcode={S8} operation={S8}"),
+                diagnostic.code, backend.target, backend.allocator, backend.function, backend.opcode, backend.operation);
+        compiler_driver_collect_diagnostic(warnings, diagnostic);
         result.error = COMPILER_DRIVER_ERROR_CODEGEN;
-        // A refusal that has a rule behind it says so in the rule's own words
-        // and blames the source position, the way the frontend's refusals do;
-        // the instruction identity below is what is left for a shape that has
-        // no lowering yet, where there is no rule to name (#831).
-        result.diagnostic =
-            code.failure_reason.length
-                ? string_format(arena, S8("{S8} (in function '{S8}', source {u32}:{u32})"), code.failure_reason, function_name, source_line, source_column)
-                : string_format(arena,
-                                S8("C code generation failed with error {u32}, function {u32} ('{S8}', state {u32}, blocks {u32}, instructions {u32}), "
-                                   "instruction {u32}, opcode {u32}, operation {u32}, source {u32}:{u32}, referenced symbol '{S8}'"),
-                                (u32)code.error, code.failed_function.value, function_name, function_state, function_block_count, function_instruction_count,
-                                code.failed_instruction.value, (u32)code.failed_opcode, operation, source_line, source_column, referenced_symbol);
+        result.diagnostic = compiler_diagnostic_render(arena, diagnostic);
         goto end;
     }
     if (invocation.reject_machine_fallback && code.statistics.fallback_function_count)
     {
-        IrFunction* fallback_function = module->functions + code.first_fallback_function.value;
-        IrSourcePosition position = ir_source_position(lowered.program, fallback_function->source);
-        IrSource* source = ir_source_from_id(&lowered.program->sources, (IrSourceId){.value = position.source});
+        CodegenModule context = code;
+        context.failed_function = code.first_fallback_function;
+        context.failed_instruction = IR_INSTRUCTION_ID_INVALID;
+        context.failed_opcode = code.first_fallback_opcode;
+        CompilerDiagnosticBackend backend = compiler_driver_backend_context(arena, invocation, lowered.program, module, context);
+        backend.reason = codegen_fallback_reason_string(code.first_fallback_reason);
+        CompilerDiagnostic diagnostic = {
+            .code = S8("codegen.machine-fallback"), .backend = &backend,
+            .primary = compiler_driver_backend_location(lowered.program, module, context.failed_function, context.failed_instruction),
+        };
+        diagnostic.message = string_format(arena,
+            S8("machine fallback rejected: target={S8} allocator={S8} reason={S8} opcode={S8} function='{S8}' fallbacks={u32}"),
+            backend.target, backend.allocator, backend.reason, backend.opcode, backend.function, code.statistics.fallback_function_count);
+        compiler_driver_collect_diagnostic(warnings, diagnostic);
         result.error = COMPILER_DRIVER_ERROR_CODEGEN;
-        result.diagnostic = string_format(arena,
-            S8("machine fallback rejected: target={S8}-{S8} allocator={S8} reason={S8} opcode={u32} function='{S8}' source={S8}:{u32}:{u32} fallbacks={u32}"),
-            cpu_arch_to_string_os(invocation.target.cpu_arch), operating_system_to_string_os(invocation.target.os),
-            codegen_register_allocator_mode_string((CodegenRegisterAllocatorMode)invocation.register_allocator),
-            codegen_fallback_reason_string(code.first_fallback_reason), (u32)code.first_fallback_opcode, fallback_function->name,
-            source ? source->path : invocation.input_paths[0], position.line, position.column, code.statistics.fallback_function_count);
+        result.diagnostic = compiler_diagnostic_render(arena, diagnostic);
         goto end;
     }
     ObjectFile object = object_from_canonical_codegen_module(arena, lowered.program, &code, invocation.target);
@@ -3537,7 +3534,7 @@ BUSTER_GLOBAL_LOCAL GpuPipelineAction compiler_driver_gpu_action(CompilerDriverA
 }
 
 BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* arena, CompilerDriverInvocation invocation,
-                                                                      CompilerDriverWarningCollector* warnings)
+                                                                      CompilerDriverDiagnosticCollector* warnings)
 {
     CompilerDriverResult result = {0};
     GpuSourceLanguage language = compiler_driver_gpu_language(invocation.language);
@@ -3602,8 +3599,9 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
 
 CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation)
 {
-    CompilerDriverWarningCollector warnings = {
+    CompilerDriverDiagnosticCollector warnings = {
         .arena = arena,
+        .suppress_records = invocation.suppress_diagnostic_records,
     };
     CompilerDriverResult result = {0};
     if (!arena)
@@ -4121,6 +4119,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     if (linked.error != LINK_ERROR_NONE)
     {
         result.error = COMPILER_DRIVER_ERROR_LINK;
+        result.native_link.error = linked.error;
+        result.native_link.symbol = linked.symbol;
         result.diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with error {u32} on symbol '{S8}'"), (u32)linked.error, linked.symbol)
                                                  : string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
         goto finish;
@@ -4169,6 +4169,29 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             string_format(arena, S8("native C link failed with {S8}: {S8}"), link_error_name(result.native_link.error), result.native_link.symbol);
     }
 finish:
+    if (result.error != COMPILER_DRIVER_ERROR_NONE && !warnings.suppress_records)
+    {
+        bool has_error = false;
+        for (u32 index = 0; index < warnings.record_count; index += 1)
+        {
+            has_error |= warnings.records[index].severity == COMPILER_DIAGNOSTIC_ERROR;
+        }
+        if (!has_error)
+        {
+            CompilerDiagnostic diagnostic = {
+                .code = compiler_driver_error_code(result.error), .message = result.diagnostic,
+                .primary = {.range = {.source = IR_SOURCE_ID_INVALID}},
+            };
+            if (result.error == COMPILER_DRIVER_ERROR_LINK && result.native_link.error != LINK_ERROR_NONE)
+            {
+                diagnostic.code = compiler_driver_link_code(result.native_link.error);
+                diagnostic.symbol = result.native_link.symbol;
+            }
+            compiler_driver_collect_diagnostic(&warnings, diagnostic);
+        }
+    }
+    result.diagnostics = warnings.records;
+    result.diagnostic_count = warnings.record_count;
     result.warning = compiler_driver_warning_flatten(warnings);
     return result;
 }

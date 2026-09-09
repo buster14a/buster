@@ -891,6 +891,12 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, 
         u64 end = 0;
         if (!codegen_inline_assembly_template_reference(template_source, index, extra, instruction->operand_count, &operand_index, &end))
         {
+            if (reason_out)
+            {
+                *reason_out = index + 1 < template_source.length && template_source.pointer[index + 1] == 'l'
+                    ? S8("inline assembly label references (%l) are unsupported in this template form")
+                    : S8("inline assembly template contains an unsupported operand reference");
+            }
             return false;
         }
         IrValueId value = instruction->operands[operand_index];

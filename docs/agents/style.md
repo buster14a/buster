@@ -63,8 +63,8 @@
   not promised to compile with TCC. Avoid compiler-specific extensions unless
   guarded.
 - **Idioms**: arena allocation (`<buster/lib/arena.h>`) — no malloc/free churn;
-  `String8`/`S8("...")` (defined in `<buster/lib/base.h>`) — no C strings; `STRUCT(Name)`
-  declarations; `BUSTER_`-prefixed macros; 4-space indent, snake_case, braces
+  `String8`/`S8("...")` (defined in `<buster/lib/base.h>`) — no C strings; explicit struct typedefs
+  and declarations; `BUSTER_`-prefixed macros; 4-space indent, snake_case, braces
   on their own line. Prefer function headers, declarations, statements, and
   similar constructs on one line; split them only when doing so is clearer.
   Match the surrounding file.

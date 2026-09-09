@@ -129,7 +129,11 @@ struct IrSourceRegion
     s64 line_delta;
     IrSourcePosition stamp;
     IrSourceRegionKind kind;
-    u32 reserved;
+    // Optional original provenance, encoded plus one so zero means absent.
+    // TEXT stores the physical source ID before remapping; STAMP stores the
+    // mapped offset whose expansion produced this region. Diagnostic recovery
+    // follows stamp origins iteratively, leaving ordinary source queries alone.
+    u32 origin_plus_one;
 };
 
 // Everything a lookup needs before it knows which region it wants: the
@@ -521,6 +525,9 @@ BUSTER_F_DECL IrSource* ir_source_from_id(IrSourceTable* table, IrSourceId id);
 // The mapped byte space, resolved. `cursor` may be null; passing one across a
 // walk is what keeps a sequence of lookups from re-searching.
 BUSTER_F_DECL IrSourcePosition ir_source_map_position(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor);
+// Original physical location before remapping/expansion, or line zero when
+// the producer retained no origin. Stamp chains are bounded by map size.
+BUSTER_F_DECL IrSourcePosition ir_source_map_original_position(IrSourceMap const* map, u32 offset);
 // Only which source the offset lands in, skipping the line/column search.
 BUSTER_F_DECL u32 ir_source_map_source(IrSourceMap const* map, u32 offset, IrSourceMapCursor* cursor);
 // The same, for a source the frontend handed over whole: counts the line

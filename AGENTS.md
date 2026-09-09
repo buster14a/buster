@@ -43,7 +43,7 @@ disagree, inspect the code and update the affected guide in the same change.
   only trivial, statically bounded recursion is allowed.
 - **No compiler callbacks/function-pointer dispatch**, except the uniform
   `lane_run` entry. Use direct calls, loops, switches, and explicit work data.
-- Use arena allocation, `String8`/`S8`, `STRUCT(Name)`, and `BUSTER_` macros.
+- Use arena allocation, `String8`/`S8`, explicit struct typedefs, and `BUSTER_` macros.
   Match surrounding style: four spaces, snake_case, braces on their own line,
   and single-line declarations/statements where clear. Include headers through
   `<buster/lib/...>` or `<buster/tests/...>`.
