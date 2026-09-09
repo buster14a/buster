@@ -1,0 +1,128 @@
+name: Astra preprocessing final validation
+
+on:
+  push:
+    branches: [astra/20260909-sequential-transport]
+    paths: [.github/workflows/astra-sequential-finalize.yml]
+
+permissions: {}
+
+concurrency:
+  group: astra-preprocessor-finalize-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: payload
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: dd27c44f628aa902cba5fb7c54ee3aaf9870d685
+          path: source
+          persist-credentials: false
+      - name: Replace the reviewed private evaluator only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import pathlib
+          replacement = pathlib.Path('payload/.github/astra-transport/pp-evaluator-final.c').read_bytes()
+          if hashlib.sha256(replacement).hexdigest() != '040e05db4a4a1c991f642b85a11d286688f497b1712207e9e92e41a8858d6dbf':
+              raise SystemExit('Replacement identity mismatch')
+          path = pathlib.Path('source/src/buster/lib/compiler/frontend/c/c_source.c')
+          before = path.read_bytes()
+          def blob(data):
+              return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+          if blob(before) != 'f1c6959d6e62776d41ac8c50f2b9c5e59d4b1452':
+              raise SystemExit('Original source identity mismatch')
+          start = before.index(b'BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(')
+          end = before.index(b'// The parse-side entry point:', start)
+          after = before[:start] + replacement + b'\n' + before[end:]
+          if blob(after) != 'e3079bac32f163b0e6d7d36848f2b965b34b0959':
+              raise SystemExit('Final source identity mismatch')
+          path.write_bytes(after)
+          PY
+      - name: Append to the session branch without overwriting concurrent changes
+        id: publish
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target=refs/heads/astra/147-258-preprocessor-short-circuit
+          test "$(git ls-remote origin "$target" | cut -f1)" = dd27c44f628aa902cba5fb7c54ee3aaf9870d685
+          git add src/buster/lib/compiler/frontend/c/c_source.c
+          test "$(git diff --cached --name-only)" = src/buster/lib/compiler/frontend/c/c_source.c
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'c: keep conditional evaluation control flow structured'
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin "HEAD:$target"
+          printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          printf 'Reviewed source commit: %s\n' "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+  validate:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.publish.outputs.sha }}
+          persist-credentials: false
+      - name: Record exact source and independent fixture oracles
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pp-final"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/pp-final/source-sha.txt"
+          clang --version | tee "$RUNNER_TEMP/pp-final/clang.txt"
+          gcc --version | tee "$RUNNER_TEMP/pp-final/gcc.txt"
+          clang -std=c17 -Wall -Wextra -Werror -fsyntax-only tests/basic_c_preprocessor_short_circuit.c
+          gcc -std=c17 -Wall -Wextra -Werror -fsyntax-only tests/basic_c_preprocessor_short_circuit.c
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g0 build.c -o "$RUNNER_TEMP/buster-build"
+      - name: Registered Release regressions with bounded split compilation
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF '-DCMAKE_C_FLAGS_RELEASE=-O1 -DNDEBUG' 2>&1 | tee "$RUNNER_TEMP/pp-final/release-configure.txt"
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/pp-final/release-tests.txt"
+      - name: Native differential configurations and self-host fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_differential --self-test 2>&1 | tee "$RUNNER_TEMP/pp-final/differential-self-test.txt"
+          "$RUNNER_TEMP/buster-build" test_differential --ide build/Release/ide --cc clang --source tests/basic_c_preprocessor_short_circuit.c --out build/pp-final-differential --generated 0 --minimize 0 2>&1 | tee "$RUNNER_TEMP/pp-final/differential.txt"
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/pp-final/mode-matrix.txt"
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/pp-final/self-host.txt"
+      - name: Registered Debug regressions under AddressSanitizer and UndefinedBehaviorSanitizer
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --sanitize --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF '-DCMAKE_C_FLAGS_DEBUG=-O0 -g0' 2>&1 | tee "$RUNNER_TEMP/pp-final/sanitizer-configure.txt"
+          "$RUNNER_TEMP/buster-build" build --config Debug -t test_all 2>&1 | tee "$RUNNER_TEMP/pp-final/sanitizer-tests.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: astra-preprocessor-final-${{ github.run_id }}
+          path: ${{ runner.temp }}/pp-final/
+          if-no-files-found: error
+          retention-days: 7
