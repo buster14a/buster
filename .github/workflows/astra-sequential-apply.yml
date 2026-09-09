@@ -1,0 +1,176 @@
+name: Astra first compiler slice
+
+on:
+  push:
+    branches:
+      - astra/20260909-sequential-transport
+    paths:
+      - .github/workflows/astra-sequential-apply.yml
+
+permissions: {}
+
+concurrency:
+  group: astra-first-slice-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: payload
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: bf9afdbe886821aecc9be787075b7cb84c9bdcd1
+          path: source
+          persist-credentials: false
+      - name: Recover and verify the reviewed source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import os
+          import pathlib
+          import zlib
+          path = pathlib.Path('payload/.github/astra-transport/pp-short-circuit.patch.zlib.b64')
+          encoded = path.read_text().strip()
+          # Correct two identified transcription errors in the transport bytes.
+          # The decoded patch must still match its pre-upload SHA-256 exactly.
+          encoded = encoded.replace('C6QBaNeJlmvNRu15', 'C6QBaNeJwfNJlmvNRu15')
+          encoded = encoded.replace('ZN8nb6dr6ptZb', 'ZN8nb6drptZb')
+          patch = zlib.decompress(base64.b64decode(encoded, validate=True))
+          expected = '09699eb54ec0128c5800ecd456c671abfea16d15d269f6f462361babd3a33d2b'
+          actual = hashlib.sha256(patch).hexdigest()
+          if actual != expected:
+              raise SystemExit(f'Patch identity mismatch: {actual}')
+          destination = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pp-short-circuit.patch'
+          destination.write_bytes(patch)
+          print(f'Verified reviewed patch SHA-256: {actual}')
+          PY
+      - name: Apply only the reviewed compiler and regression files
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = bf9afdbe886821aecc9be787075b7cb84c9bdcd1
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = bf9afdbe886821aecc9be787075b7cb84c9bdcd1
+          git apply --check "$RUNNER_TEMP/pp-short-circuit.patch"
+          git apply --index "$RUNNER_TEMP/pp-short-circuit.patch"
+          git diff --cached --check
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              'docs/agents/frontend/foundations.md',
+              'src/buster/lib/compiler/frontend/c/c_source.c',
+              'src/buster/tests/compiler/driver/driver_test.c',
+              'src/buster/tests/compiler/frontend/c/c_test.c',
+              'tests/basic_c_preprocessor_short_circuit.c',
+          }
+          actual = set(subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines())
+          if actual != allowed:
+              raise SystemExit(f'Unexpected changed paths: {actual}')
+          PY
+          clang -std=c17 -Wall -Wextra -Werror -fsyntax-only tests/basic_c_preprocessor_short_circuit.c
+          gcc -std=c17 -Wall -Wextra -Werror -fsyntax-only tests/basic_c_preprocessor_short_circuit.c
+      - name: Publish a new source branch without rewriting any existing branch
+        id: publish
+        working-directory: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          target=refs/heads/astra/147-258-preprocessor-short-circuit
+          if git ls-remote --exit-code --heads origin "$target"; then
+            echo 'Refusing to modify an existing target branch.' >&2
+            exit 1
+          else
+            status=$?
+            test "$status" -eq 2
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'c: defer faults in short-circuit preprocessing expressions (#147, #258)'
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin "HEAD:$target"
+          sha=$(git rev-parse HEAD)
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+          printf 'Candidate commit: %s\nCompiler validation is a separate job.\n' "$sha" >> "$GITHUB_STEP_SUMMARY"
+          git show --stat --oneline HEAD > "$RUNNER_TEMP/pp-short-circuit-manifest.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: astra-first-slice-patch-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/pp-short-circuit.patch
+            ${{ runner.temp }}/pp-short-circuit-manifest.txt
+            payload/.github/astra-transport/pp-short-circuit.patch.zlib.b64
+          if-no-files-found: error
+          retention-days: 1
+
+  reproduce:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.publish.outputs.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Build the frozen baseline with bounded split compilation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pp-evidence"
+          cp tests/basic_c_preprocessor_short_circuit.c "$RUNNER_TEMP/pp-evidence/reproducer.c"
+          git checkout --detach bf9afdbe886821aecc9be787075b7cb84c9bdcd1
+          clang --version | tee "$RUNNER_TEMP/pp-evidence/clang.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g0 build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF '-DCMAKE_C_FLAGS_RELEASE=-O1 -DNDEBUG' 2>&1 | tee "$RUNNER_TEMP/pp-evidence/configure.txt"
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/pp-evidence/baseline-build.txt"
+      - name: Require the reported baseline rejection, not a crash or timeout
+        shell: bash
+        run: |
+          set -euo pipefail
+          if timeout 120s build/Release/ide cc -std=c17 -g0 -fsyntax-only "$RUNNER_TEMP/pp-evidence/reproducer.c" > "$RUNNER_TEMP/pp-evidence/baseline-rejection.txt" 2>&1; then
+            echo 'Baseline unexpectedly accepted the reproducer; re-evaluate the finding.' >&2
+            exit 1
+          else
+            status=$?
+            test "$status" -eq 1
+          fi
+          grep -F 'invalid preprocessing conditional expression' "$RUNNER_TEMP/pp-evidence/baseline-rejection.txt"
+      - name: Build and independently compare the candidate across existing native configurations
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ needs.publish.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "$CANDIDATE_SHA"
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/pp-evidence/candidate-build.txt"
+          "$RUNNER_TEMP/buster-build" test_differential --self-test 2>&1 | tee "$RUNNER_TEMP/pp-evidence/differential-self-test.txt"
+          "$RUNNER_TEMP/buster-build" test_differential --ide build/Release/ide --cc clang --source tests/basic_c_preprocessor_short_circuit.c --out build/pp-short-circuit-differential --generated 0 --minimize 0 2>&1 | tee "$RUNNER_TEMP/pp-evidence/differential.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: astra-first-slice-evidence-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/pp-evidence/
+            build/pp-short-circuit-differential/
+          if-no-files-found: error
+          retention-days: 7
