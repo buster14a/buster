@@ -69,6 +69,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TIME_TRACE_SUMMARY_SELF_TEST,
     BUILD_COMMAND_TEST_TIMING_SUMMARY,
     BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST,
+    BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST,
     BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA,
     BUILD_COMMAND_IMPORT_ARM_A64_METADATA,
     BUILD_COMMAND_IMPORT_ARM_A64_SYSREG,
@@ -17233,9 +17234,24 @@ struct MuslDirectoryEntry
     u8 reserved[7];
 };
 
+BUSTER_GLOBAL_LOCAL void musl_directory_append(Arena* arena, MuslDirectoryEntry** entries, u64* count, u64* capacity, MuslDirectoryEntry entry)
+{
+    if (*count == *capacity)
+    {
+        u64 grown_capacity = *capacity * 2;
+        MuslDirectoryEntry* grown = arena_allocate(arena, MuslDirectoryEntry, grown_capacity);
+        memcpy(grown, *entries, *count * sizeof(*grown));
+        *entries = grown;
+        *capacity = grown_capacity;
+    }
+    (*entries)[*count] = entry;
+    *count += 1;
+}
+
 // One directory level, names only. A symbolic link is refused rather than
 // followed: the manifest has to describe the pinned checkout and nothing a link
-// might point at outside it.
+// might point at outside it. Collect every entry before the caller sorts the
+// manifest; an iteration error must never publish an apparently complete prefix.
 BUSTER_GLOBAL_LOCAL bool musl_list_directory(Arena* arena, String8 directory, MuslDirectoryEntry** entries_out, u64* count_out)
 {
     u64 capacity = 512;
@@ -17251,6 +17267,12 @@ BUSTER_GLOBAL_LOCAL bool musl_list_directory(Arena* arena, String8 directory, Mu
     if (find == INVALID_HANDLE_VALUE)
     {
         result = false;
+        if (GetLastError() == ERROR_FILE_NOT_FOUND)
+        {
+            String16 directory_w = string16_from_string8(temporary.arena, directory, true);
+            DWORD attributes = GetFileAttributesW(directory_w.pointer);
+            result = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        }
     }
     else
     {
@@ -17258,7 +17280,7 @@ BUSTER_GLOBAL_LOCAL bool musl_list_directory(Arena* arena, String8 directory, Mu
         {
             String8 name =
                 string8_from_string16(arena, (String16){.pointer = find_data.cFileName, .length = string16_length(find_data.cFileName)}, true);
-            if (string_equal(name, S8(".")) || string_equal(name, S8("..")) || count >= capacity)
+            if (string_equal(name, S8(".")) || string_equal(name, S8("..")))
             {
                 continue;
             }
@@ -17267,12 +17289,20 @@ BUSTER_GLOBAL_LOCAL bool musl_list_directory(Arena* arena, String8 directory, Mu
                 result = false;
                 break;
             }
-            entries[count++] = (MuslDirectoryEntry){
-                .name = name,
-                .is_directory = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
-            };
+            musl_directory_append(arena, &entries, &count, &capacity,
+                                  (MuslDirectoryEntry){
+                                      .name = name,
+                                      .is_directory = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
+                                  });
         } while (FindNextFileW(find, &find_data));
-        FindClose(find);
+        if (result && GetLastError() != ERROR_NO_MORE_FILES)
+        {
+            result = false;
+        }
+        if (!FindClose(find))
+        {
+            result = false;
+        }
     }
     scratch_end(temporary);
 #else
@@ -17284,9 +17314,17 @@ BUSTER_GLOBAL_LOCAL bool musl_list_directory(Arena* arena, String8 directory, Mu
     }
     else
     {
-        struct dirent* entry = 0;
-        while ((entry = readdir(handle)) != 0 && count < capacity)
+        while (true)
         {
+            // lstat and allocations between reads may change errno, while EOF
+            // leaves it untouched. Reset it immediately before each readdir.
+            errno = 0;
+            struct dirent* entry = readdir(handle);
+            if (!entry)
+            {
+                result = errno == 0;
+                break;
+            }
             String8 name = string_from_pointer((char8*)entry->d_name);
             if (string_equal(name, S8(".")) || string_equal(name, S8("..")))
             {
@@ -17299,16 +17337,20 @@ BUSTER_GLOBAL_LOCAL bool musl_list_directory(Arena* arena, String8 directory, Mu
                 result = false;
                 break;
             }
-            entries[count++] = (MuslDirectoryEntry){
-                .name = string_duplicate_arena(arena, name, true),
-                .is_directory = S_ISDIR(status.st_mode) != 0,
-            };
+            musl_directory_append(arena, &entries, &count, &capacity,
+                                  (MuslDirectoryEntry){
+                                      .name = string_duplicate_arena(arena, name, true),
+                                      .is_directory = S_ISDIR(status.st_mode) != 0,
+                                  });
         }
-        closedir(handle);
+        if (closedir(handle) != 0)
+        {
+            result = false;
+        }
     }
 #endif
-    *entries_out = entries;
-    *count_out = count;
+    *entries_out = result ? entries : 0;
+    *count_out = result ? count : 0;
     return result;
 }
 
@@ -17512,6 +17554,152 @@ BUSTER_GLOBAL_LOCAL bool musl_collect_manifest(Arena* arena, String8 root, Strin
     }
     *manifest_out = manifest;
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult musl_directory_self_test(Arena* arena)
+{
+    enum
+    {
+        FILE_COUNT = 1100
+    };
+    String8 directory = {0};
+    bool owned = summary_self_test_claim_directory(arena, S8("musl-directory"), &directory);
+    bool passed = owned;
+    bool symlink_checked = false;
+    if (owned)
+    {
+        MuslManifest manifests[2] = {0};
+        String8 roots[2] = {0};
+        for (u64 order = 0; order < BUSTER_ARRAY_LENGTH(roots); order += 1)
+        {
+            String8 root = path_join(arena, directory, order ? S8("reverse") : S8("forward"));
+            roots[order] = root;
+            String8 sources = path_join(arena, root, S8("src/stress"));
+            String8 architecture = path_join(arena, sources, S8(MUSL_COMPATIBILITY_ARCHITECTURE));
+            String8 required[] = {architecture, path_join(arena, root, S8("src/malloc/" MUSL_COMPATIBILITY_ALLOCATOR)), path_join(arena, root, S8("crt")),
+                                  path_join(arena, root, S8("ldso"))};
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(required); index += 1)
+            {
+                make_directory_recursive(arena, required[index]);
+            }
+            bool created = true;
+            for (u64 index = 0; index < FILE_COUNT && created; index += 1)
+            {
+                u64 number = order ? FILE_COUNT - index - 1 : index;
+                String8 name = string_format(arena, S8("unit-{u64}.c"), number);
+                created = file_write(path_join(arena, sources, name), BUSTER_SLICE_TO_BYTE_SLICE(S8("/* fixture */\n")));
+            }
+            created = file_write(path_join(arena, architecture, S8("unit-0.c")), BUSTER_SLICE_TO_BYTE_SLICE(S8("/* replacement */\n"))) && created;
+
+            MuslDirectoryEntry* entries = 0;
+            u64 count = 0;
+            bool listed = musl_list_directory(arena, sources, &entries, &count);
+            bool inventory_valid = created && listed && count == FILE_COUNT + 1;
+            u8 seen[FILE_COUNT] = {0};
+            u64 directories = 0;
+            for (u64 index = 0; index < count; index += 1)
+            {
+                MuslDirectoryEntry entry = entries[index];
+                if (entry.is_directory)
+                {
+                    directories += 1;
+                    inventory_valid = string_equal(entry.name, S8(MUSL_COMPATIBILITY_ARCHITECTURE)) && inventory_valid;
+                }
+                else
+                {
+                    u64 number = FILE_COUNT;
+                    bool valid_name = string_starts_with_sequence(entry.name, S8("unit-")) && string_ends_with_sequence(entry.name, S8(".c")) &&
+                                      entry.name.length > 7 && text_parse_u64(string_slice(entry.name, 5, entry.name.length - 2), &number) &&
+                                      number < FILE_COUNT;
+                    if (valid_name)
+                    {
+                        inventory_valid = !seen[number] && inventory_valid;
+                        seen[number] = 1;
+                    }
+                    else
+                    {
+                        inventory_valid = false;
+                    }
+                }
+            }
+            inventory_valid = directories == 1 && inventory_valid;
+            for (u64 index = 0; index < FILE_COUNT; index += 1)
+            {
+                inventory_valid = seen[index] && inventory_valid;
+            }
+            if (!inventory_valid)
+            {
+                string_print(S8("error: musl directory self-test order={u64} expected={u64} actual={u64} complete_unique=0\n"), order, (u64)FILE_COUNT + 1,
+                             count);
+            }
+            bool manifest_valid = created && musl_collect_manifest(arena, root, path_join(arena, root, S8("output")), &manifests[order]);
+            MuslManifest manifest = manifests[order];
+            manifest_valid = manifest.unit_count == FILE_COUNT && manifest.architecture_c_unit_count == 1 && manifest_valid;
+            for (u64 index = 0; index < manifest.unit_count; index += 1)
+            {
+                MuslUnit unit = manifest.units[index];
+                bool replacement = string_equal(unit.relative, S8("src/stress/unit-0"));
+                String8 expected_source =
+                    replacement ? path_join(arena, architecture, S8("unit-0.c")) : string_format(arena, S8("{S8}.c"), path_join(arena, root, unit.relative));
+                manifest_valid = string_equal(unit.source, expected_source) && unit.architecture == replacement && !unit.assembly && manifest_valid;
+                manifest_valid =
+                    (replacement ? string_equal(unit.replaced_source, path_join(arena, sources, S8("unit-0.c"))) : unit.replaced_source.length == 0) &&
+                    manifest_valid;
+                if (index)
+                {
+                    manifest_valid = musl_string_less(manifest.units[index - 1].relative, unit.relative) && manifest_valid;
+                }
+            }
+            passed = inventory_valid && manifest_valid && passed;
+        }
+        bool identical = manifests[0].unit_count == FILE_COUNT && manifests[1].unit_count == FILE_COUNT;
+        for (u64 index = 0; identical && index < FILE_COUNT; index += 1)
+        {
+            identical = string_equal(manifests[0].units[index].relative, manifests[1].units[index].relative);
+        }
+        passed = identical && passed;
+
+        MuslDirectoryEntry* entries = 0;
+        u64 count = 0;
+#if !BUSTER_WINDOWS
+        // EOF must not inherit an unrelated error from before the read.
+        errno = EIO;
+#endif
+        bool empty = musl_list_directory(arena, path_join(arena, roots[0], S8("crt")), &entries, &count);
+        passed = empty && count == 0 && passed;
+        String8 invalid[] = {path_join(arena, directory, S8("missing")), path_join(arena, roots[0], S8("src/stress/unit-0.c"))};
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+        {
+            count = 99;
+            bool listed = musl_list_directory(arena, invalid[index], &entries, &count);
+            passed = !listed && !entries && count == 0 && passed;
+        }
+
+        String8 link = path_join(arena, roots[0], S8("src/stress/link.c"));
+#if BUSTER_WINDOWS
+        String16 link_w = string16_from_string8(arena, link, true);
+        String16 target_w = string16_from_string8(arena, S8("unit-0.c"), true);
+        symlink_checked = CreateSymbolicLinkW(link_w.pointer, target_w.pointer, 0) != 0;
+        if (!symlink_checked)
+        {
+            bool privilege_missing = GetLastError() == ERROR_PRIVILEGE_NOT_HELD;
+            passed = privilege_missing && passed;
+            string_print(S8("MUSL_DIRECTORY_SELF_TEST symlink_creation_unavailable={u32}\n"), (u32)privilege_missing);
+        }
+#else
+        symlink_checked = symlink("unit-0.c", (const char*)link.pointer) == 0;
+        passed = symlink_checked && passed;
+#endif
+        if (symlink_checked)
+        {
+            bool listed = musl_list_directory(arena, path_join(arena, roots[0], S8("src/stress")), &entries, &count);
+            passed = !listed && !entries && count == 0 && passed;
+        }
+        passed = os_directory_delete(directory) && passed;
+    }
+    string_print(S8("MUSL_DIRECTORY_SELF_TEST status={S8} files_per_order={u64} symlink_checked={u32}\n"), passed ? S8("pass") : S8("fail"), (u64)FILE_COUNT,
+                 (u32)symlink_checked);
+    return passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 
 // musl's Makefile builds three headers before anything compiles, and it builds
@@ -22231,7 +22419,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         string_print(S8("error: artifact fan-out was requested on an unsupported self-host consumer platform\n"));
         return PROCESS_RESULT_FAILED;
     }
-    ProcessResult focused_test_result = build_artifact_fanout_tests(arena, fanout_forced);
+    ProcessResult focused_test_result = musl_directory_self_test(arena);
+    if (focused_test_result == PROCESS_RESULT_SUCCESS)
+    {
+        focused_test_result = build_artifact_fanout_tests(arena, fanout_forced);
+    }
     if (focused_test_result != PROCESS_RESULT_SUCCESS)
     {
         return focused_test_result;
@@ -33875,6 +34067,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TIME_TRACE_SUMMARY_SELF_TEST] = S8_INITIALIZER("time_trace_summary_self_test"),
         [BUILD_COMMAND_TEST_TIMING_SUMMARY] = S8_INITIALIZER("test_timing_summary"),
         [BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST] = S8_INITIALIZER("test_timing_summary_self_test"),
+        [BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST] = S8_INITIALIZER("musl_directory_self_test"),
         [BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA] = S8_INITIALIZER("import_assembly_metadata"),
         [BUILD_COMMAND_IMPORT_ARM_A64_METADATA] = S8_INITIALIZER("import_arm_a64_metadata"),
         [BUILD_COMMAND_IMPORT_ARM_A64_SYSREG] = S8_INITIALIZER("import_arm_a64_sysregs"),
@@ -34939,6 +35132,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST:
         {
             result = test_timing_summary_self_test(arena);
+        }
+        break;
+        case BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST:
+        {
+            result = musl_directory_self_test(arena);
         }
         break;
         case BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA:

@@ -36,6 +36,13 @@ replaces a portable one of the same name the manifest is 1356 units: 1306
 portable C, 18 architecture C and 32 assembly. The replacement rule and what
 Buster does with it are described with the archive below.
 
+Directory inventories grow as needed and retain every entry before manifest
+sorting. Native enumeration or close errors fail the listing and clear its
+outputs; symbolic links and Windows reparse points remain refused. The native
+`musl_directory_self_test` command covers 1,100-file directories created in both
+orders, uniqueness, sorted manifests and architecture replacements, and runs in
+the desktop CI combination matrices without requiring an external checkout.
+
 One flag set drives both compilers, and it is musl's own `CFLAGS_ALL` minus the
 flags musl's `configure` only offers a compiler that accepts them: `-std=c99
 -nostdinc -fno-builtin -fno-strict-aliasing -fno-stack-protector
