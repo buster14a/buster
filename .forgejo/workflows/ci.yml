@@ -133,6 +133,9 @@ jobs:
         run: |
           set -euo pipefail
           ./build.sh test_differential --self-test
+          if [[ ! -f build/CMakeCache.txt ]]; then
+            ./build.sh generate --cc clang --config Release --linker DEFAULT
+          fi
           ./build.sh build --config Release -t ide
           ./build.sh test_differential --ide build/Release/ide --out build/differential-ci --sanitize-oracle
       - name: Test (Windows)
