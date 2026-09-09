@@ -21,6 +21,7 @@
 //                                                superbuild scheduler
 //   xed_import_*, assembly_import_*              x86 metadata importer (XED)
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
+//   bench_throughput_add                        reproducible compiler benchmarks
 //   process_arguments, main                      command dispatch
 
 #define BUSTER_UNITY_BUILD 1
@@ -60,6 +61,8 @@
 typedef enum BuildCommand
 {
     BUILD_COMMAND_NONE,
+    BUILD_COMMAND_BENCH_THROUGHPUT,
+    BUILD_COMMAND_BENCH_THROUGHPUT_CI,
     BUILD_COMMAND_GENERATE,
     BUILD_COMMAND_BUILD,
     BUILD_COMMAND_CLANG_ANALYZE,
@@ -34049,6 +34052,137 @@ BUSTER_GLOBAL_LOCAL void machine_info_print(void)
 // Native semantic matrix and bounded reducer; policy stays in the build driver.
 #include "tools/differential.c"
 
+// Compiler construction stays in the existing generate/build commands. This
+// command builds the small native measurement tool, then forwards its argv
+// without shell parsing. No new dependency or compiler-library module is added.
+BUSTER_GLOBAL_LOCAL void bench_throughput_add(Arena* arena, SliceString8 arguments)
+{
+    make_directory_recursive(arena, S8("build/throughput-tools"));
+    bool self_test = arguments.length == 1 && string_equal(arguments.pointer[0], S8("self-test"));
+#if BUSTER_WINDOWS
+    String8 executable = self_test ? S8("build/throughput-tools/throughput-tests.exe") : S8("build/throughput-tools/throughput.exe");
+#else
+    String8 executable = self_test ? S8("build/throughput-tools/throughput-tests") : S8("build/throughput-tools/throughput");
+#endif
+    // Resolve before opening the arena-backed argument builder: lookup also
+    // allocates. Windows CreateProcess does not search PATH for this argument.
+    String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
+    ProcessRun* compile = run_add(arena, step_add(arena));
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, compiler);
+    os_argument_builder_append(&builder, S8("-std=c11"));
+    os_argument_builder_append(&builder, S8("-O2"));
+    os_argument_builder_append(&builder, S8("-Wall"));
+    os_argument_builder_append(&builder, S8("-Wextra"));
+    os_argument_builder_append(&builder, S8("-Werror"));
+    os_argument_builder_append(&builder, S8("-fwrapv"));
+    os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
+    os_argument_builder_append(&builder, S8("-funsigned-char"));
+    os_argument_builder_append(&builder, self_test ? S8("tools/throughput/tests.c") : S8("tools/throughput/throughput.c"));
+#if !BUSTER_WINDOWS
+    os_argument_builder_append(&builder, S8("-lm"));
+#endif
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, executable);
+    *compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
+                            .spawn_options = {.use_process_environment = 1}};
+    ProcessRun* measure = run_add(arena, step_add(arena));
+    builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, executable);
+    if (self_test)
+    {
+        os_argument_builder_append(&builder, S8("build/throughput-tool-tests"));
+    }
+    else
+    {
+        for (u64 i = 0; i < arguments.length; i += 1)
+        {
+            os_argument_builder_append(&builder, arguments.pointer[i]);
+        }
+    }
+    *measure = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
+                            .spawn_options = {.use_process_environment = 1}};
+}
+
+// A same-runner CI comparison. A separately checked-out baseline is required;
+// the generated workload and flags are owned by the candidate harness, shared
+// byte-for-byte by both compiler executables. Never restore timing baselines or
+// compiler executables from a cache. The CI checkout supplies immutable SHAs.
+BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceString8 arguments)
+{
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    if (arguments.length != 1)
+    {
+        string_print(S8("error: bench_throughput_ci requires one separately checked-out baseline directory\n"));
+    }
+    else
+    {
+        String8 baseline = os_path_absolute(arena, arguments.pointer[0], true);
+        String8 current = os_path_absolute(arena, S8("."), true);
+#if BUSTER_WINDOWS
+        String8 driver = os_path_absolute(arena, S8("build/build.exe"), true);
+        String8 binary_leaf = S8("build/throughput-ci-compiler/Release/ide.exe");
+#else
+        String8 driver = os_path_absolute(arena, S8("build/build"), true);
+        String8 binary_leaf = S8("build/throughput-ci-compiler/Release/ide");
+#endif
+        if (baseline.length && current.length && driver.length && !string_equal(baseline, current))
+        {
+            String8 roots[] = {baseline, current};
+            for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(roots); i += 1)
+            {
+                ProcessRun* configure = run_add(arena, step_add(arena));
+                OsArgumentBuilder builder = os_argument_builder_start(arena);
+                os_argument_builder_append(&builder, driver);
+                os_argument_builder_append(&builder, S8("generate"));
+                os_argument_builder_append(&builder, S8("--build-directory"));
+                os_argument_builder_append(&builder, S8("build/throughput-ci-compiler"));
+                os_argument_builder_append(&builder, S8("--ci"));
+                os_argument_builder_append(&builder, S8("--cc"));
+                os_argument_builder_append(&builder, S8("clang"));
+                os_argument_builder_append(&builder, S8("--"));
+                os_argument_builder_append(&builder, S8("-DBUSTER_INCLUDE_TESTS=OFF"));
+                os_argument_builder_append(&builder, S8("-DBUSTER_UNITY_BUILD=OFF"));
+                os_argument_builder_append(&builder, S8("-DBUSTER_BENCH_ALLOCATIONS=OFF"));
+                os_argument_builder_append(&builder, S8("-DCMAKE_LINKER_TYPE=DEFAULT"));
+                *configure = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = roots[i],
+                                          .timeout_seconds = 600, .spawn_options = {.use_process_environment = 1}};
+                ProcessRun* compile = run_add(arena, step_add(arena));
+                builder = os_argument_builder_start(arena);
+                os_argument_builder_append(&builder, driver);
+                os_argument_builder_append(&builder, S8("build"));
+                os_argument_builder_append(&builder, S8("--build-directory"));
+                os_argument_builder_append(&builder, S8("build/throughput-ci-compiler"));
+                os_argument_builder_append(&builder, S8("--config"));
+                os_argument_builder_append(&builder, S8("Release"));
+                os_argument_builder_append(&builder, S8("-t"));
+                os_argument_builder_append(&builder, S8("ide"));
+                os_argument_builder_append(&builder, S8("--"));
+                os_argument_builder_append(&builder, S8("-j2"));
+                *compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = roots[i],
+                                        .timeout_seconds = 1200, .spawn_options = {.use_process_environment = 1}};
+            }
+            String8 baseline_binary = path_join(arena, baseline, binary_leaf);
+            String8 candidate_binary = path_join(arena, current, binary_leaf);
+            String8 base_sha = os_get_environment_variable(S8("BUSTER_THROUGHPUT_BASE_SHA"));
+            String8 head_sha = os_get_environment_variable(S8("BUSTER_THROUGHPUT_HEAD_SHA"));
+            String8 benchmark[] = {S8("run"), S8("--baseline"), baseline_binary, S8("--candidate"), candidate_binary,
+                S8("--baseline-id"), base_sha.length ? base_sha : S8("unspecified"),
+                S8("--candidate-id"), head_sha.length ? head_sha : S8("unspecified"),
+                S8("--output"), S8("build/throughput-ci-results"), S8("--profile"), S8("ci"),
+                S8("--mode"), S8("all"), S8("--pairs"), S8("20"), S8("--warmups"), S8("2"), S8("--timeout"), S8("120"),
+                S8("--cpu"), S8("auto")};
+            bench_throughput_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(benchmark));
+            result = PROCESS_RESULT_SUCCESS;
+        }
+        else
+        {
+            string_print(S8("error: invalid or identical benchmark checkout directories\n"));
+        }
+    }
+    return result;
+}
+
 ProcessResult process_arguments(void)
 {
     ProcessResult result = PROCESS_RESULT_SUCCESS;
@@ -34062,6 +34196,8 @@ ProcessResult process_arguments(void)
 
     BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
+        [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
+        [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
         [BUILD_COMMAND_BUILD] = S8_INITIALIZER("build"),
         [BUILD_COMMAND_CLANG_ANALYZE] = S8_INITIALIZER("clang_analyze"),
@@ -34163,6 +34299,7 @@ ProcessResult process_arguments(void)
     String8List generate_cmake_arguments = {0};
     String8List build_targets = {0};
     String8List native_arguments = {0};
+    String8List throughput_arguments = {0};
     TestCjsonOptions test_cjson_options = {0};
     TestZlibOptions test_zlib_options = {0};
     TestLuaOptions test_lua_options = {0};
@@ -34185,6 +34322,12 @@ ProcessResult process_arguments(void)
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
         String8 argument = arguments.pointer[argument_i];
+        if (command == BUILD_COMMAND_BENCH_THROUGHPUT || command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
+        {
+            string8_list_push(arena, &throughput_arguments, argument);
+            argument_i += 1;
+            continue;
+        }
         String8 argument_option = argument;
         String8 argument_value = {0};
         bool argument_has_value = build_argument_split_value(argument, &argument_option, &argument_value);
@@ -35095,6 +35238,16 @@ ProcessResult process_arguments(void)
             break;
         case BUILD_COMMAND_NONE:
         {
+        }
+        break;
+        case BUILD_COMMAND_BENCH_THROUGHPUT_CI:
+        {
+            result = bench_throughput_ci_add(arena, string8_list_to_slice(arena, throughput_arguments));
+        }
+        break;
+        case BUILD_COMMAND_BENCH_THROUGHPUT:
+        {
+            bench_throughput_add(arena, string8_list_to_slice(arena, throughput_arguments));
         }
         break;
         case BUILD_COMMAND_GENERATE:

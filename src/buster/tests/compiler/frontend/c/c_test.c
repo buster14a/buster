@@ -10609,6 +10609,50 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_scratch_and_hardening(UnitTes
         BUSTER_TEST(arguments, return_carries_atomic);
         scratch_end(temporary);
     }
+    for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+    {
+        // Exchange/CAS operate on integer representations, while record
+        // values and qualified object types keep their canonical contracts.
+        TemporalArena temporary = scratch_begin(0, 0);
+        String8 source = S8("typedef struct { char a, b, c; } three;"
+                            " static _Atomic three object;"
+                            " int change(three expected, three desired) {"
+                            " return __c11_atomic_compare_exchange_strong(&object, &expected, desired,"
+                            " __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE); }"
+                            " three exchange(three desired) {"
+                            " return __c11_atomic_exchange(&object, desired, __ATOMIC_SEQ_CST); }\n");
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("atomic-aggregate-exchange.c"), tokens, parse, target_native,
+                                                            (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
+        u32 exchange_count = 0;
+        u32 compare_count = 0;
+        if (lowered.program)
+        {
+            IrModule* module = lowered.program->modules;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + instruction_index;
+                    if (instruction->opcode != IR_OPCODE_ATOMIC_COMPARE_EXCHANGE && instruction->opcode != IR_OPCODE_ATOMIC_READ_MODIFY_WRITE)
+                    {
+                        continue;
+                    }
+                    IrType* value_type = ir_type_from_id(&lowered.program->types, instruction->canonical_type);
+                    BUSTER_TEST(arguments, value_type && value_type->kind == IR_TYPE_INTEGER && value_type->layout.size == 4 &&
+                                             !value_type->is_atomic);
+                    compare_count += instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE;
+                    exchange_count += instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE && instruction->atomic_operation == IR_ATOMIC_EXCHANGE;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, compare_count == 1 && exchange_count == 1);
+        scratch_end(temporary);
+    }
     {
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult atomic_builtin_tokens = c_preprocess(temporary.arena,

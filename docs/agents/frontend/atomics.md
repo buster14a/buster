@@ -153,10 +153,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   added is written as zero, because Clang copies the value through a zeroed
   temporary and that is the oracle. The widths the canonical emitters lower
   that access at are one, two, four and eight bytes on both targets, plus
-  sixteen on x86-64 where `cx16` gives them `CMPXCHG16B` -- the sequence
-  `_Atomic __int128` already used, which now also takes any aggregate the
-  promotion padded into the same width. The machine selectors decline the
-  aggregate shapes and the function falls back to the canonical emitter, which
+  sixteen on x86-64 where `cx16` gives them `CMPXCHG16B`, and on AArch64
+  through exclusive-pair loops -- the sequences `_Atomic __int128` already
+  uses, which also take aggregates promoted into that width. The machine
+  selectors decline the aggregate shapes and the function falls back to the canonical emitter, which
   the fallback statistics already count, so all four allocators answer the same
   bytes. Anything wider would need a `libatomic` lock and there is none here,
   so lowering refuses it with a diagnostic naming the width rather than leaving
@@ -167,12 +167,25 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   the place and drops the load again: refusing at the emit site rejects
   `&object.atomic_member`, which performs no atomic access at all and is what
   `tests/basic_c_packed_layout.c` writes over its seventeen-byte atomic
-  member. AArch64 has no 128-bit lock-free access
-  here -- `_Atomic __int128` does not lower there either -- so a sixteen-byte
-  atomic aggregate is one of the shapes that refusal covers, and the refusal is
-  therefore target-dependent where the layout rule above is not.
+  member. The sixteen-byte x86-64 access requires `cx16`, so the refusal is
+  target-dependent where the layout rule above is not.
   `tests/basic_c_atomic_aggregate.c` runs the bytes under every allocator with
   Clang's answers baked in, including the padding.
+- **Aggregate C11 exchange and compare-exchange use integer representations
+  in canonical IR.** `c_ir_atomic_aggregate_bits_place` preserves the atomic
+  qualifier on an integer pointer view of the same promoted object.
+  `c_ir_atomic_aggregate_bits_value` converts record values through private
+  scalar storage, zeroing the promoted tail before writing a smaller record.
+  The returned bits become a record again for exchange results and failed-CAS
+  expected-value writeback. Existing aggregate loads/stores retain their
+  canonical types; the IR validator and native integer atomic emitters keep
+  their kind constraints. The supported-width policy remains the existing
+  aggregate atomic access policy. GNU `_n` builtins do not accept records.
+  The fixture covers three 16-byte shapes, strong/weak CAS, stale expected
+  writeback, load/store/exchange, natural alignment, and a three-byte record
+  promoted to four bytes, a volatile record with six bytes of members, and a
+  union. The 16-byte runtime cases execute on x86-64 and AArch64. Raw IR
+  validation covers both frontend SSA paths.
 - **A parameter and a return value of an atomic aggregate carry the atomic type
   itself, and what converts between it and the record is an object rather than
   an instruction.** Every access in between carries the unqualified type -- a

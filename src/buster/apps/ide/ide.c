@@ -827,6 +827,9 @@ BUSTER_GLOBAL_LOCAL void source_metrics_append_group(Arena* arena, String8* text
 BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String8 unit, CSourceMetrics unique, CSourceMetrics lexed,
                                               CPreprocessedMetrics preprocessed)
 {
+#if BUSTER_BENCH_ALLOCATIONS
+    ArenaBenchmarkCounters allocations = arena_benchmark_counters();
+#endif
     String8 text = {0};
     source_metrics_append_line(&text, string_format(arena, S8("version={u32}\n"), (u32)SOURCE_METRICS_FILE_VERSION));
     source_metrics_append_line(&text, string_format(arena, S8("unit={S8}\n"), unit));
@@ -837,6 +840,10 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     source_metrics_append_field(arena, &text, S8("preprocessed"), S8("spelling_bytes"), preprocessed.spelling_bytes);
     source_metrics_append_field(arena, &text, S8("preprocessed"), S8("expansions"), preprocessed.expansions);
     source_metrics_append_field(arena, &text, S8("preprocessed"), S8("definitions"), preprocessed.definitions);
+#if BUSTER_BENCH_ALLOCATIONS
+    source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_calls"), allocations.calls);
+    source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_bytes"), allocations.requested_bytes);
+#endif
     return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
 }
 
