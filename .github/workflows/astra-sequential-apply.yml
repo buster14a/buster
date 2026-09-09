@@ -56,7 +56,7 @@ jobs:
           destination.write_bytes(patch)
           print(f'Verified reviewed patch SHA-256: {actual}')
           PY
-      - name: Apply only the reviewed compiler and regression files
+      - name: Apply and check exact final source identities
         working-directory: source
         shell: bash
         run: |
@@ -65,20 +65,38 @@ jobs:
           test "$(git ls-remote origin refs/heads/main | cut -f1)" = bf9afdbe886821aecc9be787075b7cb84c9bdcd1
           git apply --check "$RUNNER_TEMP/pp-short-circuit.patch"
           git apply --index "$RUNNER_TEMP/pp-short-circuit.patch"
-          git diff --cached --check
           python3 - <<'PY'
+          import hashlib
+          import pathlib
           import subprocess
-          allowed = {
-              'docs/agents/frontend/foundations.md',
-              'src/buster/lib/compiler/frontend/c/c_source.c',
-              'src/buster/tests/compiler/driver/driver_test.c',
-              'src/buster/tests/compiler/frontend/c/c_test.c',
-              'tests/basic_c_preprocessor_short_circuit.c',
+          fixture = pathlib.Path('tests/basic_c_preprocessor_short_circuit.c')
+          text = fixture.read_text()
+          old = '#if (1 ? -1 : BAD_UNSIGNED) <= 0'
+          new = '#if ~(1 ? 1 : BAD_UNSIGNED) <= 0'
+          if text.count(old) != 1:
+              raise SystemExit('Unexpected fixture content')
+          # Both arms are positive before conversion. Complementing the result
+          # still distinguishes unsigned from signed common type, without
+          # GCC warning about an intentionally negative converted operand.
+          fixture.write_text(text.replace(old, new))
+          subprocess.run(['git', 'add', str(fixture)], check=True)
+          expected = {
+              'docs/agents/frontend/foundations.md': 'df5ca1e0461f727eda19edcfa6bc9b1093ae0df3',
+              'src/buster/lib/compiler/frontend/c/c_source.c': 'f1c6959d6e62776d41ac8c50f2b9c5e59d4b1452',
+              'src/buster/tests/compiler/driver/driver_test.c': '039c9b1e16873071f288dcab4f9f0ab43c3887a2',
+              'src/buster/tests/compiler/frontend/c/c_test.c': 'b5bc65aab1051be8c46f9991d7d3f81ea0660213',
+              'tests/basic_c_preprocessor_short_circuit.c': '97e1aa149ea88829cb12ec110cc10e0f864f22ee',
           }
           actual = set(subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines())
-          if actual != allowed:
+          if actual != set(expected):
               raise SystemExit(f'Unexpected changed paths: {actual}')
+          for name, digest in expected.items():
+              data = pathlib.Path(name).read_bytes()
+              actual_digest = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              if actual_digest != digest:
+                  raise SystemExit(f'Final source mismatch: {name}: {actual_digest}')
           PY
+          git diff --cached --check
           clang -std=c17 -Wall -Wextra -Werror -fsyntax-only tests/basic_c_preprocessor_short_circuit.c
           gcc -std=c17 -Wall -Wextra -Werror -fsyntax-only tests/basic_c_preprocessor_short_circuit.c
       - name: Publish a new source branch without rewriting any existing branch
