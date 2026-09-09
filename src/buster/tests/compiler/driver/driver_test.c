@@ -3351,6 +3351,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     scratch_end(c_object_temporary);
 #endif
 #if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SANITIZE
+    UnitTestResult allocation_lifetimes = compiler_driver_allocation_lifetimes(arguments);
+    result.test_count += allocation_lifetimes.test_count;
+    result.succeeded_test_count += allocation_lifetimes.succeeded_test_count;
+
     String8 c_executable_path = buster_test_temporary_path(arguments->arena, S8("buster-c-driver"),
 #if BUSTER_WINDOWS
                                                            S8(".exe"));
@@ -7319,10 +7323,6 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
-    UnitTestResult allocation_lifetimes = compiler_driver_allocation_lifetimes(arguments);
-    result.test_count += allocation_lifetimes.test_count;
-    result.succeeded_test_count += allocation_lifetimes.succeeded_test_count;
-
     // The musl compatibility inventory reduced four independent frontend
     // singletons to these fixtures: a variable-length array declared in a
     // comma-separated declarator list, a pointer to a variably modified array
