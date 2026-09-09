@@ -997,6 +997,15 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .clobber_mask = 1u << MACHINE_A64_X13,
         .fixed_register_mask = 0xf, .fixed_registers = {MACHINE_A64_X9, MACHINE_A64_X10, MACHINE_A64_X12, MACHINE_A64_X11},
     },
+    [MACHINE_A64_CLEAR_INSTRUCTION_CACHE] = {
+        .name = S8_INITIALIZER("a64_clear_instruction_cache"),
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .implicit_resource_defs = MACHINE_RESOURCE_NZCV_MASK,
+        .clobber_mask = (1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X11),
+        .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_A64_X9, MACHINE_A64_X10},
+    },
     [MACHINE_A64_ATOMIC_FENCE] = {
         .name = S8_INITIALIZER("a64_atomic_fence"),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
@@ -1326,6 +1335,7 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_LEA_BLOCK] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 49,
     [MACHINE_A64_INDIRECT_BRANCH] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 50,
     [MACHINE_X64_LOAD_SYMBOL_GOT] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 51,
+    [MACHINE_A64_CLEAR_INSTRUCTION_CACHE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 52,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)

@@ -6222,6 +6222,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 case IR_OPCODE_ATOMIC_COMPARE_EXCHANGE:
                     instruction_selected = machine_x64_select_atomic_compare_exchange(&selector, instruction, result_register);
                     break;
+                case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
+                    // x86 cache maintenance emits no instructions. Argument
+                    // side effects have already been lowered independently.
+                    instruction_selected = true;
+                    break;
                 case IR_OPCODE_ATOMIC_FENCE:
                     instruction_selected = machine_x64_select_atomic_fence(&selector, instruction);
                     break;

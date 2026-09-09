@@ -1751,9 +1751,108 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_unsigned_switch(UnitTestArgument
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_clear_instruction_cache(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice input = file_read(arguments->arena, S8("tests/differential/clear_cache.c"), (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    BUSTER_TEST(arguments, source.length != 0);
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    // Clang's encoding of tests/differential/clear_cache_aarch64.s. The
+    // alignment and both loop targets are part of this independent oracle.
+    u32 cache_words[] = {0x927ef52b, 0xaa0b03e9, 0xeb0a013f, 0x54000082, 0xd50b7b29, 0x91001129, 0x17fffffc, 0xd5033b9f,
+                        0xaa0b03e9, 0xeb0a013f, 0x54000082, 0xd50b7529, 0x91001129, 0x17fffffc, 0xd5033b9f, 0xd5033fdf};
+    MachineOpcodeInfo const* info = machine_opcode_info(MACHINE_A64_CLEAR_INSTRUCTION_CACHE);
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 0) == MACHINE_A64_X9);
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 1) == MACHINE_A64_X10);
+    BUSTER_TEST(arguments, info->clobber_mask == ((1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X11)));
+    BUSTER_TEST(arguments, (info->implicit_resource_defs & MACHINE_RESOURCE_NZCV_MASK) != 0);
+    for (u32 target_index = 0; source.length && target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("clear-cache.c"), source, targets[target_index],
+                                                                     (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, targets[target_index],
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                    BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+                    if (target_index == 1 && generated.error == CODEGEN_ERROR_NONE)
+                    {
+                        u32 sequences = 0;
+                        for (u64 offset = 0; offset + sizeof(cache_words) <= generated.code.length; offset += 4)
+                        {
+                            sequences += memcmp(generated.code.pointer + offset, cache_words, sizeof(cache_words)) == 0;
+                        }
+                        BUSTER_TEST(arguments, sequences == 3);
+                    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                    bool native_arch = (BUSTER_CPU_ARCH_X86_64 && target_index == 0) || (BUSTER_CPU_ARCH_AARCH64 && target_index == 1);
+                    if (native_arch && generated.error == CODEGEN_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, generated.relocation_count == 0);
+                        CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                        BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                        if (executable.address)
+                        {
+                            u32 range_offset = machine_test_module_offset(&generated, module, S8("clear_range"));
+                            u32 argument_offset = machine_test_module_offset(&generated, module, S8("clear_arguments"));
+                            u32 live_offset = machine_test_module_offset(&generated, module, S8("clear_live"));
+                            BUSTER_TEST(arguments, range_offset != UINT32_MAX && argument_offset != UINT32_MAX && live_offset != UINT32_MAX);
+                            if (range_offset != UINT32_MAX && argument_offset != UINT32_MAX && live_offset != UINT32_MAX)
+                            {
+                                typedef void ClearRange(char*, char*);
+                                typedef s32 ClearArguments(char*, s32, s32*, s32*);
+                                typedef u64 ClearLive(char*, u64, u64, u64, u64, u64, u64, u64);
+                                ClearRange* range = 0;
+                                ClearArguments* call = 0;
+                                ClearLive* live = 0;
+                                void* address = (u8*)executable.address + range_offset;
+                                memcpy(&range, &address, sizeof(range));
+                                address = (u8*)executable.address + argument_offset;
+                                memcpy(&call, &address, sizeof(call));
+                                address = (u8*)executable.address + live_offset;
+                                memcpy(&live, &address, sizeof(live));
+                                char bytes[256] = {0};
+                                for (s32 start = 0; start < 128; start += 1)
+                                {
+                                    s32 first = start;
+                                    s32 second = 5;
+                                    range(bytes + start, bytes + start);
+                                    range(bytes + start, bytes + start + 2);
+                                    BUSTER_TEST(arguments, call(bytes + start, 65, &first, &second) == start + 43);
+                                    BUSTER_TEST(arguments, first == start + 1 && second == 6);
+                                    BUSTER_TEST(arguments, live(bytes, 1, 2, 3, 4, 5, 6, 7) == 406);
+                                }
+                            }
+                        }
+                        codegen_release_executable(executable);
+                    }
+#endif
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult cache_result = machine_test_clear_instruction_cache(arguments);
+    result.test_count += cache_result.test_count;
+    result.succeeded_test_count += cache_result.succeeded_test_count;
     UnitTestResult switch_result = machine_test_unsigned_switch(arguments);
     result.test_count += switch_result.test_count;
     result.succeeded_test_count += switch_result.succeeded_test_count;
@@ -2068,7 +2167,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 236);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 237);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_OPCODE_SKELETON_RETURN] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
@@ -2180,6 +2279,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_A64_ATOMIC_RMW] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_A64_ATOMIC_CAS] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_A64_ATOMIC_FENCE] = MACHINE_SCHEDULE_UNIT_BARRIER,
+        [MACHINE_A64_CLEAR_INSTRUCTION_CACHE] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_A64_STACK_ALLOCATE] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_A64_SWITCH] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_A64_VLOAD_FRAME_SIZED] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,
@@ -2303,7 +2403,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 81);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 82);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};

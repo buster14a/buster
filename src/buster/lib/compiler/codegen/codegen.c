@@ -18519,7 +18519,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         c_a64_load(&emitter, 9, instruction->operands[0]);
                         c_a64_load(&emitter, 10, instruction->operands[1]);
-                        codegen_emit_u32(&buffer, UINT32_C(0xaa0903eb));
+                        // Visit every four-byte granule intersecting the
+                        // range, including a final line after an unaligned begin.
+                        codegen_emit_u32(&buffer, UINT32_C(0x927ef52b));
+                        codegen_emit_u32(&buffer, UINT32_C(0xaa0b03e9));
                         codegen_emit_u32(&buffer, UINT32_C(0xeb0a013f));
                         codegen_emit_u32(&buffer, UINT32_C(0x54000082));
                         codegen_emit_u32(&buffer, UINT32_C(0xd50b7b29));
