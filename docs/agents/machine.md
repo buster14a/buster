@@ -111,6 +111,19 @@
   data-clean and instruction-invalidate walks cover aligned four-byte granules
   through the exclusive end, with DSB/ISB barriers. The direct AArch64 oracle
   uses the same alignment rule; an unaligned start must not skip a final line.
+- Windows/UEFI x86-64 variadic definitions home RCX/RDX/R8/R9 before any
+  argument capture can reuse those registers. The caller-owned homes adjoin
+  the overflow arguments; both homing and `LEA_INCOMING` include placement's
+  `incoming_base` for callee-save pushes preceding RBP. Each supported named
+  parameter consumes one slot, and a hidden return pointer consumes the first.
+  Pointer-sized `va_list` copies use eight bytes and `va_end` emits no write.
+  Scalar and aggregate `va_arg` reads advance one slot, dereferencing indirect
+  aggregates according to the canonical ABI classification. Existing indirect
+  argument/vector signature exclusions still apply to callers.
+  Variadic callers duplicate scalar float bits into positional GPRs during the
+  integer staging pass, after all XMM bridges, and omit the System V AL count.
+  Cross-compiler regressions cover both call directions, register exhaustion,
+  copied lists, small/indirect aggregates, and hidden result pointers.
 - x86 CPUID/XGETBV literal assembly with complete 32-bit pure outputs and
   separate fixed inputs selects constrained machine rows. Numeric/named ties
   retain the input's fixed register. CPUID consumes RAX/RCX together and

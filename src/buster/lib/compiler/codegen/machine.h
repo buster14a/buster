@@ -658,6 +658,8 @@ typedef enum MachineOpcode
     MACHINE_A64_CLEAR_INSTRUCTION_CACHE, // use begin/end; fixed X9/X10; clobber X9/X11/NZCV
     MACHINE_X64_CPUID,                  // use leaf/subleaf in RAX/RCX; frame receives RAX/RBX/RCX/RDX
     MACHINE_X64_XGETBV,                 // use index in RCX; frame receives RAX/RDX
+    MACHINE_X64_WIN_VA_SAVE,            // use RCX/RDX/R8/R9; store caller-owned argument homes
+    MACHINE_X64_LEA_INCOMING,           // def general; payload = byte offset into incoming arguments
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

@@ -492,6 +492,20 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
         .memory_effect = MACHINE_MEMORY_EFFECT_READ,
     },
+    [MACHINE_X64_LEA_INCOMING] = {
+        .name = S8_INITIALIZER("x64_lea_incoming"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+    },
+    [MACHINE_X64_WIN_VA_SAVE] = {
+        .name = S8_INITIALIZER("x64_win_va_save"),
+        .operand_count = 4,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
+        .fixed_register_mask = 0xf,
+        .fixed_registers = {MACHINE_X64_RCX, MACHINE_X64_RDX, MACHINE_X64_R8, MACHINE_X64_R9},
+    },
     [MACHINE_X64_VA_SAVE] = {
         .name = S8_INITIALIZER("x64_va_save"),
         .operand_count = 1,
@@ -1358,6 +1372,8 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_CLEAR_INSTRUCTION_CACHE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 52,
     [MACHINE_X64_CPUID] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 53,
     [MACHINE_X64_XGETBV] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 54,
+    [MACHINE_X64_WIN_VA_SAVE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 55,
+    [MACHINE_X64_LEA_INCOMING] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 56,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)
@@ -1451,6 +1467,7 @@ BUSTER_GLOBAL_LOCAL void machine_opcode_rows_once(void)
             break;
         case MACHINE_X64_FCMP_SET:
         case MACHINE_X64_CPUID:
+        case MACHINE_X64_WIN_VA_SAVE:
             encode_budget = 40;
             break;
         case MACHINE_X64_ATOMIC_RMW:

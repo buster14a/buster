@@ -13,7 +13,7 @@ From the repository root, build `ide` normally and use a **new** output director
 ./build.sh test_differential --ide build/Release/ide --cc clang --out build/differential-release --sanitize-oracle
 ```
 
-The defaults use nine permanent cases and four generated cases, seed 1, a
+The defaults use ten permanent cases and four generated cases, seed 1, a
 10-second deadline per child, and at most 64 reduction trials for the first
 runtime mismatch in each case. A reference compiler must be available; its
 absence is a failure, not a skip. `--cc` accepts a Clang/GCC-style executable,
@@ -119,6 +119,16 @@ check callee-save preservation. Leaves zero and `0x80000000` avoid the
 processor-specific APIC ID returned by leaf one. Non-x86 hosts exercise the
 fixture's portable branch. Machine tests additionally cover XGETBV encoding,
 reject a target without XSAVE, and execute it only when CPUID reports OSXSAVE.
+
+The native-variadic fixture checks calls in both directions against the host
+compiler. It exercises integer and float register exhaustion, named parameters
+on the stack, independent copied lists with local canaries, hidden
+result pointers, and one-, two-, four-, eight- and sixteen-byte aggregates.
+Machine tests require zero fallback for its six callees on x86-64 Linux,
+macOS, Windows and UEFI in both frontend forms and every allocator, and execute
+the matching host ABI. The sixteen-byte variadic aggregates are passed to
+Buster by the host compiler; Windows indirect aggregate callers retain their
+existing separate selection restriction.
 
 ## IR/MIR checks
 
