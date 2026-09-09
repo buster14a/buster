@@ -8,7 +8,9 @@
 //   A function body is split into statements the same way, and the one fact
 //   kept about them is the token range of each _Static_assert statement
 //   (CParserStaticAssert), which c_parse_bind_function_static_asserts
-//   checks against the block scopes the body binder creates.
+//   checks against the block scopes the body binder creates. Body splitting
+//   reuses one depth-sized CParserBodyFrames vector; published declarations
+//   and assertion ranges remain owned by the translation-unit arena.
 //   One record is one declarator, not one declaration: a comma-separated
 //   list is split into a record per declarator, each keeping the shared
 //   specifiers in token_start/token_count and its own declarator segment in
@@ -14426,6 +14428,35 @@ struct CParserBlockFrame
     u32 bracket_depth;
 };
 
+// One private, depth-sized vector per syntax pass, reused across bodies.
+// No declaration or assertion retains a frame address. Growth copies only
+// the live prefix; callers reacquire frames after a reserve.
+#define C_PARSER_BODY_FRAME_INITIAL_CAPACITY 16u
+
+typedef struct CParserBodyFrames CParserBodyFrames;
+struct CParserBodyFrames
+{
+    CParserBlockFrame* data;
+    u32 capacity;
+};
+
+BUSTER_C_INTERNAL void c_parser_body_frames_reserve(Arena* arena, CParserBodyFrames* frames, u32 count)
+{
+    if (count == frames->capacity)
+    {
+        // c_parse_ast caps tokens below 2^31. A live frame requires an
+        // opening brace, so the last possible doubling is 2^30 -> 2^31.
+        u32 capacity = frames->capacity ? frames->capacity * 2 : C_PARSER_BODY_FRAME_INITIAL_CAPACITY;
+        CParserBlockFrame* data = arena_allocate(arena, CParserBlockFrame, capacity);
+        if (count)
+        {
+            memcpy(data, frames->data, sizeof(*data) * count);
+        }
+        frames->data = data;
+        frames->capacity = capacity;
+    }
+}
+
 // Notes the statement [start, end) on the declaration if it is a
 // _Static_assert.  A C23 attribute sequence may precede the keyword and
 // stays inside the noted range, which begins where the statement does.  An
@@ -14469,11 +14500,13 @@ BUSTER_C_INTERNAL void c_parser_static_assert_note(Arena* arena, CPreprocessResu
 // its tokens.  A `{` seen inside parentheses or brackets (a compound literal
 // or a statement expression in an argument) belongs to the statement that
 // spans it and opens no block.
-BUSTER_C_INTERNAL void c_parser_parse_function_body(Arena* arena, CPreprocessResult preprocess, CParserDeclaration* declaration)
+BUSTER_C_INTERNAL void c_parser_parse_function_body(Arena* arena, CPreprocessResult preprocess, CParserDeclaration* declaration,
+                                                       CParserBodyFrames* body_frames)
 {
     u32 body_start = declaration->body_start;
     u32 body_end = body_start + declaration->body_token_count;
-    CParserBlockFrame* frames = arena_allocate(arena, CParserBlockFrame, declaration->body_token_count + 1);
+    c_parser_body_frames_reserve(arena, body_frames, 0);
+    CParserBlockFrame* frames = body_frames->data;
     u32 frame_count = 1;
     frames[0] = (CParserBlockFrame){
         .statement_start = body_start,
@@ -14510,6 +14543,11 @@ BUSTER_C_INTERNAL void c_parser_parse_function_body(Arena* arena, CPreprocessRes
         if (!frame->parenthesis_depth && !frame->bracket_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
             BUSTER_VALIDATE(frame_count < declaration->body_token_count + 1);
+            if (frame_count == body_frames->capacity)
+            {
+                c_parser_body_frames_reserve(arena, body_frames, frame_count);
+                frames = body_frames->data;
+            }
             frames[frame_count++] = (CParserBlockFrame){
                 .statement_start = index + 1,
             };
@@ -14775,6 +14813,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
         result.diagnostic_capacity = token_count + 1;
         result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
         u32* delimiter_stack = arena_allocate(arena, u32, token_count + 1);
+        CParserBodyFrames body_frames = {0};
         u32 index = 0;
         while (index < token_count && c_preprocess_token_shape_at(token_shapes, &preprocess, index) != C_TOKEN_END_OF_FILE)
         {
@@ -14997,7 +15036,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                 c_parser_parse_declaration_expression(preprocess, declaration);
                 if (declaration->kind == C_PARSER_DECLARATION_FUNCTION && body_token_count)
                 {
-                    c_parser_parse_function_body(arena, preprocess, declaration);
+                    c_parser_parse_function_body(arena, preprocess, declaration, &body_frames);
                 }
                 if (result.last_declaration)
                 {

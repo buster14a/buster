@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/frontend/c/c_test.h>
+#include <buster/lib/time.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResult* outer_result, CLexResult lex, u64 index, CTokenKind kind, String8 spelling)
@@ -13779,9 +13780,134 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* argument
     return result;
 }
 
+// A syntax pass retains declarations/assertions, not one token-sized body
+// frame array per function. Guard the storage bound, independent of timing.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_body_frame_storage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    bool census = os_get_environment_variable(S8("BUSTER_PARSER_FRAME_CENSUS")).length != 0;
+    u32 function_counts[] = {64, 256};
+    for (u32 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(function_counts); count_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        u32 function_count = function_counts[count_index];
+        String8 body = S8("int syntax_body(void) { _Static_assert(1, \"retained\");"
+                         " int x=0; x+=1; x+=2; x+=3; x+=4; x+=5; x+=6;"
+                         " { x+=7; } return x; }\n");
+        String8 source = {
+            .pointer = arena_allocate(temporary.arena, char8, body.length * function_count),
+            .length = body.length * function_count,
+        };
+        for (u32 index = 0; index < function_count; index += 1)
+        {
+            memcpy(source.pointer + body.length * index, body.pointer, body.length);
+        }
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+        u64 before = temporary.arena->position;
+        TimeDataType start = timestamp_take();
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        u64 parse_ns = timestamp_ns_between(start, timestamp_take());
+        u64 allocated = temporary.arena->position - before;
+        // The two token-indexed arrays are deliberately unchanged. Everything
+        // else published here is one declaration and one assertion per body.
+        u64 published = (tokens.token_count + 1) * (sizeof(CDiagnostic) + sizeof(u32)) +
+                        (u64)function_count * (sizeof(CParserDeclaration) + sizeof(CParserStaticAssert));
+        if (census)
+        {
+            string_print(S8("PARSER_FRAME_CENSUS functions={u32} tokens={u64} syntax_bytes={u64} published_bytes={u64} parse_ns={u64}\n"),
+                         function_count, tokens.token_count, allocated, published, parse_ns);
+        }
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.declaration_count == function_count);
+        BUSTER_TEST(arguments, allocated <= published + BUSTER_KB(4));
+        u32 declarations = 0;
+        for (CParserDeclaration* declaration = syntax.first_declaration; declaration; declaration = declaration->next)
+        {
+            BUSTER_TEST(arguments, declaration->first_static_assert != 0);
+            BUSTER_TEST(arguments, declaration->first_static_assert == declaration->last_static_assert);
+            if (declaration->first_static_assert)
+            {
+                BUSTER_TEST(arguments, declaration->first_static_assert->next == 0);
+                BUSTER_TEST(arguments, declaration->first_static_assert->token_start >= declaration->body_start);
+                BUSTER_TEST(arguments, declaration->first_static_assert->token_start +
+                                          declaration->first_static_assert->token_count <=
+                                          declaration->body_start + declaration->body_token_count);
+            }
+            declarations += 1;
+        }
+        BUSTER_TEST(arguments, declarations == function_count);
+        scratch_end(temporary);
+    }
+
+    // Cross growth boundaries, then reuse the largest vector for shallow and
+    // empty bodies. Assertions created before/during/after growth must survive.
+    TemporalArena temporary = scratch_begin(0, 0);
+    u32 depths[] = {0, 15, 16, 17, 31, 32, 33, 255, 1023, 1, 0};
+    u64 source_capacity = BUSTER_KB(32);
+    char8* source_buffer = arena_allocate(temporary.arena, char8, source_capacity);
+    u64 source_length = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(depths); index += 1)
+    {
+        c_test_append_source(source_buffer, source_capacity, &source_length,
+                             string_format(temporary.arena, S8("int frame_growth_{u32}(void) {{\n"), index));
+        c_test_append_source(source_buffer, source_capacity, &source_length, S8("_Static_assert(1, \"before\");\n"));
+        for (u32 depth = 0; depth < depths[index]; depth += 1)
+        {
+            c_test_append_source(source_buffer, source_capacity, &source_length, S8("{"));
+        }
+        c_test_append_source(source_buffer, source_capacity, &source_length, S8("_Static_assert(1, \"deep\");\n"));
+        for (u32 depth = 0; depth < depths[index]; depth += 1)
+        {
+            c_test_append_source(source_buffer, source_capacity, &source_length, S8("}"));
+        }
+        c_test_append_source(source_buffer, source_capacity, &source_length, S8("_Static_assert(1, \"after\"); return 0; }\n"));
+    }
+    c_test_append_source(source_buffer, source_capacity, &source_length,
+                         S8("void empty_body(void) {}\n"
+                            "int frame_failure(void) { _Static_assert(0, \"kept after growth\"); return 0; }\n"));
+    CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){.pointer = source_buffer, .length = source_length},
+                                             (CPreprocessOptions){.source_path = S8("parser-body-frames.c")});
+    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+    BUSTER_TEST(arguments, syntax.declaration_count == BUSTER_ARRAY_LENGTH(depths) + 2);
+    u32 declaration_index = 0;
+    u32 previous_assertion = 0;
+    for (CParserDeclaration* declaration = syntax.first_declaration; declaration; declaration = declaration->next)
+    {
+        u32 assertion_count = 0;
+        for (CParserStaticAssert* assertion = declaration->first_static_assert; assertion; assertion = assertion->next)
+        {
+            BUSTER_TEST(arguments, assertion->token_start > previous_assertion);
+            BUSTER_TEST(arguments, assertion->token_start >= declaration->body_start);
+            BUSTER_TEST(arguments, assertion->token_start + assertion->token_count <= declaration->body_start + declaration->body_token_count);
+            previous_assertion = assertion->token_start;
+            assertion_count += 1;
+        }
+        u32 expected = declaration_index < BUSTER_ARRAY_LENGTH(depths) ? 3 :
+                       declaration_index == BUSTER_ARRAY_LENGTH(depths) ? 0 : 1;
+        BUSTER_TEST(arguments, assertion_count == expected);
+        declaration_index += 1;
+    }
+    CIRLowerResult analysis = c_analyze(temporary.arena, S8("parser-body-frames.c"), tokens, syntax, target_native);
+    BUSTER_TEST(arguments, analysis.diagnostic_count == 1);
+    if (analysis.diagnostic_count == 1)
+    {
+        BUSTER_TEST(arguments, analysis.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+        BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, S8("static assertion failed: \"kept after growth\""));
+        BUSTER_TEST(arguments, analysis.diagnostics[0].location.line == BUSTER_ARRAY_LENGTH(depths) * 4 + 2);
+        BUSTER_TEST(arguments, analysis.diagnostics[0].location.column == 27);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    c_test_result_add(&result, c_test_parser_body_frame_storage(arguments));
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
     c_test_result_add(&result, c_test_lexer_rewind_zeroed(arguments));
     c_test_result_add(&result, c_test_scope_interval_index(arguments));
