@@ -143,7 +143,7 @@ jobs:
           ./build.sh test_mode_matrix --config Release
       - name: Native configuration differential matrix
         shell: bash
-        if: ${{ !cancelled() && (contains(matrix.runner, 'x86_64-linux-dedicated') || contains(matrix.runner, 'macos')) }}
+        if: ${{ cancelled() == false && (contains(matrix.runner, 'x86_64-linux-dedicated') || contains(matrix.runner, 'macos')) }}
         run: |
           set -euo pipefail
           ./build.sh test_differential --self-test
