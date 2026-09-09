@@ -602,7 +602,7 @@ BUSTER_GLOBAL_LOCAL u32 meta_reduce(MetaContext* context, MetaSpec* spec, u32* m
     return attempts;
 }
 
-BUSTER_GLOBAL_LOCAL bool meta_number(String8 name, u32 fallback, u32 maximum, u32* output)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool meta_number(String8 name, u32 fallback, u32 maximum, u32* output)
 {
     String8 text = os_get_environment_variable(name);
     bool valid = true;
@@ -633,7 +633,7 @@ BUSTER_GLOBAL_LOCAL bool meta_number(String8 name, u32 fallback, u32 maximum, u3
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL MetaSummary meta_run(MetaContext* context, u32 first_seed, u32 cases, u32 transform_mask)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context, u32 first_seed, u32 cases, u32 transform_mask)
 {
     MetaSummary result = {0};
     Arena* arena = context->arena;
@@ -789,7 +789,7 @@ BUSTER_GLOBAL_LOCAL MetaSummary meta_run(MetaContext* context, u32 first_seed, u
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL MetaContext meta_context(Arena* arena, String8 directory, bool full)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaContext meta_context(Arena* arena, String8 directory, bool full)
 {
     String8 compiler = os_get_environment_variable(S8("BUSTER_METAMORPHIC_COMPILER"));
     if (!compiler.length && program_state && program_state->input.arguments.length)
@@ -808,7 +808,7 @@ BUSTER_GLOBAL_LOCAL MetaContext meta_context(Arena* arena, String8 directory, bo
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool meta_prepare_node(MetaContext* context)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool meta_prepare_node(MetaContext* context)
 {
     bool result = true;
     if (context->node.length && (!context->target_filter.length || string_equal(context->target_filter, S8("wasm64"))))
