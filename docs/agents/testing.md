@@ -67,3 +67,13 @@
 - Headers are included as `<buster/lib/...>` or `<buster/tests/...>` (include
   root is `src/`).
   `compile_commands.json` is exported to `build/` by default.
+
+## Native differential matrix
+
+`build.c` exposes `test_differential` (implementation: `tools/differential.c`).
+Use a fresh output directory and a built native `ide`; run `--self-test` before
+matrix execution. The driver and runner share `codegen_configurations.h` for
+allocator/optimization discovery. See [differential-testing.md](../differential-testing.md)
+for ABI fixtures, diagnostics, opt-in IR/MIR validation, sanitizer controls,
+reduction limits and evidence format. This supplements all existing gates;
+it does not replace target-matrix execution or the seeded differential corpus.

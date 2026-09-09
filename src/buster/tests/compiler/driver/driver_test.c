@@ -1,3 +1,4 @@
+#include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/tests/compiler/driver/driver_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/tests/compiler/codegen/codegen_test.h>
@@ -2124,12 +2125,47 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, direct_ssa_options.disable_local_promotion == (index == 1));
     }
 
+    // The same registry drives option parsing and native differential coverage.
+    struct { String8 flag; u8 level; } differential_levels[] = {
+#define BUSTER_DRIVER_TEST_LEVEL(flag, level) {S8(flag), level},
+        BUSTER_CODEGEN_OPTIMIZATIONS(BUSTER_DRIVER_TEST_LEVEL)
+#undef BUSTER_DRIVER_TEST_LEVEL
+    };
+    struct { String8 name; u8 mode; } differential_modes[] = {
+#define BUSTER_DRIVER_TEST_MODE(name, mode) {S8(name), mode},
+        BUSTER_CODEGEN_ALLOCATORS(BUSTER_DRIVER_TEST_MODE)
+#undef BUSTER_DRIVER_TEST_MODE
+    };
+    for (u32 level_index = 0; level_index < BUSTER_ARRAY_LENGTH(differential_levels); level_index += 1)
+    {
+        for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(differential_modes); mode_index += 1)
+        {
+            String8 flags[] = {differential_levels[level_index].flag,
+                string_format(arguments->arena, S8("-fregister-allocator={S8}"), differential_modes[mode_index].name),
+                S8("-fverify-codegen"), S8("source.c")};
+            CompilerDriverInvocation checked = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(flags));
+            BUSTER_TEST(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, checked.verify_codegen && checked.register_allocator_explicit);
+            BUSTER_TEST(arguments, checked.optimization_level == differential_levels[level_index].level);
+            BUSTER_TEST(arguments, checked.register_allocator == differential_modes[mode_index].mode);
+        }
+    }
+
+    String8 unsupported_verification[] = {S8("-E"), S8("-fsyntax-only"), S8("-emit-llvm")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unsupported_verification); index += 1)
+    {
+        String8 flags[] = {unsupported_verification[index], S8("-fverify-codegen"), S8("source.c")};
+        CompilerDriverInvocation checked = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(flags));
+        BUSTER_TEST(arguments, checked.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    }
+
     String8 register_allocator_default_command_line[] = {S8("source.c")};
     CompilerDriverInvocation register_allocator_default = compiler_driver_parse_arguments(
         arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(register_allocator_default_command_line));
     BUSTER_TEST(arguments, register_allocator_default.error == COMPILER_DRIVER_ERROR_NONE);
     BUSTER_TEST(arguments, register_allocator_default.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST);
     BUSTER_TEST(arguments, !register_allocator_default.register_allocator_explicit);
+    BUSTER_TEST(arguments, !register_allocator_default.verify_codegen);
 
     String8 register_allocator_o0_command_line[] = {S8("-O0"), S8("source.c")};
     CompilerDriverInvocation register_allocator_o0 = compiler_driver_parse_arguments(

@@ -183,3 +183,16 @@ things in the x86-64 dynamic writer, and the AArch64 one through it:
   and Buster linked it and let the loader pick. **Do not use `sys_errlist` as a
   Clang-differential fixture** — a harness that reads "Clang refuses, Buster
   accepts" as a Buster success measures nothing (issue #660).
+
+## Native invariant verification
+
+`-fverify-codegen` validates canonical IR even when the frontend certified it,
+then checks selected and changed scheduled MIR and placement validity. Invalid
+verified states fail compilation before fallback can hide them. It applies to
+native x86-64/AArch64 code generation, including the `none` canonical path;
+preprocessing, syntax-only and direct non-native output reject the flag.
+Successful compilation prints a versioned `CODEGEN_VERIFY` line with module,
+selected-function and scheduled-function counts and the effective allocator.
+Normal compilation keeps its existing validation certificates and fast paths.
+The [native differential runner](../differential-testing.md) consumes this
+explicit opt-in evidence and compares executable observations independently.

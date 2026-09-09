@@ -141,6 +141,14 @@ jobs:
         run: |
           set -euo pipefail
           ./build.sh test_mode_matrix --config Release
+      - name: Native configuration differential matrix
+        shell: bash
+        if: ${{ !cancelled() && (contains(matrix.runner, 'x86_64-linux-dedicated') || contains(matrix.runner, 'macos')) }}
+        run: |
+          set -euo pipefail
+          ./build.sh test_differential --self-test
+          ./build.sh build --config Release -t ide
+          ./build.sh test_differential --ide build/Release/ide --out build/differential-ci --sanitize-oracle
       - name: Test (Windows)
         shell: powershell
         if: ${{ contains(matrix.runner, 'windows') }}
