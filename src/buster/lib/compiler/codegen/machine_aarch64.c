@@ -3616,6 +3616,23 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_compare_exchange(MachineA64Se
     return selected;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_clear_instruction_cache(MachineA64Selector* selector, IrInstruction* instruction)
+{
+    u32 begin;
+    u32 end;
+    bool selected = false;
+    if (instruction->operand_count == 2 && machine_a64_operand_register(selector, instruction->operands[0], &begin) &&
+        machine_a64_operand_register(selector, instruction->operands[1], &end))
+    {
+        machine_a64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, begin), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, end)},
+            .opcode = MACHINE_A64_CLEAR_INSTRUCTION_CACHE,
+        });
+        selected = true;
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_fence(MachineA64Selector* selector, IrInstruction* instruction)
 {
     // Signal fences and relaxed thread fences emit nothing, exactly like
@@ -4049,6 +4066,9 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
             break;
         case IR_OPCODE_ATOMIC_COMPARE_EXCHANGE:
             selected = machine_a64_select_atomic_compare_exchange(selector, instruction, result_register);
+            break;
+        case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
+            selected = machine_a64_select_clear_instruction_cache(selector, instruction);
             break;
         case IR_OPCODE_ATOMIC_FENCE:
             selected = machine_a64_select_atomic_fence(selector, instruction);
@@ -6531,6 +6551,10 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             // ld(a)xr, operation, st(l)xr, cbnz.
             capacity64 += 16;
             break;
+        case MACHINE_A64_CLEAR_INSTRUCTION_CACHE:
+            // Two cache-maintenance loops, alignment, and barriers.
+            capacity64 += 64;
+            break;
         case MACHINE_A64_ATOMIC_CAS:
             // ld(a)xr, cmp, b.ne, st(l)xr, cbnz, clrex.
             capacity64 += 24;
@@ -7035,6 +7059,28 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 machine_a64_emit(&encoder, 0xd5033f5fu);
             }
             break;
+            case MACHINE_A64_CLEAR_INSTRUCTION_CACHE:
+                // Cache lines are at least four bytes. Round the initial
+                // address down so a short unaligned range cannot miss its
+                // final line. X11 keeps that start for the second walk.
+                // Both loops compare unsigned addresses against exclusive X10.
+                machine_a64_emit(&encoder, 0x927ef52bu); // and x11, x9, #-4
+                machine_a64_emit(&encoder, 0xaa0b03e9u); // mov x9, x11
+                machine_a64_emit(&encoder, 0xeb0a013fu); // cmp x9, x10
+                machine_a64_emit(&encoder, 0x54000082u); // b.hs data_done
+                machine_a64_emit(&encoder, 0xd50b7b29u); // dc cvau, x9
+                machine_a64_emit(&encoder, 0x91001129u); // add x9, x9, #4
+                machine_a64_emit(&encoder, 0x17fffffcu); // b data_loop
+                machine_a64_emit(&encoder, 0xd5033b9fu); // dsb ish
+                machine_a64_emit(&encoder, 0xaa0b03e9u); // mov x9, x11
+                machine_a64_emit(&encoder, 0xeb0a013fu); // cmp x9, x10
+                machine_a64_emit(&encoder, 0x54000082u); // b.hs instruction_done
+                machine_a64_emit(&encoder, 0xd50b7529u); // ic ivau, x9
+                machine_a64_emit(&encoder, 0x91001129u); // add x9, x9, #4
+                machine_a64_emit(&encoder, 0x17fffffcu); // b instruction_loop
+                machine_a64_emit(&encoder, 0xd5033b9fu); // dsb ish
+                machine_a64_emit(&encoder, 0xd5033fdfu); // isb
+                break;
             case MACHINE_A64_ATOMIC_FENCE:
                 // dmb ish, the canonical thread-fence word.
                 machine_a64_emit(&encoder, 0xd5033bbfu);
