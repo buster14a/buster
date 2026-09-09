@@ -27,8 +27,17 @@
 #if ~(1 ? 1 : BAD_UNSIGNED) <= 0
 #error unselected unsigned arm must still determine the common type
 #endif
+#if ~(0 ? BAD_UNSIGNED : 1) <= 0
+#error unselected true arm must still determine the common type
+#endif
 #if (1 ? -1 : BAD_DIV) >= 0
 #error signed conditional unexpectedly became unsigned
+#endif
+#if ((0 && BAD_DIV) ? BAD_REM : 29) != 29
+#error a discarded fault contaminated a later false condition
+#endif
+#if ((1 || BAD_REM) ? 31 : BAD_DIV) != 31
+#error a discarded fault contaminated a later true condition
 #endif
 #if 0
 #error inactive directive
