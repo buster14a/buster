@@ -105,6 +105,11 @@
   tails. The canonical caller saves and realigns RSP, then restores it after
   the call. Cross-link alignment tests with another compiler; a Buster caller
   and callee can otherwise share the same wrong assumption.
+- The x86 exact-emission bridge represents a full-width 32-bit immediate as
+  its signed low-32-bit pattern. Normalize only when both register and
+  immediate widths are 32; narrower immediates and 64-bit destinations retain
+  their sign-extension constraints. High-bit unsigned switch constants must
+  encode without canonical fallback.
 - The f32/f64-to-u64 biased conversions compare against **2^63 in the source
   format**. Both x86 emitters use `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
   `CODEGEN_F64_SIGNED64_LIMIT_BITS`; the source width does not change which
