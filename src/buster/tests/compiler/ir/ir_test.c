@@ -270,6 +270,134 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     result.succeeded_test_count += call_validation.succeeded_test_count;
     result.test_count += call_validation.test_count;
 
+    // A large unrelated type table must not turn a two-field ABI query into
+    // a type-table-sized scratch request. Use fresh scratch arenas so an old
+    // high-water mark cannot conceal an allocation regression. The ABI-context
+    // cache remains owned by fixture_arena, not by the classifier's worklist.
+    {
+        Arena* fixture_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(2), .flags = {.no_pool = 1}});
+        BUSTER_TEST(arguments, fixture_arena != 0);
+        if (fixture_arena)
+        {
+            IrProgram fixture = ir_program_initialize(fixture_arena, 0, 1036, 0, 0);
+            IrType integer_type = {.kind = IR_TYPE_INTEGER, .bit_width = 64,
+                                  .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}};
+            IrTypeId integer_id = ir_program_add_type(&fixture, integer_type);
+            IrTypeId float_id = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 64,
+                .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true}});
+            for (u32 index = 0; index < 1024; index += 1)
+            {
+                ir_program_add_type(&fixture, integer_type);
+            }
+            IrField* small_fields = arena_allocate(fixture_arena, IrField, 2);
+            small_fields[0] = (IrField){.type = float_id, .offset = 0};
+            small_fields[1] = (IrField){.type = integer_id, .offset = 8};
+            IrType small_type = {.kind = IR_TYPE_STRUCT, .fields = small_fields, .field_count = 2,
+                .layout = {.size = 16, .alignment = 8, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true}};
+            IrTypeId small_id = ir_program_add_type(&fixture, small_type);
+            // Forty pending siblings, each with forty alternatives, require
+            // two growth steps. The float sibling pending below both grows
+            // must survive copying; otherwise the first part becomes INTEGER.
+            IrTypeId nested = integer_id;
+            for (u32 level = 0; level < 2; level += 1)
+            {
+                IrField* alternatives = arena_allocate(fixture_arena, IrField, 40);
+                for (u32 index = 0; index < 40; index += 1)
+                {
+                    alternatives[index] = (IrField){.type = nested};
+                }
+                nested = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_UNION, .fields = alternatives, .field_count = 40,
+                    .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true}});
+            }
+            IrField* grown_fields = arena_allocate(fixture_arena, IrField, 2);
+            grown_fields[0] = small_fields[0];
+            grown_fields[1] = (IrField){.type = nested, .offset = 8};
+            small_type.fields = grown_fields;
+            IrTypeId grown_id = ir_program_add_type(&fixture, small_type);
+            IrField* invalid_fields = arena_allocate(fixture_arena, IrField, 40);
+            for (u32 index = 0; index < 40; index += 1)
+            {
+                invalid_fields[index] = (IrField){.type = integer_id};
+            }
+            // The first popped field is invalid, after the frontier has grown.
+            // A failed classification must rewind its temporary storage too.
+            invalid_fields[39].type = IR_TYPE_ID_INVALID;
+            IrTypeId invalid_id = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_UNION,
+                .fields = invalid_fields, .field_count = 40,
+                .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true}});
+            // Reject an impossible array count before adding it to a nonempty
+            // frontier. That addition would otherwise wrap a u64 to zero.
+            IrTypeId excessive_array = ir_program_add_type(&fixture, (IrType){.kind = IR_TYPE_ARRAY,
+                .element_type = integer_id, .element_count = UINT64_MAX,
+                .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_AGGREGATE, .resolved = true}});
+            IrField* excessive_fields = arena_allocate(fixture_arena, IrField, 2);
+            excessive_fields[0] = small_fields[0];
+            excessive_fields[1] = (IrField){.type = excessive_array, .offset = 8};
+            small_type.fields = excessive_fields;
+            IrTypeId excessive_id = ir_program_add_type(&fixture, small_type);
+
+            ThreadContext* previous = thread_context_selected();
+            arena_pool_release_thread();
+            ThreadContext* isolated = thread_context_allocate();
+            BUSTER_TEST(arguments, isolated != 0);
+            if (isolated)
+            {
+                thread_context_select(isolated);
+                u64 positions[SCRATCH_ARENA_COUNT];
+                u64 dirty[SCRATCH_ARENA_COUNT];
+                for (u32 index = 0; index < (u32)SCRATCH_ARENA_COUNT; index += 1)
+                {
+                    positions[index] = isolated->arenas[index]->position;
+                    dirty[index] = arena_dirty_position(isolated->arenas[index]);
+                }
+                IrAbiValue small = ir_type_abi_value(&fixture, small_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+                bool local_only = true;
+                for (u32 index = 0; index < (u32)SCRATCH_ARENA_COUNT; index += 1)
+                {
+                    local_only &= isolated->arenas[index]->position == positions[index] && arena_dirty_position(isolated->arenas[index]) == dirty[index];
+                }
+                IrAbiValue grown = ir_type_abi_value(&fixture, grown_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+                bool rewound = true;
+                bool grew = false;
+                for (u32 index = 0; index < (u32)SCRATCH_ARENA_COUNT; index += 1)
+                {
+                    Arena* scratch = isolated->arenas[index];
+                    rewound &= scratch->position == positions[index];
+                    grew |= arena_dirty_position(scratch) > dirty[index];
+                    TemporalArena poison = arena_begin_temporal(scratch);
+                    u8* bytes = arena_allocate(scratch, u8, BUSTER_KB(16));
+                    memset(bytes, 0xa5, BUSTER_KB(16));
+                    scratch_end(poison);
+                }
+                u64 classifications = fixture.abi_contexts[IR_ABI_CONVENTION_SYSTEMV_X86_64].classified_values;
+                IrAbiValue cached = ir_type_abi_value(&fixture, grown_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+                bool cache_reused = classifications == 2 &&
+                    fixture.abi_contexts[IR_ABI_CONVENTION_SYSTEMV_X86_64].classified_values == classifications;
+                IrAbiValue invalid = ir_type_abi_value(&fixture, invalid_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+                IrAbiValue excessive = ir_type_abi_value(&fixture, excessive_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+                bool invalid_rewound = true;
+                for (u32 index = 0; index < (u32)SCRATCH_ARENA_COUNT; index += 1)
+                {
+                    invalid_rewound &= isolated->arenas[index]->position == positions[index];
+                }
+                thread_context_release(isolated);
+                thread_context_select(previous);
+                BUSTER_TEST(arguments, local_only);
+                BUSTER_TEST(arguments, rewound && grew);
+                BUSTER_TEST(arguments, small.part_count == 2 && !small.memory && !small.indirect);
+                BUSTER_TEST(arguments, small.parts[0].abi_class == IR_ABI_CLASS_FLOAT && small.parts[1].abi_class == IR_ABI_CLASS_INTEGER);
+                BUSTER_TEST(arguments, grown.part_count == 2 && !grown.memory && !grown.indirect);
+                BUSTER_TEST(arguments, grown.parts[0].abi_class == IR_ABI_CLASS_FLOAT && grown.parts[1].abi_class == IR_ABI_CLASS_INTEGER);
+                BUSTER_TEST(arguments, cached.part_count == grown.part_count && cached.parts[0].abi_class == grown.parts[0].abi_class &&
+                                       cached.parts[1].abi_class == grown.parts[1].abi_class);
+                BUSTER_TEST(arguments, cache_reused);
+                BUSTER_TEST(arguments, invalid_rewound && invalid.indirect && invalid.part_count == 1);
+                BUSTER_TEST(arguments, excessive.indirect && excessive.part_count == 1);
+            }
+            BUSTER_TEST(arguments, arena_destroy(fixture_arena, 1));
+        }
+    }
+
     IrProgram abi_program = ir_program_initialize(arguments->arena, 0, 32, 0, 0);
     IrTypeId abi_f32 = ir_program_add_type(&abi_program, (IrType){
         .kind = IR_TYPE_FLOAT,
