@@ -656,6 +656,8 @@ typedef enum MachineOpcode
     // instead of computed. def; payload indexes call_targets.
     MACHINE_X64_LOAD_SYMBOL_GOT,
     MACHINE_A64_CLEAR_INSTRUCTION_CACHE, // use begin/end; fixed X9/X10; clobber X9/X11/NZCV
+    MACHINE_X64_CPUID,                  // use leaf/subleaf in RAX/RCX; frame receives RAX/RBX/RCX/RDX
+    MACHINE_X64_XGETBV,                 // use index in RCX; frame receives RAX/RDX
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

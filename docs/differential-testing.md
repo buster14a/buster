@@ -13,7 +13,7 @@ From the repository root, build `ide` normally and use a **new** output director
 ./build.sh test_differential --ide build/Release/ide --cc clang --out build/differential-release --sanitize-oracle
 ```
 
-The defaults use eight permanent cases and four generated cases, seed 1, a
+The defaults use nine permanent cases and four generated cases, seed 1, a
 10-second deadline per child, and at most 64 reduction trials for the first
 runtime mismatch in each case. A reference compiler must be available; its
 absence is a failure, not a skip. `--cc` accepts a Clang/GCC-style executable,
@@ -111,6 +111,14 @@ side effects, and values kept live across the cache operation. AArch64 machine
 tests also compare the emitted sequence with the independent Clang assembly
 fixture, including both loop targets and barriers. These checks do not assume
 that a hardware cache failure is observable on every host.
+
+The CPU-query fixture compares CPUID outputs with a separately compiled host
+caller, including reordered tied inputs, indirect output places, and inputs
+kept live after the query. The host pins a value in RBX across the call to
+check callee-save preservation. Leaves zero and `0x80000000` avoid the
+processor-specific APIC ID returned by leaf one. Non-x86 hosts exercise the
+fixture's portable branch. Machine tests additionally cover XGETBV encoding,
+reject a target without XSAVE, and execute it only when CPUID reports OSXSAVE.
 
 ## IR/MIR checks
 
