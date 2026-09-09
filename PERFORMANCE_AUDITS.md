@@ -53,6 +53,7 @@ keep current.
 ## Audits, newest first
 
 - [`2026-09-09T002543Z`](docs/performance-audits/2026-09-09T002543Z.md) — Shared compiler diagnostics: source provenance, symbolic refusals and publication cost (#35, #315)
+- [`2026-09-09T002241Z`](docs/performance-audits/2026-09-09T002241Z.md) — Preserve AT&T literal mnemonics and typed suffix widths (#193)
 - [`2026-09-09T000655Z`](docs/performance-audits/2026-09-09T000655Z.md) — Deterministic merged-section bytes: isolated initialization cost (#303)
 - [`2026-09-08T235007Z`](docs/performance-audits/2026-09-08T235007Z.md) — Correct local sanitizer provenance for the frontend SSA audit (#34)
 - [`2026-09-08T234002Z`](docs/performance-audits/2026-09-08T234002Z.md) — Recover APX, REX2 and EVEX broadcast encoding fixes (#190, #191, #192)

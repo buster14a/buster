@@ -163,6 +163,13 @@ consume the same resolved plan; they must not independently guess SIB, prefixes,
 or immediate widths. Decoder tests use independent oracle bytes and legal-form
 sets; a Buster encode/decode round trip alone cannot prove correctness.
 
+The AT&T suffix adapter accepts generic `b/w/l/q` widths. The `s/t` widths
+come only from explicit typed aliases, including the x87 aliases. A literal
+metadata mnemonic retains its identity after its operands are rejected; a
+trailing letter must not turn `bts` into `bt`. Typed aliases such as scalar
+`movq` still select their base family when the distinct metadata `MOVQ` family
+does not match. These are syntax projections, not another byte authority.
+
 ### Throughput and publication
 
 Keep compact contiguous records, integer IDs, immutable normalized plans and
