@@ -32,6 +32,13 @@ compiler and command provenance. Use the existing throughput runner for paired
 measurements, source/binary immutability checks, fresh output checks and separate
 allocation replays. Never take timing/RSS evidence from the instrumented compiler.
 
+The three-platform `Compiler throughput` harness job also compiles a separate
+observer-enabled `build.c` driver and runs its small bootstrap-checker self-test.
+It validates the captured exit census with this reader and retains the raw log
+and JSON/CSV report. This exercises the enabled desktop reporting path on Linux,
+macOS and Windows without rebuilding the full compiler. The smoke has one main
+thread; worker completion remains covered by the instrumented compiler tests.
+
 ## Counter meanings
 
 | Field | Meaning |
