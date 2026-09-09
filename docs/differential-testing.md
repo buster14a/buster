@@ -19,6 +19,15 @@ runtime mismatch in each case. A reference compiler must be available; its
 absence is a failure, not a skip. `--cc` accepts a Clang/GCC-style executable,
 not a shell command containing flags. On Windows specify the `.exe` path.
 
+The native variadic case also exercises ELF AArch64's independent integer
+and floating-point argument files. Its ten-float call exhausts the floating
+registers, and its mixed named parameters check the anonymous integer cursor.
+Both directions cross compiler boundaries, with copied lists and stack
+canaries. Homogeneous floating aggregates cover two- and four-element reads,
+including a spill that closes the floating register file before a smaller
+following argument. Machine unit tests select and verify the fixture for ELF
+AArch64 as well as x86-64 and execute it when the host ABI matches.
+
 ```sh
 ./build.sh test_differential --self-test
 ./build.sh test_differential --list-configurations

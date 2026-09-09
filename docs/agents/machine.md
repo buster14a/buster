@@ -124,6 +124,18 @@
   integer staging pass, after all XMM bridges, and omit the System V AL count.
   Cross-compiler regressions cover both call directions, register exhaustion,
   copied lists, small/indirect aggregates, and hidden result pointers.
+- ELF AArch64 variadic definitions capture X0-X7 and Q0-Q7 into a 192-byte
+  save area before argument capture. Named parameters consume their ABI's
+  independent integer and floating-point register files. The existing private
+  four-word list stores the integer cursor, overflow pointer, save pointer,
+  and floating-point cursor; `va_copy` copies all four words and `va_end`
+  emits no write. Scalar and homogeneous floating aggregates advance the Q
+  cursor, while integer reads advance the X cursor; both use the shared overflow pointer after
+  register exhaustion. A composite that cannot fit closes its register file
+  before smaller following arguments. The direct oracle and MIR use the same
+  image. Passing lists between Buster and another compiler still requires the
+  public AAPCS64 `va_list` representation; that work is
+  tracked in [#360](https://github.com/buster14a/buster/issues/360).
 - x86 CPUID/XGETBV literal assembly with complete 32-bit pure outputs and
   separate fixed inputs selects constrained machine rows. Numeric/named ties
   retain the input's fixed register. CPUID consumes RAX/RCX together and

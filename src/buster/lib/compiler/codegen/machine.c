@@ -949,7 +949,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("a64_va_save"),
         .operand_count = 1,
         // The operand is a frame slot, so no register class is attached.
-        // The row reads the still-live incoming X0-X7 and sits first in the
+        // The row reads the still-live incoming X0-X7/Q0-Q7 and sits first in the
         // entry block, before any capture row can disturb them.
         .operand_info = {MACHINE_OPERAND_FRAME},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
@@ -2524,6 +2524,11 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
     bool valid = true;
     switch (instruction->opcode)
     {
+        case MACHINE_A64_VA_SAVE:
+        {
+            u32 slot = machine_ref_payload(instruction->operands[0]);
+            valid = slot < function->stack_slot_count && function->stack_slot_sizes[slot] >= MACHINE_A64_VA_SAVE_BYTES;
+        } break;
         case MACHINE_X64_CPUID:
         case MACHINE_X64_XGETBV:
         {
@@ -2557,7 +2562,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
                     valid = machine_ref_kind(result_ref) == MACHINE_REF_STACK_SLOT && machine_ref_payload(result_ref) == metadata->result_slot;
                     if (valid && instruction->opcode == MACHINE_A64_VA_ARG)
                     {
-                        valid = metadata->part_count * 8u <= function->stack_slot_sizes[metadata->result_slot];
+                        valid = metadata->size <= function->stack_slot_sizes[metadata->result_slot];
                     }
                 }
                 else

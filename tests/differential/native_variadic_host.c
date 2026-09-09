@@ -12,6 +12,10 @@ long long native_va_named(long long, double, long long, double, long long, int, 
 struct NativeVaResult native_va_result(int, ...);
 long long native_va_small(int, ...);
 long long native_va_indirect(int, ...);
+struct NativeVaHfa4 { float a; float b; float c; float d; };
+struct NativeVaHfa2 { double a; double b; };
+double native_va_hfa(int, ...);
+double native_va_hfa_overflow(double, double, double, double, double, double, double, int, ...);
 int native_va_call_host(void);
 long long native_va_host_ints(int count, ...)
 {
@@ -70,6 +74,7 @@ int main(void)
     int bad = native_va_ints(0) != 0;
     bad |= native_va_ints(7, 1ll, 2ll, 3ll, 4ll, 5ll, 6ll, 7ll) != 140;
     bad |= native_va_floats(1.5, 4, 2.5, 3.5, 4.5, 5.5) != 62.0;
+    bad |= native_va_floats(1.5, 10, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0) != 394.5;
     bad |= native_va_named(1ll, 2.0, 3ll, 4.0, 5ll, 5, 6ll, 7ll, 8ll, 9ll, 10ll) != 55;
     struct NativeVaResult result = native_va_result(5, 1ll, 2ll, 3ll, 4ll, 5ll);
     bad |= result.sum != 15 || result.count != 5;
@@ -78,6 +83,10 @@ int main(void)
     bad |= native_va_small(17, a, b, c, d, 99ll) != (17ll - 3 - 301 - 70001 - 0x123456789ll + 99);
     struct NativeVaIndirect x = {2, 3}; struct NativeVaIndirect y = {5, 6}; struct NativeVaIndirect z = {7, 8};
     bad |= native_va_indirect(1, x, 4ll, y, z, 9ll) != 144;
+    struct NativeVaHfa4 hfa4 = {1, 2, 3, 4};
+    struct NativeVaHfa2 hfa2 = {5, 6};
+    bad |= native_va_hfa(1, hfa4, hfa2, 7.0) != 99.0;
+    bad |= native_va_hfa_overflow(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 1, hfa4, hfa2, 7.0) != 77.0;
     bad |= native_va_call_host();
     printf("native-variadic=%d\n", bad);
     return bad;

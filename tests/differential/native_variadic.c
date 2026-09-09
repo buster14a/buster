@@ -78,6 +78,29 @@ long long native_va_indirect(int bias, ...)
     return bias + a.first + 2 * a.second + first + 3 * b.first + 4 * b.second + 5 * c.first + 6 * c.second + last;
 }
 
+struct NativeVaHfa4 { float a; float b; float c; float d; };
+struct NativeVaHfa2 { double a; double b; };
+double native_va_hfa(int marker, ...)
+{
+    va_list ap;
+    __builtin_va_start(ap, marker);
+    struct NativeVaHfa4 a = __builtin_va_arg(ap, struct NativeVaHfa4);
+    struct NativeVaHfa2 b = __builtin_va_arg(ap, struct NativeVaHfa2);
+    double tail = __builtin_va_arg(ap, double);
+    __builtin_va_end(ap);
+    return marker + a.a + 2 * a.b + 3 * a.c + 4 * a.d + 5 * b.a + 6 * b.b + tail;
+}
+double native_va_hfa_overflow(double a, double b, double c, double d, double e, double f, double g, int marker, ...)
+{
+    va_list ap;
+    __builtin_va_start(ap, marker);
+    struct NativeVaHfa4 first = __builtin_va_arg(ap, struct NativeVaHfa4);
+    struct NativeVaHfa2 second = __builtin_va_arg(ap, struct NativeVaHfa2);
+    double tail = __builtin_va_arg(ap, double);
+    __builtin_va_end(ap);
+    return a + b + c + d + e + f + g + marker + first.a + 2 * first.b + 3 * first.c + 4 * first.d + second.a + second.b + tail;
+}
+
 #ifndef BUSTER_MACHINE_VA_TEST
 long long native_va_host_ints(int, ...);
 double native_va_host_floats(double, int, ...);
@@ -88,6 +111,7 @@ int native_va_call_host(void)
 {
     int bad = native_va_host_ints(7, 1ll, 2ll, 3ll, 4ll, 5ll, 6ll, 7ll) != 140;
     bad |= native_va_host_floats(1.5, 4, 2.5, 3.5, 4.5, 5.5) != 62.0;
+    bad |= native_va_host_floats(1.5, 10, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0) != 394.5;
     bad |= native_va_host_named(1ll, 2.0, 3ll, 4.0, 5ll, 5, 6ll, 7ll, 8ll, 9ll, 10ll) != 55;
     struct NativeVaResult result = native_va_host_result(5, 1ll, 2ll, 3ll, 4ll, 5ll);
     bad |= result.sum != 15 || result.count != 5;

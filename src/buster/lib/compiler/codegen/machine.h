@@ -1169,7 +1169,11 @@ typedef struct MachineFunction MachineFunction;
 // save-area/overflow-area sequence without consulting IR or calling back into
 // the canonical emitter.  A memory-class part has `is_memory` set and makes
 // the row use the overflow path directly.
-#define MACHINE_VA_ARG_PART_LIMIT 2
+// System V x86-64 needs two parts; an AArch64 HFA can contain four.
+#define MACHINE_VA_ARG_PART_LIMIT 4
+#define MACHINE_A64_VA_GP_SAVE_BYTES 64u
+#define MACHINE_A64_VA_FP_SAVE_BYTES 128u
+#define MACHINE_A64_VA_SAVE_BYTES (MACHINE_A64_VA_GP_SAVE_BYTES + MACHINE_A64_VA_FP_SAVE_BYTES)
 typedef struct MachineVaArgPart MachineVaArgPart;
 struct MachineVaArgPart
 {
