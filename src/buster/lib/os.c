@@ -449,6 +449,9 @@ bool os_commit(void* address, u64 size, ProtectionFlags protection, bool lock)
         os_fault(address, size);
     }
 
+#if BUSTER_BENCH_ALLOCATIONS
+    arena_benchmark_event(ARENA_BENCHMARK_OS_COMMIT, S8(__FILE__), S8(__func__), __LINE__, size, 0, 0, 0, result);
+#endif
     return result;
 }
 
@@ -483,6 +486,9 @@ bool os_decommit(void* address, u64 size)
 #elif defined(_WIN32)
     result = VirtualFree(address, size, MEM_DECOMMIT) != 0;
 #endif
+#if BUSTER_BENCH_ALLOCATIONS
+    arena_benchmark_event(ARENA_BENCHMARK_OS_DECOMMIT, S8(__FILE__), S8(__func__), __LINE__, size, 0, 0, 0, result);
+#endif
     return result;
 }
 
@@ -512,6 +518,9 @@ void* os_reserve(void* base, u64 size, ProtectionFlags protection, MapFlags map)
     DWORD allocation_flags = os_windows_allocation_flags(map);
     DWORD protection_flags = os_windows_protection_flags(protection);
     address = VirtualAlloc(base, size, allocation_flags, protection_flags);
+#endif
+#if BUSTER_BENCH_ALLOCATIONS
+    arena_benchmark_event(ARENA_BENCHMARK_OS_RESERVE, S8(__FILE__), S8(__func__), __LINE__, size, 0, 0, 0, address != 0);
 #endif
     return address;
 }
@@ -600,6 +609,9 @@ BUSTER_GLOBAL_LOCAL void thread_entry_point(ThreadCallback* user_entry_point, vo
     // OS worker is about to lose this TLS pool, so unmap it instead of
     // stranding the reservations and touched pages until process exit.
     arena_pool_release_thread();
+#if BUSTER_BENCH_ALLOCATIONS
+    arena_benchmark_flush(false);
+#endif
     // Last, so the count covers every instant this thread could still have
     // touched a shared global. os_thread_join returns after this store.
     atomic_u64_decrement(&os_live_thread_count);
@@ -2152,6 +2164,9 @@ bool os_unreserve(void* address, u64 size)
         virtual_free_result = VirtualFree(address, 0, MEM_RELEASE);
         result = virtual_free_result != 0;
     }
+#endif
+#if BUSTER_BENCH_ALLOCATIONS
+    arena_benchmark_event(ARENA_BENCHMARK_OS_UNRESERVE, S8(__FILE__), S8(__func__), __LINE__, size, 0, 0, 0, result);
 #endif
     return result;
 }

@@ -250,3 +250,13 @@ The seal detects accidental corruption; it is not a signature against a party
 who can edit both files and hashes. Incomplete runs retain diagnostics but have
 no valid completion marker. CI publishes the summary and keeps raw evidence for
 14 days, including failures; archive important acceptance bundles elsewhere.
+
+## Per-site allocation reports
+
+The same `BUSTER_BENCH_ALLOCATIONS` recorder also supports an optional
+[allocation census](../../docs/allocation-census.md). Set
+`BUSTER_ALLOCATION_CENSUS=1` for a separate diagnostic invocation and validate
+its saved stderr with the offline reader. This exit report includes worker and
+cleanup traffic, whereas source metrics retain the original calling-thread
+pre-formatting snapshot. Keep each process log separate and do not substitute
+census timings for the normal uninstrumented series.

@@ -53,6 +53,7 @@ keep current.
 ## Audits, newest first
 
 - [`2026-09-09T024511Z`](docs/performance-audits/2026-09-09T024511Z.md) — Pointer block parameters: native coverage, verification and migration cost (#36)
+- [`2026-09-09T011927Z`](docs/performance-audits/2026-09-09T011927Z.md) — Recover per-site allocation census through the existing optional observer
 - [`2026-09-09T011843Z`](docs/performance-audits/2026-09-09T011843Z.md) — Member lookup: local search rows and depth-sized paths (#295)
 - [`2026-09-09T004223Z`](docs/performance-audits/2026-09-09T004223Z.md) — Recover the native compiler-throughput harness and diagnostic allocation observer
 - [`2026-09-09T004819Z`](docs/performance-audits/2026-09-09T004819Z.md) — Canonical integer views for atomic aggregate exchange and compare-exchange (#195)

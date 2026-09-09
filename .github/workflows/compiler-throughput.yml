@@ -40,6 +40,10 @@ jobs:
           mkdir -p build
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
           ./build/build bench_throughput self-test
+          # Compile the optional reporter without rebuilding the full compiler.
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -DBUSTER_BENCH_ALLOCATIONS=1 build.c -o build/build-census
+          BUSTER_ALLOCATION_CENSUS=1 ./build/build-census self_host_audit_self_test 2> build/allocation-census.log
+          python3 tools/allocation_census.py --input build/allocation-census.log --output build/allocation-census-report --label 'build-driver CI smoke'
       - name: Native harness tests (Windows)
         if: runner.os == 'Windows'
         shell: powershell
@@ -53,12 +57,24 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference build.c -lws2_32 -o build/build.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./build/build.exe bench_throughput self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -fwrapv -fno-strict-aliasing -funsigned-char -DBUSTER_BENCH_ALLOCATIONS=1 build.c -lws2_32 -o build/build-census.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:BUSTER_ALLOCATION_CENSUS = '1'
+          # Native redirection preserves the UTF-8 report bytes in Windows PowerShell.
+          cmd /d /c 'build\build-census.exe self_host_audit_self_test 2> build\allocation-census.log'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item Env:BUSTER_ALLOCATION_CENSUS
+          python tools/allocation_census.py --input build/allocation-census.log --output build/allocation-census-report --label 'build-driver CI smoke'
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: throughput-harness-${{ matrix.os }}
-          path: build/throughput-tool-tests
+          path: |
+            build/throughput-tool-tests
+            build/allocation-census.log
+            build/allocation-census-report
           retention-days: 7
           if-no-files-found: warn
 

@@ -2,20 +2,7 @@
 #include <buster/lib/os.h>
 #include <buster/lib/integer.h>
 
-#if BUSTER_BENCH_ALLOCATIONS
-BUSTER_THREAD_LOCAL_DECL ArenaBenchmarkCounters arena_benchmark_thread;
 
-void arena_benchmark_record(u64 size)
-{
-    arena_benchmark_thread.calls += 1;
-    arena_benchmark_thread.requested_bytes += size;
-}
-
-ArenaBenchmarkCounters arena_benchmark_counters(void)
-{
-    return arena_benchmark_thread;
-}
-#endif
 
 BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 
@@ -393,3 +380,306 @@ void scratch_end(TemporalArena temporal)
     Arena* arena = temporal.arena;
     arena_set_position(arena, temporal.position);
 }
+
+#if BUSTER_BENCH_ALLOCATIONS
+#include <buster/lib/system_headers.h>
+
+// One allocation-free TLS recorder supplies both the source-metrics snapshot
+// and the optional exit census. No sampling or silent overflow is permitted.
+#define ARENA_BENCHMARK_SITE_CAPACITY 8192
+
+typedef struct ArenaBenchmarkSite ArenaBenchmarkSite;
+struct ArenaBenchmarkSite
+{
+    String8 file;
+    String8 function;
+    u32 line;
+    ArenaBenchmarkKind kind;
+    ArenaBenchmarkCounters totals;
+};
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL ArenaBenchmarkSite arena_benchmark_sites[ARENA_BENCHMARK_SITE_CAPACITY];
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL ArenaBenchmarkCounters arena_benchmark_totals[ARENA_BENCHMARK_KIND_COUNT];
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_benchmark_reported;
+BUSTER_GLOBAL_LOCAL bool arena_benchmark_report_enabled;
+BUSTER_GLOBAL_LOCAL AtomicU64 arena_benchmark_report_sequence;
+BUSTER_GLOBAL_LOCAL AtomicU64 arena_benchmark_report_turn;
+
+BUSTER_GLOBAL_LOCAL void arena_benchmark_raw_write(ByteSlice bytes)
+{
+    u64 offset = 0;
+    while (offset < bytes.length)
+    {
+#if defined(__linux__) || defined(__APPLE__)
+        ssize_t written;
+        do
+        {
+            written = write(STDERR_FILENO, bytes.pointer + offset, (size_t)(bytes.length - offset));
+        } while (written < 0 && errno == EINTR);
+        if (written <= 0)
+        {
+            os_exit(1);
+        }
+        offset += (u64)written;
+#elif defined(_WIN32)
+        DWORD written = 0;
+        // Every bounded record is at most 4 KiB; the DWORD conversion is exact.
+        if (!WriteFile(GetStdHandle(STD_ERROR_HANDLE), bytes.pointer + offset, (DWORD)(bytes.length - offset), &written, 0) || !written)
+        {
+            os_exit(1);
+        }
+        offset += written;
+#else
+        BUSTER_UNUSED(bytes);
+        os_exit(1);
+#endif
+    }
+}
+
+BUSTER_NORETURN BUSTER_GLOBAL_LOCAL void arena_benchmark_fail(void)
+{
+    // Raw output remains usable after thread-context cleanup and needs no arena.
+    String8 message = S8("BUSTER_ALLOC_ERROR capacity, counter, or lifecycle failure\n");
+    arena_benchmark_raw_write(BUSTER_SLICE_TO_BYTE_SLICE(message));
+    os_exit(1);
+}
+
+BUSTER_GLOBAL_LOCAL void arena_benchmark_add(ArenaBenchmarkCounters* totals, u64 size, u64 padding,
+                                            u64 zero_requested, u64 zero_written, bool success)
+{
+    if (totals->calls == UINT64_MAX || size > UINT64_MAX - totals->requested_bytes ||
+        padding > UINT64_MAX - totals->padding || zero_requested > UINT64_MAX - totals->zero_requested ||
+        zero_written > UINT64_MAX - totals->zero_written)
+    {
+        arena_benchmark_fail();
+    }
+    totals->calls += 1;
+    totals->requested_bytes += size;
+    totals->padding += padding;
+    totals->zero_requested += zero_requested;
+    totals->zero_written += zero_written;
+    // Subset counts/bytes cannot overflow before their checked supersets.
+    totals->empty += size == 0;
+    totals->small += size > 0 && size <= 64;
+    totals->maximum = BUSTER_MAX(totals->maximum, size);
+    totals->failures += !success;
+    totals->failed_bytes += success ? 0 : size;
+}
+
+BUSTER_GLOBAL_LOCAL bool arena_benchmark_name_equal(String8 left, String8 right)
+{
+    bool result = left.length == right.length && !memcmp(left.pointer, right.pointer, (size_t)left.length);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 arena_benchmark_hash_name(u64 hash, String8 name)
+{
+    for (u64 index = 0; index < name.length; index += 1)
+    {
+        hash = (hash ^ name.pointer[index]) * 1099511628211ull;
+    }
+    return hash;
+}
+
+void arena_benchmark_event(ArenaBenchmarkKind kind, String8 file, String8 function, u32 line,
+                           u64 size, u64 padding, u64 zero_requested, u64 zero_written, bool success)
+{
+    if (arena_benchmark_reported || (u32)kind >= ARENA_BENCHMARK_KIND_COUNT || !line || !file.length || !function.length ||
+        zero_written > zero_requested || zero_requested > size)
+    {
+        arena_benchmark_fail();
+    }
+    // Textual identities coalesce equal spellings across non-unity TUs. Neither
+    // addresses nor the hash-table emission order are part of the protocol.
+    u64 hash = arena_benchmark_hash_name(14695981039346656037ull, file);
+    hash = arena_benchmark_hash_name(hash, function) ^ ((u64)line << 3) ^ (u64)kind;
+    u64 index = hash & (ARENA_BENCHMARK_SITE_CAPACITY - 1);
+    u64 probes = 0;
+    while (arena_benchmark_sites[index].line &&
+           (arena_benchmark_sites[index].kind != kind || arena_benchmark_sites[index].line != line ||
+            !arena_benchmark_name_equal(arena_benchmark_sites[index].file, file) ||
+            !arena_benchmark_name_equal(arena_benchmark_sites[index].function, function)))
+    {
+        index = (index + 1) & (ARENA_BENCHMARK_SITE_CAPACITY - 1);
+        probes += 1;
+        if (probes == ARENA_BENCHMARK_SITE_CAPACITY)
+        {
+            arena_benchmark_fail();
+        }
+    }
+    ArenaBenchmarkSite* site = arena_benchmark_sites + index;
+    site->kind = kind;
+    site->file = file;
+    site->function = function;
+    site->line = line;
+    arena_benchmark_add(&site->totals, size, padding, zero_requested, zero_written, success);
+    arena_benchmark_add(arena_benchmark_totals + kind, size, padding, zero_requested, zero_written, success);
+}
+
+ArenaBenchmarkCounters arena_benchmark_kind_counters(ArenaBenchmarkKind kind)
+{
+    BUSTER_CHECK_RAW((u32)kind < ARENA_BENCHMARK_KIND_COUNT);
+    return arena_benchmark_totals[kind];
+}
+
+ArenaBenchmarkCounters arena_benchmark_counters(void)
+{
+    return arena_benchmark_kind_counters(ARENA_BENCHMARK_ARENA);
+}
+
+void* arena_benchmark_allocate(Arena* arena, u64 size, u64 alignment, bool zeroed, String8 file, String8 function, u32 line)
+{
+    u64 start = arena->position;
+    u64 dirty = zeroed ? arena_dirty_position(arena) : 0;
+    void* result = zeroed ? arena_benchmark_allocate_zeroed_bytes_raw(arena, size, alignment)
+                          : arena_benchmark_allocate_bytes_raw(arena, size, alignment);
+    u64 begin = arena->position - size;
+    u64 clear_end = BUSTER_MIN(dirty, arena->position);
+    u64 written = clear_end > begin ? clear_end - begin : 0;
+    arena_benchmark_event(ARENA_BENCHMARK_ARENA, file, function, line, size, begin - start, zeroed ? size : 0, written, true);
+    return result;
+}
+
+void arena_benchmark_report_enable(bool enabled)
+{
+    BUSTER_CHECK_RAW(os_is_only_live_thread());
+    arena_benchmark_report_enabled = enabled;
+}
+
+BUSTER_GLOBAL_LOCAL u64 arena_benchmark_append(char* buffer, u64 length, u64 capacity, String8 text)
+{
+    for (u64 index = 0; index < text.length; index += 1)
+    {
+        char8 value = text.pointer[index];
+        bool escaped = value == '\t' || value == '\n' || value == '\r' || value == '\\';
+        if (length + 1 + (u64)escaped > capacity)
+        {
+            arena_benchmark_fail();
+        }
+        if (escaped)
+        {
+            buffer[length++] = '\\';
+            value = value == '\t' ? 't' : value == '\n' ? 'n' : value == '\r' ? 'r' : '\\';
+        }
+        buffer[length++] = value;
+    }
+    return length;
+}
+
+BUSTER_GLOBAL_LOCAL u64 arena_benchmark_separator(char* buffer, u64 length, u64 capacity)
+{
+    if (length == capacity)
+    {
+        arena_benchmark_fail();
+    }
+    buffer[length++] = '\t';
+    return length;
+}
+
+BUSTER_GLOBAL_LOCAL u64 arena_benchmark_number(char* buffer, u64 length, u64 capacity, u64 number)
+{
+    char digits[20];
+    u64 count = 0;
+    do
+    {
+        digits[count++] = (char)('0' + number % 10);
+        number /= 10;
+    } while (number);
+    if (length + count + 1 > capacity)
+    {
+        arena_benchmark_fail();
+    }
+    buffer[length++] = '\t';
+    while (count)
+    {
+        buffer[length++] = digits[--count];
+    }
+    return length;
+}
+
+BUSTER_GLOBAL_LOCAL u64 arena_benchmark_values(char* buffer, u64 length, u64 capacity, ArenaBenchmarkCounters totals)
+{
+    u64 values[] = {totals.calls, totals.requested_bytes, totals.padding, totals.zero_requested, totals.zero_written,
+                    totals.empty, totals.small, totals.maximum, totals.failures, totals.failed_bytes};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(values); index += 1)
+    {
+        length = arena_benchmark_number(buffer, length, capacity, values[index]);
+    }
+    return length;
+}
+
+BUSTER_GLOBAL_LOCAL void arena_benchmark_write(char* buffer, u64 length)
+{
+    // Callers reserve the final byte. A ticket lock covers the entire epoch,
+    // including partial writes, without depending on a platform's PIPE_BUF.
+    buffer[length++] = '\n';
+    arena_benchmark_raw_write((ByteSlice){.pointer = (u8*)buffer, .length = length});
+}
+
+void arena_benchmark_flush(bool final)
+{
+    if (arena_benchmark_report_enabled)
+    {
+        if (arena_benchmark_reported || (final && !os_is_only_live_thread()))
+        {
+            arena_benchmark_fail();
+        }
+        arena_benchmark_reported = true;
+        u64 ticket = atomic_u64_increment(&arena_benchmark_report_sequence);
+        if (ticket == UINT64_MAX)
+        {
+            arena_benchmark_fail();
+        }
+        while (atomic_u64_add(&arena_benchmark_report_turn, 0) != ticket)
+        {
+            // Reporting happens once per retiring thread, never on a hot path.
+        }
+        u64 epoch = ticket + 1;
+        String8 names[] = {S8("arena"), S8("os_reserve"), S8("os_commit"), S8("os_decommit"), S8("os_unreserve")};
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == ARENA_BENCHMARK_KIND_COUNT);
+        u64 row_count = 0;
+        for (u64 index = 0; index < ARENA_BENCHMARK_SITE_CAPACITY; index += 1)
+        {
+            ArenaBenchmarkSite* site = arena_benchmark_sites + index;
+            if (site->line)
+            {
+                char buffer[4096];
+                u64 capacity = sizeof(buffer) - 1;
+                u64 length = arena_benchmark_append(buffer, 0, capacity, S8("BUSTER_ALLOC_V2"));
+                length = arena_benchmark_number(buffer, length, capacity, epoch);
+                length = arena_benchmark_separator(buffer, length, capacity);
+                length = arena_benchmark_append(buffer, length, capacity, names[site->kind]);
+                length = arena_benchmark_separator(buffer, length, capacity);
+                length = arena_benchmark_append(buffer, length, capacity, site->file);
+                length = arena_benchmark_number(buffer, length, capacity, site->line);
+                length = arena_benchmark_separator(buffer, length, capacity);
+                length = arena_benchmark_append(buffer, length, capacity, site->function);
+                length = arena_benchmark_values(buffer, length, capacity, site->totals);
+                arena_benchmark_write(buffer, length);
+                row_count += 1;
+            }
+        }
+        char footer[512];
+        u64 capacity = sizeof(footer) - 1;
+        for (u64 kind = 0; kind < ARENA_BENCHMARK_KIND_COUNT; kind += 1)
+        {
+            u64 length = arena_benchmark_append(footer, 0, capacity, S8("BUSTER_ALLOC_TOTAL_V2"));
+            length = arena_benchmark_number(footer, length, capacity, epoch);
+            length = arena_benchmark_separator(footer, length, capacity);
+            length = arena_benchmark_append(footer, length, capacity, names[kind]);
+            length = arena_benchmark_values(footer, length, capacity, arena_benchmark_totals[kind]);
+            arena_benchmark_write(footer, length);
+        }
+        u64 length = arena_benchmark_append(footer, 0, capacity, S8("BUSTER_ALLOC_END_V2"));
+        length = arena_benchmark_number(footer, length, capacity, epoch);
+        length = arena_benchmark_number(footer, length, capacity, row_count);
+        arena_benchmark_write(footer, length);
+        if (final)
+        {
+            length = arena_benchmark_append(footer, 0, capacity, S8("BUSTER_ALLOC_DONE_V2"));
+            length = arena_benchmark_number(footer, length, capacity, epoch);
+            arena_benchmark_write(footer, length);
+        }
+        atomic_u64_increment(&arena_benchmark_report_turn);
+    }
+}
+#endif

@@ -115,17 +115,45 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE u64 arena_array_size(u64 el
 }
 
 #if BUSTER_BENCH_ALLOCATIONS
-// Diagnostic builds only. These are calling-thread bump requests, not malloc
-// calls, live bytes, reserved virtual memory, or process RSS. Snapshot before
-// formatting a report, so the report does not count its own allocations.
+// Calling-thread cumulative request traffic. These counters are not live bytes,
+// physical OS zeroing, libc allocation, or RSS. Reporting never resets them.
 typedef struct ArenaBenchmarkCounters ArenaBenchmarkCounters;
 struct ArenaBenchmarkCounters
 {
     u64 calls;
     u64 requested_bytes;
+    u64 padding;
+    u64 zero_requested;
+    u64 zero_written;
+    u64 empty;
+    u64 small;
+    u64 maximum;
+    u64 failures;
+    u64 failed_bytes;
 };
-BUSTER_F_DECL void arena_benchmark_record(u64 size);
+typedef enum ArenaBenchmarkKind
+{
+    ARENA_BENCHMARK_ARENA,
+    ARENA_BENCHMARK_OS_RESERVE,
+    ARENA_BENCHMARK_OS_COMMIT,
+    ARENA_BENCHMARK_OS_DECOMMIT,
+    ARENA_BENCHMARK_OS_UNRESERVE,
+    ARENA_BENCHMARK_KIND_COUNT,
+} ArenaBenchmarkKind;
 BUSTER_F_DECL ArenaBenchmarkCounters arena_benchmark_counters(void);
+BUSTER_F_DECL ArenaBenchmarkCounters arena_benchmark_kind_counters(ArenaBenchmarkKind kind);
+BUSTER_F_DECL void arena_benchmark_event(ArenaBenchmarkKind kind, String8 file, String8 function, u32 line,
+                                        u64 size, u64 padding, u64 zero_requested, u64 zero_written, bool success);
+BUSTER_F_DECL void* arena_benchmark_allocate(Arena* arena, u64 size, u64 alignment, bool zeroed,
+                                            String8 file, String8 function, u32 line);
+// Capture emission preference before workers start. The single recorder remains
+// enabled throughout the instrumented process, including startup and cleanup.
+BUSTER_F_DECL void arena_benchmark_report_enable(bool enabled);
+BUSTER_F_DECL void arena_benchmark_flush(bool final);
+// Preserve the ordinary inline implementation in disabled builds. Instrumented
+// wrappers below observe exactly one request around these same primitives.
+#define arena_allocate_bytes arena_benchmark_allocate_bytes_raw
+#define arena_allocate_zeroed_bytes arena_benchmark_allocate_zeroed_bytes_raw
 #endif
 
 // The bump is inline and the commit is not. Every allocation performs the same
@@ -148,9 +176,6 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_bytes(
     }
     void* result = (u8*)arena + aligned_offset;
     arena->position = aligned_size_after;
-#if BUSTER_BENCH_ALLOCATIONS
-    arena_benchmark_record(size);
-#endif
     BUSTER_CHECK(arena->position <= arena->os_position);
     return result;
 }
@@ -185,6 +210,25 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_zeroed
     }
     return result;
 }
+
+#if BUSTER_BENCH_ALLOCATIONS
+#undef arena_allocate_bytes
+#undef arena_allocate_zeroed_bytes
+// Function-address/parenthesized uses remain observed, attributed to these
+// fallback wrappers. Ordinary calls below retain their original source site.
+BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
+{
+    return arena_benchmark_allocate(arena, size, alignment, false, S8(__FILE__), S8(__func__), __LINE__);
+}
+BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_zeroed_bytes(Arena* arena, u64 size, u64 alignment)
+{
+    return arena_benchmark_allocate(arena, size, alignment, true, S8(__FILE__), S8(__func__), __LINE__);
+}
+#define arena_allocate_bytes(arena, size, alignment) \
+    arena_benchmark_allocate((arena), (size), (alignment), false, S8(__FILE__), S8(__func__), __LINE__)
+#define arena_allocate_zeroed_bytes(arena, size, alignment) \
+    arena_benchmark_allocate((arena), (size), (alignment), true, S8(__FILE__), S8(__func__), __LINE__)
+#endif
 
 #define arena_allocate(arena, T, count) (T*)arena_allocate_bytes(arena, arena_array_size(sizeof(T), count), BUSTER_ALIGN_OF(T))
 // The zeroed form of arena_allocate: same array, already zero, with only the
