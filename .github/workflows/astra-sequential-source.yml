@@ -1,0 +1,42 @@
+name: Astra sequential source transport
+
+on:
+  push:
+    branches:
+      - astra/20260909-sequential-transport
+    paths:
+      - .github/workflows/astra-sequential-source.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: astra-sequential-source-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: bf9afdbe886821aecc9be787075b7cb84c9bdcd1
+          persist-credentials: false
+      - name: Export pinned tracked source only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = bf9afdbe886821aecc9be787075b7cb84c9bdcd1
+          git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/buster-source.sha"
+          printf 'Pinned source export only; no compilation or test result.\n' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: astra-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/buster-source.tar.gz
+            ${{ runner.temp }}/buster-source.sha
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
