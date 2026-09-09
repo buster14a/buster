@@ -118,12 +118,23 @@
   parameter consumes one slot, and a hidden return pointer consumes the first.
   Pointer-sized `va_list` copies use eight bytes and `va_end` emits no write.
   Scalar and aggregate `va_arg` reads advance one slot, dereferencing indirect
-  aggregates according to the canonical ABI classification. Existing indirect
-  argument/vector signature exclusions still apply to callers.
+  aggregates according to the canonical ABI classification. Reads remain
+  limited to sixteen bytes; vector and 128-bit integer signatures remain excluded.
   Variadic callers duplicate scalar float bits into positional GPRs during the
   integer staging pass, after all XMM bridges, and omit the System V AL count.
   Cross-compiler regressions cover both call directions, register exhaustion,
   copied lists, small/indirect aggregates, and hidden result pointers.
+- Windows/UEFI x86-64 indirect aggregate arguments occupy one pointer slot.
+  Callers copy exact value bytes into storage aligned to sixteen bytes after
+  their shadow and stack-argument area; every call site reuses the maximum outgoing
+  reservation. Fixed and variadic arguments share this ABI placement. Callees
+  capture incoming register pointers before floating bridges, capture stack
+  pointers next, and materialize parameter objects after all incoming captures.
+  Parameter writes affect the private value copy. Complete outgoing sizes are
+  checked before narrowing frame displacements. Alignment requirements above
+  sixteen bytes remain outside this subset. Cross-compiler tests cover odd
+  sizes, larger aggregates, hidden returns, indirect calls, large anonymous
+  arguments, mixed floating parameters and caller-value preservation.
 - ELF AArch64 variadic definitions capture X0-X7 and Q0-Q7 into a 192-byte
   save area before argument capture. Named parameters consume their ABI's
   independent integer and floating-point register files. The existing private
