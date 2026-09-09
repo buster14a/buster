@@ -2901,6 +2901,33 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classify_bit_field(IrField const* field
     return result;
 }
 
+// Most aggregates need only a handful of pending fields, independently of
+// the translation unit's type count. Grow a local worklist only when that
+// actual frontier outgrows it. The old classification limit remains the
+// acceptance bound; it is no longer an allocation size paid for every type.
+#define IR_ABI_LOCAL_TASK_CAPACITY 32
+BUSTER_GLOBAL_LOCAL bool ir_abi_tasks_reserve(TemporalArena* temporary, IrAbiClassificationTask** tasks, u32* capacity,
+                                             u32 count, u64 required, u32 limit)
+{
+    bool valid = required <= limit;
+    if (valid && required > *capacity)
+    {
+        if (!temporary->arena)
+        {
+            *temporary = scratch_begin(0, 0);
+        }
+        u32 grown = (u32)BUSTER_MIN((u64)limit, BUSTER_MAX(required, (u64)*capacity * 2));
+        IrAbiClassificationTask* replacement = arena_allocate(temporary->arena, IrAbiClassificationTask, grown);
+        if (count)
+        {
+            memcpy(replacement, *tasks, sizeof(*replacement) * count);
+        }
+        *tasks = replacement;
+        *capacity = grown;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId root_type, IrAbiClass classes[2])
 {
     IrType* root = ir_type_from_id(&program->types, root_type);
@@ -2911,9 +2938,11 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
     }
     else
     {
-        TemporalArena temporary = scratch_begin(0, 0);
-        u32 capacity = BUSTER_MAX(program->types.count * 16, 16);
-        IrAbiClassificationTask* tasks = arena_allocate(temporary.arena, IrAbiClassificationTask, capacity);
+        TemporalArena temporary = {0};
+        u32 limit = BUSTER_MAX(program->types.count * 16, 16);
+        u32 capacity = BUSTER_MIN(limit, IR_ABI_LOCAL_TASK_CAPACITY);
+        IrAbiClassificationTask local_tasks[IR_ABI_LOCAL_TASK_CAPACITY];
+        IrAbiClassificationTask* tasks = local_tasks;
         u32 count = 1;
         tasks[0] = (IrAbiClassificationTask){
             .type = root_type,
@@ -2936,7 +2965,7 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
             }
             if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
             {
-                if (count + type->field_count > capacity)
+                if (!ir_abi_tasks_reserve(&temporary, &tasks, &capacity, count, (u64)count + type->field_count, limit))
                 {
                     valid = false;
                     break;
@@ -2963,7 +2992,8 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
             if (type->kind == IR_TYPE_ARRAY)
             {
                 IrType* element = ir_type_from_id(&program->types, type->element_type);
-                if (!element || !element->layout.resolved || type->element_count > capacity - count)
+                if (!element || !element->layout.resolved || type->element_count > limit - count ||
+                    !ir_abi_tasks_reserve(&temporary, &tasks, &capacity, count, (u64)count + type->element_count, limit))
                 {
                     valid = false;
                     break;
@@ -3032,7 +3062,12 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
                 classes[part] = ir_system_v_abi_class_merge(classes[part], abi_class);
             }
         }
-        scratch_end(temporary);
+        // Only value records are copied into the caller's classes. Neither
+        // the local array nor a grown scratch array can escape this call.
+        if (temporary.arena)
+        {
+            scratch_end(temporary);
+        }
         result = valid;
     }
 
