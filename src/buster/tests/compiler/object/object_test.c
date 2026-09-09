@@ -2320,6 +2320,89 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, mach_cfi_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
     }
 
+    // Apple ld accepts a SUBTRACTOR/UNSIGNED pair in x86 __eh_frame, not the
+    // SIGNED relocation used for instruction operands. Keep the section at a
+    // noncanonical index to test classification by kind rather than array slot.
+    ObjectSection x86_cfi_sections[] = {
+        mach_cfi_object.sections[OBJECT_SECTION_TEXT], mach_cfi_object.sections[OBJECT_SECTION_UNWIND],
+    };
+    x86_cfi_sections[1].data.pointer = arena_allocate(arguments->arena, u8, x86_cfi_sections[1].data.length);
+    memcpy(x86_cfi_sections[1].data.pointer, mach_cfi_object.sections[OBJECT_SECTION_UNWIND].data.pointer,
+           (size_t)x86_cfi_sections[1].data.length);
+    ObjectRelocation x86_cfi_relocation = mach_cfi_object.relocations[0];
+    ObjectSymbol x86_cfi_symbol = mach_cfi_object.symbols[x86_cfi_relocation.symbol];
+    x86_cfi_symbol.section = 0;
+    x86_cfi_relocation.section = 1;
+    x86_cfi_relocation.symbol = 0;
+    ObjectFile x86_cfi_sparse = mach_cfi_object;
+    x86_cfi_sparse.sections = x86_cfi_sections;
+    x86_cfi_sparse.section_count = BUSTER_ARRAY_LENGTH(x86_cfi_sections);
+    x86_cfi_sparse.symbols = &x86_cfi_symbol;
+    x86_cfi_sparse.symbol_count = 1;
+    x86_cfi_sparse.relocations = &x86_cfi_relocation;
+    x86_cfi_sparse.relocation_count = 1;
+    s64 x86_cfi_addends[] = {INT32_MIN, -17, 0, 23, INT32_MAX};
+    ObjectArtifact x86_cfi_pair = {0};
+    u32 x86_cfi_relocations_offset = 0;
+    for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(x86_cfi_addends); addend_index += 1)
+    {
+        x86_cfi_relocation.addend = x86_cfi_addends[addend_index];
+        memset(x86_cfi_sections[1].data.pointer + x86_cfi_relocation.offset, 0xa5, 4);
+        x86_cfi_pair = object_write(arguments->arena, &x86_cfi_sparse, OBJECT_FORMAT_MACH_O64);
+        BUSTER_TEST(arguments, x86_cfi_pair.error == OBJECT_ERROR_NONE);
+        u32 raw_offset = 0;
+        u32 relocation_count = 0;
+        bool located = object_test_mach_section_offsets(x86_cfi_pair.bytes, 1, &raw_offset, &x86_cfi_relocations_offset, &relocation_count);
+        BUSTER_TEST(arguments, located && relocation_count == 2);
+        if (located && relocation_count == 2)
+        {
+            u32 words[4] = {0};
+            u32 stored = 0;
+            memcpy(words, x86_cfi_pair.bytes.pointer + x86_cfi_relocations_offset, sizeof(words));
+            memcpy(&stored, x86_cfi_pair.bytes.pointer + raw_offset + x86_cfi_relocation.offset, sizeof(stored));
+            // The wire representation is also checked independently against
+            // LLVM assembly output; these bits are the Mach-O contract.
+            BUSTER_TEST(arguments, words[0] == x86_cfi_relocation.offset && words[2] == words[0]);
+            BUSTER_TEST(arguments, (words[1] >> 28) == 5 && (words[3] >> 28) == 0);
+            BUSTER_TEST(arguments, ((words[1] >> 24) & 15) == 12 && ((words[3] >> 24) & 15) == 12);
+            BUSTER_TEST(arguments, (s32)stored == x86_cfi_addends[addend_index]);
+        }
+        ObjectFile roundtrip = object_read(arguments->arena, x86_cfi_pair.bytes, x86_cfi_sparse.target);
+        BUSTER_TEST(arguments, roundtrip.error == OBJECT_ERROR_NONE && roundtrip.relocation_count == 1);
+        if (roundtrip.error == OBJECT_ERROR_NONE && roundtrip.relocation_count == 1)
+        {
+            BUSTER_TEST(arguments, roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32 &&
+                                   roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND &&
+                                   roundtrip.relocations[0].offset == x86_cfi_relocation.offset &&
+                                   roundtrip.relocations[0].addend == x86_cfi_addends[addend_index]);
+        }
+    }
+    x86_cfi_relocation.addend = (s64)INT32_MAX + 1;
+    BUSTER_TEST(arguments, object_write(arguments->arena, &x86_cfi_sparse, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    x86_cfi_relocation.addend = (s64)INT32_MIN - 1;
+    BUSTER_TEST(arguments, object_write(arguments->arena, &x86_cfi_sparse, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    if (x86_cfi_pair.error == OBJECT_ERROR_NONE && x86_cfi_relocations_offset)
+    {
+        for (u32 defect = 0; defect < 6; defect += 1)
+        {
+            ByteSlice broken = {.pointer = arena_allocate(arguments->arena, u8, x86_cfi_pair.bytes.length), .length = x86_cfi_pair.bytes.length};
+            memcpy(broken.pointer, x86_cfi_pair.bytes.pointer, (size_t)broken.length);
+            u32 words[4] = {0};
+            memcpy(words, broken.pointer + x86_cfi_relocations_offset, sizeof(words));
+            switch (defect)
+            {
+            case 0: words[2] += 4; break; // Pair offsets differ.
+            case 1: words[1] |= 1u << 24; break; // Subtraction is not PC-relative.
+            case 2: words[3] |= 1u << 28; break; // Second record must be UNSIGNED.
+            case 3: words[3] &= ~(1u << 27); break; // Both symbols must be external.
+            case 4: words[1] |= 0x00ffffff; break; // Invalid subtractor symbol.
+            case 5: words[1] &= 0xff000000; break; // Text symbol is not the place.
+            }
+            memcpy(broken.pointer + x86_cfi_relocations_offset, words, sizeof(words));
+            BUSTER_TEST(arguments, object_read(arguments->arena, broken, x86_cfi_sparse.target).error != OBJECT_ERROR_NONE);
+        }
+    }
+
     CodegenModule a64_cfi_module = separate_module;
     a64_cfi_module.relocations = 0;
     a64_cfi_module.relocation_count = 0;

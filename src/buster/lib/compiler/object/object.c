@@ -6404,15 +6404,18 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 if (read_ok)
                 {
                     current_section_kind = (ObjectSectionKind)section_kinds[section_index];
-                    if (target.cpu_arch == CPU_ARCH_AARCH64 && relocation_type == 1 && length == 2 &&
+                    bool arm64_difference = target.cpu_arch == CPU_ARCH_AARCH64 && relocation_type == 1;
+                    bool x86_unwind_difference = target.cpu_arch == CPU_ARCH_X86_64 && relocation_type == 5 &&
+                                                 current_section_kind == OBJECT_SECTION_UNWIND;
+                    if ((arm64_difference || x86_unwind_difference) && length == 2 &&
                         !object_section_kind_is_zero_fill(current_section_kind))
                     {
                         u32 next_source_offset = 0;
                         u32 next_information = 0;
-                        if (relocation_index + 1 >= relocation_count || !external || pc_relative || (source_offset_u32 & 3) ||
+                        if (relocation_index + 1 >= relocation_count || !external || pc_relative ||
                             section_bases[section_index] > UINT64_MAX - source_offset_u32 ||
-                            ((section_bases[section_index] + source_offset_u32) & 3) ||
-                            result.sections[section_kinds[section_index]].alignment < 4 ||
+                            (arm64_difference && ((source_offset_u32 & 3) || ((section_bases[section_index] + source_offset_u32) & 3) ||
+                                                  result.sections[section_kinds[section_index]].alignment < 4)) ||
                             !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) ||
                             !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &next_information) || next_source_offset != source_offset_u32 ||
                             (next_information >> 28) != 0 || ((next_information >> 25) & 0x3) != 2 || !(next_information & (1u << 27)) ||
@@ -6467,7 +6470,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                                 .offset = place,
                                 .section = (u32)current_section_kind,
                                 .symbol = symbol_map[target_source_symbol],
-                                .kind = OBJECT_RELOCATION_AARCH64_PREL32,
+                                .kind = arm64_difference ? OBJECT_RELOCATION_AARCH64_PREL32 : OBJECT_RELOCATION_X86_64_PC32,
                             };
                             relocation_index += 1;
                         }
@@ -10451,6 +10454,13 @@ BUSTER_GLOBAL_LOCAL void object_mach_name_write(u8* destination, u64 capacity, S
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool object_mach_place_difference(ObjectFile* object, ObjectRelocation* relocation)
+{
+    return (object->target.cpu_arch == CPU_ARCH_AARCH64 && relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32) ||
+           (object->target.cpu_arch == CPU_ARCH_X86_64 && relocation->kind == OBJECT_RELOCATION_X86_64_PC32 &&
+            object->sections[relocation->section].kind == OBJECT_SECTION_UNWIND);
+}
+
 BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFile* object)
 {
     ObjectArtifact result = {
@@ -10474,7 +10484,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     u32 prel32_count = 0;
     for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
     {
-        prel32_count += object->relocations[relocation].kind == OBJECT_RELOCATION_AARCH64_PREL32;
+        prel32_count += object_mach_place_difference(object, &object->relocations[relocation]);
     }
     if (prel32_count > UINT32_MAX - object->symbol_count || object->symbol_count + prel32_count > 0x00ffffff)
     {
@@ -10486,7 +10496,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     u32 next_place_symbol = object->symbol_count;
     for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
     {
-        prel32_place_symbols[relocation] = object->relocations[relocation].kind == OBJECT_RELOCATION_AARCH64_PREL32 ? next_place_symbol++ : UINT32_MAX;
+        prel32_place_symbols[relocation] = object_mach_place_difference(object, &object->relocations[relocation]) ? next_place_symbol++ : UINT32_MAX;
     }
     if (section_count > (UINT32_MAX - MACH_SEGMENT_COMMAND_SIZE) / MACH_SECTION_SIZE)
     {
@@ -10526,7 +10536,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
                 continue;
             }
             s64 addend = source->addend;
-            if (source->kind == OBJECT_RELOCATION_X86_64_PC32)
+            bool place_difference = prel32_place_symbols[relocation] != UINT32_MAX;
+            if (source->kind == OBJECT_RELOCATION_X86_64_PC32 && !place_difference)
             {
                 addend += 4;
             }
@@ -10534,11 +10545,16 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
             {
                 object_write_s64_at(&buffer, section_offsets[section] + source->offset, addend);
             }
-            else if (source->kind == OBJECT_RELOCATION_AARCH64_PREL32)
+            else if (place_difference)
             {
-                // Mach-O arm64 PREL32 stores its signed addend in the
-                // relocated word.  Always rewrite the slot, including a
-                // zero addend, so stale input bytes cannot survive a write.
+                // Both architectures encode S + A - P as a symbol difference.
+                // Unlike x86 instruction relocations, this pair has no -4
+                // bias. Rewrite even a zero addend to discard stale slot bytes.
+                if (addend < INT32_MIN || addend > INT32_MAX)
+                {
+                    buffer.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    break;
+                }
                 object_write_u32_at(&buffer, section_offsets[section] + source->offset, (u32)(s32)addend);
             }
             else if (addend && source->kind != OBJECT_RELOCATION_AARCH64_CALL26 && source->kind != OBJECT_RELOCATION_AARCH64_JUMP26 &&
@@ -10547,12 +10563,13 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
             {
                 object_write_u32_at(&buffer, section_offsets[section] + source->offset, (u32)addend);
             }
-            if (source->kind == OBJECT_RELOCATION_AARCH64_PREL32)
+            if (place_difference)
             {
                 u64 offset = buffer.count;
                 object_buffer_zero(&buffer, 2 * MACH_RELOCATION_SIZE);
                 object_write_u32_at(&buffer, offset, (u32)source->offset);
-                object_write_u32_at(&buffer, offset + 4, prel32_place_symbols[relocation] | (2u << 25) | (1u << 27) | (1u << 28));
+                u32 subtractor_type = object->target.cpu_arch == CPU_ARCH_X86_64 ? 5u : 1u;
+                object_write_u32_at(&buffer, offset + 4, prel32_place_symbols[relocation] | (2u << 25) | (1u << 27) | (subtractor_type << 28));
                 object_write_u32_at(&buffer, offset + MACH_RELOCATION_SIZE, (u32)source->offset);
                 object_write_u32_at(&buffer, offset + MACH_RELOCATION_SIZE + 4, source->symbol | (2u << 25) | (1u << 27));
                 relocation_counts[section] += 2;
@@ -10587,10 +10604,6 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
             bool pc_relative = source->kind != OBJECT_RELOCATION_ABSOLUTE64 && source->kind != OBJECT_RELOCATION_ABSOLUTE32 &&
                                source->kind != OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12 &&
                                source->kind != OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12;
-            if (source->section == OBJECT_SECTION_UNWIND && source->kind == OBJECT_RELOCATION_X86_64_PC32)
-            {
-                type = 1;
-            }
             u32 word = (source->symbol & 0x00ffffff) | (pc_relative ? 1u << 24 : 0) | ((source->kind == OBJECT_RELOCATION_ABSOLUTE64 ? 3u : 2u) << 25) |
                        (1u << 27) | (type << 28);
             object_write_u32_at(&buffer, offset + 4, word);
