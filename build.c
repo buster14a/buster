@@ -91,6 +91,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_MUSL,
     BUILD_COMMAND_TEST_CPYTHON,
     BUILD_COMMAND_TEST_MODE_MATRIX,
+    BUILD_COMMAND_TEST_DIFFERENTIAL,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COUNT,
@@ -34045,6 +34046,9 @@ BUSTER_GLOBAL_LOCAL void machine_info_print(void)
                  os_get_logical_thread_count(), os_get_physical_memory_size() >> 20);
 }
 
+// Native semantic matrix and bounded reducer; policy stays in the build driver.
+#include "tools/differential.c"
+
 ProcessResult process_arguments(void)
 {
     ProcessResult result = PROCESS_RESULT_SUCCESS;
@@ -34089,6 +34093,7 @@ ProcessResult process_arguments(void)
         [BUILD_COMMAND_TEST_MUSL] = S8_INITIALIZER("test_musl"),
         [BUILD_COMMAND_TEST_CPYTHON] = S8_INITIALIZER("test_cpython"),
         [BUILD_COMMAND_TEST_MODE_MATRIX] = S8_INITIALIZER("test_mode_matrix"),
+        [BUILD_COMMAND_TEST_DIFFERENTIAL] = S8_INITIALIZER("test_differential"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
     };
@@ -34170,6 +34175,12 @@ ProcessResult process_arguments(void)
     TestQuickjsOptions test_quickjs_options = {0};
     TestMuslOptions test_musl_options = {0};
     TestCpythonOptions test_cpython_options = {0};
+
+    if (command == BUILD_COMMAND_TEST_DIFFERENTIAL)
+    {
+        result = differential_main(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
+        argument_i = arguments.length;
+    }
 
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
@@ -35050,7 +35061,8 @@ ProcessResult process_arguments(void)
 
     // Every parse-failure path above leaves argument_i on the offending
     // argument; report it here so no failure exits silently with code 1.
-    if (result != PROCESS_RESULT_SUCCESS)
+    // Differential execution has already emitted its own usage or result.
+    if (result != PROCESS_RESULT_SUCCESS && command != BUILD_COMMAND_TEST_DIFFERENTIAL)
     {
         if (argument_i < arguments.length)
         {
@@ -35263,6 +35275,11 @@ ProcessResult process_arguments(void)
         case BUILD_COMMAND_TEST_CPYTHON:
         {
             test_cpython_action_add(arena, test_cpython_options);
+        }
+        break;
+        case BUILD_COMMAND_TEST_DIFFERENTIAL:
+        {
+            // Executed before the ordinary build-option parser.
         }
         break;
         case BUILD_COMMAND_TEST_MODE_MATRIX:

@@ -249,13 +249,34 @@ jobs:
           "$driver" generate --cc clang --config Release --linker DEFAULT
           "$driver" test_mode_matrix --config Release
 
+      - name: Native configuration differential matrix
+        id: differential
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'unix' }}
+        shell: bash
+        env:
+          CFLAGS: -Wno-invalid-feature-combination
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          exec > >(tee "$RUNNER_TEMP/buster-ci/differential.log") 2>&1
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" test_differential --self-test
+          # The preceding mode step normally configured this tree. Recover a
+          # missing graph too, so an earlier failure cannot skip this gate.
+          if [[ ! -f build/CMakeCache.txt ]]; then
+            "$driver" generate --cc clang --config Release --linker DEFAULT
+          fi
+          "$driver" build --config Release -t ide
+          "$driver" test_differential --ide build/Release/ide --out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle
+
       - name: Desktop result and reproduction
         if: ${{ always() && steps.checkout.outcome == 'success' }}
         shell: bash
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'unix' && 'workflow_tools zig combinations_unix modes' || 'workflow_tools zig combinations_windows' }}
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'unix' && 'workflow_tools zig combinations_unix modes differential' || 'workflow_tools zig combinations_windows' }}
           BUSTER_CI_REPRO: See docs/ci-github-actions.md for the matching hosted bootstrap and full matrix commands.
         run: '"$BUSTER_CI_PYTHON" tools/ci_summary.py'
 
@@ -264,7 +285,10 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/buster-ci/
+          path: |
+            ${{ runner.temp }}/buster-ci/
+            !${{ runner.temp }}/buster-ci/differential/**/program
+            !${{ runner.temp }}/buster-ci/differential/**/subject.o
           if-no-files-found: ignore
           retention-days: 7
 

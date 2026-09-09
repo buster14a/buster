@@ -2281,6 +2281,9 @@ void codegen_statistics_add(CodegenStatistics* total, CodegenStatistics* unit)
     total->exact_successes += unit->exact_successes;
     total->exact_failures += unit->exact_failures;
     total->mutable_virtual_register_count += unit->mutable_virtual_register_count;
+    total->verified_ir_module_count += unit->verified_ir_module_count;
+    total->verified_mir_function_count += unit->verified_mir_function_count;
+    total->verified_scheduled_function_count += unit->verified_scheduled_function_count;
     for (u32 index = 0; index < IR_OPCODE_COUNT + 1; index += 1)
     {
         total->fallback_opcode_counts[index] += unit->fallback_opcode_counts[index];
@@ -9586,8 +9589,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // Keep the verifier as the authority for replayed/manual machine
             // IR, but do not reread every freshly selected row before its
             // immediate allocator consumer.
-            MachineVerifyError verify_error = selected.supported && !selected.selector_certified ? machine_verify_function(&selected.function).error
-                                                                                                  : MACHINE_VERIFY_NONE;
+            MachineVerifyError verify_error = selected.supported && (options.verify_invariants || !selected.selector_certified)
+                                                  ? machine_verify_function(&selected.function).error : MACHINE_VERIFY_NONE;
+            if (options.verify_invariants && selected.supported)
+            {
+                result.statistics.verified_mir_function_count += 1;
+                if (verify_error != MACHINE_VERIFY_NONE)
+                {
+                    buffer.error = CODEGEN_ERROR_INVALID_IR;
+                    scratch_end(machine_scratch);
+                    break;
+                }
+            }
             if (selected.supported && verify_error != MACHINE_VERIFY_NONE)
             {
                 fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
@@ -9622,8 +9635,24 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     MachineScheduleResult scheduled = machine_schedule_function(machine_scratch.arena, &selected.function);
                     if (scheduled.moved)
                     {
+                        if (options.verify_invariants)
+                        {
+                            result.statistics.verified_scheduled_function_count += 1;
+                            if (machine_verify_function(&scheduled.function).error != MACHINE_VERIFY_NONE)
+                            {
+                                buffer.error = CODEGEN_ERROR_INVALID_IR;
+                                scratch_end(machine_scratch);
+                                break;
+                            }
+                        }
                         result.statistics.allocator_scheduled_function_count += 1;
                         MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_scratch.arena, &scheduled.function);
+                        if (options.verify_invariants && !scheduled_placement.valid)
+                        {
+                            buffer.error = CODEGEN_ERROR_INVALID_IR;
+                            scratch_end(machine_scratch);
+                            break;
+                        }
                         u32 placement_saved_registers = 0;
                         u32 scheduled_saved_registers = 0;
                         for (u32 physical_register = 0; physical_register < MACHINE_TARGET_REGISTER_LIMIT; physical_register += 1)
@@ -9644,6 +9673,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 if (!placement.valid)
                 {
                     fallback_reason = CODEGEN_FALLBACK_PLACEMENT;
+                    if (options.verify_invariants)
+                    {
+                        buffer.error = CODEGEN_ERROR_INVALID_IR;
+                        scratch_end(machine_scratch);
+                        break;
+                    }
                 }
                 if (placement.valid)
                 {
@@ -20360,7 +20395,7 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
     // code-buffer growth might rewind. Explicit function conventions reserve
     // their own contexts too; language type records remain untouched.
     ir_prepare_program_abi(program, codegen_canonical_ir_abi_convention(result.abi));
-    IrValidationResult validation = ir_prepare_canonical_module(program, module, options.assume_validated);
+    IrValidationResult validation = ir_prepare_canonical_module(program, module, options.assume_validated && !options.verify_invariants);
     if (validation.error != IR_VALIDATION_NONE)
     {
         result.error = CODEGEN_ERROR_INVALID_IR;
@@ -20429,6 +20464,7 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
         // more room cannot fix, and is reported as it stands.
         if (!code_buffer_exhausted)
         {
+            result.statistics.verified_ir_module_count = options.verify_invariants ? 1 : 0;
             return result;
         }
         scratch_end(attempt_scope);

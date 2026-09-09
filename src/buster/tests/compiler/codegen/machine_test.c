@@ -28,10 +28,10 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlockParameter) == 40);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrIncoming) == 16);
-// Four bytes of flags plus the code-model byte -fPIC sets. The record is
+// Five bytes of flags plus the code-model byte -fPIC sets. The record is
 // passed by value on every module generation, so it stays a handful of bytes
 // and this check is what says so.
-BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 5);
+BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 6);
 
 // Compiles one C source through the C frontend into a canonical IrProgram
 // for machine-selection tests. Diagnostics fail the caller's assertions.
@@ -2794,6 +2794,17 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, tree_base_placement.valid && tree_scheduled_placement.valid);
             BUSTER_TEST(arguments, tree_scheduled_placement.reload_count + tree_scheduled_placement.spill_count <
                                        tree_base_placement.reload_count + tree_base_placement.spill_count);
+            // Exercise the opt-in verifier on the production QUALITY schedule,
+            // in addition to directly validating the scheduling pass above.
+            CodegenModule verified_schedule = codegen_generate_canonical_module(arguments->arena, schedule_program, schedule_program->modules,
+                schedule_targets[target_index], (CodegenModuleOptions){.assume_validated = true, .verify_invariants = true,
+                                                                       .register_allocator = CODEGEN_REGISTER_ALLOCATOR_QUALITY});
+            BUSTER_TEST(arguments, verified_schedule.error == CODEGEN_ERROR_NONE);
+            BUSTER_TEST(arguments, verified_schedule.statistics.verified_ir_module_count == 1);
+            BUSTER_TEST(arguments, verified_schedule.statistics.verified_mir_function_count == 2);
+            BUSTER_TEST(arguments, verified_schedule.statistics.verified_scheduled_function_count > 0);
+            BUSTER_TEST(arguments, verified_schedule.statistics.verified_scheduled_function_count ==
+                                   verified_schedule.statistics.allocator_scheduled_function_count);
         }
     }
 
