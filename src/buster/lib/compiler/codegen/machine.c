@@ -2539,8 +2539,56 @@ BUSTER_GLOBAL_LOCAL u32 machine_verify_dominator_intersect(u32 left, u32 right, 
 
 // Build immediate dominators with the Cooper-Harvey-Kennedy iteration, then
 // number the dominator forest so each query is two comparisons. Block zero is
-// the ordinary entry; disconnected malformed/replay components receive their
-// own conservative root instead of inheriting dominance from block zero.
+// the ordinary entry. Unreachable source SCCs have a shared synthetic entry:
+// every member is a conservative entry to a closed cycle. This makes their
+// dominance independent of storage order and preserves joins between roots.
+BUSTER_GLOBAL_LOCAL u32 machine_verify_dominance_postorder(u32 block_count, u32* successors, u32* successor_offsets, u8 const* entries,
+                                                           u8* visited, u32* component, u32* dfs_blocks, u32* dfs_next, u32* postorder)
+{
+    memset(visited, 0, block_count);
+    u32 root_count = 0;
+    u32 postorder_count = 0;
+    for (u32 start = 0; start < block_count; start += 1)
+    {
+        if (visited[start] || (entries && !entries[start]))
+        {
+            continue;
+        }
+        u32 component_index = start == 0 ? 0u : 1u;
+        root_count += 1;
+        u32 depth = 1;
+        dfs_blocks[0] = start;
+        dfs_next[0] = successor_offsets[start];
+        visited[start] = 1;
+        component[start] = component_index;
+        while (depth)
+        {
+            u32 block = dfs_blocks[depth - 1];
+            u32* next = dfs_next + depth - 1;
+            if (*next < successor_offsets[block + 1])
+            {
+                u32 successor = successors[*next];
+                *next += 1;
+                if (!visited[successor])
+                {
+                    visited[successor] = 1;
+                    component[successor] = component_index;
+                    dfs_blocks[depth] = successor;
+                    dfs_next[depth] = successor_offsets[successor];
+                    depth += 1;
+                }
+            }
+            else
+            {
+                postorder[postorder_count++] = block;
+                depth -= 1;
+            }
+        }
+    }
+    BUSTER_CHECK(postorder_count == block_count);
+    return root_count;
+}
+
 BUSTER_GLOBAL_LOCAL MachineVerifyDominance machine_verify_dominance_build(Arena* arena, MachineFunction* function)
 {
     MachineVerifyDominance result = {0};
@@ -2580,70 +2628,104 @@ BUSTER_GLOBAL_LOCAL MachineVerifyDominance machine_verify_dominance_build(Arena*
 
     u8* visited = arena_allocate(arena, u8, block_count);
     u8* is_root = arena_allocate(arena, u8, block_count);
-    memset(visited, 0, block_count);
     memset(is_root, 0, block_count);
+    is_root[0] = 1;
     u32* component = arena_allocate(arena, u32, block_count);
-    u32* roots = arena_allocate(arena, u32, block_count);
+    u32* roots = arena_allocate(arena, u32, 2);
     u32* dfs_blocks = arena_allocate(arena, u32, block_count);
     u32* dfs_next = arena_allocate(arena, u32, block_count);
     u32* traversal_postorder = arena_allocate(arena, u32, block_count);
-    u32 root_count = 0;
-    u32 postorder_count = 0;
-    for (u32 start_ordinal = 0; start_ordinal < block_count; start_ordinal += 1)
-    {
-        u32 start = start_ordinal;
-        if (visited[start])
-        {
-            continue;
-        }
-        u32 component_index = root_count;
-        roots[root_count++] = start;
-        is_root[start] = 1;
-        u32 depth = 1;
-        dfs_blocks[0] = start;
-        dfs_next[0] = successor_offsets[start];
-        visited[start] = 1;
-        component[start] = component_index;
-        while (depth)
-        {
-            u32 block = dfs_blocks[depth - 1];
-            u32* next = dfs_next + depth - 1;
-            if (*next < successor_offsets[block + 1])
-            {
-                u32 successor = successors[*next];
-                *next += 1;
-                if (!visited[successor])
-                {
-                    visited[successor] = 1;
-                    component[successor] = component_index;
-                    dfs_blocks[depth] = successor;
-                    dfs_next[depth] = successor_offsets[successor];
-                    depth += 1;
-                }
-            }
-            else
-            {
-                traversal_postorder[postorder_count++] = block;
-                depth -= 1;
-            }
-        }
-    }
+    u32 root_count = machine_verify_dominance_postorder(block_count, successors, successor_offsets, 0, visited, component,
+                                                       dfs_blocks, dfs_next, traversal_postorder);
 
     u32* rpo = arena_allocate(arena, u32, block_count);
-    u32* rpo_indices = arena_allocate(arena, u32, block_count);
+    u32* rpo_indices = arena_allocate(arena, u32, block_count + 1u);
     for (u32 index = 0; index < block_count; index += 1)
     {
         rpo[index] = traversal_postorder[block_count - index - 1];
-        rpo_indices[rpo[index]] = index;
+        rpo_indices[rpo[index]] = index + 1u;
     }
-    u32* immediate_dominators = arena_allocate(arena, u32, block_count);
-    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    u32 synthetic_root = block_count;
+    rpo_indices[synthetic_root] = 0;
+    bool disconnected = root_count > 1;
+    if (disconnected)
+    {
+        // Kosaraju's reverse walk reuses the completed DFS order and stack.
+        // Only unreachable nodes participate: a dead edge into the ordinary
+        // entry component must not invalidate dominance on executable paths.
+        u32* scc = arena_allocate(arena, u32, block_count);
+        memset(scc, 0xff, sizeof(*scc) * block_count);
+        u8* source_scc = arena_allocate(arena, u8, block_count);
+        u32 scc_count = 0;
+        for (u32 index = 0; index < block_count; index += 1)
+        {
+            u32 start = rpo[index];
+            if (component[start] == 0 || scc[start] != UINT32_MAX)
+            {
+                continue;
+            }
+            u32 scc_index = scc_count++;
+            source_scc[scc_index] = 1;
+            u32 pending = 1;
+            dfs_blocks[0] = start;
+            scc[start] = scc_index;
+            while (pending)
+            {
+                u32 block = dfs_blocks[--pending];
+                for (u32 edge = predecessor_offsets[block]; edge < predecessor_offsets[block + 1]; edge += 1)
+                {
+                    u32 predecessor = predecessors[edge];
+                    if (component[predecessor] != 0 && scc[predecessor] == UINT32_MAX)
+                    {
+                        scc[predecessor] = scc_index;
+                        dfs_blocks[pending++] = predecessor;
+                    }
+                }
+            }
+        }
+        for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+        {
+            MachineEdge const* edge = function->edges + edge_index;
+            if (component[edge->source_block] != 0 && component[edge->destination_block] != 0 &&
+                scc[edge->source_block] != scc[edge->destination_block])
+            {
+                source_scc[scc[edge->destination_block]] = 0;
+            }
+        }
+        for (u32 block = 1; block < block_count; block += 1)
+        {
+            is_root[block] = component[block] != 0 && source_scc[scc[block]] != 0;
+        }
+        // The discovery forest may have started inside a non-source SCC.
+        // Rebuild RPO from the actual entries before intersecting dominators;
+        // parent chains must progress toward earlier positions in this order.
+        (void)machine_verify_dominance_postorder(block_count, successors, successor_offsets, is_root, visited, component,
+                                                dfs_blocks, dfs_next, traversal_postorder);
+        for (u32 index = 0; index < block_count; index += 1)
+        {
+            rpo[index] = traversal_postorder[block_count - index - 1];
+            rpo_indices[rpo[index]] = index + 1u;
+        }
+    }
+    u32* immediate_dominators = arena_allocate(arena, u32, block_count + 1u);
+    for (u32 block_index = 0; block_index <= block_count; block_index += 1)
     {
         immediate_dominators[block_index] = UINT32_MAX;
     }
-    for (u32 root_index = 0; root_index < root_count; root_index += 1)
+    immediate_dominators[0] = 0;
+    immediate_dominators[synthetic_root] = synthetic_root;
+    for (u32 block = 1; block < block_count; block += 1)
     {
-        immediate_dominators[roots[root_index]] = roots[root_index];
+        if (is_root[block])
+        {
+            immediate_dominators[block] = synthetic_root;
+        }
+    }
+    roots[0] = 0;
+    root_count = 1;
+    if (disconnected)
+    {
+        roots[root_count++] = synthetic_root;
     }
     bool changed;
     do
@@ -2676,8 +2758,8 @@ BUSTER_GLOBAL_LOCAL MachineVerifyDominance machine_verify_dominance_build(Arena*
         }
     } while (changed);
 
-    u32* child_offsets = arena_allocate(arena, u32, block_count + 1);
-    memset(child_offsets, 0, sizeof(*child_offsets) * (block_count + 1));
+    u32* child_offsets = arena_allocate(arena, u32, block_count + 2u);
+    memset(child_offsets, 0, sizeof(*child_offsets) * (block_count + 2u));
     for (u32 block = 0; block < block_count; block += 1)
     {
         if (immediate_dominators[block] != UINT32_MAX && immediate_dominators[block] != block)
@@ -2685,13 +2767,13 @@ BUSTER_GLOBAL_LOCAL MachineVerifyDominance machine_verify_dominance_build(Arena*
             child_offsets[immediate_dominators[block] + 1] += 1;
         }
     }
-    for (u32 block = 0; block < block_count; block += 1)
+    for (u32 block = 0; block <= block_count; block += 1)
     {
         child_offsets[block + 1] += child_offsets[block];
     }
     u32* children = arena_allocate(arena, u32, block_count);
-    u32* child_cursors = arena_allocate(arena, u32, block_count);
-    memcpy(child_cursors, child_offsets, sizeof(*child_cursors) * block_count);
+    u32* child_cursors = arena_allocate(arena, u32, block_count + 1u);
+    memcpy(child_cursors, child_offsets, sizeof(*child_cursors) * (block_count + 1u));
     for (u32 block = 0; block < block_count; block += 1)
     {
         if (immediate_dominators[block] != UINT32_MAX && immediate_dominators[block] != block)
@@ -2699,8 +2781,8 @@ BUSTER_GLOBAL_LOCAL MachineVerifyDominance machine_verify_dominance_build(Arena*
             children[child_cursors[immediate_dominators[block]]++] = block;
         }
     }
-    u32* preorder = arena_allocate(arena, u32, block_count);
-    u32* postorder = arena_allocate(arena, u32, block_count);
+    u32* preorder = arena_allocate(arena, u32, block_count + 1u);
+    u32* postorder = arena_allocate(arena, u32, block_count + 1u);
     u32 clock = 0;
     for (u32 root_index = 0; root_index < root_count; root_index += 1)
     {
@@ -2760,7 +2842,7 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
         result.error = MACHINE_VERIFY_STORAGE;
         return result;
     }
-    if (function->instruction_count >= MACHINE_POINT_INSTRUCTION_LIMIT)
+    if (function->instruction_count >= MACHINE_POINT_INSTRUCTION_LIMIT || function->block_count >= MACHINE_POINT_INSTRUCTION_LIMIT)
     {
         result.error = MACHINE_VERIFY_POINT_CAPACITY;
         return result;
