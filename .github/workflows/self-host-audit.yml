@@ -15,14 +15,18 @@ jobs:
   bootstrap:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: Linux x86-64 bootstrap evidence
-    runs-on: ubuntu-24.04
+    # Match the maintained Linux CI image: older Clang can reject native
+    # AVX10 feature detection on newer hosted CPUs before self-hosting starts.
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
       - name: Bootstrap native build driver
-        run: clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+        run: |
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
       - name: Test the bootstrap checker
         run: '"$RUNNER_TEMP/buster-build" self_host_audit_self_test'
       - name: Configure production compiler
