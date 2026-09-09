@@ -53,8 +53,8 @@ keep current.
 ## Audits, newest first
 
 - [`2026-09-09T024511Z`](docs/performance-audits/2026-09-09T024511Z.md) — Pointer block parameters: native coverage, verification and migration cost (#36)
-- [`2026-09-09T002849Z`](docs/performance-audits/2026-09-09T002849Z.md) — Bound SysV aggregate classification scratch to the active frontier (#301)
 - [`2026-09-09T004223Z`](docs/performance-audits/2026-09-09T004223Z.md) — Recover the native compiler-throughput harness and diagnostic allocation observer
+- [`2026-09-09T002849Z`](docs/performance-audits/2026-09-09T002849Z.md) — Bound SysV aggregate classification scratch to the active frontier (#301)
 - [`2026-09-09T002543Z`](docs/performance-audits/2026-09-09T002543Z.md) — Shared compiler diagnostics: source provenance, symbolic refusals and publication cost (#35, #315)
 - [`2026-09-09T002241Z`](docs/performance-audits/2026-09-09T002241Z.md) — Preserve AT&T literal mnemonics and typed suffix widths (#193)
 - [`2026-09-09T000655Z`](docs/performance-audits/2026-09-09T000655Z.md) — Deterministic merged-section bytes: isolated initialization cost (#303)
@@ -65,7 +65,6 @@ keep current.
 - [`2026-09-08T143633Z`](docs/performance-audits/2026-09-08T143633Z.md) — Frontend SSA: per-owner escape recovery, expression temporaries and complete CFG construction
 - [`2026-09-08T043530Z`](docs/performance-audits/2026-09-08T043530Z.md) — Direct frontend SSA: bounded construction, differential validation and compile-time measurements
 - [`2026-09-08T022122Z`](docs/performance-audits/2026-09-08T022122Z.md) — forwarding runtime stubs: metadata-derived recipes and fail-closed publication (#267)
-
 - [`2026-09-07T233720Z`](docs/performance-audits/2026-09-07T233720Z.md) — direct old/new ABI service timing on the same scalar and aggregate query traces (#39)
 - [`2026-09-07T233029Z`](docs/performance-audits/2026-09-07T233029Z.md) — Fix EVEX broadcast displacement scaling and half-tuple counts (#191)
 - [`2026-09-07T231507Z`](docs/performance-audits/2026-09-07T231507Z.md) — active-target ABI contexts remove mutable type caches (#39)
@@ -87,10 +86,10 @@ keep current.
 - [`2026-08-30T182357Z`](docs/performance-audits/2026-08-30T182357Z.md) — the translation phase takes the chunk kernel and the window emitter's line metrics become one subtraction; the cursor residue and checkpoint-row stores are measured negative and closed
 - [`2026-08-24T174159Z`](docs/performance-audits/2026-08-24T174159Z.md) — #539 position-index tile classification A/B and fixed-point audit
 - [`2026-08-24T171245Z`](docs/performance-audits/2026-08-24T171245Z.md) — #538 token-shape sidecar A/B and fixed-point audit
-- [`2026-08-24T131758Z`](docs/performance-audits/2026-08-24T131758Z.md) — same-arena single-chunk machine streams alias their live payload instead of flattening
 - [`2026-08-24T131821Z`](docs/performance-audits/2026-08-24T131821Z.md) — the x86 template cache clears only its arena dirty prefix and skips the fresh suffix
-- [`2026-08-24T092849Z`](docs/performance-audits/2026-08-24T092849Z.md) — a parameter's outermost suffix size is dead in every case: the VLA parameter layout stops emitting the whole-object multiply
+- [`2026-08-24T131758Z`](docs/performance-audits/2026-08-24T131758Z.md) — same-arena single-chunk machine streams alias their live payload instead of flattening
 - [`2026-08-24T093352Z`](docs/performance-audits/2026-08-24T093352Z.md) — an absent array bound is not a variable-length array either — main's argv and envp lose their layout, and a null control puts a number on the build-shift floor that hid two sites
+- [`2026-08-24T092849Z`](docs/performance-audits/2026-08-24T092849Z.md) — a parameter's outermost suffix size is dead in every case: the VLA parameter layout stops emitting the whole-object multiply
 - [`2026-08-24T085746Z`](docs/performance-audits/2026-08-24T085746Z.md) — a constant array bound is not a variable-length array: the array-parameter layout stops emitting a multiply of two constants into every entry block
 - [`2026-08-22T232956Z`](docs/performance-audits/2026-08-22T232956Z.md) — register allocator — caller-saved vector span pins, the last allocation-side lever: built, fires, and measured negative in both spellings; no code change lands
 - [`2026-08-22T231635Z`](docs/performance-audits/2026-08-22T231635Z.md) — the by-value preprocess result loses its cold half, and an exact copy census re-ranks the compile's memcpy traffic
