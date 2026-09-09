@@ -8,9 +8,15 @@ jobs:
       tested: ${{ steps.gate.outputs.tested }}
     steps:
       - name: Checkout
-        uses: https://data.forgejo.org/actions/checkout@v4
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # reviewed v4; docs/ci-action-pins.md
         with:
           persist-credentials: false
+      - name: Validate approved action references
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .forgejo/scripts/check_action_pins.py
+          python3 tests/action_pins_test.py
       - name: Check merged SHA statuses
         id: gate
         env:
@@ -41,9 +47,17 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
-        uses: https://data.forgejo.org/actions/checkout@v4
+        uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # reviewed v4; docs/ci-action-pins.md
         with:
           persist-credentials: false
+      - name: Validate approved action references
+        shell: bash
+        env:
+          BUSTER_CI_PYTHON: ${{ contains(matrix.runner, 'windows') && 'python' || 'python3' }}
+        run: |
+          set -euo pipefail
+          "$BUSTER_CI_PYTHON" .forgejo/scripts/check_action_pins.py
+          "$BUSTER_CI_PYTHON" tests/action_pins_test.py
       - name: Test (Android)
         shell: bash
         if: ${{ contains(matrix.runner, 'x86_64-linux-dedicated') }}
