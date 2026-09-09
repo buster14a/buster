@@ -309,6 +309,17 @@ independent legacy mutable-register and pressure-census contracts.
   `c_test_frontend_global_types` pins that no lowered function holds a load of
   a struct or union type nothing reads, and that the by-value read beside it
   keeps the one it needs.
+- **Member-search scratch follows the visited anonymous graph.**
+  `c_ir_emit_field_place_from_value` keeps 32 type/parent/field/depth rows on
+  the C stack and grows all four arrays together in its temporal arena only
+  when the visited prefix fills them. Parent indices and breadth-first order
+  survive growth; the type-table count remains a validity and cycle bound,
+  not an initial allocation size. The reversed result path needs only
+  `found_depth + 1` fields, with the same 32-entry local allowance. Emitted
+  places, operands, immediates and missing-member diagnostics remain in the
+  persistent builder arena. The private `c_gen_internal.h` test seam checks
+  these lifetimes by poisoning released scratch, including broad/deep,
+  ambiguous, missing, cyclic and qualified-place cases.
 - **A value never carries a qualifier.** The frontend builds a qualified copy
   of a type wherever a qualifier is written, because a place, a pointee or a
   member has to carry it, and that copy keeps the base's kind and layout: it is
