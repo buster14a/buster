@@ -76,7 +76,16 @@ UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
     String8 input_path = buster_test_temporary_path(arguments->arena, S8("diagnostic-input"), S8(".c"));
     String8 header = S8("#line 200 \"logical-header.h\"\n#define BAD missing_name\nint mapped_error(void) { return BAD; }\n");
     BUSTER_TEST(arguments, file_write(header_path, BUSTER_SLICE_TO_BYTE_SLICE(header)));
-    String8 source = string_format(arguments->arena, S8("#warning first warning\n#include \"{S8}\"\n"), header_path);
+    // Both fixtures share a directory. Windows uses a relative temporary
+    // root, so spelling that whole path inside the include would resolve it
+    // relative to the input again and duplicate the directory prefix.
+    u64 header_name_offset = 0;
+    for (u64 index = 0; index < header_path.length; index += 1)
+    {
+        if (header_path.pointer[index] == '/' || header_path.pointer[index] == '\\') header_name_offset = index + 1;
+    }
+    String8 header_name = {.pointer = header_path.pointer + header_name_offset, .length = header_path.length - header_name_offset};
+    String8 source = string_format(arguments->arena, S8("#warning first warning\n#include \"{S8}\"\n"), header_name);
     BUSTER_TEST(arguments, file_write(input_path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
     CompilerDriverResult included = compiler_diagnostic_test_compile(arguments->arena, input_path, false);
     BUSTER_TEST(arguments, included.error == COMPILER_DRIVER_ERROR_ANALYSIS && included.diagnostic_count == 2);
@@ -155,7 +164,9 @@ UnitTestResult compiler_diagnostic_tests(UnitTestArguments* arguments)
         // when the instruction encoder diagnosed a longer mnemonic.
         BUSTER_TEST(arguments, diagnostic.primary.range.length == 1);
     }
-    assembly_path = buster_test_temporary_path(arguments->arena, S8("diagnostic-assembly"), S8(".S"));
+    // Distinct stems also keep these fixtures distinct on case-insensitive
+    // filesystems; changing only .s to .S would reuse the preceding input.
+    assembly_path = buster_test_temporary_path(arguments->arena, S8("diagnostic-preprocessed-assembly"), S8(".S"));
     assembly = S8("#line 80 \"logical-assembly.S\"\n.text\nmov $1, %eax\nnot_a_real_opcode %eax\n");
     BUSTER_TEST(arguments, file_write(assembly_path, BUSTER_SLICE_TO_BYTE_SLICE(assembly)));
     CompilerDriverResult preassembled = compiler_diagnostic_test_compile(arguments->arena, assembly_path, false);
