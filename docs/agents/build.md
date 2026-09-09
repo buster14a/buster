@@ -87,13 +87,19 @@ shell, CMake, and utility subprocesses.
 `build/build` commands: `generate`, `build` (default), `clang_analyze`, `test_cjson`, `test_zlib`, `test_lua`, `test_yyjson`, `test_stb`, `test_lz4`, `test_sqlite`, `test_sbase`, `test_doom`, `test_quickjs`, `test_musl`, `test_cpython`,
 `cmake_profile_summary`, `ninja_log_summary`, `time_trace_summary`,
 `time_trace_summary_self_test`, `test_timing_summary`,
-`test_timing_summary_self_test`,
+`test_timing_summary_self_test`, `musl_directory_self_test`,
 `import_assembly_metadata`, `import_arm_a64_metadata`,
 `import_arm_a64_sysregs`, `test_self_host`, `test_mode_matrix`,
 `x86_64_completion_census`,
 `test_all_combinations`,
 `test_all_combinations_ci`; `self_host_from_existing` is an internal
 build-driver worker command used only by the pooled artifact-fanout target.
+
+`musl_directory_self_test` checks complete, unique directory inventories through
+two capacity growths, opposite creation orders, manifest sorting and architecture
+replacement, empty/error paths, and symbolic-link refusal. It runs before the
+local and CI combination matrices on Windows and POSIX; Windows reports when
+the host lacks permission to create the test link.
 
 `test_mode_matrix` (`./build.sh test_mode_matrix --config Release`, also a
 Ninja target) is the execution-mode cross product: every register-allocator
