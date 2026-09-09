@@ -638,13 +638,12 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_place_address_offset(MachineA64Selec
         return false;
     }
     IrValue* value = function->values + base.value;
-    if (value->definition.value >= function->instruction_count)
-    {
-        return false;
-    }
-    IrInstruction* definition = function->instructions + value->definition.value;
+    // An incoming block parameter has no defining instruction. Its pointer
+    // value lives in the edge-defined vreg, just like an instruction result.
+    IrInstruction* definition = value->definition.value < function->instruction_count ? function->instructions + value->definition.value : 0;
+    bool local = definition && definition->opcode == IR_OPCODE_LOCAL;
     u32 slot = selector->value_stack_slots[base.value];
-    if (definition->opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[base.value] != UINT32_MAX &&
+    if (local && selector->value_virtual_registers[base.value] != UINT32_MAX &&
         !machine_a64_local_is_indirect(selector, base))
     {
         // A promoted local has no address. The promotability scan proved
@@ -659,7 +658,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_place_address_offset(MachineA64Selec
     // the snapshot an rvalue base indexes into. Slices and struct values
     // stay on the loaded-pointer path below.
     IrType* value_type = ir_type_from_id(&selector->program->types, value->canonical_type);
-    bool storage_value = definition->opcode == IR_OPCODE_LOCAL ||
+    bool storage_value = local ||
                          (value->category == IR_VALUE_VALUE && value_type &&
                           (value_type->kind == IR_TYPE_ARRAY || value_type->kind == IR_TYPE_VECTOR));
     if (storage_value && slot != UINT32_MAX)

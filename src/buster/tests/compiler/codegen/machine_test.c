@@ -713,17 +713,17 @@ BUSTER_GLOBAL_LOCAL MachineX64SourceAudit machine_test_x86_source_authority_audi
 
 // Every caller sits inside the executing-differential sections below, so
 // the definition carries their guard: configurations that compile those
-// out (non-x86-64, or the sanitized and fuzzing builds) do not pass
+// out (other architectures, or the sanitized and fuzzing builds) do not pass
 // -Wno-unused-function and would reject an unreferenced helper.
 //
 // Those sections call the emitted bytes through a native function pointer,
-// and the bytes are generated for the System V ABI regardless of host,
-// because the corpus fixes a Linux target so the machine path runs
-// everywhere. A Microsoft-ABI host therefore passes arguments in the wrong
+// and the bytes are generated for a Linux target on the native architecture.
+// The x86 corpus uses System V; the AArch64 pointer corpus uses the shared
+// fixed scalar argument convention. A Microsoft-ABI x86 host passes arguments in the wrong
 // registers and both paths read whatever the callee-side registers happen
 // to hold, so Windows is excluded from executing — it still selects,
 // verifies, places, encodes and checks fallback accounting above.
-#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_WINDOWS && !BUSTER_SANITIZE
 BUSTER_GLOBAL_LOCAL u32 machine_test_module_offset(CodegenModule* module, IrModule* ir_module, String8 name)
 {
     IrFunction* ir_function = machine_test_ir_function_find(ir_module, name);
@@ -1447,9 +1447,231 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_fast_edge_index(UnitTestArgument
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_disconnected_dominance(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    MachineBlock capacity_block = {0};
+    MachineFunction capacity_function = {.blocks = &capacity_block, .block_count = MACHINE_POINT_INSTRUCTION_LIMIT};
+    BUSTER_TEST(arguments, machine_verify_function(&capacity_function).error == MACHINE_VERIFY_POINT_CAPACITY);
+    // Entry zero returns independently. Permute every other block so a
+    // disconnected chain's true entry can be stored after its users.
+    for (u32 root_a = 1; root_a <= 4; root_a += 1)
+    {
+        for (u32 middle = 1; middle <= 4; middle += 1)
+        {
+            for (u32 sink = 1; sink <= 4; sink += 1)
+            {
+                if (root_a == middle || root_a == sink || middle == sink)
+                {
+                    continue;
+                }
+                u32 root_b = 10u - root_a - middle - sink;
+                for (u32 variant = 0; variant < 6; variant += 1)
+                {
+                    MachineInstruction instructions[5] = {0};
+                    MachineBlock blocks[5] = {0};
+                    for (u32 block = 0; block < BUSTER_ARRAY_LENGTH(blocks); block += 1)
+                    {
+                        instructions[block].opcode = MACHINE_OPCODE_SKELETON_RETURN;
+                        blocks[block] = (MachineBlock){.first_instruction = block, .instruction_count = 1, .parameter_offset = 3};
+                    }
+                    MachineVirtualRegister registers[3] = {0};
+                    MachineBlockParameter parameters[3] = {0};
+                    for (u32 reg = 0; reg < BUSTER_ARRAY_LENGTH(registers); reg += 1)
+                    {
+                        registers[reg] = (MachineVirtualRegister){.definition_point = MACHINE_POINT_INVALID,
+                            .register_class = MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID};
+                        parameters[reg].virtual_register = reg;
+                    }
+                    blocks[root_a].parameter_offset = 0;
+                    blocks[root_a].parameter_count = 1;
+                    blocks[root_b].parameter_offset = 1;
+                    blocks[root_b].parameter_count = 1;
+                    blocks[sink].parameter_offset = 2;
+                    blocks[sink].parameter_count = 1;
+                    MachineRef sources[] = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0),
+                                            machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1)};
+                    MachineEdge edges[5] = {
+                        {.source_block = root_a, .destination_block = middle},
+                        {.source_block = middle, .destination_block = sink, .copy_count = 1},
+                    };
+                    u32 edge_count = 2;
+                    if (variant == 1)
+                    {
+                        // Either root can reach the join. A value defined at
+                        // only root A cannot dominate the outgoing copy.
+                        edges[edge_count++] = (MachineEdge){.source_block = root_b, .destination_block = middle};
+                    }
+                    else if (variant >= 4)
+                    {
+                        // A downstream cycle must start its traversal from
+                        // the real entry, even if an interior block is stored
+                        // first. Adding a second entry invalidates B's value
+                        // on the path that bypasses B.
+                        edges[0] = (MachineEdge){.source_block = root_a, .destination_block = root_b, .copy_count = 1};
+                        edges[1] = (MachineEdge){.source_block = root_b, .destination_block = middle};
+                        edges[2] = (MachineEdge){.source_block = middle, .destination_block = root_b, .copy_offset = 1, .copy_count = 1};
+                        edges[3] = (MachineEdge){.source_block = middle, .destination_block = sink, .copy_offset = 1, .copy_count = 1};
+                        edge_count = 4;
+                        if (variant == 5)
+                        {
+                            edges[edge_count++] = (MachineEdge){.source_block = root_a, .destination_block = middle};
+                        }
+                    }
+                    else if (variant >= 2)
+                    {
+                        // A closed source cycle has no distinguished entry.
+                        // Both members define their own parameters; only B
+                        // dominates the tail reached exclusively from B.
+                        edges[0].source_block = root_b;
+                        edges[1].copy_offset = variant == 2 ? 1u : 0u;
+                        edges[edge_count++] = (MachineEdge){.source_block = root_a, .destination_block = root_b, .copy_count = 1};
+                        edges[edge_count++] = (MachineEdge){.source_block = root_b, .destination_block = root_a, .copy_offset = 1, .copy_count = 1};
+                    }
+                    MachineFunction function = {
+                        .instructions = instructions, .instruction_count = BUSTER_ARRAY_LENGTH(instructions),
+                        .blocks = blocks, .block_count = BUSTER_ARRAY_LENGTH(blocks),
+                        .virtual_registers = registers, .virtual_register_count = BUSTER_ARRAY_LENGTH(registers),
+                        .block_parameters = parameters, .block_parameter_count = BUSTER_ARRAY_LENGTH(parameters),
+                        .edges = edges, .edge_count = edge_count,
+                        .edge_copy_sources = sources, .edge_copy_source_count = BUSTER_ARRAY_LENGTH(sources),
+                    };
+                    MachineVerifyError expected = variant & 1u ? MACHINE_VERIFY_VIRTUAL_REGISTER_USE_BEFORE_DEFINITION : MACHINE_VERIFY_NONE;
+                    BUSTER_TEST_RAW(arguments, machine_verify_function(&function).error == expected,
+                                    string_format(arguments->arena, S8("disconnected roots {u32}/{u32}, middle {u32}, sink {u32}, variant {u32}"),
+                                                  root_a, root_b, middle, sink, variant));
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_pointer_block_parameters(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "int pointer_join(int *a, int *b, int n) { int *p; if (n) p = b; else p = a; return p[2]; }\n"
+        "int pointer_walk(int *a, int *b, int n) { int *p = a; int sum = 0; while (n > 0) { sum += *p; p += 1; n -= 1; } return sum; }\n"
+        "int pointer_backwards(int *a, int *b, int n) { int *p = a + n; int sum = 0; while (p != a) { p -= 1; sum += p[0]; } return sum; }\n"
+        "int pointer_swap(int *a, int *b, int n) { int sum = 0; while (n > 0) { int *tmp = a; a = b; b = tmp; sum += a[0]; n -= 1; } return sum; }\n"
+        "int pointer_length(int *a, int *b, int n) { int *p = a; while (*p) p += 1; return (int)(p - a); }\n");
+    String8 names[] = {S8("pointer_join"), S8("pointer_walk"), S8("pointer_backwards"), S8("pointer_swap"), S8("pointer_length")};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    CodegenRegisterAllocatorMode modes[] = {
+        CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+        CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY,
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("pointer-block-parameters.c"), source, targets[target_index],
+                                                                     (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+                {
+                    IrFunction* function = machine_test_ir_function_find(module, names[name_index]);
+                    BUSTER_TEST(arguments, function != 0);
+                    if (function)
+                    {
+                        u32 pointer_parameters = 0;
+                        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+                        {
+                            for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
+                            {
+                                IrType* type = ir_type_from_id(&program->types, parameter->canonical_type);
+                                pointer_parameters += type && type->kind == IR_TYPE_POINTER;
+                            }
+                        }
+                        // Keep the original failure reachable even if frontend
+                        // lowering changes: the SSA fixture must contain joins.
+                        BUSTER_TEST(arguments, memory_form || pointer_parameters != 0);
+                        MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, targets[target_index]);
+                        BUSTER_TEST_RAW(arguments, selected.supported, names[name_index]);
+                        if (selected.supported)
+                        {
+                            BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                        }
+                    }
+                }
+                for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(modes); mode_index += 1)
+                {
+                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, targets[target_index],
+                                                                                (CodegenModuleOptions){.register_allocator = (u8)modes[mode_index]});
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                    BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                    bool native_arch = (BUSTER_CPU_ARCH_X86_64 && target_index == 0) || (BUSTER_CPU_ARCH_AARCH64 && target_index == 1);
+                    if (native_arch && generated.error == CODEGEN_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, generated.relocation_count == 0);
+                        CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                        BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                        if (executable.address)
+                        {
+                            s32 a[] = {3, -7, 19, 4, 11, -2, 0};
+                            s32 b[] = {13, 5, -17, 8, -9, 6};
+                            for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+                            {
+                                u32 offset = machine_test_module_offset(&generated, module, names[name_index]);
+                                BUSTER_TEST(arguments, offset != UINT32_MAX);
+                                if (offset != UINT32_MAX)
+                                {
+                                    typedef s32 PointerCall(s32*, s32*, s32);
+                                    PointerCall* call = 0;
+                                    void* address = (u8*)executable.address + offset;
+                                    memcpy(&call, &address, sizeof(call));
+                                    for (s32 n = 0; n <= 6; n += 1)
+                                    {
+                                        s32 expected = 0;
+                                        if (name_index == 0)
+                                        {
+                                            expected = n ? b[2] : a[2];
+                                        }
+                                        else if (name_index == 4)
+                                        {
+                                            expected = 6;
+                                        }
+                                        else
+                                        {
+                                            for (s32 i = 0; i < n; i += 1)
+                                            {
+                                                expected += name_index == 3 ? (i & 1 ? a[0] : b[0]) : a[i];
+                                            }
+                                        }
+                                        BUSTER_TEST_RAW(arguments, call(a, b, n) == expected, names[name_index]);
+                                    }
+                                }
+                            }
+                        }
+                        codegen_release_executable(executable);
+                    }
+#endif
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult dominance_result = machine_test_disconnected_dominance(arguments);
+    result.test_count += dominance_result.test_count;
+    result.succeeded_test_count += dominance_result.succeeded_test_count;
+    UnitTestResult pointer_result = machine_test_pointer_block_parameters(arguments);
+    result.test_count += pointer_result.test_count;
+    result.succeeded_test_count += pointer_result.succeeded_test_count;
     UnitTestResult edge_index_result = machine_test_fast_edge_index(arguments);
     result.test_count += edge_index_result.test_count;
     result.succeeded_test_count += edge_index_result.succeeded_test_count;

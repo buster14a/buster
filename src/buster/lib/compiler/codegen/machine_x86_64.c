@@ -5139,6 +5139,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                                                          .register_class = vector ? MACHINE_REGISTER_CLASS_VECTOR : MACHINE_REGISTER_CLASS_GENERAL,
                                                                          .typed_origin = parameter->value.value,
                                                                      });
+            // Block parameters are values defined by incoming edges. They
+            // have no instruction for the opcode classifier below to visit,
+            // but pointer parameters still supply INDEX bases.
+            selector.place_kinds[parameter->value.value] = MACHINE_X64_PLACE_OTHER;
             value_def_blocks[parameter->value.value] = function->blocks[block_index].id.value;
         }
     }

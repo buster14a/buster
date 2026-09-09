@@ -42,6 +42,16 @@
   `MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE` exception is explicit and counted;
   FAST/QUALITY liveness scans all textual touches, the scheduler preserves
   their source order, and SSA-only consumers must reject mutable values.
+- Canonical block parameters are defined by incoming edges, so their
+  `IrValue.definition` is invalid by design. Selectors must still classify
+  them as values and accept their pointer registers as address bases.
+  Only instruction-defined locals take the frame-address path; an absent
+  instruction definition is not a missing value.
+- The verifier separates entry-reachable code from unreachable components.
+  Unreachable source SCCs attach to a synthetic dominator root, with every
+  member of a closed source cycle treated as an entry. Block storage order
+  cannot create dominance, and a join reachable from multiple disconnected
+  entries cannot inherit one entry's values without block parameters.
 - The opcode switches in `machine_select_canonical_function_x86_64` and
   `machine_a64_select_instruction` are the authoritative machine selections.
   Add a selection to the target switch and its direct helpers, with MIR and
