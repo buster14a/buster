@@ -1663,9 +1663,100 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_pointer_block_parameters(UnitTes
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_unsigned_switch(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice input = file_read(arguments->arena, S8("tests/differential/switch_unsigned.c"), (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    BUSTER_TEST(arguments, source.length != 0);
+    String8 names[] = {S8("switch_u32"), S8("switch_u64")};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; source.length && target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("switch-unsigned.c"), source, targets[target_index],
+                                                                     (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+                {
+                    IrFunction* function = machine_test_ir_function_find(module, names[name_index]);
+                    BUSTER_TEST(arguments, function != 0);
+                    if (function)
+                    {
+                        MachineSelectResult selected;
+                        MachineEncodeResult encoded = machine_test_encode(temporary.arena, program, function, targets[target_index], &selected);
+                        BUSTER_TEST_RAW(arguments, encoded.valid, names[name_index]);
+                        // Keep the original encoder path covered even if the
+                        // frontend later changes its switch lowering strategy.
+                        u32 cases = 0;
+                        for (u32 row = 0; row < selected.function.switch_case_count; row += 1)
+                        {
+                            MachineSwitchCase* item = selected.function.switch_cases + row;
+                            cases += item->compare_width == (name_index ? 64 : 32);
+                        }
+                        BUSTER_TEST(arguments, cases == (name_index ? 7u : 5u));
+                    }
+                }
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, targets[target_index],
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                    BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                    bool native_arch = (BUSTER_CPU_ARCH_X86_64 && target_index == 0) || (BUSTER_CPU_ARCH_AARCH64 && target_index == 1);
+                    if (native_arch && generated.error == CODEGEN_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, generated.relocation_count == 0);
+                        CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                        BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                        if (executable.address)
+                        {
+                            u64 values[] = {0, 0x7fffffff, 0x80000000, 0xb9000000, 0xf9400000, 0xffffffff,
+                                UINT64_C(0xffffffff80000000), UINT64_MAX, UINT64_C(0x180000000), UINT64_C(0x100000000)};
+                            u32 expected[2][10] = {{0, 1, 2, 3, 4, 5, 2, 5, 2, 0}, {0, 1, 2, 3, 4, 5, 6, 7, 0, 0}};
+                            for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(names); name_index += 1)
+                            {
+                                u32 offset = machine_test_module_offset(&generated, module, names[name_index]);
+                                BUSTER_TEST(arguments, offset != UINT32_MAX);
+                                if (offset != UINT32_MAX)
+                                {
+                                    typedef u64 SwitchCall(u64);
+                                    SwitchCall* call = 0;
+                                    void* address = (u8*)executable.address + offset;
+                                    memcpy(&call, &address, sizeof(call));
+                                    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(values); i += 1)
+                                    {
+                                        BUSTER_TEST_RAW(arguments, call(values[i]) == expected[name_index][i], names[name_index]);
+                                    }
+                                }
+                            }
+                        }
+                        codegen_release_executable(executable);
+                    }
+#endif
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult switch_result = machine_test_unsigned_switch(arguments);
+    result.test_count += switch_result.test_count;
+    result.succeeded_test_count += switch_result.succeeded_test_count;
     UnitTestResult dominance_result = machine_test_disconnected_dominance(arguments);
     result.test_count += dominance_result.test_count;
     result.succeeded_test_count += dominance_result.succeeded_test_count;

@@ -9864,9 +9864,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_metadata_register_immediate(MachineX64
                                                                       u64 immediate, u16 register_width, u16 immediate_width,
                                                                       MachineX64ExactEmitCounters* counters)
 {
+    // A full-width 32-bit immediate is a bit pattern. The exact bridge's
+    // signed operand must retain its high bit without widening its value.
+    // Keep narrower immediates and 64-bit destinations sign-extension aware.
+    s64 value = register_width == 32 && immediate_width == 32 ? (s64)(s32)(u32)immediate : (s64)immediate;
     BusterX86MetadataPhysicalOperand operands[2] = {
         machine_x64_exact_gpr_operand(destination, register_width),
-        machine_x64_exact_immediate_operand((s64)immediate, immediate_width),
+        machine_x64_exact_immediate_operand(value, immediate_width),
     };
     return machine_x64_emit_metadata_instruction(encoder, mnemonic, operands, 2, (BusterX86MetadataFeatureInput){0},
                                                  (BusterX86MetadataPhysicalAttributes){0}, counters);
