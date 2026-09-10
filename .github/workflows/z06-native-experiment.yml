@@ -1,0 +1,145 @@
+name: Z06 native paired experiment
+on:
+  push:
+    branches: [astra/z06-20260910-transport]
+    paths: [.github/workflows/z06-native-experiment.yml]
+permissions:
+  contents: read
+concurrency:
+  group: z06-native-experiment-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  compare:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      BUSTER_TEST_JOBS: '1'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BASE_SHA: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+      HEAD_SHA: bca546743b170cc283c2e46d8b2ff09e28a66095
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: bca546743b170cc283c2e46d8b2ff09e28a66095
+          path: candidate
+          persist-credentials: false
+      - name: Record provenance and check the C17 fixture independently
+        run: |
+          set -euxo pipefail
+          mkdir -p evidence candidate/build
+          test "$(git -C baseline rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$HEAD_SHA"
+          {
+            date -u; uname -a; lscpu; clang --version; gcc --version
+            printf 'baseline=%s\ncandidate=%s\n' "$BASE_SHA" "$HEAD_SHA"
+            printf 'SMT control: not modified; hosted virtual hardware is not Zen 5 acceptance.\n'
+          } > evidence/provenance.txt
+          sha256sum candidate/tests/basic_c_macro_task_batches.c > evidence/fixture.sha256
+          for cc in clang gcc; do
+            "$cc" -std=c17 -Wall -Wextra -Werror -Wpedantic -fwrapv -fno-strict-aliasing -funsigned-char \
+              candidate/tests/basic_c_macro_task_batches.c -o "evidence/reference-$cc"
+            "./evidence/reference-$cc"
+          done
+          printf 'Clang and GCC C17 runtime oracles passed.\n' > evidence/reference-result.txt
+          cd candidate
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+      - name: Build trusted and observer compilers sequentially in isolated directories
+        run: |
+          set -euxo pipefail
+          driver="$GITHUB_WORKSPACE/candidate/build/build"
+          for side in baseline candidate; do
+            for kind in normal census; do
+              allocation=OFF
+              if test "$kind" = census; then allocation=ON; fi
+              (
+                cd "$GITHUB_WORKSPACE/$side"
+                "$driver" generate --build-directory "build/z06-$kind" --ci --cc clang -- \
+                  -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF \
+                  "-DBUSTER_BENCH_ALLOCATIONS=$allocation" -DCMAKE_LINKER_TYPE=DEFAULT
+                "$driver" build --build-directory "build/z06-$kind" --config Release -t ide -- -j2
+                sha256sum "build/z06-$kind/Release/ide"
+              ) 2>&1 | tee "evidence/build-$side-$kind.log"
+            done
+            size -A "$side/build/z06-normal/Release/ide" > "evidence/$side-size.txt"
+            nm -S --size-sort "$side/build/z06-normal/Release/ide" > "evidence/$side-symbols.txt"
+            objdump -d -Mintel --disassemble=c_preprocess_expand "$side/build/z06-normal/Release/ide" > "evidence/$side-expand.asm"
+            objdump -d -Mintel --disassemble=c_macro_invocation_arguments "$side/build/z06-normal/Release/ide" > "evidence/$side-arguments.asm"
+            objdump -d -Mintel --disassemble=c_macro_expansion_tasks_push "$side/build/z06-normal/Release/ide" > "evidence/$side-push.asm"
+          done
+      - name: Execute both Buster revisions in all four modes on the independent fixture
+        run: |
+          set -euxo pipefail
+          fixture="$GITHUB_WORKSPACE/candidate/tests/basic_c_macro_task_batches.c"
+          for mode in none mir-stack fast quality; do
+            for side in baseline candidate; do
+              "$GITHUB_WORKSPACE/$side/build/z06-normal/Release/ide" cc -std=c17 -g0 -O0 \
+                "-fregister-allocator=$mode" "$fixture" -o "$GITHUB_WORKSPACE/evidence/$side-$mode"
+              "$GITHUB_WORKSPACE/evidence/$side-$mode"
+            done
+            cmp "evidence/baseline-$mode" "evidence/candidate-$mode"
+          done
+          printf 'Both revisions passed the fixture in all four modes with identical A/B executables.\n' > evidence/mode-result.txt
+      - name: Paired native harness with frozen macro-heavy unity and macro-free controls
+        run: |
+          set -euxo pipefail
+          root="$GITHUB_WORKSPACE"
+          driver="$root/candidate/build/build"
+          # The working directory is the frozen source tree: -Isrc must not
+          # resolve to either moving candidate's source during unity replay.
+          cd "$root/baseline"
+          "$driver" bench_throughput self-test 2>&1 | tee "$root/evidence/native-self-test.log"
+          "$driver" bench_throughput run \
+            --baseline "$root/baseline/build/z06-normal/Release/ide" \
+            --candidate "$root/candidate/build/z06-normal/Release/ide" \
+            --baseline-id "$BASE_SHA" --candidate-id "$HEAD_SHA" \
+            --allocation-baseline "$root/baseline/build/z06-census/Release/ide" \
+            --allocation-candidate "$root/candidate/build/z06-census/Release/ide" \
+            --output "$root/evidence/paired" --profile ci --mode all --pairs 20 --warmups 2 \
+            --cpu auto --timeout 120 --pmu --require-identical-output \
+            --self-host-root "$root/baseline" --self-host-generated "$root/baseline/build/z06-normal/generated" \
+            2>&1 | tee "$root/evidence/native-run.log"
+      - name: Per-site allocation census outside the timing path
+        if: ${{ !cancelled() && steps.build_compilers.outcome != 'failure' }}
+        run: |
+          set -euxo pipefail
+          root="$GITHUB_WORKSPACE"
+          cd "$root/baseline"
+          for side in baseline candidate; do
+            compiler="$root/$side/build/z06-census/Release/ide"
+            test -x "$compiler"
+            BUSTER_ALLOCATION_CENSUS=1 "$compiler" cc -g -O0 -Isrc \
+              "-I$root/baseline/build/z06-normal/generated" -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 \
+              -fregister-allocator=fast -lm src/buster/apps/ide/ide.c \
+              "-fsource-metrics=$root/evidence/$side-unity.metrics" -o "$root/evidence/$side-unity" \
+              2> "$root/evidence/$side-unity.census"
+            python3 tools/allocation_census.py --input "$root/evidence/$side-unity.census" --output "$root/evidence/$side-unity-census"
+            BUSTER_ALLOCATION_CENSUS=1 "$compiler" cc -std=c17 -g0 -O0 -fregister-allocator=fast \
+              "$root/candidate/tests/basic_c_macro_task_batches.c" -o "$root/evidence/$side-fixture-census" \
+              2> "$root/evidence/$side-fixture.census"
+            python3 tools/allocation_census.py --input "$root/evidence/$side-fixture.census" --output "$root/evidence/$side-fixture-census-report"
+          done
+          cmp "$root/evidence/baseline-unity" "$root/evidence/candidate-unity"
+          cmp "$root/evidence/baseline-fixture-census" "$root/evidence/candidate-fixture-census"
+      - name: Retain every sample, failed invocation, census and build configuration
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: z06-native-experiment-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            evidence/
+            baseline/build/z06-normal/CMakeCache.txt
+            baseline/build/z06-normal/compile_commands.json
+            baseline/build/z06-census/CMakeCache.txt
+            baseline/build/z06-census/compile_commands.json
+            candidate/build/z06-normal/CMakeCache.txt
+            candidate/build/z06-normal/compile_commands.json
+            candidate/build/z06-census/CMakeCache.txt
+            candidate/build/z06-census/compile_commands.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
