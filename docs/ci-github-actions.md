@@ -250,6 +250,29 @@ applicable suite. Missing, skipped, cancelled or failed work fails the summary.
 Diagnostic uploads do not start after cancellation. The aggregate `CI complete`
 continues to require all six desktop jobs, three mobile jobs and workflow lint.
 
+The iOS launcher retains separate signing logs for each Debug/Release bundle
+and one shutdown log under `BUSTER_IOS_CONSOLE_LOG`; the GitHub mobile job
+places these in `RUNNER_TEMP/buster-ci/`, inside its existing artifact. Each
+phase keeps the first 64 KiB of combined raw stdout/stderr while draining the
+remaining output, reports truncation, and records the exact shell-quoted
+command, helper status, native command status when available, elapsed time
+and unchanged deadline. Native exit 124 is an ordinary command failure;
+helper exit 124 without a native completion record is a timeout. Status 137
+without that record remains ambiguous between timeout escalation and a signal.
+The first failed phase also retains bounded source SHA, Xcode/SDK, selected
+device and runtime context. Shutdown records the prior batch status and cannot
+erase an earlier failure or turn otherwise successful tests green.
+
+`bash tests/mobile_ci_scripts_test.sh` covers nonzero and hanging commands,
+bounded output, independent batch results and cleanup failure propagation.
+The macOS lifecycle job additionally invokes real codesign against an empty
+app and real simctl shutdown against an invalid device ID. These intentional,
+bounded rejections retain native diagnostics and Xcode/runtime provenance;
+they do not diagnose the intermittent signing/shutdown stalls from #394.
+Set `BUSTER_MOBILE_TEST_EVIDENCE_DIR` to retain each case's files; the lifecycle
+workflow includes them alongside its established console-log artifact. The
+attached launch-monitor ownership suite continues to use macOS `/bin/bash`.
+
 Collect timing using `python3 tools/github_ci_time.py collect --branch main --limit 30 --output /tmp/before.json`
 and summarize using `python3 tools/github_ci_time.py summarize /tmp/before.json`.
 For a candidate, replace `--branch main` with `--head-sha COMMIT`. The collector

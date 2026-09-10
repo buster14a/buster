@@ -406,6 +406,7 @@ jobs:
         shell: bash
         env:
           BUSTER_IOS_ARCH: ${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}
+          BUSTER_IOS_CONSOLE_LOG: ${{ runner.temp }}/buster-ci/ios-console.log
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
