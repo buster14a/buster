@@ -1,0 +1,109 @@
+name: Z12 frozen unity owner census
+
+on:
+  push:
+    branches: [astra/z12-130-transport-20260910]
+    paths: [.github/workflows/z12-unity-census.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: z12-unity-census-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 2
+
+jobs:
+  census:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 820cb87376eaa626ae593238ef6fbaaabfc2c992
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ed803c583ea43fce9a7c74b17560ad636c558c0a
+          path: transport
+          persist-credentials: false
+      - name: Build both trusted compilers sequentially
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          lscpu > evidence/lscpu.txt
+          clang --version > evidence/clang.txt
+          (cd candidate && clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/z12-build")
+          for root in baseline candidate; do
+            (
+              cd "$root"
+              "$RUNNER_TEMP/z12-build" generate --build-directory build/throughput-ci-compiler --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF -DCMAKE_LINKER_TYPE=DEFAULT
+              "$RUNNER_TEMP/z12-build" build --build-directory build/throughput-ci-compiler --config Release -t ide -- -j2
+            ) 2>&1 | tee "evidence/$root-build.log"
+            for symbol in machine_fast_conform_edge machine_fast_placement_build_prepassed; do
+              objdump -d --disassemble="$symbol" "$root/build/throughput-ci-compiler/Release/ide" > "evidence/$root-$symbol.disassembly.txt"
+            done
+            cp "$root/build/throughput-ci-compiler/compile_commands.json" "evidence/$root-compile_commands.json"
+          done
+          cp baseline/build/throughput-ci-compiler/Release/ide evidence/baseline-uninstrumented
+          git -C candidate rev-parse HEAD > evidence/frozen-input-sha.txt
+          git -C candidate ls-files -z | (cd candidate && xargs -0 sha256sum) > evidence/frozen-tracked-input-hashes.txt
+          mkdir -p candidate/build/throughput-ci-compiler/generated
+      - name: Build diagnostic compiler separately without changing frozen inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 transport/.github/z12/probe.py baseline
+          git -C baseline diff > evidence/probe.patch
+          (cd baseline && "$RUNNER_TEMP/z12-build" build --build-directory build/throughput-ci-compiler --config Release -t ide -- -j2) 2>&1 | tee evidence/probe-build.log
+      - name: Replay FAST and QUALITY over identical frozen unity sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections, hashlib, json, pathlib, subprocess
+          root=pathlib.Path.cwd(); out=root/'evidence'; frozen=root/'candidate'; rows=collections.defaultdict(lambda:[0,0,0]); records=[]
+          variants=[('reference',out/'baseline-uninstrumented'),('candidate',frozen/'build/throughput-ci-compiler/Release/ide'),('probe',root/'baseline/build/throughput-ci-compiler/Release/ide')]
+          for mode in ('fast','quality'):
+              hashes=[]
+              for variant,binary in variants:
+                  artifact=out/f'unity-{mode}-{variant}'
+                  command=[str(binary),'cc','-Isrc','-Ibuild/throughput-ci-compiler/generated','-DBUSTER_UNITY_BUILD=1','-DBUSTER_INCLUDE_TESTS=0','-g',f'-fregister-allocator={mode}',f'-fsource-metrics={out}/unity-{mode}-{variant}.metrics','-v','src/buster/apps/ide/ide.c','-o',str(artifact),'-lm']
+                  (out/f'unity-{mode}-{variant}.command.json').write_text(json.dumps({'argv':command,'cwd':str(frozen)},indent=2)+'\n')
+                  with (out/f'unity-{mode}-{variant}.log').open('w') as log:
+                      subprocess.run(command,cwd=frozen,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=120)
+                  hashes.append(hashlib.sha256(artifact.read_bytes()).hexdigest())
+              assert len(set(hashes))==1,(mode,hashes)
+              records.append({'mode':mode,'reference_candidate_probe_output_sha256':hashes[0]})
+              for line in (out/f'unity-{mode}-probe.log').read_text().splitlines():
+                  if line.startswith('Z12_OWNER,'):
+                      _,site,n,calls,hits,prefix=line.split(','); row=rows[(mode,int(site),int(n))]
+                      for i,v in enumerate((calls,hits,prefix)): row[i]+=int(v)
+          (out/'unity-output-identity.json').write_text(json.dumps(records,indent=2)+'\n')
+          with (out/'unity-owner-census.csv').open('w') as f:
+              f.write('mode,site,population,calls,hits,prefix_reads,full_scalar_reads\n')
+              for (mode,site,n),(calls,hits,prefix) in sorted(rows.items()): f.write(f'{mode},{site},{n},{calls},{hits},{prefix},{n*calls}\n')
+          print('FAST and QUALITY: reference, candidate, and diagnostic probe outputs are byte-identical.')
+          print('Diagnostic population measurement only; these replays are not a timing acceptance experiment.')
+          PY
+          git -C candidate ls-files -z | (cd candidate && xargs -0 sha256sum) > evidence/frozen-tracked-input-hashes-after.txt
+          cmp evidence/frozen-tracked-input-hashes.txt evidence/frozen-tracked-input-hashes-after.txt
+      - name: Check immutable audit index on the source revision
+        working-directory: candidate
+        run: python3 tools/new_audit.py --check
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: z12-unity-census-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
