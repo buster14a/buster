@@ -977,7 +977,9 @@ struct MachineOpcodeInfo
     // declared operands; owners must vacate before the instruction runs.
     u64 clobber_mask;
     u16 attributes;
-    u16 fixed_register_set;
+    // Layout padding, not a second fixed-register authority. Only the
+    // per-slot mask and register bytes below describe fixed assignments.
+    u16 reserved_constraints;
     u16 memory_fold_alternate;
     // Reserved layout-neutral seam. Recipe lookup is kept in a separate
     // read-only projection so opcode metadata remains constant and safe to

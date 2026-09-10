@@ -132,14 +132,14 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,                                                            \
-        .schedule_class = MACHINE_SCHEDULE_CLASS_SHIFT, .fixed_register_set = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX),                              \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_SHIFT,                                                                                                       \
         .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_X64_RAX, MACHINE_X64_RCX},                                                                    \
     }
 #define MACHINE_INFO_DIVIDE(name_literal)                                                                                                                      \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = 1u << MACHINE_X64_RDX,                     \
-        .schedule_class = MACHINE_SCHEDULE_CLASS_DIV, .fixed_register_set = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX),                               \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_DIV,                                                                                                        \
         .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_X64_RAX, MACHINE_X64_RCX},                                                                    \
         .implicit_physical_defs = 1ull << MACHINE_X64_RDX,                                                                                                     \
     }
@@ -150,7 +150,7 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = 1u << MACHINE_X64_RDX,                     \
-        .schedule_class = MACHINE_SCHEDULE_CLASS_MUL, .fixed_register_set = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX),                                 \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_MUL,                                                                                                          \
         .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_X64_RAX, MACHINE_X64_RCX},                                                                     \
         .implicit_physical_defs = 1ull << MACHINE_X64_RDX,                                                                                                      \
     }
@@ -1657,7 +1657,7 @@ bool machine_opcode_operand_is_early_clobber(MachineOpcodeInfo const* info, u32 
 
 bool machine_opcode_has_constraints(MachineOpcodeInfo const* info)
 {
-    return info && (info->tied_pair || info->early_clobber_mask || info->fixed_register_set || info->fixed_register_mask ||
+    return info && (info->tied_pair || info->early_clobber_mask || info->fixed_register_mask ||
                     (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED));
 }
 
