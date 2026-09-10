@@ -1,0 +1,138 @@
+name: Z15 production-output run census
+on:
+  push:
+    branches: [astra/z15-encoding-transport-20260910]
+    paths: [.github/workflows/z15-production-census.yml]
+permissions:
+  contents: read
+jobs:
+  census:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: d1f19b8792ea8f5b9df684cda9bdabdf89677621
+          persist-credentials: false
+      - name: Build the unchanged trusted compiler with bounded workers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/source-sha.txt
+          lscpu > evidence/cpu.txt
+          uname -a > evidence/os.txt
+          clang --version > evidence/clang.txt
+          objdump --version > evidence/objdump.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+          cp build/CMakeCache.txt evidence/
+          cp build/compile_commands.json evidence/
+          sha256sum build/Release/ide > evidence/compiler-sha256.txt
+          size build/Release/ide > evidence/compiler-size.txt
+          "$RUNNER_TEMP/buster-build" bench_throughput generate --output evidence/inputs --profile ci --seed 20260907
+      - name: Inspect real ordered bytes; no measurements or reordered instructions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import collections, hashlib, json, re, subprocess
+          root = Path('evidence')
+          inputs = sorted((root / 'inputs').glob('*.c'))
+          assert len(inputs) == 6, inputs
+          # Supplemental coverage control, not a representative timing input.
+          control = root / 'wide-switch-control.c'
+          cases = '\n'.join(f'case 0x{(i+1)*0x100000001:016x}ULL: return {i+1}u;' for i in range(32))
+          control.write_text('unsigned wide_switch(unsigned long long x) { switch (x) {\n' + cases + '\ndefault: return 0u; } }\n')
+          inputs.append(control)
+          compiler = str(Path('build/Release/ide').resolve())
+          instruction = re.compile(r'^\s*([0-9a-f]+):\s+((?:[0-9a-f]{2}\s+)+)\s*(\S+)', re.I)
+          results = []
+          manifest = []
+          def shape(data):
+              p = 0
+              rex = 0
+              if data and 0x40 <= data[0] <= 0x4f:
+                  rex = data[0]
+                  p = 1
+              if p >= len(data):
+                  return None
+              op = data[p]
+              tail = data[p+1:]
+              if 0xb8 <= op <= 0xbf and rex & 8 and len(tail) == 8:
+                  return ('movabs-imm64', len(data))
+              if 0xb8 <= op <= 0xbf and not rex & 8 and len(tail) == 4:
+                  return ('mov-imm32', len(data))
+              if 0x50 <= op <= 0x57 and not tail:
+                  return ('push-gpr', len(data))
+              if 0x58 <= op <= 0x5f and not tail:
+                  return ('pop-gpr', len(data))
+              # Same opcode, operand width and exact length; only register bits vary.
+              if op in (0x89, 0x8b, 0x01, 0x03, 0x29, 0x2b, 0x21, 0x23, 0x09, 0x0b, 0x31, 0x33, 0x39, 0x3b, 0x85) and len(tail) == 1 and tail[0] & 0xc0 == 0xc0:
+                  return (f'gpr-op{op:02x}-w{64 if rex & 8 else 32}', len(data))
+              return None
+          for source in inputs:
+              source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+              for mode in ['none', 'mir-stack', 'fast', 'quality']:
+                  name = source.stem + '-' + mode
+                  obj = root / (name + '.o')
+                  argv = [compiler, 'cc', '-c', '-g0', '-O0', '-v', '-fregister-allocator=' + mode, str(source), '-o', str(obj)]
+                  run = subprocess.run(argv, text=True, capture_output=True, timeout=120)
+                  (root / (name + '.stdout')).write_text(run.stdout)
+                  (root / (name + '.stderr')).write_text(run.stderr)
+                  manifest.append({'source': str(source), 'source_sha256': source_hash, 'mode': mode, 'argv': argv, 'exit': run.returncode})
+                  assert run.returncode == 0, (name, run.returncode, run.stderr)
+                  dump = subprocess.check_output(['objdump', '-d', '-w', str(obj)], text=True)
+                  (root / (name + '.disasm')).write_text(dump)
+                  hist = collections.defaultdict(collections.Counter)
+                  previous = None
+                  count = 0
+                  end = None
+                  total = 0
+                  def flush():
+                      if previous is not None and count:
+                          hist[previous][count] += 1
+                  for line in dump.splitlines():
+                      match = instruction.match(line)
+                      if match is None:
+                          flush()
+                          previous, count, end = None, 0, None
+                          continue
+                      address = int(match.group(1), 16)
+                      data = bytes.fromhex(match.group(2))
+                      key = shape(data)
+                      total += 1
+                      if key is not None and key == previous and address == end:
+                          count += 1
+                      else:
+                          flush()
+                          previous, count = key, 1 if key is not None else 0
+                      end = address + len(data)
+                  flush()
+                  rows = []
+                  for (kind, width), lengths in sorted(hist.items()):
+                      rows.append({'shape': kind, 'bytes': width, 'instructions': sum(n*r for n,r in lengths.items()),
+                                   'runs': sum(lengths.values()), 'maximum': max(lengths),
+                                   'full_groups4': sum((n//4)*r for n,r in lengths.items()),
+                                   'full_groups8': sum((n//8)*r for n,r in lengths.items()),
+                                   'full_groups16': sum((n//16)*r for n,r in lengths.items()),
+                                   'length_histogram': dict(sorted(lengths.items()))})
+                  results.append({'source': source.stem, 'mode': mode, 'total_disassembled': total,
+                                  'object_sha256': hashlib.sha256(obj.read_bytes()).hexdigest(), 'classes': rows})
+          (root / 'commands.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          (root / 'run-census.json').write_text(json.dumps(results, indent=2) + '\n')
+          (root / 'scope.txt').write_text('Untimed production-output census. Six existing native-harness CI inputs plus a separate wide-switch coverage control; four allocators. Shapes are a conservative byte-form candidate classification, not prepared-table identities or proof of profitability. Includes direct-backend output when selected; verbose compiler logs retain coverage. Function/section/noninstruction discontinuities break runs. Memory/variable-length/vector forms are excluded. No compiler instrumentation, changed source, second IR, timing harness, instruction reordering, or SIMD implementation.\n')
+          print('Inspected', len(results), 'production objects; no timing claim.')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: z15-production-output-census
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 14
