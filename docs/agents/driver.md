@@ -21,8 +21,10 @@ diagnostic callers may select `none`, `mir-stack`, `fast`, or `quality` with
 `-fregister-allocator=<mode>`; when several allocator-affecting options are
 present, the last one wins.
 The allocators run on x86-64 under both System V and Win64, and on AArch64
-everywhere but the PE-unwind targets, which still take the canonical path
-whole. Win64 differs from System V in the file it allocates — RSI and RDI are
+including ordinary Windows/UEFI functions with validated compact MIR frame
+and unwind records. Windows AArch64 variadic signatures and calls still fall
+back per function; the target is no longer excluded wholesale. Win64 differs
+from System V in the file it allocates — RSI and RDI are
 callee-saved there, so the allocator has seven callee-saved registers instead
 of five and the vector class keeps only the volatile ZMMs — and in how a call
 is built: the outgoing arguments and the callee's shadow space are written
@@ -32,9 +34,11 @@ can only carry a frame-pointer offset up to 240 bytes. Its prologue pushes the
 callee-saved registers before establishing the frame pointer for the same
 reason. Windows/UEFI variadic definitions and calls use the positional home
 area and float-register duplication described in the [machine guide](machine.md).
+Win64 indirect aggregate arguments use private caller copies with up to
+sixteen-byte alignment, as described in the [machine guide](machine.md).
 Shapes the Win64 subset does not build yet — 128-bit integer signatures,
-vector signatures, indirect (non 1/2/4/8-byte)
-aggregate arguments, and dynamic stack allocation — fall back per function,
+vector signatures, over-aligned aggregate arguments, and dynamic stack
+allocation — fall back per function,
 which `-v`'s `fallback_functions` and `CODEGEN_FALLBACK` lines report.
 `CODEGEN_FALLBACK_REASON` additionally identifies the target, allocator and
 stable reason name for every fallback. Its disjoint counts sum to
@@ -101,14 +105,22 @@ allocator (`mir-stack`, `fast` or `quality`); NONE, direct non-native emission,
 preprocessing and syntax-only checks cannot satisfy the gate. Assembly inputs
 and linked prebuilt objects have no canonical C functions to gate.
 For example, `build/Release/ide cc -fregister-allocator=mir-stack -fno-machine-fallback -target aarch64-unknown-linux -c tests/basic_c_call_abi.c -o build/mir-coverage.o`.
-`compiler_driver_test_machine_fallback` runs a curated arithmetic, control-flow
-and call-ABI corpus through this gate for x86-64 and AArch64 Linux under all
-three machine allocators in `test_all`, including CI. Unsupported Win64
-signature shapes and Darwin/Windows AArch64 variadic signatures have separate
-negative tests. Windows and UEFI large-frame tests cover both architectures,
-and Windows ARM64 MIR unwind boundaries execute against the native OS API.
-This corpus is a coverage floor, not a claim of complete MIR
-lowering or permission to retire the canonical oracle.
+`compiler_driver_test_machine_fallback` runs the same ten-fixture arithmetic,
+control-flow, call-ABI, aggregate and frame corpus for x86-64 and AArch64 on
+Linux, macOS and Windows, under all three machine allocators and both explicit
+frontend forms in `test_all`, including CI. Its 360 object-compilation rows
+require 330 non-empty strict successes and 30 explicit refusals: variadic
+fixtures on Windows/Darwin AArch64 and dynamic stack allocation on Windows
+x86-64. Refusals require exact fallback-function, reason and opcode counts, preserve an
+existing output, and still compile through the direct fallback. They are not
+skips; implementing a gap must replace its refusal expectation with strict
+success. Every target/allocator/frontend cohort emits a `MIR_COVERAGE` row
+with actual strict successes, validated expected rejections and failures.
+Object compilation is not target execution. Separate AArch64 vector and
+integer-pair tests, unsupported signature controls, Windows/UEFI large-frame
+tests, and native Windows ARM64 unwind-boundary execution remain registered.
+This corpus is a coverage floor for #36, not a claim of complete MIR lowering
+or permission to retire the canonical oracle.
 
 A `.s` input, or any input under `-x assembler`, is an assembly translation
 unit rather than a C one. `assembly_unit_encode` (`assembly_unit.c`) is the

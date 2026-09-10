@@ -1235,35 +1235,103 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_windows_arm64_unwind(Uni
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux"), S8("x86_64-apple-macos"),
+                         S8("aarch64-apple-macos"), S8("x86_64-unknown-windows"), S8("aarch64-unknown-windows")};
     String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
-    String8 corpus[] = {S8("tests/basic_c_operations.c"), S8("tests/basic_c_explicit_allocator_sticks.c"), S8("tests/basic_c_call_abi.c"),
-                         S8("tests/basic_c_pointer_to_vla.c"), S8("tests/basic_c_anonymous_bit_field_initializer.c"),
-                         S8("tests/basic_c_unnamed_initializer_members.c"), S8("tests/basic_c_packed_layout.c"),
-                         S8("tests/basic_c_large_frame.c"), S8("tests/basic_c_win64_large_frame.c"),
-                         S8("tests/basic_c_statement_expression_value.c")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    struct
+    {
+        String8 path;
+        u32 variadic_definitions;
+        bool dynamic_stack;
+    } corpus[] = {
+        {.path = S8("tests/basic_c_operations.c"), .variadic_definitions = 2},
+        {.path = S8("tests/basic_c_explicit_allocator_sticks.c")},
+        {.path = S8("tests/basic_c_call_abi.c")},
+        {.path = S8("tests/basic_c_pointer_to_vla.c"), .dynamic_stack = true},
+        {.path = S8("tests/basic_c_anonymous_bit_field_initializer.c")},
+        {.path = S8("tests/basic_c_unnamed_initializer_members.c")},
+        {.path = S8("tests/basic_c_packed_layout.c")},
+        {.path = S8("tests/basic_c_large_frame.c")},
+        {.path = S8("tests/basic_c_win64_large_frame.c")},
+        {.path = S8("tests/basic_c_statement_expression_value.c"), .variadic_definitions = 1},
+    };
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
+        bool variadic_gap = string_equal(targets[target], S8("aarch64-apple-macos")) ||
+                            string_equal(targets[target], S8("aarch64-unknown-windows"));
+        bool dynamic_stack_gap = string_equal(targets[target], S8("x86_64-unknown-windows"));
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
-            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(corpus); fixture += 1)
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
             {
-                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_path(temporary.arena, S8("buster-mir-strict-corpus"), S8(".o"));
-                String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], S8("-fno-machine-fallback"),
-                                     S8("-fverify-codegen"), S8("-o"), output, corpus[fixture]};
-                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
-                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object,
-                                string_format(arguments->arena, S8("strict {S8} {S8} {S8}: {S8}"), targets[target], modes[mode], corpus[fixture], compiled.diagnostic));
-                BUSTER_TEST(arguments, compiled.codegen_statistics.function_count != 0 && compiled.codegen_statistics.fallback_function_count == 0);
-                if (target == 1 && mode == 0 && fixture == 1)
+                u32 strict_successes = 0;
+                u32 expected_rejections = 0;
+                u64 failures_before = result.test_count - result.succeeded_test_count;
+                for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(corpus); fixture += 1)
                 {
-                    // This AArch64 loop has edge copies under MIR_STACK.
-                    // Emission used to drop their boundary reload statistic.
-                    BUSTER_TEST(arguments, compiled.codegen_statistics.allocator_boundary_reload_count != 0);
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    u64 case_failures_before = result.test_count - result.succeeded_test_count;
+                    // #36: do not drop unsupported rows from the census. Each
+                    // variadic definition has one caller in these fixtures.
+                    // Supporting a gap must replace its refusal with a strict
+                    // success expectation, not silently leave stale exclusions.
+                    u32 signatures = variadic_gap ? corpus[fixture].variadic_definitions : 0;
+                    u32 calls = signatures;
+                    u32 dynamic_stacks = dynamic_stack_gap && corpus[fixture].dynamic_stack ? 1u : 0u;
+                    u32 fallbacks = signatures + calls + dynamic_stacks;
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-mir-strict-corpus"), S8(".o"));
+                    ByteSlice sentinel = {.pointer = (u8*)"existing-output", .length = 15};
+                    if (fallbacks)
+                    {
+                        BUSTER_TEST(arguments, file_write(output, sentinel));
+                    }
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
+                                         S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, corpus[fixture].path};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 description = string_format(arguments->arena, S8("strict {S8} {S8} {S8} {S8}: {S8}"),
+                        targets[target], modes[mode], frontends[frontend], corpus[fixture].path, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count != 0, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == fallbacks, description);
+                    if (fallbacks)
+                    {
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_CODEGEN && !compiled.has_object, description);
+                        BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_reason_counts[CODEGEN_FALLBACK_SIGNATURE] == signatures, description);
+                        BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == calls + dynamic_stacks, description);
+                        BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_opcode_counts[IR_OPCODE_COUNT] == signatures, description);
+                        BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_opcode_counts[IR_OPCODE_CALL] == calls, description);
+                        BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_opcode_counts[IR_OPCODE_STACK_ALLOCATE] == dynamic_stacks, description);
+                        ByteSlice retained = file_read(temporary.arena, output, (FileReadOptions){0});
+                        BUSTER_TEST_RAW(arguments, retained.length == sentinel.length &&
+                            memcmp(retained.pointer, sentinel.pointer, sentinel.length) == 0, description);
+                        // The direct oracle still supports each refused MIR row.
+                        // A frontend or object-writer failure is not an accepted
+                        // fallback and must not manufacture a green coverage row.
+                        invocation.reject_machine_fallback = false;
+                        CompilerDriverResult reference = compiler_driver_execute_invocation(temporary.arena, invocation);
+                        BUSTER_TEST_RAW(arguments, reference.error == COMPILER_DRIVER_ERROR_NONE && reference.has_object, reference.diagnostic);
+                        BUSTER_TEST_RAW(arguments, reference.codegen_statistics.function_count == compiled.codegen_statistics.function_count &&
+                            reference.codegen_statistics.fallback_function_count == fallbacks, description);
+                        expected_rejections += (u32)(case_failures_before == result.test_count - result.succeeded_test_count);
+                    }
+                    else
+                    {
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                        strict_successes += (u32)(case_failures_before == result.test_count - result.succeeded_test_count);
+                    }
+                    if (string_equal(targets[target], S8("aarch64-unknown-linux")) && mode == 0 &&
+                        string_equal(corpus[fixture].path, S8("tests/basic_c_explicit_allocator_sticks.c")))
+                    {
+                        // This AArch64 loop has edge copies under MIR_STACK.
+                        // Emission used to drop their boundary reload statistic.
+                        BUSTER_TEST(arguments, compiled.codegen_statistics.allocator_boundary_reload_count != 0);
+                    }
+                    scratch_end(temporary);
                 }
-                scratch_end(temporary);
+                string_print(S8("MIR_COVERAGE target={S8} allocator={S8} frontend={S8} fixtures={u32} strict_successes={u32} expected_rejections={u32} failures={u64}\n"),
+                    targets[target], modes[mode], frontends[frontend], (u32)BUSTER_ARRAY_LENGTH(corpus), strict_successes, expected_rejections,
+                    result.test_count - result.succeeded_test_count - failures_before);
             }
         }
     }
