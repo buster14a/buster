@@ -2418,6 +2418,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // owners, and all four SIMD tiles must agree with lane membership. The
     // empty mask deliberately permits a null row, as an empty contract does.
     BUSTER_TEST(arguments, machine_fast_owner_match_mask_test(0, 0, 0) == 0);
+    BUSTER_TEST(arguments, !machine_fast_owner_contains_test(0, 0, 0));
+    BUSTER_TEST(arguments, !machine_fast_owner_contains_test(0, 0, UINT32_MAX));
     u64 owner_page_size = os_get_page_size();
     u8* owner_pages = (u8*)os_reserve(0, owner_page_size * 2u, (ProtectionFlags){0}, (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
     BUSTER_TEST(arguments, owner_pages != 0);
@@ -2447,6 +2449,26 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     }
                 }
                 BUSTER_TEST(arguments, machine_fast_owner_match_mask_test(owners, masks[mask_index], value) == expected);
+                BUSTER_TEST(arguments, machine_fast_owner_contains_test(owners, masks[mask_index], value) == (expected != 0));
+            }
+        }
+        // Unique high-bit owners cover late sparse hits and absent values,
+        // independently of the duplicate-owner populations above.
+        for (u32 lane = 0; lane < count; lane += 1)
+        {
+            owners[lane] = UINT32_C(0x80000000) + lane;
+        }
+        u32 queries[] = {owners[0], owners[count - 1u], UINT32_MAX};
+        for (u32 mask_index = 0; mask_index < BUSTER_ARRAY_LENGTH(masks); mask_index += 1)
+        {
+            for (u32 query_index = 0; query_index < BUSTER_ARRAY_LENGTH(queries); query_index += 1)
+            {
+                bool expected = false;
+                for (u32 lane = 0; lane < count; lane += 1)
+                {
+                    expected |= owners[lane] == queries[query_index] && ((masks[mask_index] >> lane) & 1u);
+                }
+                BUSTER_TEST(arguments, machine_fast_owner_contains_test(owners, masks[mask_index], queries[query_index]) == expected);
             }
         }
     }
