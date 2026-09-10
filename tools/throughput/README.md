@@ -306,3 +306,16 @@ its saved stderr with the offline reader. This exit report includes worker and
 cleanup traffic, whereas source metrics retain the original calling-thread
 pre-formatting snapshot. Keep each process log separate and do not substitute
 census timings for the normal uninstrumented series.
+
+
+### QUALITY scratch/work census
+
+The existing `BUSTER_BENCH_ALLOCATIONS=ON` diagnostic compiler also emits
+`quality_census.version=1` and `quality_census.*` integer fields in each
+`-fsource-metrics` file. The native runner already retains these files beside
+its artifacts during the separate `--allocation-baseline` / `--allocation-candidate`
+replays and requires their object bytes to match the uninstrumented subjects.
+Unknown additive keys do not change its timing or allocation schema. See
+[QUALITY census](../../docs/quality-scratch-census.md) for exact meanings,
+scope, exclusions and interpretation. These diagnostic runs are not latency,
+RSS or hardware-counter acceptance evidence.
