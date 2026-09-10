@@ -1,0 +1,96 @@
+diff --git a/src/buster/lib/compiler/assembly/x86_64_metadata.c b/src/buster/lib/compiler/assembly/x86_64_metadata.c
+index 87cc8df..f6cf4e5 100644
+--- a/src/buster/lib/compiler/assembly/x86_64_metadata.c
++++ b/src/buster/lib/compiler/assembly/x86_64_metadata.c
+@@ -1,7 +1,8 @@
+ // x86 instruction-byte authority: generated form normalization, checked
+ // selection/emission, and derived exact-machine specializations live here.
+ // Map: buster_x86_metadata_encode (checked request), emit_form_to_scratch
+-// (general packing), emit_machine_fast (derived hot plans), tls_prepare
++// (general packing), select_form/prepare_source_tuple_query (source contracts),
++// emit_machine_fast (derived hot plans), tls_prepare
+ // and forwarding_prepare/got_prepare (fixed-envelope recipes), prewarm_all_forms
+ // (worker publication).
+ // Parsing, allocation, scheduling and object-format relocation policy remain
+@@ -8945,15 +8946,10 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
+             bool selected_x87_no_rexw = false;
+             u16 inferred_source_tuple_width = 0;
+             bool ambiguous_source_tuple = false;
+-            // The three memory-topology probes below run once per candidate, but each
+-            // one first rejects on conditions that depend only on the query, which is
+-            // loop-invariant.  Hoist those here so a query that can satisfy neither
+-            // shape skips all three calls outright instead of re-deriving the same
+-            // answer for every candidate considered.  These are the callees' own
+-            // query-side tests, so this is a necessary condition and can only skip a
+-            // call that would have returned false.  The two families are mutually
+-            // exclusive by construction: the topology pair requires no decorator at
+-            // all, the typed probe requires the broadcast decorator.
++            // Hoist query-only rejection before the per-candidate memory probes.
++            // Aggregate/block topology requires undecorated operands; the typed
++            // probe requires broadcast. Source-semantic tuple projection also
++            // covers ordinary EVEX loads and validates the explicit source size.
+             bool topology_query_possible =
+                 query.operands && query.operand_count == 2 && query.address_size == 64 &&
+                 query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64 && !query.attributes.lock &&
+diff --git a/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c b/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c
+index 8eae9a3..be9c3a8 100644
+--- a/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c
++++ b/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c
+@@ -2812,9 +2812,22 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
+     // implicit byte-width of an unsuffixed memory operand is an AT&T-only
+     // question. Nothing moved down.
+     BUSTER_TEST(arguments, source.intel_exact_count == 5629 && source.intel_normalized_relocation_count == 28 &&
+-                             source.intel_alias_equivalent_count == 226 && source.intel_unresolved_count == 3956 &&
+-                             source.intel_byte_mismatch_count == 768 && source.intel_relocation_mismatch_count == 0 &&
++                             source.intel_alias_equivalent_count == 226 && source.intel_unresolved_count == 3957 &&
++                             source.intel_byte_mismatch_count == 767 && source.intel_relocation_mismatch_count == 0 &&
+                              source.intel_policy_rejected_count == 542 && source.intel_different_encoding_count == 17);
++    // #280 changes exactly this census row: VMOVNTDQA zmm0, dword ptr
++    // [rax] is an invalid explicit tuple, not permission to emit another
++    // width. Pin its key and rejection; every formerly exact Intel/AT&T
++    // row retains its class in the complete before/after record comparison.
++    BusterX86CompletionCensusRecord source_tuple_record = records[7468];
++    BUSTER_TEST(arguments, source_tuple_record.form_id == 7468 &&
++                             source_tuple_record.stable_hash == UINT64_C(0xfe3905a4046fe79e) &&
++                             source_tuple_record.intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED &&
++                             source_tuple_record.intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS &&
++                             source_tuple_record.intel_byte_count == 0 &&
++                             source_tuple_record.att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH &&
++                             source_tuple_record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
++                             source_tuple_record.att_byte_count == 6);
+     // Literal VCVTTSS2SIS/VCVTTSS2USIS memory forms previously lost their
+     // final S and emitted another instruction through the generic suffix
+     // fallback. They now reject the census operands instead of emitting
+@@ -2841,8 +2854,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
+     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
+                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
+                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
+-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6668 &&
+-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3261 &&
++    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6667 &&
++                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3262 &&
+                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
+                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
+                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 542);
+diff --git a/src/buster/tests/compiler/assembly/x86_64_metadata_test.c b/src/buster/tests/compiler/assembly/x86_64_metadata_test.c
+index e8d39e3..2b6ff0b 100644
+--- a/src/buster/tests/compiler/assembly/x86_64_metadata_test.c
++++ b/src/buster/tests/compiler/assembly/x86_64_metadata_test.c
+@@ -2528,7 +2528,17 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestAr
+             valid &= case_valid;
+         }
+     }
++    // The census's old dword-qualified ZMM VMOVNTDQA was not valid source.
++    // Check the legal full tuple separately before its rejection control.
++    u8 const stream_expected[] = {0x62, 0xf2, 0x7d, 0x48, 0x2a, 0x00};
++    AssemblyEncodeResult stream_encoded = assembly_encode(arguments->arena,
++        S8("vmovntdqa zmm0, zmmword ptr [rax]\n"),
++        (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
++    valid &= stream_encoded.diagnostic_count == 0 && stream_encoded.relocation_count == 0 &&
++        x86_64_metadata_test_bytes_equal(stream_encoded.bytes.pointer, (u32)stream_encoded.bytes.length,
++                                        stream_expected, sizeof(stream_expected));
+     String8 const invalid_widths[] = {
++        S8("vmovntdqa zmm0, dword ptr [rax]\n"),
+         S8("vcvtps2pd xmm0{k1}, dword ptr [rax]\n"),
+         S8("vcvtps2pd ymm0{k1}, qword ptr [rax]\n"),
+         S8("vcvtps2pd ymm0{k1}, ymmword ptr [rax]\n"),
