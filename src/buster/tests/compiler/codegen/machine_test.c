@@ -1,3 +1,8 @@
+// Machine backend regressions: instruction metadata, selection, allocation,
+// CFG/parameter-edge remapping, scheduling and native ABI execution.
+// machine_tests is the module entry; machine_test_parameter_edge_split owns
+// the bounded linear remapping oracle and large-fanout structural controls.
+
 #include <buster/tests/compiler/codegen/machine_test.h>
 #if BUSTER_INCLUDE_TESTS
 
@@ -1250,6 +1255,302 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
     return result;
 }
 
+// Topology/remapping oracle, independent of the production outgoing index.
+// Allocation and executable parallel-copy semantics remain covered by the
+// registered basic_c_fast_ra_cfg and local-promotion mode-matrix fixtures.
+BUSTER_GLOBAL_LOCAL u32 machine_test_split_target(MachineEdge const* edges, u32 edge_count, u32 const* split_ids,
+                                                 u32 const* block_map, u32 source, u32 destination)
+{
+    u32 result = block_map[destination];
+    for (u32 edge_index = 0; edge_index < edge_count; edge_index += 1)
+    {
+        if (edges[edge_index].source_block == source && edges[edge_index].destination_block == destination && split_ids[edge_index] != UINT32_MAX)
+        {
+            result = split_ids[edge_index];
+            break;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_edge_split(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 start = arena->position;
+    enum { BLOCK_COUNT = 7, ROW_COUNT = BLOCK_COUNT * 2, EDGE_COUNT = BLOCK_COUNT * 3, CASE_COUNT = BLOCK_COUNT * 3 };
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        MachineTargetDescription const* target = architecture ? machine_target_aarch64() : machine_target_x86_64();
+        MachineFunction empty = {.target = target};
+        BUSTER_TEST(arguments, machine_function_split_parameter_edges(arena, &empty));
+        BUSTER_TEST(arguments, arena->position == start && empty.block_count == 0 && empty.edges == 0);
+        for (u32 variant = 0; variant < 16; variant += 1)
+        {
+            MachineInstruction rows[ROW_COUNT] = {0};
+            MachineBlock blocks[BLOCK_COUNT] = {0};
+            MachineEdge edges[EDGE_COUNT] = {0};
+            MachineSwitchCase cases[CASE_COUNT] = {0};
+            MachineVirtualRegister values[BLOCK_COUNT] = {0};
+            MachineLineMark marks[ROW_COUNT + 2] = {0};
+            MachineRef copies[] = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0),
+                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1)};
+            MachineBlockParameter parameters[] = {{.virtual_register = 0}, {.virtual_register = 1}};
+            u32 kinds[BLOCK_COUNT] = {0};
+            u32 block_map[BLOCK_COUNT] = {0};
+            u32 row_map[ROW_COUNT] = {0};
+            u32 split_ids[EDGE_COUNT];
+            memset(split_ids, 0xff, sizeof(split_ids));
+            for (u32 block = 0; block < BLOCK_COUNT; block += 1)
+            {
+                // Conditional duplicate targets, switch duplicates, computed
+                // labels, unconditional copies, backedges and missing pairs.
+                u32 kind = variant ? block % 4u : 3u;
+                kinds[block] = kind;
+                u32 first = (block + 1u) % BLOCK_COUNT;
+                u32 second = variant & 1u ? first : (block + 3u) % BLOCK_COUNT;
+                blocks[block] = (MachineBlock){.first_instruction = block * 2u, .instruction_count = 2, .parameter_count = 2,
+                                              .frequency_class = (u16)block};
+                rows[block * 2u] = (MachineInstruction){.opcode = (u16)(architecture ? MACHINE_A64_LEA_BLOCK : MACHINE_X64_LEA_BLOCK),
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, block)}, .payload = first};
+                MachineInstruction* branch = rows + block * 2u + 1u;
+                if (kind == 0)
+                {
+                    *branch = (MachineInstruction){.opcode = (u16)(architecture ? MACHINE_A64_BCC : MACHINE_X64_JCC),
+                        .operands = {machine_ref_make(MACHINE_REF_BLOCK, first), machine_ref_make(MACHINE_REF_BLOCK, second)}};
+                }
+                else if (kind == 1 || kind == 2)
+                {
+                    *branch = (MachineInstruction){.opcode = kind == 1 ? target->switch_opcode : (u16)(architecture ? MACHINE_A64_INDIRECT_BRANCH : MACHINE_X64_INDIRECT_BRANCH),
+                        .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, 0)}, .payload = block * 3u, .flags = 3};
+                    if (kind == 1) { branch->operands[1] = machine_ref_make(MACHINE_REF_BLOCK, second); }
+                }
+                else
+                {
+                    *branch = (MachineInstruction){.opcode = target->unconditional_branch_opcode,
+                        .operands = {machine_ref_make(MACHINE_REF_BLOCK, first)}};
+                }
+                for (u32 slot = 0; slot < 3; slot += 1)
+                {
+                    u32 destination = slot == 1 ? second : first;
+                    // An earlier no-copy duplicate must not hide a later split.
+                    edges[block * 3u + slot] = (MachineEdge){.source_block = block, .destination_block = destination,
+                        .copy_offset = slot == 1 ? 2u : 0u, .copy_count = (u16)(slot ? 2 : 0), .flags = (u16)(block * 3u + slot)};
+                    cases[block * 3u + slot] = (MachineSwitchCase){.value = slot, .target_block = destination, .compare_width = 32};
+                }
+                values[block] = (MachineVirtualRegister){.definition_point = block ? machine_point_make(block * 2u, block & 1u ? MACHINE_POINT_AFTER : MACHINE_POINT_BEFORE) : MACHINE_POINT_INVALID,
+                    .register_class = MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = block + 11u};
+            }
+            u32 random = 0x31974adbu + variant;
+            for (u32 count = EDGE_COUNT; count > 1; count -= 1)
+            {
+                random = random * 1664525u + 1013904223u;
+                u32 other = random % count;
+                MachineEdge swap = edges[count - 1u];
+                edges[count - 1u] = edges[other];
+                edges[other] = swap;
+            }
+            u32 edge_count = variant == 15 ? EDGE_COUNT / 3u : EDGE_COUNT;
+            for (u32 row = 0; row <= ROW_COUNT; row += 1) { marks[row] = (MachineLineMark){.row = row, .instruction = row + 17u}; }
+            marks[ROW_COUNT + 1] = marks[ROW_COUNT];
+            MachineFunction function = {.instructions = rows, .instruction_count = ROW_COUNT, .blocks = blocks, .block_count = BLOCK_COUNT,
+                .edges = edges, .edge_count = edge_count, .switch_cases = cases, .switch_case_count = CASE_COUNT,
+                .virtual_registers = values, .virtual_register_count = BLOCK_COUNT, .line_marks = marks, .line_mark_count = ROW_COUNT + 2,
+                .edge_copy_sources = copies, .edge_copy_source_count = BUSTER_ARRAY_LENGTH(copies),
+                .block_parameters = parameters, .block_parameter_count = BUSTER_ARRAY_LENGTH(parameters), .target = target};
+            u32 expected_blocks = 0;
+            for (u32 block = 0; block < BLOCK_COUNT; block += 1)
+            {
+                block_map[block] = expected_blocks++;
+                for (u32 edge = 0; edge < edge_count; edge += 1)
+                {
+                    if (edges[edge].source_block == block && edges[edge].copy_count && kinds[block] != 3)
+                    {
+                        split_ids[edge] = expected_blocks++;
+                    }
+                }
+            }
+            u32 split_count = expected_blocks - BLOCK_COUNT;
+            MachineInstruction expected_rows[ROW_COUNT + EDGE_COUNT] = {0};
+            MachineBlock expected_block_rows[BLOCK_COUNT + EDGE_COUNT] = {0};
+            MachineEdge expected_edges[EDGE_COUNT * 2] = {0};
+            MachineSwitchCase expected_cases[CASE_COUNT];
+            memcpy(expected_cases, cases, sizeof(cases));
+            u32 row_cursor = 0;
+            for (u32 block = 0; block < BLOCK_COUNT; block += 1)
+            {
+                expected_block_rows[block_map[block]] = blocks[block];
+                expected_block_rows[block_map[block]].first_instruction = row_cursor;
+                for (u32 offset = 0; offset < 2; offset += 1)
+                {
+                    u32 row = block * 2u + offset;
+                    row_map[row] = row_cursor;
+                    MachineInstruction copy = rows[row];
+                    if (offset == 0) { copy.payload = block_map[copy.payload]; }
+                    for (u32 slot = 0; slot < MACHINE_INSTRUCTION_OPERAND_COUNT; slot += 1)
+                    {
+                        if (machine_ref_kind(copy.operands[slot]) == MACHINE_REF_BLOCK)
+                        {
+                            u32 destination = machine_ref_payload(copy.operands[slot]);
+                            copy.operands[slot] = machine_ref_make(MACHINE_REF_BLOCK,
+                                machine_test_split_target(edges, edge_count, split_ids, block_map, block, destination));
+                        }
+                    }
+                    expected_rows[row_cursor++] = copy;
+                }
+                if (kinds[block] == 1 || kinds[block] == 2)
+                {
+                    for (u32 slot = 0; slot < 3; slot += 1)
+                    {
+                        MachineSwitchCase* item = expected_cases + block * 3u + slot;
+                        item->target_block = machine_test_split_target(edges, edge_count, split_ids, block_map, block, item->target_block);
+                    }
+                }
+                for (u32 edge = 0; edge < edge_count; edge += 1)
+                {
+                    if (edges[edge].source_block == block && split_ids[edge] != UINT32_MAX)
+                    {
+                        expected_block_rows[split_ids[edge]] = (MachineBlock){.first_instruction = row_cursor, .instruction_count = 1};
+                        expected_rows[row_cursor++] = (MachineInstruction){.opcode = target->unconditional_branch_opcode,
+                            .operands = {machine_ref_make(MACHINE_REF_BLOCK, block_map[edges[edge].destination_block])}};
+                    }
+                }
+            }
+            u32 edge_cursor = 0;
+            for (u32 edge = 0; edge < edge_count; edge += 1)
+            {
+                MachineEdge copy = edges[edge];
+                copy.source_block = block_map[copy.source_block];
+                copy.destination_block = block_map[copy.destination_block];
+                if (split_ids[edge] != UINT32_MAX)
+                {
+                    MachineEdge first = copy;
+                    first.destination_block = split_ids[edge];
+                    first.copy_count = 0;
+                    expected_edges[edge_cursor++] = first;
+                    copy.source_block = split_ids[edge];
+                }
+                expected_edges[edge_cursor++] = copy;
+            }
+            bool valid = machine_function_split_parameter_edges(arena, &function);
+            BUSTER_TEST(arguments, valid);
+            BUSTER_TEST(arguments, function.block_count == expected_blocks && function.instruction_count == row_cursor && function.edge_count == edge_cursor);
+            u64 retained = arena->position - start;
+            u64 output_bytes = (u64)row_cursor * sizeof(MachineInstruction) + (u64)expected_blocks * sizeof(MachineBlock) +
+                               (u64)edge_cursor * sizeof(MachineEdge) + sizeof(cases);
+            BUSTER_TEST(arguments, split_count ? retained >= output_bytes && retained <= output_bytes + 64u : retained == 0);
+            // Poison every reclaimed mapping/index word before examining output.
+            u32* poison = arena_allocate(arena, u32, ROW_COUNT + 2u * EDGE_COUNT + 3u * BLOCK_COUNT + 16u);
+            memset(poison, 0xa5, (ROW_COUNT + 2u * EDGE_COUNT + 3u * BLOCK_COUNT + 16u) * sizeof(u32));
+            if (valid && function.block_count == expected_blocks && function.instruction_count == row_cursor && function.edge_count == edge_cursor)
+            {
+                BUSTER_TEST(arguments, memcmp(function.instructions, expected_rows, (u64)row_cursor * sizeof(MachineInstruction)) == 0);
+                BUSTER_TEST(arguments, memcmp(function.blocks, expected_block_rows, (u64)expected_blocks * sizeof(MachineBlock)) == 0);
+                BUSTER_TEST(arguments, memcmp(function.edges, expected_edges, (u64)edge_cursor * sizeof(MachineEdge)) == 0);
+                BUSTER_TEST(arguments, memcmp(function.switch_cases, expected_cases, sizeof(cases)) == 0);
+                BUSTER_TEST(arguments, function.edge_copy_sources == copies && function.block_parameters == parameters);
+                BUSTER_TEST(arguments, copies[0] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1) && copies[1] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0) &&
+                                       copies[2] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0) && copies[3] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1));
+                for (u32 value = 0; value < BLOCK_COUNT; value += 1)
+                {
+                    BUSTER_TEST(arguments, values[value].definition_point == (value ? machine_point_make(row_map[value * 2u], value & 1u ? MACHINE_POINT_AFTER : MACHINE_POINT_BEFORE) : MACHINE_POINT_INVALID));
+                    BUSTER_TEST(arguments, values[value].typed_origin == value + 11u);
+                }
+                for (u32 row = 0; row <= ROW_COUNT; row += 1)
+                {
+                    BUSTER_TEST(arguments, marks[row].row == (row < ROW_COUNT ? row_map[row] : row_cursor) && marks[row].instruction == row + 17u);
+                }
+                BUSTER_TEST(arguments, marks[ROW_COUNT + 1].row == row_cursor);
+                u64 before_repeat = arena->position;
+                MachineInstruction* published = function.instructions;
+                BUSTER_TEST(arguments, machine_function_split_parameter_edges(arena, &function));
+                BUSTER_TEST(arguments, arena->position == before_repeat && function.instructions == published);
+            }
+            arena_set_position(arena, start);
+        }
+        // Large chain/fanout controls use direct formulas, not a quadratic oracle.
+        u32 sizes[] = {2, 257, 4097};
+        for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(sizes); size += 1)
+        {
+            for (u32 chain = 0; chain < 2; chain += 1)
+            {
+                u32 block_count = sizes[size];
+                u32 edge_count = block_count - 1u;
+                MachineFunction function = {.target = target, .block_count = block_count, .instruction_count = block_count,
+                    .edge_count = edge_count, .switch_case_count = chain ? 0 : edge_count};
+                function.blocks = arena_allocate(arena, MachineBlock, block_count);
+                function.instructions = arena_allocate(arena, MachineInstruction, block_count);
+                function.edges = arena_allocate(arena, MachineEdge, edge_count);
+                function.switch_cases = arena_allocate(arena, MachineSwitchCase, function.switch_case_count);
+                for (u32 block = 0; block < block_count; block += 1)
+                {
+                    function.blocks[block] = (MachineBlock){.first_instruction = block, .instruction_count = 1};
+                    function.instructions[block] = (MachineInstruction){.opcode = (u16)(architecture ? MACHINE_A64_RET : MACHINE_X64_RET)};
+                }
+                if (chain)
+                {
+                    for (u32 block = 0; block < edge_count; block += 1)
+                    {
+                        MachineRef next = machine_ref_make(MACHINE_REF_BLOCK, block + 1u);
+                        function.instructions[block] = (MachineInstruction){.opcode = (u16)(architecture ? MACHINE_A64_BCC : MACHINE_X64_JCC), .operands = {next, next}};
+                    }
+                }
+                else
+                {
+                    function.instructions[0] = (MachineInstruction){.opcode = target->switch_opcode, .flags = (u16)edge_count,
+                        .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, 0), machine_ref_make(MACHINE_REF_BLOCK, 1)}};
+                }
+                for (u32 edge = 0; edge < edge_count; edge += 1)
+                {
+                    function.edges[edge] = (MachineEdge){.source_block = chain ? edge_count - edge - 1u : 0, .destination_block = edge_count - edge, .copy_count = 1};
+                    if (!chain) { function.switch_cases[edge] = (MachineSwitchCase){.value = edge, .target_block = edge + 1u}; }
+                }
+                u64 before_split = arena->position;
+                if (edge_count > 1)
+                {
+                    MachineEdge saved = function.edges[0];
+                    MachineInstruction* original = function.instructions;
+                    for (u32 endpoint = 0; endpoint < 2; endpoint += 1)
+                    {
+                        function.edges[0] = saved;
+                        if (endpoint == 0) { function.edges[0].source_block = block_count; }
+                        else { function.edges[0].destination_block = block_count; }
+                        BUSTER_TEST(arguments, !machine_function_split_parameter_edges(arena, &function));
+                        BUSTER_TEST(arguments, function.instructions == original && function.block_count == block_count);
+                        arena_set_position(arena, before_split);
+                    }
+                    function.edges[0] = saved;
+                }
+                bool valid = machine_function_split_parameter_edges(arena, &function);
+                BUSTER_TEST(arguments, valid);
+                BUSTER_TEST(arguments, function.block_count == block_count + edge_count && function.edge_count == 2u * edge_count);
+                u64 expected_bytes = (u64)(block_count + edge_count) * (sizeof(MachineInstruction) + sizeof(MachineBlock)) +
+                                     (u64)edge_count * 2u * sizeof(MachineEdge) + (u64)function.switch_case_count * sizeof(MachineSwitchCase);
+                BUSTER_TEST(arguments, arena->position - before_split >= expected_bytes && arena->position - before_split <= expected_bytes + 64u);
+                if (valid && function.block_count == block_count + edge_count && function.edge_count == 2u * edge_count)
+                {
+                    BUSTER_TEST(arguments, machine_ref_payload(function.instructions[0].operands[1]) == (chain ? 1u : edge_count));
+                    for (u32 edge = 0; edge < edge_count; edge += 1)
+                    {
+                        u32 source = chain ? 2u * (edge_count - edge - 1u) : 0;
+                        u32 split = chain ? source + 1u : edge + 1u;
+                        u32 destination = chain ? 2u * (edge_count - edge) : 2u * edge_count - edge;
+                        BUSTER_TEST(arguments, function.edges[edge * 2u].source_block == source && function.edges[edge * 2u].destination_block == split && function.edges[edge * 2u].copy_count == 0);
+                        BUSTER_TEST(arguments, function.edges[edge * 2u + 1u].source_block == split && function.edges[edge * 2u + 1u].destination_block == destination && function.edges[edge * 2u + 1u].copy_count == 1);
+                        BUSTER_TEST(arguments, function.instructions[split].opcode == target->unconditional_branch_opcode && machine_ref_payload(function.instructions[split].operands[0]) == destination);
+                        if (!chain)
+                        {
+                            BUSTER_TEST(arguments, function.switch_cases[edge].target_block == edge_count - edge && function.switch_cases[edge].value == edge);
+                        }
+                    }
+                }
+                arena_set_position(arena, start);
+            }
+        }
+    }
+    return result;
+}
+
 // The linear oracle is intentionally test-only. Raw edge order need not agree
 // with block order, and duplicate pairs must keep the first edge, not the last.
 BUSTER_GLOBAL_LOCAL u32 machine_test_first_edge(MachineFunction const* function, u32 source, u32 destination)
@@ -2181,6 +2482,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     UnitTestResult pointer_result = machine_test_pointer_block_parameters(arguments);
     result.test_count += pointer_result.test_count;
     result.succeeded_test_count += pointer_result.succeeded_test_count;
+    UnitTestResult parameter_split_result = machine_test_parameter_edge_split(arguments);
+    result.test_count += parameter_split_result.test_count;
+    result.succeeded_test_count += parameter_split_result.succeeded_test_count;
     UnitTestResult edge_index_result = machine_test_fast_edge_index(arguments);
     result.test_count += edge_index_result.test_count;
     result.succeeded_test_count += edge_index_result.succeeded_test_count;

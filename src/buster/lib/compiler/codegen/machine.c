@@ -2,8 +2,9 @@
 // machine path (machine.h documents the representation). This file owns
 // what every backend shares — MachineRef/MachinePoint encoding, the
 // MachineOpcodeInfo metadata accessors, the chunked instruction stream and
-// function builder, frequency-class stamping, the verifier, the baseline
-// MIR_STACK placement, and replay serialization — and then includes the
+// function builder, parameter-edge normalization
+// (machine_function_split_parameter_edges), frequency-class stamping, the
+// verifier, baseline MIR_STACK placement, and replay serialization — and then includes the
 // implementation files at the bottom in the backend-implementation-file
 // pattern (selection facts, the x86-64 and AArch64 selectors/encoders,
 // scheduling, and the FAST/QUALITY register allocators), so none of those
@@ -2031,20 +2032,12 @@ BUSTER_GLOBAL_LOCAL bool machine_function_parameter_edge_needs_split(MachineFunc
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL u32 machine_function_parameter_edge_target(MachineFunction const* function, u32 const* old_to_new,
-                                                                u32 const* split_blocks, u32 source_block, u32 destination_block)
+// The map is local to one source block. Duplicate destinations select the first
+// raw edge that actually splits, not an earlier edge with no copies.
+BUSTER_GLOBAL_LOCAL u32 machine_function_parameter_edge_target(u32 const* old_to_new, u32 const* split_targets, u32 destination_block)
 {
-    u32 result = old_to_new[destination_block];
-    for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
-    {
-        MachineEdge const* edge = function->edges + edge_index;
-        if (edge->source_block == source_block && edge->destination_block == destination_block && split_blocks[edge_index] != UINT32_MAX)
-        {
-            result = split_blocks[edge_index];
-            break;
-        }
-    }
-    return result;
+    u32 split = split_targets[destination_block];
+    return split != UINT32_MAX ? split : old_to_new[destination_block];
 }
 
 bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function)
@@ -2073,23 +2066,8 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
             u32 new_block_count = (u32)new_block_count64;
             u32 new_instruction_count = (u32)new_instruction_count64;
             u32 new_edge_count = (u32)new_edge_count64;
-            u32* old_to_new = arena_allocate(arena, u32, old_block_count);
-            u32* split_blocks = arena_allocate(arena, u32, old_edge_count);
-            u32* old_to_new_instruction = arena_allocate(arena, u32, old_instruction_count);
-            memset(split_blocks, 0xff, sizeof(*split_blocks) * old_edge_count);
-            u32 block_cursor = 0;
-            for (u32 old_block = 0; old_block < old_block_count; old_block += 1)
-            {
-                old_to_new[old_block] = block_cursor++;
-                for (u32 edge_index = 0; edge_index < old_edge_count; edge_index += 1)
-                {
-                    MachineEdge const* edge = function->edges + edge_index;
-                    if (edge->source_block == old_block && machine_function_parameter_edge_needs_split(function, edge))
-                    {
-                        split_blocks[edge_index] = block_cursor++;
-                    }
-                }
-            }
+            // Publishable storage precedes all temporary maps. No index or
+            // remapping array survives this pass, including on a failed remap.
             MachineInstruction* instructions = arena_allocate(arena, MachineInstruction, new_instruction_count);
             MachineBlock* blocks = arena_allocate(arena, MachineBlock, new_block_count);
             MachineEdge* edges = arena_allocate(arena, MachineEdge, new_edge_count);
@@ -2098,10 +2076,70 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
             {
                 memcpy(switch_cases, function->switch_cases, sizeof(*switch_cases) * function->switch_case_count);
             }
-            u32 instruction_cursor = 0;
-            block_cursor = 0;
+            u64 scratch_position = arena->position;
+            u32* old_to_new = arena_allocate(arena, u32, old_block_count);
+            u32* split_blocks = arena_allocate(arena, u32, old_edge_count);
+            u32* old_to_new_instruction = arena_allocate(arena, u32, old_instruction_count);
+            u32* outgoing_offsets = arena_allocate(arena, u32, (u64)old_block_count + 1u);
+            u32* outgoing_edges = arena_allocate(arena, u32, old_edge_count);
+            // First CSR scatter cursors, then destination -> first split block.
+            u32* split_targets = arena_allocate(arena, u32, old_block_count);
+            memset(split_blocks, 0xff, sizeof(*split_blocks) * old_edge_count);
+            memset(outgoing_offsets, 0, sizeof(*outgoing_offsets) * ((u64)old_block_count + 1u));
+            for (u32 edge_index = 0; edge_index < old_edge_count; edge_index += 1)
+            {
+                MachineEdge const* edge = function->edges + edge_index;
+                if (edge->source_block >= old_block_count || edge->destination_block >= old_block_count)
+                {
+                    result = false;
+                }
+                else
+                {
+                    outgoing_offsets[edge->source_block + 1u] += 1;
+                }
+            }
             for (u32 old_block = 0; old_block < old_block_count; old_block += 1)
             {
+                outgoing_offsets[old_block + 1u] += outgoing_offsets[old_block];
+            }
+            memcpy(split_targets, outgoing_offsets, sizeof(*split_targets) * old_block_count);
+            for (u32 edge_index = 0; result && edge_index < old_edge_count; edge_index += 1)
+            {
+                u32 source = function->edges[edge_index].source_block;
+                outgoing_edges[split_targets[source]++] = edge_index;
+            }
+            memset(split_targets, 0xff, sizeof(*split_targets) * old_block_count);
+            u32 block_cursor = 0;
+            for (u32 old_block = 0; result && old_block < old_block_count; old_block += 1)
+            {
+                old_to_new[old_block] = block_cursor++;
+                for (u32 cursor = outgoing_offsets[old_block]; cursor < outgoing_offsets[old_block + 1u]; cursor += 1)
+                {
+                    u32 edge_index = outgoing_edges[cursor];
+                    if (machine_function_parameter_edge_needs_split(function, function->edges + edge_index))
+                    {
+                        split_blocks[edge_index] = block_cursor++;
+                    }
+                }
+            }
+            u32 instruction_cursor = 0;
+            block_cursor = 0;
+            for (u32 old_block = 0; result && old_block < old_block_count; old_block += 1)
+            {
+                u32 first_edge = outgoing_offsets[old_block];
+                u32 limit_edge = outgoing_offsets[old_block + 1u];
+                // Stable CSR order preserves first-split duplicate semantics.
+                // These updates are ordered: repeated destinations are not
+                // independent scatter lanes. A non-splitting edge never wins.
+                for (u32 cursor = first_edge; cursor < limit_edge; cursor += 1)
+                {
+                    u32 edge_index = outgoing_edges[cursor];
+                    u32 destination = function->edges[edge_index].destination_block;
+                    if (split_blocks[edge_index] != UINT32_MAX && split_targets[destination] == UINT32_MAX)
+                    {
+                        split_targets[destination] = split_blocks[edge_index];
+                    }
+                }
                 MachineBlock const* old = function->blocks + old_block;
                 MachineBlock* copied = blocks + block_cursor++;
                 *copied = *old;
@@ -2129,7 +2167,7 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                             }
                             instruction.operands[slot] = machine_ref_make(
                                 MACHINE_REF_BLOCK,
-                                machine_function_parameter_edge_target(function, old_to_new, split_blocks, old_block, destination));
+                                machine_function_parameter_edge_target(old_to_new, split_targets, destination));
                         }
                     }
                     if (!result)
@@ -2162,15 +2200,19 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                                 break;
                             }
                             switch_case->target_block = machine_function_parameter_edge_target(
-                                function, old_to_new, split_blocks, old_block, switch_case->target_block);
+                                old_to_new, split_targets, switch_case->target_block);
                         }
                     }
                     instructions[instruction_cursor++] = instruction;
                 }
-                for (u32 edge_index = 0; result && edge_index < old_edge_count; edge_index += 1)
+                for (u32 cursor = first_edge; result && cursor < limit_edge; cursor += 1)
                 {
+                    u32 edge_index = outgoing_edges[cursor];
                     MachineEdge const* edge = function->edges + edge_index;
-                    if (edge->source_block == old_block && split_blocks[edge_index] != UINT32_MAX)
+                    // Sparse reset visits actual outgoing entries, including
+                    // duplicates, instead of clearing every block per source.
+                    split_targets[edge->destination_block] = UINT32_MAX;
+                    if (split_blocks[edge_index] != UINT32_MAX)
                     {
                         blocks[block_cursor++] = (MachineBlock){.first_instruction = instruction_cursor, .instruction_count = 1};
                         instructions[instruction_cursor++] = (MachineInstruction){
@@ -2251,6 +2293,7 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                 function->edge_count = new_edge_count;
                 function->switch_cases = switch_cases;
             }
+            arena_set_position(arena, scratch_position);
         }
     }
     return result;

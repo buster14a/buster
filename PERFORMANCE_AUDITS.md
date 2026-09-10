@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-10T010529Z`](docs/performance-audits/2026-09-10T010529Z.md) — Z11 parameter-edge splitter: stable scratch-only outgoing indexes (#296)
 - [`2026-09-09T163649Z`](docs/performance-audits/2026-09-09T163649Z.md) — Repair ELF AArch64 variadic register cursors and HFA overflow (#36)
 - [`2026-09-09T151546Z`](docs/performance-audits/2026-09-09T151546Z.md) — Lower Windows x86-64 variadic calls through MIR (#36)
 - [`2026-09-09T141413Z`](docs/performance-audits/2026-09-09T141413Z.md) — Select fixed CPU queries in MIR without self-host fallback (#36)
