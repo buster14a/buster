@@ -3072,7 +3072,7 @@ BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
     S8_INITIALIZER("__restrict"),    S8_INITIALIZER("__restrict__"), S8_INITIALIZER("__signed"),    S8_INITIALIZER("__signed__"),
     S8_INITIALIZER("__asm"),         S8_INITIALIZER("__asm__"),   S8_INITIALIZER("__alignof"),      S8_INITIALIZER("__alignof__"),
     S8_INITIALIZER("_Nonnull"),      S8_INITIALIZER("_Nullable"), S8_INITIALIZER("_Null_unspecified"), S8_INITIALIZER("__int128"),
-    S8_INITIALIZER("__complex"),     S8_INITIALIZER("__complex__"),
+    S8_INITIALIZER("__complex"),     S8_INITIALIZER("__complex__"), S8_INITIALIZER("__builtin_va_list"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_declaration_keyword_spellings) < C_DECLARATION_KEYWORD_SLOT_COUNT / 2);
@@ -6496,18 +6496,45 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
     }
     else if (string_equal(name, S8("stdarg.h")))
     {
+        // The Windows CRT may declare its public pointer-sized va_list in
+        // vadefs.h before stdarg.h is included. Keep that public representation
+        // and bridge its storage to the builtin cursor explicitly; typedef
+        // spelling must not confer builtin type identity.
         source = S8("#ifndef __STDARG_H\n"
                     "#define __STDARG_H\n"
                     "typedef __builtin_va_list __gnuc_va_list;\n"
+                    "#if defined(_WIN32)\n"
+                    "#ifndef _VA_LIST_DEFINED\n"
+                    "#define _VA_LIST_DEFINED\n"
+                    "typedef char *va_list;\n"
+                    "#endif\n"
+                    "#define __BUSTER_STDARG_PLACE(arguments) (*((__builtin_va_list *)&(arguments)))\n"
+                    "#else\n"
                     "typedef __gnuc_va_list va_list;\n"
+                    "#define __BUSTER_STDARG_PLACE(arguments) (arguments)\n"
+                    "#endif\n"
                     "#define va_start(arguments, last) "
-                    "__builtin_va_start(arguments, last)\n"
+                    "__builtin_va_start(__BUSTER_STDARG_PLACE(arguments), last)\n"
                     "#define va_end(arguments) "
-                    "__builtin_va_end(arguments)\n"
+                    "__builtin_va_end(__BUSTER_STDARG_PLACE(arguments))\n"
                     "#define va_arg(arguments, type) "
-                    "__builtin_va_arg(arguments, type)\n"
+                    "__builtin_va_arg(__BUSTER_STDARG_PLACE(arguments), type)\n"
                     "#define va_copy(destination, source) "
-                    "__builtin_va_copy(destination, source)\n"
+                    "__builtin_va_copy(__BUSTER_STDARG_PLACE(destination), __BUSTER_STDARG_PLACE(source))\n"
+                    "#if defined(_WIN32)\n"
+                    "#ifdef __crt_va_start\n"
+                    "#undef __crt_va_start\n"
+                    "#define __crt_va_start(arguments, last) va_start(arguments, last)\n"
+                    "#endif\n"
+                    "#ifdef __crt_va_arg\n"
+                    "#undef __crt_va_arg\n"
+                    "#define __crt_va_arg(arguments, type) va_arg(arguments, type)\n"
+                    "#endif\n"
+                    "#ifdef __crt_va_end\n"
+                    "#undef __crt_va_end\n"
+                    "#define __crt_va_end(arguments) va_end(arguments)\n"
+                    "#endif\n"
+                    "#endif\n"
                     "#endif\n");
     }
     else if (string_equal(name, S8("stddef.h")))
@@ -7398,7 +7425,6 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__CHAR8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__CHAR16_TYPE__", S8("unsigned short"));
     C_DEFINE_TYPE_MACRO("__CHAR32_TYPE__", S8("unsigned int"));
-    C_DEFINE_TYPE_MACRO("__builtin_va_list", S8("void *"));
     C_DEFINE_TYPE_MACRO("__SIZEOF_POINTER__", string_format(arena, S8("{u32}"), layout.pointer.size));
     C_DEFINE_TYPE_MACRO("__POINTER_WIDTH__", string_format(arena, S8("{u32}"), layout.pointer.bit_width));
     C_DEFINE_TYPE_MACRO("__SIZE_WIDTH__", string_format(arena, S8("{u32}"), layout.pointer.bit_width));
@@ -7417,8 +7443,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         // for the 128-bit integer keyword rather than declaring them in a
         // header, and code that uses 128-bit arithmetic reaches for them
         // directly (SQLite's decimal and integer-overflow helpers do).  The
-        // keyword itself is already understood, so name it the same way
-        // __builtin_va_list is named above.
+        // keyword itself is already understood, so retain it in the expansion.
         C_DEFINE_TYPE_MACRO("__int128_t", S8("__int128"));
         C_DEFINE_TYPE_MACRO("__uint128_t", S8("unsigned __int128"));
     }

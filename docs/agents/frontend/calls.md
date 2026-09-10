@@ -128,3 +128,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   objects/archives where the selected action permits them. Unknown languages,
   retired module-root options, and unsupported source extensions must fail
   explicitly rather than being forwarded or guessed.
+
+- `__builtin_va_list` is a builtin type spelling, never a `void *` macro.
+  Both primitive-type scanners preserve its identity, and arbitrary typedef
+  aliases share the unqualified `C_TYPE_VA_LIST`. Typedef names alone do not
+  confer that identity. `va_start` and `va_copy` lower their destination through
+  the existing place continuation and retain it while evaluating the copy
+  source. List members, subscripts and dereferences follow the same address
+  conversion as named objects; every operand is evaluated once. Invalid list
+  types and nonmodifiable destinations fail in the frontend before VA IR is
+  published. This does not change target layouts or the public AArch64 list ABI.
+
+  The builtin Windows `stdarg.h` honors the CRT's `_VA_LIST_DEFINED` guard.
+  Its public `va_list` has the CRT pointer representation; macros address that
+  storage through an explicit builtin-list place cast. This supports either
+  header order without turning ordinary pointer typedefs into builtin types.
+  The modern CRT `__crt_va_*` macros use the same bridge when already defined.
