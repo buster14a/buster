@@ -1,0 +1,27 @@
+name: Z15 transfer checksum diagnosis
+on:
+  push:
+    branches: [astra/z15-encoding-transport-20260910]
+    paths: [.github/workflows/z15-payload-read.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Package transfer bytes without hidden-path filtering
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/z15-transfer"
+          cp .github/z15-product.patch.b64 "$RUNNER_TEMP/z15-transfer/payload.b64"
+          cp .github/workflows/z15-encoding-transport.yml "$RUNNER_TEMP/z15-transfer/publish.yml"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: z15-transfer-diagnosis
+          path: ${{ runner.temp }}/z15-transfer/
+          if-no-files-found: error
+          retention-days: 1
