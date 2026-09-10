@@ -1,0 +1,57 @@
+name: A09 pinned source and coordination snapshot
+
+on:
+  push:
+    branches: [astra/a09-memory-transport-20260909]
+    paths: [.github/workflows/astra-a09-source.yml]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: a09-source-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          fetch-depth: 100
+          persist-credentials: false
+      - name: Export exact source and paginated coordination records
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/a09-snapshot"
+          mkdir -p "$out"
+          test "$(git rev-parse HEAD)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          git archive --format=tar.gz --output="$out/source.tar.gz" HEAD
+          git rev-parse HEAD > "$out/source.sha"
+          git log -40 --format=fuller > "$out/recent-commits.txt"
+          git log -30 --format=fuller -- src/buster/lib/compiler/frontend/c/c_parse.c > "$out/parser-commits.txt"
+          repo=repos/buster14a/buster
+          gh api --paginate --slurp "$repo/issues?state=all&per_page=100&sort=created&direction=asc" > "$out/issues-pages.json"
+          gh api --paginate --slurp "$repo/pulls?state=all&per_page=100&sort=created&direction=asc" > "$out/pulls-pages.json"
+          gh api --paginate --slurp "$repo/issues/comments?per_page=100" > "$out/issue-comments-pages.json"
+          gh api --paginate --slurp "$repo/pulls/comments?per_page=100" > "$out/review-comments-pages.json"
+          for number in 244 357 362; do
+            gh api --paginate --slurp "$repo/pulls/$number/reviews?per_page=100" > "$out/pr-$number-reviews.json"
+            gh api -H 'Accept: application/vnd.github.diff' "$repo/pulls/$number" > "$out/pr-$number.diff"
+          done
+          printf 'Pinned source and paginated repository metadata only; no compilation or tests executed.\n' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: a09-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/a09-snapshot/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
