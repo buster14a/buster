@@ -8203,6 +8203,49 @@ bool buster_x86_metadata_form_standalone_sae_capable(BusterX86MetadataForm form)
     return buster_x86_metadata_form_standalone_sae_capable_impl(form);
 }
 
+// Source tuple size and encoded element type are distinct for conversions.
+// The query-side gate below proves a two-operand EVEX vector load; each
+// candidate then supplies its own tuple and element widths. Preserve explicit
+// qualifiers, including m64 half tuples, as constraints. An invalid qualifier
+// is reported only after shape binding, so another vector-length candidate
+// still gets its own independent check. Direct physical queries are unchanged.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_source_tuple_query(
+    BusterX86MetadataForm form, BusterX86MetadataPatternSemantics const* pattern,
+    BusterX86MetadataPhysicalQuery query, BusterX86MetadataPhysicalOperand* candidate_operands,
+    bool* source_width_valid)
+{
+    bool projected = false;
+    if (form.encoder_family == BUSTER_X86_METADATA_ENCODER_EVEX && !form.apx_flags && !form.amx_flags &&
+        pattern->has_tuple_control && (pattern->tuple_control_kind == BUSTER_X86_METADATA_TUPLE_FULL ||
+                                       pattern->tuple_control_kind == BUSTER_X86_METADATA_TUPLE_HALF))
+    {
+        u16 tuple_width = buster_x86_metadata_emit_tuple_memory_width(*pattern);
+        u16 element_width = 0;
+        u32 memory_count = 0;
+        bool schema_valid = true;
+        for (u32 index = 0; index < form.operand_count && schema_valid; index += 1)
+        {
+            BusterX86MetadataOperand metadata = {0};
+            schema_valid = buster_x86_metadata_operand(form.id, index, &metadata);
+            if (schema_valid && metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY)
+            {
+                memory_count += 1;
+                element_width = buster_x86_metadata_single_scalar_width(metadata.physical_width_flags);
+            }
+        }
+        if (schema_valid && memory_count == 1 && element_width && tuple_width)
+        {
+            bool broadcast = (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) != 0;
+            u16 source_width = query.operands[1].memory.source_width;
+            *source_width_valid = !source_width || source_width == (broadcast ? element_width : tuple_width);
+            memcpy(candidate_operands, query.operands, query.operand_count * sizeof(*candidate_operands));
+            candidate_operands[1].width = element_width;
+            projected = true;
+        }
+    }
+    return projected;
+}
+
 // AT&T memory operands intentionally omit the Intel-style scalar qualifier
 // for EVEX broadcasts.  Infer that qualifier only while evaluating the
 // candidate form whose schema supplies one unambiguous scalar width.  The
@@ -8920,6 +8963,15 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                                         (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) != 0 &&
                                         !query.attributes.sae &&
                                         query.attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NONE;
+            bool source_tuple_query_possible = query.source_semantics && query.operand_count == 2 &&
+                query.address_size == 64 && query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                query.operands[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                (query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM ||
+                 query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM ||
+                 query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM) &&
+                (query.attributes.has_mask_register || query.attributes.zeroing ||
+                 (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) ||
+                 query.operands[0].reg.width == 512 || query.operands[0].reg.index >= 16);
             for (u32 position = 0; position < candidates.count; position += 1)
             {
                 u32 form_id = 0;
@@ -8983,7 +9035,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                     if (buster_x86_metadata_emit_parse_pattern(form, &pattern) && pattern.has_modep5 && pattern.modep5_value != 0)
                         continue;
                 }
-                // Deliberately uninitialized: both writers below memcpy the query's
+                // Deliberately uninitialized: the writers below memcpy the query's
                 // whole operand prefix before touching it, and `candidate_query`
                 // adopts the array only when one of them ran.  Zero-initializing all
                 // sixteen entries is 2,304 bytes of dead stores per candidate.
@@ -8991,6 +9043,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 BusterX86MetadataPhysicalQuery candidate_query = query;
                 u16 block_memory_width = 0;
                 bool inferred_memory_width = false;
+                bool source_width_valid = true;
                 bool aggregate_memory_topology =
                     topology_query_possible &&
                     buster_x86_metadata_aggregate_memory_source_topology_internal(form, query, &block_memory_width);
@@ -9013,8 +9066,13 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 }
                 else
                 {
-                    inferred_memory_width = typed_query_possible &&
-                                            buster_x86_metadata_prepare_typed_memory_query(form, query, candidate_operands);
+                    inferred_memory_width = source_tuple_query_possible &&
+                        buster_x86_metadata_prepare_source_tuple_query(form, filter_view, query, candidate_operands, &source_width_valid);
+                    if (!inferred_memory_width)
+                    {
+                        inferred_memory_width = typed_query_possible &&
+                            buster_x86_metadata_prepare_typed_memory_query(form, query, candidate_operands);
+                    }
                 }
                 if (inferred_memory_width)
                     candidate_query.operands = candidate_operands;
@@ -9050,8 +9108,18 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 BusterX86MetadataEncodeScratch scratch = {0};
                 u32 diagnostic_operand = 0;
                 s64 diagnostic_value = 0;
-                BusterX86MetadataEncodeStatus status = buster_x86_metadata_emit_form_to_scratch(candidate_query, form, &scratch, &diagnostic_operand,
-                                                                                                   &diagnostic_value, 0, 0, false, false);
+                BusterX86MetadataEncodeStatus status;
+                if (source_width_valid)
+                {
+                    status = buster_x86_metadata_emit_form_to_scratch(candidate_query, form, &scratch, &diagnostic_operand,
+                                                                      &diagnostic_value, 0, 0, false, false);
+                }
+                else
+                {
+                    status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+                    diagnostic_operand = 1;
+                    diagnostic_value = query.operands[1].memory.source_width;
+                }
                 if (status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
                 {
                     BusterX86MetadataString required_feature = {0};

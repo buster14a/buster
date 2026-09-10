@@ -2434,26 +2434,28 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestAr
                                 wrong_count, features, BUSTER_ARRAY_LENGTH(features), untouched, sizeof(untouched), 0, 0);
                             valid &= rejected.status == BUSTER_X86_METADATA_ENCODE_DECORATOR && rejected.byte_count == 0 && untouched[0] == 0xa5;
                         }
-                        bool check_source = test_case.memory_divisor == 1 || broadcast;
-                        AssemblySyntax syntax = ASSEMBLY_SYNTAX_ATT;
-                        if (test_case.memory_divisor == 2 && broadcast)
+                        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source,
+                            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+                        bool source_valid = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                            x86_64_metadata_test_bytes_equal(encoded.bytes.pointer, (u32)encoded.bytes.length, expected, expected_count);
+                        if (test_case.memory_divisor == 2)
                         {
-                            // The existing AT&T conversion adapter infers the destination's
-                            // scalar width. Exercise this tuple through the supported explicit
-                            // Intel m32 spelling; full tuples also cover unqualified AT&T input.
                             String8 const intel_addresses[] = {S8("rax"), S8("rbp"), S8("rax+rcx*4")};
-                            source = string_format(arguments->arena, S8("{S8} {S8}0{{k1}}, dword ptr [{S8}{S8}{s64}]{S8}\n"),
-                                                   test_case.mnemonic, registers[size_index], intel_addresses[address_index],
-                                                   displacement < 0 ? S8("-") : S8("+"), displacement < 0 ? -displacement : displacement, suffix);
-                            syntax = ASSEMBLY_SYNTAX_INTEL;
-                        }
-                        bool source_valid = true;
-                        if (check_source)
-                        {
-                            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source,
-                                (AssemblyEncodeOptions){.target = target, .syntax = syntax});
-                            source_valid = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
-                                x86_64_metadata_test_bytes_equal(encoded.bytes.pointer, (u32)encoded.bytes.length, expected, expected_count);
+                            String8 const tuple_qualifiers[] = {S8("qword"), S8("xmmword"), S8("ymmword")};
+                            String8 qualifier = broadcast ? S8("dword") : tuple_qualifiers[size_index];
+                            String8 intel_source = string_format(arguments->arena,
+                                S8("{S8} {S8}0{{k1}}, {S8} ptr [{S8}{S8}{s64}]{S8}\n"),
+                                test_case.mnemonic, registers[size_index], qualifier, intel_addresses[address_index],
+                                displacement < 0 ? S8("-") : S8("+"), displacement < 0 ? -displacement : displacement, suffix);
+                            AssemblyEncodeResult intel_encoded = assembly_encode(arguments->arena, intel_source,
+                                (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+                            bool intel_valid = intel_encoded.diagnostic_count == 0 && intel_encoded.relocation_count == 0 &&
+                                x86_64_metadata_test_bytes_equal(intel_encoded.bytes.pointer, (u32)intel_encoded.bytes.length, expected, expected_count);
+                            if (!intel_valid)
+                            {
+                                arguments->show(arguments, S8("EVEX_TUPLE source: {S8}"), intel_source);
+                            }
+                            source_valid &= intel_valid;
                         }
                         if (!direct_valid || !exact_valid || !source_valid)
                         {
@@ -2466,6 +2468,68 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestAr
             }
         }
     }
+    // Narrowing reads a full source tuple even when the destination is smaller.
+    // The VL=256 destination is also XMM: its explicit m256 qualifier must
+    // select that form rather than depend on candidate enumeration order.
+    typedef struct X86NarrowTupleCase X86NarrowTupleCase;
+    struct X86NarrowTupleCase
+    {
+        String8 source;
+        AssemblySyntax syntax;
+        u8 evex;
+        u8 displacement;
+    };
+    X86NarrowTupleCase const narrowing[] = {
+        {S8("vcvtpd2ps 64(%rax), %xmm0{%k1}\n"), ASSEMBLY_SYNTAX_ATT, 0x09, 0x04},
+        {S8("vcvtpd2ps xmm0{k1}, xmmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, 0x09, 0x04},
+        {S8("vcvtpd2ps xmm0{k1}, ymmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, 0x29, 0x02},
+        {S8("vcvtpd2ps 64(%rax), %ymm0{%k1}\n"), ASSEMBLY_SYNTAX_ATT, 0x49, 0x01},
+        {S8("vcvtpd2ps ymm0{k1}, zmmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, 0x49, 0x01},
+        {S8("vcvtpd2ps 64(%rax){1to2}, %xmm0{%k1}\n"), ASSEMBLY_SYNTAX_ATT, 0x19, 0x08},
+        {S8("vcvtpd2ps 64(%rax){1to4}, %xmm0{%k1}\n"), ASSEMBLY_SYNTAX_ATT, 0x39, 0x08},
+        {S8("vcvtpd2ps 64(%rax){1to8}, %ymm0{%k1}\n"), ASSEMBLY_SYNTAX_ATT, 0x59, 0x08},
+        {S8("vcvtpd2ps ymm0{k1}, qword ptr [rax+64]{1to8}\n"), ASSEMBLY_SYNTAX_INTEL, 0x59, 0x08},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(narrowing); index += 1)
+    {
+        X86NarrowTupleCase test_case = narrowing[index];
+        u8 expected[] = {0x62, 0xf1, 0xfd, test_case.evex, 0x5a, 0x40, test_case.displacement};
+        for (u32 repeat = 0; repeat < 2; repeat += 1)
+        {
+            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, test_case.source,
+                (AssemblyEncodeOptions){.target = target, .syntax = test_case.syntax});
+            bool case_valid = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                x86_64_metadata_test_bytes_equal(encoded.bytes.pointer, (u32)encoded.bytes.length, expected, sizeof(expected));
+            if (!case_valid)
+            {
+                arguments->show(arguments, S8("EVEX_NARROW source: {S8}"), test_case.source);
+            }
+            valid &= case_valid;
+        }
+    }
+    String8 const invalid_widths[] = {
+        S8("vcvtps2pd xmm0{k1}, dword ptr [rax]\n"),
+        S8("vcvtps2pd ymm0{k1}, qword ptr [rax]\n"),
+        S8("vcvtps2pd ymm0{k1}, ymmword ptr [rax]\n"),
+        S8("vcvtps2pd zmm0{k1}, zmmword ptr [rax]\n"),
+        S8("vcvtps2pd zmm0{k1}, qword ptr [rax]{1to8}\n"),
+        S8("vcvtps2pd xmm0{k1}, dword ptr [rax]{1to4}\n"),
+        S8("vcvtpd2ps xmm0{k1}, qword ptr [rax]\n"),
+        S8("vcvtpd2ps ymm0{k1}, ymmword ptr [rax]\n"),
+        S8("vcvtpd2ps ymm0{k1}, dword ptr [rax]{1to8}\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_widths); index += 1)
+    {
+        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, invalid_widths[index],
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        bool case_valid = rejected.diagnostic_count != 0 && rejected.bytes.length == 0 && rejected.relocation_count == 0;
+        if (!case_valid)
+        {
+            arguments->show(arguments, S8("EVEX_INVALID_WIDTH accepted: {S8}"), invalid_widths[index]);
+        }
+        valid &= case_valid;
+    }
+
     return valid;
 }
 
