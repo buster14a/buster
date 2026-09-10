@@ -505,9 +505,11 @@ jobs:
           NATIVE_RESULT: ${{ needs.native.result }}
           MOBILE_RESULT: ${{ needs.mobile.result }}
         run: |
-          printf '| Shards | Result |\n| --- | --- |\n| All six desktop lanes | %s |\n| All three mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT" >> "$GITHUB_STEP_SUMMARY"
-          printf '| All four native lanes | %s |\n' "$NATIVE_RESULT" >> "$GITHUB_STEP_SUMMARY"
-          printf '| Workflow lint | %s |\n' "$LINT_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          {
+            printf '| Shards | Result |\n| --- | --- |\n| All six desktop lanes | %s |\n| All three mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
+            printf '| All four native lanes | %s |\n' "$NATIVE_RESULT"
+            printf '| Workflow lint | %s |\n' "$LINT_RESULT"
+          } >> "$GITHUB_STEP_SUMMARY"
           if [[ "$LINT_RESULT" != success || "$DESKTOP_RESULT" != success || "$NATIVE_RESULT" != success || "$MOBILE_RESULT" != success ]]; then
             echo '::error::All desktop, native and mobile shards must succeed; failure, cancellation and skips do not pass.'
             exit 1
