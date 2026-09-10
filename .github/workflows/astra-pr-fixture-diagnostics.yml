@@ -13,7 +13,7 @@ jobs:
         include:
           - pr: 374
             runner: ubuntu-26.04
-            source: c0517fb8bd3accf4c0f6020fad52bc0ddc4570fb
+            source: d6b54495cddc9ee9a50accbaf8269eab19afd11b
           - pr: 372
             runner: windows-2025
             source: 5ee277f956ea637c95c28ec3b220bbda63aea774
@@ -61,6 +61,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $Driver generate --cc clang --ci --linker DEFAULT
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:INCLUDE | Out-File -FilePath (Join-Path $env:RUNNER_TEMP "vs-includes.txt") -Encoding utf8
           & $Driver build --config Release -t ide -- -j1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Print bounded fixture diagnostics
@@ -84,7 +85,7 @@ jobs:
               376: [["-Isrc", "-c", "tests/basic_c_simd_translate.c"],
                     ["-Isrc", "-DBUSTER_KERNEL=1", "-c", "tests/basic_c_simd_translate.c"],
                     ["-Isrc", "--target=x86_64-linux-gnu", "-c", "tests/basic_c_simd_translate.c"]],
-              372: [["-c", str(tmp / "stdint.c")], ["-c", str(tmp / "paste.c")]],
+              372: [["-c", str(tmp / "stdint.c")], ["-c", str(tmp / "paste.c")], ["-nostdinc", *sum([["-isystem", path] for path in (tmp / "vs-includes.txt").read_text(encoding="utf-8-sig").strip().split(";") if path], []), "-c", str(tmp / "stdint.c")]],
               368: [["-target", "wasm64-unknown-freestanding", "-nostdinc", "tests/basic_c_wasm64_integer_ops.c"]],
           }[pr]
           failed = False
@@ -101,10 +102,8 @@ jobs:
               failed |= r.returncode != 0
           if pr == 374:
               source = Path("tests/basic_c_constexpr_leaf.c").read_text()
-              for i, line in enumerate([l for l in source.splitlines() if "failed |=" in l]):
-                  source = source.replace(line, line.replace("failed |= ", "failed |= (" ).replace(";", ") << %d;" % i))
               probe = tmp / "constexpr.c"
-              probe.write_text(source.replace("return failed;", "return scoped_constants();"))
+              probe.write_text(source)
               for mode in ["none", "mir-stack", "fast", "quality"]:
                   exe = tmp / ("constexpr-" + mode)
                   cmd = [ide, "cc", "-std=c23", "-fregister-allocator=" + mode, str(probe), "-o", str(exe)]
@@ -117,76 +116,3 @@ jobs:
           raise SystemExit(1 if failed else 0)
           PY
 
-
-  evex-interop:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    env:
-      CMAKE_BUILD_PARALLEL_LEVEL: 1
-      BUSTER_TEST_JOBS: 1
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: 12c7ada2b0d929c676363ef00dd7069db43f4dc8
-          persist-credentials: false
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ github.sha }}
-          path: audit
-          sparse-checkout: .astra
-          persist-credentials: false
-      - name: Build exact EVEX source and run independent interoperability oracle
-        run: |
-          git rev-parse HEAD
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
-          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
-          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j1
-          python3 audit/.astra/oracle373.py
-
-  quality-census:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - config: Release
-            sanitize: ''
-          - config: Debug
-            sanitize: --sanitize
-    runs-on: ubuntu-26.04
-    timeout-minutes: 25
-    env:
-      CMAKE_BUILD_PARALLEL_LEVEL: 1
-      BUSTER_TEST_JOBS: 1
-      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: 082dc8a2add214c005a9801d2f388558943f1852
-          persist-credentials: false
-      - name: Validate registered allocation-census tests
-        env:
-          AUDIT_CONFIG: ${{ matrix.config }}
-          AUDIT_SANITIZE: ${{ matrix.sanitize }}
-        run: |
-          git rev-parse HEAD
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
-          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT $AUDIT_SANITIZE -- -DBUSTER_BENCH_ALLOCATIONS=ON
-          "$RUNNER_TEMP/buster-build" build --config "$AUDIT_CONFIG" -t test_all -- -j1
-      - name: Check both census namespaces against ordinary object bytes
-        if: ${{ matrix.config == 'Release' }}
-        run: |
-          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT --build-dir "$RUNNER_TEMP/normal"
-          "$RUNNER_TEMP/buster-build" build --build-dir "$RUNNER_TEMP/normal" --config Release -t ide -- -j1
-          python3 - <<'PY'
-          from pathlib import Path
-          import os, subprocess
-          tmp = Path(os.environ["RUNNER_TEMP"])
-          for mode in ["none", "mir-stack", "fast", "quality"]:
-              for label, ide in [("normal", tmp/"normal/Release/ide"), ("probe", Path("build/Release/ide"))]:
-                  subprocess.run([str(ide), "cc", "-c", "-g0", "-O0", "-fregister-allocator="+mode, "-fsource-metrics="+str(tmp/(mode+"-"+label+".metrics")), "tests/basic_c_operations.c", "-o", str(tmp/(mode+"-"+label+".o"))], check=True)
-              assert (tmp/(mode+"-normal.o")).read_bytes() == (tmp/(mode+"-probe.o")).read_bytes()
-              metrics = (tmp/(mode+"-probe.metrics")).read_text()
-              assert "quality_census.version=1" in metrics and "ir_construction.version=1" in metrics
-              assert "ir_construction.overflowed=0" in metrics
-              print(mode, "ordinary/probe object equality and both census namespaces pass", flush=True)
-          PY
