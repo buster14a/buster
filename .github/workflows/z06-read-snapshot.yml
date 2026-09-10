@@ -1,0 +1,40 @@
+name: Z06 read-only investigation snapshot
+
+on:
+  push:
+    branches: [astra/z06-20260910-transport]
+    paths:
+      - .github/workflows/z06-read-snapshot.yml
+      - .github/z06_read_snapshot.py
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: z06-read-snapshot-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Export pinned source and paginated public coordination evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SNAPSHOT_OUT: ${{ runner.temp }}/z06-read-snapshot
+        run: python3 .github/z06_read_snapshot.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() }}
+        with:
+          name: z06-read-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/z06-read-snapshot
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
