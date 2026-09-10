@@ -43,7 +43,8 @@ jobs:
           pr = int(os.environ["AUDIT_PR"])
           ide = os.path.abspath("build/Release/ide")
           cases = {
-              370: [["-c", "-Itests/differential", "tests/differential/qualified_aggregate.c"]],
+              370: [["-c", "-fverify-codegen", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", "-Itests/differential", "tests/differential/qualified_aggregate.c"],
+                    ["-c", "-fverify-codegen", "-fno-frontend-ssa", "-fno-canonical-local-promotion", "-fno-target-local-promotion", "-Itests/differential", "tests/differential/qualified_aggregate.c"]],
               374: [["-std=c23", "-c", "tests/basic_c_constexpr_leaf.c"]],
               376: [["-Isrc", "-c", "tests/basic_c_simd_translate.c"],
                     ["-Isrc", "-DBUSTER_KERNEL=1", "-c", "tests/basic_c_simd_translate.c"],
