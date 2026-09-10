@@ -2669,7 +2669,7 @@ BUSTER_GLOBAL_LOCAL void x64_emit_store_float_bits(X64Builder* builder, X64Regis
 
 
 
-BUSTER_GLOBAL_LOCAL bool x64_emit_windows_stack_allocate(CodegenBuffer* buffer, u32 size, CodegenFunctionDescriptor* descriptor, u32 action_capacity,
+bool codegen_x64_emit_windows_stack_allocate(CodegenBuffer* buffer, u32 size, CodegenFunctionDescriptor* descriptor, u32 action_capacity,
                                                           u32 function_offset)
 {
     if (!buffer || size <= CODEGEN_X64_STACK_PROBE_PAGE)
@@ -4722,7 +4722,7 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_adjust_stack_described(CodegenBuf
         (void)codegen_canonical_x64_metadata_emit(buffer, S8("ADD"), operands, BUSTER_ARRAY_LENGTH(operands));
         return;
     }
-    if (!windows || !x64_emit_windows_stack_allocate(buffer, byte_count, descriptor, action_capacity, descriptor ? descriptor->code_offset : 0))
+    if (!windows || !codegen_x64_emit_windows_stack_allocate(buffer, byte_count, descriptor, action_capacity, descriptor ? descriptor->code_offset : 0))
     {
         while (byte_count)
         {
@@ -9709,8 +9709,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         u32 machine_unwind_capacity = 0;
                         if (target.cpu_arch == CPU_ARCH_X86_64)
                         {
-                            machine_unwind_capacity = 9u + placement.frame_size / CODEGEN_X64_STACK_PROBE_PAGE +
-                                                      (placement.frame_size % CODEGEN_X64_STACK_PROBE_PAGE != 0);
+                            machine_unwind_capacity = encoded.frame_allocation_offset ? 10u :
+                                9u + placement.frame_size / CODEGEN_X64_STACK_PROBE_PAGE +
+                                (placement.frame_size % CODEGEN_X64_STACK_PROBE_PAGE != 0);
                         }
                         else
                         {
@@ -9883,6 +9884,17 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         // exact end offset of its subtract; the probe bytes
                         // follow each action.
                         u32 machine_frame_remaining = placement.frame_size;
+                        if (encoded.frame_allocation_offset)
+                        {
+                            // The shared Windows probe leaves RSP unchanged
+                            // until its final SUB. Consume the actual encoded
+                            // offset instead of reconstructing loop lengths.
+                            machine_prologue_cursor = encoded.frame_allocation_offset;
+                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, placement.frame_size) &&
+                                                   machine_unwind_valid;
+                            machine_frame_remaining = 0;
+                        }
                         while (machine_frame_remaining)
                         {
                             u32 machine_frame_chunk = BUSTER_MIN(machine_frame_remaining, CODEGEN_X64_STACK_PROBE_PAGE);

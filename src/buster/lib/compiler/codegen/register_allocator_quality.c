@@ -442,7 +442,9 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             foreclosed |= caller_saved_allocatable;
         }
         bool legacy_constrained = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) != 0;
-        bool constrained = legacy_constrained || info->fixed_register_mask || info->early_clobber_mask || info->fixed_register_set;
+        // A tie alone does not force scratch registers: unlike the shared
+        // constraint predicate, this predicate controls the pin budget.
+        bool constrained = legacy_constrained || info->fixed_register_mask || info->early_clobber_mask;
         u32 register_operand_slots = 0;
         for (u32 slot = 0; slot < info->operand_count; slot += 1)
         {

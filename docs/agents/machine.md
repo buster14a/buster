@@ -135,6 +135,15 @@
   sixteen bytes remain outside this subset. Cross-compiler tests cover odd
   sizes, larger aggregates, hidden returns, indirect calls, large anonymous
   arguments, mixed floating parameters and caller-value preservation.
+- Windows/UEFI x86-64 MIR frames larger than one page reuse
+  `codegen_x64_emit_windows_stack_allocate`, the direct emitter's bounded
+  R10/R11 probe loop. RSP stays unchanged until the final allocation, so a
+  large frame requires one allocation unwind action and a bounded prologue.
+  `MachineEncodeResult.frame_allocation_offset` supplies its actual byte offset
+  to unwind construction without widening the result on 64-bit hosts.
+  Keep object creation and native Windows execution of
+  `tests/basic_c_win64_large_frame.c` covered in every allocator mode; page
+  probing must preserve all incoming argument registers and private copies.
 - ELF AArch64 variadic definitions capture X0-X7 and Q0-Q7 into a 192-byte
   save area before argument capture. Named parameters consume their ABI's
   independent integer and floating-point register files. The existing private

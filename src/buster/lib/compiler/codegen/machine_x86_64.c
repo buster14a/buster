@@ -7,6 +7,7 @@
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
@@ -11590,8 +11591,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     // account for that bounded prefix even for small functions with a large
     // spill frame; otherwise a valid placement can truncate before its first
     // machine row.
-    u64 frame_probe_chunks = ((u64)placement->frame_size + 4095u) / 4096u;
-    capacity64 += frame_probe_chunks * 24u;
+    bool windows_frame_probe = function->target && function->target->saves_precede_frame_pointer &&
+                               placement->frame_size > CODEGEN_X64_STACK_PROBE_PAGE;
+    u64 frame_probe_chunks = ((u64)placement->frame_size + CODEGEN_X64_STACK_PROBE_PAGE - 1u) / CODEGEN_X64_STACK_PROBE_PAGE;
+    capacity64 += windows_frame_probe ? 64u : frame_probe_chunks * 24u;
     // Vector spill and reload edits are ten bytes (EVEX plus disp32).
     capacity64 += (u64)placement->edit_count * 12;
     if (capacity64 > UINT32_MAX)
@@ -11652,9 +11655,21 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     // page per subtract with a probe touch after each, so a frame larger
     // than the guard page cannot skip it.
     u32 frame_remaining = placement->frame_size;
+    if (windows_frame_probe)
+    {
+        // Reuse the direct emitter's bounded Win64 probe. Its R10/R11
+        // scratch does not disturb incoming integer, float or hidden-result
+        // arguments, and RSP changes only at the final allocation instruction.
+        CodegenBuffer probe = {.bytes = encoder.bytes, .count = encoder.count, .capacity = encoder.capacity};
+        (void)codegen_x64_emit_windows_stack_allocate(&probe, frame_remaining, 0, 0, 0);
+        encoder.count = (u32)probe.count;
+        encoder.overflow |= probe.error != CODEGEN_ERROR_NONE;
+        result.frame_allocation_offset = encoder.count;
+        frame_remaining = 0;
+    }
     while (frame_remaining)
     {
-        u32 frame_chunk = BUSTER_MIN(frame_remaining, 4096u);
+        u32 frame_chunk = BUSTER_MIN(frame_remaining, CODEGEN_X64_STACK_PROBE_PAGE);
         bool frame_chunk_byte = frame_chunk <= INT8_MAX;
         if (machine_x64_emit_fixed_template(&encoder,
                                             frame_chunk_byte ? MACHINE_X64_FIXED_TEMPLATE_SUB_RSP_IMM8 : MACHINE_X64_FIXED_TEMPLATE_SUB_RSP_IMM32,
