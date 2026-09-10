@@ -174,6 +174,13 @@
   format**. Both x86 emitters use `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
   `CODEGEN_F64_SIGNED64_LIMIT_BITS`; the source width does not change which
   integer bit the final bias restores.
+- AArch64 symbol addresses on macOS/iOS use ADRP/ADD with Mach-O PAGE21 and
+  PAGEOFF12 relocations in every allocator. The selector records the page
+  reference beside the call target, and the encoder publishes both instruction
+  sites. Absolute inline pointer literals in executable text are rejected by
+  Apple's linker. Direct calls retain CALL26; ELF/PE address and TLS forms
+  retain their existing target contracts. The qualified-aggregate differential
+  corpus checks native Apple linking and execution across allocator modes.
 - `-fPIC` is a code model, not an accepted flag. It reaches code generation as
   `CodegenModuleOptions.position_independent`, and generation resolves it for
   the target: x86-64 ELF, where the relocations it changes are the ones `ld`

@@ -13,7 +13,7 @@ From the repository root, build `ide` normally and use a **new** output director
 ./build.sh test_differential --ide build/Release/ide --cc clang --out build/differential-release --sanitize-oracle
 ```
 
-The defaults use eleven permanent cases and four generated cases, seed 1, a
+The defaults use thirteen permanent cases and four generated cases, seed 1, a
 10-second deadline per child, and at most 64 reduction trials for the first
 runtime mismatch in each case. A reference compiler must be available; its
 absence is a failure, not a skip. `--cc` accepts a Clang/GCC-style executable,
@@ -120,6 +120,13 @@ isolate the callee's local copy, whose alignment fix already landed in
 [PR #282](https://github.com/buster14a/buster/pull/282). No alignment fix is
 part of this harness change.
 
+The qualified-aggregate fixture cross-links top-level const/volatile parameter
+objects with an independent host caller and callees. It checks private-copy
+semantics, compatible function pointers selected across a loop join, expression
+function-pointer types, large by-value objects, and nested pointer qualifiers.
+The minimal source regression and frontend invariant test independently retain
+strict fixed-argument type matching and volatile accesses (GitHub #361).
+
 The unsigned-switch fixture cross-links 32- and 64-bit switch functions with a
 Clang-built caller. It checks high-bit case constants, default edges, and values
 that share their low 32 bits but must remain distinct in a 64-bit comparison.
@@ -223,3 +230,8 @@ artifacts are retained with the desktop logs (generated executables and objects
 are excluded). Forgejo's dedicated Linux and macOS lanes also run the native
 matrix. This wiring does not establish that an unavailable native runner ran;
 report the actual submitted-revision checks separately.
+
+The `va-list-places` case keeps all lists within one translation unit and checks
+builtin aliases, member/index/dereference destinations, independent copies and
+side-effect counts against Clang at O0/O2. It exercises frontend list handling
+without exchanging public list objects across the AArch64 compiler boundary.

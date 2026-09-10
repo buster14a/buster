@@ -1391,6 +1391,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
 }
 
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_APPLE && !BUSTER_ANDROID && !BUSTER_IOS
+#if BUSTER_LINK_LIBC && !BUSTER_SANITIZE
+BUSTER_GLOBAL_LOCAL SliceString8 compiler_driver_test_host_command(Arena* arena, SliceString8 options)
+{
+    String8* items = arena_allocate(arena, String8, options.length + 2);
+    u64 count = 0;
+    items[count++] = S8(BUSTER_HOST_C_COMPILER);
+    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length)
+    {
+        items[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+    }
+    memcpy(items + count, options.pointer, options.length * sizeof(*items));
+    return (SliceString8){.pointer = items, .length = count + options.length};
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_alignment(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2302,6 +2317,33 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_STRING_TEST(arguments, invocation.sysroot, S8("/sdk"));
     BUSTER_STRING_TEST(arguments, invocation.source_metrics_path, S8("metrics.txt"));
     BUSTER_TEST(arguments, invocation.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST);
+
+    String8 bitfield_options[][2] = {
+        {S8("-fsysv-unnamed-bitfields=integer"), S8("-fsysv-unnamed-bitfields=padding")},
+        {S8("-fsysv-unnamed-bitfields=padding"), S8("-fsysv-unnamed-bitfields=integer")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bitfield_options); index += 1)
+    {
+        String8 flags[] = {S8("-target"), S8("x86_64-unknown-linux"), bitfield_options[index][0], bitfield_options[index][1], S8("source.c")};
+        CompilerDriverInvocation selected = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(flags));
+        BUSTER_TEST(arguments, selected.error == COMPILER_DRIVER_ERROR_NONE && selected.sysv_bitfield_abi_explicit);
+        BUSTER_TEST(arguments, selected.sysv_unnamed_bitfields_integer == (index == 1));
+    }
+    String8 invalid_bitfield_options[] = {S8("-fsysv-unnamed-bitfields="), S8("-fsysv-unnamed-bitfields=gcc")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_bitfield_options); index += 1)
+    {
+        String8 flags[] = {invalid_bitfield_options[index], S8("source.c")};
+        CompilerDriverInvocation rejected = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(flags));
+        BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_ARGUMENT && rejected.diagnostic.length);
+    }
+    String8 unsupported_bitfield_targets[] = {S8("aarch64-unknown-linux"), S8("x86_64-unknown-windows"), S8("wasm64-unknown-freestanding")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unsupported_bitfield_targets); index += 1)
+    {
+        String8 flags[] = {S8("-target"), unsupported_bitfield_targets[index], S8("-fsysv-unnamed-bitfields=integer"), S8("source.c")};
+        CompilerDriverInvocation rejected = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(flags));
+        BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_ARGUMENT && rejected.diagnostic.length);
+    }
+    BUSTER_TEST(arguments, !invocation.sysv_unnamed_bitfields_integer && !invocation.sysv_bitfield_abi_explicit);
 
     String8 direct_ssa_command_lines[][4] = {
         {S8("source.c"), S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fno-target-local-promotion")},
@@ -9130,8 +9172,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         // active against every host.
         u64 host_clang_major = 0;
         {
-            String8 host_version_command[] = {S8(BUSTER_HOST_C_COMPILER), S8("--version")};
-            ProcessSpawnResult host_version_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_version_command), (SliceString8){0}, (SliceString8){0},
+            String8 host_version_command[] = {S8("--version")};
+            ProcessSpawnResult host_version_spawn = os_process_spawn(compiler_driver_test_host_command(packed_pair_arena,
+                                                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(host_version_command)), (SliceString8){0}, (SliceString8){0},
                                                                      (ProcessSpawnOptions){
                                                                          .capture = ((u64)1 << STANDARD_STREAM_OUTPUT),
                                                                          .use_process_environment = true,
@@ -9159,58 +9202,123 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             }
         }
         String8 host_clang_major_define = string_format(packed_pair_arena, S8("-DPACKED_LAYOUT_HOST_CLANG_MAJOR={u64}"), host_clang_major);
+        // Measure this ABI boundary independently: newer Clang can select
+        // either behavior, so its major version alone cannot choose it.
+        String8 host_abi_probe = buster_test_temporary_path(packed_pair_arena, S8("buster-host-bitfield-abi"), S8(""));
+        String8 host_abi_compile[] = {S8("-O0"), S8("-fno-lto"), S8("tests/host_sysv_unnamed_bitfields.c"), S8("-o"), host_abi_probe};
+        ProcessSpawnOptions host_abi_options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = true,
+        };
+        ProcessSpawnResult host_abi_build = os_process_spawn(compiler_driver_test_host_command(packed_pair_arena,
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(host_abi_compile)), (SliceString8){0}, (SliceString8){0}, host_abi_options);
+        bool host_abi_known = false;
+        String8 host_abi_flag = {0};
+        String8 host_abi_define = {0};
+        if (host_abi_build.handle && os_process_wait_deadline(packed_pair_arena, host_abi_build, 30000000).result == PROCESS_RESULT_SUCCESS)
+        {
+            ProcessSpawnResult host_abi_run = os_process_spawn((SliceString8){.pointer = &host_abi_probe, .length = 1},
+                (SliceString8){0}, (SliceString8){0}, host_abi_options);
+            if (host_abi_run.handle)
+            {
+                ProcessWaitResult observed = os_process_wait_deadline(packed_pair_arena, host_abi_run, 3000000);
+                String8 output = {.pointer = (char8*)observed.streams[STANDARD_STREAM_OUTPUT].pointer,
+                                  .length = observed.streams[STANDARD_STREAM_OUTPUT].length};
+                bool integer = string_equal(output, S8("integer\n"));
+                host_abi_known = observed.result == PROCESS_RESULT_SUCCESS && (integer || string_equal(output, S8("padding\n")));
+                host_abi_flag = integer ? S8("-fsysv-unnamed-bitfields=integer") : S8("-fsysv-unnamed-bitfields=padding");
+                host_abi_define = integer ? S8("-DPACKED_LAYOUT_SYSV_INTEGER_BITFIELDS=1") : S8("-DPACKED_LAYOUT_SYSV_INTEGER_BITFIELDS=0");
+            }
+        }
+        BUSTER_TEST(arguments, host_abi_known);
+        if (!host_abi_known)
+        {
+            arguments->show(arguments, S8("configured host unnamed-bitfield ABI probe failed; no convention was assumed\n"));
+        }
         String8 host_packed_callee_path = buster_test_temporary_path(packed_pair_arena, S8("buster-c-packed-host-callee"), S8(".o"));
         String8 host_packed_caller_path = buster_test_temporary_path(packed_pair_arena, S8("buster-c-packed-host-caller"), S8(".o"));
+        String8 host_bitfield_caller_path = buster_test_temporary_path(packed_pair_arena, S8("buster-bitfield-host-caller"), S8(".o"));
         // -fno-pic and -g0 for the same reasons the x87 pair above uses them:
         // this linker has no GOT model, and clang's newer debug sections sit
         // outside the object reader's model.
         String8 host_packed_callee_command[] = {
-            S8(BUSTER_HOST_C_COMPILER), host_clang_major_define, S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_packed_callee_path,
+            host_clang_major_define, host_abi_define, S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_packed_callee_path,
             S8("tests/basic_c_packed_layout_callee.c"),
         };
         String8 host_packed_caller_command[] = {
-            S8(BUSTER_HOST_C_COMPILER), host_clang_major_define, S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_packed_caller_path,
+            host_clang_major_define, host_abi_define, S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_packed_caller_path,
             S8("tests/basic_c_packed_layout_caller.c"),
+        };
+        String8 host_bitfield_caller_command[] = {
+            host_clang_major_define, host_abi_define, S8("-fno-pic"), S8("-g0"), S8("-c"), S8("-o"), host_bitfield_caller_path,
+            S8("tests/basic_c_sysv_bitfield_policy.c"),
         };
         ProcessSpawnOptions host_packed_options = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
             .use_process_environment = true,
         };
-        ProcessSpawnResult host_packed_callee_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_packed_callee_command), (SliceString8){0},
+        ProcessSpawnResult host_packed_callee_spawn = os_process_spawn(compiler_driver_test_host_command(packed_pair_arena,
+                                                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(host_packed_callee_command)), (SliceString8){0},
                                                                        (SliceString8){0}, host_packed_options);
-        ProcessSpawnResult host_packed_caller_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_packed_caller_command), (SliceString8){0},
+        ProcessSpawnResult host_packed_caller_spawn = os_process_spawn(compiler_driver_test_host_command(packed_pair_arena,
+                                                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(host_packed_caller_command)), (SliceString8){0},
                                                                        (SliceString8){0}, host_packed_options);
         bool host_packed_callee_compiled =
             host_packed_callee_spawn.handle && os_process_wait_sync(packed_pair_arena, host_packed_callee_spawn).result == PROCESS_RESULT_SUCCESS;
         bool host_packed_caller_compiled =
             host_packed_caller_spawn.handle && os_process_wait_sync(packed_pair_arena, host_packed_caller_spawn).result == PROCESS_RESULT_SUCCESS;
+        ProcessSpawnResult host_bitfield_caller_spawn = os_process_spawn(compiler_driver_test_host_command(packed_pair_arena,
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(host_bitfield_caller_command)), (SliceString8){0}, (SliceString8){0}, host_packed_options);
+        bool host_bitfield_caller_compiled =
+            host_bitfield_caller_spawn.handle && os_process_wait_sync(packed_pair_arena, host_bitfield_caller_spawn).result == PROCESS_RESULT_SUCCESS;
         BUSTER_TEST(arguments, host_packed_callee_compiled && host_packed_caller_compiled);
-        for (u64 allocator_index = 0;
-             host_packed_callee_compiled && host_packed_caller_compiled && allocator_index < BUSTER_ARRAY_LENGTH(c_long_double_allocators);
-             allocator_index += 1)
+        BUSTER_TEST(arguments, host_bitfield_caller_compiled);
+        for (u64 configuration = 0;
+             host_abi_known && host_packed_callee_compiled && host_packed_caller_compiled && host_bitfield_caller_compiled &&
+                 configuration < BUSTER_ARRAY_LENGTH(c_long_double_allocators) * 2;
+             configuration += 1)
         {
+            u64 allocator_index = configuration / 2;
+            String8 frontend_flag = configuration % 2 ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa");
             String8 buster_packed_callee_path = buster_test_temporary_path(packed_pair_arena, S8("buster-c-packed-callee"), S8(".o"));
             String8 buster_packed_caller_path = buster_test_temporary_path(packed_pair_arena, S8("buster-c-packed-caller"), S8(".o"));
+            String8 buster_bitfield_caller_path = buster_test_temporary_path(packed_pair_arena, S8("buster-bitfield-caller"), S8(".o"));
             String8 buster_packed_callee_command[] = {
-                c_long_double_allocators[allocator_index], host_clang_major_define, S8("-c"), S8("-o"), buster_packed_callee_path,
+                c_long_double_allocators[allocator_index], frontend_flag, host_abi_flag, host_clang_major_define, host_abi_define,
+                S8("-fverify-codegen"), S8("-c"), S8("-o"), buster_packed_callee_path,
                 S8("tests/basic_c_packed_layout_callee.c"),
             };
             String8 buster_packed_caller_command[] = {
-                c_long_double_allocators[allocator_index], host_clang_major_define, S8("-c"), S8("-o"), buster_packed_caller_path,
+                c_long_double_allocators[allocator_index], frontend_flag, host_abi_flag, host_clang_major_define, host_abi_define,
+                S8("-c"), S8("-o"), buster_packed_caller_path,
                 S8("tests/basic_c_packed_layout_caller.c"),
+            };
+            // The new policy has strict independent coverage. The original
+            // caller also exercises unrelated underaligned volatile aggregate
+            // construction; retain that entire pre-existing mixed test.
+            String8 buster_bitfield_caller_command[] = {
+                c_long_double_allocators[allocator_index], frontend_flag, host_abi_flag, host_clang_major_define, host_abi_define,
+                S8("-fverify-codegen"), S8("-c"), S8("-o"), buster_bitfield_caller_path,
+                S8("tests/basic_c_sysv_bitfield_policy.c"),
             };
             CompilerDriverResult buster_packed_callee = compiler_driver_execute_invocation(
                 packed_pair_arena, compiler_driver_parse_arguments(packed_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_packed_callee_command)));
             CompilerDriverResult buster_packed_caller = compiler_driver_execute_invocation(
                 packed_pair_arena, compiler_driver_parse_arguments(packed_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_packed_caller_command)));
+            CompilerDriverResult buster_bitfield_caller = compiler_driver_execute_invocation(
+                packed_pair_arena, compiler_driver_parse_arguments(packed_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_bitfield_caller_command)));
             BUSTER_TEST(arguments, buster_packed_callee.error == COMPILER_DRIVER_ERROR_NONE && buster_packed_caller.error == COMPILER_DRIVER_ERROR_NONE);
-            if (buster_packed_callee.error != COMPILER_DRIVER_ERROR_NONE || buster_packed_caller.error != COMPILER_DRIVER_ERROR_NONE)
+            BUSTER_TEST(arguments, buster_bitfield_caller.error == COMPILER_DRIVER_ERROR_NONE);
+            if (buster_packed_callee.error != COMPILER_DRIVER_ERROR_NONE || buster_packed_caller.error != COMPILER_DRIVER_ERROR_NONE ||
+                buster_bitfield_caller.error != COMPILER_DRIVER_ERROR_NONE)
             {
                 continue;
             }
-            String8 packed_object_pairs[2][2] = {
+            String8 packed_object_pairs[4][2] = {
                 {buster_packed_caller_path, host_packed_callee_path},
                 {host_packed_caller_path, buster_packed_callee_path},
+                {buster_bitfield_caller_path, host_packed_callee_path},
+                {host_bitfield_caller_path, buster_packed_callee_path},
             };
             for (u64 direction = 0; direction < BUSTER_ARRAY_LENGTH(packed_object_pairs); direction += 1)
             {
@@ -9291,6 +9399,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // and empty macro arguments across the same allocator matrix.
     String8 c_quickjs_regression_paths[] = {
         S8("tests/basic_c_aggregate_attribute.c"),
+        S8("tests/basic_c_integer_literals.c"),
         S8("tests/basic_c_local_enum_declarator.c"),
         S8("tests/basic_c_attribute_short_spelling.c"),
         S8("tests/basic_c_atomic_specifier.c"),
@@ -9308,6 +9417,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     };
     String8 c_quickjs_regression_names[] = {
         S8("buster-c-aggregate-attribute"),
+        S8("buster-c-integer-literals"),
         S8("buster-c-local-enum-declarator"),
         S8("buster-c-attribute-short-spelling"),
         S8("buster-c-atomic-specifier"),
@@ -9819,7 +9929,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_null_pointer_offsetof.c"),
         S8("tests/basic_c_created_nan_sign.c"),
         S8("tests/basic_c_static_compound_literal.c"),
+        S8("tests/basic_c_va_list_places.c"),
         S8("tests/basic_c_typeof_conditional.c"),
+        S8("tests/basic_c_qualified_aggregate_call.c"),
+        S8("tests/basic_c_qualified_compound.c"),
     };
     String8 c_musl_shape_fixture_names[] = {
         S8("buster-c-reversed-subscript"),
@@ -9834,7 +9947,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-null-pointer-offsetof"),
         S8("buster-c-created-nan-sign"),
         S8("buster-c-static-compound-literal"),
+        S8("buster-c-va-list-places"),
         S8("buster-c-typeof-conditional"),
+        S8("buster-c-qualified-aggregate-call"),
+        S8("buster-c-qualified-compound"),
     };
     String8 c_musl_shape_allocator_flags[] = {
         S8("-fregister-allocator=none"),
