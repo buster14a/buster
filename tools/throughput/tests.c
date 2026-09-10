@@ -97,6 +97,20 @@ static int test_child(int argc, char** argv)
     {
         for (int i = 3; i < argc; ++i) printf("%s\n", argv[i]);
     }
+#ifndef _WIN32
+    else if (!strcmp(argv[2], "summary-write-failure") && argc == 4)
+    {
+        /* Restrict only this child so buffered report writes fail at close. */
+        struct rlimit limit;
+        int ok = getrlimit(RLIMIT_FSIZE, &limit) == 0;
+        if (ok)
+        {
+            limit.rlim_cur = 1;
+            ok = signal(SIGXFSZ, SIG_IGN) != SIG_ERR && setrlimit(RLIMIT_FSIZE, &limit) == 0;
+        }
+        result = ok && tp_compare(argv[3]) == 2 ? 0 : 1;
+    }
+#endif
     else result = 2;
     return result;
 }
@@ -125,7 +139,13 @@ static void test_processes(char const* executable, char const* root)
     CHECK(quoted.exit_code == 0);
     FILE* file = fopen(log, "rb");
     char text[256] = {0};
-    if (file) { (void)fread(text, 1, sizeof(text) - 1, file); fclose(file); }
+    CHECK(file != NULL);
+    if (file)
+    {
+        size_t count = fread(text, 1, sizeof(text) - 1, file);
+        CHECK(count < sizeof(text) - 1 && !ferror(file));
+        CHECK(fclose(file) == 0);
+    }
 #ifdef _WIN32
     CHECK(!strcmp(text, "space in argument\r\nquote\"inside\r\ntail\\\r\n\r\n"));
 #else
@@ -239,6 +259,63 @@ static void test_inputs(char const* root)
     CHECK(!tp_read_metrics(metrics, &row));
 }
 
+static void test_summaries(char const* root, int expected)
+{
+    for (unsigned i = 0; i < sizeof(tp_summary_names) / sizeof(tp_summary_names[0]); ++i)
+    {
+        char path[TP_PATH_CAP];
+        int path_ok = tp_path(path, root, tp_summary_names[i]);
+        CHECK(path_ok);
+        if (path_ok)
+        {
+            struct stat info;
+            int status = stat(path, &info);
+            CHECK(expected ? status == 0 : status != 0 && errno == ENOENT);
+        }
+    }
+}
+
+static void test_summary_cleanup(char const* root)
+{
+    char directory[TP_PATH_CAP], blocked[TP_PATH_CAP], path[TP_PATH_CAP];
+    int paths_ok = tp_path(directory, root, "blocked-summary") && tp_mkdirs(directory) &&
+                   tp_path(blocked, directory, tp_summary_names[0]) && tp_mkdirs(blocked);
+    CHECK(paths_ok);
+    if (paths_ok)
+    {
+        /* A nonempty directory fails removal on every supported host. The
+         * other report must still be removed, and unrelated contents retained. */
+        CHECK(test_text(blocked, "keep.txt", "not a derived report\n"));
+        CHECK(test_text(directory, tp_summary_names[1], "stale verdict\n"));
+        CHECK(!tp_remove_summaries(directory));
+        struct stat info;
+        CHECK(tp_path(path, directory, tp_summary_names[1]));
+        CHECK(stat(path, &info) != 0 && errno == ENOENT);
+        CHECK(tp_path(path, blocked, "keep.txt"));
+        CHECK(stat(path, &info) == 0);
+        CHECK(tp_compare(directory) == 2);
+    }
+}
+
+#ifndef _WIN32
+static void test_summary_write_failure(char const* executable, char const* root)
+{
+    char directory[TP_PATH_CAP], log[TP_PATH_CAP];
+    int paths_ok = tp_path(directory, root, "summary-write-failure") &&
+                   tp_path(log, root, "summary-write-failure.log");
+    CHECK(paths_ok);
+    if (paths_ok)
+    {
+        CHECK(test_bundle(directory, 0));
+        char* command[] = {(char*)executable, "child", "summary-write-failure", directory, NULL};
+        TpProcess child = tp_process(command, NULL, log, 3, -1, 0);
+        CHECK(child.exit_code == 0 && !child.timed_out && !child.launch_error);
+        test_summaries(directory, 0);
+        CHECK(tp_completion(directory, 1, 20, 1, 0));
+    }
+}
+#endif
+
 int main(int argc, char** argv)
 {
     int result = 2;
@@ -254,12 +331,30 @@ int main(int argc, char** argv)
             char path[TP_PATH_CAP], leaf[128];
             snprintf(leaf, sizeof(leaf), "scenario-%u", scenario);
             CHECK(tp_path(path, root, leaf) && test_bundle(path, scenario));
+            CHECK(test_text(path, tp_summary_names[0], "stale verdict\n"));
+            CHECK(test_text(path, tp_summary_names[1], "stale verdict\n"));
             CHECK(tp_compare(path) == expected[scenario]);
+            test_summaries(path, expected[scenario] != 2);
+            /* Comparison/cleanup must preserve all six sealed evidence files. */
+            CHECK(tp_completion(path, 1, 20, 1, 0));
         }
         char tampered[TP_PATH_CAP];
         CHECK(tp_path(tampered, root, "scenario-0"));
+        test_summaries(tampered, 1);
         CHECK(test_text(tampered, "metadata.json", "changed\n"));
         CHECK(tp_compare(tampered) == 2);
+        test_summaries(tampered, 0);
+        CHECK(test_bundle(tampered, 0));
+        CHECK(tp_compare(tampered) == 0);
+        char completion[TP_PATH_CAP];
+        CHECK(tp_path(completion, tampered, "complete.txt"));
+        CHECK(remove(completion) == 0);
+        CHECK(tp_compare(tampered) == 2);
+        test_summaries(tampered, 0);
+        test_summary_cleanup(root);
+#ifndef _WIN32
+        test_summary_write_failure(executable, root);
+#endif
         test_compile_options();
         test_sample_paths(executable, root);
         test_inputs(root);
