@@ -12,6 +12,7 @@
 // unencodable request returns false rather than a wrong word.
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
 #include <buster/lib/string.h>
 #include <buster/lib/os.h>
 
@@ -2108,6 +2109,40 @@ bool a64_pc_relative_patch(A64Opcode opcode, u32 word, s64 displacement, u32* pa
     A64OpcodeDescriptor const* descriptor = a64_opcode_descriptor(opcode);
     return descriptor && descriptor->pc_relative_operand != A64_NO_PC_RELATIVE_OPERAND && (word & descriptor->fixed_mask) == descriptor->fixed_value &&
            a64_pc_relative_insert((A64PCRelativeLayout)descriptor->pc_relative_layout, word, displacement, patched);
+}
+
+// ADD W and ADD X share the generated operand layout. Normalize only the
+// register-width bit for the exact ADDXri decoder/encoder, then restore it;
+// the generated plan remains the sole owner of the immediate bit segments.
+bool a64_add_lo12_read(u32 word, u32* immediate)
+{
+    u32 fields[3] = {0};
+    bool valid = immediate && a64_generated_raw_decode(BUSTER_AARCH64_GENERATED_FORM_ADDXRI, word | UINT32_C(0x80000000), fields, 3) &&
+                 fields[2] <= A64_IMM12_MAX;
+    if (valid)
+    {
+        *immediate = fields[2];
+    }
+    return valid;
+}
+
+bool a64_add_lo12_patch(u32 word, u32 immediate, u32* patched)
+{
+    u32 fields[3] = {0};
+    bool valid = patched && immediate <= A64_IMM12_MAX &&
+                 a64_generated_raw_decode(BUSTER_AARCH64_GENERATED_FORM_ADDXRI, word | UINT32_C(0x80000000), fields, 3) &&
+                 fields[2] <= A64_IMM12_MAX;
+    u32 result = 0;
+    if (valid)
+    {
+        fields[2] = immediate;
+        valid = a64_generated_production_raw_encode(BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, 3, &result);
+    }
+    if (valid)
+    {
+        *patched = (result & ~UINT32_C(0x80000000)) | (word & UINT32_C(0x80000000));
+    }
+    return valid;
 }
 
 bool a64_mc_encode(A64MCInst const* instruction, u32* word)
