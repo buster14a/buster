@@ -4,6 +4,7 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
+#include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
 #include <buster/lib/compiler/codegen/register_allocator_fast_internal.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/file.h>
@@ -32,6 +33,79 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrIncoming) == 16);
 // passed by value on every module generation, so it stays a handful of bytes
 // and this check is what says so.
 BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 6);
+
+// Independent goldens correspond to x86_64_movabs_encoding_oracle.s. The
+// bounded producer comparison also checks every byte outside the instruction.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_movabs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, machine_x64_test_movabs_prepared());
+    u64 values[] = {0, 1, 127, 128, 255, 256, UINT64_C(0x7fffffff), UINT64_C(0x80000000),
+                    UINT64_C(0xffffffff), UINT64_C(0x100000000), UINT64_C(0xffffffff80000000),
+                    UINT64_C(0x7fffffffffffffff), UINT64_C(0x8000000000000000), UINT64_MAX,
+                    UINT64_C(0x0123456789abcdef)};
+    u8 prefixes[16][2] = {
+        {0x48, 0xb8}, {0x48, 0xb9}, {0x48, 0xba}, {0x48, 0xbb},
+        {0x48, 0xbc}, {0x48, 0xbd}, {0x48, 0xbe}, {0x48, 0xbf},
+        {0x49, 0xb8}, {0x49, 0xb9}, {0x49, 0xba}, {0x49, 0xbb},
+        {0x49, 0xbc}, {0x49, 0xbd}, {0x49, 0xbe}, {0x49, 0xbf},
+    };
+    for (u32 reg = 0; reg < 16; reg += 1)
+    {
+        for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1)
+        {
+            u64 value = values[value_index];
+            for (u32 start = 0; start <= 17; start += 1)
+            {
+                for (u32 available = 0; available <= 17; available += 1)
+                {
+                    u8 bytes[64];
+                    u8 reference[64];
+                    u8 expected[64];
+                    memset(bytes, 0xa5, sizeof(bytes));
+                    memset(reference, 0xa5, sizeof(reference));
+                    memset(expected, 0xa5, sizeof(expected));
+                    bool valid = available >= 10;
+                    if (valid)
+                    {
+                        expected[start] = prefixes[reg][0];
+                        expected[start + 1] = prefixes[reg][1];
+                        for (u32 byte = 0; byte < 8; byte += 1)
+                        {
+                            expected[start + 2 + byte] = (u8)(value >> (8u * byte));
+                        }
+                    }
+                    MachineEncodeResult emitted = machine_x64_test_emit_movabs(bytes, start + available, start, reg, value, false);
+                    MachineEncodeResult oracle = machine_x64_test_emit_movabs(reference, start + available, start, reg, value, true);
+                    BUSTER_TEST(arguments, emitted.valid == valid && oracle.valid == valid);
+                    BUSTER_TEST(arguments, emitted.byte_count == start + (valid ? 10u : 0u) && emitted.byte_count == oracle.byte_count);
+                    BUSTER_TEST(arguments, emitted.exact_attempts == 1 && emitted.exact_successes == (u32)valid &&
+                                           emitted.exact_failures == (u32)!valid);
+                    BUSTER_TEST(arguments, emitted.exact_attempts == oracle.exact_attempts &&
+                                           emitted.exact_successes == oracle.exact_successes && emitted.exact_failures == oracle.exact_failures);
+                    BUSTER_TEST(arguments, memcmp(bytes, reference, sizeof(bytes)) == 0 && memcmp(bytes, expected, sizeof(bytes)) == 0);
+                }
+            }
+        }
+    }
+    u32 invalid_registers[] = {16, 31, 32, UINT16_MAX, 65536, UINT32_MAX};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_registers) + 3; index += 1)
+    {
+        u8 bytes[32];
+        u8 expected[32];
+        memset(bytes, 0xa5, sizeof(bytes));
+        memset(expected, 0xa5, sizeof(expected));
+        u32 reg = index < BUSTER_ARRAY_LENGTH(invalid_registers) ? invalid_registers[index] : 0;
+        bool null_output = index == BUSTER_ARRAY_LENGTH(invalid_registers);
+        u32 start = index == BUSTER_ARRAY_LENGTH(invalid_registers) + 1 ? 33u :
+                    index == BUSTER_ARRAY_LENGTH(invalid_registers) + 2 ? UINT32_MAX : 0u;
+        MachineEncodeResult emitted = machine_x64_test_emit_movabs(null_output ? 0 : bytes, sizeof(bytes), start, reg, 0, false);
+        BUSTER_TEST(arguments, !emitted.valid && emitted.byte_count == start);
+        BUSTER_TEST(arguments, emitted.exact_attempts == 1 && emitted.exact_successes == 0 && emitted.exact_failures == 1);
+        BUSTER_TEST(arguments, memcmp(bytes, expected, sizeof(bytes)) == 0);
+    }
+    return result;
+}
 
 // Compiles one C source through the C frontend into a canonical IrProgram
 // for machine-selection tests. Diagnostics fail the caller's assertions.
@@ -2952,6 +3026,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1466 (rows: {u32})"), exact_map.fixed_template_rows));
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
+    UnitTestResult movabs_result = machine_test_prepared_movabs(arguments);
+    result.test_count += movabs_result.test_count;
+    result.succeeded_test_count += movabs_result.succeeded_test_count;
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
     BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 173);
