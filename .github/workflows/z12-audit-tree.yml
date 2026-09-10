@@ -1,0 +1,77 @@
+name: Z12 immutable audit preparation
+
+on:
+  push:
+    branches: [astra/z12-130-transport-20260910]
+    paths: [.github/workflows/z12-audit-tree.yml]
+
+permissions:
+  contents: write
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: z12-audit-tree-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 820cb87376eaa626ae593238ef6fbaaabfc2c992
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 01c095e59f5e6674086ba42053acf798c1801630
+          path: transport
+          persist-credentials: false
+      - name: Recheck main and overlapping work, then mint the immutable entry
+        working-directory: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p ../evidence
+          test "$(gh api repos/buster14a/buster/branches/main --jq .commit.sha)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          test "$(gh api repos/buster14a/buster/pulls/377 --jq .head.sha)" = 820cb87376eaa626ae593238ef6fbaaabfc2c992
+          gh api --paginate --slurp 'repos/buster14a/buster/pulls?state=open&per_page=100' > ../evidence/open-pr-pages.json
+          gh api --paginate --slurp 'repos/buster14a/buster/issues/130/comments?per_page=100' > ../evidence/issue-130-comments.json
+          for pr in $(gh api --paginate 'repos/buster14a/buster/pulls?state=open&per_page=100' --jq '.[].number'); do
+            gh api --paginate "repos/buster14a/buster/pulls/$pr/files?per_page=100" --jq '.[].filename' > "../evidence/pr-$pr-files.txt"
+          done
+          audit=$(python3 tools/new_audit.py --platform 'Ubuntu 26.04.1 hosted VM, reported AMD EPYC 7763; Clang 21.1.8' 'Z12 sparse owner membership: paired pilot and unity census, no proven speedup')
+          printf '\n' >> "$audit"
+          cat ../transport/.github/z12/audit-summary.md >> "$audit"
+          cp "$audit" ../evidence/
+          cp PERFORMANCE_AUDITS.md ../evidence/
+          printf '%s\n' "$audit" > ../evidence/audit-path.txt
+          git add PERFORMANCE_AUDITS.md "$audit"
+          git diff --cached --check
+          git diff --cached > ../evidence/audit.patch
+          git write-tree > ../evidence/expected-tree.sha
+          python3 - <<'PY'
+          import json,pathlib,subprocess
+          names=subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines()
+          assert len(names)==2 and 'PERFORMANCE_AUDITS.md' in names,names
+          assert all(n=='PERFORMANCE_AUDITS.md' or n.startswith('docs/performance-audits/') for n in names)
+          entries=[{'path':n,'mode':'100644','type':'blob','content':pathlib.Path(n).read_text()} for n in names]
+          pathlib.Path('../evidence/tree-request.json').write_text(json.dumps({'base_tree':'93ee044324a732e92ed5aff0e872235c3bd94b47','tree':entries}))
+          PY
+          gh api --method POST repos/buster14a/buster/git/trees --input ../evidence/tree-request.json > ../evidence/tree-response.json
+          test "$(jq -r .sha ../evidence/tree-response.json)" = "$(cat ../evidence/expected-tree.sha)"
+          printf 'Prepared tree `%s`; no branch or pull request was moved.\n' "$(cat ../evidence/expected-tree.sha)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Run the unchanged complete audit checker
+        working-directory: source
+        run: python3 tools/new_audit.py --check
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: z12-audit-preparation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
