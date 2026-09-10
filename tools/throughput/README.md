@@ -86,6 +86,47 @@ cache experiment. Every invocation is a new compiler process, including every
 warmup and sample. The harness does not drop host caches, disable security
 controls, change the governor or attempt privileged machine configuration.
 
+### Assembly-output experiments
+
+`--artifact object|assembly` selects the final artifact for the six ordinary
+workload classes. The default is unchanged: `-c` with a `.o` output. Assembly
+mode uses `-S` with a `.s` output and adds `/assembly` to each ordinary series
+name in `jobs.tsv` and the comparison summaries. Each metadata job explicitly
+records `object`, `assembly` or `executable`. Source generation, source hashes,
+mode selection, pair counts and statistical thresholds are unchanged.
+
+```sh
+./build.sh bench_throughput run --baseline /base/ide --candidate /candidate/ide --output build/throughput-assembly --artifact assembly --mode all --require-identical-output
+./build.sh bench_throughput compare --output build/throughput-assembly
+```
+
+Use the same Clang-built compiler for both inputs first to validate A/A
+collection. Then compare frozen baseline/candidate compilers on an idle runner.
+The existing tiny-startup case retains the small-output control. For the
+many-function scaling series, `--profile ci --scale 2`, `4`, `8` and `16`
+produce 1,024, 2,048, 4,096 and 8,192 definitions respectively. Every run still
+includes all six workload classes; use a different output directory at each
+scale. Large cases must finish under the existing deadline, not be discarded
+or assigned a larger timeout merely to obtain a passing result.
+
+This times the whole compiler process through final assembly-file generation,
+including any printer index/sort construction, scratch management and writes.
+It does not isolate printer time or establish a speedup by itself. Existing
+`--pmu` and allocation options reuse the same assembly command through separate
+diagnostic replays; their output must match the ordinary timing artifact.
+Retain both assembly and ordinary object comparisons. Hardware requirements,
+paired uncertainty, source/binary hashes and unavailable-counter rules remain
+those documented below. An absent regression verdict is not proof of a win.
+
+With frozen self-host inputs, stage 1/2/3 remain executable compiler builds:
+assembly mode applies only to ordinary jobs. `--flag -S`, `--flag -c` and
+`--flag -E` remain forbidden. No assembler or generated program runs inside the
+timing samples. Exact A/B assembly hashes do not replace independent assembler
+checks or the compiler's full, mode, sanitizer, platform and self-host gates.
+Crafted empty/tied-symbol/relocation cases and printer phase attribution remain
+separate correctness/profiling work for #116; no new compiler timing hooks or
+parallel measurement framework are introduced here.
+
 ## Measurements and their limits
 
 `wall_seconds` spans process launch through wait completion. User and system

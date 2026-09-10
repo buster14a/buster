@@ -330,29 +330,65 @@ static void test_compile_options(void)
     char* options[] = {"throughput", "generate", "--flag", "-O3", "--flag", "-O0", NULL};
     TpConfig config;
     CHECK(tp_options(6, options, &config));
-    config.self_host_generated = "generated";
-    for (unsigned stage = 0; stage < 3; ++stage)
+    CHECK(!config.assembly);
+    char* artifact_options[] = {"throughput", "generate", "--flag", "-O3", "--flag", "-O0", "--artifact", "object", NULL};
+    for (unsigned assembly = 0; assembly < 2; ++assembly)
     {
-        for (unsigned mode = 0; mode < 4; ++mode)
+        artifact_options[7] = assembly ? "assembly" : "object";
+        CHECK(tp_options(8, artifact_options, &config));
+        CHECK(config.assembly == (int)assembly);
+        config.self_host_generated = "generated";
+        for (unsigned stage = 0; stage < 4; ++stage)
         {
-            TpJob job = {0};
-            job.mode = mode;
-            job.stage = stage;
-            strcpy(job.workload.path, "input.c");
-            TpArguments args;
-            tp_compile_arguments(&config, &job, "ide", "output", "metrics", &args);
-            unsigned selected = 0, last_optimization = 0, selections = 0;
-            for (unsigned i = 0; i < args.count; ++i)
+            for (unsigned mode = 0; mode < 4; ++mode)
             {
-                if (!strncmp(args.values[i], "-O", 2)) last_optimization = i;
-                if (!strncmp(args.values[i], "-fregister-allocator=", 21)) { selected = i; ++selections; }
+                TpJob job = {0};
+                job.mode = mode;
+                job.stage = stage;
+                job.assembly = config.assembly;
+                strcpy(job.workload.path, "input.c");
+                TpArguments args;
+                tp_compile_arguments(&config, &job, "ide", "output", "metrics", &args);
+                unsigned selected = 0, last_optimization = 0, selections = 0;
+                unsigned objects = 0, assemblies = 0, preprocesses = 0;
+                for (unsigned i = 0; i < args.count; ++i)
+                {
+                    if (!strncmp(args.values[i], "-O", 2)) last_optimization = i;
+                    if (!strncmp(args.values[i], "-fregister-allocator=", 21)) { selected = i; ++selections; }
+                    objects += !strcmp(args.values[i], "-c");
+                    assemblies += !strcmp(args.values[i], "-S");
+                    preprocesses += !strcmp(args.values[i], "-E");
+                }
+                CHECK(selections == 1 && selected > last_optimization &&
+                      !strcmp(args.values[selected] + 21, tp_modes[mode]) && args.values[args.count] == NULL);
+                CHECK(objects == (unsigned)(!stage && !assembly));
+                CHECK(assemblies == (unsigned)(!stage && assembly));
+                CHECK(!preprocesses);
+                CHECK(!strcmp(tp_artifact_extension(&job), stage ? ".exe" : assembly ? ".s" : ".o"));
+                CHECK(!strcmp(args.values[0], "ide") && !strcmp(args.values[1], "cc"));
+                CHECK(!strcmp(args.values[2], stage ? "-g" : "-g0"));
+                CHECK(args.count >= 3);
+                if (args.count >= 3)
+                {
+                    CHECK(!strcmp(args.values[args.count - 3], "input.c") &&
+                          !strcmp(args.values[args.count - 2], "-o") &&
+                          !strcmp(args.values[args.count - 1], "output"));
+                }
             }
-            CHECK(selections == 1 && selected > last_optimization &&
-                  !strcmp(args.values[selected] + 21, tp_modes[mode]) && args.values[args.count] == NULL);
         }
     }
     char* forbidden[] = {"throughput", "generate", "--flag", "-fno-register-allocator", NULL};
     CHECK(!tp_options(4, forbidden, &config));
+    forbidden[3] = "-S";
+    CHECK(!tp_options(4, forbidden, &config));
+    forbidden[3] = "-c";
+    CHECK(!tp_options(4, forbidden, &config));
+    forbidden[3] = "-E";
+    CHECK(!tp_options(4, forbidden, &config));
+    char* invalid_artifact[] = {"throughput", "generate", "--artifact", "executable", NULL};
+    CHECK(!tp_options(4, invalid_artifact, &config));
+    char* missing_artifact[] = {"throughput", "generate", "--artifact", NULL};
+    CHECK(!tp_options(3, missing_artifact, &config));
 }
 
 static void test_sample_paths(char const* executable, char const* root)
