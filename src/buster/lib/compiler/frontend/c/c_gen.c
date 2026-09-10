@@ -4254,8 +4254,9 @@ BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_entity(CIntegerIrBuilder* 
     return result;
 }
 
-// The last local this token names, for the four sites that fall back to the
-// name when the entity lookup finds nothing.  All four ran a string_equal per
+// The last local this token names, for the four sites whose token has no
+// resolved entity. A resolved global must never select a same-named local
+// from a scope that has ended.  All four ran a string_equal per
 // row: 24.940 fallbacks over 2,32 M rows on a self-compile, which is where the
 // lowering's 2,3 M memcmp calls came from, and string_equal is the worst
 // L1d-miss-per-cycle ratio of any ordinary symbol in the compile.  The intern
@@ -12787,7 +12788,7 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
                 CToken base_token = builder->preprocess.tokens[nested_start + 1];
                 CEntityId entity = c_ir_identifier_entity(builder, nested_start + 1);
                 CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-                if (!local)
+                if (!local && entity.value == C_ID_UNDERLYING_INVALID)
                 {
                     local = c_ir_find_local_by_name(builder, base_token);
                 }
@@ -12916,7 +12917,7 @@ c_ir_place_base_resolved:
         }
         CEntityId entity = c_ir_identifier_entity(builder, base_index);
         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-        if (!local)
+        if (!local && entity.value == C_ID_UNDERLYING_INVALID)
         {
             local = c_ir_find_local_by_name(builder, builder->preprocess.tokens[base_index]);
         }
@@ -21041,7 +21042,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
             {
                 CEntityId operand_entity = c_ir_identifier_entity(builder, index + 2);
                 CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, operand_entity);
-                if (!local)
+                if (!local && operand_entity.value == C_ID_UNDERLYING_INVALID)
                 {
                     local = c_ir_find_local_by_name(builder, builder->preprocess.tokens[index + 2]);
                 }
@@ -25536,7 +25537,7 @@ c_ir_expression_core_loop:
             {
                 CEntityId entity = c_ir_identifier_entity(builder, index);
                 CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-                if (!local)
+                if (!local && entity.value == C_ID_UNDERLYING_INVALID)
                 {
                     local = c_ir_find_local_by_name(builder, token);
                 }

@@ -41,6 +41,22 @@ static int scoped_constants(void)
     return value + width;
 }
 
+// A resolved file object must retain its identity after a same-named local
+// leaves scope, for value, type, assignment and address queries alike.
+static long shadowed_object = 17;
+static int scoped_object(void)
+{
+    int failed = shadowed_object != 17;
+    {
+        unsigned char shadowed_object = 5;
+        failed |= sizeof(shadowed_object) != 1 || shadowed_object != 5;
+    }
+    failed |= sizeof(shadowed_object) != sizeof(long);
+    shadowed_object = 23;
+    long* place = &shadowed_object;
+    return failed || *place != 23;
+}
+
 int main(void)
 {
     int failed = 0;
@@ -51,5 +67,6 @@ int main(void)
     failed |= nested.values[0] + nested.values[1] + nested.values[2] != 71;
     failed |= selected.integer != 31;
     failed |= scoped_constants() != 12;
+    failed |= scoped_object();
     return failed;
 }
