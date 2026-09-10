@@ -20768,7 +20768,9 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
 {
     IrType* place_type = ir_type_from_id(&builder->program->types, type);
     bool atomic = place_type && place_type->is_atomic;
-    IrTypeId value_type = atomic ? place_type->unqualified_type : type;
+    // The operation consumes an unqualified value even when the destination
+    // place is volatile. Loads and stores retain that place's access flags.
+    IrTypeId value_type = place_type && (atomic || place_type->is_volatile) ? place_type->unqualified_type : type;
     IrType* unqualified = ir_type_from_id(&builder->program->types, value_type);
     bool pointer_arithmetic = unqualified && unqualified->kind == IR_TYPE_POINTER && (operation == C_CONDITIONAL_ADD || operation == C_CONDITIONAL_SUBTRACT);
     IrValueId previous = IR_VALUE_ID_INVALID;
