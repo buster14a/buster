@@ -43,16 +43,23 @@ jobs:
           import json, os, subprocess
           from pathlib import Path
           paths = {'docs/agents/driver.md', 'src/buster/lib/compiler/assembly/assembly.c', 'src/buster/lib/compiler/assembly/x86_64_metadata.c', 'src/buster/tests/compiler/assembly/x86_64_metadata_test.c', 'src/buster/tests/compiler/assembly/x86_64_completion_census_test.c'}
+          reviewed_heads = {
+              371: ('d60fd28ae58e8a2af18e0d37f659d51ea2ef6aa8', {'docs/agents/driver.md'}),
+              388: ('39232f3accbe6636d666f44dad847fcb59564859', {'docs/agents/driver.md', 'src/buster/lib/compiler/assembly/x86_64_metadata.c'}),
+          }
+          conflicts = []
           for page in json.loads((Path(os.environ['RUNNER_TEMP'])/'a07-preflight/open-prs.json').read_text()):
               for pr in page:
                   if pr['head']['ref'] == os.environ['OWN_BRANCH']:
                       continue
                   files = json.loads(subprocess.check_output(['gh','api','--paginate','--slurp',f"repos/buster14a/buster/pulls/{pr['number']}/files?per_page=100"]))
                   overlap = paths.intersection(f['filename'] for page in files for f in page)
-                  reviewed = pr['number'] == 371 and pr['head']['sha'] == 'd60fd28ae58e8a2af18e0d37f659d51ea2ef6aa8' and overlap == {'docs/agents/driver.md'}
+                  reviewed = reviewed_heads.get(pr['number']) == (pr['head']['sha'], overlap)
                   print(pr['number'], pr['head']['sha'], 'overlap', sorted(overlap), 'reviewed_disjoint', reviewed)
                   if overlap and not reviewed:
-                      raise SystemExit('Competing changes require review before publication')
+                      conflicts.append(pr['number'])
+          if conflicts:
+              raise SystemExit(f'Competing changes require review before publication: {conflicts}')
           PY
           git checkout --detach "$PARENT"
           git apply --check "$RUNNER_TEMP/a07.patch"
