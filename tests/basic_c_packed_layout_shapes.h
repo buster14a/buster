@@ -83,10 +83,12 @@ struct __attribute__((packed)) packed_bit_cross_record
     char tail;
 };
 
-// An *unnamed* bit-field is padding for the classification and contributes no
-// class at all, which is observable beside a float: this record comes back in
-// `xmm0` where the named spelling below comes back in `rax`, because only the
-// named field merges INTEGER into the eightbyte the float already claimed.
+// The named field always merges INTEGER. For the unnamed spelling, historical
+// Buster/Clang use padding while GCC uses INTEGER; the mixed driver selects the
+// host's measured convention explicitly, including return-register controls.
+#ifndef PACKED_LAYOUT_SYSV_INTEGER_BITFIELDS
+#define PACKED_LAYOUT_SYSV_INTEGER_BITFIELDS 0
+#endif
 struct packed_bit_named_record
 {
     float lead;
@@ -195,6 +197,9 @@ extern struct packed_bit_named_record packed_layout_make_bit_named(float lead, i
 extern long long packed_layout_bit_named_sum(struct packed_bit_named_record record);
 extern struct packed_bit_padded_record packed_layout_make_bit_padded(float lead);
 extern float packed_layout_bit_padded_lead(struct packed_bit_padded_record record);
+extern struct packed_bit_padded_record packed_layout_bit_padded_neighbors(int left, struct packed_bit_padded_record record,
+                                                                        int right, float before, float after);
+extern struct packed_bit_padded_record packed_layout_bit_padded_register_result(void);
 extern unsigned long long packed_layout_below_natural_size(void);
 extern unsigned long long packed_layout_below_natural_offset(void);
 extern struct below_natural_record packed_layout_make_below_natural(char tag, int value);

@@ -3597,6 +3597,144 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArgume
     return result;
 }
 
+// GitHub #147 / #258: faults are deferred, syntax errors are not. The
+// expression is passed through a macro so these tests also exercise expansion.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_case(UnitTestArguments* arguments, String8 expression,
+                                                           bool expected_valid, bool expected_value, bool elif)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = string_format(temporary.arena,
+                                  S8("#define TEST_EXPRESSION {S8}\n{S8} TEST_EXPRESSION\nkept\n#else\ndropped\n#endif\n"),
+                                  expression, elif ? S8("#if 0\nunused\n#elif") : S8("#if"));
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){.source_path = S8("conditional-short-circuit.c")});
+    if (expected_valid)
+    {
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, preprocess.token_count == 2);
+        c_test_preprocessed_token(arguments, &result, preprocess, 0, C_TOKEN_IDENTIFIER, expected_value ? S8("kept") : S8("dropped"));
+    }
+    else
+    {
+        bool diagnosed = false;
+        for (u32 index = 0; index < preprocess.diagnostic_count; index += 1)
+        {
+            diagnosed |= preprocess.diagnostics[index].kind == C_DIAGNOSTIC_INVALID_CONDITIONAL;
+        }
+        BUSTER_TEST(arguments, diagnosed);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_preprocessor_short_circuit(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 faults[] = {
+        S8("(1 / 0)"),
+        S8("(1 % 0)"),
+        S8("((-9223372036854775807LL - 1) / -1)"),
+        S8("((-9223372036854775807LL - 1) % -1)"),
+    };
+    struct
+    {
+        String8 format;
+        bool valid;
+        bool value;
+    } contexts[] = {
+        {S8("0 && {S8}"), true, false},
+        {S8("1 || {S8}"), true, true},
+        {S8("1 ? 7 : {S8}"), true, true},
+        {S8("0 ? {S8} : 0"), true, false},
+        {S8("1 || !{S8}"), true, true},
+        {S8("0 && ~{S8}"), true, false},
+        {S8("1 || ({S8} < 1)"), true, true},
+        {S8("1 || ({S8} << 1)"), true, true},
+        {S8("0 && (1 >> {S8})"), true, false},
+        {S8("0 && ({S8} / 0)"), true, false},
+        {S8("0 && ({S8} || 1)"), true, false},
+        {S8("1 || ({S8} && 0)"), true, true},
+        {S8("1 || ({S8} ? 0 : 1)"), true, true},
+        {S8("(0 && {S8}) ? 0 : 1"), true, true},
+        {S8("0 ? 0 : 1 ? 1 : {S8}"), true, true},
+        {S8("1 ? 0 ? {S8} : 1 : 0"), true, true},
+        {S8("{S8}"), false, false},
+        {S8("1 && {S8}"), false, false},
+        {S8("0 || {S8}"), false, false},
+        {S8("0 ? 1 : {S8}"), false, false},
+        {S8("1 ? {S8} : 1"), false, false},
+        {S8("{S8} || 1"), false, false},
+        {S8("{S8} && 0"), false, false},
+        {S8("{S8} ? 1 : 1"), false, false},
+        {S8("!{S8}"), false, false},
+        {S8("~{S8}"), false, false},
+        {S8("-{S8}"), false, false},
+        {S8("+{S8}"), false, false},
+        {S8("{S8} + 1"), false, false},
+        {S8("{S8} - 1"), false, false},
+        {S8("{S8} * 0"), false, false},
+        {S8("{S8} == 0"), false, false},
+        {S8("{S8} != 0"), false, false},
+        {S8("{S8} <= 0"), false, false},
+        {S8("{S8} >= 0"), false, false},
+        {S8("{S8} > 0"), false, false},
+        {S8("{S8} & 0"), false, false},
+        {S8("{S8} | 1"), false, false},
+        {S8("{S8} ^ 1"), false, false},
+        {S8("1 << {S8}"), false, false},
+        {S8("{S8} >> 1"), false, false},
+    };
+    for (u32 fault_index = 0; fault_index < BUSTER_ARRAY_LENGTH(faults); fault_index += 1)
+    {
+        for (u32 context_index = 0; context_index < BUSTER_ARRAY_LENGTH(contexts); context_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 expression = string_format(temporary.arena, contexts[context_index].format, faults[fault_index]);
+            c_test_result_add(&result, c_test_conditional_case(arguments, expression, contexts[context_index].valid, contexts[context_index].value, false));
+            c_test_result_add(&result, c_test_conditional_case(arguments, expression, contexts[context_index].valid, contexts[context_index].value, true));
+            scratch_end(temporary);
+        }
+    }
+    struct
+    {
+        String8 expression;
+        bool value;
+    } signedness[] = {
+        {S8("(1 ? -1 : (1u / 0)) > 0"), true},
+        {S8("(0 ? (1u % 0) : -1) < 0"), false},
+        {S8("(1 ? -1 : (1 / 0)) < 0"), true},
+        {S8("(0 ? (1 % 0) : -1) < 0"), true},
+        {S8("((1 || (1u / 0)) ? -1 : -2) < 0"), true},
+        {S8("((0 && (1u % 0)) ? -2 : -1) < 0"), true},
+        {S8("((1 ? -1 : (1u / 0)) >> 63) == 1"), true},
+        {S8("((1 ? -1 : (1 / 0)) >> 63) == -1"), true},
+        {S8("((1 ? -1 : (1u / 0)) / 2) > 0"), true},
+        {S8("((1 ? -3 : (1 / 0)) / 2) == -1"), true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(signedness); index += 1)
+    {
+        c_test_result_add(&result, c_test_conditional_case(arguments, signedness[index].expression, true, signedness[index].value, false));
+        c_test_result_add(&result, c_test_conditional_case(arguments, signedness[index].expression, true, signedness[index].value, true));
+    }
+    String8 malformed[] = {
+        S8("1 || (1 + )"),
+        S8("0 && (1 / )"),
+        S8("1 ? 1 : (1 % )"),
+        S8("0 ? (1 + ) : 1"),
+        S8("1 || (1 / 0"),
+        S8("0 && (1 2)"),
+        S8("1 ? 1"),
+        S8("0 && *1"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
+    {
+        c_test_result_add(&result, c_test_conditional_case(arguments, malformed[index], false, false, false));
+        c_test_result_add(&result, c_test_conditional_case(arguments, malformed[index], false, false, true));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9430,6 +9568,132 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_address_place_assignment
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("x86_64-unknown-linux-gnu"), S8("x86_64-pc-windows"),
+                         S8("aarch64-unknown-linux-gnu"), S8("aarch64-apple-macos"), S8("aarch64-pc-windows")};
+    String8 source = S8("typedef __builtin_va_list custom_list; typedef custom_list nested_list;"
+        "typedef void *va_list; struct State { nested_list ap; };"
+        "int test(int n, ...) { struct State state; nested_list copies[2]; nested_list *p = copies + 1; int i = 0;"
+        " __builtin_va_start(state.ap, n); __builtin_va_copy(copies[i++], state.ap); __builtin_va_copy(*p, state.ap);"
+        " int value = __builtin_va_arg(state.ap, int) + __builtin_va_arg(copies[0], int) + __builtin_va_arg(*p, int);"
+        " __builtin_va_end(state.ap); __builtin_va_end(copies[0]); __builtin_va_end(*p); return value + i; }");
+    String8 invalid[] = {
+        S8("typedef void *va_list; void test(int n, ...) { va_list ap; __builtin_va_start(ap, n); }"),
+        S8("void test(int n, ...) { const __builtin_va_list ap; __builtin_va_start(ap, n); }"),
+        S8("void test(int n, ...) { __builtin_va_start(0, n); }"),
+        S8("void test(int n, ...) { __builtin_va_list ap; __builtin_va_copy(ap, 0); }"),
+        S8("void test(int n) { __builtin_va_list ap; __builtin_va_start(ap, n); }"),
+        S8("void test(void) { int ap; __builtin_va_end(ap); }"),
+        S8("int test(void) { int ap; return __builtin_va_arg(ap, int); }"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TargetParseResult target = target_parse_triple(targets[target_index]);
+        BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessOptions options = {.target = target.target, .data_layout = target_data_layout(target.target)};
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.declaration_count >= 3);
+            if (parse.declaration_count >= 3)
+            {
+                CTypeId first = parse.declarations[0].type;
+                CTypeId alias = parse.declarations[1].type;
+                CType* list = c_type_from_id(&parse, first);
+                CType* pointer = c_type_from_id(&parse, parse.declarations[2].type);
+                BUSTER_TEST(arguments, first.value == alias.value);
+                BUSTER_TEST(arguments, list && list->kind == C_TYPE_VA_LIST);
+                BUSTER_TEST(arguments, pointer && pointer->kind == C_TYPE_POINTER);
+            }
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("va-list-places.c"), tokens, parse, target.target,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
+            if (lowered.program && !lowered.diagnostic_count)
+            {
+                IrModule* module = lowered.program->modules;
+                IrFunction* function = c_test_find_ir_function(module, S8("test"));
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, function != 0);
+                u32 starts = 0;
+                u32 copies = 0;
+                u32 reads = 0;
+                u32 ends = 0;
+                for (u32 index = 0; function && index < function->instruction_count; index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + index;
+                    starts += instruction->opcode == IR_OPCODE_VA_START;
+                    copies += instruction->opcode == IR_OPCODE_VA_COPY;
+                    reads += instruction->opcode == IR_OPCODE_VA_ARG;
+                    ends += instruction->opcode == IR_OPCODE_VA_END;
+                    if (instruction->opcode == IR_OPCODE_VA_START && target_index < 2)
+                    {
+                        IrType* list = ir_type_from_id(&lowered.program->types, instruction->canonical_type);
+                        BUSTER_TEST(arguments, list && list->kind == IR_TYPE_VA_LIST && list->layout.resolved);
+                        // Preserve the existing padded SysV cursor and the
+                        // pointer-sized Windows cursor; this is no ABI rewrite.
+                        BUSTER_TEST(arguments, list && list->layout.size == (target_index == 0 ? 32u : 8u));
+                    }
+                }
+                BUSTER_TEST(arguments, starts == 1 && copies == 2 && reads == 3 && ends == 3);
+            }
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+            {
+                CPreprocessResult bad_tokens = c_preprocess(temporary.arena, invalid[case_index], options);
+                CParseResult bad_parse = c_parse(temporary.arena, bad_tokens);
+                CIRLowerResult bad = c_lower_to_ir_with_options(temporary.arena, S8("invalid-va-list.c"), bad_tokens, bad_parse, target.target,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, !bad_tokens.diagnostic_count && !bad_parse.diagnostic_count, invalid[case_index]);
+                BUSTER_TEST_RAW(arguments, bad.diagnostic_count == 1, invalid[case_index]);
+                if (bad.diagnostic_count == 1)
+                {
+                    BUSTER_TEST(arguments, bad.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                    BUSTER_TEST(arguments, bad.diagnostics[0].message.length > 0);
+                }
+            }
+            if (target.target.os == OPERATING_SYSTEM_WINDOWS)
+            {
+                String8 prefixes[] = {
+                    S8("#include <stdarg.h>\n#ifndef _VA_LIST_DEFINED\n#define _VA_LIST_DEFINED\ntypedef char *va_list;\n#endif\n"),
+                    S8("#define _VA_LIST_DEFINED\ntypedef char *va_list;\n"
+                       "#define __crt_va_start(ap, last) __builtin_va_start(ap, last)\n"
+                       "#define __crt_va_arg(ap, type) __builtin_va_arg(ap, type)\n"
+                       "#define __crt_va_end(ap) __builtin_va_end(ap)\n"
+                       "#include <stdarg.h>\n"),
+                };
+                for (u32 order = 0; order < BUSTER_ARRAY_LENGTH(prefixes); order += 1)
+                {
+                    String8 body = S8("int test(int n, ...) { struct { va_list ap; } state; va_list copy;"
+                        " va_start(state.ap, n); va_copy(copy, state.ap); int result = va_arg(copy, int);"
+                        " va_end(copy); va_end(state.ap); return result; }\n"
+                        "_Static_assert(sizeof(va_list) == sizeof(void *), \"public Windows layout\");\n"
+                        "#ifdef __crt_va_start\n"
+                        "int crt(int n, ...) { va_list ap; __crt_va_start(ap, n);"
+                        " int result = __crt_va_arg(ap, int); __crt_va_end(ap); return result; }\n"
+                        "#endif\n");
+                    String8 header_source = string_format(temporary.arena, S8("{S8}{S8}"), prefixes[order], body);
+                    CPreprocessResult header_tokens = c_preprocess(temporary.arena, header_source, options);
+                    CParseResult header_parse = c_parse(temporary.arena, header_tokens);
+                    CIRLowerResult header = c_lower_to_ir_with_options(temporary.arena, S8("windows-stdarg-order.c"), header_tokens,
+                        header_parse, target.target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST(arguments, !header_tokens.diagnostic_count && !header_parse.diagnostic_count);
+                    BUSTER_TEST(arguments, header.program && !header.diagnostic_count);
+                    if (header.program && !header.diagnostic_count)
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(header.program, header.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vectors(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9559,7 +9823,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vectors(UnitTestArguments* ar
     scratch_end(variadic_call_temporary);
     TemporalArena c23_va_start_temporary = scratch_begin(0, 0);
     CPreprocessResult c23_va_start_tokens = c_preprocess(c23_va_start_temporary.arena,
-                                                         S8("typedef void *va_list;"
+                                                         S8("typedef __builtin_va_list va_list;"
                                                             " int first(int count, ...)"
                                                             " { va_list arguments;"
                                                             " __builtin_c23_va_start("
@@ -12267,29 +12531,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         S8("x86_64-apple-macos"),
         S8("x86_64-apple-ios"),
     };
-    String8 sources[] = {
-        S8("long double cast_value = (long double)1; int main(void) { return 0; }"),
-        S8("long double conditional_value = 1.0L ? 2.0L : 3.0L; int main(void) { return 0; }"),
-        S8("long double integer_arithmetic = 1 + 2; int main(void) { return 0; }"),
-        S8("void atomic_local(void) { _Atomic(long double) value = 0.0L; (void)value; } int main(void) { return 0; }"),
-        S8("long double atomic_load(_Atomic(long double) *value) { return __c11_atomic_load(value, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
-        S8("void atomic_store(_Atomic(long double) *value) { __c11_atomic_store(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
-        S8("long double atomic_exchange(_Atomic(long double) *value) { return __c11_atomic_exchange(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
-        S8("int atomic_compare(_Atomic(long double) *value, long double *expected) { return __c11_atomic_compare_exchange_strong(value, expected, 0.0L, __ATOMIC_RELAXED, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
-        S8("void fixed_f80_variadic(long double value, ...) { (void)value; } int main(void) { return 0; }"),
+    struct
+    {
+        String8 source;
+        bool invalid_integer;
+    } sources[] = {
+        {S8("long double cast_value = (long double)1; int main(void) { return 0; }"), false},
+        {S8("long double conditional_value = 1.0L ? 2.0L : 3.0L; int main(void) { return 0; }"), false},
+        {S8("long double integer_arithmetic = 1 + 2; int main(void) { return 0; }"), false},
+        {S8("void atomic_local(void) { _Atomic(long double) value = 0.0L; (void)value; } int main(void) { return 0; }"), false},
+        {S8("long double atomic_load(_Atomic(long double) *value) { return __c11_atomic_load(value, __ATOMIC_RELAXED); } int main(void) { return 0; }"), false},
+        {S8("void atomic_store(_Atomic(long double) *value) { __c11_atomic_store(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"), false},
+        {S8("long double atomic_exchange(_Atomic(long double) *value) { return __c11_atomic_exchange(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"), false},
+        {S8("int atomic_compare(_Atomic(long double) *value, long double *expected) { return __c11_atomic_compare_exchange_strong(value, expected, 0.0L, __ATOMIC_RELAXED, __ATOMIC_RELAXED); } int main(void) { return 0; }"), false},
+        {S8("void fixed_f80_variadic(long double value, ...) { (void)value; } int main(void) { return 0; }"), false},
         // `va_arg` reads a wide value back in the two shapes the argument side
         // passes one in; the shapes past the two eightbytes its copy covers --
         // a `long double _Complex`, an aggregate with a tail behind the
         // payload -- are named here rather than at code generation.
-        S8("typedef void *va_list; int take(int count, ...) { va_list arguments; long double _Complex value = __builtin_va_arg(arguments, long double _Complex); return value != 0; } int main(void) { return 0; }"),
-        S8("typedef void *va_list; struct ldlarge { long double f; int tail; }; int take(int count, ...) { va_list arguments; struct ldlarge value = __builtin_va_arg(arguments, struct ldlarge); return value.tail; } int main(void) { return 0; }"),
-        S8("long double malformed_exponent = 0x1pL; int main(void) { return 0; }"),
-        S8("long double invalid_i_suffix = 123i; int main(void) { return 0; }"),
-        S8("long double invalid_i65_suffix = 123i65; int main(void) { return 0; }"),
-        S8("long double invalid_u64_suffix = 123u64; int main(void) { return 0; }"),
-        S8("long double invalid_lUl_suffix = 123lUl; int main(void) { return 0; }"),
-        S8("long double invalid_lL_suffix = 123lL; int main(void) { return 0; }"),
-        S8("long double invalid_uLl_suffix = 123uLl; int main(void) { return 0; }"),
+        {S8("typedef __builtin_va_list va_list; int take(int count, ...) { va_list arguments; long double _Complex value = __builtin_va_arg(arguments, long double _Complex); return value != 0; } int main(void) { return 0; }"), false},
+        {S8("typedef __builtin_va_list va_list; struct ldlarge { long double f; int tail; }; int take(int count, ...) { va_list arguments; struct ldlarge value = __builtin_va_arg(arguments, struct ldlarge); return value.tail; } int main(void) { return 0; }"), false},
+        {S8("long double malformed_exponent = 0x1pL; int main(void) { return 0; }"), false},
+        {S8("long double invalid_i_suffix = 123i; int main(void) { return 0; }"), true},
+        {S8("long double invalid_i65_suffix = 123i65; int main(void) { return 0; }"), true},
+        {S8("long double invalid_u64_suffix = 123u64; int main(void) { return 0; }"), true},
+        {S8("long double invalid_lUl_suffix = 123lUl; int main(void) { return 0; }"), true},
+        {S8("long double invalid_lL_suffix = 123lL; int main(void) { return 0; }"), true},
+        {S8("long double invalid_uLl_suffix = 123uLl; int main(void) { return 0; }"), true},
     };
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
     {
@@ -12304,14 +12572,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
             TemporalArena temporary = scratch_begin(0, 0);
             CPreprocessResult preprocess = {0};
             CParseResult parse = {0};
-            CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[source_index], target_triples[target_index],
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[source_index].source, target_triples[target_index],
                                                          parsed_target.target, &preprocess, &parse);
             BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
-            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-            BUSTER_TEST(arguments, lowered.diagnostic_count == 1);
-            if (lowered.diagnostic_count == 1)
+            if (sources[source_index].invalid_integer)
             {
-                BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                // Invalid integer spellings fail during parsing, before
+                // wide-float lowering or any unevaluated-operand shortcut.
+                BUSTER_TEST(arguments, parse.diagnostic_count == 1);
+                if (parse.diagnostic_count == 1)
+                {
+                    BUSTER_TEST(arguments, parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_INTEGER_LITERAL);
+                }
+                BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+                BUSTER_TEST(arguments, lowered.program == 0);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+                BUSTER_TEST(arguments, lowered.diagnostic_count == 1);
+                if (lowered.diagnostic_count == 1)
+                {
+                    BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                }
             }
             scratch_end(temporary);
         }
@@ -12340,8 +12623,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
             S8("long double add(long double left, long double right) { return left + right; } int main(void) { return 0; }"),
             S8("int compare(long double left, long double right) { return left < right; } int main(void) { return 0; }"),
             S8("void variadic_call(int count, ...); void call(void) { variadic_call(0, 1.0L); } int main(void) { return 0; }"),
-            S8("typedef void *va_list; int take(int count, ...) { va_list arguments; long double value = __builtin_va_arg(arguments, long double); return value != 0; } int main(void) { return 0; }"),
-            S8("typedef void *va_list; union ldshape { long double f; struct { unsigned long m; unsigned short se; } i; }; unsigned long take(int count, ...) { va_list arguments; union ldshape value = __builtin_va_arg(arguments, union ldshape); return value.i.m; } int main(void) { return 0; }"),
+            S8("typedef __builtin_va_list va_list; int take(int count, ...) { va_list arguments; long double value = __builtin_va_arg(arguments, long double); return value != 0; } int main(void) { return 0; }"),
+            S8("typedef __builtin_va_list va_list; union ldshape { long double f; struct { unsigned long m; unsigned short se; } i; }; unsigned long take(int count, ...) { va_list arguments; union ldshape value = __builtin_va_arg(arguments, union ldshape); return value.i.m; } int main(void) { return 0; }"),
             S8("long double arithmetic = 1.0L + 2.0L; int main(void) { return 0; }"),
             S8("long double parenthesized_arithmetic = (1.0L + 2.0L); int main(void) { return 0; }"),
             S8("long double aggregate[1] = { 1.0L }; int main(void) { return 0; }"),
@@ -12639,6 +12922,175 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
 // Compare the indexed probe with the historical ascending entity-table scan
 // while forcing the probe through local names, including a nested shadow, and
 // through a hand-built collision bucket with two different spellings.
+// Callable values lose top-level volatile, but the callee parameter object
+// retains it. Keep the strict call validator sensitive to an actual mismatch.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_qualified_parameter_values(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice input = file_read(arguments->arena, S8("tests/basic_c_qualified_aggregate_call.c"), (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    BUSTER_TEST(arguments, input.length != 0);
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("qualified-parameter.c"), tokens, parse, target,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && !lowered.diagnostic_count);
+            IrProgram* program = lowered.program;
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                IrFunction* callee = c_test_find_ir_function(module, S8("read_value"));
+                IrFunction* caller = c_test_find_ir_function(module, S8("main"));
+                BUSTER_TEST(arguments, callee && caller);
+                IrTypeId object_type = IR_TYPE_ID_INVALID;
+                if (callee && caller)
+                {
+                    IrType* signature = ir_type_from_id(&program->types, callee->canonical_type);
+                    BUSTER_TEST(arguments, signature && signature->parameter_count == 1);
+                    u32 incoming = 0;
+                    u32 volatile_loads = 0;
+                    u32 volatile_stores = 0;
+                    for (u32 index = 0; index < callee->instruction_count; index += 1)
+                    {
+                        IrInstruction* instruction = callee->instructions + index;
+                        if (instruction->opcode == IR_OPCODE_ARGUMENT && signature && signature->parameter_count == 1)
+                        {
+                            IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                            BUSTER_TEST(arguments, type && type->kind == IR_TYPE_STRUCT && !type->is_volatile);
+                            BUSTER_TEST(arguments, instruction->canonical_type.value == signature->parameter_types[0].value);
+                            incoming += 1;
+                        }
+                        if (instruction->opcode == IR_OPCODE_LOCAL)
+                        {
+                            IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                            if (type && type->kind == IR_TYPE_STRUCT && type->is_volatile)
+                            {
+                                object_type = instruction->canonical_type;
+                                BUSTER_TEST(arguments, callee->values[instruction->result.value].is_volatile);
+                            }
+                        }
+                        volatile_loads += instruction->opcode == IR_OPCODE_LOAD && instruction->volatile_access;
+                        volatile_stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
+                    }
+                    BUSTER_TEST(arguments, incoming == 1 && volatile_loads >= 1 && volatile_stores >= 1);
+                    BUSTER_TEST(arguments, object_type.value != IR_ID_UNDERLYING_INVALID);
+                    u32 calls = 0;
+                    for (u32 index = 0; index < caller->instruction_count; index += 1)
+                    {
+                        IrInstruction* instruction = caller->instructions + index;
+                        if (instruction->opcode == IR_OPCODE_CALL && instruction->operand_count == 2 && signature && signature->parameter_count == 1)
+                        {
+                            IrValue* value = caller->values + instruction->operands[1].value;
+                            BUSTER_TEST(arguments, value->canonical_type.value == signature->parameter_types[0].value);
+                            BUSTER_TEST(arguments, value->definition.value < caller->instruction_count);
+                            if (value->definition.value < caller->instruction_count && object_type.value != IR_ID_UNDERLYING_INVALID)
+                            {
+                                IrInstruction* load = caller->instructions + value->definition.value;
+                                BUSTER_TEST(arguments, load->opcode == IR_OPCODE_LOAD);
+                                if (load->opcode == IR_OPCODE_LOAD)
+                                {
+                                    // A load may carry the equivalent qualified representation,
+                                    // but a fixed call must still match its exact value signature.
+                                    IrTypeId saved = value->canonical_type;
+                                    IrTypeId saved_load = load->canonical_type;
+                                    value->canonical_type = object_type;
+                                    load->canonical_type = object_type;
+                                    IrValidationResult invalid = ir_validate_canonical_module(program, module);
+                                    BUSTER_TEST(arguments, invalid.error == IR_VALIDATION_CALL_SIGNATURE);
+                                    BUSTER_TEST(arguments, invalid.function.value == caller->id.value && invalid.instruction.value == index);
+                                    value->canonical_type = saved;
+                                    load->canonical_type = saved_load;
+                                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                                }
+                            }
+                            calls += 1;
+                        }
+                    }
+                    BUSTER_TEST(arguments, calls == 1);
+                    BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_qualified_compound_values(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("int update(volatile int* value, const unsigned char* delta) { *value += delta[0]; return *value; }");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("qualified-compound.c"), tokens, parse, target,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && !lowered.diagnostic_count);
+            IrProgram* program = lowered.program;
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                IrFunction* function = c_test_find_ir_function(module, S8("update"));
+                BUSTER_TEST(arguments, function != 0);
+                if (function)
+                {
+                    u32 additions = 0;
+                    u32 volatile_loads = 0;
+                    u32 volatile_stores = 0;
+                    for (u32 index = 0; index < function->instruction_count; index += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + index;
+                        volatile_loads += instruction->opcode == IR_OPCODE_LOAD && instruction->volatile_access;
+                        volatile_stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
+                        if (instruction->opcode == IR_OPCODE_BINARY && instruction->binary_operation == IR_BINARY_INTEGER_ADD)
+                        {
+                            IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                            BUSTER_TEST(arguments, type && !type->is_volatile && !type->is_atomic);
+                            for (u32 operand = 0; operand < instruction->operand_count; operand += 1)
+                            {
+                                IrValueId value = instruction->operands[operand];
+                                BUSTER_TEST(arguments, value.value < function->value_count);
+                                if (value.value < function->value_count)
+                                {
+                                    BUSTER_TEST(arguments, function->values[value.value].canonical_type.value == instruction->canonical_type.value);
+                                }
+                            }
+                            additions += 1;
+                        }
+                    }
+                    BUSTER_TEST(arguments, additions == 1 && volatile_loads == 2 && volatile_stores == 1);
+                    BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // Parameter objects need the same effective alignment as ordinary local
 // declarations. Checking IR on every native target catches the frontend loss
 // even when a machine backend independently recovers the type's alignment.
@@ -14101,6 +14553,158 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_body_frame_storage(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    struct
+    {
+        String8 spelling;
+        u64 value;
+    } valid[] = {
+        {S8("0"), 0}, {S8("00"), 0}, {S8("077"), 63}, {S8("255"), 255},
+        {S8("0xdeadBEEF"), UINT64_C(0xdeadbeef)}, {S8("0B101010"), 42},
+        {S8("18446744073709551615ULL"), UINT64_MAX},
+        {S8("01777777777777777777777ULL"), UINT64_MAX},
+        {S8("0XFFFFFFFFFFFFFFFFuLL"), UINT64_MAX},
+        {S8("0b1111111111111111111111111111111111111111111111111111111111111111ULL"), UINT64_MAX},
+        {S8("18'446'744'073'709'551'615ULL"), UINT64_MAX},
+        {S8("0xFF'FFu"), 65535}, {S8("0'77"), 63}, {S8("0b10'10"), 10},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(valid); index += 1)
+    {
+        u64 value = 17;
+        BUSTER_TEST_RAW(arguments, c_conditional_number(valid[index].spelling, &value), valid[index].spelling);
+        BUSTER_TEST_RAW(arguments, value == valid[index].value, valid[index].spelling);
+    }
+    String8 suffixes[] = {
+        S8(""), S8("u"), S8("U"), S8("l"), S8("L"), S8("ll"), S8("LL"),
+        S8("ul"), S8("uL"), S8("Ul"), S8("UL"), S8("lu"), S8("lU"), S8("Lu"), S8("LU"),
+        S8("ull"), S8("uLL"), S8("Ull"), S8("ULL"), S8("llu"), S8("llU"), S8("LLu"), S8("LLU"),
+        S8("i8"), S8("I8"), S8("ui8"), S8("uI8"), S8("Ui8"), S8("UI8"),
+        S8("i16"), S8("I16"), S8("ui16"), S8("uI16"), S8("Ui16"), S8("UI16"),
+        S8("i32"), S8("I32"), S8("ui32"), S8("uI32"), S8("Ui32"), S8("UI32"),
+        S8("i64"), S8("I64"), S8("ui64"), S8("uI64"), S8("Ui64"), S8("UI64"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(suffixes); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 spelling = string_format(temporary.arena, S8("42{S8}"), suffixes[index]);
+        u64 value = 0;
+        BUSTER_TEST_RAW(arguments, c_conditional_number(spelling, &value), spelling);
+        BUSTER_TEST(arguments, value == 42);
+        scratch_end(temporary);
+    }
+    String8 invalid[] = {
+        S8(""), S8("09"), S8("08u"), S8("0b2"), S8("0b102"), S8("0x"), S8("0Xg"), S8("0b"),
+        S8("1lL"), S8("1Ll"), S8("1uu"), S8("1UU"), S8("1lul"), S8("1lll"), S8("1ulL"),
+        S8("1i128"), S8("1i7"), S8("1i08"), S8("1ui8u"), S8("1i64u"), S8("1z"), S8("1xyz"),
+        S8("18446744073709551616ULL"), S8("02000000000000000000000ULL"), S8("0x10000000000000000ULL"),
+        S8("0b10000000000000000000000000000000000000000000000000000000000000000ULL"),
+        S8("99999999999999999999999999999999999999"),
+        S8("'1"), S8("0x'1"), S8("1''0"), S8("1'"), S8("1'u"), S8("0b1'2"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        u64 value = 17;
+        BUSTER_TEST_RAW(arguments, !c_conditional_number(invalid[index], &value), invalid[index]);
+        BUSTER_TEST(arguments, value == 17);
+    }
+    char8 bounded[] = {'0', '7', '7', '9'};
+    u64 bounded_value = 0;
+    BUSTER_TEST(arguments, c_conditional_number((String8){.pointer = bounded, .length = 3}, &bounded_value));
+    BUSTER_TEST(arguments, bounded_value == 63);
+    BUSTER_TEST(arguments, !c_conditional_number((String8){.pointer = bounded, .length = 4}, &bounded_value));
+    BUSTER_TEST(arguments, bounded_value == 63);
+
+    String8 malformed[] = {S8("09"), S8("1lL"), S8("1uu"), S8("18446744073709551616ULL"), S8("0x10000000000000000ULL")};
+    struct
+    {
+        String8 prefix;
+        String8 suffix;
+    } contexts[] = {
+        {S8("unsigned long long value = "), S8(";\n")},
+        {S8("int test(void) { return (int)("), S8("); }\n")},
+        {S8("enum E { VALUE = "), S8(" };\n")},
+        {S8("int array["), S8("];\n")},
+        {S8("_Static_assert("), S8(", \"literal\");\n")},
+        {S8("int test(void) { return sizeof("), S8("); }\n")},
+        {S8("int test(void) { return sizeof((int)"), S8("); }\n")},
+        {S8("int test(void) { return 1 ? 0 : (int)"), S8("; }\n")},
+        {S8("int test(void) { return 0 && (int)"), S8("; }\n")},
+        {S8("static int unused(void) { return (int)"), S8("; }\nint main(void) { return 0; }\n")},
+        {S8("long double value = "), S8(";\n")},
+    };
+    for (u32 dialect = 0; dialect < C_PREPROCESS_DIALECT_COUNT; dialect += 1)
+    {
+        for (u32 spelling = 0; spelling < BUSTER_ARRAY_LENGTH(malformed); spelling += 1)
+        {
+            for (u32 context = 0; context < BUSTER_ARRAY_LENGTH(contexts); context += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 source = string_format(temporary.arena, S8("/* location */\n{S8}{S8}{S8}"),
+                                               contexts[context].prefix, malformed[spelling], contexts[context].suffix);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                    (CPreprocessOptions){.source_path = S8("integer-spelling.c"), .dialect = (CPreprocessDialect)dialect});
+                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0, source);
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == 1, source);
+                if (syntax.diagnostic_count == 1)
+                {
+                    CDiagnostic diagnostic = syntax.diagnostics[0];
+                    BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_INVALID_INTEGER_LITERAL);
+                    BUSTER_TEST(arguments, diagnostic.location.line == 2);
+                    BUSTER_TEST(arguments, diagnostic.location.column == contexts[context].prefix.length + 1);
+                }
+                CIRLowerResult lowered = c_analyze(temporary.arena, S8("integer-spelling.c"), tokens, syntax, target_native);
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0, source);
+                scratch_end(temporary);
+            }
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 directives[] = {S8("#if "), S8("#if 0 && "), S8("#if 0\n#elif ")};
+            for (u32 directive = 0; directive < BUSTER_ARRAY_LENGTH(directives); directive += 1)
+            {
+                String8 source = string_format(temporary.arena, S8("{S8}{S8}\n#endif\n"), directives[directive], malformed[spelling]);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                    (CPreprocessOptions){.source_path = S8("integer-directive.c"), .dialect = (CPreprocessDialect)dialect});
+                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 1, source);
+                if (tokens.diagnostic_count == 1)
+                {
+                    BUSTER_TEST(arguments, tokens.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_CONDITIONAL);
+                    BUSTER_TEST(arguments, tokens.diagnostics[0].location.line == (directive == 2 ? 2u : 1u));
+                }
+            }
+            scratch_end(temporary);
+        }
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = S8("#define UNUSED 09\n"
+                            "#define STR(x) #x\n"
+                            "#define JOIN(a,b) a ## b\n"
+                            "#if 0\nunsigned bad = 09;\n#endif\n"
+                            "#if 077 != 63 || 0xffffffffffffffffULL != 18446744073709551615ULL\n#error values\n#endif\n"
+                            "_Static_assert(sizeof(1i8) == 1 && sizeof(1ui8) == 1, \"i8 width\");\n"
+                            "_Static_assert(sizeof(1i16) == 2 && sizeof(1ui16) == 2, \"i16 width\");\n"
+                            "_Static_assert(sizeof(1i32) == 4 && sizeof(1ui32) == 4, \"i32 width\");\n"
+                            "_Static_assert(sizeof(1i64) == 8 && sizeof(1ui64) == 8, \"i64 width\");\n"
+                            "_Static_assert(0xffui8 == 255 && 0xffffui16 == 65535 && 0xffffffffui32 == 4294967295u, \"SDK limits\");\n"
+                            "unsigned long long maximum = JOIN(18446744073709551615, ULL);\n"
+                            "const char *text = STR(09);\n"
+                            "int test(void) { return sizeof(09.0) != sizeof(double) || maximum != 0xffffffffffffffffULL; }\n");
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.source_path = S8("integer-positive.c"), .dialect = (CPreprocessDialect)dialect});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult lowered = c_analyze(temporary.arena, S8("integer-positive.c"), tokens, syntax, target_native);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        if (lowered.program)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, &lowered.program->modules[0]).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -14110,6 +14714,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_scope_interval_index(arguments));
     c_test_result_add(&result, c_test_initializer_relocation_orders(arguments));
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
+    c_test_result_add(&result, c_test_preprocessor_short_circuit(arguments));
     c_test_result_add(&result, c_test_null_preprocessing_directives(arguments));
     c_test_result_add(&result, c_test_malformed_initializer_progress_and_identifier_uses(arguments));
     c_test_result_add(&result, c_test_frontend_lex_differential(arguments));
@@ -14149,6 +14754,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_casted_dereference_update(arguments));
     c_test_result_add(&result, c_test_parenthesized_function_declarations(arguments));
     c_test_result_add(&result, c_test_parenthesized_address_place_assignment(arguments));
+    c_test_result_add(&result, c_test_va_list_identity_and_places(arguments));
+
     c_test_result_add(&result, c_test_frontend_vectors(arguments));
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
     c_test_result_add(&result, c_test_inline_assembly_volatile_ir(arguments));
@@ -14168,6 +14775,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_wide_float_global_braces(arguments));
     c_test_result_add(&result, c_test_wide_float_global_folding(arguments));
     c_test_result_add(&result, c_test_float_integer_constants(arguments));
+    c_test_result_add(&result, c_test_integer_spelling_consistency(arguments));
     c_test_result_add(&result, c_test_constant_entity_lookup(arguments));
 
     c_test_result_add(&result, c_test_static_range_designators(arguments));
@@ -14224,7 +14832,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             S8("typedef struct Pair { int left; int right; } Pair;"
                " typedef float Float4 __attribute__((vector_size(16)));"
                " typedef __int128 Wide;"
-               " typedef void *va_list;"
+               " typedef __builtin_va_list va_list;"
                " static int callback(int value);"
                " static int callback_two(int value) { return value + 2; }"
                " static int (*callbacks[2])(int) = { callback, callback_two };"
@@ -14763,6 +15371,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 
     c_test_result_add(&result, c_test_packed_and_aligned_layout(arguments));
     c_test_result_add(&result, c_test_parameter_local_alignment(arguments));
+    c_test_result_add(&result, c_test_qualified_parameter_values(arguments));
+    c_test_result_add(&result, c_test_qualified_compound_values(arguments));
 
     TemporalArena nested_temporary = scratch_begin(0, 0);
     String8 nested_prefix = S8("static int identity(int value)"

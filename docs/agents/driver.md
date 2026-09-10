@@ -46,6 +46,19 @@ signature; `opcode` retains the first rejected canonical opcode in the legacy
 while `verification` identifies an implementation failure. The allocator,
 stage, opcode and reason counters all survive multi-input compilation.
 
+For two-operand EVEX vector loads/conversions, an ordinary memory qualifier
+names the source tuple, not the destination register width. A broadcast
+qualifier names its scalar element. The metadata selector projects the
+candidate's element width and validates the source qualifier independently;
+for example, masked `vcvtps2pd zmm0, m256` reads eight 32-bit elements while
+masked `vcvtpd2ps ymm0, m512` reads eight 64-bit elements. AT&T's unqualified
+memory spelling uses the same candidate contract. Unsized ordinary loads
+whose destination permits multiple source tuple widths are rejected as
+ambiguous; encoding length and candidate order cannot choose input lanes.
+This bounded projection
+requires a mask/broadcast, ZMM destination, or high vector register and covers
+FULL/HALF EVEX tuples; it does not replace all legacy/VEX source inference.
+
 `-fno-frontend-ssa` selects the original memory-form C lowering;
 `-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last
 flag wins. These controls are independent of `-fno-canonical-local-promotion`
@@ -54,6 +67,30 @@ SSA already built by the frontend. For a fully memory-form differential input,
 disable frontend SSA as well. Verbose compilation reports `IR_FRONTEND_SSA`
 counters beside `IR_LOCAL_PROMOTION`; see the
 [frontend ownership contract](frontend/foundations.md#direct-local-ssa-github-34).
+
+`-fsysv-unnamed-bitfields=integer|padding` selects the classification of
+nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`
+is the unchanged Buster default; `integer` includes those fields in INTEGER
+eightbyte classification for GCC interoperability. Zero-width fields contribute
+no class in either mode, and object layout is unchanged. The last selection
+wins. Invalid values, other native conventions, nonnative targets and LLVM
+bitcode output reject the option. This is one explicit ABI boundary, not a
+general emulation of any GCC or Clang version. Compile interoperating units
+with the policy their external objects use; the linker cannot infer it.
+
+The configured-host packed-layout tests use an independent register probe
+(`tests/host_sysv_unnamed_bitfields.c`) instead of guessing from a version
+string. A later float argument forces a known live XMM0 value under either
+convention. Both link directions then run all four allocators and both frontend
+forms, including later integer/float parameters and an assembly return control
+that zeros the unselected return register. A failed or unknown probe fails the
+test; it never silently assumes a convention or waives a mixed-link check.
+The policy-specific caller also requires `-fverify-codegen` in both link
+directions. The original caller remains intact; its separate underaligned
+volatile aggregate construction defect is tracked in #398.
+`IR_LOCAL_PROMOTION_WORK` reports shared-promotion parameter-cleanup sweeps and
+actual visits, separately from removed rows. The [middle-end pass map](../middle-end-pass-map.md)
+defines their scope, invalidation rules and separate diagnostic replay protocol.
 
 `-fno-machine-fallback` makes native C coverage strict: after code generation
 succeeds, any fallback fails the translation unit before object writing and
