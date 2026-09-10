@@ -23,12 +23,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p build "$RUNNER_TEMP/a08-baseline"
+          mkdir -p "$RUNNER_TEMP/a08-baseline"
+          git rev-parse HEAD > "$RUNNER_TEMP/a08-baseline/baseline-sha.txt"
+          exec > >(tee "$RUNNER_TEMP/a08-baseline/build.log") 2>&1
           clang --version
           node --version
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
-          build/build generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF '-DCMAKE_C_FLAGS_RELEASE=-O1 -DNDEBUG'
-          build/build build --config Release -t ide -- -j1
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF '-DCMAKE_C_FLAGS_RELEASE=-O1 -DNDEBUG'
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j1
       - name: Reproduce independent current capability boundaries
         shell: bash
         run: |
@@ -46,6 +48,7 @@ jobs:
             cat "$root/$name.log"
             test "$status" -eq 1
             grep -E 'indirect calls are unsupported|function-address relocations are unsupported' "$root/$name.log"
+            test "$(cat "$root/$name.wasm")" = retained-output
             printf 'BASELINE_REFUSAL case=%s exit=%s\n' "$name" "$status"
           done
           build/Release/ide cc -target wasm64-unknown-freestanding -nostdinc -o "$root/control.wasm" tests/basic_c_wasm64_integer_ops.c
