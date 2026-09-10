@@ -60,6 +60,8 @@ jobs:
       - name: Exercise mobile script and attached monitor lifecycles
         id: lifecycle
         shell: bash
+        env:
+          BUSTER_MOBILE_TEST_EVIDENCE_DIR: ${{ runner.temp }}/mobile-lifecycle-evidence
         run: |
           set -euo pipefail
           /bin/bash --version
@@ -78,6 +80,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mobile-lifecycle-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/mobile-lifecycle.log
+          path: |
+            ${{ runner.temp }}/mobile-lifecycle.log
+            ${{ runner.temp }}/mobile-lifecycle-evidence/
           if-no-files-found: ignore
           retention-days: 7
