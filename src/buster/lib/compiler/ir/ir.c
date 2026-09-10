@@ -1,5 +1,6 @@
 // Canonical typed IR construction, ABI classification, and validation
-// (model.h owns the record shapes, ir.h the API). The construction
+// (model.h owns the record shapes, ir.h the API). ir_construction_record
+// owns optional calling-thread construction diagnostics. The construction
 // functions (ir_program_initialize, ir_program_add_*, ir_module_add_*,
 // ir_function_add_*) are thin capacity-checked appends; the substance here
 // is what sits between the frontend and the backends: source-map lookup
@@ -16,10 +17,55 @@
 
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 
 #include <buster/lib/file.h>
 #include <buster/lib/simd.h>
 #include <buster/lib/string.h>
+
+#if BUSTER_BENCH_ALLOCATIONS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL IrConstructionCounters ir_construction_totals;
+
+void ir_construction_record(IrConstructionCounter counter, u64 amount)
+{
+    if ((u32)counter < IR_CONSTRUCTION_COUNT)
+    {
+        u64* value = ir_construction_totals.values + counter;
+        if (amount > UINT64_MAX - *value)
+        {
+            *value = UINT64_MAX;
+            ir_construction_totals.overflowed = true;
+        }
+        else
+        {
+            *value += amount;
+        }
+    }
+    else
+    {
+        ir_construction_totals.overflowed = true;
+    }
+    return;
+}
+
+IrConstructionCounters ir_construction_counters(void)
+{
+    return ir_construction_totals;
+}
+
+String8 ir_construction_counter_name(IrConstructionCounter counter)
+{
+    String8 result = {0};
+    switch (counter)
+    {
+#define IR_CONSTRUCTION_NAME(id, name) case IR_CONSTRUCTION_##id: result = S8(#name); break;
+        IR_CONSTRUCTION_COUNTERS(IR_CONSTRUCTION_NAME)
+#undef IR_CONSTRUCTION_NAME
+        default: break;
+    }
+    return result;
+}
+#endif
 
 IrType* ir_type_from_id(IrTypeTable* table, IrTypeId id)
 {
@@ -4066,6 +4112,8 @@ IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block
     {
         if (function->block_count >= function->block_capacity)
         {
+            IR_CONSTRUCTION_RECORD(BLOCK_GROWS, 1);
+            IR_CONSTRUCTION_RECORD(BLOCK_ROWS_COPIED, function->block_count);
             u32 capacity = function->block_capacity ? function->block_capacity * 2 : 8;
             IrBlock* blocks = arena_allocate(arena, IrBlock, capacity);
             if (function->block_count)
@@ -4079,6 +4127,7 @@ IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block
             .value = function->block_count,
         };
         function->blocks[function->block_count++] = block;
+        IR_CONSTRUCTION_RECORD(BLOCK_APPENDS, 1);
         result = &function->blocks[function->block_count - 1];
     }
 
@@ -4096,6 +4145,8 @@ IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue valu
     {
         if (function->value_count >= function->value_capacity)
         {
+            IR_CONSTRUCTION_RECORD(VALUE_GROWS, 1);
+            IR_CONSTRUCTION_RECORD(VALUE_ROWS_COPIED, function->value_count);
             u32 capacity = function->value_capacity ? function->value_capacity * 2 : 16;
             IrValue* values = arena_allocate(arena, IrValue, capacity);
             if (function->value_count)
@@ -4109,6 +4160,7 @@ IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue valu
             .value = function->value_count++,
         };
         function->values[id.value] = value;
+        IR_CONSTRUCTION_RECORD(VALUE_APPENDS, 1);
         result = id;
     }
 
@@ -4149,6 +4201,8 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
     {
         if (function->instruction_count >= function->instruction_capacity)
         {
+            IR_CONSTRUCTION_RECORD(INSTRUCTION_GROWS, 1);
+            IR_CONSTRUCTION_RECORD(INSTRUCTION_ROWS_COPIED, function->instruction_count);
             u32 capacity = function->instruction_capacity ? function->instruction_capacity * 2 : 16;
             IrInstruction* instructions = arena_allocate(arena, IrInstruction, capacity);
             if (function->instruction_count)
@@ -4158,9 +4212,11 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
             {
                 IrSourceRange* canonical_sources = arena_allocate(arena, IrSourceRange, capacity);
                 memset(canonical_sources, 0, sizeof(*canonical_sources) * capacity);
+                IR_CONSTRUCTION_RECORD(SOURCE_ROWS_CLEARED, capacity);
                 if (function->instruction_canonical_sources)
                 {
                     memcpy(canonical_sources, function->instruction_canonical_sources, sizeof(*canonical_sources) * function->instruction_count);
+                    IR_CONSTRUCTION_RECORD(SOURCE_ROWS_COPIED, function->instruction_count);
                 }
                 function->instruction_canonical_sources = canonical_sources;
             }
@@ -4179,6 +4235,8 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
         {
             function->instruction_canonical_sources[id.value] = canonical_source;
         }
+        IR_CONSTRUCTION_RECORD(INSTRUCTION_APPENDS, 1);
+        IR_CONSTRUCTION_RECORD(OPERAND_SLOTS_APPENDED, instruction.operand_count);
         result = id;
     }
 

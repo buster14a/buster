@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -203,6 +204,139 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("needs:", mobile)
         self.assertIn("needs: [lint, test, mobile]", text)
         self.assertIn("github.run_id", text.split("concurrency:", 1)[1].split("permissions:", 1)[0])
+
+    def test_platform_and_bootstrap_events_cover_the_same_revisions(self):
+        expected = ("  pull_request:", "  push:", "    branches: [main]",
+                    "    tags: ['**']", "  merge_group:",
+                    "    types: [checks_requested]", "  workflow_dispatch:")
+        for name in ("ci.yml", "self-host-audit.yml"):
+            with self.subTest(workflow=name):
+                text = (ROOT / ".github/workflows" / name).read_text()
+                block = re.search(r"(?ms)^on:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", text)
+                self.assertIsNotNone(block)
+                lines = tuple(line.rstrip() for line in block.group(1).splitlines()
+                              if line.strip() and not line.lstrip().startswith("#"))
+                self.assertEqual(lines, expected)
+                # Default checkout is the PR/merge-group merge revision, not
+                # an independently selected head or a stale branch ref.
+                self.assertNotRegex(text, r"(?m)^\s+(ref|repository):")
+
+    def test_bootstrap_cancellation_is_isolated_by_workflow_and_event(self):
+        suffix = ("${{ github.workflow }}-${{ github.event_name }}-"
+                  "${{ github.event_name == 'pull_request' && github.event.pull_request.number || "
+                  "github.event_name == 'merge_group' && github.ref || github.run_id }}")
+        cancel = "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}"
+        for name, prefix in (("ci.yml", "ci-"), ("self-host-audit.yml", "bootstrap-")):
+            with self.subTest(workflow=name):
+                text = (ROOT / ".github/workflows" / name).read_text()
+                block = re.search(r"(?ms)^concurrency:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", text)
+                self.assertIsNotNone(block)
+                lines = tuple(line.strip() for line in block.group(1).splitlines()
+                              if line.strip() and not line.lstrip().startswith("#"))
+                self.assertEqual(lines, ("group: " + prefix + suffix, "cancel-in-progress: " + cancel))
+
+    def test_bootstrap_keeps_every_native_gate_in_order(self):
+        text = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
+        commands = re.findall(r"(?m)^        run: '\"\$RUNNER_TEMP/buster-build\" (.+)'$", text)
+        self.assertEqual(commands, [
+            "self_host_audit_self_test",
+            "generate --cc clang --ci --linker DEFAULT",
+            "test_self_host --config Release",
+            "test_self_host_audit --config Release",
+            "build --config Release -t test_all",
+        ])
+        gates = text[text.index("      - name: Test the bootstrap checker"):].split(
+            "      - name: Retain stage evidence even on failure", 1)[0]
+        self.assertNotRegex(gates, r"(?m)^\s*continue-on-error:")
+        blocks = re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", gates)
+        self.assertEqual([name for name, _ in blocks], [
+            "Test the bootstrap checker",
+            "Configure production compiler",
+            "Preserve ordinary bootstrap and alternate-backend gates",
+            "Verify each generation and repeat",
+            "Run compiler regressions",
+            "Check the bootstrap probe against independent compiler oracles",
+        ])
+        evidence_gates = {
+            "Run compiler regressions",
+            "Check the bootstrap probe against independent compiler oracles",
+        }
+        for name, block in blocks:
+            with self.subTest(gate=name):
+                conditions = re.findall(r"(?m)^        if: (.+)$", block)
+                # These two independent results survive an audit failure, but
+                # cannot run before ordinary bootstrap or after cancellation.
+                expected = (["${{ !cancelled() && steps.ordinary_bootstrap.outcome == 'success' }}"]
+                            if name in evidence_gates else [])
+                self.assertEqual(conditions, expected)
+        self.assertIn("        id: ordinary_bootstrap\n", dict(blocks)[
+            "Preserve ordinary bootstrap and alternate-backend gates"])
+        oracle = dict(blocks)["Check the bootstrap probe against independent compiler oracles"]
+        self.assertIn('"$RUNNER_TEMP/buster-build" test_differential --self-test', oracle)
+        self.assertIn('"$RUNNER_TEMP/buster-build" test_differential --ide build/Release/ide '
+                      '--cc clang --source tests/self_host_bootstrap_probe.c --sanitize-oracle '
+                      '--out build/self-host-audit/probe-oracle', oracle)
+        self.assertNotIn("needs:", text)
+        self.assertIn("name: Linux x86-64 bootstrap evidence", text)
+        self.assertIn("runs-on: ubuntu-26.04", text)
+        self.assertIn("timeout-minutes: 30", text)
+        self.assertNotIn("secrets.", text)
+        self.assertNotRegex(text, r"(?m)^\s*[^#\n]+: write$")
+        artifact = text.split("      - name: Retain stage evidence even on failure", 1)[1]
+        self.assertIn("name: bootstrap-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}", artifact)
+        self.assertIn("if: ${{ !cancelled() }}", artifact)
+        self.assertNotIn("always()", artifact)
+
+    def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        aggregate = text.split("\n  complete:", 1)[1]
+        self.assertIn("needs: [lint, test, mobile]", aggregate)
+        self.assertIn("always()", aggregate)
+        # Execute the workflow's real shell body, not a Python copy of its
+        # predicate. Subshells contain its exit statements; all 125 outcomes
+        # include empty/missing dependency results as well as terminal states.
+        body = aggregate.split("        run: |\n", 1)[1]
+        body = textwrap.dedent(body)
+        with tempfile.TemporaryDirectory() as temporary:
+            gate = Path(temporary) / "aggregate.sh"
+            gate.write_bytes(body.encode("utf-8"))
+            environment = dict(os.environ, BUSTER_CI_GATE=gate.as_posix(),
+                               GITHUB_STEP_SUMMARY=(Path(temporary) / "summary.md").as_posix())
+            script = r"""
+set -eu
+checked=0
+for LINT_RESULT in success failure cancelled skipped ''; do
+  for DESKTOP_RESULT in success failure cancelled skipped ''; do
+    for MOBILE_RESULT in success failure cancelled skipped ''; do
+      export LINT_RESULT DESKTOP_RESULT MOBILE_RESULT
+      actual=0
+      ( . "$BUSTER_CI_GATE" ) >/dev/null 2>&1 || actual=$?
+      if [[ "$LINT_RESULT" == success && "$DESKTOP_RESULT" == success && "$MOBILE_RESULT" == success ]]; then
+        [[ "$actual" -eq 0 ]] || exit 1
+      else
+        [[ "$actual" -ne 0 ]] || exit 1
+      fi
+      checked=$((checked + 1))
+    done
+  done
+done
+printf '%s\n' "$checked"
+"""
+            # Windows CreateProcess can choose System32/bash.exe (WSL)
+            # before PATH. Use an absolute shell path; on Windows select
+            # the installed Git Bash, not an unrelated WSL distribution.
+            bash = shutil.which("bash")
+            if os.name == "nt":
+                git = shutil.which("git")
+                self.assertIsNotNone(git, "Git for Windows is a CI prerequisite")
+                bash = next((str(parent / "bin/bash.exe")
+                             for parent in Path(git).resolve().parents
+                             if (parent / "bin/bash.exe").is_file()), None)
+            self.assertIsNotNone(bash, "Bash is a CI prerequisite")
+            result = subprocess.run([bash, "--noprofile", "--norc", "-c", script], env=environment,
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.strip(), "125")
 
     @unittest.skipIf(os.name == "nt", "The failure-propagation probe uses the Unix Clang driver")
     def test_recoverable_ubsan_error_is_fatal_with_ci_environment(self):

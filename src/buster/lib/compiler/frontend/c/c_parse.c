@@ -5141,38 +5141,31 @@ BUSTER_C_INTERNAL void c_parse_aggregate_lookup_insert(CParseResult* result, CTy
     }
 }
 
-// The variable-argument list type, created once per translation unit. A libc
-// spells the same builtin under several typedef names -- musl declares
-// `va_list` in <stdarg.h> and `__isoc_va_list` in the public prototypes, both
-// as `__builtin_va_list` -- and a prototype written with one name has to stay
-// compatible with a definition written with the other, so all of them have to
-// land on one type id rather than on a fresh one each.
+// Builtin identity belongs to the type, so every typedef spelling shares it.
 BUSTER_C_INTERNAL CTypeId c_parse_variable_argument_list_type(CParseResult* result)
 {
+    CTypeId type = C_TYPE_ID_INVALID;
     for (u32 index = 0; index < result->type_count; index += 1)
     {
-        if (result->types[index].kind == C_TYPE_VA_LIST)
+        CType* candidate = result->types + index;
+        if (candidate->kind == C_TYPE_VA_LIST && !candidate->is_const && !candidate->is_volatile &&
+            !candidate->is_restrict && !candidate->is_atomic && !candidate->has_unqualified_type)
         {
-            return (CTypeId){.value = index};
+            type = (CTypeId){.value = index};
+            break;
         }
     }
-    return c_parse_add_type(result, (CType){
-                                        .element_type = C_TYPE_ID_INVALID,
-                                        .return_type = C_TYPE_ID_INVALID,
-                                        .array_bound = C_ARRAY_BOUND_INVALID,
-                                        .kind = C_TYPE_VA_LIST,
-                                        .is_complete = true,
-                                    });
-}
-
-// The typedef names that introduce the variable-argument list type. The set is
-// closed rather than "any typedef of __builtin_va_list" because the underlying
-// spelling is what these names are declared from, and matching on the name is
-// what keeps a library's own alias out of the builtin's identity.
-BUSTER_C_INTERNAL bool c_parse_variable_argument_list_name(String8 name)
-{
-    return string_equal(name, S8("va_list")) || string_equal(name, S8("__gnuc_va_list")) || string_equal(name, S8("__builtin_va_list")) ||
-           string_equal(name, S8("__isoc_va_list"));
+    if (type.value == C_ID_UNDERLYING_INVALID)
+    {
+        type = c_parse_add_type(result, (CType){
+            .element_type = C_TYPE_ID_INVALID,
+            .return_type = C_TYPE_ID_INVALID,
+            .array_bound = C_ARRAY_BOUND_INVALID,
+            .kind = C_TYPE_VA_LIST,
+            .is_complete = true,
+        });
+    }
+    return type;
 }
 
 BUSTER_C_SHARED CTypeId c_parse_add_type(CParseResult* result, CType type)
@@ -5413,6 +5406,10 @@ BUSTER_C_INTERNAL bool c_parse_type_word(String8 spelling)
     {
         return string_equal(spelling, S8("_Thread_local")) || string_equal(spelling, S8("__extension__"));
     }
+    case 17:
+    {
+        return string_equal(spelling, S8("__builtin_va_list"));
+    }
     default:
     {
         return false;
@@ -5535,6 +5532,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
 {
     bool seen_type = false;
     bool seen_void = false;
+    bool seen_va_list = false;
     bool seen_bool = false;
     bool seen_char = false;
     bool seen_short = false;
@@ -5580,7 +5578,12 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
             break;
         }
         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
-        if (string_equal(spelling, S8("void")))
+        if (string_equal(spelling, S8("__builtin_va_list")))
+        {
+            seen_va_list = true;
+            seen_type = true;
+        }
+        else if (string_equal(spelling, S8("void")))
         {
             seen_void = true;
             seen_type = true;
@@ -5671,7 +5674,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
     // `_Imaginary` is recognized only so that a declaration spelled with it
     // is rejected here instead of parsed as an implicit int with a stray
     // identifier; no target this compiler emits for has imaginary types.
-    if (seen_imaginary)
+    if (seen_imaginary || (seen_va_list && seen_complex))
     {
         return C_TYPE_ID_INVALID;
     }
@@ -5689,7 +5692,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
         }
         return c_parse_add_type(result, type);
     }
-    if (seen_void)
+    if (seen_va_list)
+    {
+        bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float ||
+                         seen_double || seen_int128 || seen_complex || seen_imaginary || long_count;
+        type.kind = invalid ? C_TYPE_INVALID : C_TYPE_VA_LIST;
+    }
+    else if (seen_void)
     {
         type.kind = C_TYPE_VOID;
     }
@@ -5730,7 +5739,20 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
         BUSTER_UNUSED(seen_int);
         type.kind = seen_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
     }
-    return c_parse_add_type(result, type);
+    CTypeId parsed = C_TYPE_ID_INVALID;
+    if (type.kind == C_TYPE_VA_LIST)
+    {
+        parsed = c_parse_variable_argument_list_type(result);
+        if (type.is_const || type.is_volatile || type.is_restrict || type.is_atomic)
+        {
+            parsed = c_parse_add_qualified_type(result, parsed, type);
+        }
+    }
+    else if (type.kind != C_TYPE_INVALID)
+    {
+        parsed = c_parse_add_type(result, type);
+    }
+    return parsed;
 }
 
 BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
@@ -6441,6 +6463,7 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
 {
     bool seen_type = false;
     bool seen_void = false;
+    bool seen_va_list = false;
     bool seen_bool = false;
     bool seen_char = false;
     bool seen_short = false;
@@ -6481,7 +6504,12 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
             break;
         }
         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
-        if (string_equal(spelling, S8("void")))
+        if (string_equal(spelling, S8("__builtin_va_list")))
+        {
+            seen_va_list = true;
+            seen_type = true;
+        }
+        else if (string_equal(spelling, S8("void")))
         {
             seen_void = true;
             seen_type = true;
@@ -6553,6 +6581,12 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     if (!seen_type || (seen_signed && seen_unsigned) || seen_imaginary)
     {
         result = C_TYPE_INVALID;
+    }
+    else if (seen_va_list)
+    {
+        bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float ||
+                         seen_double || seen_int128 || seen_complex || seen_imaginary || long_count;
+        result = invalid ? C_TYPE_INVALID : C_TYPE_VA_LIST;
     }
     else if (seen_complex)
     {
@@ -12974,10 +13008,6 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             }
             type = object_type;
         }
-        if (is_typedef && c_parse_variable_argument_list_name(c_token_spelling(preprocess.spelling_base, name)))
-        {
-            type = c_parse_variable_argument_list_type(result);
-        }
         // A block-scope `typedef int cache_line __attribute__((aligned(64)));`
         // writes the request on the type it declares, not on an object, so it
         // moves onto the type the way the file-scope path in
@@ -15695,10 +15725,6 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
                                                                });
             }
             c_parse_validate_constexpr_declaration(&machine, arena, &result, preprocess, declaration);
-            if (kind == C_DECLARATION_TYPEDEF && c_parse_variable_argument_list_name(declaration->name))
-            {
-                declaration->type = c_parse_variable_argument_list_type(&result);
-            }
             // A declarator with no parameter list still declares a function
             // when its type is one -- `extern __typeof(f) g;`, musl's
             // weak_alias spelling, and the same shape through a typedef

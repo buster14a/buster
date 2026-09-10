@@ -3597,6 +3597,144 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArgume
     return result;
 }
 
+// GitHub #147 / #258: faults are deferred, syntax errors are not. The
+// expression is passed through a macro so these tests also exercise expansion.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_case(UnitTestArguments* arguments, String8 expression,
+                                                           bool expected_valid, bool expected_value, bool elif)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = string_format(temporary.arena,
+                                  S8("#define TEST_EXPRESSION {S8}\n{S8} TEST_EXPRESSION\nkept\n#else\ndropped\n#endif\n"),
+                                  expression, elif ? S8("#if 0\nunused\n#elif") : S8("#if"));
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){.source_path = S8("conditional-short-circuit.c")});
+    if (expected_valid)
+    {
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, preprocess.token_count == 2);
+        c_test_preprocessed_token(arguments, &result, preprocess, 0, C_TOKEN_IDENTIFIER, expected_value ? S8("kept") : S8("dropped"));
+    }
+    else
+    {
+        bool diagnosed = false;
+        for (u32 index = 0; index < preprocess.diagnostic_count; index += 1)
+        {
+            diagnosed |= preprocess.diagnostics[index].kind == C_DIAGNOSTIC_INVALID_CONDITIONAL;
+        }
+        BUSTER_TEST(arguments, diagnosed);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_preprocessor_short_circuit(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 faults[] = {
+        S8("(1 / 0)"),
+        S8("(1 % 0)"),
+        S8("((-9223372036854775807LL - 1) / -1)"),
+        S8("((-9223372036854775807LL - 1) % -1)"),
+    };
+    struct
+    {
+        String8 format;
+        bool valid;
+        bool value;
+    } contexts[] = {
+        {S8("0 && {S8}"), true, false},
+        {S8("1 || {S8}"), true, true},
+        {S8("1 ? 7 : {S8}"), true, true},
+        {S8("0 ? {S8} : 0"), true, false},
+        {S8("1 || !{S8}"), true, true},
+        {S8("0 && ~{S8}"), true, false},
+        {S8("1 || ({S8} < 1)"), true, true},
+        {S8("1 || ({S8} << 1)"), true, true},
+        {S8("0 && (1 >> {S8})"), true, false},
+        {S8("0 && ({S8} / 0)"), true, false},
+        {S8("0 && ({S8} || 1)"), true, false},
+        {S8("1 || ({S8} && 0)"), true, true},
+        {S8("1 || ({S8} ? 0 : 1)"), true, true},
+        {S8("(0 && {S8}) ? 0 : 1"), true, true},
+        {S8("0 ? 0 : 1 ? 1 : {S8}"), true, true},
+        {S8("1 ? 0 ? {S8} : 1 : 0"), true, true},
+        {S8("{S8}"), false, false},
+        {S8("1 && {S8}"), false, false},
+        {S8("0 || {S8}"), false, false},
+        {S8("0 ? 1 : {S8}"), false, false},
+        {S8("1 ? {S8} : 1"), false, false},
+        {S8("{S8} || 1"), false, false},
+        {S8("{S8} && 0"), false, false},
+        {S8("{S8} ? 1 : 1"), false, false},
+        {S8("!{S8}"), false, false},
+        {S8("~{S8}"), false, false},
+        {S8("-{S8}"), false, false},
+        {S8("+{S8}"), false, false},
+        {S8("{S8} + 1"), false, false},
+        {S8("{S8} - 1"), false, false},
+        {S8("{S8} * 0"), false, false},
+        {S8("{S8} == 0"), false, false},
+        {S8("{S8} != 0"), false, false},
+        {S8("{S8} <= 0"), false, false},
+        {S8("{S8} >= 0"), false, false},
+        {S8("{S8} > 0"), false, false},
+        {S8("{S8} & 0"), false, false},
+        {S8("{S8} | 1"), false, false},
+        {S8("{S8} ^ 1"), false, false},
+        {S8("1 << {S8}"), false, false},
+        {S8("{S8} >> 1"), false, false},
+    };
+    for (u32 fault_index = 0; fault_index < BUSTER_ARRAY_LENGTH(faults); fault_index += 1)
+    {
+        for (u32 context_index = 0; context_index < BUSTER_ARRAY_LENGTH(contexts); context_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 expression = string_format(temporary.arena, contexts[context_index].format, faults[fault_index]);
+            c_test_result_add(&result, c_test_conditional_case(arguments, expression, contexts[context_index].valid, contexts[context_index].value, false));
+            c_test_result_add(&result, c_test_conditional_case(arguments, expression, contexts[context_index].valid, contexts[context_index].value, true));
+            scratch_end(temporary);
+        }
+    }
+    struct
+    {
+        String8 expression;
+        bool value;
+    } signedness[] = {
+        {S8("(1 ? -1 : (1u / 0)) > 0"), true},
+        {S8("(0 ? (1u % 0) : -1) < 0"), false},
+        {S8("(1 ? -1 : (1 / 0)) < 0"), true},
+        {S8("(0 ? (1 % 0) : -1) < 0"), true},
+        {S8("((1 || (1u / 0)) ? -1 : -2) < 0"), true},
+        {S8("((0 && (1u % 0)) ? -2 : -1) < 0"), true},
+        {S8("((1 ? -1 : (1u / 0)) >> 63) == 1"), true},
+        {S8("((1 ? -1 : (1 / 0)) >> 63) == -1"), true},
+        {S8("((1 ? -1 : (1u / 0)) / 2) > 0"), true},
+        {S8("((1 ? -3 : (1 / 0)) / 2) == -1"), true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(signedness); index += 1)
+    {
+        c_test_result_add(&result, c_test_conditional_case(arguments, signedness[index].expression, true, signedness[index].value, false));
+        c_test_result_add(&result, c_test_conditional_case(arguments, signedness[index].expression, true, signedness[index].value, true));
+    }
+    String8 malformed[] = {
+        S8("1 || (1 + )"),
+        S8("0 && (1 / )"),
+        S8("1 ? 1 : (1 % )"),
+        S8("0 ? (1 + ) : 1"),
+        S8("1 || (1 / 0"),
+        S8("0 && (1 2)"),
+        S8("1 ? 1"),
+        S8("0 && *1"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
+    {
+        c_test_result_add(&result, c_test_conditional_case(arguments, malformed[index], false, false, false));
+        c_test_result_add(&result, c_test_conditional_case(arguments, malformed[index], false, false, true));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9430,6 +9568,99 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_address_place_assignment
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_va_list_identity_and_places(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("x86_64-unknown-linux-gnu"), S8("x86_64-pc-windows"),
+                         S8("aarch64-unknown-linux-gnu"), S8("aarch64-apple-macos")};
+    String8 source = S8("typedef __builtin_va_list custom_list; typedef custom_list nested_list;"
+        "typedef void *va_list; struct State { nested_list ap; };"
+        "int test(int n, ...) { struct State state; nested_list copies[2]; nested_list *p = copies + 1; int i = 0;"
+        " __builtin_va_start(state.ap, n); __builtin_va_copy(copies[i++], state.ap); __builtin_va_copy(*p, state.ap);"
+        " int value = __builtin_va_arg(state.ap, int) + __builtin_va_arg(copies[0], int) + __builtin_va_arg(*p, int);"
+        " __builtin_va_end(state.ap); __builtin_va_end(copies[0]); __builtin_va_end(*p); return value + i; }");
+    String8 invalid[] = {
+        S8("typedef void *va_list; void test(int n, ...) { va_list ap; __builtin_va_start(ap, n); }"),
+        S8("void test(int n, ...) { const __builtin_va_list ap; __builtin_va_start(ap, n); }"),
+        S8("void test(int n, ...) { __builtin_va_start(0, n); }"),
+        S8("void test(int n, ...) { __builtin_va_list ap; __builtin_va_copy(ap, 0); }"),
+        S8("void test(int n) { __builtin_va_list ap; __builtin_va_start(ap, n); }"),
+        S8("void test(void) { int ap; __builtin_va_end(ap); }"),
+        S8("int test(void) { int ap; return __builtin_va_arg(ap, int); }"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TargetParseResult target = target_parse_triple(targets[target_index]);
+        BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CPreprocessOptions options = {.target = target.target, .data_layout = target_data_layout(target.target)};
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.declaration_count >= 3);
+            if (parse.declaration_count >= 3)
+            {
+                CTypeId first = parse.declarations[0].type;
+                CTypeId alias = parse.declarations[1].type;
+                CType* list = c_type_from_id(&parse, first);
+                CType* pointer = c_type_from_id(&parse, parse.declarations[2].type);
+                BUSTER_TEST(arguments, first.value == alias.value);
+                BUSTER_TEST(arguments, list && list->kind == C_TYPE_VA_LIST);
+                BUSTER_TEST(arguments, pointer && pointer->kind == C_TYPE_POINTER);
+            }
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("va-list-places.c"), tokens, parse, target.target,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, lowered.program && lowered.diagnostic_count == 0);
+            if (lowered.program && !lowered.diagnostic_count)
+            {
+                IrModule* module = lowered.program->modules;
+                IrFunction* function = c_test_find_ir_function(module, S8("test"));
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, function != 0);
+                u32 starts = 0;
+                u32 copies = 0;
+                u32 reads = 0;
+                u32 ends = 0;
+                for (u32 index = 0; function && index < function->instruction_count; index += 1)
+                {
+                    IrInstruction* instruction = function->instructions + index;
+                    starts += instruction->opcode == IR_OPCODE_VA_START;
+                    copies += instruction->opcode == IR_OPCODE_VA_COPY;
+                    reads += instruction->opcode == IR_OPCODE_VA_ARG;
+                    ends += instruction->opcode == IR_OPCODE_VA_END;
+                    if (instruction->opcode == IR_OPCODE_VA_START && target_index < 2)
+                    {
+                        IrType* list = ir_type_from_id(&lowered.program->types, instruction->canonical_type);
+                        BUSTER_TEST(arguments, list && list->kind == IR_TYPE_VA_LIST && list->layout.resolved);
+                        // Preserve the existing padded SysV cursor and the
+                        // pointer-sized Windows cursor; this is no ABI rewrite.
+                        BUSTER_TEST(arguments, list && list->layout.size == (target_index == 0 ? 32u : 8u));
+                    }
+                }
+                BUSTER_TEST(arguments, starts == 1 && copies == 2 && reads == 3 && ends == 3);
+            }
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+            {
+                CPreprocessResult bad_tokens = c_preprocess(temporary.arena, invalid[case_index], options);
+                CParseResult bad_parse = c_parse(temporary.arena, bad_tokens);
+                CIRLowerResult bad = c_lower_to_ir_with_options(temporary.arena, S8("invalid-va-list.c"), bad_tokens, bad_parse, target.target,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, !bad_tokens.diagnostic_count && !bad_parse.diagnostic_count, invalid[case_index]);
+                BUSTER_TEST_RAW(arguments, bad.diagnostic_count == 1, invalid[case_index]);
+                if (bad.diagnostic_count == 1)
+                {
+                    BUSTER_TEST(arguments, bad.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                    BUSTER_TEST(arguments, bad.diagnostics[0].message.length > 0);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vectors(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9559,7 +9790,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vectors(UnitTestArguments* ar
     scratch_end(variadic_call_temporary);
     TemporalArena c23_va_start_temporary = scratch_begin(0, 0);
     CPreprocessResult c23_va_start_tokens = c_preprocess(c23_va_start_temporary.arena,
-                                                         S8("typedef void *va_list;"
+                                                         S8("typedef __builtin_va_list va_list;"
                                                             " int first(int count, ...)"
                                                             " { va_list arguments;"
                                                             " __builtin_c23_va_start("
@@ -12281,8 +12512,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         // passes one in; the shapes past the two eightbytes its copy covers --
         // a `long double _Complex`, an aggregate with a tail behind the
         // payload -- are named here rather than at code generation.
-        S8("typedef void *va_list; int take(int count, ...) { va_list arguments; long double _Complex value = __builtin_va_arg(arguments, long double _Complex); return value != 0; } int main(void) { return 0; }"),
-        S8("typedef void *va_list; struct ldlarge { long double f; int tail; }; int take(int count, ...) { va_list arguments; struct ldlarge value = __builtin_va_arg(arguments, struct ldlarge); return value.tail; } int main(void) { return 0; }"),
+        S8("typedef __builtin_va_list va_list; int take(int count, ...) { va_list arguments; long double _Complex value = __builtin_va_arg(arguments, long double _Complex); return value != 0; } int main(void) { return 0; }"),
+        S8("typedef __builtin_va_list va_list; struct ldlarge { long double f; int tail; }; int take(int count, ...) { va_list arguments; struct ldlarge value = __builtin_va_arg(arguments, struct ldlarge); return value.tail; } int main(void) { return 0; }"),
         S8("long double malformed_exponent = 0x1pL; int main(void) { return 0; }"),
         S8("long double invalid_i_suffix = 123i; int main(void) { return 0; }"),
         S8("long double invalid_i65_suffix = 123i65; int main(void) { return 0; }"),
@@ -12340,8 +12571,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
             S8("long double add(long double left, long double right) { return left + right; } int main(void) { return 0; }"),
             S8("int compare(long double left, long double right) { return left < right; } int main(void) { return 0; }"),
             S8("void variadic_call(int count, ...); void call(void) { variadic_call(0, 1.0L); } int main(void) { return 0; }"),
-            S8("typedef void *va_list; int take(int count, ...) { va_list arguments; long double value = __builtin_va_arg(arguments, long double); return value != 0; } int main(void) { return 0; }"),
-            S8("typedef void *va_list; union ldshape { long double f; struct { unsigned long m; unsigned short se; } i; }; unsigned long take(int count, ...) { va_list arguments; union ldshape value = __builtin_va_arg(arguments, union ldshape); return value.i.m; } int main(void) { return 0; }"),
+            S8("typedef __builtin_va_list va_list; int take(int count, ...) { va_list arguments; long double value = __builtin_va_arg(arguments, long double); return value != 0; } int main(void) { return 0; }"),
+            S8("typedef __builtin_va_list va_list; union ldshape { long double f; struct { unsigned long m; unsigned short se; } i; }; unsigned long take(int count, ...) { va_list arguments; union ldshape value = __builtin_va_arg(arguments, union ldshape); return value.i.m; } int main(void) { return 0; }"),
             S8("long double arithmetic = 1.0L + 2.0L; int main(void) { return 0; }"),
             S8("long double parenthesized_arithmetic = (1.0L + 2.0L); int main(void) { return 0; }"),
             S8("long double aggregate[1] = { 1.0L }; int main(void) { return 0; }"),
@@ -14110,6 +14341,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_scope_interval_index(arguments));
     c_test_result_add(&result, c_test_initializer_relocation_orders(arguments));
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
+    c_test_result_add(&result, c_test_preprocessor_short_circuit(arguments));
     c_test_result_add(&result, c_test_null_preprocessing_directives(arguments));
     c_test_result_add(&result, c_test_malformed_initializer_progress_and_identifier_uses(arguments));
     c_test_result_add(&result, c_test_frontend_lex_differential(arguments));
@@ -14149,6 +14381,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_casted_dereference_update(arguments));
     c_test_result_add(&result, c_test_parenthesized_function_declarations(arguments));
     c_test_result_add(&result, c_test_parenthesized_address_place_assignment(arguments));
+    c_test_result_add(&result, c_test_va_list_identity_and_places(arguments));
+
     c_test_result_add(&result, c_test_frontend_vectors(arguments));
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
     c_test_result_add(&result, c_test_inline_assembly_volatile_ir(arguments));
@@ -14224,7 +14458,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
             S8("typedef struct Pair { int left; int right; } Pair;"
                " typedef float Float4 __attribute__((vector_size(16)));"
                " typedef __int128 Wide;"
-               " typedef void *va_list;"
+               " typedef __builtin_va_list va_list;"
                " static int callback(int value);"
                " static int callback_two(int value) { return value + 2; }"
                " static int (*callbacks[2])(int) = { callback, callback_two };"

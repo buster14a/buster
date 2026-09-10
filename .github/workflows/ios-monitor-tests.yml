@@ -5,6 +5,8 @@ on:
     paths:
       - 'ios/**'
       - 'android/**'
+      - 'CMakeLists.txt'
+      - 'cmake/AndroidApk.cmake'
       - 'tests/*mobile*'
       - 'tests/*ios*'
       - 'tests/*android*'
@@ -15,6 +17,8 @@ on:
     paths:
       - 'ios/**'
       - 'android/**'
+      - 'CMakeLists.txt'
+      - 'cmake/AndroidApk.cmake'
       - 'tests/*mobile*'
       - 'tests/*ios*'
       - 'tests/*android*'

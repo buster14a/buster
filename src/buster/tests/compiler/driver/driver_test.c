@@ -1133,6 +1133,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_codeview_limit(UnitTestA
 
 // The curated MIR corpus is part of test_all/CI. Keep exclusions in separate
 // negative tests so an unsupported target cannot make a strict gate vacuous.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_windows_large_frame(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("x86_64-windows"), S8("x86_64-uefi")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 sizes[] = {S8("-DBUSTER_FRAME_BYTES=131088"), S8("-DBUSTER_FRAME_BYTES=524304")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(sizes); size += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 object_path = buster_test_temporary_path(temporary.arena, S8("buster-windows-large-frame"), S8(".obj"));
+                String8 command[] = {S8("-c"), size ? S8("-g") : S8("-g0"), S8("-target"), targets[target], modes[mode], sizes[size],
+                                     mode ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
+                                     S8("tests/basic_c_win64_large_frame.c"), S8("-o"), object_path};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                // Before the bounded probe, all three MIR modes exceeded the
+                // one-byte COFF prologue limit; NONE is the independent path.
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+                BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 0);
+                BUSTER_TEST(arguments, compiled.codegen_statistics.maximum_stack_frame_bytes >= 131088);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+                {
+                    BUSTER_TEST(arguments, compiled.object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length != 0);
+                    BUSTER_TEST(arguments, compiled.object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length != 0);
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
+                    if (target == 0)
+                    {
+                        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-windows-large-frame"), S8(".exe"));
+                        String8 link[] = {object_path, S8("-o"), output};
+                        CompilerDriverResult linked = compiler_driver_execute_invocation(temporary.arena,
+                            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link)));
+                        BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                        if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            // Probe growth and preservation of incoming GPR,
+                            // XMM, stack and indirect aggregate arguments.
+                            BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, output));
+                        }
+                    }
+#endif
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1748,6 +1801,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     UnitTestResult fallback = compiler_driver_test_machine_fallback(arguments);
     result.test_count += fallback.test_count;
     result.succeeded_test_count += fallback.succeeded_test_count;
+    UnitTestResult windows_large_frame = compiler_driver_test_windows_large_frame(arguments);
+    result.test_count += windows_large_frame.test_count;
+    result.succeeded_test_count += windows_large_frame.succeeded_test_count;
     UnitTestResult codeview_limit = compiler_driver_test_codeview_limit(arguments);
     result.test_count += codeview_limit.test_count;
     result.succeeded_test_count += codeview_limit.succeeded_test_count;
@@ -9129,6 +9185,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_unnamed_initializer_members.c"),
         S8("tests/basic_c_constant_conditional_type.c"),
         S8("tests/basic_c_macro_empty_paste.c"),
+        S8("tests/basic_c_preprocessor_short_circuit.c"),
     };
     String8 c_quickjs_regression_names[] = {
         S8("buster-c-aggregate-attribute"),
@@ -9145,6 +9202,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-unnamed-initializer-members"),
         S8("buster-c-constant-conditional-type"),
         S8("buster-c-macro-empty-paste"),
+        S8("buster-c-preprocessor-short-circuit"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths); fixture_index += 1)
     {
@@ -9642,6 +9700,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_null_pointer_offsetof.c"),
         S8("tests/basic_c_created_nan_sign.c"),
         S8("tests/basic_c_static_compound_literal.c"),
+        S8("tests/basic_c_va_list_places.c"),
         S8("tests/basic_c_typeof_conditional.c"),
     };
     String8 c_musl_shape_fixture_names[] = {
@@ -9657,6 +9716,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-null-pointer-offsetof"),
         S8("buster-c-created-nan-sign"),
         S8("buster-c-static-compound-literal"),
+        S8("buster-c-va-list-places"),
         S8("buster-c-typeof-conditional"),
     };
     String8 c_musl_shape_allocator_flags[] = {
