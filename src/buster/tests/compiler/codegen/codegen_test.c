@@ -1190,7 +1190,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, i128_count_codegen.error == CODEGEN_ERROR_NONE);
     }
     String8 canonical_windows_c_source = S8(
-        "typedef void *va_list;\n"
+        "typedef __builtin_va_list va_list;\n"
         "struct Pair { int left; int right; };\n"
         "struct Big { long long first; long long second; long long third; };\n"
         "static int sum_pair(struct Pair value) { return value.left + value.right; }\n"
@@ -1726,7 +1726,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     TargetDataLayout aarch64_windows_layout = target_data_layout(aarch64_windows_target);
     BUSTER_TEST(arguments, aarch64_windows_layout.va_list.size == 8);
     String8 aarch64_windows_variadic_source = S8(
-        "typedef void *va_list;\n"
+        "typedef __builtin_va_list va_list;\n"
         "static long sum_many(int count, ...) {\n"
         "    va_list arguments; va_list copy; long total = 0;\n"
         "    __builtin_va_start(arguments, count); __builtin_va_copy(copy, arguments);\n"

@@ -3072,7 +3072,7 @@ BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
     S8_INITIALIZER("__restrict"),    S8_INITIALIZER("__restrict__"), S8_INITIALIZER("__signed"),    S8_INITIALIZER("__signed__"),
     S8_INITIALIZER("__asm"),         S8_INITIALIZER("__asm__"),   S8_INITIALIZER("__alignof"),      S8_INITIALIZER("__alignof__"),
     S8_INITIALIZER("_Nonnull"),      S8_INITIALIZER("_Nullable"), S8_INITIALIZER("_Null_unspecified"), S8_INITIALIZER("__int128"),
-    S8_INITIALIZER("__complex"),     S8_INITIALIZER("__complex__"),
+    S8_INITIALIZER("__complex"),     S8_INITIALIZER("__complex__"), S8_INITIALIZER("__builtin_va_list"),
 };
 
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_declaration_keyword_spellings) < C_DECLARATION_KEYWORD_SLOT_COUNT / 2);
@@ -7278,7 +7278,6 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     C_DEFINE_TYPE_MACRO("__CHAR8_TYPE__", S8("unsigned char"));
     C_DEFINE_TYPE_MACRO("__CHAR16_TYPE__", S8("unsigned short"));
     C_DEFINE_TYPE_MACRO("__CHAR32_TYPE__", S8("unsigned int"));
-    C_DEFINE_TYPE_MACRO("__builtin_va_list", S8("void *"));
     C_DEFINE_TYPE_MACRO("__SIZEOF_POINTER__", string_format(arena, S8("{u32}"), layout.pointer.size));
     C_DEFINE_TYPE_MACRO("__POINTER_WIDTH__", string_format(arena, S8("{u32}"), layout.pointer.bit_width));
     C_DEFINE_TYPE_MACRO("__SIZE_WIDTH__", string_format(arena, S8("{u32}"), layout.pointer.bit_width));
@@ -7297,8 +7296,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         // for the 128-bit integer keyword rather than declaring them in a
         // header, and code that uses 128-bit arithmetic reaches for them
         // directly (SQLite's decimal and integer-overflow helpers do).  The
-        // keyword itself is already understood, so name it the same way
-        // __builtin_va_list is named above.
+        // keyword itself is already understood, so retain it in the expansion.
         C_DEFINE_TYPE_MACRO("__int128_t", S8("__int128"));
         C_DEFINE_TYPE_MACRO("__uint128_t", S8("unsigned __int128"));
     }

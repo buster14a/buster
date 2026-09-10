@@ -11958,6 +11958,7 @@ typedef enum CIrPreparedCallContinuation
     C_IR_PREPARED_CALL_CONTINUATION_CLEAR_FIRST,
     C_IR_PREPARED_CALL_CONTINUATION_CLEAR_SECOND,
     C_IR_PREPARED_CALL_CONTINUATION_PREFETCH,
+    C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION,
     C_IR_PREPARED_CALL_CONTINUATION_VA_END,
     C_IR_PREPARED_CALL_CONTINUATION_VA_COPY,
     C_IR_PREPARED_CALL_CONTINUATION_VA_ARG,
@@ -17028,6 +17029,123 @@ BUSTER_C_INTERNAL IrValueId c_ir_atomic_aggregate_bits_value(CIntegerIrBuilder* 
     return result;
 }
 
+// Builtins consume a pointer to the existing target-specific list object.
+// Check this at the frontend boundary instead of publishing malformed VA IR.
+BUSTER_C_INTERNAL bool c_ir_va_list_operand_valid(CIntegerIrBuilder* builder, IrValueId value)
+{
+    IrType* pointer = value.value < builder->function->value_count
+                          ? ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type) : 0;
+    IrType* list = pointer && pointer->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, pointer->element_type) : 0;
+    return list && list->kind == IR_TYPE_VA_LIST;
+}
+
+BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+                                                                        CIrPreparedCallContinuation continuation, bool child_success,
+                                                                        IrValueId child_value)
+{
+    CIrPreparedCall* selected = builder->prepared_calls + frame->as.prepared_call.call_index;
+    CToken token = builder->preprocess.tokens[selected->token_index];
+    IrSourceRange source = c_ir_token_source_range(builder, token);
+    u32 starts[2] = {0};
+    u32 ends[2] = {0};
+    u32 count = 0;
+    bool valid = c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &count) &&
+                 count == (selected->builtin_va_end ? 1u : 2u);
+    CIrPreparedCallStepResult step = C_IR_PREPARED_CALL_STEP_FINISHED;
+    IrValueId source_list = IR_VALUE_ID_INVALID;
+    IrTypeId destination_type = IR_TYPE_ID_INVALID;
+    if (valid && selected->builtin_va_start)
+    {
+        IrType* function_type = ir_type_from_id(&builder->program->types, builder->function->canonical_type);
+        valid = function_type && function_type->is_variadic;
+    }
+    if (valid && selected->builtin_va_end)
+    {
+        if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_END)
+        {
+            source_list = child_value;
+            valid = child_success && c_ir_va_list_operand_valid(builder, source_list);
+        }
+        else
+        {
+            step = c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_END, starts[0], ends[0], true);
+        }
+    }
+    else if (valid)
+    {
+        if (continuation != C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION && continuation != C_IR_PREPARED_CALL_CONTINUATION_VA_COPY)
+        {
+            // MSVC's header passes the address to __va_start; recover the
+            // same destination expression without re-evaluating its effects.
+            if (selected->builtin_va_start && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__va_start")) &&
+                starts[0] < ends[0] && c_token_is_punctuator(&builder->preprocess.tokens[starts[0]], C_PUNCTUATOR_AMPERSAND))
+            {
+                starts[0] += 1;
+            }
+            step = c_ir_prepared_call_request_place(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION, starts[0], ends[0]);
+        }
+        else
+        {
+            // Keep the lowered place across the copy-source continuation.
+            // Calls, indexing and increments in the destination run once.
+            if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION)
+            {
+                frame->as.prepared_call.state->place = child_value;
+            }
+            IrValueId place = frame->as.prepared_call.state->place;
+            IrValue* destination = place.value < builder->function->value_count ? builder->function->values + place.value : 0;
+            IrType* type = destination ? ir_type_from_id(&builder->program->types, destination->canonical_type) : 0;
+            valid = child_success && destination && destination->category == IR_VALUE_PLACE && !destination->is_read_only &&
+                    type && type->kind == IR_TYPE_VA_LIST && !type->is_atomic;
+            if (valid)
+            {
+                destination_type = type->is_volatile ? type->unqualified_type : destination->canonical_type;
+                if (selected->builtin_va_copy && continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION)
+                {
+                    step = c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_COPY, starts[1], ends[1], true);
+                }
+                else if (selected->builtin_va_copy)
+                {
+                    source_list = child_value;
+                    valid = c_ir_va_list_operand_valid(builder, source_list);
+                }
+            }
+        }
+    }
+    if (valid && step == C_IR_PREPARED_CALL_STEP_FINISHED)
+    {
+        IrTypeId result_type = selected->builtin_va_end ? builder->void_type : destination_type;
+        IrValueId result = selected->builtin_va_end ? IR_VALUE_ID_INVALID : c_ir_add_result(builder, result_type);
+        IrInstruction instruction = c_ir_instruction_initialize(selected->builtin_va_start ? IR_OPCODE_VA_START :
+                                                               selected->builtin_va_copy ? IR_OPCODE_VA_COPY : IR_OPCODE_VA_END, result_type);
+        if (!selected->builtin_va_start)
+        {
+            instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
+            instruction.operands[0] = source_list;
+            instruction.operand_count = 1;
+        }
+        instruction.result = result;
+        IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+        if (!selected->builtin_va_end)
+        {
+            builder->function->values[result.value].definition = id;
+            IrValueId place = frame->as.prepared_call.state->place;
+            valid = c_ir_emit_store_place(builder, place, builder->function->values[place.value].canonical_type, result, source);
+        }
+    }
+    if (!valid)
+    {
+        if (!builder->failure_message.length)
+        {
+            builder->failure_message = selected->builtin_va_end ? S8("va_end requires a va_list operand") :
+                S8("va_start/va_copy requires a modifiable va_list destination and valid arguments");
+            builder->failure_token_index = selected->token_index;
+        }
+        step = C_IR_PREPARED_CALL_STEP_FAILED;
+    }
+    return step;
+}
+
 BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -18233,119 +18351,10 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
         }
         if (selected->builtin_va_start || selected->builtin_va_copy || selected->builtin_va_end)
         {
-            u32 argument_start = selected->open_index + 1;
-            u32 separator = selected->close_index;
-            u32 parentheses = 0;
-            u32 brackets = 0;
-            for (u32 index = argument_start; index < selected->close_index; index += 1)
+            CIrPreparedCallStepResult step = c_ir_emit_va_list_call_step(builder, frame, continuation, child_success, child_value);
+            if (step != C_IR_PREPARED_CALL_STEP_FINISHED)
             {
-                CToken current = builder->preprocess.tokens[index];
-                if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
-                {
-                    parentheses += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
-                {
-                    parentheses -= 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
-                {
-                    brackets += 1;
-                }
-                else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET) && brackets)
-                {
-                    brackets -= 1;
-                }
-                else if (!parentheses && !brackets && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
-                {
-                    separator = index;
-                    break;
-                }
-            }
-            IrSourceRange source = c_ir_token_source_range(builder, token);
-            if (selected->builtin_va_end)
-            {
-                IrValueId list = IR_VALUE_ID_INVALID;
-                if (argument_start >= selected->close_index || separator != selected->close_index)
-                {
-                    return false;
-                }
-                if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_END)
-                {
-                    if (!child_success)
-                    {
-                        return C_IR_PREPARED_CALL_STEP_FAILED;
-                    }
-                    list = child_value;
-                }
-                else
-                {
-                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_END, argument_start,
-                                                                 selected->close_index, true);
-                }
-                IrSourceRange instruction_source = source;
-                IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_VA_END, builder->void_type);
-                instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
-                instruction.operands[0] = list;
-                instruction.operand_count = 1;
-                c_ir_append_instruction(builder, instruction, instruction_source);
-            }
-            else
-            {
-                u32 list_index = argument_start;
-                if (selected->builtin_va_start && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__va_start")) && list_index < separator &&
-                    c_token_is_punctuator(&builder->preprocess.tokens[list_index], C_PUNCTUATOR_AMPERSAND))
-                {
-                    list_index += 1;
-                }
-                if (separator == selected->close_index || separator != list_index + 1 ||
-                    builder->preprocess.tokens[list_index].kind != C_TOKEN_IDENTIFIER)
-                {
-                    return false;
-                }
-                CEntityId entity = c_ir_identifier_entity(builder, list_index);
-                CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
-                if (!local)
-                {
-                    return false;
-                }
-                IrValueId source_list = IR_VALUE_ID_INVALID;
-                if (selected->builtin_va_copy)
-                {
-                    if (separator + 1 >= selected->close_index)
-                    {
-                        return false;
-                    }
-                    if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_COPY)
-                    {
-                        if (!child_success)
-                        {
-                            return C_IR_PREPARED_CALL_STEP_FAILED;
-                        }
-                        source_list = child_value;
-                    }
-                    else
-                    {
-                        return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_COPY, separator + 1,
-                                                                     selected->close_index, true);
-                    }
-                }
-                IrValueId result = c_ir_add_result(builder, local->type);
-                IrSourceRange instruction_source = source;
-                IrInstruction instruction = c_ir_instruction_initialize(selected->builtin_va_start ? IR_OPCODE_VA_START : IR_OPCODE_VA_COPY, local->type);
-                if (selected->builtin_va_copy)
-                {
-                    instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
-                    instruction.operands[0] = source_list;
-                    instruction.operand_count = 1;
-                }
-                instruction.result = result;
-                IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-                builder->function->values[result.value].definition = id;
-                if (!c_ir_emit_store(builder, local, result, source))
-                {
-                    return false;
-                }
+                return step;
             }
             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
             selected->emitted = true;
@@ -18395,6 +18404,12 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             else
             {
                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_ARG, argument_start, separator, true);
+            }
+            if (!c_ir_va_list_operand_valid(builder, list))
+            {
+                builder->failure_message = S8("va_arg requires a va_list operand");
+                builder->failure_token_index = selected->token_index;
+                return C_IR_PREPARED_CALL_STEP_FAILED;
             }
             selected->result = c_ir_add_result(builder, result_type);
             IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
@@ -24615,6 +24630,15 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_root_update_resume(CIntegerIrB
     }
 }
 
+// Apply va_list object decay equally to named, member and indexed places.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_expression_place_value(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrSourceRange source)
+{
+    IrType* object = ir_type_from_id(&builder->program->types, type);
+    bool address = object && object->kind == IR_TYPE_VA_LIST &&
+                   (builder->va_list_builtin_operand || c_ir_va_list_parameter_decays(builder->target));
+    return address ? c_ir_emit_address_of_place(builder, place, type, source) : c_ir_emit_load_place(builder, place, type, source);
+}
+
 // Shared by the PREFIX_UPDATE/POSTFIX_UPDATE/IDENTIFIER_PLACE resume arm of
 // c_ir_lower_expression_core_step and its off-loop direct runs: consume the
 // successful place child in machine->child_result, load through it and apply
@@ -24649,7 +24673,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_expression_core_consume_place(CIntegerIrBuilde
                                                   c_token_is_punctuator(&builder->preprocess.tokens[consumed + 1], C_PUNCTUATOR_MINUS_MINUS));
             value = place_type && (place_type->kind == IR_TYPE_ARRAY || (place_type->is_atomic && postfix))
                         ? place
-                        : c_ir_emit_load_place(builder, place, type, source);
+                        : c_ir_emit_expression_place_value(builder, place, type, source);
             if (value.value != IR_ID_UNDERLYING_INVALID && postfix)
             {
                 value = c_ir_emit_increment(builder, place, type, value, builder->preprocess.tokens[consumed + 1], false);
@@ -25625,7 +25649,7 @@ c_ir_expression_core_loop:
                             IrType* field = ir_type_from_id(&builder->program->types, field_type);
                             value = field && (field->kind == IR_TYPE_ARRAY || (field->is_atomic && c_ir_postfix_update_at(builder, index + 2, end)))
                                         ? place
-                                        : c_ir_emit_load_place(builder, place, field_type, source);
+                                        : c_ir_emit_expression_place_value(builder, place, field_type, source);
                             index += 2;
                         }
                     }
@@ -25671,7 +25695,7 @@ c_ir_expression_core_loop:
                         IrType* type_value = ir_type_from_id(&builder->program->types, type);
                         value = type_value && (type_value->kind == IR_TYPE_ARRAY || (type_value->is_atomic && c_ir_postfix_update_at(builder, index, end)))
                                     ? place
-                                    : c_ir_emit_load_place(builder, place, type, source);
+                                    : c_ir_emit_expression_place_value(builder, place, type, source);
                     }
                 }
                 else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
@@ -25868,7 +25892,7 @@ c_ir_expression_core_loop:
                 bool postfix_update = c_ir_postfix_update_at(builder, prepared->close_index, end);
                 IrValueId indexed_value = element && element->kind == IR_TYPE_ARRAY         ? place
                                           : element && element->is_atomic && postfix_update ? place
-                                                                                            : c_ir_emit_load_place(builder, place, element_type, source);
+                                                                                            : c_ir_emit_expression_place_value(builder, place, element_type, source);
                 if (postfix_update)
                 {
                     indexed_value =
@@ -25929,7 +25953,7 @@ c_ir_expression_core_loop:
             bool postfix_update = c_ir_postfix_update_at(builder, index, end);
             IrValueId indexed_value = element && element->kind == IR_TYPE_ARRAY         ? place
                                       : element && element->is_atomic && postfix_update ? place
-                                                                                        : c_ir_emit_load_place(builder, place, element_type, source);
+                                                                                        : c_ir_emit_expression_place_value(builder, place, element_type, source);
             if (postfix_update)
             {
                 indexed_value = c_ir_emit_increment(builder, place, element_type, indexed_value, builder->preprocess.tokens[index + 1], false);
@@ -25997,7 +26021,7 @@ c_ir_expression_core_loop:
             bool member_place = field && (field->kind == IR_TYPE_STRUCT || field->kind == IR_TYPE_UNION) && index + 2 < end &&
                                 c_token_is_punctuator(&builder->preprocess.tokens[index + 2], C_PUNCTUATOR_DOT);
             values[value_count - 1] =
-                field && (field->kind == IR_TYPE_ARRAY || member_place) ? place : c_ir_emit_load_place(builder, place, field_type, source);
+                field && (field->kind == IR_TYPE_ARRAY || member_place) ? place : c_ir_emit_expression_place_value(builder, place, field_type, source);
             if (values[value_count - 1].value == IR_ID_UNDERLYING_INVALID)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
