@@ -1,0 +1,155 @@
+diff --git a/docs/agents/frontend/calls.md b/docs/agents/frontend/calls.md
+index 099a813..104ba07 100644
+--- a/docs/agents/frontend/calls.md
++++ b/docs/agents/frontend/calls.md
+@@ -124,3 +124,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
+   objects/archives where the selected action permits them. Unknown languages,
+   retired module-root options, and unsupported source extensions must fail
+   explicitly rather than being forwarded or guessed.
++
++The same object/value boundary applies to `c_ir_emit_compound_assignment`:
++use the unqualified computation type for volatile as well as atomic objects,
++while retaining the qualified place for loads/stores and the existing atomic
++read-modify-write path. `basic_c_qualified_compound.c` and
++`c_test_qualified_compound_values` guard exact binary operand/result types,
++volatile accesses, and canonical preparation in both frontend forms. The
++qualified-aggregate differential case also exercises a nested volatile pointer.
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index 7133d60..a718af4 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -20768,7 +20768,9 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
+ {
+     IrType* place_type = ir_type_from_id(&builder->program->types, type);
+     bool atomic = place_type && place_type->is_atomic;
+-    IrTypeId value_type = atomic ? place_type->unqualified_type : type;
++    // Keep the place qualified for its accesses, but compute on the value
++    // produced by lvalue conversion, for volatile as well as atomic objects.
++    IrTypeId value_type = place_type && (atomic || place_type->is_volatile) ? place_type->unqualified_type : type;
+     IrType* unqualified = ir_type_from_id(&builder->program->types, value_type);
+     bool pointer_arithmetic = unqualified && unqualified->kind == IR_TYPE_POINTER && (operation == C_CONDITIONAL_ADD || operation == C_CONDITIONAL_SUBTRACT);
+     IrValueId previous = IR_VALUE_ID_INVALID;
+diff --git a/src/buster/tests/compiler/driver/driver_test.c b/src/buster/tests/compiler/driver/driver_test.c
+index 5c6e037..9e7d48e 100644
+--- a/src/buster/tests/compiler/driver/driver_test.c
++++ b/src/buster/tests/compiler/driver/driver_test.c
+@@ -9644,6 +9644,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
+         S8("tests/basic_c_static_compound_literal.c"),
+         S8("tests/basic_c_typeof_conditional.c"),
+         S8("tests/basic_c_qualified_aggregate_call.c"),
++        S8("tests/basic_c_qualified_compound.c"),
+     };
+     String8 c_musl_shape_fixture_names[] = {
+         S8("buster-c-reversed-subscript"),
+@@ -9660,6 +9661,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
+         S8("buster-c-static-compound-literal"),
+         S8("buster-c-typeof-conditional"),
+         S8("buster-c-qualified-aggregate-call"),
++        S8("buster-c-qualified-compound"),
+     };
+     String8 c_musl_shape_allocator_flags[] = {
+         S8("-fregister-allocator=none"),
+diff --git a/src/buster/tests/compiler/frontend/c/c_test.c b/src/buster/tests/compiler/frontend/c/c_test.c
+index b2567e4..b1e81c0 100644
+--- a/src/buster/tests/compiler/frontend/c/c_test.c
++++ b/src/buster/tests/compiler/frontend/c/c_test.c
+@@ -12745,6 +12745,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_qualified_parameter_values(UnitTestArg
+     return result;
+ }
+ 
++// Volatile compound assignments operate on values, not qualified objects.
++BUSTER_GLOBAL_LOCAL UnitTestResult c_test_qualified_compound_values(UnitTestArguments* arguments)
++{
++    UnitTestResult result = {0};
++    ByteSlice input = file_read(arguments->arena, S8("tests/basic_c_qualified_compound.c"), (FileReadOptions){0});
++    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
++    BUSTER_TEST(arguments, input.length != 0);
++    Target targets[] = {
++        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
++        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
++    };
++    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
++    {
++        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
++        {
++            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
++            Target target = targets[target_index];
++            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
++            CParseResult parse = c_parse(temporary.arena, tokens);
++            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("qualified-compound.c"), tokens, parse, target,
++                                                                 (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
++            BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && !lowered.diagnostic_count);
++            IrProgram* program = lowered.program;
++            BUSTER_TEST(arguments, program && program->module_count == 1);
++            if (program && program->module_count == 1)
++            {
++                IrModule* module = program->modules;
++                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
++                IrFunction* function = c_test_find_ir_function(module, S8("update"));
++                BUSTER_TEST(arguments, function != 0);
++                if (function)
++                {
++                    u32 additions = 0;
++                    u32 volatile_loads = 0;
++                    u32 volatile_stores = 0;
++                    for (u32 index = 0; index < function->instruction_count; index += 1)
++                    {
++                        IrInstruction* instruction = function->instructions + index;
++                        if (instruction->opcode == IR_OPCODE_BINARY && instruction->binary_operation == IR_BINARY_INTEGER_ADD)
++                        {
++                            IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
++                            BUSTER_TEST(arguments, type && type->kind == IR_TYPE_INTEGER && !type->is_volatile && !type->is_atomic);
++                            BUSTER_TEST(arguments, instruction->operand_count == 2);
++                            for (u32 operand = 0; operand < instruction->operand_count; operand += 1)
++                            {
++                                IrValueId value = instruction->operands[operand];
++                                BUSTER_TEST(arguments, value.value < function->value_count);
++                                if (value.value < function->value_count)
++                                {
++                                    BUSTER_TEST(arguments, function->values[value.value].canonical_type.value == instruction->canonical_type.value);
++                                }
++                            }
++                            additions += 1;
++                        }
++                        volatile_loads += instruction->opcode == IR_OPCODE_LOAD && instruction->volatile_access;
++                        volatile_stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
++                    }
++                    BUSTER_TEST(arguments, additions == 1 && volatile_loads >= 2 && volatile_stores == 1);
++                    BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
++                }
++            }
++            scratch_end(temporary);
++        }
++    }
++    return result;
++}
++
+ // Parameter objects need the same effective alignment as ordinary local
+ // declarations. Checking IR on every native target catches the frontend loss
+ // even when a machine backend independently recovers the type's alignment.
+@@ -14870,6 +14937,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+     c_test_result_add(&result, c_test_packed_and_aligned_layout(arguments));
+     c_test_result_add(&result, c_test_parameter_local_alignment(arguments));
+     c_test_result_add(&result, c_test_qualified_parameter_values(arguments));
++    c_test_result_add(&result, c_test_qualified_compound_values(arguments));
+ 
+     TemporalArena nested_temporary = scratch_begin(0, 0);
+     String8 nested_prefix = S8("static int identity(int value)"
+diff --git a/tests/basic_c_qualified_compound.c b/tests/basic_c_qualified_compound.c
+new file mode 100644
+index 0000000..a119ce0
+--- /dev/null
++++ b/tests/basic_c_qualified_compound.c
+@@ -0,0 +1,12 @@
++int update(volatile int* value)
++{
++    *value += 3;
++    return *value;
++}
++
++int main(void)
++{
++    volatile int value = 4;
++    int result = update(&value);
++    return result != 7 || value != 7;
++}
