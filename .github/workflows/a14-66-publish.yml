@@ -1,0 +1,162 @@
+name: A14 publish and validate external compiler fixture
+
+on:
+  push:
+    branches: [astra/a14-66-fixture-ci]
+    paths: [.github/workflows/a14-66-publish.yml]
+
+permissions: {}
+
+concurrency:
+  group: a14-66-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.publish.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: source
+          persist-credentials: false
+      - name: Verify original and replacement identities
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '48654dc4d2a9ef706e5c1b928a2186ab647878419af0bc0f728c2a3605567c44  ../transport/.github/a14-66/fixture.patch' | sha256sum -c -
+          python3 - <<'PY'
+          import subprocess
+          expected = {
+              'CMakeLists.txt': '96d2cfb73a897ad1663b69932bce57374c6359c5',
+              'build.c': 'e2012cfc56fa5bdec7905fe6b2bce330a865154a',
+              'src/buster/tests/compiler/driver/driver_test.c': 'e3e9e9068deb7dde5bf6f609c13298d13601120e',
+              'tests/basic_c_pic.c': '4c2a0b09d5d234f93e44222992c9b297f823ee6a',
+              'docs/agents/testing.md': 'e42e9a83cda26ed25cc52dc02b10b7bad569219a',
+          }
+          for path, sha in expected.items():
+              assert subprocess.check_output(['git', 'hash-object', path], text=True).strip() == sha, path
+          PY
+          git apply --check ../transport/.github/a14-66/fixture.patch
+          git apply ../transport/.github/a14-66/fixture.patch
+          git diff --check
+          python3 - <<'PY'
+          import subprocess
+          expected = {
+              'CMakeLists.txt': '9fc9ee51f50332414337d3916f67e6b33ecf8c70',
+              'build.c': '37a174bd6564fe089ceb217174df7b1cba2289c1',
+              'src/buster/tests/compiler/driver/driver_test.c': '3da10b009b85deeb8323535f2f9e2f00749bd122',
+              'tests/basic_c_pic.c': '15e88dacd2ff55a8af6844debbf2b22f2b94c193',
+              'docs/agents/testing.md': 'ff9bbdc6100bf8460e1ba05895ba39a0d2fbfe69',
+          }
+          assert set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()) == set(expected)
+          for path, sha in expected.items():
+              assert subprocess.check_output(['git', 'hash-object', path], text=True).strip() == sha, path
+          PY
+      - name: Publish only a new session-owned implementation branch
+        id: publish
+        working-directory: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          base=ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          branch=fix/a14-66-host-compiler-fixtures
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$base"
+          test -z "$(git ls-remote origin "refs/heads/$branch")"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add CMakeLists.txt build.c src/buster/tests/compiler/driver/driver_test.c tests/basic_c_pic.c docs/agents/testing.md
+          git diff --cached --check
+          git commit -m 'tests: make configured PIC fixtures compiler-family aware'
+          git -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' push origin "HEAD:refs/heads/$branch"
+          sha="$(git rev-parse HEAD)"
+          echo "source_sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Published source SHA: $sha" >> "$GITHUB_STEP_SUMMARY"
+          git show --stat --oneline HEAD
+  validate:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            config: Debug
+            sanitize: ''
+          - compiler: clang
+            config: Release
+            sanitize: ''
+          - compiler: clang
+            config: Debug
+            sanitize: --sanitize
+    env:
+      HOST_COMPILER: ${{ matrix.compiler }}
+      BUILD_CONFIG: ${{ matrix.config }}
+      SANITIZE_FLAG: ${{ matrix.sanitize }}
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.publish.outputs.source_sha }}
+          persist-credentials: false
+      - name: Record exact source and bootstrap the existing build driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a14-validation"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/a14-validation/source-sha.txt"
+          clang --version | tee "$RUNNER_TEMP/a14-validation/clang.txt"
+          gcc --version | tee "$RUNNER_TEMP/a14-validation/gcc.txt"
+          node --version | tee "$RUNNER_TEMP/a14-validation/node.txt"
+          free -h | tee "$RUNNER_TEMP/a14-validation/memory.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build" 2>&1 | tee "$RUNNER_TEMP/a14-validation/bootstrap.txt"
+      - name: Configure an idle tree with the selected host compiler
+        id: configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          extra=()
+          if test -n "$SANITIZE_FLAG"; then extra+=("$SANITIZE_FLAG"); fi
+          "$RUNNER_TEMP/buster-build" generate --cc "$HOST_COMPILER" --ci --linker DEFAULT "${extra[@]}" 2>&1 | tee "$RUNNER_TEMP/a14-validation/configure.txt"
+      - name: Run all registered tests without suppressing unrelated failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" build --config "$BUILD_CONFIG" -t test_all -- -j1 2>&1 | tee "$RUNNER_TEMP/a14-validation/test-all.txt"
+      - name: Preserve all native allocator and target legs
+        if: ${{ always() && steps.configure.outcome == 'success' && matrix.compiler == 'clang' && matrix.config == 'Release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/a14-validation/modes.txt"
+      - name: Preserve the production self-host fixed point
+        if: ${{ always() && steps.configure.outcome == 'success' && matrix.compiler == 'clang' && matrix.config == 'Release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/a14-validation/self-host.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() && !cancelled() }}
+        with:
+          name: a14-66-${{ matrix.compiler }}-${{ matrix.config }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/a14-validation/
+          if-no-files-found: error
+          retention-days: 7
