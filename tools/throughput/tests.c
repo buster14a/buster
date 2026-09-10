@@ -42,6 +42,14 @@ static int test_bundle(char const* root, unsigned scenario)
                     row.process.user_seconds = 0.8;
                     row.process.system_seconds = 0.1;
                     row.process.peak_rss_bytes = 64.0 * 1048576.0;
+                    if (scenario == 10 || scenario == 11)
+                    {
+                        row.process.diagnostics_available = (1u << TP_DIAGNOSTICS) - 1u;
+                        for (unsigned i = 0; i < TP_DIAGNOSTICS; ++i)
+                            row.process.diagnostics[i] = scenario == 10 ? (variant ? UINT64_C(1000000000000) : 1) : 0;
+                        if (scenario == 11 && variant && pair == 3)
+                            row.process.diagnostics_available &= ~(1u << TP_MINOR_FAULTS);
+                    }
                     row.arena_calls = row.arena_bytes = NAN;
                     for (unsigned i = 0; i < TP_COUNTERS; ++i) row.process.counters[i] = NAN;
                     row.output_bytes = 4; row.source_bytes = 16; row.source_lines = 2; row.source_functions = 1;
@@ -93,6 +101,7 @@ static int test_child(int argc, char** argv)
             free((void*)memory);
         }
     }
+    else if (!strcmp(argv[2], "compare") && argc == 4) result = tp_compare(argv[3]);
     else if (!strcmp(argv[2], "echo"))
     {
         for (int i = 3; i < argc; ++i) printf("%s\n", argv[i]);
@@ -129,7 +138,29 @@ static void test_processes(char const* executable, char const* root)
     TpProcess timeout = tp_process(sleep, NULL, log, 1, -1, 0);
     CHECK(timeout.timed_out && timeout.wall_seconds < 4.0);
     char* memory[] = {(char*)executable, "child", "memory", NULL};
+#ifdef __linux__
+    struct rusage before = {0}, after = {0};
+    CHECK(getrusage(RUSAGE_CHILDREN, &before) == 0);
+#endif
     TpProcess large = tp_process(memory, NULL, log, 3, -1, 0);
+#ifdef __linux__
+    CHECK(getrusage(RUSAGE_CHILDREN, &after) == 0);
+    /* No other child runs between these snapshots. The independent cumulative
+     * OS delta must match this invocation's wait4 result, not lifetime totals. */
+    CHECK(large.diagnostics_available == (1u << TP_DIAGNOSTICS) - 1u);
+    CHECK(large.diagnostics[TP_MINOR_FAULTS] == (uint64_t)(after.ru_minflt - before.ru_minflt));
+    CHECK(large.diagnostics[TP_MAJOR_FAULTS] == (uint64_t)(after.ru_majflt - before.ru_majflt));
+    CHECK(large.diagnostics[TP_VOLUNTARY_SWITCHES] == (uint64_t)(after.ru_nvcsw - before.ru_nvcsw));
+    CHECK(large.diagnostics[TP_INVOLUNTARY_SWITCHES] == (uint64_t)(after.ru_nivcsw - before.ru_nivcsw));
+    CHECK(large.diagnostics[TP_MINOR_FAULTS] > 0 && large.diagnostics[TP_VOLUNTARY_SWITCHES] > 0);
+    printf("PROCESS_DIAGNOSTICS minor=%" PRIu64 " major=%" PRIu64 " voluntary=%" PRIu64 " involuntary=%" PRIu64 "\n",
+           large.diagnostics[TP_MINOR_FAULTS], large.diagnostics[TP_MAJOR_FAULTS],
+           large.diagnostics[TP_VOLUNTARY_SWITCHES], large.diagnostics[TP_INVOLUNTARY_SWITCHES]);
+#else
+    CHECK(large.diagnostics_available == 0 && timeout.diagnostics_available == 0 && failed.diagnostics_available == 0);
+#endif
+    TpProcess rejected = tp_process(fail, NULL, root, 2, -1, 0);
+    CHECK(rejected.launch_error && rejected.diagnostics_available == 0);
     CHECK(large.exit_code == 0 && large.peak_rss_bytes >= 80.0 * 1048576.0);
     TpProcess small = tp_process(fail, NULL, log, 2, -1, 0);
     CHECK(small.exit_code == 7 && small.peak_rss_bytes < large.peak_rss_bytes * 0.8);
@@ -153,6 +184,145 @@ static void test_processes(char const* executable, char const* root)
 #endif
     for (unsigned i = 0; i < TP_COUNTERS; ++i)
         CHECK(isfinite(quoted.counters[i]) ? quoted.running_fraction[i] >= 0.90 : quoted.counter_errors[i] != 0);
+}
+
+/* Exact integer serialization is independent of floating-point summary
+ * medians. Zero, UINT64_MAX and unavailable must survive a complete replay. */
+static void test_process_fields(char const* root)
+{
+    char path[TP_PATH_CAP];
+    int path_ok = tp_path(path, root, "process-fields.csv");
+    CHECK(path_ok);
+    TpRow row = {0};
+    row.process.wall_seconds = 1.0;
+    row.process.user_seconds = 0.8;
+    row.process.system_seconds = 0.1;
+    row.process.peak_rss_bytes = 67108864.0;
+    row.process.diagnostics_available = (1u << TP_MINOR_FAULTS) | (1u << TP_MAJOR_FAULTS) | (1u << TP_VOLUNTARY_SWITCHES);
+    row.process.diagnostics[TP_MAJOR_FAULTS] = UINT64_MAX;
+    row.process.diagnostics[TP_VOLUNTARY_SWITCHES] = 17;
+    for (unsigned i = 0; i < TP_COUNTERS; ++i) row.process.counters[i] = NAN;
+    row.arena_calls = row.arena_bytes = NAN;
+    row.output_bytes = 4; row.source_bytes = 16; row.source_lines = 2; row.source_functions = 1;
+    memset(row.output_hash, '0', 64); row.output_hash[64] = 0;
+    FILE* file = path_ok ? fopen(path, "wb") : NULL;
+    CHECK(file != NULL);
+    if (file)
+    {
+        fputs(TP_RAW_HEADER, file);
+        for (unsigned round = 0; round < TP_ROUNDS; ++round)
+            for (unsigned variant = 0; variant < 2; ++variant)
+                CHECK(tp_sample_csv(file, round, 0, variant, variant, 0, &row));
+        CHECK(fclose(file) == 0);
+        TpRow loaded[TP_ROUNDS * 2] = {0};
+        CHECK(tp_load_samples(root, "process-fields.csv", 1, 1, 1, loaded));
+        for (unsigned i = 0; i < TP_ROUNDS * 2; ++i)
+        {
+            CHECK(loaded[i].process.diagnostics_available == row.process.diagnostics_available);
+            CHECK(loaded[i].process.diagnostics[TP_MINOR_FAULTS] == 0);
+            CHECK(loaded[i].process.diagnostics[TP_MAJOR_FAULTS] == UINT64_MAX);
+            CHECK(loaded[i].process.diagnostics[TP_VOLUNTARY_SWITCHES] == 17);
+            CHECK(isnan(tp_metric(&loaded[i], TP_STANDARD_METRICS + TP_INVOLUNTARY_SWITCHES)));
+        }
+    }
+    static char const* const tokens[] = {"NA", "0", "18446744073709551615", "-1", "1.5", "nan", "inf", "", "18446744073709551616", "1e3", "0x1"};
+    for (unsigned token = 0; token < sizeof(tokens) / sizeof(tokens[0]); ++token)
+    {
+        file = path_ok ? fopen(path, "wb") : NULL;
+        CHECK(file != NULL);
+        if (file)
+        {
+            fputs(TP_RAW_HEADER, file);
+            for (unsigned round = 0; round < TP_ROUNDS; ++round)
+            {
+                for (unsigned variant = 0; variant < 2; ++variant)
+                    fprintf(file, "%u,0,%u,%u,0,1,0.8,0.1,67108864,NA,NA,NA,NA,NA,NA,NA,NA,4,16,2,1,%s,%s,0,0,0\n",
+                            round, variant, variant, row.output_hash, tokens[token]);
+            }
+            CHECK(fclose(file) == 0);
+            TpRow loaded[TP_ROUNDS * 2] = {0};
+            CHECK(tp_load_samples(root, "process-fields.csv", 1, 1, 1, loaded) == (token < 3));
+        }
+    }
+}
+
+static void test_diagnostic_probes(char const* root)
+{
+    char directory[TP_PATH_CAP], path[TP_PATH_CAP];
+    int paths_ok = tp_path(directory, root, "diagnostic-probes") && test_bundle(directory, 0) &&
+                   tp_path(path, directory, "telemetry.csv");
+    CHECK(paths_ok);
+    FILE* file = paths_ok ? fopen(path, "wb") : NULL;
+    CHECK(file != NULL);
+    if (file)
+    {
+        fputs(TP_RAW_HEADER, file);
+        for (unsigned kind = 0; kind < 2; ++kind)
+        {
+            for (unsigned repeat = 0; repeat < 3; ++repeat)
+            {
+                for (unsigned variant = 0; variant < 2; ++variant)
+                {
+                    TpRow row = {0};
+                    row.process.wall_seconds = 1.0;
+                    row.process.peak_rss_bytes = 67108864.0;
+                    for (unsigned i = 0; i < TP_COUNTERS; ++i) row.process.counters[i] = NAN;
+                    row.arena_calls = kind ? 3.0 : NAN;
+                    row.arena_bytes = kind ? 15.0 : NAN;
+                    row.output_bytes = 4; row.source_bytes = 16; row.source_lines = 2; row.source_functions = 1;
+                    memset(row.output_hash, '0', 64); row.output_hash[64] = 0;
+                    if (!kind)
+                    {
+                        row.process.diagnostics_available = (1u << TP_DIAGNOSTICS) - 1u;
+                        for (unsigned i = 0; i < TP_DIAGNOSTICS; ++i) row.process.diagnostics[i] = repeat + variant;
+                        if (variant && repeat == 2) row.process.diagnostics_available &= ~(1u << TP_MINOR_FAULTS);
+                    }
+                    CHECK(tp_sample_csv(file, kind, repeat, variant, variant, 0, &row));
+                }
+            }
+        }
+        CHECK(fclose(file) == 0);
+        CHECK(tp_completion(directory, 1, 20, 1, 1));
+        CHECK(tp_compare(directory) == 0);
+        paths_ok = tp_path(path, directory, "summary.json");
+        CHECK(paths_ok);
+        file = paths_ok ? fopen(path, "rb") : NULL;
+        CHECK(file != NULL);
+        if (file)
+        {
+            char text[16384] = {0};
+            size_t size = fread(text, 1, sizeof(text) - 1, file);
+            CHECK(size < sizeof(text) - 1 && !ferror(file));
+            CHECK(strstr(text, "\"minor_faults\":[null,null]") != NULL);
+            CHECK(strstr(text, "\"available_samples\":2,\"median\":null") != NULL);
+            CHECK(strstr(text, "\"available_samples\":0,\"median\":null") != NULL);
+            CHECK(fclose(file) == 0);
+        }
+    }
+}
+
+static void test_legacy_schema(char const* executable, char const* root)
+{
+    char directory[TP_PATH_CAP], log[TP_PATH_CAP];
+    int paths_ok = tp_path(directory, root, "legacy-schema") && tp_mkdirs(directory) &&
+                   test_text(directory, "complete.txt", "schema=1 jobs=1 pairs=20 rounds=2 guard=1\n") &&
+                   tp_path(log, directory, "rejection.log");
+    CHECK(paths_ok);
+    if (paths_ok)
+    {
+        char* args[] = {(char*)executable, "child", "compare", directory, NULL};
+        TpProcess result = tp_process(args, NULL, log, 3, -1, 0);
+        CHECK(result.exit_code == 2 && !result.launch_error && !result.timed_out);
+    }
+    FILE* file = paths_ok ? fopen(log, "rb") : NULL;
+    CHECK(file != NULL);
+    if (file)
+    {
+        char text[2048] = {0};
+        size_t count = fread(text, 1, sizeof(text) - 1, file);
+        CHECK(count < sizeof(text) - 1 && !ferror(file) && strstr(text, "unsupported result schema 1 (expected 2)") != NULL);
+        CHECK(fclose(file) == 0);
+    }
 }
 
 static void test_compile_options(void)
@@ -325,7 +495,7 @@ int main(int argc, char** argv)
         char root[TP_PATH_CAP], executable[TP_PATH_CAP];
         CHECK(tp_absolute(argv[1], root) && tp_mkdirs(root) && tp_absolute(argv[0], executable));
         CHECK(tp_self_test() == 0);
-        static int const expected[] = {0, 1, 0, 0, 0, 1, 2, 2, 2, 2};
+        static int const expected[] = {0, 1, 0, 0, 0, 1, 2, 2, 2, 2, 0, 0};
         for (unsigned scenario = 0; scenario < sizeof(expected) / sizeof(expected[0]); ++scenario)
         {
             char path[TP_PATH_CAP], leaf[128];
@@ -355,10 +525,14 @@ int main(int argc, char** argv)
 #ifndef _WIN32
         test_summary_write_failure(executable, root);
 #endif
+        test_process_fields(root);
+        test_diagnostic_probes(root);
+        test_legacy_schema(executable, root);
         test_compile_options();
         test_sample_paths(executable, root);
         test_inputs(root);
         test_processes(executable, root);
+        printf("THROUGHPUT_RECORD_BYTES process=%zu row=%zu\n", sizeof(TpProcess), sizeof(TpRow));
         fprintf(stdout, "THROUGHPUT_INTEGRATION_TEST assertions=%u failures=%u\n", test_assertions, test_failures);
         result = test_failures ? 1 : 0;
     }

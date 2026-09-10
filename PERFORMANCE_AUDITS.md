@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-10T190535Z`](docs/performance-audits/2026-09-10T190535Z.md) — Z02: recover process diagnostics with exact availability and unchanged guard semantics
 - [`2026-09-10T190027Z`](docs/performance-audits/2026-09-10T190027Z.md) — Z02: invalidate rejected throughput summaries and preserve sealed evidence
 - [`2026-09-10T180045Z`](docs/performance-audits/2026-09-10T180045Z.md) — SysV unnamed-bitfield interoperability with unchanged default classification (#66, #391)
 - [`2026-09-09T174124Z`](docs/performance-audits/2026-09-09T174124Z.md) — Lower Win64 indirect aggregate arguments through MIR (#36)
