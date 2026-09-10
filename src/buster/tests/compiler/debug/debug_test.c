@@ -1,5 +1,123 @@
 #include <buster/tests/compiler/debug/debug_test.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/codegen/machine_schedule_internal.h>
+
+BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_scheduled_line_marks(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const counts[] = {0, 1, 2, 3, 15, 16, 17, 31, 32, 33, 63, 64, 65, 255, 256, 257, 1023};
+    u32 random = 0x9e3779b9u;
+    for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(counts); size_index += 1)
+    {
+        u32 count = counts[size_index];
+        for (u32 pattern = 0; pattern < 7; pattern += 1)
+        {
+            u64 case_position = arguments->arena->position;
+            MachineLineMark* original = arena_allocate(arguments->arena, MachineLineMark, count ? count : 1);
+            MachineLineMark* saved = arena_allocate(arguments->arena, MachineLineMark, count ? count : 1);
+            MachineLineMark* expected = arena_allocate(arguments->arena, MachineLineMark, count ? count : 1);
+            u32* rows = arena_allocate(arguments->arena, u32, count ? count : 1);
+            for (u32 index = 0; index < count; index += 1)
+            {
+                rows[index] = pattern == 1 || pattern == 3 ? count - 1 - index : index;
+            }
+            if (pattern == 2)
+            {
+                for (u32 remaining = count; remaining > 1; remaining -= 1)
+                {
+                    random ^= random << 13;
+                    random ^= random >> 17;
+                    random ^= random << 5;
+                    u32 other = random % remaining;
+                    u32 swap = rows[remaining - 1];
+                    rows[remaining - 1] = rows[other];
+                    rows[other] = swap;
+                }
+            }
+            for (u32 index = 0; index < count; index += 1)
+            {
+                u32 row = pattern == 3 ? index / 3 : index;
+                if (pattern == 4 && index % 3 == 0)
+                {
+                    row = count;
+                }
+                if (pattern == 5)
+                {
+                    row = index % 3 == 0 ? UINT32_MAX : (index % 3 == 1 ? count : index);
+                }
+                if (pattern == 6 && count > 1 && index >= count - 2)
+                {
+                    row = 2 * count - 3 - index;
+                }
+                original[index] = (MachineLineMark){.row = row, .instruction = index};
+                saved[index] = original[index];
+                expected[index] = original[index];
+                if (row < count)
+                {
+                    expected[index].row = rows[row];
+                }
+            }
+            // Independent reference: the former complete stable insertion sort.
+            // Keep this quadratic oracle bounded to the small differential cases.
+            for (u32 index = 1; index < count; index += 1)
+            {
+                MachineLineMark mark = expected[index];
+                u32 shift = index;
+                while (shift && expected[shift - 1].row > mark.row)
+                {
+                    expected[shift] = expected[shift - 1];
+                    shift -= 1;
+                }
+                expected[shift] = mark;
+            }
+            // Account for exactly the retained output allocation, including
+            // alignment. Using one arena also tests the harder aliasing case.
+            u64 output_position = arguments->arena->position;
+            MachineLineMark* reserved = arena_allocate(arguments->arena, MachineLineMark, count ? count : 1);
+            BUSTER_UNUSED(reserved);
+            u64 retained_position = arguments->arena->position;
+            arena_set_position(arguments->arena, output_position);
+            MachineLineMark* actual = machine_schedule_remap_line_marks(arguments->arena, arguments->arena,
+                                                                         count ? original : 0, count,
+                                                                         count ? rows : 0, count);
+            BUSTER_TEST(arguments, actual != 0);
+            BUSTER_TEST(arguments, memcmp(actual, expected, (u64)count * sizeof(MachineLineMark)) == 0);
+            BUSTER_TEST(arguments, memcmp(original, saved, (u64)count * sizeof(MachineLineMark)) == 0);
+            BUSTER_TEST(arguments, arguments->arena->position == retained_position);
+            // Sorted input needs no merge workspace, even above the tiny path.
+            // row_count == 0 deliberately supplies no map and preserves all keys.
+            MachineLineMark* repeated = machine_schedule_remap_line_marks(arguments->arena, 0, actual, count, 0, 0);
+            BUSTER_TEST(arguments, memcmp(repeated, actual, (u64)count * sizeof(MachineLineMark)) == 0);
+            arena_set_position(arguments->arena, case_position);
+        }
+    }
+
+    // One mark per row of a large reversed publication. The exact linear
+    // oracle avoids adding quadratic work to every platform's test suite.
+    u64 large_position = arguments->arena->position;
+    u32 const large_count = 65537;
+    MachineLineMark* original = arena_allocate(arguments->arena, MachineLineMark, large_count);
+    u32* rows = arena_allocate(arguments->arena, u32, large_count);
+    for (u32 index = 0; index < large_count; index += 1)
+    {
+        original[index] = (MachineLineMark){.row = index, .instruction = index};
+        rows[index] = large_count - 1 - index;
+    }
+    MachineLineMark* actual = machine_schedule_remap_line_marks(arguments->arena, arguments->arena,
+                                                                 original, large_count, rows, large_count);
+    bool exact = true;
+    bool untouched = true;
+    for (u32 index = 0; index < large_count; index += 1)
+    {
+        exact = exact && actual[index].row == index && actual[index].instruction == large_count - 1 - index;
+        untouched = untouched && original[index].row == index && original[index].instruction == index &&
+                    rows[index] == large_count - 1 - index;
+    }
+    BUSTER_TEST(arguments, exact);
+    BUSTER_TEST(arguments, untouched);
+    arena_set_position(arguments->arena, large_position);
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_location_index_validation(UnitTestArguments* arguments)
 {
@@ -92,6 +210,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_location_index_validation(UnitTest
 UnitTestResult debug_model_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = debug_test_location_index_validation(arguments);
+    UnitTestResult scheduled = debug_test_scheduled_line_marks(arguments);
+    result.succeeded_test_count += scheduled.succeeded_test_count;
+    result.test_count += scheduled.test_count;
     BUSTER_TEST(arguments, debug_register_dwarf_number((Target){.cpu_arch = CPU_ARCH_X86_64}, DEBUG_REGISTER_X86_RAX) == 0);
     BUSTER_TEST(arguments, debug_register_dwarf_number((Target){.cpu_arch = CPU_ARCH_X86_64}, DEBUG_REGISTER_X86_RSP) == 7);
     BUSTER_TEST(arguments, debug_register_dwarf_number((Target){.cpu_arch = CPU_ARCH_AARCH64}, DEBUG_REGISTER_AARCH64_X29) == 29);
