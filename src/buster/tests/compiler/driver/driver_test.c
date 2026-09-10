@@ -9129,6 +9129,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_unnamed_initializer_members.c"),
         S8("tests/basic_c_constant_conditional_type.c"),
         S8("tests/basic_c_macro_empty_paste.c"),
+        S8("tests/basic_c_preprocessor_short_circuit.c"),
     };
     String8 c_quickjs_regression_names[] = {
         S8("buster-c-aggregate-attribute"),
@@ -9145,6 +9146,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-unnamed-initializer-members"),
         S8("buster-c-constant-conditional-type"),
         S8("buster-c-macro-empty-paste"),
+        S8("buster-c-preprocessor-short-circuit"),
     };
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths); fixture_index += 1)
     {
