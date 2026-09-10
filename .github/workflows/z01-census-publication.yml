@@ -27,126 +27,24 @@ jobs:
           ref: 2f5f9be468f154006dd923ce57afec84985e3459
           path: source
           persist-credentials: false
-      - name: Record the source census and mint its immutable audit
-        working-directory: source
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/z01-census"
-          cp ../payload/.github/z01/census.md docs/compiler-throughput-census.md
-          python3 - <<'PY'
-          import pathlib, subprocess
-          root = pathlib.Path('docs/performance-audits')
-          before = set(root.glob('*.md'))
-          subprocess.run(['python3', 'tools/new_audit.py', '--platform', 'Source census; CI validation pending; physical Zen 5 unverified', 'Z01 compiler census and first-error syntax diagnostic storage (#128, #248)'], check=True)
-          added = set(root.glob('*.md')) - before
-          if len(added) != 1:
-              raise SystemExit('Expected one newly minted audit')
-          audit = added.pop()
-          with audit.open('a') as out:
-              out.write('''
-          Baseline: `ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae`.
-          Production/test commit: `2f5f9be468f154006dd923ce57afec84985e3459`.
-          The [whole-compiler census](../compiler-throughput-census.md) records
-          source populations, ownership, historical measurements, negative
-          experiments and the remaining current-main measurement fields.
-
-          ## Classification and change
-
-          Verified unnecessary clean-path allocation; throughput benefit untested
-          when this immutable entry was minted. `c_parse_ast` reserved
-          `token_count + 1` syntax-diagnostic rows before discovering an error.
-          `c_parser_diagnostic` now receives the existing parse arena and allocates
-          the same fixed-capacity contiguous storage only on its first error.
-          No diagnostic cap, row size, error order, semantic diagnostic builder,
-          SIMD primitive, target feature or canonical/MIR representation changes.
-          Successful parses remove one request of
-          `(token_count + 1) * sizeof(CDiagnostic)` logical bytes. This is not a
-          measurement of physical traffic, RSS, zeroing or elapsed time.
-
-          ## Regression and validation status at recording
-
-          `c_test_parser_diagnostic_storage` covers empty/clean inputs, null/no-token
-          guards, dense ordered errors, truncated syntax, exact messages/locations
-          and the semantic handoff's arena-owned lifetime. The existing body-frame
-          storage bound is tightened to exclude clean syntax diagnostic storage.
-          Publication checked all three resulting source blob hashes and the
-          immutable baseline. No compiler was built or tested locally.
-
-          [CI experiment 34423619331](https://github.com/buster14a/buster/actions/runs/34423619331)
-          was started for baseline Release/self-host, tests-only expected-red,
-          candidate Release/mode/self-host, existing native paired smoke and strict
-          sanitizer checks. At audit recording, completed compiler validation and
-          performance results are not asserted. The PR must report exact checked
-          SHAs and completed check links separately; publication success is not
-          test success. Full ordinary PR platform and representative throughput
-          gates remain required. No verified physical Zen 5 or Zen 4 acceptance,
-          PMU, disassembly or code-size verdict is supplied by this entry.
-
-          ## Budgets and remaining work
-
-          Preserve byte-identical outputs for this representation-only change,
-          exact diagnostics and all supported modes/platforms. No additional
-          retained error rows and no successful-path diagnostic array are allowed.
-          Record RSS/code size independently. Reuse the native throughput harness,
-          separate allocation observer and paired protocol, never a parallel
-          measurement stack. First-error materialization is deliberately narrower
-          than every growth/dense-error experiment discussed in #248. The separate
-          semantic diagnostic array is unchanged. Keep the PR draft until required
-          correctness and representative physical-hardware acceptance are known.
-          ''')
-          pathlib.Path('../census-audit-path.txt').write_text(str(audit) + '\n')
-          PY
-          python3 tools/new_audit.py --check
-          git diff --check
-          test "$(git hash-object src/buster/lib/compiler/frontend/c/c_parse.c)" = 848de5ef421fe286ca6ec8c5a05f28959f04db3f
-          test "$(git hash-object src/buster/lib/compiler/frontend/c/c.h)" = 014ea548e06980c8e5f4594ea62f405903031f46
-          test "$(git hash-object src/buster/tests/compiler/frontend/c/c_test.c)" = e3436dd6702014572988eaaccf04ea71995d22e0
-      - name: Publish docs only on the owned unchanged branch
+      - name: Record baseline format failure and publish reviewed documentation
         working-directory: source
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json, os, pathlib, subprocess
-          repo = 'repos/buster14a/buster'
-          parent = '2f5f9be468f154006dd923ce57afec84985e3459'
-          main = 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae'
-          ref = '/git/refs/heads/astra/z01-248-lazy-syntax-diagnostics'
-          def api(endpoint, data=None, method='POST'):
-              args = ['gh', 'api', repo + endpoint]
-              if data is not None:
-                  args += ['--method', method, '--input', '-']
-              result = subprocess.run(args, input=None if data is None else json.dumps(data), text=True, capture_output=True, check=True)
-              return json.loads(result.stdout)
-          def unchanged():
-              return api('/git/ref/heads/main')['object']['sha'] == main and api(ref)['object']['sha'] == parent
-          if not unchanged():
-              raise SystemExit('Main or the owned branch advanced; review required')
-          paths = ['PERFORMANCE_AUDITS.md', 'docs/compiler-throughput-census.md', pathlib.Path('../census-audit-path.txt').read_text().strip()]
-          entries = []
-          for path in paths:
-              blob = api('/git/blobs', {'content': pathlib.Path(path).read_text(), 'encoding': 'utf-8'})
-              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
-          base_tree = api('/git/commits/' + parent)['tree']['sha']
-          tree = api('/git/trees', {'base_tree': base_tree, 'tree': entries})
-          commit = api('/git/commits', {'message': 'docs: map compiler work and record the #248 storage experiment', 'tree': tree['sha'], 'parents': [parent]})
-          if not unchanged():
-              raise SystemExit('Main or the owned branch advanced during publication')
-          api(ref, {'sha': commit['sha'], 'force': False}, 'PATCH')
-          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'z01-census'
-          (evidence / 'published-sha.txt').write_text(commit['sha'] + '\n')
-          (evidence / 'audit-path.txt').write_text(paths[-1] + '\n')
-          (evidence / 'changed-files.txt').write_text('\n'.join(paths) + '\n')
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
-              out.write('Published docs-only commit: ' + commit['sha'] + '\n\nAudit: ' + paths[-1] + '\n')
-          PY
+          python3 ../payload/.github/z01/publish_docs.py
+      - name: Strict audit-format gate (existing historical error is not suppressed)
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/new_audit.py --check 2>&1 | tee "$RUNNER_TEMP/z01-census/candidate-audit-check.txt"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
           name: z01-census-publication-${{ github.run_id }}
           path: ${{ runner.temp }}/z01-census/
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 7
