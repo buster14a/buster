@@ -4657,6 +4657,125 @@ BUSTER_C_SHARED bool c_conditional_operator(CToken token, bool unary, CCondition
     return false;
 }
 
+// Keep integer admission independent of expression evaluation. Preprocessing,
+// syntax validation, ordinary lowering and wide-float initialization share this
+// bounded reader; type selection and dialect policy remain with their callers.
+BUSTER_C_SHARED bool c_number_is_float(String8 spelling)
+{
+    bool floating = false;
+    bool hexadecimal = spelling.length >= 2 && spelling.pointer[0] == '0' && (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X');
+    for (u64 index = 0; !floating && index < spelling.length; index += 1)
+    {
+        u8 byte = spelling.pointer[index];
+        floating = byte == '.' || byte == 'p' || byte == 'P' || (!hexadecimal && (byte == 'e' || byte == 'E'));
+    }
+    return floating;
+}
+
+// Microsoft SDK limits use i8/i16/i32 as well as i64. Keep admission and
+// the lowerer's fixed-width type choice on one bounded suffix decoder.
+BUSTER_C_SHARED u32 c_integer_msvc_suffix_width(String8 suffix)
+{
+    u32 width = 0;
+    u64 index = suffix.length && (suffix.pointer[0] == 'u' || suffix.pointer[0] == 'U');
+    if (index < suffix.length && (suffix.pointer[index] == 'i' || suffix.pointer[index] == 'I'))
+    {
+        index += 1;
+        u64 digits = suffix.length - index;
+        if (digits == 1 && suffix.pointer[index] == '8')
+        {
+            width = 8;
+        }
+        else if (digits == 2)
+        {
+            u8 first = suffix.pointer[index];
+            u8 second = suffix.pointer[index + 1];
+            if (first == '1' && second == '6')
+            {
+                width = 16;
+            }
+            else if (first == '3' && second == '2')
+            {
+                width = 32;
+            }
+            else if (first == '6' && second == '4')
+            {
+                width = 64;
+            }
+        }
+    }
+    return width;
+}
+
+BUSTER_C_SHARED u32 c_integer_msvc_literal_width(String8 spelling, bool* is_unsigned)
+{
+    u32 width = 0;
+    for (u32 length = 2; !width && length <= 3 && length <= spelling.length; length += 1)
+    {
+        u64 start = spelling.length - length;
+        width = c_integer_msvc_suffix_width((String8){.pointer = spelling.pointer + start, .length = length});
+        if (width)
+        {
+            *is_unsigned = start && (spelling.pointer[start - 1] == 'u' || spelling.pointer[start - 1] == 'U');
+        }
+    }
+    return width;
+}
+
+BUSTER_C_INTERNAL bool c_integer_suffix_valid(String8 suffix)
+{
+    bool valid = !suffix.length;
+    if (suffix.length)
+    {
+        bool first_unsigned = suffix.pointer[0] == 'u' || suffix.pointer[0] == 'U';
+        bool first_long = suffix.pointer[0] == 'l' || suffix.pointer[0] == 'L';
+        if (c_integer_msvc_suffix_width(suffix))
+        {
+            valid = true;
+        }
+        else if (suffix.length == 1)
+        {
+            valid = first_unsigned || first_long;
+        }
+        else if (suffix.length == 2 || suffix.length == 3)
+        {
+            bool second_unsigned = suffix.pointer[1] == 'u' || suffix.pointer[1] == 'U';
+            bool second_long = suffix.pointer[1] == 'l' || suffix.pointer[1] == 'L';
+            bool long_pair = first_long && second_long && suffix.pointer[0] == suffix.pointer[1];
+            if (suffix.length == 2)
+            {
+                valid = long_pair || (first_unsigned && second_long) || (first_long && second_unsigned);
+            }
+            else
+            {
+                bool third_unsigned = suffix.pointer[2] == 'u' || suffix.pointer[2] == 'U';
+                bool third_long = suffix.pointer[2] == 'l' || suffix.pointer[2] == 'L';
+                valid = (first_unsigned && second_long && third_long && suffix.pointer[1] == suffix.pointer[2]) ||
+                        (long_pair && third_unsigned);
+            }
+        }
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL u32 c_integer_digit(u8 byte)
+{
+    u32 digit = UINT32_MAX;
+    if (byte >= '0' && byte <= '9')
+    {
+        digit = (u32)(byte - '0');
+    }
+    else if (byte >= 'a' && byte <= 'f')
+    {
+        digit = (u32)(byte - 'a') + 10;
+    }
+    else if (byte >= 'A' && byte <= 'F')
+    {
+        digit = (u32)(byte - 'A') + 10;
+    }
+    return digit;
+}
+
 BUSTER_C_SHARED bool c_conditional_number(String8 spelling, u64* value)
 {
     u32 base = 10;
@@ -4676,44 +4795,45 @@ BUSTER_C_SHARED bool c_conditional_number(String8 spelling, u64* value)
         else
         {
             base = 8;
-            index = 0;
         }
     }
     u64 parsed = 0;
+    u64 cutoff = UINT64_MAX / base;
+    u32 last_digit = (u32)(UINT64_MAX % base);
     bool any = false;
-    for (; index < spelling.length; index += 1)
+    bool valid = true;
+    while (valid && index < spelling.length)
     {
-        char8 character = spelling.pointer[index];
-        if (character == '\'')
+        u8 byte = spelling.pointer[index];
+        if (byte == '\'')
         {
-            continue;
-        }
-        u32 digit = UINT32_MAX;
-        if (character >= '0' && character <= '9')
-        {
-            digit = (u32)(character - '0');
-        }
-        else if (character >= 'a' && character <= 'f')
-        {
-            digit = (u32)(character - 'a') + 10;
-        }
-        else if (character >= 'A' && character <= 'F')
-        {
-            digit = (u32)(character - 'A') + 10;
+            // A separator joins two digits of this base, never a prefix or
+            // suffix. Checking the next byte also rejects consecutive quotes.
+            valid = any && index + 1 < spelling.length && c_integer_digit(spelling.pointer[index + 1]) < base;
+            index += 1;
         }
         else
         {
-            break;
+            u32 digit = c_integer_digit(byte);
+            if (digit >= base)
+            {
+                break;
+            }
+            valid = parsed < cutoff || (parsed == cutoff && digit <= last_digit);
+            if (valid)
+            {
+                parsed = parsed * base + digit;
+                any = true;
+                index += 1;
+            }
         }
-        if (digit >= base)
-        {
-            break;
-        }
-        parsed = parsed * base + digit;
-        any = true;
     }
-    *value = parsed;
-    return any;
+    valid = valid && any && c_integer_suffix_valid((String8){.pointer = spelling.pointer + index, .length = spelling.length - index});
+    if (valid)
+    {
+        *value = parsed;
+    }
+    return valid;
 }
 
 // C11 6.10.1p4: conditional-inclusion arithmetic uses intmax_t or

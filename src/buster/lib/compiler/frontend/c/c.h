@@ -251,6 +251,7 @@ typedef enum CDiagnosticKind
     // token length field cannot represent it and only literals carry the
     // oversized escape, so the token is diagnosed and its length clamped.
     C_DIAGNOSTIC_TOKEN_TOO_LONG,
+    C_DIAGNOSTIC_INVALID_INTEGER_LITERAL,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
