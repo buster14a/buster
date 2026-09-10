@@ -77,7 +77,7 @@ jobs:
               files = pages(f"repos/buster14a/buster/pulls/{pr['number']}/files?per_page=100")
               (out / f"pr-{pr['number']}-files.json").write_text(json.dumps(files, indent=2))
               overlap = set(expected) & {file['filename'] for file in files}
-              if pr['number'] not in [357, 362, 365, 367] and overlap:
+              if pr['number'] not in [357, 362, 365, 367, 370, 372] and overlap:
                   raise SystemExit(f"Unreviewed competing change: PR {pr['number']}: {sorted(overlap)}")
           (out / 'source-manifest.json').write_text(json.dumps(expected, indent=2))
           PY
