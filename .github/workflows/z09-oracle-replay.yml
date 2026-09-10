@@ -1,0 +1,114 @@
+name: Z09 independent census replay
+on:
+  push:
+    branches: [astra/z09-pass-census-transport-20260909]
+    paths: [.github/workflows/z09-oracle-replay.yml]
+permissions:
+  contents: read
+jobs:
+  diagnostics:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      BUSTER_TEST_JOBS: 1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: d60fd28ae58e8a2af18e0d37f659d51ea2ef6aa8
+          persist-credentials: false
+      - name: Build pinned trusted compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build "$RUNNER_TEMP/z09-replay"
+          test "$(git rev-parse HEAD)" = d60fd28ae58e8a2af18e0d37f659d51ea2ef6aa8
+          clang --version > "$RUNNER_TEMP/z09-replay/clang.txt"
+          lscpu > "$RUNNER_TEMP/z09-replay/cpu.txt"
+          uname -a > "$RUNNER_TEMP/z09-replay/os.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/z09-build
+          ./build/z09-build generate --build-directory build/z09-diagnostic --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF -DCMAKE_LINKER_TYPE=DEFAULT
+          ./build/z09-build build --build-directory build/z09-diagnostic --config Release -t ide -- -j1
+      - name: Replay complete fixtures and multi-input aggregation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess
+          repo = pathlib.Path.cwd()
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'z09-replay'
+          ide = str(repo / 'build/z09-diagnostic/Release/ide')
+          records = []
+          def digest(path):
+              return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+          def run(label, command):
+              process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+              (out / (label + '.log')).write_bytes(process.stdout)
+              records.append({'label': label, 'command': command, 'returncode': process.returncode})
+              (out / 'commands.json').write_text(json.dumps(records, indent=2))
+              assert process.returncode == 0, (label, process.returncode, process.stdout.decode(errors='replace')[-6000:])
+              return process.stdout
+          def fields(output, prefix):
+              lines = [line for line in output.decode().splitlines() if line.startswith(prefix + ' ')]
+              assert len(lines) == 1, (prefix, lines)
+              return {key: int(value) for key, value in re.findall(r'([a-z_]+)=([0-9]+)', lines[0])}
+          flags = ['-std=gnu11', '-g0', '-O0', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char']
+          fixtures = ['basic_c_local_promotion.c', 'basic_c_frontend_ssa.c', 'basic_c_operations.c']
+          rows = []
+          for fixture in fixtures:
+              original = repo / 'tests' / fixture
+              source = original
+              if fixture == 'basic_c_operations.c':
+                  # The original fixture intentionally spells Buster's va_list as
+                  # void*. Clang rejects that ABI type. Use the portable spelling
+                  # already used by basic_c_va_arg_long_double.c, for BOTH compilers.
+                  # Keep every expression, function and expected result unchanged.
+                  text = original.read_text()
+                  assert text.count('typedef void* va_list;') == 1
+                  source = out / fixture
+                  source.write_text(text.replace('typedef void* va_list;', 'typedef __builtin_va_list va_list;'))
+              oracle = out / (fixture + '.clang')
+              run(fixture + '-oracle-build', ['clang', *flags, str(source), '-o', str(oracle)])
+              expected = run(fixture + '-oracle-execute', [str(oracle)])
+              for frontend in ('direct', 'memory'):
+                  frontend_flags = [] if frontend == 'direct' else ['-fno-frontend-ssa']
+                  for mode in ('none', 'mir-stack', 'fast', 'quality'):
+                      label = fixture + '-' + frontend + '-' + mode
+                      executable = out / (label + '.program')
+                      command = [ide, 'cc', *flags, *frontend_flags, '-fno-target-local-promotion', '-fregister-allocator=' + mode, str(source), '-o', str(executable)]
+                      run(label + '-build', command)
+                      quiet_hash = digest(executable)
+                      verbose = run(label + '-verbose', [*command, '-v'])
+                      assert quiet_hash == digest(executable), ('verbose changed output', label)
+                      assert run(label + '-execute', [str(executable)]) == expected, ('oracle output mismatch', label)
+                      rows.append({'fixture': fixture, 'original_sha256': digest(original), 'input_sha256': digest(source), 'frontend': frontend, 'mode': mode, 'output_sha256': quiet_hash,
+                                   'work': fields(verbose, 'IR_LOCAL_PROMOTION_WORK'), 'promotion': fields(verbose, 'IR_LOCAL_PROMOTION'),
+                                   'frontend_ssa': fields(verbose, 'IR_FRONTEND_SSA'), 'clang_runtime_agreement': True, 'verbose_output_identical': True})
+                      (out / 'census.json').write_text(json.dumps(rows, indent=2))
+                      print(label, rows[-1]['work'], 'removed=', rows[-1]['promotion']['parameters_removed'])
+          a = out / 'sum-a.c'
+          b = out / 'sum-b.c'
+          a.write_text('int first(int c,int x){int v=x;if(c)c+=1;return v;}\n')
+          b.write_text('int second(int c){int v;if(c)v=11;else v=29;return v;}\n')
+          sums = []
+          for mode in ('none', 'mir-stack', 'fast', 'quality'):
+              common = [ide, 'cc', *flags, '-fno-frontend-ssa', '-fno-target-local-promotion', '-fregister-allocator=' + mode, '-v', '-c']
+              single = []
+              for source in (a, b):
+                  single.append(fields(run(mode + '-' + source.stem, [*common, str(source), '-o', str(source.with_suffix('.o'))]), 'IR_LOCAL_PROMOTION_WORK'))
+              total = fields(run(mode + '-multi-input', [*common, str(a), str(b)]), 'IR_LOCAL_PROMOTION_WORK')
+              assert total == {key: single[0][key] + single[1][key] for key in total}, (mode, single, total)
+              sums.append({'mode': mode, 'inputs': single, 'sum': total})
+          (out / 'aggregation.json').write_text(json.dumps(sums, indent=2))
+          (out / 'manifest.json').write_text(json.dumps({'compiler_sha': 'd60fd28ae58e8a2af18e0d37f659d51ea2ef6aa8', 'compiler_sha256': digest(ide), 'scope': 'Untimed diagnostics, no performance or Zen 5 evidence', 'cases': len(rows), 'aggregate_cases': len(sums)}, indent=2))
+          print('DIAGNOSTIC_CASES', len(rows), 'MULTI_INPUT_CASES', len(sums))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: z09-independent-replay
+          path: |
+            ${{ runner.temp }}/z09-replay
+            build/z09-diagnostic/CMakeCache.txt
+            build/z09-diagnostic/compile_commands.json
+          if-no-files-found: error
+          retention-days: 7
