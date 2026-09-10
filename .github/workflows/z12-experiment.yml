@@ -1,0 +1,171 @@
+name: Z12 sparse owner experiment
+
+on:
+  push:
+    branches: [astra/z12-130-transport-20260910]
+    paths: [.github/workflows/z12-experiment.yml, .github/z12/**]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: z12-experiment-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 2
+  UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+jobs:
+  experiment:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: candidate
+          persist-credentials: false
+      - name: Apply only the reviewed hypothesis and record provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          echo 'a52c38d386375ffc64b7e08370ef9d2c75d5ce68172fea72e3edea38c934d9ed  transport/.github/z12/candidate.patch' | sha256sum -c -
+          git -C candidate apply --check ../transport/.github/z12/candidate.patch
+          git -C candidate apply --index ../transport/.github/z12/candidate.patch
+          git -C candidate diff --cached --check
+          git -C candidate diff --cached > evidence/candidate.patch
+          git -C candidate write-tree > evidence/candidate-tree.txt
+          git -C baseline rev-parse HEAD > evidence/baseline-sha.txt
+          git -C transport rev-parse HEAD > evidence/transport-sha.txt
+          lscpu > evidence/lscpu.txt
+          uname -a > evidence/uname.txt
+          clang --version > evidence/clang.txt
+          taskset -pc $$ > evidence/initial-affinity.txt
+          cat /sys/devices/system/cpu/smt/active > evidence/smt.txt || printf 'unavailable\n' > evidence/smt.txt
+          cat /proc/sys/kernel/perf_event_paranoid > evidence/perf-policy.txt || printf 'unavailable\n' > evidence/perf-policy.txt
+      - name: Build uninstrumented compilers sequentially with two jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p candidate/build
+          (cd candidate && clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build)
+          driver="$PWD/candidate/build/build"
+          for root in baseline candidate; do
+            (
+              cd "$root"
+              "$driver" generate --build-directory build/throughput-ci-compiler --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF -DCMAKE_LINKER_TYPE=DEFAULT
+              "$driver" build --build-directory build/throughput-ci-compiler --config Release -t ide -- -j2
+            ) 2>&1 | tee "evidence/$root-build.log"
+            cp "$root/build/throughput-ci-compiler/CMakeCache.txt" "evidence/$root-CMakeCache.txt"
+            cp "$root/build/throughput-ci-compiler/compile_commands.json" "evidence/$root-compile_commands.json"
+            size -A "$root/build/throughput-ci-compiler/Release/ide" > "evidence/$root-size.txt"
+            nm -S --size-sort "$root/build/throughput-ci-compiler/Release/ide" > "evidence/$root-symbols.txt"
+            objdump -d --disassemble=machine_fast_conform_edge --disassemble=machine_fast_placement_build_prepassed "$root/build/throughput-ci-compiler/Release/ide" > "evidence/$root-disassembly.txt"
+          done
+      - name: Existing native paired experiment with exact A/B output equality
+        id: timing
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/build bench_throughput self-test 2>&1 | tee ../evidence/harness-tests.log
+          ./build/build bench_throughput run --baseline "$GITHUB_WORKSPACE/baseline/build/throughput-ci-compiler/Release/ide" --candidate "$PWD/build/throughput-ci-compiler/Release/ide" --baseline-id ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae --candidate-id ef99-plus-patch-a52c38d386375ffc --output ../evidence/throughput --profile ci --mode all --pairs 20 --warmups 2 --timeout 120 --cpu auto --require-identical-output --pmu 2>&1 | tee ../evidence/throughput.log
+      - name: Diagnostic query census after all uninstrumented timing
+        if: ${{ !cancelled() && steps.timing.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp baseline/build/throughput-ci-compiler/Release/ide evidence/baseline-uninstrumented
+          python3 transport/.github/z12/probe.py baseline
+          git -C baseline diff > evidence/probe.patch
+          (cd baseline && "$GITHUB_WORKSPACE/candidate/build/build" build --build-directory build/throughput-ci-compiler --config Release -t ide -- -j2) 2>&1 | tee evidence/probe-build.log
+          python3 - <<'PY'
+          import collections, hashlib, json, pathlib, subprocess
+          root=pathlib.Path.cwd(); out=root/'evidence'; seen=set(); rows=collections.defaultdict(lambda:[0,0,0]); records=[]
+          for line in (out/'throughput/commands.jsonl').read_text().splitlines():
+              rec=json.loads(line); args=rec['argv']
+              if pathlib.Path(args[0]).resolve()!=root/'baseline/build/throughput-ci-compiler/Release/ide': continue
+              mode=next((a.split('=',1)[1] for a in args if a.startswith('-fregister-allocator=')),None)
+              if mode not in ('fast','quality'): continue
+              source=args[args.index('-o')-1]; key=(source,mode)
+              if key in seen: continue
+              seen.add(key); label=f'{pathlib.Path(source).stem}-{mode}'; hashes=[]
+              for variant,binary in [('reference',out/'baseline-uninstrumented'),('probe',root/'baseline/build/throughput-ci-compiler/Release/ide')]:
+                  command=list(args); command[0]=str(binary)
+                  artifact=out/f'{label}-{variant}.o'; command[command.index('-o')+1]=str(artifact)
+                  command=[f'-fsource-metrics={out}/{label}-{variant}.metrics' if a.startswith('-fsource-metrics=') else a for a in command]
+                  with (out/f'{label}-{variant}.log').open('w') as log:
+                      subprocess.run(command,cwd=rec['cwd'],stdout=log,stderr=subprocess.STDOUT,check=True,timeout=120)
+                  hashes.append(hashlib.sha256(artifact.read_bytes()).hexdigest())
+              assert hashes[0]==hashes[1],(key,hashes)
+              records.append({'case':label,'source_sha256':hashlib.sha256(pathlib.Path(source).read_bytes()).hexdigest(),'output_sha256':hashes[0]})
+              for line in (out/f'{label}-probe.log').read_text().splitlines():
+                  if line.startswith('Z12_OWNER,'):
+                      _,site,n,calls,hits,prefix=line.split(','); row=rows[(label,int(site),int(n))]
+                      for i,v in enumerate((calls,hits,prefix)): row[i]+=int(v)
+          assert seen, 'no baseline FAST/QUALITY commands available to replay'
+          (out/'census-output-identity.json').write_text(json.dumps(records,indent=2)+'\n')
+          with (out/'owner-census.csv').open('w') as f:
+              f.write('case,site,population,calls,hits,prefix_reads,full_scalar_reads\n')
+              for (label,site,n),(calls,hits,prefix) in sorted(rows.items()): f.write(f'{label},{site},{n},{calls},{hits},{prefix},{n*calls}\n')
+          print('Census replayed',len(seen),'frozen case/mode combinations; every probe output matched its uninstrumented reference.')
+          PY
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          if test -f evidence/throughput/summary.md; then cat evidence/throughput/summary.md >> "$GITHUB_STEP_SUMMARY"; fi
+          printf '\nZ12 prototype only. Hosted CPU evidence is not physical Zen 5/Zen 4 acceptance. Census is diagnostic, not timing.\n' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: z12-experiment-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
+
+  validation:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: candidate
+          persist-credentials: false
+      - name: Validate candidate compiler and guarded owner regressions
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'a52c38d386375ffc64b7e08370ef9d2c75d5ce68172fea72e3edea38c934d9ed  ../transport/.github/z12/candidate.patch' | sha256sum -c -
+          git apply --check ../transport/.github/z12/candidate.patch
+          git apply --index ../transport/.github/z12/candidate.patch
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          ./build/build generate --cc clang --ci --linker DEFAULT
+          ./build/build build --config Release -t test_all -- -j2
+          ./build/build test_self_host --config Release
+          ./build/build test_self_host_audit --config Release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: z12-candidate-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate/build/self-host-audit/
+          retention-days: 7
+          if-no-files-found: warn

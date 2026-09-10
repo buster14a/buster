@@ -1,0 +1,117 @@
+diff --git a/src/buster/lib/compiler/codegen/register_allocator_fast.c b/src/buster/lib/compiler/codegen/register_allocator_fast.c
+index 4b256cd..70ea117 100644
+--- a/src/buster/lib/compiler/codegen/register_allocator_fast.c
++++ b/src/buster/lib/compiler/codegen/register_allocator_fast.c
+@@ -404,7 +404,34 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_owner_match_mask(u32 const* owner, u64 acti
+     return matches;
+ }
+ 
++// Existence-only consumers need not finish a sparse walk after finding an
++// owner. Dense populations keep the full-mask helper's guarded SIMD tiles;
++// duplicate removal still requests every match through that helper directly.
++BUSTER_GLOBAL_LOCAL bool machine_fast_owner_contains(u32 const* owner, u64 active, u32 value)
++{
++    bool result = false;
++#if BUSTER_SIMD_512
++    if (mask64_count(active) >= 16)
++    {
++        result = machine_fast_owner_match_mask(owner, active, value) != 0;
++    }
++    else
++#endif
++    {
++        for (; active && !result; active &= active - 1u)
++        {
++            result = owner[machine_fast_first_set(active)] == value;
++        }
++    }
++    return result;
++}
++
+ #if BUSTER_INCLUDE_TESTS
++bool machine_fast_owner_contains_test(u32 const* owner, u64 active, u32 value)
++{
++    return machine_fast_owner_contains(owner, active, value);
++}
++
+ u64 machine_fast_owner_match_mask_test(u32 const* owner, u64 active, u32 value)
+ {
+     return machine_fast_owner_match_mask(owner, active, value);
+@@ -450,7 +477,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
+     {
+         u32 physical_register = machine_fast_first_set(remaining);
+         u32 resident = owner[physical_register];
+-        if (machine_fast_owner_match_mask(contract_owner, contract_held, resident))
++        if (machine_fast_owner_contains(contract_owner, contract_held, resident))
+         {
+             continue;
+         }
+@@ -500,7 +527,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
+                 // pending value's single dirty copy; a clean occupant
+                 // reloads at its own turn, its slot current by the
+                 // clean-implies-stored invariant.
+-                if (machine_fast_owner_match_mask(contract_owner, pending, resident))
++                if (machine_fast_owner_contains(contract_owner, pending, resident))
+                 {
+                     continue;
+                 }
+@@ -1743,7 +1770,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
+                             }
+                             else if (repairs_fully && !((repair_pin_active >> contract_register) & 1u))
+                             {
+-                                entry_dirty |= machine_fast_owner_match_mask(edge_owner, edge_dirty, value) ? machine_fast_lane(contract_register) : 0u;
++                                entry_dirty |= machine_fast_owner_contains(edge_owner, edge_dirty, value) ? machine_fast_lane(contract_register) : 0u;
+                             }
+                             else
+                             {
+diff --git a/src/buster/lib/compiler/codegen/register_allocator_fast_internal.h b/src/buster/lib/compiler/codegen/register_allocator_fast_internal.h
+index cd30dac..f4b84c5 100644
+--- a/src/buster/lib/compiler/codegen/register_allocator_fast_internal.h
++++ b/src/buster/lib/compiler/codegen/register_allocator_fast_internal.h
+@@ -4,5 +4,6 @@
+ 
+ // Private test seam for the active-lane owner query in register_allocator_fast.c.
+ #if BUSTER_INCLUDE_TESTS
++BUSTER_F_DECL bool machine_fast_owner_contains_test(u32 const* owner, u64 active, u32 value);
+ BUSTER_F_DECL u64 machine_fast_owner_match_mask_test(u32 const* owner, u64 active, u32 value);
+ #endif
+diff --git a/src/buster/tests/compiler/codegen/machine_test.c b/src/buster/tests/compiler/codegen/machine_test.c
+index 9f80a61..16e62a5 100644
+--- a/src/buster/tests/compiler/codegen/machine_test.c
++++ b/src/buster/tests/compiler/codegen/machine_test.c
+@@ -2418,6 +2418,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
+     // owners, and all four SIMD tiles must agree with lane membership. The
+     // empty mask deliberately permits a null row, as an empty contract does.
+     BUSTER_TEST(arguments, machine_fast_owner_match_mask_test(0, 0, 0) == 0);
++    BUSTER_TEST(arguments, !machine_fast_owner_contains_test(0, 0, 0));
++    BUSTER_TEST(arguments, !machine_fast_owner_contains_test(0, 0, UINT32_MAX));
+     u64 owner_page_size = os_get_page_size();
+     u8* owner_pages = (u8*)os_reserve(0, owner_page_size * 2u, (ProtectionFlags){0}, (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
+     BUSTER_TEST(arguments, owner_pages != 0);
+@@ -2447,6 +2449,26 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
+                     }
+                 }
+                 BUSTER_TEST(arguments, machine_fast_owner_match_mask_test(owners, masks[mask_index], value) == expected);
++                BUSTER_TEST(arguments, machine_fast_owner_contains_test(owners, masks[mask_index], value) == (expected != 0));
++            }
++        }
++        // Unique high-bit owners cover late sparse hits and absent values,
++        // independently of the duplicate-owner populations above.
++        for (u32 lane = 0; lane < count; lane += 1)
++        {
++            owners[lane] = UINT32_C(0x80000000) + lane;
++        }
++        u32 queries[] = {owners[0], owners[count - 1u], UINT32_MAX};
++        for (u32 mask_index = 0; mask_index < BUSTER_ARRAY_LENGTH(masks); mask_index += 1)
++        {
++            for (u32 query_index = 0; query_index < BUSTER_ARRAY_LENGTH(queries); query_index += 1)
++            {
++                bool expected = false;
++                for (u32 lane = 0; lane < count; lane += 1)
++                {
++                    expected |= owners[lane] == queries[query_index] && ((masks[mask_index] >> lane) & 1u);
++                }
++                BUSTER_TEST(arguments, machine_fast_owner_contains_test(owners, masks[mask_index], queries[query_index]) == expected);
+             }
+         }
+     }
