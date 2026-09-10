@@ -1,9 +1,10 @@
 name: Buster CI
 
 # Build/test policy remains in build.c. The six desktop platform/architecture
-# lanes retain their complete compiler/configuration and execution-mode matrices.
-# Mobile suites are independent shards, not duplicate desktop builds. See
-# docs/ci-workflow-audit.md for coverage, cache boundaries and reproduction.
+# lanes retain their complete compiler/configuration matrices. Four independent
+# Unix native shards retain the mode and differential matrices, sharing their
+# existing producer tree. Mobile suites remain independent. See
+# docs/ci-native-shards.md for the partition, reproduction and timing acceptance.
 on:
   pull_request:
   push:
@@ -80,30 +81,35 @@ jobs:
       matrix:
         include:
           - name: Linux x86-64
+            suite: combinations
             runner: ubuntu-26.04
             platform: unix
             os: linux
             arch: x86_64
             zig_target: x86_64-linux
           - name: Linux AArch64
+            suite: combinations
             runner: ubuntu-26.04-arm
             platform: unix
             os: linux
             arch: aarch64
             zig_target: aarch64-linux
           - name: macOS x86-64
+            suite: combinations
             runner: macos-26-intel
             platform: unix
             os: macos
             arch: x86_64
             zig_target: x86_64-macos
           - name: macOS AArch64
+            suite: combinations
             runner: macos-26
             platform: unix
             os: macos
             arch: aarch64
             zig_target: aarch64-macos
           - name: Windows x86-64
+            suite: combinations
             runner: windows-2025
             platform: windows
             os: windows
@@ -113,6 +119,7 @@ jobs:
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
             clang_arch: x86_64
           - name: Windows AArch64
+            suite: combinations
             runner: windows-11-arm
             platform: windows
             os: windows
@@ -121,6 +128,30 @@ jobs:
             vs_arch: arm64
             vs_component: Microsoft.VisualStudio.Component.VC.Tools.ARM64
             clang_arch: aarch64
+          - name: Linux x86-64 native
+            suite: native
+            runner: ubuntu-26.04
+            platform: unix
+            os: linux
+            arch: x86_64
+          - name: Linux AArch64 native
+            suite: native
+            runner: ubuntu-26.04-arm
+            platform: unix
+            os: linux
+            arch: aarch64
+          - name: macOS x86-64 native
+            suite: native
+            runner: macos-26-intel
+            platform: unix
+            os: macos
+            arch: x86_64
+          - name: macOS AArch64 native
+            suite: native
+            runner: macos-26
+            platform: unix
+            os: macos
+            arch: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -140,7 +171,7 @@ jobs:
 
       - name: Install mold
         id: mold
-        if: ${{ !cancelled() && matrix.os == 'linux' && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.suite == 'combinations' && matrix.os == 'linux' && steps.checkout.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -151,7 +182,7 @@ jobs:
       # files, extracted compilers, credentials, or previous test verdicts.
       - name: Restore Zig archive
         id: zig_cache
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.suite == 'combinations' && steps.checkout.outcome == 'success' }}
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/zig-archive/archive
@@ -159,7 +190,7 @@ jobs:
 
       - name: Install verified Zig
         id: zig
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.suite == 'combinations' && steps.checkout.outcome == 'success' }}
         timeout-minutes: 10
         shell: bash
         env:
@@ -171,7 +202,7 @@ jobs:
       # Publish immediately after verification, before compiler build/tests.
       # A corrupt hit is a hard failure and is never silently republished.
       - name: Save verified Zig archive
-        if: ${{ !cancelled() && steps.zig.outcome == 'success' && steps.zig_cache.outputs.cache-hit != 'true' && steps.zig_cache.outputs.cache-primary-key != '' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        if: ${{ !cancelled() && matrix.suite == 'combinations' && steps.zig.outcome == 'success' && steps.zig_cache.outputs.cache-hit != 'true' && steps.zig_cache.outputs.cache-primary-key != '' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/zig-archive/archive
@@ -179,7 +210,7 @@ jobs:
 
       - name: Application compilers
         id: tools_unix
-        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.zig.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.suite == 'combinations' && matrix.platform == 'unix' && steps.zig.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -189,7 +220,7 @@ jobs:
 
       - name: Combination matrix (Linux, macOS)
         id: combinations_unix
-        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success') }}
+        if: ${{ !cancelled() && matrix.suite == 'combinations' && matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -201,7 +232,7 @@ jobs:
 
       - name: Combination matrix (Windows)
         id: combinations_windows
-        if: ${{ !cancelled() && matrix.platform == 'windows' && steps.zig.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.suite == 'combinations' && matrix.platform == 'windows' && steps.zig.outcome == 'success' }}
         shell: powershell
         env:
           VS_ARCH: ${{ matrix.vs_arch }}
@@ -237,11 +268,12 @@ jobs:
           cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'combinations.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # A failed combination must not hide an independent allocator-mode result.
-      # No continue-on-error: an earlier failure still fails this desktop lane.
+      # Native suites run beside combinations on independent workspaces. Keep
+      # modes and differential together: they already share a producer tree.
+      # A failed mode result must not suppress the differential evidence.
       - name: Execution-mode matrix
         id: modes
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'unix' }}
+        if: ${{ !cancelled() && matrix.suite == 'native' && steps.checkout.outcome == 'success' && matrix.platform == 'unix' }}
         shell: bash
         env:
           CFLAGS: -Wno-invalid-feature-combination
@@ -257,7 +289,7 @@ jobs:
 
       - name: Native configuration differential matrix
         id: differential
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'unix' }}
+        if: ${{ !cancelled() && matrix.suite == 'native' && steps.checkout.outcome == 'success' && matrix.platform == 'unix' }}
         shell: bash
         env:
           CFLAGS: -Wno-invalid-feature-combination
@@ -282,15 +314,15 @@ jobs:
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'unix' && 'workflow_tools zig combinations_unix modes differential' || 'workflow_tools zig combinations_windows' }}
-          BUSTER_CI_REPRO: See docs/ci-github-actions.md for the matching hosted bootstrap and full matrix commands.
+          BUSTER_CI_REQUIRED: ${{ matrix.suite == 'native' && 'workflow_tools modes differential' || matrix.platform == 'unix' && 'workflow_tools zig combinations_unix' || 'workflow_tools zig combinations_windows' }}
+          BUSTER_CI_REPRO: See docs/ci-native-shards.md for the matching suite, hosted bootstrap and full matrix commands.
         run: '"$BUSTER_CI_PYTHON" tools/ci_summary.py'
 
       - name: Retain desktop logs
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: desktop-${{ matrix.suite }}-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/buster-ci/
             !${{ runner.temp }}/buster-ci/differential/**/program
@@ -446,7 +478,7 @@ jobs:
           DESKTOP_RESULT: ${{ needs.test.result }}
           MOBILE_RESULT: ${{ needs.mobile.result }}
         run: |
-          printf '| Shards | Result |\n| --- | --- |\n| All six desktop lanes | %s |\n| All three mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf '| Shards | Result |\n| --- | --- |\n| All ten desktop suite shards (six platforms) | %s |\n| All three mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT" >> "$GITHUB_STEP_SUMMARY"
           printf '| Workflow lint | %s |\n' "$LINT_RESULT" >> "$GITHUB_STEP_SUMMARY"
           if [[ "$LINT_RESULT" != success || "$DESKTOP_RESULT" != success || "$MOBILE_RESULT" != success ]]; then
             echo '::error::All desktop and mobile shards must succeed; failure, cancellation and skips do not pass.'
