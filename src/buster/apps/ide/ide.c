@@ -928,6 +928,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                      p.candidate_locals, p.promoted_locals, p.removed_loads, p.removed_stores,
                      p.inserted_parameters, p.removed_parameters, p.uninitialized_locals, p.barrier_functions,
                      p.instructions_before, p.instructions_after, p.values_before, p.values_after);
+        string_print(S8("IR_LOCAL_PROMOTION_WORK parameter_sweeps={u64} block_visits={u64} parameter_visits={u64} incoming_visits={u64}\n"),
+                     p.parameter_sweeps, p.parameter_block_visits, p.parameter_visits, p.parameter_incoming_visits);
     }
     if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose && compile.codegen_statistics.function_count)
     {

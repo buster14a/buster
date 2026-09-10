@@ -682,6 +682,13 @@ struct IrLocalPromotionStatistics
     u64 instructions_after;
     u64 values_before;
     u64 values_after;
+    // Trivial-parameter cleanup work, including the final unchanged sweep.
+    // Visits are not unique rows. Incoming visits stop at the first conflict;
+    // pre-existing parameters are visited but are not candidates for removal.
+    u64 parameter_sweeps;
+    u64 parameter_block_visits;
+    u64 parameter_visits;
+    u64 parameter_incoming_visits;
 };
 
 typedef struct IrModule IrModule;

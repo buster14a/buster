@@ -54,6 +54,9 @@ SSA already built by the frontend. For a fully memory-form differential input,
 disable frontend SSA as well. Verbose compilation reports `IR_FRONTEND_SSA`
 counters beside `IR_LOCAL_PROMOTION`; see the
 [frontend ownership contract](frontend/foundations.md#direct-local-ssa-github-34).
+`IR_LOCAL_PROMOTION_WORK` reports shared-promotion parameter-cleanup sweeps and
+actual visits, separately from removed rows. The [middle-end pass map](../middle-end-pass-map.md)
+defines their scope, invalidation rules and separate diagnostic replay protocol.
 
 `-fno-machine-fallback` makes native C coverage strict: after code generation
 succeeds, any fallback fails the translation unit before object writing and

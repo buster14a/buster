@@ -26,6 +26,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
         bool barrier;
         bool trivial;
     } fixtures[] = {
+        {S8("int test(void){return 7;}"), true, false, false, false, false},
         {S8("int test(void){int x=3;x+=4;return x;}"), true, false, false, false, false},
         {S8("int test(int c){int v;if(c)v=11;else v=29;return v;}"), true, true, false, false, false},
         {S8("int test(int n){int a=1,b=2;while(n-->0){int t=a;a=b;b=t;}return a*10+b;}"), true, true, false, false, false},
@@ -74,6 +75,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                 BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
                 BUSTER_TEST(arguments, function->instruction_count == old_instructions && function->value_count == old_values);
                 BUSTER_TEST(arguments, !module->local_promotion_complete && module->local_promotion.promoted_locals == 0);
+                BUSTER_TEST(arguments, module->local_promotion.parameter_sweeps == 0);
+                BUSTER_TEST(arguments, module->local_promotion.parameter_block_visits == 0);
+                BUSTER_TEST(arguments, module->local_promotion.parameter_visits == 0);
+                BUSTER_TEST(arguments, module->local_promotion.parameter_incoming_visits == 0);
                 program->disable_local_promotion = false;
                 IrValidationResult valid = ir_prepare_canonical_module(program, module, false);
                 BUSTER_TEST(arguments, valid.error == IR_VALIDATION_NONE);
@@ -121,6 +126,53 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                 }
                 IrLocalPromotionStatistics stats = module->local_promotion;
                 BUSTER_TEST(arguments, stats.instructions_before - stats.instructions_after == stats.promoted_locals + stats.removed_loads + stats.removed_stores);
+                // Each fixture has one lowered function. The declaration-only
+                // callees contribute no sweeps, and promotion preserves blocks.
+                BUSTER_TEST(arguments, stats.parameter_block_visits == stats.parameter_sweeps * function->block_count);
+                if (stats.promoted_locals)
+                {
+                    // Every changing sweep removes at least one parameter;
+                    // convergence includes one final sweep with no removals.
+                    BUSTER_TEST(arguments, stats.parameter_sweeps >= 1);
+                    BUSTER_TEST(arguments, stats.parameter_sweeps <= stats.removed_parameters + 1);
+                    BUSTER_TEST(arguments, stats.parameter_visits >= stats.inserted_parameters);
+                    if (fixture.trivial)
+                    {
+                        // Only v is live at this diamond's join; both incoming
+                        // definitions are x. Its sole parameter is removed on
+                        // the first sweep and absent from the convergence sweep.
+                        BUSTER_TEST(arguments, stats.inserted_parameters == 1);
+                        BUSTER_TEST(arguments, stats.removed_parameters == 1);
+                        BUSTER_TEST(arguments, stats.parameter_sweeps == 2);
+                        BUSTER_TEST(arguments, stats.parameter_visits == 1);
+                        BUSTER_TEST(arguments, stats.parameter_incoming_visits == 2);
+                    }
+                    if (!stats.inserted_parameters && !joins)
+                    {
+                        // Compaction with no parameters still visits each block
+                        // once, but has no parameter or incoming-list work.
+                        BUSTER_TEST(arguments, stats.parameter_sweeps == 1);
+                        BUSTER_TEST(arguments, stats.parameter_visits == 0);
+                        BUSTER_TEST(arguments, stats.parameter_incoming_visits == 0);
+                    }
+                    if (!stats.removed_parameters)
+                    {
+                        BUSTER_TEST(arguments, stats.parameter_sweeps == 1);
+                        BUSTER_TEST(arguments, stats.parameter_visits == joins);
+                    }
+                    if (fixture.joins)
+                    {
+                        BUSTER_TEST(arguments, stats.parameter_visits > 0);
+                        BUSTER_TEST(arguments, stats.parameter_incoming_visits > 0);
+                    }
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, stats.parameter_sweeps == 0);
+                    BUSTER_TEST(arguments, stats.parameter_block_visits == 0);
+                    BUSTER_TEST(arguments, stats.parameter_visits == 0);
+                    BUSTER_TEST(arguments, stats.parameter_incoming_visits == 0);
+                }
                 BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
                 BUSTER_TEST(arguments, memory_compare(&stats, &module->local_promotion, sizeof(stats)));
                 BUSTER_TEST(arguments, (function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN) != 0);
