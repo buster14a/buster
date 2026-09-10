@@ -2,6 +2,7 @@ name: Astra PR fixture diagnostics
 on:
   push:
     branches: [codex/astra-pr-fixture-diagnostics]
+    paths: [.github/workflows/astra-pr-fixture-diagnostics.yml]
 permissions:
   contents: read
 jobs:
@@ -10,21 +11,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - pr: 370
-            runner: ubuntu-26.04
-            source: cb8a5830b656f47bb250c00563ea47517af3d988
           - pr: 374
             runner: ubuntu-26.04
             source: c0517fb8bd3accf4c0f6020fad52bc0ddc4570fb
-          - pr: 376
-            runner: macos-26
-            source: 515c12c8525ee16cd770a288883f30691f2d7d30
           - pr: 372
             runner: windows-2025
             source: 5ee277f956ea637c95c28ec3b220bbda63aea774
-          - pr: 368
-            runner: ubuntu-26.04
-            source: c012b31136dc1733df980c064d22c41571284aa2
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -48,12 +40,29 @@ jobs:
           p.write_text(s)
           PY
       - name: Compile exact candidate with the repository build driver
+        if: ${{ matrix.pr != 372 }}
         run: |
           git rev-parse HEAD
           clang --version
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
           "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
           "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j1
+      - name: Compile Windows diagnostic with the existing CI toolchain setup
+        if: ${{ matrix.pr == 372 }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPath = (& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          & clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o $Driver
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver generate --cc clang --ci --linker DEFAULT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver build --config Release -t ide -- -j1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Print bounded fixture diagnostics
         env:
           AUDIT_PR: ${{ matrix.pr }}
@@ -95,7 +104,7 @@ jobs:
               for i, line in enumerate([l for l in source.splitlines() if "failed |=" in l]):
                   source = source.replace(line, line.replace("failed |= ", "failed |= (" ).replace(";", ") << %d;" % i))
               probe = tmp / "constexpr.c"
-              probe.write_text(source)
+              probe.write_text(source.replace("return failed;", "return scoped_constants();"))
               for mode in ["none", "mir-stack", "fast", "quality"]:
                   exe = tmp / ("constexpr-" + mode)
                   cmd = [ide, "cc", "-std=c23", "-fregister-allocator=" + mode, str(probe), "-o", str(exe)]
@@ -108,3 +117,76 @@ jobs:
           raise SystemExit(1 if failed else 0)
           PY
 
+
+  evex-interop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 1
+      BUSTER_TEST_JOBS: 1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 12c7ada2b0d929c676363ef00dd7069db43f4dc8
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: audit
+          sparse-checkout: .astra
+          persist-credentials: false
+      - name: Build exact EVEX source and run independent interoperability oracle
+        run: |
+          git rev-parse HEAD
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j1
+          python3 audit/.astra/oracle373.py
+
+  quality-census:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - config: Release
+            sanitize: ''
+          - config: Debug
+            sanitize: --sanitize
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 1
+      BUSTER_TEST_JOBS: 1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 082dc8a2add214c005a9801d2f388558943f1852
+          persist-credentials: false
+      - name: Validate registered allocation-census tests
+        env:
+          AUDIT_CONFIG: ${{ matrix.config }}
+          AUDIT_SANITIZE: ${{ matrix.sanitize }}
+        run: |
+          git rev-parse HEAD
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT $AUDIT_SANITIZE -- -DBUSTER_BENCH_ALLOCATIONS=ON
+          "$RUNNER_TEMP/buster-build" build --config "$AUDIT_CONFIG" -t test_all -- -j1
+      - name: Check both census namespaces against ordinary object bytes
+        if: ${{ matrix.config == 'Release' }}
+        run: |
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT --build-dir "$RUNNER_TEMP/normal"
+          "$RUNNER_TEMP/buster-build" build --build-dir "$RUNNER_TEMP/normal" --config Release -t ide -- -j1
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, subprocess
+          tmp = Path(os.environ["RUNNER_TEMP"])
+          for mode in ["none", "mir-stack", "fast", "quality"]:
+              for label, ide in [("normal", tmp/"normal/Release/ide"), ("probe", Path("build/Release/ide"))]:
+                  subprocess.run([str(ide), "cc", "-c", "-g0", "-O0", "-fregister-allocator="+mode, "-fsource-metrics="+str(tmp/(mode+"-"+label+".metrics")), "tests/basic_c_operations.c", "-o", str(tmp/(mode+"-"+label+".o"))], check=True)
+              assert (tmp/(mode+"-normal.o")).read_bytes() == (tmp/(mode+"-probe.o")).read_bytes()
+              metrics = (tmp/(mode+"-probe.metrics")).read_text()
+              assert "quality_census.version=1" in metrics and "ir_construction.version=1" in metrics
+              assert "ir_construction.overflowed=0" in metrics
+              print(mode, "ordinary/probe object equality and both census namespaces pass", flush=True)
+          PY
