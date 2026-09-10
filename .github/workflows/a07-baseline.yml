@@ -1,0 +1,71 @@
+name: A07 frozen baseline
+on:
+  push:
+    branches: [astra/a07-280-inspection]
+    paths: [.github/workflows/a07-baseline.yml]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      BUSTER_TEST_JOBS: 1
+      CMAKE_BUILD_PARALLEL_LEVEL: 1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          persist-credentials: false
+      - name: Build frozen Release compiler with one worker
+        id: build
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a07-baseline"
+          exec > >(tee "$RUNNER_TEMP/a07-baseline/build.log") 2>&1
+          clang --version
+          as --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/a07-driver"
+          "$RUNNER_TEMP/a07-driver" generate --ci --cc clang --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/a07-driver" build --config Release -t ide -- -j1
+      - name: Independent assembly and baseline rejection
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/a07-baseline"
+          printf '.text\nvcvtps2pd 64(%%rax),%%zmm0{%%k1}\n' > "$out/ordinary-att.s"
+          printf '.text\nvcvtps2pd 64(%%rax){1to8},%%zmm0{%%k1}\n' > "$out/broadcast-att.s"
+          printf '.intel_syntax noprefix\n.text\nvcvtps2pd zmm0{k1},ymmword ptr [rax+64]\n' > "$out/ordinary-intel.s"
+          exec > >(tee "$out/reproduction.log") 2>&1
+          for source in "$out/"*.s; do
+            as --64 "$source" -o "$source.gas.o"
+            clang --target=x86_64-unknown-linux-gnu -c "$source" -o "$source.clang.o"
+            objcopy --dump-section ".text=$source.gas.bin" "$source.gas.o"
+            objcopy --dump-section ".text=$source.clang.bin" "$source.clang.o"
+            cmp "$source.gas.bin" "$source.clang.bin"
+            od -An -tx1 "$source.gas.bin"
+            set +e
+            build/Release/ide cc -c -march=znver5 "$source" -o "$source.buster.o"
+            status=$?
+            set -e
+            printf 'BASELINE %s exit=%s\n' "$source" "$status"
+            test "$status" = 1
+          done
+      - name: Frozen full Release tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/a07-driver" build --config Release -t test_all -- -j1 2>&1 | tee "$RUNNER_TEMP/a07-baseline/tests.log"
+      - name: Frozen ordinary self-host fixed point
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/a07-driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/a07-baseline/self-host.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a07-frozen-baseline-${{ github.sha }}
+          path: ${{ runner.temp }}/a07-baseline
+          if-no-files-found: error
+          retention-days: 7
