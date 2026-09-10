@@ -2480,7 +2480,6 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestAr
         u8 displacement;
     };
     X86NarrowTupleCase const narrowing[] = {
-        {S8("vcvtpd2ps 64(%rax), %xmm0{%k1}\n"), ASSEMBLY_SYNTAX_ATT, 0x09, 0x04},
         {S8("vcvtpd2ps xmm0{k1}, xmmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, 0x09, 0x04},
         {S8("vcvtpd2ps xmm0{k1}, ymmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, 0x29, 0x02},
         {S8("vcvtpd2ps 64(%rax), %ymm0{%k1}\n"), ASSEMBLY_SYNTAX_ATT, 0x49, 0x01},
@@ -2503,6 +2502,28 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestAr
             if (!case_valid)
             {
                 arguments->show(arguments, S8("EVEX_NARROW source: {S8}"), test_case.source);
+            }
+            valid &= case_valid;
+        }
+    }
+    // GNU as and Clang reject these unsized narrowing loads: the same XMM
+    // destination accepts m128 or m256. Vary displacement compressibility so
+    // the shortest encoding cannot silently decide the number of input lanes.
+    s64 const ambiguous_displacements[] = {0, 64, 2032, 4064};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(ambiguous_displacements); index += 1)
+    {
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            String8 source = dialect ? string_format(arguments->arena, S8("vcvtpd2ps {s64}(%rax), %xmm0{{%k1}}\n"),
+                                                       ambiguous_displacements[index])
+                                     : string_format(arguments->arena, S8("vcvtpd2ps xmm0{{k1}}, [rax+{s64}]\n"),
+                                                       ambiguous_displacements[index]);
+            AssemblyEncodeResult rejected = assembly_encode(arguments->arena, source,
+                (AssemblyEncodeOptions){.target = target, .syntax = dialect ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
+            bool case_valid = rejected.diagnostic_count != 0 && rejected.bytes.length == 0 && rejected.relocation_count == 0;
+            if (!case_valid)
+            {
+                arguments->show(arguments, S8("EVEX_AMBIGUOUS_TUPLE accepted: {S8}"), source);
             }
             valid &= case_valid;
         }

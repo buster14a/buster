@@ -8212,7 +8212,7 @@ bool buster_x86_metadata_form_standalone_sae_capable(BusterX86MetadataForm form)
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_source_tuple_query(
     BusterX86MetadataForm form, BusterX86MetadataPatternSemantics const* pattern,
     BusterX86MetadataPhysicalQuery query, BusterX86MetadataPhysicalOperand* candidate_operands,
-    bool* source_width_valid)
+    bool* source_width_valid, u16* source_tuple_width)
 {
     bool projected = false;
     if (form.encoder_family == BUSTER_X86_METADATA_ENCODER_EVEX && !form.apx_flags && !form.amx_flags &&
@@ -8240,6 +8240,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_source_tuple_query(
             *source_width_valid = !source_width || source_width == (broadcast ? element_width : tuple_width);
             memcpy(candidate_operands, query.operands, query.operand_count * sizeof(*candidate_operands));
             candidate_operands[1].width = element_width;
+            *source_tuple_width = tuple_width;
             projected = true;
         }
     }
@@ -8942,6 +8943,8 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
             bool first_failure_form_recorded = false;
             bool selected_implicit_one = false;
             bool selected_x87_no_rexw = false;
+            u16 inferred_source_tuple_width = 0;
+            bool ambiguous_source_tuple = false;
             // The three memory-topology probes below run once per candidate, but each
             // one first rejects on conditions that depend only on the query, which is
             // loop-invariant.  Hoist those here so a query that can satisfy neither
@@ -9044,6 +9047,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 u16 block_memory_width = 0;
                 bool inferred_memory_width = false;
                 bool source_width_valid = true;
+                u16 candidate_source_tuple_width = 0;
                 bool aggregate_memory_topology =
                     topology_query_possible &&
                     buster_x86_metadata_aggregate_memory_source_topology_internal(form, query, &block_memory_width);
@@ -9067,7 +9071,8 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 else
                 {
                     inferred_memory_width = source_tuple_query_possible &&
-                        buster_x86_metadata_prepare_source_tuple_query(form, filter_view, query, candidate_operands, &source_width_valid);
+                        buster_x86_metadata_prepare_source_tuple_query(form, filter_view, query, candidate_operands,
+                                                                       &source_width_valid, &candidate_source_tuple_width);
                     if (!inferred_memory_width)
                     {
                         inferred_memory_width = typed_query_possible &&
@@ -9155,6 +9160,16 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                         result.failure_form_id = form_id;
                     }
                     continue;
+                }
+                if (candidate_source_tuple_width && !query.operands[1].memory.source_width &&
+                    !(query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST))
+                {
+                    // An unsized narrowing load can bind the same XMM destination
+                    // with different source tuples. Encoding length and form order
+                    // cannot choose its semantics; require a source qualifier.
+                    ambiguous_source_tuple |= inferred_source_tuple_width &&
+                                              inferred_source_tuple_width != candidate_source_tuple_width;
+                    inferred_source_tuple_width = candidate_source_tuple_width;
                 }
                 result.candidate_count += 1;
                 BusterX86MetadataPatternSemantics candidate_storage = {0};
@@ -9250,7 +9265,16 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                     }
                 }
             }
-            if (result.candidate_count) result.status = BUSTER_X86_METADATA_ENCODE_SUCCESS;
+            if (ambiguous_source_tuple)
+            {
+                result.status = BUSTER_X86_METADATA_ENCODE_AMBIGUOUS;
+                result.form_id = UINT32_MAX;
+                result.stable_hash = 0;
+                result.selected_byte_count = 0;
+                result.selected_memory_width = 0;
+                result.selected_memory_operand = UINT8_MAX;
+            }
+            else if (result.candidate_count) result.status = BUSTER_X86_METADATA_ENCODE_SUCCESS;
             else if (!saw_allowed) result.status = BUSTER_X86_METADATA_ENCODE_FEATURE_MODE_PRIVILEGE;
             else if (!saw_matching_count) result.status = BUSTER_X86_METADATA_ENCODE_WRONG_OPERAND_COUNT;
             else if (!saw_shape)

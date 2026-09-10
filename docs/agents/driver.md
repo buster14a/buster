@@ -52,7 +52,10 @@ qualifier names its scalar element. The metadata selector projects the
 candidate's element width and validates the source qualifier independently;
 for example, masked `vcvtps2pd zmm0, m256` reads eight 32-bit elements while
 masked `vcvtpd2ps ymm0, m512` reads eight 64-bit elements. AT&T's unqualified
-memory spelling uses the same candidate contract. This bounded projection
+memory spelling uses the same candidate contract. Unsized ordinary loads
+whose destination permits multiple source tuple widths are rejected as
+ambiguous; encoding length and candidate order cannot choose input lanes.
+This bounded projection
 requires a mask/broadcast, ZMM destination, or high vector register and covers
 FULL/HALF EVEX tuples; it does not replace all legacy/VEX source inference.
 
