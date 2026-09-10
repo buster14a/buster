@@ -1,0 +1,108 @@
+name: A09 frozen baseline allocation and binding census
+
+on:
+  push:
+    branches: [astra/a09-memory-transport-20260909]
+    paths: [.github/workflows/astra-a09-baseline.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a09-baseline-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  census:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          persist-credentials: false
+      - name: Record provenance and add diagnostic-only loop counters
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a09-baseline"
+          git rev-parse HEAD > "$RUNNER_TEMP/a09-baseline/base.sha"
+          clang --version > "$RUNNER_TEMP/a09-baseline/clang.txt"
+          lscpu > "$RUNNER_TEMP/a09-baseline/cpu.txt"
+          free -b > "$RUNNER_TEMP/a09-baseline/memory.txt"
+          python3 - <<'PY'
+          import pathlib
+          path = pathlib.Path('src/buster/lib/compiler/frontend/c/c_parse.c')
+          text = path.read_text()
+          text = '#include <stdio.h>\nstatic unsigned long long a09_binding_calls;\nstatic unsigned long long a09_binding_visits;\n' + text
+          begin = text.index('BUSTER_C_INTERNAL void c_parse_binding_bind(')
+          end = text.index('// Restores every binding', begin)
+          body = text[begin:end]
+          body = body.replace('    if (result->binding_by_symbol', '    a09_binding_calls += 1;\n    if (result->binding_by_symbol', 1)
+          needle = '                oldest = result->binding_undo[index].symbol == symbol ? index : UINT32_MAX;'
+          assert body.count(needle) == 1
+          body = body.replace(needle, '                a09_binding_visits += 1;\n' + needle)
+          text = text[:begin] + body + text[end:]
+          begin = text.index('CParseResult c_analyze_semantics(')
+          end = text.index('\nCParseResult c_parse(', begin)
+          body = text[begin:end]
+          position = body.rfind('    return result;')
+          assert position >= 0
+          body = body[:position] + '    fprintf(stderr, "A09_BIND calls=%llu visits=%llu\\n", a09_binding_calls, a09_binding_visits);\n' + body[position:]
+          path.write_text(text[:begin] + body + text[end:])
+          PY
+          git diff > "$RUNNER_TEMP/a09-baseline/diagnostic-only.patch"
+      - name: Build a separate observer compiler with one worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g0 build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --build-directory build-probe --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1 | tee "$RUNNER_TEMP/a09-baseline/configure.txt"
+          "$RUNNER_TEMP/buster-build" build --build-directory build-probe --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/a09-baseline/build.txt"
+      - name: Geometric current-main operation counts and allocation census
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'a09-baseline'
+          rows = []
+          for count in [0, 1, 4, 16, 64, 256, 1024, 4096, 16384]:
+              source = 'int main(void) {\n' + ''.join(f'extern int fresh_{i}(void);\n' for i in range(count)) + 'return 0;\n}\n'
+              path = out / f'fresh-{count}.c'
+              path.write_text(source)
+              command = ['build-probe/Release/ide', 'cc', '-std=c17', '-g0', '-fsyntax-only', str(path)]
+              env = dict(os.environ)
+              if count in [0, 4096]:
+                  env['BUSTER_ALLOCATION_CENSUS'] = '1'
+              result = subprocess.run(command, text=True, capture_output=True, timeout=120, env=env)
+              (out / f'fresh-{count}.log').write_text(result.stdout + result.stderr)
+              if result.returncode:
+                  raise SystemExit(f'Baseline source failed: {count}, status {result.returncode}: {result.stderr[-4000:]}')
+              matches = re.findall(r'A09_BIND calls=(\d+) visits=(\d+)', result.stderr)
+              if len(matches) != 1:
+                  raise SystemExit(f'Missing unique operation record for {count}: {matches}')
+              calls, visits = map(int, matches[0])
+              row = dict(count=count, calls=calls, visits=visits, source_sha256=hashlib.sha256(source.encode()).hexdigest(), command=command)
+              rows.append(row)
+              print(json.dumps(row), flush=True)
+              (out / 'operation-counts.json').write_text(json.dumps(rows, indent=2) + '\n')
+          for compiler in ['clang', 'gcc']:
+              for count in [0, 16, 16384]:
+                  subprocess.run([compiler, '-std=c17', '-Wall', '-Wextra', '-Werror', '-fsyntax-only', str(out / f'fresh-{count}.c')], check=True)
+          PY
+          python3 tools/allocation_census.py --input "$RUNNER_TEMP/a09-baseline/fresh-0.log" --output "$RUNNER_TEMP/a09-baseline/small-census"
+          python3 tools/allocation_census.py --input "$RUNNER_TEMP/a09-baseline/fresh-4096.log" --output "$RUNNER_TEMP/a09-baseline/large-census"
+          printf 'Diagnostic-only compiler: operation and allocation counts, not timing/RSS samples.\n' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: a09-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/a09-baseline/
+          if-no-files-found: error
+          retention-days: 14
