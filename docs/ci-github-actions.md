@@ -86,6 +86,58 @@ that is what makes its legs *execute* rather than fall back to the disassembly
 oracle: x86-64 ELF and Mach-O on the Intel runners, AArch64 ELF and Mach-O on
 the Arm ones. Windows is excluded from it as it is on Forgejo.
 
+## Supplementary bootstrap scheduling and tested revision
+
+`Self-host fixed point` supplies the independent **Linux x86-64 bootstrap
+evidence** check (spelled `Linux x86-64 bootstrap evidence` in GitHub). It
+preserves the ordinary fixed point and alternate-backend gates, then runs the
+three-generation repeated audit and full compiler regressions. It has no
+prerequisite on the platform matrix and does not replace that matrix's
+per-platform self-host coverage.
+
+Both workflows have the same event policy:
+
+| Event | Checkout/tested revision | Scheduling |
+| --- | --- | --- |
+| Pull request opened, synchronized or reopened, including forks | GitHub's `refs/pull/<number>/merge` revision (`GITHUB_SHA`), not merely the head SHA | One run of each workflow per event; a new revision supersedes that PR's older run |
+| Push to `main` | Pushed commit | Every run retained, including pending runs |
+| Tag push | Commit selected by the tag event | Every run retained |
+| Merge group | GitHub's generated merge-group revision | Coalesced only within that workflow and merge-group ref |
+| Explicit workflow dispatch | Revision selected for that workflow dispatch | Independent run-ID group; no automatic coalescing |
+| Other branch push | No automatic run | Open/update its PR, or deliberately dispatch a fixed-revision measurement |
+
+GitHub supplies the PR merge revision to both default checkouts. Check the
+actual run/checkout SHA: the REST run's `head_sha` can identify the PR head,
+while the runner checks out the merge revision. The separate head and merge
+SHAs must not be substituted for one another in validation reports. Re-running
+a job retains the original event SHA; a newer PR head requires its own run.
+Branch protection should require **both `CI complete` and
+`Linux x86-64 bootstrap evidence`** when the stronger audit is mandatory.
+`CI complete` aggregates only its own lint, desktop and mobile jobs; it is not
+a proxy for the separate bootstrap result. No same-name skipped check is
+introduced to stand in for a missing run, and this documentation does not
+change repository rules.
+
+Each workflow uses its own name and event in the concurrency key. Only PR and
+merge-group runs permit cancellation. Main, tag and manual runs include their
+run ID: `cancel-in-progress: false` alone would still allow a newer pending run
+to replace an older pending run. The bootstrap workflow no longer starts an
+expensive audit just because an inspection/transport branch is published.
+This avoids automatic work on non-PR feature pushes, not deliberate main,
+tag or manual validation. It does not establish a measured latency speedup.
+
+Fork validation uses only standard hosted runners, read-only contents access,
+non-persisted checkout credentials, and no secrets or bootstrap caches.
+GitHub's normal approval requirements still apply. The trusted cancellation
+recovery workflow remains scoped to `Buster CI` and eligible same-repository
+PRs; this change does not broaden recovery or the source-free broker.
+
+`python3 tests/ci_tools_test.py -v` checks the shared event/concurrency contract,
+retained bootstrap command order, and the actual `CI complete` shell predicate
+under all 125 combinations of success, failure, cancellation, skip and missing
+results. These checks validate the checked-in policy; they are not evidence
+that a live fork, merge queue, manual dispatch or cancellation race was run.
+
 ## Bootstrapping and prerequisites
 
 `build.c` is compiled with the Clang already installed on the image rather than
