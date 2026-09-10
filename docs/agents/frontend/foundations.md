@@ -115,6 +115,15 @@ independent legacy mutable-register and pressure-census contracts.
   `C_DIAGNOSTIC_INVALID_INTEGER_LITERAL`; preprocessing keeps the conditional
   directive diagnostic. `c_test_integer_spelling_consistency` and
   `tests/basic_c_integer_literals.c` cover these contracts (GitHub #148).
+- Preprocessing integer-expression reductions carry signedness and a deferred
+  arithmetic-fault bit in the same byte. Division by zero and signed
+  `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
+  `&&`, `||` and `?:` propagate faults only from evaluated operands; the
+  conditional's common unsigned type still depends on both arms. Syntax
+  validation remains unconditional. `c_test_preprocessor_short_circuit` covers
+  generated `#if`/`#elif`, live-fault and malformed-dead-operand controls;
+  `tests/basic_c_preprocessor_short_circuit.c` runs in the existing native
+  allocator matrix (GitHub #147, #258).
 - A folded conditional expression converts its selected value to the common
   type of both arms before any enclosing operator consumes it. Constant and
   runtime typing share `c_ir_conditional_pointer_type`; arithmetic uses the

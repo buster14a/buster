@@ -7,6 +7,7 @@
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
@@ -551,14 +552,18 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
         {
             return false;
         }
-        if (use == IR_ABI_USE_RESULT && (abi.indirect || abi.memory))
+        if ((use == IR_ABI_USE_RESULT && (abi.indirect || abi.memory)) ||
+            (use != IR_ABI_USE_RESULT && convention == IR_ABI_CONVENTION_WIN64_X86_64 && abi.indirect && type->layout.alignment <= 16))
         {
-            // Large results return through a hidden pointer.
+            // Large results use a hidden pointer. Win64 aggregate arguments
+            // use one pointer slot, backed by a private copy aligned to sixteen bytes.
             *shape = (MachineX64ValueShape){
+                .part_count = use == IR_ABI_USE_RESULT ? 0 : 1,
                 .byte_size = (u32)((type->layout.size + 7) & ~(u64)7),
                 .exact_byte_size = (u32)type->layout.size,
                 .aggregate = true,
                 .indirect = true,
+                .stack_alignment = use == IR_ABI_USE_RESULT ? 0 : 16,
             };
             return true;
         }
@@ -630,12 +635,13 @@ BUSTER_GLOBAL_LOCAL void machine_x64_place_argument(MachineX64ValueShape* shape,
         u32 slot = BUSTER_MAX(*integer_count, *float_count);
         if (shape->force_stack || shape->part_count != 1 || slot >= BUSTER_ARRAY_LENGTH(machine_x64_windows_arguments))
         {
+            u32 parts = shape->indirect ? 1 : shape->byte_size / 8;
             *placement = (MachineX64ArgumentPlacement){
                 .first_stack_part = (u16)*stack_part_count,
-                .stack_part_count = (u16)(shape->byte_size / 8),
+                .stack_part_count = (u16)parts,
                 .on_stack = true,
             };
-            *stack_part_count += shape->byte_size / 8;
+            *stack_part_count += parts;
             *integer_count = slot + 1;
             *float_count = slot + 1;
             return;
@@ -4213,6 +4219,7 @@ struct MachineX64CallPlan
     u32 integer_count;
     u32 float_count;
     u32 stack_part_count;
+    u32 outgoing_bytes;
     bool stack_padding;
     bool windows_call;
     bool direct_call;
@@ -4289,7 +4296,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
     // The fixed parameters are the signature's verdict and rows; the
     // variadic tail — every argument past them, shaped by its value's type
     // under the same rules — continues the signature's cursors per call.
-    // Aggregate variadic tails stay outside the subset.
+    // Indirect aggregate tails use the same one-pointer Win64 placement.
     if (planned)
     {
         planned = signature->arguments_supported;
@@ -4334,6 +4341,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
     {
         plan->stack_padding = (plan->stack_part_count & 1) != 0;
     }
+    u64 outgoing_bytes = plan->windows_call ? (32ull + (u64)plan->stack_part_count * 8 + 15) & ~(u64)15 : 0;
     for (u32 argument_index = 0; argument_index < plan->argument_count && planned; argument_index += 1)
     {
         plan->argument_registers[argument_index] = UINT32_MAX;
@@ -4341,7 +4349,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_plan_call(MachineX64Selector* selector, IrI
         planned = plan->argument_shapes[argument_index].aggregate
                       ? plan->argument_slots[argument_index] != UINT32_MAX
                       : machine_x64_operand_register(selector, instruction->operands[argument_index + 1], plan->argument_registers + argument_index);
+        if (plan->windows_call && plan->argument_shapes[argument_index].indirect)
+        {
+            outgoing_bytes += ((u64)plan->argument_shapes[argument_index].byte_size + 15) & ~(u64)15;
+        }
     }
+    // Frame displacements are signed 32-bit. Check the complete reservation
+    // before narrowing or emitting any outgoing-area address.
+    planned = planned && outgoing_bytes <= INT32_MAX;
+    plan->outgoing_bytes = planned ? (u32)outgoing_bytes : 0;
     return planned;
 }
 
@@ -4374,15 +4390,37 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
     // which the allocator is free to pick because nothing here is fixed.
     if (plan->windows_call)
     {
-        u32 call_outgoing_bytes = (32u + plan->stack_part_count * 8u + 15u) & ~15u;
         if (selector->outgoing_slot == UINT32_MAX)
         {
-            selector->outgoing_slot = machine_x64_append_slot(selector, call_outgoing_bytes, 16);
+            selector->outgoing_slot = machine_x64_append_slot(selector, plan->outgoing_bytes, 16);
         }
-        selector->outgoing_bytes = BUSTER_MAX(selector->outgoing_bytes, call_outgoing_bytes);
+        selector->outgoing_bytes = BUSTER_MAX(selector->outgoing_bytes, plan->outgoing_bytes);
+        u32 copy_offset = (32u + plan->stack_part_count * 8u + 15u) & ~15u;
         for (u32 argument_index = 0; argument_index < plan->argument_count; argument_index += 1)
         {
+            MachineX64ValueShape const* shape = plan->argument_shapes + argument_index;
             MachineX64ArgumentPlacement const* argument_placement = plan->argument_placements + argument_index;
+            if (shape->indirect)
+            {
+                // The callee may modify its parameter. Copy exact bytes into
+                // the shared outgoing area after shadow/stack arguments;
+                // all call sites reuse this area at their maximum size.
+                u32 pointer = machine_x64_synthesize_register(selector);
+                machine_x64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer),
+                                 machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot)},
+                    .payload = copy_offset,
+                    .opcode = MACHINE_X64_LEA_FRAME,
+                });
+                machine_x64_select_row(selector, (MachineInstruction){
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer),
+                                 machine_ref_make(MACHINE_REF_STACK_SLOT, plan->argument_slots[argument_index])},
+                    .payload = shape->exact_byte_size,
+                    .opcode = MACHINE_X64_COPY_PTR_FROM_FRAME,
+                });
+                plan->argument_registers[argument_index] = pointer;
+                copy_offset += (shape->byte_size + 15u) & ~15u;
+            }
             if (!argument_placement->on_stack)
             {
                 continue;
@@ -4391,7 +4429,7 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
             {
                 u32 outgoing_offset = 32u + ((u32)argument_placement->first_stack_part + part_index) * 8u;
                 u32 part_register = plan->argument_registers[argument_index];
-                if (plan->argument_shapes[argument_index].aggregate)
+                if (shape->aggregate && !shape->indirect)
                 {
                     part_register = machine_x64_synthesize_register(selector);
                     machine_x64_select_row(selector, (MachineInstruction){
@@ -4481,6 +4519,20 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
             }
             u32 next_integer = plan->argument_placements[argument_index].first_integer;
             u32 next_float = plan->argument_placements[argument_index].first_float;
+            if (shape->indirect)
+            {
+                // Pointer arguments stage after every floating bridge, just
+                // like scalar integer arguments.
+                if (!float_pass)
+                {
+                    machine_x64_select_row(selector, (MachineInstruction){
+                        .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, machine_x64_argument_register(plan->windows_call, next_integer)),
+                                     machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, plan->argument_registers[argument_index])},
+                        .opcode = MACHINE_X64_MOV_RR,
+                    });
+                }
+                continue;
+            }
             if (shape->vector)
             {
                 if (float_pass)
@@ -6042,6 +6094,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             u32 normalize_values[MACHINE_X64_MAX_ARGUMENTS] = {0};
             u16 normalize_opcodes[MACHINE_X64_MAX_ARGUMENTS] = {0};
             u32 normalize_count = 0;
+            u32 indirect_registers[MACHINE_X64_MAX_ARGUMENTS];
             for (u32 capture_pass = 0; capture_pass < 2 && selector.supported; capture_pass += 1)
             {
                 bool float_pass = capture_pass == 1;
@@ -6056,6 +6109,30 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     MachineX64ArgumentPlacement* parameter_placement = selector.parameter_placements + argument_index;
                     u32 next_integer = parameter_placement->first_integer;
                     u32 next_float = parameter_placement->first_float;
+                    if (shape->indirect)
+                    {
+                        // Capture incoming GPR pointers before float bridges;
+                        // read stack pointers after the GPRs are free. Defer
+                        // copying bytes until both capture passes finish.
+                        if (float_pass == parameter_placement->on_stack)
+                        {
+                            u32 pointer = machine_x64_synthesize_register(&selector);
+                            MachineInstruction capture = {
+                                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer)},
+                                .payload = incoming_stack_base + (u32)parameter_placement->first_stack_part * 8,
+                                .opcode = MACHINE_X64_LOAD_INCOMING,
+                            };
+                            if (!parameter_placement->on_stack)
+                            {
+                                capture.operands[1] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, machine_x64_argument_register(windows_abi, next_integer));
+                                capture.payload = 0;
+                                capture.opcode = MACHINE_X64_MOV_RR;
+                            }
+                            machine_x64_select_row(&selector, capture);
+                            indirect_registers[argument_index] = pointer;
+                        }
+                        continue;
+                    }
                     if (parameter_placement->on_stack)
                     {
                         // Stack parameters copy from the caller-pushed area
@@ -6262,6 +6339,31 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                                                  : parameter_type->layout.size == 2 ? MACHINE_X64_MOVZX16_RR
                                                                                                     : MACHINE_X64_MOV32_RR;
                             normalize_count += 1;
+                        }
+                    }
+                }
+            }
+            if (windows_abi)
+            {
+                for (u32 argument_index = 0; argument_index < function_type->parameter_count && selector.supported; argument_index += 1)
+                {
+                    u32 value = selector.argument_values[argument_index];
+                    MachineX64ValueShape* shape = selector.parameter_shapes + argument_index;
+                    if (value != IR_ID_UNDERLYING_INVALID && shape->indirect)
+                    {
+                        u32 slot = selector.value_stack_slots[value];
+                        if (slot == UINT32_MAX)
+                        {
+                            machine_x64_reject(&selector, IR_OPCODE_ARGUMENT);
+                        }
+                        else
+                        {
+                            machine_x64_select_row(&selector, (MachineInstruction){
+                                .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
+                                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, indirect_registers[argument_index])},
+                                .payload = shape->exact_byte_size,
+                                .opcode = MACHINE_X64_COPY_FRAME_FROM_PTR,
+                            });
                         }
                     }
                 }
@@ -11489,8 +11591,10 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     // account for that bounded prefix even for small functions with a large
     // spill frame; otherwise a valid placement can truncate before its first
     // machine row.
-    u64 frame_probe_chunks = ((u64)placement->frame_size + 4095u) / 4096u;
-    capacity64 += frame_probe_chunks * 24u;
+    bool windows_frame_probe = function->target && function->target->saves_precede_frame_pointer &&
+                               placement->frame_size > CODEGEN_X64_STACK_PROBE_PAGE;
+    u64 frame_probe_chunks = ((u64)placement->frame_size + CODEGEN_X64_STACK_PROBE_PAGE - 1u) / CODEGEN_X64_STACK_PROBE_PAGE;
+    capacity64 += windows_frame_probe ? 64u : frame_probe_chunks * 24u;
     // Vector spill and reload edits are ten bytes (EVEX plus disp32).
     capacity64 += (u64)placement->edit_count * 12;
     if (capacity64 > UINT32_MAX)
@@ -11544,16 +11648,28 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     if (saves_first)
     {
         // The frame pointer lands below the saves, so they sit at its
-        // positive offsets and the epilogue recovers RSP with a plain move.
+        // positive offsets. Its fixed epilogue adds back the allocation.
         machine_x64_emit_fixed_registers(&encoder, MACHINE_X64_FIXED_TEMPLATE_MOV_RBP_RSP, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64);
     }
     // The stack allocation mirrors the canonical chunked form: at most a
     // page per subtract with a probe touch after each, so a frame larger
     // than the guard page cannot skip it.
     u32 frame_remaining = placement->frame_size;
+    if (windows_frame_probe)
+    {
+        // Reuse the direct emitter's bounded Win64 probe. Its R10/R11
+        // scratch does not disturb incoming integer, float or hidden-result
+        // arguments, and RSP changes only at the final allocation instruction.
+        CodegenBuffer probe = {.bytes = encoder.bytes, .count = encoder.count, .capacity = encoder.capacity};
+        (void)codegen_x64_emit_windows_stack_allocate(&probe, frame_remaining, 0, 0, 0);
+        encoder.count = (u32)probe.count;
+        encoder.overflow |= probe.error != CODEGEN_ERROR_NONE;
+        result.frame_allocation_offset = encoder.count;
+        frame_remaining = 0;
+    }
     while (frame_remaining)
     {
-        u32 frame_chunk = BUSTER_MIN(frame_remaining, 4096u);
+        u32 frame_chunk = BUSTER_MIN(frame_remaining, CODEGEN_X64_STACK_PROBE_PAGE);
         bool frame_chunk_byte = frame_chunk <= INT8_MAX;
         if (machine_x64_emit_fixed_template(&encoder,
                                             frame_chunk_byte ? MACHINE_X64_FIXED_TEMPLATE_SUB_RSP_IMM8 : MACHINE_X64_FIXED_TEMPLATE_SUB_RSP_IMM32,
@@ -11728,34 +11844,32 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         {
                             machine_x64_emit_fixed_vzeroupper(&encoder);
                         }
+                        // Windows fixed-stack unwind records use RSP alone.
+                        // Its epilogue grammar requires ADD RSP, constant (not
+                        // MOV RSP, RBP), followed only by the saved-register pops.
+                        if (saves_first && placement->frame_size)
+                        {
+                            (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RSP,
+                                                                               placement->frame_size, 64,
+                                                                               placement->frame_size <= INT8_MAX ? 8 : 32, 0);
+                        }
                         if (placement->callee_saved_mask)
                         {
-                            // Point RSP at the pushed registers, restore them in
-                            // reverse push order, then unwind the frame base. Where
-                            // the saves precede the frame pointer they already sit
-                            // at it, so a plain move is the whole adjustment.
-                            u32 push_count = 0;
-                            for (u32 push_register = 0; push_register < MACHINE_X64_REGISTER_COUNT; push_register += 1)
+                            if (!saves_first)
                             {
-                                push_count += (placement->callee_saved_mask >> push_register) & 1u;
-                            }
-                            if (function->target && function->target->saves_precede_frame_pointer)
-                            {
-                                machine_x64_emit_fixed_registers(&encoder, MACHINE_X64_FIXED_TEMPLATE_MOV_RSP_RBP, S8("MOV"),
-                                                                 MACHINE_X64_RSP, MACHINE_X64_RBP, 64);
-                            }
-                            else
-                            {
-                                // At most sixteen pushes, so the displacement is a
-                                // negative byte -- the class the template was
-                                // proven for; anything else keeps the bridge.
+                                u32 push_count = 0;
+                                for (u32 push_register = 0; push_register < MACHINE_X64_REGISTER_COUNT; push_register += 1)
+                                {
+                                    push_count += (placement->callee_saved_mask >> push_register) & 1u;
+                                }
+                                // System V retains its frame-relative restore.
                                 s64 frame_displacement = -(s64)(8u * push_count);
                                 if (frame_displacement < INT8_MIN ||
                                     machine_x64_emit_fixed_template(&encoder, MACHINE_X64_FIXED_TEMPLATE_LEA_RSP_RBP_DISP8,
                                                                     (u8)frame_displacement) == MACHINE_X64_FIXED_TEMPLATE_UNPUBLISHED)
                                 {
                                     (void)machine_x64_emit_metadata_register_memory(&encoder, S8("LEA"), MACHINE_X64_RSP, MACHINE_X64_RBP,
-                                            frame_displacement, 64, 64, 0);
+                                                                                    frame_displacement, 64, 64, 0);
                                 }
                             }
                             for (u32 pop_reverse = MACHINE_X64_ZMM0; pop_reverse > 0; pop_reverse -= 1)
@@ -11767,7 +11881,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                                 }
                             }
                         }
-                        else
+                        else if (!saves_first)
                         {
                             machine_x64_emit_fixed_registers(&encoder, MACHINE_X64_FIXED_TEMPLATE_MOV_RSP_RBP, S8("MOV"),
                                                              MACHINE_X64_RSP, MACHINE_X64_RBP, 64);
