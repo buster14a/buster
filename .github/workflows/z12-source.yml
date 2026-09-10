@@ -1,0 +1,47 @@
+name: Z12 pinned source inspection
+
+on:
+  push:
+    branches: [astra/z12-130-transport-20260910]
+    paths: [.github/workflows/z12-source.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: z12-source-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          fetch-depth: 100
+          persist-credentials: false
+      - name: Export pinned tracked source and paged repository inventory
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/z12-source"
+          mkdir -p "$out"
+          test "$(git rev-parse HEAD)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          git archive --format=tar.gz --output="$out/buster-source.tar.gz" HEAD
+          git rev-parse HEAD > "$out/buster-source.sha"
+          git log -30 --format=fuller --name-status -- src/buster/lib/compiler/codegen/register_allocator_fast.c src/buster/lib/compiler/codegen/register_allocator_fast_internal.h src/buster/tests/compiler/codegen/machine_test.c > "$out/relevant-history.txt"
+          gh api --paginate --slurp 'repos/buster14a/buster/issues?state=open&per_page=100&sort=created&direction=asc' > "$out/open-issues-pages.json"
+          gh api --paginate --slurp 'repos/buster14a/buster/pulls?state=open&per_page=100&sort=created&direction=asc' > "$out/open-pr-pages.json"
+          printf 'Pinned source export and paged read-only inventory only; no compilation or test result.\n' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: z12-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/z12-source/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
