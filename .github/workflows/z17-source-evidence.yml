@@ -1,0 +1,38 @@
+name: Z17 source evidence
+
+on:
+  push:
+    branches: [astra/z17-source-evidence-20260909]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          persist-credentials: false
+      - name: Pack frozen tracked source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          git archive --format=tar.gz --output="$RUNNER_TEMP/buster-z17-source.tar.gz" HEAD
+          sha256sum "$RUNNER_TEMP/buster-z17-source.tar.gz" > "$RUNNER_TEMP/buster-z17-source.sha256"
+          git rev-parse HEAD > "$RUNNER_TEMP/buster-z17-source.commit"
+          printf 'Source transport only; no build, test, or benchmark result.\n' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: z17-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/buster-z17-source.tar.gz
+            ${{ runner.temp }}/buster-z17-source.sha256
+            ${{ runner.temp }}/buster-z17-source.commit
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
