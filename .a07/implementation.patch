@@ -1,0 +1,291 @@
+diff --git a/docs/agents/driver.md b/docs/agents/driver.md
+index 3b5f514..7105b8d 100644
+--- a/docs/agents/driver.md
++++ b/docs/agents/driver.md
+@@ -46,6 +46,16 @@ signature; `opcode` retains the first rejected canonical opcode in the legacy
+ while `verification` identifies an implementation failure. The allocator,
+ stage, opcode and reason counters all survive multi-input compilation.
+ 
++For two-operand EVEX vector loads/conversions, an ordinary memory qualifier
++names the source tuple, not the destination register width. A broadcast
++qualifier names its scalar element. The metadata selector projects the
++candidate's element width and validates the source qualifier independently;
++for example, masked `vcvtps2pd zmm0, m256` reads eight 32-bit elements while
++masked `vcvtpd2ps ymm0, m512` reads eight 64-bit elements. AT&T's unqualified
++memory spelling uses the same candidate contract. This bounded projection
++requires a mask/broadcast, ZMM destination, or high vector register and covers
++FULL/HALF EVEX tuples; it does not replace all legacy/VEX source inference.
++
+ `-fno-frontend-ssa` selects the original memory-form C lowering;
+ `-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last
+ flag wins. These controls are independent of `-fno-canonical-local-promotion`
+diff --git a/src/buster/lib/compiler/assembly/assembly.c b/src/buster/lib/compiler/assembly/assembly.c
+index 90e9699..3b7af6d 100644
+--- a/src/buster/lib/compiler/assembly/assembly.c
++++ b/src/buster/lib/compiler/assembly/assembly.c
+@@ -12239,6 +12239,21 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
+             bool explicit_width = operands[index].memory.width_explicit;
+             if (explicit_width && physical[index].memory.source_width > 64)
+             {
++                // A two-operand EVEX vector load may read a half tuple (or a
++                // full tuple wider than its destination). Keep the source
++                // qualifier for candidate-specific tuple validation instead of
++                // equating it with the first vector register's width.
++                bool evex_vector_load = operand_count == 2 && index == 1 &&
++                                        physical[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
++                                        (physical[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM ||
++                                         physical[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM ||
++                                         physical[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM) &&
++                                        (operands[0].has_mask || operands[0].zeroing || operands[1].broadcast ||
++                                         physical[0].reg.width == 512 || physical[0].reg.index >= 16);
++                if (evex_vector_load)
++                {
++                    continue;
++                }
+                 // Intel legacy XMM source spells the aggregate memory width
+                 // directly.  VEX/EVEX/XOP rows and AT&T suffix projection
+                 // publish a scalar element width while carrying the aggregate
+diff --git a/src/buster/lib/compiler/assembly/x86_64_metadata.c b/src/buster/lib/compiler/assembly/x86_64_metadata.c
+index 61c9a66..e46060a 100644
+--- a/src/buster/lib/compiler/assembly/x86_64_metadata.c
++++ b/src/buster/lib/compiler/assembly/x86_64_metadata.c
+@@ -8203,6 +8203,49 @@ bool buster_x86_metadata_form_standalone_sae_capable(BusterX86MetadataForm form)
+     return buster_x86_metadata_form_standalone_sae_capable_impl(form);
+ }
+ 
++// Source tuple size and encoded element type are distinct for conversions.
++// The query-side gate below proves a two-operand EVEX vector load; each
++// candidate then supplies its own tuple and element widths. Preserve explicit
++// qualifiers, including m64 half tuples, as constraints. An invalid qualifier
++// is reported only after shape binding, so another vector-length candidate
++// still gets its own independent check. Direct physical queries are unchanged.
++BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_source_tuple_query(
++    BusterX86MetadataForm form, BusterX86MetadataPatternSemantics const* pattern,
++    BusterX86MetadataPhysicalQuery query, BusterX86MetadataPhysicalOperand* candidate_operands,
++    bool* source_width_valid)
++{
++    bool projected = false;
++    if (form.encoder_family == BUSTER_X86_METADATA_ENCODER_EVEX && !form.apx_flags && !form.amx_flags &&
++        pattern->has_tuple_control && (pattern->tuple_control_kind == BUSTER_X86_METADATA_TUPLE_FULL ||
++                                       pattern->tuple_control_kind == BUSTER_X86_METADATA_TUPLE_HALF))
++    {
++        u16 tuple_width = buster_x86_metadata_emit_tuple_memory_width(*pattern);
++        u16 element_width = 0;
++        u32 memory_count = 0;
++        bool schema_valid = true;
++        for (u32 index = 0; index < form.operand_count && schema_valid; index += 1)
++        {
++            BusterX86MetadataOperand metadata = {0};
++            schema_valid = buster_x86_metadata_operand(form.id, index, &metadata);
++            if (schema_valid && metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY)
++            {
++                memory_count += 1;
++                element_width = buster_x86_metadata_single_scalar_width(metadata.physical_width_flags);
++            }
++        }
++        if (schema_valid && memory_count == 1 && element_width && tuple_width)
++        {
++            bool broadcast = (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) != 0;
++            u16 source_width = query.operands[1].memory.source_width;
++            *source_width_valid = !source_width || source_width == (broadcast ? element_width : tuple_width);
++            memcpy(candidate_operands, query.operands, query.operand_count * sizeof(*candidate_operands));
++            candidate_operands[1].width = element_width;
++            projected = true;
++        }
++    }
++    return projected;
++}
++
+ // AT&T memory operands intentionally omit the Intel-style scalar qualifier
+ // for EVEX broadcasts.  Infer that qualifier only while evaluating the
+ // candidate form whose schema supplies one unambiguous scalar width.  The
+@@ -8920,6 +8963,15 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
+                                         (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) != 0 &&
+                                         !query.attributes.sae &&
+                                         query.attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NONE;
++            bool source_tuple_query_possible = query.source_semantics && query.operand_count == 2 &&
++                query.address_size == 64 && query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
++                query.operands[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
++                (query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM ||
++                 query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM ||
++                 query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM) &&
++                (query.attributes.has_mask_register || query.attributes.zeroing ||
++                 (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) ||
++                 query.operands[0].reg.width == 512 || query.operands[0].reg.index >= 16);
+             for (u32 position = 0; position < candidates.count; position += 1)
+             {
+                 u32 form_id = 0;
+@@ -8983,7 +9035,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
+                     if (buster_x86_metadata_emit_parse_pattern(form, &pattern) && pattern.has_modep5 && pattern.modep5_value != 0)
+                         continue;
+                 }
+-                // Deliberately uninitialized: both writers below memcpy the query's
++                // Deliberately uninitialized: the writers below memcpy the query's
+                 // whole operand prefix before touching it, and `candidate_query`
+                 // adopts the array only when one of them ran.  Zero-initializing all
+                 // sixteen entries is 2,304 bytes of dead stores per candidate.
+@@ -8991,6 +9043,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
+                 BusterX86MetadataPhysicalQuery candidate_query = query;
+                 u16 block_memory_width = 0;
+                 bool inferred_memory_width = false;
++                bool source_width_valid = true;
+                 bool aggregate_memory_topology =
+                     topology_query_possible &&
+                     buster_x86_metadata_aggregate_memory_source_topology_internal(form, query, &block_memory_width);
+@@ -9013,8 +9066,13 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
+                 }
+                 else
+                 {
+-                    inferred_memory_width = typed_query_possible &&
+-                                            buster_x86_metadata_prepare_typed_memory_query(form, query, candidate_operands);
++                    inferred_memory_width = source_tuple_query_possible &&
++                        buster_x86_metadata_prepare_source_tuple_query(form, filter_view, query, candidate_operands, &source_width_valid);
++                    if (!inferred_memory_width)
++                    {
++                        inferred_memory_width = typed_query_possible &&
++                            buster_x86_metadata_prepare_typed_memory_query(form, query, candidate_operands);
++                    }
+                 }
+                 if (inferred_memory_width)
+                     candidate_query.operands = candidate_operands;
+@@ -9050,8 +9108,18 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
+                 BusterX86MetadataEncodeScratch scratch = {0};
+                 u32 diagnostic_operand = 0;
+                 s64 diagnostic_value = 0;
+-                BusterX86MetadataEncodeStatus status = buster_x86_metadata_emit_form_to_scratch(candidate_query, form, &scratch, &diagnostic_operand,
+-                                                                                                   &diagnostic_value, 0, 0, false, false);
++                BusterX86MetadataEncodeStatus status;
++                if (source_width_valid)
++                {
++                    status = buster_x86_metadata_emit_form_to_scratch(candidate_query, form, &scratch, &diagnostic_operand,
++                                                                      &diagnostic_value, 0, 0, false, false);
++                }
++                else
++                {
++                    status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
++                    diagnostic_operand = 1;
++                    diagnostic_value = query.operands[1].memory.source_width;
++                }
+                 if (status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
+                 {
+                     BusterX86MetadataString required_feature = {0};
+diff --git a/src/buster/tests/compiler/assembly/x86_64_metadata_test.c b/src/buster/tests/compiler/assembly/x86_64_metadata_test.c
+index 677e51f..7978079 100644
+--- a/src/buster/tests/compiler/assembly/x86_64_metadata_test.c
++++ b/src/buster/tests/compiler/assembly/x86_64_metadata_test.c
+@@ -2434,26 +2434,28 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestAr
+                                 wrong_count, features, BUSTER_ARRAY_LENGTH(features), untouched, sizeof(untouched), 0, 0);
+                             valid &= rejected.status == BUSTER_X86_METADATA_ENCODE_DECORATOR && rejected.byte_count == 0 && untouched[0] == 0xa5;
+                         }
+-                        bool check_source = test_case.memory_divisor == 1 || broadcast;
+-                        AssemblySyntax syntax = ASSEMBLY_SYNTAX_ATT;
+-                        if (test_case.memory_divisor == 2 && broadcast)
++                        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source,
++                            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
++                        bool source_valid = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
++                            x86_64_metadata_test_bytes_equal(encoded.bytes.pointer, (u32)encoded.bytes.length, expected, expected_count);
++                        if (test_case.memory_divisor == 2)
+                         {
+-                            // The existing AT&T conversion adapter infers the destination's
+-                            // scalar width. Exercise this tuple through the supported explicit
+-                            // Intel m32 spelling; full tuples also cover unqualified AT&T input.
+                             String8 const intel_addresses[] = {S8("rax"), S8("rbp"), S8("rax+rcx*4")};
+-                            source = string_format(arguments->arena, S8("{S8} {S8}0{{k1}}, dword ptr [{S8}{S8}{s64}]{S8}\n"),
+-                                                   test_case.mnemonic, registers[size_index], intel_addresses[address_index],
+-                                                   displacement < 0 ? S8("-") : S8("+"), displacement < 0 ? -displacement : displacement, suffix);
+-                            syntax = ASSEMBLY_SYNTAX_INTEL;
+-                        }
+-                        bool source_valid = true;
+-                        if (check_source)
+-                        {
+-                            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source,
+-                                (AssemblyEncodeOptions){.target = target, .syntax = syntax});
+-                            source_valid = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+-                                x86_64_metadata_test_bytes_equal(encoded.bytes.pointer, (u32)encoded.bytes.length, expected, expected_count);
++                            String8 const tuple_qualifiers[] = {S8("qword"), S8("xmmword"), S8("ymmword")};
++                            String8 qualifier = broadcast ? S8("dword") : tuple_qualifiers[size_index];
++                            String8 intel_source = string_format(arguments->arena,
++                                S8("{S8} {S8}0{{k1}}, {S8} ptr [{S8}{S8}{s64}]{S8}\n"),
++                                test_case.mnemonic, registers[size_index], qualifier, intel_addresses[address_index],
++                                displacement < 0 ? S8("-") : S8("+"), displacement < 0 ? -displacement : displacement, suffix);
++                            AssemblyEncodeResult intel_encoded = assembly_encode(arguments->arena, intel_source,
++                                (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
++                            bool intel_valid = intel_encoded.diagnostic_count == 0 && intel_encoded.relocation_count == 0 &&
++                                x86_64_metadata_test_bytes_equal(intel_encoded.bytes.pointer, (u32)intel_encoded.bytes.length, expected, expected_count);
++                            if (!intel_valid)
++                            {
++                                arguments->show(arguments, S8("EVEX_TUPLE source: {S8}"), intel_source);
++                            }
++                            source_valid &= intel_valid;
+                         }
+                         if (!direct_valid || !exact_valid || !source_valid)
+                         {
+@@ -2466,6 +2468,68 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestAr
+             }
+         }
+     }
++    // Narrowing reads a full source tuple even when the destination is smaller.
++    // The VL=256 destination is also XMM: its explicit m256 qualifier must
++    // select that form rather than depend on candidate enumeration order.
++    typedef struct X86NarrowTupleCase X86NarrowTupleCase;
++    struct X86NarrowTupleCase
++    {
++        String8 source;
++        AssemblySyntax syntax;
++        u8 evex;
++        u8 displacement;
++    };
++    X86NarrowTupleCase const narrowing[] = {
++        {S8("vcvtpd2ps 64(%rax), %xmm0{%k1}\n"), ASSEMBLY_SYNTAX_ATT, 0x09, 0x04},
++        {S8("vcvtpd2ps xmm0{k1}, xmmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, 0x09, 0x04},
++        {S8("vcvtpd2ps xmm0{k1}, ymmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, 0x29, 0x02},
++        {S8("vcvtpd2ps 64(%rax), %ymm0{%k1}\n"), ASSEMBLY_SYNTAX_ATT, 0x49, 0x01},
++        {S8("vcvtpd2ps ymm0{k1}, zmmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, 0x49, 0x01},
++        {S8("vcvtpd2ps 64(%rax){1to2}, %xmm0{%k1}\n"), ASSEMBLY_SYNTAX_ATT, 0x19, 0x08},
++        {S8("vcvtpd2ps 64(%rax){1to4}, %xmm0{%k1}\n"), ASSEMBLY_SYNTAX_ATT, 0x39, 0x08},
++        {S8("vcvtpd2ps 64(%rax){1to8}, %ymm0{%k1}\n"), ASSEMBLY_SYNTAX_ATT, 0x59, 0x08},
++        {S8("vcvtpd2ps ymm0{k1}, qword ptr [rax+64]{1to8}\n"), ASSEMBLY_SYNTAX_INTEL, 0x59, 0x08},
++    };
++    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(narrowing); index += 1)
++    {
++        X86NarrowTupleCase test_case = narrowing[index];
++        u8 expected[] = {0x62, 0xf1, 0xfd, test_case.evex, 0x5a, 0x40, test_case.displacement};
++        for (u32 repeat = 0; repeat < 2; repeat += 1)
++        {
++            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, test_case.source,
++                (AssemblyEncodeOptions){.target = target, .syntax = test_case.syntax});
++            bool case_valid = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
++                x86_64_metadata_test_bytes_equal(encoded.bytes.pointer, (u32)encoded.bytes.length, expected, sizeof(expected));
++            if (!case_valid)
++            {
++                arguments->show(arguments, S8("EVEX_NARROW source: {S8}"), test_case.source);
++            }
++            valid &= case_valid;
++        }
++    }
++    String8 const invalid_widths[] = {
++        S8("vcvtps2pd xmm0{k1}, dword ptr [rax]\n"),
++        S8("vcvtps2pd ymm0{k1}, qword ptr [rax]\n"),
++        S8("vcvtps2pd ymm0{k1}, ymmword ptr [rax]\n"),
++        S8("vcvtps2pd zmm0{k1}, zmmword ptr [rax]\n"),
++        S8("vcvtps2pd zmm0{k1}, qword ptr [rax]{1to8}\n"),
++        S8("vcvtps2pd xmm0{k1}, dword ptr [rax]{1to4}\n"),
++        S8("vcvtpd2ps xmm0{k1}, qword ptr [rax]\n"),
++        S8("vcvtpd2ps ymm0{k1}, ymmword ptr [rax]\n"),
++        S8("vcvtpd2ps ymm0{k1}, dword ptr [rax]{1to8}\n"),
++    };
++    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_widths); index += 1)
++    {
++        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, invalid_widths[index],
++            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
++        bool case_valid = rejected.diagnostic_count != 0 && rejected.bytes.length == 0 && rejected.relocation_count == 0;
++        if (!case_valid)
++        {
++            arguments->show(arguments, S8("EVEX_INVALID_WIDTH accepted: {S8}"), invalid_widths[index]);
++        }
++        valid &= case_valid;
++    }
++
+     return valid;
+ }
+ 
