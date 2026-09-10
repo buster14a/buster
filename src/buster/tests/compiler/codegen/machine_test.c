@@ -2572,9 +2572,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 242);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 246);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_A64_UMULH64] = 0, // Pure GPR dataflow; no implicit chain.
+        [MACHINE_A64_CLZ32] = 0,
+        [MACHINE_A64_CLZ64] = 0,
+        [MACHINE_A64_RBIT32] = 0,
+        [MACHINE_A64_RBIT64] = 0,
         [MACHINE_OPCODE_SKELETON_RETURN] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
@@ -2873,7 +2877,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, recipe_indices_in_range);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 99);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 103);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 86);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
@@ -3184,7 +3188,12 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     {
         a64_counts[machine_emit_recipe_category(machine_opcode_emit_recipe(opcode))] += 1;
     }
-    BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 52);
+    // Appended zero-count rows retain all older serialized opcode numbers.
+    for (u16 opcode = MACHINE_A64_CLZ32; opcode <= MACHINE_A64_RBIT64; opcode += 1)
+    {
+        a64_counts[machine_emit_recipe_category(machine_opcode_emit_recipe(opcode))] += 1;
+    }
+    BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 56);
     BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 3);
     BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 19);
 
@@ -6556,6 +6565,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {MACHINE_A64_NEG64, 3, 5, 0, 0, {UINT32_C(0xcb0503e3)}, 1, "NEG64"},
         {MACHINE_A64_NOT32, 3, 5, 0, 0, {UINT32_C(0x2a2503e3)}, 1, "NOT32"},
         {MACHINE_A64_NOT64, 3, 5, 0, 0, {UINT32_C(0xaa2503e3)}, 1, "NOT64"},
+        // Independent Clang integrated-assembler words, including register 31.
+        {MACHINE_A64_CLZ32, 3, 5, 0, 0, {UINT32_C(0x5ac010a3)}, 1, "CLZ32"},
+        {MACHINE_A64_CLZ64, 3, 5, 0, 0, {UINT32_C(0xdac010a3)}, 1, "CLZ64"},
+        {MACHINE_A64_RBIT32, 3, 5, 0, 0, {UINT32_C(0x5ac000a3)}, 1, "RBIT32"},
+        {MACHINE_A64_RBIT64, 3, 5, 0, 0, {UINT32_C(0xdac000a3)}, 1, "RBIT64"},
+        {MACHINE_A64_CLZ32, 17, 31, 0, 0, {UINT32_C(0x5ac013f1)}, 1, "CLZ32 ZR"},
+        {MACHINE_A64_CLZ64, 17, 31, 0, 0, {UINT32_C(0xdac013f1)}, 1, "CLZ64 ZR"},
+        {MACHINE_A64_RBIT32, 17, 31, 0, 0, {UINT32_C(0x5ac003f1)}, 1, "RBIT32 ZR"},
+        {MACHINE_A64_RBIT64, 17, 31, 0, 0, {UINT32_C(0xdac003f1)}, 1, "RBIT64 ZR"},
         {MACHINE_A64_CMP32, 5, 7, 0, 0, {UINT32_C(0x6b0700bf)}, 1, "CMP32"},
         {MACHINE_A64_CMP64, 5, 7, 0, 0, {UINT32_C(0xeb0700bf)}, 1, "CMP64"},
         {MACHINE_A64_CMP_ZERO, 5, 0, 0, 0, {UINT32_C(0xf10000bf)}, 1, "CMP_ZERO"},

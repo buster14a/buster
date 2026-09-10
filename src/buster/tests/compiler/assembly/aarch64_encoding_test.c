@@ -1511,6 +1511,10 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
         {BUSTER_AARCH64_GENERATED_FORM_FMOVDXR, "FMOVDXr"},
         {BUSTER_AARCH64_GENERATED_FORM_ADDXRI, "ADDXri"},
         {BUSTER_AARCH64_GENERATED_FORM_RET, "RET"},
+        {BUSTER_AARCH64_GENERATED_FORM_CLZWR, "CLZWr"},
+        {BUSTER_AARCH64_GENERATED_FORM_CLZXR, "CLZXr"},
+        {BUSTER_AARCH64_GENERATED_FORM_RBITWR, "RBITWr"},
+        {BUSTER_AARCH64_GENERATED_FORM_RBITXR, "RBITXr"},
     };
     u32 production_field_total = 0;
     u32 production_segment_total = 0;

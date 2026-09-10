@@ -1183,6 +1183,33 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast(MachineA64Selector* selector, I
     return selected;
 }
 
+// Trailing-zero count is RBIT followed by CLZ. Synthesize each temporary
+// immediately before its defining row so verifier positions remain exact.
+BUSTER_GLOBAL_LOCAL u32 machine_a64_select_zero_count(MachineA64Selector* selector, u32 source_register, u32 result_register, bool wide, bool leading)
+{
+    if (!leading)
+    {
+        u32 reversed = machine_a64_synthesize_register(selector);
+        machine_a64_select_row(selector, (MachineInstruction){
+                                             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, reversed),
+                                                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                             .opcode = (u16)(wide ? MACHINE_A64_RBIT64 : MACHINE_A64_RBIT32),
+                                         });
+        source_register = reversed;
+    }
+    if (result_register == UINT32_MAX)
+    {
+        result_register = machine_a64_synthesize_register(selector);
+    }
+    u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                 .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                                                              machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
+                                                 .opcode = (u16)(wide ? MACHINE_A64_CLZ64 : MACHINE_A64_CLZ32),
+                                             });
+    machine_a64_define(selector, result_register, row);
+    return result_register;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_unary(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
@@ -1203,6 +1230,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_unary(MachineA64Selector* selector, 
                               .opcode = (u16)(negate ? (wide ? MACHINE_A64_NEG64 : MACHINE_A64_NEG32) : (wide ? MACHINE_A64_NOT64 : MACHINE_A64_NOT32)),
                           });
             machine_a64_define(selector, result_register, row);
+            selected = true;
+        }
+        else if (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
+                 instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)
+        {
+            machine_a64_select_zero_count(selector, source_register, result_register, wide,
+                                          instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS);
             selected = true;
         }
         else if (instruction->unary_operation == IR_UNARY_BOOLEAN_NOT)
@@ -1637,20 +1671,47 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_unary(MachineA64Selector* selec
                           ? selector->value_stack_slots[instruction->operands[0].value] : UINT32_MAX;
     u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
     bool negate = instruction->unary_operation == IR_UNARY_INTEGER_NEGATE;
+    bool count = instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
+                 instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS;
     bool selected = source_slot != UINT32_MAX && result_slot != UINT32_MAX &&
-                    (negate || instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT);
+                    (negate || count || instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT);
     if (selected)
     {
         u32 low = machine_a64_select_frame_load64(selector, source_slot, 0);
         u32 high = machine_a64_select_frame_load64(selector, source_slot, 8);
-        u32 constant = machine_a64_select_immediate_register(selector, negate ? 0 : UINT64_MAX);
-        u16 opcode = negate ? MACHINE_A64_SUB64 : MACHINE_A64_EOR64;
-        u32 result_low = machine_a64_select_arithmetic_row(selector, opcode, constant, low);
-        u32 result_high = machine_a64_select_arithmetic_row(selector, opcode, constant, high);
-        if (negate)
+        u32 result_low;
+        u32 result_high;
+        if (count)
         {
-            u32 borrow = machine_a64_select_compare_set(selector, low, constant, MACHINE_A64_CONDITION_NOT_EQUAL);
-            result_high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, result_high, borrow);
+            // A zero primary limb selects 64 + the other limb's count.
+            // CLZ(0) is 64 on AArch64, so both-zero also matches the direct
+            // oracle's 128, without evaluating an undefined bit scan.
+            bool leading = instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS;
+            u32 primary = leading ? high : low;
+            u32 secondary = leading ? low : high;
+            u32 first_count = machine_a64_select_zero_count(selector, primary, UINT32_MAX, true, leading);
+            u32 second_count = machine_a64_select_zero_count(selector, secondary, UINT32_MAX, true, leading);
+            u32 zero = machine_a64_select_immediate_register(selector, 0);
+            u32 width = machine_a64_select_immediate_register(selector, 64);
+            u32 crossed_count = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ADD64, second_count, width);
+            u32 first_zero = machine_a64_select_compare_set(selector, primary, zero, MACHINE_A64_CONDITION_EQUAL);
+            u32 mask = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, zero, first_zero);
+            u32 difference = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, first_count, crossed_count);
+            u32 selected_difference = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, difference, mask);
+            result_low = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, first_count, selected_difference);
+            result_high = zero;
+        }
+        else
+        {
+            u32 constant = machine_a64_select_immediate_register(selector, negate ? 0 : UINT64_MAX);
+            u16 opcode = negate ? MACHINE_A64_SUB64 : MACHINE_A64_EOR64;
+            result_low = machine_a64_select_arithmetic_row(selector, opcode, constant, low);
+            result_high = machine_a64_select_arithmetic_row(selector, opcode, constant, high);
+            if (negate)
+            {
+                u32 borrow = machine_a64_select_compare_set(selector, low, constant, MACHINE_A64_CONDITION_NOT_EQUAL);
+                result_high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, result_high, borrow);
+            }
         }
         machine_a64_select_frame_store64(selector, result_slot, 0, result_low);
         machine_a64_select_frame_store64(selector, result_slot, 8, result_high);
@@ -5837,6 +5898,18 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_emit_generated_opcode(MachineA64Encoder* en
         fields[3] = operand1;
         field_count = 4;
         break;
+    case MACHINE_A64_CLZ32:
+    case MACHINE_A64_CLZ64:
+    case MACHINE_A64_RBIT32:
+    case MACHINE_A64_RBIT64:
+        form_id = opcode == MACHINE_A64_CLZ32 ? BUSTER_AARCH64_GENERATED_FORM_CLZWR
+                  : opcode == MACHINE_A64_CLZ64 ? BUSTER_AARCH64_GENERATED_FORM_CLZXR
+                  : opcode == MACHINE_A64_RBIT32 ? BUSTER_AARCH64_GENERATED_FORM_RBITWR
+                                                  : BUSTER_AARCH64_GENERATED_FORM_RBITXR;
+        fields[0] = operand0;
+        fields[1] = operand1;
+        field_count = 2;
+        break;
     case MACHINE_A64_CMP32:
     case MACHINE_A64_CMP64:
         form_id = opcode == MACHINE_A64_CMP32 ? BUSTER_AARCH64_GENERATED_FORM_SUBSWRS : BUSTER_AARCH64_GENERATED_FORM_SUBSXRS;
@@ -7023,6 +7096,10 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             case MACHINE_A64_NEG64:
             case MACHINE_A64_NOT32:
             case MACHINE_A64_NOT64:
+            case MACHINE_A64_CLZ32:
+            case MACHINE_A64_CLZ64:
+            case MACHINE_A64_RBIT32:
+            case MACHINE_A64_RBIT64:
             case MACHINE_A64_CMP32:
             case MACHINE_A64_CMP64:
             case MACHINE_A64_CMP_ZERO:

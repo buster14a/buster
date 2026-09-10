@@ -661,6 +661,11 @@ typedef enum MachineOpcode
     MACHINE_X64_XGETBV,                 // use index in RCX; frame receives RAX/RDX
     MACHINE_X64_WIN_VA_SAVE,            // use RCX/RDX/R8/R9; store caller-owned argument homes
     MACHINE_X64_LEA_INCOMING,           // def general; payload = byte offset into incoming arguments
+    // Append new rows without renumbering existing replay opcodes.
+    MACHINE_A64_CLZ32,  // def, use; count leading zeros, including full width on zero
+    MACHINE_A64_CLZ64,
+    MACHINE_A64_RBIT32, // def, use; reverse bits within the selected width
+    MACHINE_A64_RBIT64,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

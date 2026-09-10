@@ -160,6 +160,16 @@
   ahead of their definitions publishes incorrect verifier metadata.
   `basic_c_x86_64_i128_binary.c` and `basic_c_i128_shift_edges.c` require strict
   MIR selection and cover product carries and counts below, at and above 64.
+- AArch64 leading/trailing-zero counts use importer-generated CLZ and RBIT
+  forms for ordinary 32/64-bit scalar rows. A 128-bit count operates on both
+  slot-backed limbs, selecting the primary limb's count or 64 plus the other
+  count with ordinary scalar MIR. Publish a zero high result limb, including
+  the direct oracle's all-zero-pair result of 128. Never truncate the operand
+  to a single limb or leave stale high result bytes. Preserve existing replay
+  opcode numbers by appending new rows. The registered zero-count fixture
+  covers every one-bit position and both frontend forms, with strict MIR
+  object checks on all three desktop AArch64 targets and native-host execution.
+  Float/i128 conversions and wide division/remainder remain separate gaps.
 - ELF/Mach-O AArch64 fixed frames are not limited by the scaled callee-save offset.
   Above that offset's reach, the prologue and each epilogue derive the compact
   save-area base from X29 in reserved X16, then use small unsigned offsets.
