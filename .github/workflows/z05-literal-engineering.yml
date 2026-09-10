@@ -1,0 +1,78 @@
+name: Z05 literal engineering
+
+on:
+  push:
+    branches: [astra/z05-literals-20260910-transport]
+    paths: [.github/workflows/z05-literal-engineering.yml]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  actions: read
+
+concurrency:
+  group: z05-literal-engineering-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read pinned source and repository coordination records
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/z05-snapshot"
+          mkdir -p "$out"
+          git cat-file -e ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae^{commit}
+          git bundle create "$out/buster.bundle" --all
+          git archive --format=tar.gz --output="$out/source.tar.gz" ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          gh api --paginate --slurp 'repos/buster14a/buster/issues?state=all&per_page=100' > "$out/issues-pages.json"
+          gh api --paginate --slurp 'repos/buster14a/buster/pulls?state=all&per_page=100' > "$out/pulls-pages.json"
+          gh api --paginate --slurp 'repos/buster14a/buster/issues/comments?per_page=100' > "$out/issue-comments-pages.json"
+          gh api --paginate --slurp 'repos/buster14a/buster/pulls/comments?per_page=100' > "$out/review-comments-pages.json"
+          gh api --paginate --slurp 'repos/buster14a/buster/actions/workflows?per_page=100' > "$out/workflows-pages.json"
+          gh api 'repos/buster14a/buster/branches/main' > "$out/main.json"
+          for pr in $(gh api --paginate 'repos/buster14a/buster/pulls?state=open&per_page=100' --jq '.[].number'); do
+            gh api --paginate --slurp "repos/buster14a/buster/pulls/$pr/files?per_page=100" > "$out/pr-$pr-files.json"
+            gh api --paginate --slurp "repos/buster14a/buster/pulls/$pr/reviews?per_page=100" > "$out/pr-$pr-reviews.json"
+          done
+          {
+            date --utc --iso-8601=seconds
+            printf 'baseline=ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae\ntransport=%s\n' "$GITHUB_SHA"
+            sha256sum "$out/source.tar.gz" "$out/buster.bundle"
+            lscpu
+            uname -a
+          } > "$out/provenance.txt"
+          python3 - "$out" <<'PY'
+          import json
+          import pathlib
+          import sys
+          root = pathlib.Path(sys.argv[1])
+          with (root / 'enumeration.txt').open('w') as out:
+              for name in ('issues', 'pulls', 'issue-comments', 'review-comments'):
+                  pages = json.loads((root / (name + '-pages.json')).read_text())
+                  rows = [row for page in pages for row in page]
+                  print(name, 'pages=', [len(page) for page in pages], 'records=', len(rows), file=out)
+                  if name in ('issues', 'pulls'):
+                      for row in rows:
+                          if row['state'] == 'open' and (name == 'pulls' or 'pull_request' not in row):
+                              print(row['number'], row['title'], file=out)
+          print((root / 'enumeration.txt').read_text())
+          PY
+          printf 'Read-only source/history snapshot; baseline ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae. No compiler build, test, or performance result is implied.\n' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: z05-snapshot-${{ github.run_id }}
+          path: ${{ runner.temp }}/z05-snapshot
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
