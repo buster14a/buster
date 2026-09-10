@@ -3597,6 +3597,144 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArgume
     return result;
 }
 
+// GitHub #147 / #258: faults are deferred, syntax errors are not. The
+// expression is passed through a macro so these tests also exercise expansion.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_case(UnitTestArguments* arguments, String8 expression,
+                                                           bool expected_valid, bool expected_value, bool elif)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = string_format(temporary.arena,
+                                  S8("#define TEST_EXPRESSION {S8}\n{S8} TEST_EXPRESSION\nkept\n#else\ndropped\n#endif\n"),
+                                  expression, elif ? S8("#if 0\nunused\n#elif") : S8("#if"));
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){.source_path = S8("conditional-short-circuit.c")});
+    if (expected_valid)
+    {
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, preprocess.token_count == 2);
+        c_test_preprocessed_token(arguments, &result, preprocess, 0, C_TOKEN_IDENTIFIER, expected_value ? S8("kept") : S8("dropped"));
+    }
+    else
+    {
+        bool diagnosed = false;
+        for (u32 index = 0; index < preprocess.diagnostic_count; index += 1)
+        {
+            diagnosed |= preprocess.diagnostics[index].kind == C_DIAGNOSTIC_INVALID_CONDITIONAL;
+        }
+        BUSTER_TEST(arguments, diagnosed);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_preprocessor_short_circuit(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 faults[] = {
+        S8("(1 / 0)"),
+        S8("(1 % 0)"),
+        S8("((-9223372036854775807LL - 1) / -1)"),
+        S8("((-9223372036854775807LL - 1) % -1)"),
+    };
+    struct
+    {
+        String8 format;
+        bool valid;
+        bool value;
+    } contexts[] = {
+        {S8("0 && {S8}"), true, false},
+        {S8("1 || {S8}"), true, true},
+        {S8("1 ? 7 : {S8}"), true, true},
+        {S8("0 ? {S8} : 0"), true, false},
+        {S8("1 || !{S8}"), true, true},
+        {S8("0 && ~{S8}"), true, false},
+        {S8("1 || ({S8} < 1)"), true, true},
+        {S8("1 || ({S8} << 1)"), true, true},
+        {S8("0 && (1 >> {S8})"), true, false},
+        {S8("0 && ({S8} / 0)"), true, false},
+        {S8("0 && ({S8} || 1)"), true, false},
+        {S8("1 || ({S8} && 0)"), true, true},
+        {S8("1 || ({S8} ? 0 : 1)"), true, true},
+        {S8("(0 && {S8}) ? 0 : 1"), true, true},
+        {S8("0 ? 0 : 1 ? 1 : {S8}"), true, true},
+        {S8("1 ? 0 ? {S8} : 1 : 0"), true, true},
+        {S8("{S8}"), false, false},
+        {S8("1 && {S8}"), false, false},
+        {S8("0 || {S8}"), false, false},
+        {S8("0 ? 1 : {S8}"), false, false},
+        {S8("1 ? {S8} : 1"), false, false},
+        {S8("{S8} || 1"), false, false},
+        {S8("{S8} && 0"), false, false},
+        {S8("{S8} ? 1 : 1"), false, false},
+        {S8("!{S8}"), false, false},
+        {S8("~{S8}"), false, false},
+        {S8("-{S8}"), false, false},
+        {S8("+{S8}"), false, false},
+        {S8("{S8} + 1"), false, false},
+        {S8("{S8} - 1"), false, false},
+        {S8("{S8} * 0"), false, false},
+        {S8("{S8} == 0"), false, false},
+        {S8("{S8} != 0"), false, false},
+        {S8("{S8} <= 0"), false, false},
+        {S8("{S8} >= 0"), false, false},
+        {S8("{S8} > 0"), false, false},
+        {S8("{S8} & 0"), false, false},
+        {S8("{S8} | 1"), false, false},
+        {S8("{S8} ^ 1"), false, false},
+        {S8("1 << {S8}"), false, false},
+        {S8("{S8} >> 1"), false, false},
+    };
+    for (u32 fault_index = 0; fault_index < BUSTER_ARRAY_LENGTH(faults); fault_index += 1)
+    {
+        for (u32 context_index = 0; context_index < BUSTER_ARRAY_LENGTH(contexts); context_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 expression = string_format(temporary.arena, contexts[context_index].format, faults[fault_index]);
+            c_test_result_add(&result, c_test_conditional_case(arguments, expression, contexts[context_index].valid, contexts[context_index].value, false));
+            c_test_result_add(&result, c_test_conditional_case(arguments, expression, contexts[context_index].valid, contexts[context_index].value, true));
+            scratch_end(temporary);
+        }
+    }
+    struct
+    {
+        String8 expression;
+        bool value;
+    } signedness[] = {
+        {S8("(1 ? -1 : (1u / 0)) > 0"), true},
+        {S8("(0 ? (1u % 0) : -1) < 0"), false},
+        {S8("(1 ? -1 : (1 / 0)) < 0"), true},
+        {S8("(0 ? (1 % 0) : -1) < 0"), true},
+        {S8("((1 || (1u / 0)) ? -1 : -2) < 0"), true},
+        {S8("((0 && (1u % 0)) ? -2 : -1) < 0"), true},
+        {S8("((1 ? -1 : (1u / 0)) >> 63) == 1"), true},
+        {S8("((1 ? -1 : (1 / 0)) >> 63) == -1"), true},
+        {S8("((1 ? -1 : (1u / 0)) / 2) > 0"), true},
+        {S8("((1 ? -3 : (1 / 0)) / 2) == -1"), true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(signedness); index += 1)
+    {
+        c_test_result_add(&result, c_test_conditional_case(arguments, signedness[index].expression, true, signedness[index].value, false));
+        c_test_result_add(&result, c_test_conditional_case(arguments, signedness[index].expression, true, signedness[index].value, true));
+    }
+    String8 malformed[] = {
+        S8("1 || (1 + )"),
+        S8("0 && (1 / )"),
+        S8("1 ? 1 : (1 % )"),
+        S8("0 ? (1 + ) : 1"),
+        S8("1 || (1 / 0"),
+        S8("0 && (1 2)"),
+        S8("1 ? 1"),
+        S8("0 && *1"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
+    {
+        c_test_result_add(&result, c_test_conditional_case(arguments, malformed[index], false, false, false));
+        c_test_result_add(&result, c_test_conditional_case(arguments, malformed[index], false, false, true));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -14110,6 +14248,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_scope_interval_index(arguments));
     c_test_result_add(&result, c_test_initializer_relocation_orders(arguments));
     c_test_result_add(&result, c_test_frontend_lex_preprocess(arguments));
+    c_test_result_add(&result, c_test_preprocessor_short_circuit(arguments));
     c_test_result_add(&result, c_test_null_preprocessing_directives(arguments));
     c_test_result_add(&result, c_test_malformed_initializer_progress_and_identifier_uses(arguments));
     c_test_result_add(&result, c_test_frontend_lex_differential(arguments));

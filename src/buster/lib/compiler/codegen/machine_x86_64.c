@@ -11648,7 +11648,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     if (saves_first)
     {
         // The frame pointer lands below the saves, so they sit at its
-        // positive offsets and the epilogue recovers RSP with a plain move.
+        // positive offsets. Its fixed epilogue adds back the allocation.
         machine_x64_emit_fixed_registers(&encoder, MACHINE_X64_FIXED_TEMPLATE_MOV_RBP_RSP, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64);
     }
     // The stack allocation mirrors the canonical chunked form: at most a
@@ -11844,34 +11844,32 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         {
                             machine_x64_emit_fixed_vzeroupper(&encoder);
                         }
+                        // Windows fixed-stack unwind records use RSP alone.
+                        // Its epilogue grammar requires ADD RSP, constant (not
+                        // MOV RSP, RBP), followed only by the saved-register pops.
+                        if (saves_first && placement->frame_size)
+                        {
+                            (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RSP,
+                                                                               placement->frame_size, 64,
+                                                                               placement->frame_size <= INT8_MAX ? 8 : 32, 0);
+                        }
                         if (placement->callee_saved_mask)
                         {
-                            // Point RSP at the pushed registers, restore them in
-                            // reverse push order, then unwind the frame base. Where
-                            // the saves precede the frame pointer they already sit
-                            // at it, so a plain move is the whole adjustment.
-                            u32 push_count = 0;
-                            for (u32 push_register = 0; push_register < MACHINE_X64_REGISTER_COUNT; push_register += 1)
+                            if (!saves_first)
                             {
-                                push_count += (placement->callee_saved_mask >> push_register) & 1u;
-                            }
-                            if (function->target && function->target->saves_precede_frame_pointer)
-                            {
-                                machine_x64_emit_fixed_registers(&encoder, MACHINE_X64_FIXED_TEMPLATE_MOV_RSP_RBP, S8("MOV"),
-                                                                 MACHINE_X64_RSP, MACHINE_X64_RBP, 64);
-                            }
-                            else
-                            {
-                                // At most sixteen pushes, so the displacement is a
-                                // negative byte -- the class the template was
-                                // proven for; anything else keeps the bridge.
+                                u32 push_count = 0;
+                                for (u32 push_register = 0; push_register < MACHINE_X64_REGISTER_COUNT; push_register += 1)
+                                {
+                                    push_count += (placement->callee_saved_mask >> push_register) & 1u;
+                                }
+                                // System V retains its frame-relative restore.
                                 s64 frame_displacement = -(s64)(8u * push_count);
                                 if (frame_displacement < INT8_MIN ||
                                     machine_x64_emit_fixed_template(&encoder, MACHINE_X64_FIXED_TEMPLATE_LEA_RSP_RBP_DISP8,
                                                                     (u8)frame_displacement) == MACHINE_X64_FIXED_TEMPLATE_UNPUBLISHED)
                                 {
                                     (void)machine_x64_emit_metadata_register_memory(&encoder, S8("LEA"), MACHINE_X64_RSP, MACHINE_X64_RBP,
-                                            frame_displacement, 64, 64, 0);
+                                                                                    frame_displacement, 64, 64, 0);
                                 }
                             }
                             for (u32 pop_reverse = MACHINE_X64_ZMM0; pop_reverse > 0; pop_reverse -= 1)
@@ -11883,7 +11881,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                                 }
                             }
                         }
-                        else
+                        else if (!saves_first)
                         {
                             machine_x64_emit_fixed_registers(&encoder, MACHINE_X64_FIXED_TEMPLATE_MOV_RSP_RBP, S8("MOV"),
                                                              MACHINE_X64_RSP, MACHINE_X64_RBP, 64);
