@@ -3404,9 +3404,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
 #if BUSTER_BENCH_ALLOCATIONS
         MachineQualityCensus before = machine_quality_census_snapshot();
         MachineFunction invalid = {0};
-        MachineStackPlacement rejected = machine_quality_placement_build(arguments->arena, &invalid);
+        MachineStackPlacement census_rejected = machine_quality_placement_build(arguments->arena, &invalid);
         MachineQualityCensus after = machine_quality_census_snapshot();
-        BUSTER_TEST(arguments, !rejected.valid);
+        BUSTER_TEST(arguments, !census_rejected.valid);
         BUSTER_TEST(arguments, after.functions - before.functions == 1);
         BUSTER_TEST(arguments, after.invalid_target_functions - before.invalid_target_functions == 1);
         BUSTER_TEST(arguments, after.prepassed_functions == before.prepassed_functions);
