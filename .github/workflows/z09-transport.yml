@@ -4,7 +4,7 @@ on:
     branches: [astra/z09-pass-census-transport-20260909]
     paths: [.github/workflows/z09-transport.yml]
 permissions:
-  contents: read
+  contents: write
   issues: read
   pull-requests: read
 jobs:
@@ -16,57 +16,76 @@ jobs:
         with:
           ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
           persist-credentials: false
-      - name: Capture source and paginated repository evidence
+      - name: Verify pinned patch and publish unreferenced Git objects
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/z09"
-          git archive HEAD | gzip > "$RUNNER_TEMP/z09/source.tar.gz"
+          mkdir -p "$RUNNER_TEMP/z09-publish"
           python3 - <<'PY'
-          import json, os, pathlib, urllib.request
-          from urllib.parse import urlencode
+          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
           root = 'https://api.github.com/repos/buster14a/buster'
-          def get(url):
-              request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
-              with urllib.request.urlopen(request, timeout=60) as response:
+          baseline = 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae'
+          expected_tree = 'c549e63cdfc6f77af3ff33274b6459d4216b0117'
+          def request(endpoint, payload=None):
+              body = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(root + endpoint, data=body, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'})
+              with urllib.request.urlopen(req, timeout=60) as response:
                   return json.load(response)
-          def pages(endpoint, **query):
-              rows = []
+          def pages(endpoint):
+              result = []
               page = 1
               while True:
-                  batch = get(root + endpoint + '?' + urlencode(dict(query, per_page=100, page=page)))
-                  rows.extend(batch)
+                  separator = '&' if '?' in endpoint else '?'
+                  batch = request(endpoint + separator + 'per_page=100&page=' + str(page))
+                  result.extend(batch)
                   if len(batch) < 100:
                       break
                   page += 1
-              return {'pages': page, 'rows': rows}
-          data = {'main': get(root + '/branches/main')}
-          destination = pathlib.Path(os.environ['RUNNER_TEMP']) / 'z09' / 'evidence.json'
-          try:
-              data['open_issues'] = pages('/issues', state='open', sort='created', direction='asc')
-              data['open_prs'] = pages('/pulls', state='open', sort='created', direction='asc')
-              data['issues'] = {}
-              for number in (33, 34, 38, 40, 46, 49, 50, 52, 56, 122, 125, 128, 131, 132, 133):
-                  data['issues'][number] = {'issue': get(root + '/issues/' + str(number)), 'comments': pages('/issues/' + str(number) + '/comments')}
-              data['prs'] = {}
-              numbers = sorted({row['number'] for row in data['open_prs']['rows']} | {290, 317, 338, 349})
-              for number in numbers:
-                  data['prs'][number] = {'info': get(root + '/pulls/' + str(number)), 'files': pages('/pulls/' + str(number) + '/files'), 'comments': pages('/issues/' + str(number) + '/comments'), 'reviews': pages('/pulls/' + str(number) + '/reviews'), 'review_comments': pages('/pulls/' + str(number) + '/comments')}
-              data['recent_ir_commits'] = pages('/commits', path='src/buster/lib/compiler/ir/ir_promote.c')
-              for name in ('open_issues', 'open_prs'):
-                  print(name, 'pages=', data[name]['pages'], 'count=', len(data[name]['rows']))
-                  for row in data[name]['rows']:
-                      print(row['number'], row['title'])
-              print('main', data['main']['commit']['sha'])
-          finally:
-              destination.write_text(json.dumps(data, indent=2))
+              return result
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          payload = '''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''' 
+          # Fail closed on a damaged transport; no source refs are changed here.
+          patch = gzip.decompress(base64.b64decode(payload))
+          assert hashlib.sha256(patch).hexdigest() == '6b9cd3b3a6d2133b00fe190bba4060e63ab8ca5d92dd4b77fb081ce449e49d7b'
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'z09-publish'
+          patch_path = out / 'code.patch'
+          patch_path.write_bytes(patch)
+          assert git('rev-parse', 'HEAD') == baseline
+          subprocess.run(['git', 'apply', '--check', str(patch_path)], check=True)
+          subprocess.run(['git', 'apply', '--index', str(patch_path)], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          assert git('write-tree') == expected_tree
+          paths = git('diff', '--cached', '--name-only').splitlines()
+          main = request('/branches/main')['commit']['sha']
+          assert main == baseline, ('main moved', main)
+          pulls = pages('/pulls?state=open&sort=created&direction=asc')
+          evidence = {'main': main, 'paths': paths, 'open_prs': []}
+          for pr in pulls:
+              changed = pages('/pulls/' + str(pr['number']) + '/files')
+              overlap = sorted(set(paths).intersection(row['filename'] for row in changed))
+              evidence['open_prs'].append({'number': pr['number'], 'head': pr['head']['sha'], 'files': changed, 'overlap': overlap})
+          (out / 'coordination.json').write_text(json.dumps(evidence, indent=2))
+          assert not any(pr['overlap'] for pr in evidence['open_prs']), 'New shared-file overlap requires review'
+          entries = []
+          for path in paths:
+              content = pathlib.Path(path).read_bytes()
+              blob = request('/git/blobs', {'content': base64.b64encode(content).decode(), 'encoding': 'base64'})
+              assert blob['sha'] == git('hash-object', path)
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
+          tree = request('/git/trees', {'base_tree': '093b374996f3aecca200fe2968539554fc67bf55', 'tree': entries})
+          assert tree['sha'] == expected_tree
+          (out / 'manifest.json').write_text(json.dumps({'baseline': baseline, 'tree': tree['sha'], 'paths': paths}, indent=2))
+          print('VERIFIED_TREE', tree['sha'])
+          print('BASELINE', baseline)
+          print('No branch or pull request was modified by this job.')
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
-          name: z09-pinned-source-evidence
-          path: ${{ runner.temp }}/z09
+          name: z09-verified-tree
+          path: ${{ runner.temp }}/z09-publish
           if-no-files-found: error
           retention-days: 7
