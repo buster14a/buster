@@ -12,20 +12,41 @@ jobs:
         include:
           - pr: 370
             runner: ubuntu-26.04
-            source: d72cd8dd28283f89cac78b0e49b0d8529c5405b3
+            source: cb8a5830b656f47bb250c00563ea47517af3d988
           - pr: 374
             runner: ubuntu-26.04
             source: c0517fb8bd3accf4c0f6020fad52bc0ddc4570fb
           - pr: 376
             runner: macos-26
-            source: c3d5072d7c4097ae2680da3cafaeff01151e5728
+            source: 515c12c8525ee16cd770a288883f30691f2d7d30
+          - pr: 372
+            runner: windows-2025
+            source: 5ee277f956ea637c95c28ec3b220bbda63aea774
+          - pr: 368
+            runner: ubuntu-26.04
+            source: c012b31136dc1733df980c064d22c41571284aa2
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ matrix.source }}
           persist-credentials: false
+      - name: Instrument rejected token spelling for the Windows diagnostic only
+        if: ${{ matrix.pr == 372 }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("src/buster/lib/compiler/frontend/c/c_parse.c")
+          s = p.read_text()
+          s = s.replace("c_parser_validate_integer_token(CParserResult*", "c_parser_validate_integer_token(Arena* arena, CParserResult*")
+          s = s.replace("c_parser_validate_integer_token(&result,", "c_parser_validate_integer_token(arena, &result,")
+          s = s.replace('S8("invalid integer literal or value outside the supported 64-bit range")', 'string_format(arena, S8("invalid integer spelling: {S8}"), spelling)')
+          p.write_text(s)
+          PY
       - name: Compile exact candidate with the repository build driver
         run: |
           git rev-parse HEAD
@@ -41,7 +62,12 @@ jobs:
           python3 - <<'PY'
           import os, subprocess
           pr = int(os.environ["AUDIT_PR"])
-          ide = os.path.abspath("build/Release/ide")
+          ide = os.path.abspath("build/Release/ide" + (".exe" if os.name == "nt" else ""))
+          from pathlib import Path
+          tmp = Path(os.environ["RUNNER_TEMP"])
+          if pr == 372:
+              (tmp / "stdint.c").write_text("#include <stdint.h>\n_Static_assert(12 <= UINT8_MAX, \"width\");\n")
+              (tmp / "paste.c").write_text("#define JOIN_(a,b) a##b\n#define JOIN(a,b) JOIN_(a,b)\ntypedef unsigned char JOIN(check_,__LINE__)[(12 == 12) ? 1 : -1];\n")
           cases = {
               370: [["-c", "-fverify-codegen", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", "-Itests/differential", "tests/differential/qualified_aggregate.c"],
                     ["-c", "-fverify-codegen", "-fno-frontend-ssa", "-fno-canonical-local-promotion", "-fno-target-local-promotion", "-Itests/differential", "tests/differential/qualified_aggregate.c"]],
@@ -49,6 +75,8 @@ jobs:
               376: [["-Isrc", "-c", "tests/basic_c_simd_translate.c"],
                     ["-Isrc", "-DBUSTER_KERNEL=1", "-c", "tests/basic_c_simd_translate.c"],
                     ["-Isrc", "--target=x86_64-linux-gnu", "-c", "tests/basic_c_simd_translate.c"]],
+              372: [["-c", str(tmp / "stdint.c")], ["-c", str(tmp / "paste.c")]],
+              368: [["-target", "wasm64-unknown-freestanding", "-nostdinc", "tests/basic_c_wasm64_integer_ops.c"]],
           }[pr]
           failed = False
           for i, args in enumerate(cases):
@@ -58,35 +86,25 @@ jobs:
               print(r.stdout, flush=True)
               print("EXIT", r.returncode, flush=True)
               failed |= r.returncode != 0
+          if pr == 368 and not failed:
+              r = subprocess.run(["node", "tests/wasm_integer_execution.js", str(tmp / "fixture-0.o")], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+              print("NODE", subprocess.check_output(["node", "--version"], text=True), r.returncode, r.stdout, flush=True)
+              failed |= r.returncode != 0
+          if pr == 374:
+              source = Path("tests/basic_c_constexpr_leaf.c").read_text()
+              for i, line in enumerate([l for l in source.splitlines() if "failed |=" in l]):
+                  source = source.replace(line, line.replace("failed |= ", "failed |= (" ).replace(";", ") << %d;" % i))
+              probe = tmp / "constexpr.c"
+              probe.write_text(source)
+              for mode in ["none", "mir-stack", "fast", "quality"]:
+                  exe = tmp / ("constexpr-" + mode)
+                  cmd = [ide, "cc", "-std=c23", "-fregister-allocator=" + mode, str(probe), "-o", str(exe)]
+                  r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+                  print("CONSTEXPR BUILD", mode, r.returncode, r.stdout, flush=True)
+                  if r.returncode == 0:
+                      r = subprocess.run([str(exe)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+                      print("CONSTEXPR RUN", mode, r.returncode, r.stdout, flush=True)
+                  failed |= r.returncode != 0
           raise SystemExit(1 if failed else 0)
           PY
 
-  quality-census:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - config: Release
-            sanitize: ''
-          - config: Debug
-            sanitize: --sanitize
-    runs-on: ubuntu-26.04
-    timeout-minutes: 25
-    env:
-      CMAKE_BUILD_PARALLEL_LEVEL: 1
-      BUSTER_TEST_JOBS: 1
-      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: f5c0074b903055f86ed422ca1328b3e9bcef755b
-          persist-credentials: false
-      - name: Validate registered allocation-census tests
-        env:
-          AUDIT_CONFIG: ${{ matrix.config }}
-          AUDIT_SANITIZE: ${{ matrix.sanitize }}
-        run: |
-          git rev-parse HEAD
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
-          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT $AUDIT_SANITIZE -- -DBUSTER_BENCH_ALLOCATIONS=ON
-          "$RUNNER_TEMP/buster-build" build --config "$AUDIT_CONFIG" -t test_all -- -j1
