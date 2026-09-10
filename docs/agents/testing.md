@@ -31,7 +31,11 @@
   described in `docs/ci-github-actions.md`. Its six desktop lanes cover every
   desktop OS at both x86-64 and AArch64; three independent mobile shards retain
   the Android and iOS suites without repeating desktop work. Require the
-  aggregate `CI complete` result, not just the desktop names. Both matrices
+  aggregate `CI complete` result, not just the desktop names. The separate
+  `Linux x86-64 bootstrap evidence` check is required as well when the stronger
+  repeated self-host audit is mandatory; `CI complete` does not aggregate it.
+  Both workflows cover the same PR merge revision, main/tag pushes, merge groups
+  and explicit dispatches without duplicate feature-push runs. Both matrices
   disable fail-fast, and a combination failure does not hide Unix mode tests.
   See `docs/ci-workflow-audit.md` for cache trust boundaries, diagnostics,
   cancellation, coverage details, and reproduction. Every job stays inert

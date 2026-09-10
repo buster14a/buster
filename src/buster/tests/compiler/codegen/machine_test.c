@@ -5,6 +5,7 @@
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
 #include <buster/lib/compiler/codegen/register_allocator_fast_internal.h>
+#include <buster/lib/compiler/codegen/register_allocator_quality_internal.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/file.h>
 #include <buster/lib/compiler/ir/ir.h>
@@ -23,6 +24,7 @@ BUSTER_CT_CHECK(sizeof(MachineVirtualRegister) == 16);
 BUSTER_CT_CHECK(sizeof(MachineBlock) == 32);
 BUSTER_CT_CHECK(sizeof(MachineEdge) == 16);
 BUSTER_CT_CHECK(sizeof(MachineEdit) == 16);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(MachineEncodeResult) == 72);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
@@ -2160,9 +2162,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_variadic(UnitTestArgument
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_aggregate(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice input = file_read(arguments->arena, S8("tests/differential/native_aggregate.c"), (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    BUSTER_TEST(arguments, input.length != 0);
+    OperatingSystem systems[] = {OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_UEFI, OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_MACOS};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        bool windows = system < 2;
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = systems[system]};
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("native-aggregate.c"), tokens, syntax, target,
+                                                            (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, tokens.error_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+            IrProgram* program = lowered.program;
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                u32 definitions = 0;
+                for (u32 index = 0; index < module->function_count; index += 1)
+                {
+                    IrFunction* function = module->functions + index;
+                    if (function->state == IR_FUNCTION_DECLARATION) { continue; }
+                    definitions += 1;
+                    MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                    BUSTER_TEST_RAW(arguments, selected.supported, function->name);
+                    if (selected.supported)
+                    {
+                        BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                        MachineStackPlacement placement = machine_stack_placement_build(temporary.arena, &selected.function);
+                        BUSTER_TEST(arguments, placement.valid);
+                        if (windows && string_equal(function->name, S8("native_aggregate_call_host")))
+                        {
+                            // The largest call needs 80 bytes of homes/stack
+                            // pointers and 128 bytes of aligned value copies.
+                            // Smaller calls reuse the same reservation.
+                            BUSTER_TEST(arguments, selected.function.outgoing_bytes == 208);
+                            u32 slot = selected.function.outgoing_slot;
+                            BUSTER_TEST(arguments, slot < selected.function.stack_slot_count);
+                            if (slot < selected.function.stack_slot_count)
+                            {
+                                BUSTER_TEST(arguments, selected.function.stack_slot_sizes[slot] == 208);
+                                BUSTER_TEST(arguments, selected.function.stack_slot_alignments[slot] == 16);
+                                for (u32 row = 0; row < selected.function.instruction_count; row += 1)
+                                {
+                                    MachineInstruction* instruction = selected.function.instructions + row;
+                                    if (instruction->opcode == MACHINE_X64_LEA_FRAME &&
+                                        instruction->operands[1] == machine_ref_make(MACHINE_REF_STACK_SLOT, slot))
+                                    {
+                                        BUSTER_TEST(arguments, instruction->payload >= 32 && instruction->payload < 208 &&
+                                                               (instruction->payload & 15) == 0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, definitions == 5);
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                    BUSTER_TEST(arguments, generated.statistics.function_count == 5);
+                    BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult aggregate_result = machine_test_native_aggregate(arguments);
+    result.test_count += aggregate_result.test_count;
+    result.succeeded_test_count += aggregate_result.succeeded_test_count;
     UnitTestResult variadic_result = machine_test_native_variadic(arguments);
     result.test_count += variadic_result.test_count;
     result.succeeded_test_count += variadic_result.succeeded_test_count;
@@ -2613,7 +2699,70 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     for (u16 opcode = 0; opcode < MACHINE_OPCODE_COUNT; opcode += 1)
     {
         BUSTER_TEST(arguments, opcode_rows[opcode].schedule_flags == schedule_memberships[opcode]);
+        // Whole-domain equivalence with the explicit constraint authority.
+        // This also runs unchanged on the pre-removal table: a legacy-only
+        // constraint would disagree with both the helper and its projection.
+        MachineOpcodeInfo const* info = machine_opcode_info(opcode);
+        bool constrained = info->tied_pair || info->early_clobber_mask || info->fixed_register_mask ||
+                           (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED);
+        BUSTER_TEST(arguments, machine_opcode_has_constraints(info) == constrained);
+        BUSTER_TEST(arguments, ((opcode_rows[opcode].flags & MACHINE_OPCODE_ROW_CONSTRAINED) != 0) == constrained);
+        for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(info->fixed_registers); slot += 1)
+        {
+            u32 expected = (info->fixed_register_mask & (1u << slot)) ? info->fixed_registers[slot] : UINT32_MAX;
+            BUSTER_TEST(arguments, machine_opcode_fixed_register(info, slot) == expected);
+        }
     }
+
+    // The complete SHIFT/DIVIDE/MULTIPLY_HIGH family that formerly repeated
+    // an RAX/RCX register set in addition to its two explicit slot bindings.
+    u16 const fixed_pair_opcodes[] = {
+        MACHINE_X64_SHL32, MACHINE_X64_SHL64, MACHINE_X64_SAR32, MACHINE_X64_SAR64, MACHINE_X64_SHR32, MACHINE_X64_SHR64,
+        MACHINE_X64_SDIV32, MACHINE_X64_SDIV64, MACHINE_X64_UDIV32, MACHINE_X64_UDIV64,
+        MACHINE_X64_SREM32, MACHINE_X64_SREM64, MACHINE_X64_UREM32, MACHINE_X64_UREM64, MACHINE_X64_MULH64,
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(fixed_pair_opcodes) == 15);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixed_pair_opcodes); index += 1)
+    {
+        MachineOpcodeInfo const* info = machine_opcode_info(fixed_pair_opcodes[index]);
+        BUSTER_TEST(arguments, info->operand_count == 2 && info->fixed_register_mask == 3);
+        BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 0) == MACHINE_X64_RAX);
+        BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 1) == MACHINE_X64_RCX);
+        BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 2) == UINT32_MAX);
+        BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 3) == UINT32_MAX);
+        BUSTER_TEST(arguments, (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) != 0);
+    }
+
+    // A register byte has no meaning without its mask bit. In particular,
+    // fixed RAX (register zero) is not the absence of an assignment.
+    MachineOpcodeInfo fixed_probe = {0};
+    BUSTER_TEST(arguments, !machine_opcode_has_constraints(&fixed_probe));
+    for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(fixed_probe.fixed_registers); slot += 1)
+    {
+        fixed_probe.fixed_registers[slot] = MACHINE_X64_RCX;
+        BUSTER_TEST(arguments, machine_opcode_fixed_register(&fixed_probe, slot) == UINT32_MAX);
+    }
+    BUSTER_TEST(arguments, !machine_opcode_has_constraints(&fixed_probe));
+    fixed_probe.fixed_register_mask = 1;
+    fixed_probe.fixed_registers[0] = MACHINE_X64_RAX;
+    BUSTER_TEST(arguments, machine_opcode_has_constraints(&fixed_probe));
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(&fixed_probe, 0) == MACHINE_X64_RAX);
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(&fixed_probe, 1) == UINT32_MAX);
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(&fixed_probe, 4) == UINT32_MAX);
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(&fixed_probe, UINT32_MAX) == UINT32_MAX);
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(0, 0) == UINT32_MAX);
+    BUSTER_TEST(arguments, !machine_opcode_has_constraints(0));
+    fixed_probe.fixed_register_mask = 0;
+    fixed_probe.early_clobber_mask = 1;
+    BUSTER_TEST(arguments, machine_opcode_has_constraints(&fixed_probe));
+    fixed_probe.early_clobber_mask = 0;
+    fixed_probe.attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED;
+    BUSTER_TEST(arguments, machine_opcode_has_constraints(&fixed_probe));
+    fixed_probe.attributes = 0;
+    fixed_probe.tied_pair = (u8)(1u | (2u << 4));
+    BUSTER_TEST(arguments, machine_opcode_has_constraints(&fixed_probe));
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(&fixed_probe, 0) == UINT32_MAX);
+
     // Vector scratch membership is orthogonal to the load class. A frame
     // read in an implicit V register must participate in both chains.
     MachineOpcodeInfo const* vector_load_info = machine_opcode_info(MACHINE_A64_VLOAD_FRAME);
@@ -3386,6 +3535,33 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_STRING_TEST(arguments, codegen_register_allocator_mode_string(CODEGEN_REGISTER_ALLOCATOR_MIR_STACK), S8("mir-stack"));
     BUSTER_STRING_TEST(arguments, codegen_register_allocator_mode_string(CODEGEN_REGISTER_ALLOCATOR_FAST), S8("fast"));
     BUSTER_STRING_TEST(arguments, codegen_register_allocator_mode_string(CODEGEN_REGISTER_ALLOCATOR_QUALITY), S8("quality"));
+
+    // The census counter primitive is tested even in ordinary builds. Failed
+    // additions must not turn unavailable/overflowed work into a valid zero.
+    {
+        u64 starts[] = {0, 0, UINT64_MAX - 1, UINT64_MAX, UINT64_MAX - 1};
+        u64 amounts[] = {0, UINT64_MAX, 1, 1, 2};
+        bool expected[] = {true, true, true, false, false};
+        for (u32 probe = 0; probe < BUSTER_ARRAY_LENGTH(starts); probe += 1)
+        {
+            u64 counter = starts[probe];
+            bool added = machine_quality_census_try_add(&counter, amounts[probe]);
+            BUSTER_TEST(arguments, added == expected[probe]);
+            BUSTER_TEST(arguments, counter == (expected[probe] ? starts[probe] + amounts[probe] : starts[probe]));
+        }
+#if BUSTER_BENCH_ALLOCATIONS
+        MachineQualityCensus before = machine_quality_census_snapshot();
+        MachineFunction invalid = {0};
+        MachineStackPlacement census_rejected = machine_quality_placement_build(arguments->arena, &invalid);
+        MachineQualityCensus after = machine_quality_census_snapshot();
+        BUSTER_TEST(arguments, !census_rejected.valid);
+        BUSTER_TEST(arguments, after.functions - before.functions == 1);
+        BUSTER_TEST(arguments, after.invalid_target_functions - before.invalid_target_functions == 1);
+        BUSTER_TEST(arguments, after.prepassed_functions == before.prepassed_functions);
+        BUSTER_TEST(arguments, after.candidate_region_cells == before.candidate_region_cells);
+#endif
+    }
+
 
     // Stage-9 scheduling. Thirty-two independent products all combined at
     // the end hold every intermediate live to the combine in source order —
@@ -4805,7 +4981,63 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, split_selected.supported);
             if (split_selected.supported)
             {
+#if BUSTER_BENCH_ALLOCATIONS
+                MachineQualityCensus census_before = machine_quality_census_snapshot();
+#endif
                 MachineStackPlacement split_quality = machine_quality_placement_build(arguments->arena, &split_selected.function);
+#if BUSTER_BENCH_ALLOCATIONS
+                MachineQualityCensus census_after = machine_quality_census_snapshot();
+                MachineQualityCensus census = {0};
+#define BUSTER_QUALITY_DELTA(name) census.name = census_after.name - census_before.name;
+                BUSTER_QUALITY_CENSUS_FIELDS(BUSTER_QUALITY_DELTA)
+#undef BUSTER_QUALITY_DELTA
+                BUSTER_TEST(arguments, census.functions == 1 && census.prepassed_functions == 1);
+                BUSTER_TEST(arguments, census.global_values == split_selected.function.virtual_register_count);
+                BUSTER_TEST(arguments, census.local_values > 0 && census.local_values <= census.global_values);
+                BUSTER_TEST(arguments, census.local_values_zero_functions + census.local_values_small_functions +
+                                       census.local_values_tiled_functions + census.local_values_large_functions == 1);
+                BUSTER_TEST(arguments, census.candidates > 0 && census.merged_regions > 0);
+                BUSTER_TEST(arguments, census.closure_value_tests == census.global_values * census.merged_regions);
+                BUSTER_TEST(arguments, census.closure_intersections <= census.closure_value_tests);
+                BUSTER_TEST(arguments, census.region_values_zero_regions + census.region_values_small_regions +
+                                       census.region_values_tiled_regions + census.region_values_large_regions == census.merged_regions);
+                BUSTER_TEST(arguments, census.candidate_region_cells == census.candidates * census.merged_regions);
+                BUSTER_TEST(arguments, census.candidate_region_nonzero_cells > 0 &&
+                                       census.candidate_region_nonzero_cells <= census.candidate_region_cells);
+                BUSTER_TEST(arguments, census.candidate_region_clear_bytes == census.candidate_region_cells * sizeof(u32));
+                BUSTER_TEST(arguments, census.region_table_zero_functions + census.region_table_sparse_functions +
+                                       census.region_table_mixed_functions + census.region_table_dense_functions == 1);
+                BUSTER_TEST(arguments, census.heap_restore_bytes == census.heap_snapshot_bytes * census.attempts);
+                BUSTER_TEST(arguments, census.region_selection_cells == census.region_selection_passes * census.merged_regions);
+                BUSTER_TEST(arguments, census.selected_regions <= census.region_selection_passes);
+                BUSTER_TEST(arguments, census.placement_probes <= census.attempts);
+                BUSTER_TEST(arguments, census.accepted_placements == 1);
+                // Reused dirty scratch must give identical counters and ordered
+                // placement output. Compare initialized fields/arrays, not padding.
+                MachineStackPlacement repeated = machine_quality_placement_build(arguments->arena, &split_selected.function);
+                MachineQualityCensus census_repeated = machine_quality_census_snapshot();
+#define BUSTER_QUALITY_REPEAT(name) BUSTER_TEST(arguments, census_repeated.name - census_after.name == census.name);
+                BUSTER_QUALITY_CENSUS_FIELDS(BUSTER_QUALITY_REPEAT)
+#undef BUSTER_QUALITY_REPEAT
+                BUSTER_TEST(arguments, repeated.valid && repeated.edit_count == split_quality.edit_count &&
+                                       repeated.frame_size == split_quality.frame_size && repeated.callee_saved_mask == split_quality.callee_saved_mask &&
+                                       repeated.pinned_register_count == split_quality.pinned_register_count &&
+                                       repeated.split_register_count == split_quality.split_register_count);
+                if (repeated.valid && split_quality.valid && repeated.edit_count == split_quality.edit_count)
+                {
+                    for (u32 edit_index = 0; edit_index < repeated.edit_count; edit_index += 1)
+                    {
+                        MachineEdit left = split_quality.edits[edit_index];
+                        MachineEdit right = repeated.edits[edit_index];
+                        BUSTER_TEST(arguments, left.point == right.point && left.kind == right.kind && left.flags == right.flags &&
+                                               left.subject == right.subject && left.location == right.location);
+                    }
+                    for (u64 slot = 0; slot < (u64)split_selected.function.instruction_count * 4; slot += 1)
+                    {
+                        BUSTER_TEST(arguments, split_quality.operand_registers[slot] == repeated.operand_registers[slot]);
+                    }
+                }
+#endif
                 MachineStackPlacement split_fast = machine_fast_placement_build(arguments->arena, &split_selected.function);
                 BUSTER_TEST(arguments, split_quality.valid && split_fast.valid);
                 BUSTER_TEST_RAW(arguments, split_quality.split_register_count + split_quality.pinned_register_count >= 1,

@@ -46,6 +46,19 @@ signature; `opcode` retains the first rejected canonical opcode in the legacy
 while `verification` identifies an implementation failure. The allocator,
 stage, opcode and reason counters all survive multi-input compilation.
 
+For two-operand EVEX vector loads/conversions, an ordinary memory qualifier
+names the source tuple, not the destination register width. A broadcast
+qualifier names its scalar element. The metadata selector projects the
+candidate's element width and validates the source qualifier independently;
+for example, masked `vcvtps2pd zmm0, m256` reads eight 32-bit elements while
+masked `vcvtpd2ps ymm0, m512` reads eight 64-bit elements. AT&T's unqualified
+memory spelling uses the same candidate contract. Unsized ordinary loads
+whose destination permits multiple source tuple widths are rejected as
+ambiguous; encoding length and candidate order cannot choose input lanes.
+This bounded projection
+requires a mask/broadcast, ZMM destination, or high vector register and covers
+FULL/HALF EVEX tuples; it does not replace all legacy/VEX source inference.
+
 `-fno-frontend-ssa` selects the original memory-form C lowering;
 `-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last
 flag wins. These controls are independent of `-fno-canonical-local-promotion`
