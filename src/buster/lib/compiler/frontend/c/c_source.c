@@ -7275,6 +7275,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                            0, 0, false, false);
         }
     }
+    TargetDataLayout layout = options.data_layout;
     CToken* constant_parameter_replacement = arena_allocate(arena, CToken, 1);
     constant_parameter_replacement[0] = c_space_token(space, S8("value"), C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
     String8* constant_parameters = arena_allocate(arena, String8, 1);
@@ -7284,10 +7285,32 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     };
     for (u32 macro_index = 0; macro_index < BUSTER_ARRAY_LENGTH(constant_macro_names); macro_index += 1)
     {
-        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)constant_macro_names[macro_index]), constant_parameter_replacement, 1,
+        // SDK stdint headers use these functions as their literal constructors.
+        // Keep the promoted small types, unsigned int, and target 64-bit types;
+        // identity replacements make UINT64_C(1) << lane a signed int shift.
+        String8 suffix = S8("");
+        if (macro_index == 5)
+        {
+            suffix = S8("U");
+        }
+        else if (macro_index >= 6)
+        {
+            bool is_unsigned = (macro_index & 1) != 0;
+            suffix = layout.long_integer.size == 8 ? (is_unsigned ? S8("UL") : S8("L")) : (is_unsigned ? S8("ULL") : S8("LL"));
+        }
+        CToken* replacement = constant_parameter_replacement;
+        u32 replacement_count = 1;
+        if (suffix.length)
+        {
+            replacement = arena_allocate(arena, CToken, 3);
+            replacement[0] = constant_parameter_replacement[0];
+            replacement[1] = c_space_token(space, S8("##"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_HASH_HASH);
+            replacement[2] = c_space_token(space, suffix, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
+            replacement_count = 3;
+        }
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)constant_macro_names[macro_index]), replacement, replacement_count,
                        constant_parameters, 1, true, false);
     }
-    TargetDataLayout layout = options.data_layout;
     bool windows_target = options.target.os == OPERATING_SYSTEM_WINDOWS;
     bool llp64_target = target_uses_llp64_data_model(options.target);
     bool short_wchar_target = target_uses_16_bit_wchar(options.target);

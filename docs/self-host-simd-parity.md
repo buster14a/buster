@@ -25,7 +25,7 @@ experiment documented in `performance-audits/2026-08-30T182357Z.md`.
 
 `BUSTER_SIMD_512_BASE` requires non-MSVC x86-64 with AVX-512F and AVX-512BW.
 It enables only the four public operations needed by this consumer: `simd512_load`,
-`simd512_store`, `simd512_splat_byte`, and `simd512_equal_byte`. Trusted host builds
+`simd512_store`, `simd512_splat`, and `simd512_equal_byte`. Trusted host builds
 use the existing intrinsics; self-built stages use the corresponding existing
 `__builtin_buster_simd_*` operations, without vendor headers. Unsupported targets
 use the scalar implementations.
@@ -87,6 +87,14 @@ inspection. The existing driver suite executes it in `none`, `mir-stack`, `fast`
 and `quality`, and separately compiles baseline, F/BW-only `skylake-avx512`, and
 full-feature `znver5` targets with a non-vacuous SIMD-operation-count assertion.
 These are newly registered checks, not a claim that they have passed.
+
+The macOS scalar fixture exposed a separate prerequisite: predefined
+`__UINT64_C` was an identity macro, so the SDK's `UINT64_C(1)` had signed-int
+width and the independent expected mask wrapped after lane 31. Integer
+constructor macros now paste the suffix matching the target's promoted type.
+The fixture retains every lane and adds explicit mask-width assertions; the
+frontend suite checks signedness and width under LP64, Darwin and LLP64 layouts.
+The production fallback's observed masks were already correct in that probe.
 
 Before accepting the change, require the submitted revision's ordinary self-host
 fixed point, repeated-generation audit, full tests, supported mode/platform and

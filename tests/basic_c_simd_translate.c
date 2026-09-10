@@ -9,6 +9,9 @@
 void* memcpy(void* restrict destination, void const* restrict source, size_t count);
 #include <buster/lib/simd.h>
 
+_Static_assert(sizeof(UINT64_C(1)) == 8, "mask constants need 64-bit arithmetic");
+_Static_assert(UINT64_C(1) << 63 == 0x8000000000000000ULL, "the last lane remains unsigned");
+
 u64 buster_simd_translate_block(u8* destination, u8 const* source, u64* newlines)
 {
     Simd512 chunk = simd512_load(source);
