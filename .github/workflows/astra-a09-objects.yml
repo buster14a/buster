@@ -1,0 +1,85 @@
+name: A09 immutable source preparation
+on:
+  push:
+    branches: [astra/a09-memory-transport-20260909]
+    paths: [.github/workflows/astra-a09-objects.yml]
+permissions:
+  contents: write
+  issues: read
+  pull-requests: read
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: source
+          persist-credentials: false
+      - name: Verify source and retain the complete current overlap snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a09-objects"
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, zlib
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'a09-objects'
+          root = pathlib.Path('transport/.github/astra-a09')
+          names = ['fresh-bindings.patch.zlib.b64'] + [f'fresh-bindings.patch.part{i}.b64' for i in [2, 3, 4]]
+          patch = zlib.decompress(base64.b64decode(''.join((root/name).read_text().strip() for name in names), validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '860aff8aa5b9c4867fe579f44bd5480f1a90118a2395fb947ed6ea0618739114'
+          path = out / 'source.patch'
+          path.write_bytes(patch)
+          subprocess.run(['git','-C','source','apply','--check',str(path)],check=True)
+          subprocess.run(['git','-C','source','apply','--index',str(path)],check=True)
+          subprocess.run(['git','-C','source','diff','--cached','--check'],check=True)
+          def get(endpoint):
+              return json.loads(subprocess.check_output(['gh','api',endpoint],text=True))
+          def pages(endpoint):
+              return [item for page in json.loads(subprocess.check_output(['gh','api','--paginate','--slurp',endpoint],text=True)) for item in page]
+          repo = 'repos/buster14a/buster'
+          base = 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae'
+          assert get(repo+'/git/ref/heads/main')['object']['sha'] == base
+          pulls = pages(repo+'/pulls?state=open&per_page=100')
+          (out/'open-pr-recheck.json').write_text(json.dumps(pulls,indent=2))
+          (out/'issue-302-comments.json').write_text(json.dumps(pages(repo+'/issues/302/comments?per_page=100'),indent=2))
+          changed = subprocess.check_output(['git','-C','source','diff','--cached','--name-only'],text=True).splitlines()
+          assert len(changed) == 10 and not any(name.startswith('.github/') for name in changed)
+          overlaps = []
+          for pr in pulls:
+              files = pages(f"{repo}/pulls/{pr['number']}/files?per_page=100")
+              (out/f"pr-{pr['number']}-files.json").write_text(json.dumps(files,indent=2))
+              overlap = sorted(set(changed) & {f['filename'] for f in files})
+              if overlap:
+                  overlaps.append(dict(number=pr['number'],sha=pr['head']['sha'],files=overlap))
+          (out/'overlaps.json').write_text(json.dumps(overlaps,indent=2))
+          def post(endpoint,payload):
+              return json.loads(subprocess.check_output(['gh','api','--method','POST',endpoint,'--input','-'],input=json.dumps(payload),text=True))
+          entries = []
+          for name in changed:
+              content = pathlib.Path('source',name).read_bytes()
+              blob = post(repo+'/git/blobs',dict(content=base64.b64encode(content).decode(),encoding='base64'))['sha']
+              assert blob == subprocess.check_output(['git','-C','source','hash-object',name],text=True).strip()
+              entries.append(dict(path=name,mode='100644',type='blob',sha=blob))
+          base_tree = get(repo+'/git/commits/'+base)['tree']['sha']
+          tree = post(repo+'/git/trees',dict(base_tree=base_tree,tree=entries))['sha']
+          assert tree == subprocess.check_output(['git','-C','source','write-tree'],text=True).strip()
+          commit = post(repo+'/git/commits',dict(message='c: avoid unrelated undo scans for fresh file-scope bindings (#302)',tree=tree,parents=[base]))
+          (out/'prepared.json').write_text(json.dumps(dict(base=base,sha=commit['sha'],tree=tree,files=entries),indent=2))
+          print('Prepared immutable source commit:',commit['sha'])
+          print('No repository refs were created or updated.')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a09-objects-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/a09-objects/
+          if-no-files-found: error
+          retention-days: 14
