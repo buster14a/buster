@@ -1055,6 +1055,161 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_prewarm_gang(void* argument)
     compiler_prewarm_observe(state, &state->observations[lane_index()]);
 }
 
+// Exercise the production unit kernel through the existing driver. Objects,
+// diagnostics and source counts must outlive worker scratch and TU teardown.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_results(UnitTestArguments* arguments, Arena* arena, CompilerDriverResult serial, CompilerDriverResult parallel)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, serial.error == parallel.error);
+    BUSTER_STRING_TEST(arguments, serial.diagnostic, parallel.diagnostic);
+    BUSTER_STRING_TEST(arguments, serial.warning, parallel.warning);
+    BUSTER_TEST(arguments, serial.diagnostic_count == parallel.diagnostic_count);
+    for (u32 index = 0; index < BUSTER_MIN(serial.diagnostic_count, parallel.diagnostic_count); index += 1)
+    {
+        CompilerDiagnostic first = serial.diagnostics[index];
+        CompilerDiagnostic second = parallel.diagnostics[index];
+        BUSTER_TEST(arguments, first.severity == second.severity && first.note_count == second.note_count);
+        BUSTER_STRING_TEST(arguments, first.code, second.code);
+        BUSTER_STRING_TEST(arguments, first.symbol, second.symbol);
+        BUSTER_STRING_TEST(arguments, compiler_diagnostic_render(arena, first), compiler_diagnostic_render(arena, second));
+    }
+    BUSTER_TEST(arguments, serial.tokenizer_error_count == parallel.tokenizer_error_count);
+    BUSTER_TEST(arguments, serial.tokenizer_warning_count == parallel.tokenizer_warning_count);
+    BUSTER_TEST(arguments, serial.parser_diagnostic_count == parallel.parser_diagnostic_count);
+    BUSTER_TEST(arguments, serial.analysis_diagnostic_count == parallel.analysis_diagnostic_count);
+    BUSTER_TEST(arguments, serial.source_lexed.files == parallel.source_lexed.files);
+    BUSTER_TEST(arguments, serial.source_lexed.bytes == parallel.source_lexed.bytes);
+    BUSTER_TEST(arguments, serial.source_lexed.tokens == parallel.source_lexed.tokens);
+    BUSTER_TEST(arguments, serial.source_unique.bytes == parallel.source_unique.bytes);
+    BUSTER_TEST(arguments, serial.preprocessed.tokens == parallel.preprocessed.tokens);
+    BUSTER_TEST(arguments, serial.preprocessed.bytes == parallel.preprocessed.bytes);
+    BUSTER_TEST(arguments, serial.preprocessed.spelling_bytes == parallel.preprocessed.spelling_bytes);
+    BUSTER_TEST(arguments, serial.preprocessed.expansions == parallel.preprocessed.expansions);
+    BUSTER_TEST(arguments, serial.preprocessed.definitions == parallel.preprocessed.definitions);
+    BUSTER_TEST(arguments, serial.direct_ssa.functions == parallel.direct_ssa.functions);
+    BUSTER_TEST(arguments, serial.local_promotion.instructions_after == parallel.local_promotion.instructions_after);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-unit-batch-empty"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-unit-batch"), S8(".out"));
+    String8 object_path = buster_test_temporary_path(arena, S8("buster-unit-batch-member"), S8(".o"));
+    String8 archive_path = buster_test_temporary_path(arena, S8("buster-unit-batch-member"), S8(".a"));
+    String8 empty = S8("#warning unit-batch-warning\n");
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(empty)));
+
+    String8 invalid[] = {S8("-fcompile-jobs="), S8("-fcompile-jobs=0"), S8("-fcompile-jobs=-1"),
+                         S8("-fcompile-jobs=4294967296"), S8("-fcompile-jobs=18446744073709551616"), S8("-fcompile-jobs=2x")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        String8 command[] = {invalid[index], input};
+        CompilerDriverInvocation parsed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, parsed.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    }
+    String8 maximum_command[] = {S8("-fcompile-jobs=4294967295"), input};
+    CompilerDriverInvocation maximum = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(maximum_command));
+    BUSTER_TEST(arguments, maximum.error == COMPILER_DRIVER_ERROR_NONE && maximum.compile_jobs == UINT32_MAX);
+    // Respect the enclosing test budget; single-threaded builds exercise the
+    // same test and kernel, with an honestly reported one-worker result.
+    u32 workers = (u32)buster_test_worker_count(BUSTER_MIN((u64)2, (u64)BUSTER_MAX(os_get_logical_thread_count(), (u32)1)));
+    workers = BUSTER_MAX(workers, (u32)1);
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
+#define BUSTER_UNIT_BATCH_ALLOCATOR(name, mode) S8("-fregister-allocator=" name),
+    String8 allocators[] = {BUSTER_CODEGEN_ALLOCATORS(BUSTER_UNIT_BATCH_ALLOCATOR)};
+#undef BUSTER_UNIT_BATCH_ALLOCATOR
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+        {
+            TemporalArena attempt = arena_begin_temporal(arena);
+            String8 command[] = {S8("-target"), targets[target], allocators[mode], S8("-g"), S8("-nostdinc"), S8("-o"), output,
+                                 input, S8("tests/basic_c_constructor_order.c"), input,
+                                 S8("tests/basic_c_constructor_order_second.c"), input};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.compile_jobs == 0);
+            // Reuse the initializer-order fixture rather than introducing a
+            // second corpus. An object and then an archive create serialized
+            // boundaries even with forced -x c language selection.
+            String8 member_command[] = {S8("-target"), targets[target], allocators[mode], S8("-g"), S8("-nostdinc"), S8("-c"),
+                                       S8("-o"), object_path, S8("tests/basic_c_constructor_order_second.c")};
+            CompilerDriverResult member = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(member_command)));
+            BUSTER_TEST_RAW(arguments, member.error == COMPILER_DRIVER_ERROR_NONE, member.diagnostic);
+            ByteSlice member_bytes = file_read(arena, object_path, (FileReadOptions){0});
+            BUSTER_TEST(arguments, member_bytes.length != 0);
+            String8 member_name = S8("member.o");
+            ByteSlice archive = compiler_driver_test_archive(arena, &member_bytes, &member_name, 1);
+            BUSTER_TEST(arguments, file_write(archive_path, archive));
+            for (u32 boundary = 0; boundary < 3; boundary += 1)
+            {
+                if (boundary)
+                {
+                    invocation.input_paths[3] = boundary == 1 ? object_path : archive_path;
+                    invocation.language = COMPILER_DRIVER_LANGUAGE_C;
+                }
+                invocation.compile_jobs = 1;
+                CompilerDriverResult serial = compiler_driver_execute_invocation(arena, invocation);
+                BUSTER_TEST_RAW(arguments, serial.error == COMPILER_DRIVER_ERROR_NONE, serial.diagnostic);
+                BUSTER_TEST(arguments, serial.compilation_workers == 1 && serial.tokenizer_warning_count == 3);
+                ByteSlice original = file_read(arena, output, (FileReadOptions){0});
+                BUSTER_TEST(arguments, original.length != 0);
+                // Grow/reuse a gang, take an odd final batch, then shrink it.
+                // The final serial repetition also catches recycled arenas.
+                u32 repeats[] = {workers, workers, 1};
+                for (u32 repetition = 0; repetition < BUSTER_ARRAY_LENGTH(repeats); repetition += 1)
+                {
+                    invocation.compile_jobs = repeats[repetition];
+                    CompilerDriverResult parallel = compiler_driver_execute_invocation(arena, invocation);
+                    BUSTER_TEST_RAW(arguments, parallel.error == COMPILER_DRIVER_ERROR_NONE, parallel.diagnostic);
+                    BUSTER_TEST(arguments, parallel.compilation_workers == repeats[repetition]);
+                    UnitTestResult equal = compiler_driver_test_unit_results(arguments, arena, serial, parallel);
+                    result.test_count += equal.test_count;
+                    result.succeeded_test_count += equal.succeeded_test_count;
+                    ByteSlice candidate = file_read(arena, output, (FileReadOptions){0});
+                    BUSTER_TEST(arguments, candidate.length == original.length && candidate.length &&
+                                          memory_compare(candidate.pointer, original.pointer, candidate.length));
+                }
+            }
+            scratch_end(attempt);
+        }
+    }
+
+    String8 first_path = buster_test_temporary_path(arena, S8("buster-unit-batch-first"), S8(".c"));
+    String8 later_path = buster_test_temporary_path(arena, S8("buster-unit-batch-later"), S8(".c"));
+    String8 first_source = S8("#warning first-warning\nint broken(void) { return missing_value; }\n");
+    String8 later_source = S8("#warning later-warning\n#error later-error\n");
+    BUSTER_TEST(arguments, file_write(first_path, BUSTER_SLICE_TO_BYTE_SLICE(first_source)));
+    BUSTER_TEST(arguments, file_write(later_path, BUSTER_SLICE_TO_BYTE_SLICE(later_source)));
+    String8 failure_command[] = {S8("-target"), targets[0], S8("-nostdinc"), S8("-o"), output, first_path, later_path, input};
+    CompilerDriverInvocation failure = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(failure_command));
+    String8 sentinel = S8("no output may be published after a failed unit");
+    for (u32 suppressed = 0; suppressed < 2; suppressed += 1)
+    {
+        failure.suppress_diagnostic_records = suppressed != 0;
+        failure.compile_jobs = 1;
+        BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+        CompilerDriverResult serial = compiler_driver_execute_invocation(arena, failure);
+        BUSTER_TEST(arguments, serial.error == COMPILER_DRIVER_ERROR_ANALYSIS);
+        BUSTER_TEST(arguments, serial.warning.length != 0 && serial.tokenizer_warning_count == 1);
+        BUSTER_TEST(arguments, suppressed ? serial.diagnostic_count == 0 : serial.diagnostic_count > 0);
+        failure.compile_jobs = workers;
+        CompilerDriverResult parallel = compiler_driver_execute_invocation(arena, failure);
+        BUSTER_TEST(arguments, parallel.compilation_workers == workers);
+        UnitTestResult equal = compiler_driver_test_unit_results(arguments, arena, serial, parallel);
+        result.test_count += equal.test_count;
+        result.succeeded_test_count += equal.succeeded_test_count;
+        ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, bytes.length == sentinel.length && memory_compare(bytes.pointer, sentinel.pointer, bytes.length));
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_include_population(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1756,6 +1911,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     result.succeeded_test_count += elf_boundaries.succeeded_test_count;
     result.test_count += elf_boundaries.test_count;
 #endif
+
+    UnitTestResult batches = compiler_driver_test_unit_batches(arguments);
+    result.test_count += batches.test_count;
+    result.succeeded_test_count += batches.succeeded_test_count;
 
     // compiler_prewarm() is the contract that lets a gang compile at all: the
     // frontends' remaining first-use tables are written once and read

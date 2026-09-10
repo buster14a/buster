@@ -18,6 +18,9 @@
 // (AGENTS.md). CompilerDriverDiagnosticCollector and the private adapters in
 // driver_diagnostic.c publish stable records into the result arena;
 // compiler_driver_publish_c_diagnostics preserves producer/stage ordering.
+// compiler_driver_unit_lane owns one private TU arena/collector per stable
+// input slot. Opt-in native C link batches publish in input order only after
+// the gang returns; assembly and archive selection remain serial boundaries.
 
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/driver/codegen_configurations.h>
@@ -26,6 +29,9 @@
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/codegen/bootstrap_trace.h>
+#include <buster/lib/compiler/assembly/x86_64_metadata.h>
+#include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/assembly/aarch64_semantics.h>
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/file.h>
 #include <buster/lib/string.h>
@@ -833,6 +839,22 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("-emit-llvm")))
         {
             invocation.emit_llvm_bitcode = true;
+            continue;
+        }
+        String8 compile_jobs_prefix = S8("-fcompile-jobs=");
+        if (string_starts_with_sequence(argument, compile_jobs_prefix))
+        {
+            String8 value = {.pointer = argument.pointer + compile_jobs_prefix.length,
+                             .length = argument.length - compile_jobs_prefix.length};
+            IntegerParsingU64 parsed = string8_parse_u64_decimal(value);
+            if (parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == value.length && parsed.value && parsed.value <= UINT32_MAX)
+            {
+                invocation.compile_jobs = (u32)parsed.value;
+            }
+            else
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("expected a positive 32-bit compile job count: {S8}"), argument);
+            }
             continue;
         }
         if (string_equal(argument, S8("-v")) || string_equal(argument, S8("--verbose")))
@@ -3618,13 +3640,107 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
     return result;
 }
 
+// Full frontend/IR state is retained for at most one worker-sized batch.
+// The result arena owns only compact objects/diagnostics after ordered copy;
+// it never retains another whole-function or whole-TU representation.
+typedef struct CompilerDriverUnit CompilerDriverUnit;
+struct CompilerDriverUnit
+{
+    Arena* arena;
+    CompilerDriverDiagnosticCollector warnings;
+    CompilerDriverResult result;
+};
+
+typedef struct CompilerDriverUnitBatch CompilerDriverUnitBatch;
+struct CompilerDriverUnitBatch
+{
+    CompilerDriverInvocation invocation;
+    CompilerDriverUnit* units;
+    u32 first_input;
+    u32 count;
+    u32 workers;
+};
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_parallel_c_input(CompilerDriverInvocation invocation, String8 path)
+{
+    bool native = invocation.target.cpu_arch == CPU_ARCH_X86_64 || invocation.target.cpu_arch == CPU_ARCH_AARCH64;
+    return native && invocation.action == COMPILER_DRIVER_ACTION_LINK && !invocation.emit_llvm_bitcode &&
+           !invocation.has_gpu_target && !compiler_driver_object_input(path) && !compiler_driver_archive_input(path) &&
+           compiler_driver_c_input(invocation, path) &&
+           !compiler_driver_assembly_input(invocation, path) && !compiler_driver_preprocessed_assembly_input(path);
+}
+
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_unit_worker_limit(CompilerDriverInvocation invocation)
+{
+    u32 result = 1;
+#if !BUSTER_SINGLE_THREADED
+    // An embedding caller's existing gang already owns its parallel budget.
+    // Do not turn each of its invocations into another gang.
+    if (invocation.compile_jobs > 1 && lane_count() == 1)
+    {
+        u32 logical = BUSTER_MAX(os_get_logical_thread_count(), (u32)1);
+        result = BUSTER_MAX((u32)1, BUSTER_MIN(invocation.compile_jobs, BUSTER_MIN(logical, invocation.input_count)));
+    }
+#else
+    BUSTER_UNUSED(invocation);
+#endif
+    return result;
+}
+
+void compiler_parallel_prewarm(void)
+{
+    compiler_prewarm();
+    // A later invocation may change targets while our persistent gang is
+    // parked. Prepare both native families before the first worker exists;
+    // this opt-in cold cost must not leak into ordinary serial compilation.
+    codegen_prewarm_for_target((Target){.cpu_arch = CPU_ARCH_X86_64});
+    buster_x86_metadata_prewarm_all_forms();
+    buster_aarch64_prewarm();
+    buster_aarch64_semantics_prewarm();
+}
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)
+{
+    CompilerDriverUnitBatch* batch = argument;
+    if (lane_index() == 0)
+    {
+        batch->workers = (u32)lane_count();
+    }
+    LaneRange range = lane_range(batch->count);
+    for (u64 index = range.start; index < range.end; index += 1)
+    {
+        CompilerDriverUnit* unit = &batch->units[index];
+        unit->arena = arena_create((ArenaCreation){
+            .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
+            .flags = {.pool_reuse = 1},
+        });
+        if (unit->arena)
+        {
+            unit->warnings = (CompilerDriverDiagnosticCollector){
+                .arena = unit->arena,
+                .suppress_records = batch->invocation.suppress_diagnostic_records,
+            };
+            CompilerDriverInvocation single = batch->invocation;
+            single.input_paths += batch->first_input + index;
+            single.input_count = 1;
+            single.output_path = (String8){0};
+            single.action = COMPILER_DRIVER_ACTION_OBJECT;
+            unit->result = compiler_driver_execute_c_single(unit->arena, single, true, &unit->warnings);
+        }
+        // A failed arena remains a null slot. The caller diagnoses allocation
+        // and all other failures in input order, not worker completion order.
+    }
+}
+
 CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation)
 {
     CompilerDriverDiagnosticCollector warnings = {
         .arena = arena,
         .suppress_records = invocation.suppress_diagnostic_records,
     };
-    CompilerDriverResult result = {0};
+    CompilerDriverResult result = {.compilation_workers = 1};
+    CompilerDriverUnit* unit_tasks = 0;
+    u32 unit_task_count = 0;
     if (!arena)
     {
         result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
@@ -3837,6 +3953,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     ObjectFile* objects = arena_allocate(arena, ObjectFile, object_capacity);
     String8* preprocessed = arena_allocate(arena, String8, invocation.input_count);
     u32 object_count = 0;
+    u32 unit_task_capacity = compiler_driver_unit_worker_limit(invocation);
+    u32 batch_first = 0;
+    u32 batch_end = 0;
+    bool units_prewarmed = false;
     for (u32 input_index = 0; input_index < invocation.input_count; input_index += 1)
     {
         String8 input_path = invocation.input_paths[input_index];
@@ -3899,22 +4019,66 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             single.action = COMPILER_DRIVER_ACTION_OBJECT;
         }
-        Arena* unit_arena = arena_create((ArenaCreation){
-            .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
-            // Per-unit arenas churn once per translation unit (and once per
-            // driver test fixture); reusing the parked mapping keeps its
-            // already-faulted pages instead of paying mmap + first-touch
-            // zeroing + munmap every time. The C pipeline never assumes
-            // zeroed arena memory.
-            .flags = {.pool_reuse = 1},
-        });
+        Arena* unit_arena;
+        CompilerDriverResult unit;
+        CompilerDriverUnit* task = 0;
+        if (compiler_driver_parallel_c_input(invocation, input_path))
+        {
+            if (input_index >= batch_end)
+            {
+                if (!unit_tasks)
+                {
+                    unit_tasks = arena_allocate(arena, CompilerDriverUnit, unit_task_capacity);
+                }
+                batch_first = input_index;
+                unit_task_count = 1;
+                while (unit_task_count < unit_task_capacity && unit_task_count < invocation.input_count - input_index &&
+                       compiler_driver_parallel_c_input(invocation, invocation.input_paths[input_index + unit_task_count]))
+                {
+                    unit_task_count += 1;
+                }
+                batch_end = batch_first + unit_task_count;
+                memset(unit_tasks, 0, sizeof(*unit_tasks) * unit_task_count);
+                if (unit_task_count > 1 && !units_prewarmed)
+                {
+                    compiler_parallel_prewarm();
+                    units_prewarmed = true;
+                }
+                CompilerDriverUnitBatch batch = {
+                    .invocation = invocation, .units = unit_tasks, .first_input = batch_first, .count = unit_task_count,
+                };
+                lane_run(unit_task_count, &compiler_driver_unit_lane, &batch);
+                result.compilation_workers = BUSTER_MAX(result.compilation_workers, batch.workers);
+            }
+            task = &unit_tasks[input_index - batch_first];
+            unit_arena = task->arena;
+            unit = task->result;
+            // Only the ordered prefix is observable. Later completed inputs
+            // are discarded if this input fails, including their warnings.
+            for (u32 index = 0; index < task->warnings.record_count; index += 1)
+            {
+                compiler_driver_collect_diagnostic(&warnings, task->warnings.records[index]);
+            }
+            for (CompilerDriverWarningChunk* chunk = task->warnings.first; chunk; chunk = chunk->next)
+            {
+                compiler_driver_warning_append_text(&warnings, string_duplicate_arena(arena, chunk->text, false));
+            }
+        }
+        else
+        {
+            unit_arena = arena_create((ArenaCreation){
+                .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
+                .flags = {.pool_reuse = 1},
+            });
+            unit = unit_arena ? compiler_driver_execute_c_single(unit_arena, single, suppress_object_write, &warnings)
+                              : (CompilerDriverResult){0};
+        }
         if (!unit_arena)
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
             result.diagnostic = S8("could not allocate C translation-unit arena");
             goto finish;
         }
-        CompilerDriverResult unit = compiler_driver_execute_c_single(unit_arena, single, suppress_object_write, &warnings);
         result.tokenizer_error_count += unit.tokenizer_error_count;
         result.tokenizer_warning_count += unit.tokenizer_warning_count;
         result.parser_diagnostic_count += unit.parser_diagnostic_count;
@@ -3984,6 +4148,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.error = unit.error;
             result.codegen_error = unit.codegen_error;
             result.object_error = unit.object_error;
+            if (task)
+            {
+                task->arena = 0;
+            }
             arena_destroy(unit_arena, 1);
             goto finish;
         }
@@ -4049,6 +4217,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         if (unit.output.length)
         {
             preprocessed[input_index] = string_duplicate_arena(arena, unit.output, false);
+        }
+        if (task)
+        {
+            task->arena = 0;
         }
         arena_destroy(unit_arena, 1);
     }
@@ -4190,6 +4362,17 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             string_format(arena, S8("native C link failed with {S8}: {S8}"), link_error_name(result.native_link.error), result.native_link.symbol);
     }
 finish:
+    // Every lane has joined before this unwind. A failed input can leave
+    // later slots populated; none may outlive the driver invocation.
+    for (u32 index = 0; index < unit_task_count; index += 1)
+    {
+        if (unit_tasks[index].arena)
+        {
+            arena_destroy(unit_tasks[index].arena, 1);
+            unit_tasks[index].arena = 0;
+        }
+    }
+    result.compilation_workers = BUSTER_MAX(result.compilation_workers, (u32)1);
     if (result.error != COMPILER_DRIVER_ERROR_NONE && !warnings.suppress_records)
     {
         bool has_error = false;

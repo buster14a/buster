@@ -152,9 +152,10 @@ unity trees use one job. Clang tests then run concurrently in the same bounded
 pool, with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work
 must honor that limit. Application builds are multithreaded by default;
 `./build.sh generate -DBUSTER_SINGLE_THREADED=ON` is the explicit serial
-fallback. A single compile is serial throughout: the compiler library starts no
-lanes of its own, so build-level concurrency is the only thing that has to be
-budgeted. Trees are declared longest-first — sanitized Debug,
+fallback. Compiler invocations default to one worker. The opt-in
+`ide cc -fcompile-jobs=N` native C link path also owns a bounded TU gang;
+callers enabling it must budget compiler workers together with build-level
+concurrency. It does not infer available RAM from virtual arena reservations. Trees are declared longest-first — sanitized Debug,
 sanitized Release, the unity Release tree that also runs `clang_analyze`, trees
 covering two configurations, then the rest — because Ninja admits ready edges
 from a shared pool in declaration order and a fresh CI checkout has no

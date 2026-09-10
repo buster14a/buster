@@ -12044,7 +12044,8 @@ bool buster_x86_metadata_fill_nops(u8* output, u64 count)
 
 // The complete walk: every form normalized, pattern-parsed, operand-viewed and
 // fact-filled, for a caller about to run a gang whose lanes may query any
-// form -- the test harness.  A compile never needs it.
+// form -- the test harness and opt-in parallel native C driver. Serial
+// compilation still prepares only the forms it reaches.
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_all_forms_prepared;
 void buster_x86_metadata_prewarm_all_forms(void)
 {

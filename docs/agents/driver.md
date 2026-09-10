@@ -2,6 +2,43 @@
 
 [Agent instructions](../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+## Opt-in native translation-unit lanes
+
+`-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
+zero in the invocation API) means one worker. Only consecutive native C
+inputs in a link invocation are batched; preprocessing, syntax-only, `-S`,
+`-c`, LLVM/GPU/Wasm/eBPF paths and single-input fast paths retain their
+existing execution. Objects, archives and assembly are serial boundaries,
+even when `-x c` is present. Worker count is clamped to logical CPUs, input
+count and one inside an embedding caller's multi-lane gang.
+
+Each cohort contains at most one full TU per worker. `lane_range` gives
+stable input slots, the existing persistent gang is reused, and each worker
+uses a private TU arena and diagnostic collector. No worker writes an output
+file. The caller deep-copies compact objects and diagnostics in input order,
+retains constructor priorities, and uses the existing ordered linker. The
+first failing input wins; later completed results and warnings are discarded
+and all cohort arenas are released. The one-worker and
+`BUSTER_SINGLE_THREADED` builds run the same unit kernel.
+
+`compiler_parallel_prewarm()` prepares both native target families, including
+all x86 per-form caches and exact plans, before the first persistent worker.
+Both are needed because a later invocation may switch architectures while
+workers are parked. Embedding callers must call it before starting their own
+gang. The lighter `compiler_prewarm()` remains the serial frontend/common-table
+entry. The full cold prewarm is an opt-in cost, not a new serial startup floor.
+`CompilerDriverResult.compilation_workers` reports the largest active cohort
+(or one); it is not a physical-core or memory measurement.
+
+This is a bounded feature, **not an accepted throughput improvement**. The
+default stays one pending paired representative measurements. A large input
+can still dominate a cohort; no adaptive grain, dynamic claim queue, cgroup
+admission or physical-memory estimate is introduced. Full-TU retention is
+bounded by the worker request, but compact objects still accumulate for the
+link as before. Function compilation remains serial within each TU, preserving
+signature/source-cursor and inline-assembly ordering. Existing SIMD kernels
+inside each lane are unchanged.
+
 The Clang-like `ide cc` driver accepts `-march=<model>` and
 `-mcpu=<model>` (or their separated forms), ordered target-feature overrides
 through `-mattr=+feature,-feature`, and x86 assembly dialect selection through
