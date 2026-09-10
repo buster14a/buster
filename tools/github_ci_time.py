@@ -22,6 +22,11 @@ PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS x86-64", "macOS AArch64",
              "Windows x86-64", "Windows AArch64")
 MOBILE = ("Android x86-64", "iOS x86-64", "iOS AArch64")
 SHARDED_JOBS = PLATFORMS + MOBILE + ("Workflow lint", "CI complete")
+NATIVE = tuple(name + " native" for name in PLATFORMS if not name.startswith("Windows"))
+NATIVE_SHARDED_JOBS = PLATFORMS + NATIVE + MOBILE + ("Workflow lint", "CI complete")
+# Select the expected layout independently of the jobs returned by GitHub.
+# Otherwise four missing native shards could masquerade as an older complete CI.
+LAYOUTS = {"legacy": PLATFORMS, "desktop": SHARDED_JOBS, "native": NATIVE_SHARDED_JOBS}
 RUN_FIELDS = ("id", "head_sha", "head_branch", "event", "path", "status", "conclusion",
               "run_attempt", "created_at", "run_started_at", "html_url")
 JOB_FIELDS = ("id", "name", "run_attempt", "status", "conclusion", "started_at", "completed_at", "labels")
@@ -35,20 +40,22 @@ def timestamp(value):
     return result
 
 
-def measure(run):
-    """A successful six-platform first attempt, or an explicit exclusion reason."""
+def measure(run, layout="native"):
+    """A successful first attempt of the requested layout, or an exclusion."""
+    if layout not in LAYOUTS:
+        raise ValueError(f"Unknown CI layout: {layout}")
     reason = None
     result = None
     jobs = run.get("jobs", [])
     names = sorted(job.get("name", "") for job in jobs)
-    sharded = names == sorted(SHARDED_JOBS)
+    sharded = layout != "legacy"
     if run.get("status") != "completed":
         reason = "not-completed"
     elif run.get("conclusion") != "success":
         reason = run.get("conclusion") or "no-conclusion"
     elif run.get("run_attempt") != 1:
         reason = "rerun"
-    elif names != sorted(PLATFORMS) and not sharded:
+    elif names != sorted(LAYOUTS[layout]):
         reason = "incomplete-or-different-matrix"
     elif not run.get("workflow_blob_sha"):
         reason = "unknown-workflow-revision"
@@ -63,13 +70,17 @@ def measure(run):
             if name in PLATFORMS:
                 required.add("Combination matrix (Windows)" if name.startswith("Windows")
                              else "Combination matrix (Linux, macOS)")
-                if not name.startswith("Windows"):
+                if not name.startswith("Windows") and layout != "native":
                     required.add("Execution-mode matrix")
+                    if layout == "desktop":
+                        required.add("Native configuration differential matrix")
                 if not sharded:
                     if name.startswith("macOS"):
                         required.add("Test (iOS simulator)")
                     if name == "Linux x86-64":
                         required.add("Test (Android)")
+            elif name in NATIVE:
+                required.update(("Execution-mode matrix", "Native configuration differential matrix"))
             elif name.startswith("iOS"):
                 required.add("Test (iOS simulator)")
             elif name.startswith("Android"):
@@ -107,7 +118,7 @@ def measure(run):
     return result, reason
 
 
-def summarize(data):
+def summarize(data, layout="native"):
     cohorts = defaultdict(list)
     excluded = Counter()
     seen = set()
@@ -116,7 +127,7 @@ def summarize(data):
         if identity in seen:
             raise ValueError("Duplicate run/attempt observations would bias the median")
         seen.add(identity)
-        sample, reason = measure(run)
+        sample, reason = measure(run, layout=layout)
         if reason:
             excluded[reason] += 1
         else:
@@ -128,7 +139,7 @@ def summarize(data):
                      "medians": {key: statistics.median(sample[key] for sample in samples)
                                  for key in ("elapsed_seconds", "execution_span_seconds", "initial_queue_seconds", "runner_seconds")},
                      "samples": samples})
-    return {"schema": 1, "cohorts": rows, "excluded": dict(excluded),
+    return {"schema": 1, "layout": layout, "cohorts": rows, "excluded": dict(excluded),
             "notes": ["Elapsed = workflow creation to last required job completion; queueing is included.",
                       "Execution span still includes any staggered runner starts; runner_seconds sums active job intervals.",
                       "Cancelled, failed, partial, rerun and differently configured runs are never pooled into a speedup.",
@@ -200,6 +211,9 @@ def main():
     gather.add_argument("--output", required=True)
     report = sub.add_parser("summarize")
     report.add_argument("input")
+    report.add_argument("--layout", choices=tuple(LAYOUTS), default="native",
+                        help="Expected layout: native (15 jobs), desktop (11), or legacy (6). "
+                             "Never inferred from a potentially incomplete job list.")
     report.add_argument("--output")
     args = parser.parse_args()
     status = 0
@@ -209,7 +223,7 @@ def main():
                 raise ValueError("Use limit 1..100 and max-pages 1..20")
             data = collect(args)
         else:
-            data = summarize(json.loads(Path(args.input).read_text(encoding="utf-8")))
+            data = summarize(json.loads(Path(args.input).read_text(encoding="utf-8")), layout=args.layout)
         text = json.dumps(data, indent=2) + "\n"
         if args.output:
             output = Path(args.output)
