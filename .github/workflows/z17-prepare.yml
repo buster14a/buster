@@ -1,0 +1,207 @@
+name: Z17 candidate preparation and validation
+
+on:
+  push:
+    branches: [astra/z17-source-evidence-20260909]
+    paths: [.github/workflows/z17-prepare.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: read
+      issues: read
+    outputs:
+      source: ${{ steps.prepare.outputs.source }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          persist-credentials: false
+      - name: Check immutable patch, inventory overlaps, create source objects only
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/z17-preparation"
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, pathlib, subprocess, urllib.request
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'z17-preparation'
+          api_root = 'https://api.github.com/repos/buster14a/buster/'
+          def api(path, data=None):
+              request = urllib.request.Request(api_root + path, data=None if data is None else json.dumps(data).encode(), headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          def pages(path):
+              result = []
+              for page in range(1, 100):
+                  items = api(path + ('&' if '?' in path else '?') + 'per_page=100&page=' + str(page))
+                  result.extend(items)
+                  if not items:
+                      return result
+              raise RuntimeError('Pagination did not terminate')
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          base = 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae'
+          assert git('rev-parse', 'HEAD') == base
+          assert api('branches/main')['commit']['sha'] == base, 'main changed'
+          packed = base64.b64decode(api('git/blobs/9e5e9f9b092fbfbb98951b096f8ab0be5aa7c3c9')['content'])
+          assert hashlib.sha256(packed).hexdigest() == '4e391956c64c8e1e36ecf9fbd0eea0db65ee47e61805af65225f5e96b80641cc'
+          patch = lzma.decompress(packed)
+          assert hashlib.sha256(patch).hexdigest() == '55e474bb350e1d8faeb2f4a288c058ec9731917bc2ee5cdbef9e6954875a39ae'
+          patch_path = root / 'source.patch'
+          patch_path.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', str(patch_path)], check=True)
+          subprocess.run(['git', 'apply', str(patch_path)], check=True)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          subprocess.run(['git', 'add', '-A'], check=True)
+          expected_tree = '448110eaaea21f8cc29870b6ecdd8ea3631d9536'
+          assert git('write-tree') == expected_tree, 'candidate tree mismatch'
+          paths = git('diff', '--cached', '--name-only').splitlines()
+          assert len(paths) == 12 and all(not p.startswith('.github/') for p in paths)
+          inventory = []
+          for pr in pages('pulls?state=open&sort=created&direction=asc'):
+              number = pr['number']
+              files = pages(f'pulls/{number}/files')
+              overlap = [f for f in files if f['filename'] in paths]
+              entry = {'number': number, 'title': pr['title'], 'sha': pr['head']['sha'], 'files': [f['filename'] for f in files], 'overlap': overlap}
+              if overlap:
+                  entry['comments'] = pages(f'issues/{number}/comments')
+                  entry['reviews'] = pages(f'pulls/{number}/reviews')
+                  entry['review_comments'] = pages(f'pulls/{number}/comments')
+              inventory.append(entry)
+          (root / 'open-pr-inventory.json').write_text(json.dumps(inventory, indent=2))
+          (root / 'open-issues.json').write_text(json.dumps(pages('issues?state=open&sort=created&direction=asc'), indent=2))
+          (root / 'issue-53-comments.json').write_text(json.dumps(pages('issues/53/comments'), indent=2))
+          print('OPEN_PR_INVENTORY', [(pr['number'], [f['filename'] for f in pr['overlap']]) for pr in inventory])
+          entries = []
+          for path in paths:
+              data = pathlib.Path(path).read_bytes()
+              sha = api('git/blobs', {'content': base64.b64encode(data).decode(), 'encoding': 'base64'})['sha']
+              assert sha == git('hash-object', path)
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': sha})
+          tree = api('git/trees', {'base_tree': '093b374996f3aecca200fe2968539554fc67bf55', 'tree': entries})['sha']
+          assert tree == expected_tree
+          assert api('branches/main')['commit']['sha'] == base, 'main changed before object creation'
+          commit = api('git/commits', {'message': 'driver: add opt-in bounded persistent translation-unit lanes (#53)', 'tree': tree, 'parents': [base]})['sha']
+          manifest = {'source': commit, 'base': base, 'tree': tree, 'files': entries, 'patch_sha256': hashlib.sha256(patch).hexdigest(), 'refs_updated': False}
+          (root / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('source=' + commit + '\n')
+          print('Z17_SOURCE_SHA=' + commit)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('Created source objects only; no branch/ref changed. Source `' + commit + '`, tree `' + tree + '`. Preparation is not test acceptance.\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: z17-preparation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/z17-preparation/
+          if-no-files-found: error
+          retention-days: 7
+
+  validate:
+    needs: prepare
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [release, sanitize, single-threaded, thread-sanitize]
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '2'
+      BUSTER_MATRIX_THREADS: '2'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+      - name: Record actual source and host
+        shell: bash
+        env:
+          EXPECTED_SOURCE: ${{ needs.prepare.outputs.source }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          mkdir -p "$RUNNER_TEMP/z17-validation"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/z17-validation/source.sha"
+          uname -a
+          lscpu
+          free -h
+          clang --version
+          gcc --version
+      - name: Bootstrap, configure and run the full registered suite
+        shell: bash
+        env:
+          CONFIGURATION: ${{ matrix.configuration }}
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/z17-validation/full-suite.log") 2>&1
+          set -x
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          config=Release
+          extra=(-DBUSTER_UNITY_BUILD=OFF)
+          sanitize=()
+          case "$CONFIGURATION" in
+            sanitize) config=Debug; sanitize=(--sanitize) ;;
+            single-threaded) extra+=(-DBUSTER_SINGLE_THREADED=ON) ;;
+            thread-sanitize) config=Debug; extra+=('-DCMAKE_C_FLAGS=-fsanitize=thread' '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread') ;;
+          esac
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT "${sanitize[@]}" -- "${extra[@]}"
+          "$RUNNER_TEMP/buster-build" build --config "$config" -t test_all -- -j1
+      - name: Cold-process lane path, exact output and independent runtime controls
+        if: ${{ matrix.configuration == 'release' || matrix.configuration == 'single-threaded' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/z17-validation/cold-process.log") 2>&1
+          set -x
+          evidence="$RUNNER_TEMP/z17-validation"
+          output="$evidence/constructor"
+          for mode in none mir-stack fast quality; do
+            build/Release/ide cc -fcompile-jobs=1 -fregister-allocator="$mode" -g -nostdinc -o "$output" tests/basic_c_constructor_order.c tests/basic_c_constructor_order_second.c
+            cp "$output" "$evidence/serial-$mode"
+            "$output"
+            for jobs in 2 4 1; do
+              build/Release/ide cc -fcompile-jobs="$jobs" -fregister-allocator="$mode" -g -nostdinc -o "$output" tests/basic_c_constructor_order.c tests/basic_c_constructor_order_second.c
+              cmp "$output" "$evidence/serial-$mode"
+              "$output"
+            done
+          done
+          for cc in clang gcc; do
+            for level in 0 2; do
+              "$cc" -std=gnu11 -O"$level" -fwrapv -fno-strict-aliasing -funsigned-char tests/basic_c_constructor_order.c tests/basic_c_constructor_order_second.c -o "$evidence/$cc-$level"
+              "$evidence/$cc-$level"
+            done
+          done
+          sha256sum "$evidence"/serial-* tests/basic_c_constructor_order.c tests/basic_c_constructor_order_second.c
+      - name: Existing complete modes and self-host gates
+        if: ${{ matrix.configuration == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/z17-validation/gates.log") 2>&1
+          set -x
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release
+          "$RUNNER_TEMP/buster-build" self_host_audit_self_test
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release
+          "$RUNNER_TEMP/buster-build" test_self_host_audit --config Release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: z17-validation-${{ matrix.configuration }}-${{ needs.prepare.outputs.source }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/z17-validation/
+            build/self-host-audit/
+          if-no-files-found: error
+          retention-days: 7
