@@ -7815,15 +7815,24 @@ BUSTER_C_INTERNAL bool c_ir_integer_literal_fits(CIntegerIrBuilder* builder, CTy
 
 BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder, String8 spelling, u64 value)
 {
+    IrTypeId result = IR_TYPE_ID_INVALID;
+    bool suffix_valid = true;
     bool decimal = !spelling.length || spelling.pointer[0] != '0';
     bool is_unsigned = false;
     u32 long_count = 0;
     u64 suffix_start = spelling.length;
-    bool msvc_i64_suffix = spelling.length >= 3 && (spelling.pointer[spelling.length - 3] == 'i' || spelling.pointer[spelling.length - 3] == 'I') &&
-                             spelling.pointer[spelling.length - 2] == '6' && spelling.pointer[spelling.length - 1] == '4';
-    if (msvc_i64_suffix)
+    u32 msvc_width = 0;
+    for (u32 suffix_length = 2; !msvc_width && suffix_length <= 3 && suffix_length <= spelling.length; suffix_length += 1)
     {
-        suffix_start = spelling.length - 3;
+        u64 candidate_start = spelling.length - suffix_length;
+        msvc_width = c_integer_msvc_suffix_width((String8){.pointer = spelling.pointer + candidate_start, .length = suffix_length});
+        if (msvc_width)
+        {
+            suffix_start = candidate_start;
+        }
+    }
+    if (msvc_width)
+    {
         if (suffix_start && (spelling.pointer[suffix_start - 1] == 'u' || spelling.pointer[suffix_start - 1] == 'U'))
         {
             is_unsigned = true;
@@ -7831,7 +7840,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder,
         }
         long_count = 2;
     }
-    while (!msvc_i64_suffix && suffix_start)
+    while (!msvc_width && suffix_start)
     {
         u8 byte = spelling.pointer[suffix_start - 1];
         if (byte != 'u' && byte != 'U' && byte != 'l' && byte != 'L')
@@ -7840,14 +7849,14 @@ BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder,
         }
         suffix_start -= 1;
     }
-    for (u64 index = suffix_start; !msvc_i64_suffix && index < spelling.length;)
+    for (u64 index = suffix_start; suffix_valid && !msvc_width && index < spelling.length;)
     {
         u8 byte = spelling.pointer[index];
         if (byte == 'u' || byte == 'U')
         {
             if (is_unsigned)
             {
-                return IR_TYPE_ID_INVALID;
+                suffix_valid = false;
             }
             is_unsigned = true;
             index += 1;
@@ -7857,7 +7866,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder,
             u32 count = index + 1 < spelling.length && (spelling.pointer[index + 1] == 'l' || spelling.pointer[index + 1] == 'L') ? 2 : 1;
             if (long_count || count > 2)
             {
-                return IR_TYPE_ID_INVALID;
+                suffix_valid = false;
             }
             long_count = count;
             index += count;
@@ -7866,69 +7875,78 @@ BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder,
     CTypeKind candidates[6] = {0};
     u32 candidate_count = 0;
 #define C_INTEGER_LITERAL_CANDIDATE(kind) candidates[candidate_count++] = (kind)
-    if (!long_count && !is_unsigned)
+    if (suffix_valid)
     {
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_INT);
-        if (!decimal)
+        if (msvc_width && msvc_width < 64)
+        {
+            CTypeKind signed_kind = msvc_width == 8 ? C_TYPE_SIGNED_CHAR : msvc_width == 16 ? C_TYPE_SHORT : C_TYPE_INT;
+            CTypeKind unsigned_kind = msvc_width == 8 ? C_TYPE_UNSIGNED_CHAR : msvc_width == 16 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_INT;
+            C_INTEGER_LITERAL_CANDIDATE(is_unsigned ? unsigned_kind : signed_kind);
+        }
+        else if (!long_count && !is_unsigned)
+        {
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_INT);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+            }
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+            }
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+            }
+        }
+        else if (!long_count)
         {
             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
         }
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
-        if (!decimal)
+        else if (long_count == 1 && !is_unsigned)
+        {
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+            }
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+            }
+        }
+        else if (long_count == 1)
         {
             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
         }
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
-        if (!decimal)
+        else if (!is_unsigned)
+        {
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+            }
+        }
+        else
         {
             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
         }
-    }
-    else if (!long_count)
-    {
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
-    }
-    else if (long_count == 1 && !is_unsigned)
-    {
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
-        if (!decimal)
-        {
-            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
-        }
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
-        if (!decimal)
-        {
-            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
-        }
-    }
-    else if (long_count == 1)
-    {
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
-    }
-    else if (!is_unsigned)
-    {
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
-        if (!decimal)
-        {
-            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
-        }
-    }
-    else
-    {
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
     }
 #undef C_INTEGER_LITERAL_CANDIDATE
-    for (u32 index = 0; index < candidate_count; index += 1)
+    for (u32 index = 0; result.value == IR_ID_UNDERLYING_INVALID && index < candidate_count; index += 1)
     {
         if (c_ir_integer_literal_fits(builder, candidates[index], value))
         {
-            return builder->scalar_types[candidates[index]];
+            result = builder->scalar_types[candidates[index]];
         }
     }
-    return IR_TYPE_ID_INVALID;
+    return result;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_integer(CIntegerIrBuilder* builder, CToken token)

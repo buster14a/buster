@@ -4672,6 +4672,41 @@ BUSTER_C_SHARED bool c_number_is_float(String8 spelling)
     return floating;
 }
 
+// Microsoft SDK limits use i8/i16/i32 as well as i64. Keep admission and
+// the lowerer's fixed-width type choice on one bounded suffix decoder.
+BUSTER_C_SHARED u32 c_integer_msvc_suffix_width(String8 suffix)
+{
+    u32 width = 0;
+    u64 index = suffix.length && (suffix.pointer[0] == 'u' || suffix.pointer[0] == 'U');
+    if (index < suffix.length && (suffix.pointer[index] == 'i' || suffix.pointer[index] == 'I'))
+    {
+        index += 1;
+        u64 digits = suffix.length - index;
+        if (digits == 1 && suffix.pointer[index] == '8')
+        {
+            width = 8;
+        }
+        else if (digits == 2)
+        {
+            u8 first = suffix.pointer[index];
+            u8 second = suffix.pointer[index + 1];
+            if (first == '1' && second == '6')
+            {
+                width = 16;
+            }
+            else if (first == '3' && second == '2')
+            {
+                width = 32;
+            }
+            else if (first == '6' && second == '4')
+            {
+                width = 64;
+            }
+        }
+    }
+    return width;
+}
+
 BUSTER_C_INTERNAL bool c_integer_suffix_valid(String8 suffix)
 {
     bool valid = !suffix.length;
@@ -4679,11 +4714,7 @@ BUSTER_C_INTERNAL bool c_integer_suffix_valid(String8 suffix)
     {
         bool first_unsigned = suffix.pointer[0] == 'u' || suffix.pointer[0] == 'U';
         bool first_long = suffix.pointer[0] == 'l' || suffix.pointer[0] == 'L';
-        bool msvc_i64 = suffix.length == 3 && (suffix.pointer[0] == 'i' || suffix.pointer[0] == 'I') &&
-                        suffix.pointer[1] == '6' && suffix.pointer[2] == '4';
-        bool msvc_ui64 = suffix.length == 4 && first_unsigned && (suffix.pointer[1] == 'i' || suffix.pointer[1] == 'I') &&
-                         suffix.pointer[2] == '6' && suffix.pointer[3] == '4';
-        if (msvc_i64 || msvc_ui64)
+        if (c_integer_msvc_suffix_width(suffix))
         {
             valid = true;
         }

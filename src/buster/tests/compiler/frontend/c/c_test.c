@@ -14148,6 +14148,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
         S8(""), S8("u"), S8("U"), S8("l"), S8("L"), S8("ll"), S8("LL"),
         S8("ul"), S8("uL"), S8("Ul"), S8("UL"), S8("lu"), S8("lU"), S8("Lu"), S8("LU"),
         S8("ull"), S8("uLL"), S8("Ull"), S8("ULL"), S8("llu"), S8("llU"), S8("LLu"), S8("LLU"),
+        S8("i8"), S8("I8"), S8("ui8"), S8("uI8"), S8("Ui8"), S8("UI8"),
+        S8("i16"), S8("I16"), S8("ui16"), S8("uI16"), S8("Ui16"), S8("UI16"),
+        S8("i32"), S8("I32"), S8("ui32"), S8("uI32"), S8("Ui32"), S8("UI32"),
         S8("i64"), S8("I64"), S8("ui64"), S8("uI64"), S8("Ui64"), S8("UI64"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(suffixes); index += 1)
@@ -14162,7 +14165,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
     String8 invalid[] = {
         S8(""), S8("09"), S8("08u"), S8("0b2"), S8("0b102"), S8("0x"), S8("0Xg"), S8("0b"),
         S8("1lL"), S8("1Ll"), S8("1uu"), S8("1UU"), S8("1lul"), S8("1lll"), S8("1ulL"),
-        S8("1i32"), S8("1i64u"), S8("1z"), S8("1xyz"),
+        S8("1i128"), S8("1i7"), S8("1i08"), S8("1ui8u"), S8("1i64u"), S8("1z"), S8("1xyz"),
         S8("18446744073709551616ULL"), S8("02000000000000000000000ULL"), S8("0x10000000000000000ULL"),
         S8("0b10000000000000000000000000000000000000000000000000000000000000000ULL"),
         S8("99999999999999999999999999999999999999"),
@@ -14246,6 +14249,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestA
                             "#define JOIN(a,b) a ## b\n"
                             "#if 0\nunsigned bad = 09;\n#endif\n"
                             "#if 077 != 63 || 0xffffffffffffffffULL != 18446744073709551615ULL\n#error values\n#endif\n"
+                            "_Static_assert(sizeof(1i8) == 1 && sizeof(1ui8) == 1, \"i8 width\");\n"
+                            "_Static_assert(sizeof(1i16) == 2 && sizeof(1ui16) == 2, \"i16 width\");\n"
+                            "_Static_assert(sizeof(1i32) == 4 && sizeof(1ui32) == 4, \"i32 width\");\n"
+                            "_Static_assert(sizeof(1i64) == 8 && sizeof(1ui64) == 8, \"i64 width\");\n"
+                            "_Static_assert(0xffui8 == 255 && 0xffffui16 == 65535 && 0xffffffffui32 == 4294967295u, \"SDK limits\");\n"
                             "unsigned long long maximum = JOIN(18446744073709551615, ULL);\n"
                             "const char *text = STR(09);\n"
                             "int test(void) { return sizeof(09.0) != sizeof(double) || maximum != 0xffffffffffffffffULL; }\n");

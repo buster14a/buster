@@ -105,9 +105,9 @@ independent legacy mutable-register and pressure-census contracts.
 - `c_conditional_number` admits the complete bounded integer spelling, checks
   overflow before accumulation, and leaves its output unchanged on failure.
   Ordinary constants and the x87 initializer folder share it; do not restore a
-  second integer parser. U/L/LL (with same-case LL), the existing MS i64 suffixes,
+  second integer parser. U/L/LL (with same-case LL), the MS i8/i16/i32/i64 suffixes (including unsigned forms),
   binary digits and between-digit separators retain their existing admission
-  policy. This does not add C23 bit-precise suffixes or change type selection.
+  policy. Fixed-width Microsoft suffixes retain their signed/unsigned literal type, including the Windows SDK limits. This does not add C23 bit-precise suffixes.
   The syntax pass validates integer tokens in its existing declaration/body
   walks, including unused functions and unevaluated operands. Inactive macro
   definitions and stringized tokens are not C integer tokens and remain valid.
