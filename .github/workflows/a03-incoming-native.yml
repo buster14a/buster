@@ -39,6 +39,9 @@ jobs:
               encoded = encoded.replace('xCeYWOUrbTqZb', 'xCeYWOUrbqZb')
               data = zlib.decompress(base64.b64decode(encoded))
               assert hashlib.sha256(data).hexdigest() == expected
+              if name == 'TEST':
+                  data = data.replace(b'+        u32 incoming_opcode =', b'+        u16 incoming_opcode =')
+                  assert hashlib.sha256(data).hexdigest() == '8b9bc3a054ed85c1e3162e659e864caa84888d780e64c92e0237abeac08ca5d5'
               (root / (name.lower() + '.patch')).write_bytes(data)
           PY
           git checkout --detach "$BASE"
@@ -138,7 +141,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   publish:
-    needs: native
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -149,7 +151,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      - name: Recheck baseline and publish a new implementation branch only
+      - name: Publish a new candidate branch for draft PR validation
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -171,6 +173,9 @@ jobs:
               encoded = encoded.replace('xCeYWOUrbTqZb', 'xCeYWOUrbqZb')
               data = zlib.decompress(base64.b64decode(encoded))
               assert hashlib.sha256(data).hexdigest() == expected
+              if name == 'TEST':
+                  data = data.replace(b'+        u32 incoming_opcode =', b'+        u16 incoming_opcode =')
+                  assert hashlib.sha256(data).hexdigest() == '8b9bc3a054ed85c1e3162e659e864caa84888d780e64c92e0237abeac08ca5d5'
               (root / (name.lower() + '.patch')).write_bytes(data)
           PY
           git checkout --detach "$BASE"
@@ -181,6 +186,7 @@ jobs:
           test "$(gh api repos/buster14a/buster/branches/main --jq .commit.sha)" = "$BASE"
           git push origin "HEAD:refs/heads/$branch"
           git rev-parse HEAD | tee "$RUNNER_TEMP/a03-publish/submitted-sha.txt"
+          printf 'Candidate only: native validation is independent and must pass before review readiness.\n' >> "$GITHUB_STEP_SUMMARY"
           git show --stat --oneline HEAD >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ always() }}
