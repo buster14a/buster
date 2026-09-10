@@ -1,0 +1,99 @@
+name: Z10 AArch64-target paired throughput
+on:
+  push:
+    branches: [astra/z10-transport-20260909]
+    paths: [.github/workflows/z10-aarch64-throughput.yml]
+permissions:
+  contents: read
+jobs:
+  paired:
+    if: ${{ vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 4168746f9a1ec2315a68c5ff0155279178951d17
+          path: candidate
+          persist-credentials: false
+      - name: Record immutable subjects and host provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          test "$(git -C baseline rev-parse HEAD)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          test "$(git -C candidate rev-parse HEAD)" = 4168746f9a1ec2315a68c5ff0155279178951d17
+          {
+            git -C baseline rev-parse HEAD
+            git -C candidate rev-parse HEAD
+            uname -a
+            clang --version
+            lscpu
+            taskset -pc $$
+            for file in /sys/devices/system/cpu/smt/active /sys/devices/system/cpu/smt/control /proc/sys/kernel/perf_event_paranoid; do
+              if test -r "$file"; then printf '%s: ' "$file"; cat "$file"; else printf '%s: unavailable\n' "$file"; fi
+            done
+          } > evidence/provenance.txt
+          lscpu -J > evidence/lscpu.json
+      - name: Build identical-policy trusted compilers sequentially
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          cd candidate
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/build
+          DRIVER="$PWD/build/build"
+          for subject in baseline candidate; do
+            cd "$ROOT/$subject"
+            "$DRIVER" generate --build-directory build/throughput-ci-compiler --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF -DCMAKE_LINKER_TYPE=DEFAULT
+            "$DRIVER" build --build-directory build/throughput-ci-compiler --config Release -t ide -- -j2
+          done
+          cd "$ROOT"
+          sha256sum baseline/build/throughput-ci-compiler/Release/ide candidate/build/throughput-ci-compiler/Release/ide > evidence/compiler-sha256.txt
+          stat --printf='%n %s bytes\n' baseline/build/throughput-ci-compiler/Release/ide candidate/build/throughput-ci-compiler/Release/ide > evidence/compiler-sizes.txt
+      - name: Paired end-to-end AArch64 compilation with exact output check
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/build bench_throughput self-test
+          ./build/build bench_throughput run \
+            --baseline "$GITHUB_WORKSPACE/baseline/build/throughput-ci-compiler/Release/ide" \
+            --candidate "$GITHUB_WORKSPACE/candidate/build/throughput-ci-compiler/Release/ide" \
+            --baseline-id ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae \
+            --candidate-id 4168746f9a1ec2315a68c5ff0155279178951d17 \
+            --output build/z10-aarch64-results --profile ci --mode all \
+            --pairs 20 --warmups 2 --timeout 120 --cpu auto --pmu \
+            --flag -target --flag aarch64-unknown-linux-gnu --require-identical-output
+      - name: Publish measured summary or explicit incomplete status
+        if: always()
+        shell: bash
+        run: |
+          if test -f candidate/build/z10-aarch64-results/summary.md; then
+            cat candidate/build/z10-aarch64-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'AArch64-target comparison incomplete; inspect retained logs. No speedup or physical Zen 5 evidence is established.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: z10-aarch64-throughput-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            evidence/
+            candidate/build/z10-aarch64-results/
+            candidate/build/throughput-tool-tests/
+            candidate/build/throughput-ci-compiler/CMakeCache.txt
+            candidate/build/throughput-ci-compiler/compile_commands.json
+            baseline/build/throughput-ci-compiler/CMakeCache.txt
+            baseline/build/throughput-ci-compiler/compile_commands.json
+          retention-days: 14
+          if-no-files-found: error
