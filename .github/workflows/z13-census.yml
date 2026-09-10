@@ -1,0 +1,210 @@
+name: Z13 QUALITY census publication and exact-source validation
+on:
+  push:
+    branches: [astra/z13-125-transport]
+    paths: [.github/workflows/z13-census.yml, .github/z13-transfer.bin]
+permissions:
+  contents: read
+concurrency:
+  group: z13-census-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      source_sha: ${{ steps.publish.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: source
+      - name: Verify patch and recheck main and competing work
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python3 - <<'PY'
+          import hashlib, json, pathlib, urllib.request, zlib
+          import os
+          data = bytearray(pathlib.Path('transport/.github/z13-transfer.bin').read_bytes())
+          # Restore one transfer byte; the decoded patch and final tree are checked independently.
+          assert len(data) == 12554 and data[296] == 94
+          data[296] = 30
+          patch = zlib.decompress(data)
+          assert hashlib.sha256(patch).hexdigest() == 'a31b3b6d3ec9ac90a78789045a4a6e4b863e625a383f1dff6aeb4deea7e3154d'
+          pathlib.Path('evidence/z13.patch').write_bytes(patch)
+          def get(path):
+              request = urllib.request.Request('https://api.github.com/repos/buster14a/buster/' + path, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          main = get('branches/main')
+          pathlib.Path('evidence/main.json').write_text(json.dumps(main, indent=2))
+          assert main['commit']['sha'] == 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae', 'Main moved: reconcile before publication'
+          def pages(path):
+              rows = []
+              for page in range(1, 101):
+                  batch = get(path + ('&' if '?' in path else '?') + 'per_page=100&page=' + str(page))
+                  rows += batch
+                  if len(batch) < 100:
+                      return rows
+              raise RuntimeError('Incomplete pagination')
+          prs = pages('pulls?state=open')
+          pathlib.Path('evidence/open-prs.json').write_text(json.dumps(prs, indent=2))
+          protected = {'src/buster/lib/compiler/codegen/register_allocator_quality.c', 'src/buster/lib/compiler/codegen/register_allocator_quality_internal.h'}
+          for pr in prs:
+              files = pages('pulls/' + str(pr['number']) + '/files')
+              pathlib.Path('evidence/pr-' + str(pr['number']) + '-files.json').write_text(json.dumps(files, indent=2))
+              assert not protected.intersection(x['filename'] for x in files), 'Competing QUALITY implementation: inspect before publication'
+          PY
+          cd source
+          test "$(git rev-parse HEAD)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          git apply --check ../evidence/z13.patch
+          git apply ../evidence/z13.patch
+          git diff --check
+          git add PERFORMANCE_AUDITS.md docs/performance-audits/2026-09-10T010600Z.md docs/quality-scratch-census.md src/buster/apps/ide/ide.c src/buster/lib/compiler/codegen/register_allocator_quality.c src/buster/lib/compiler/codegen/register_allocator_quality_internal.h src/buster/tests/compiler/codegen/machine_test.c tools/throughput/README.md
+          test "$(git write-tree)" = ff812bd83a70a530970eb4db13788f7303facd0e
+          git diff --cached --stat > ../evidence/diff-stat.txt
+      - name: Publish only a fresh focused branch
+        id: publish
+        working-directory: source
+        run: |
+          set -euo pipefail
+          branch=astra/z13-125-quality-census
+          test -z "$(git ls-remote --heads origin "refs/heads/$branch")"
+          git config user.name 'David'
+          git config user.email '39247043+davidgmbb@users.noreply.github.com'
+          git switch -c "$branch"
+          git commit -m 'quality: census scratch populations and repeated work in diagnostic replays'
+          sha=$(git rev-parse HEAD)
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          git push origin "HEAD:refs/heads/$branch"
+          printf '%s\n' "$sha" > ../evidence/source.sha
+          echo "source_sha=$sha" >> "$GITHUB_OUTPUT"
+          printf 'Published source `%s`; tree `ff812bd83a70a530970eb4db13788f7303facd0e`. Validation below checks this source, not the transport SHA.\n' "$sha" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: z13-publication-${{ github.run_id }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+  registered:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - config: Release
+            sanitize: ''
+          - config: Debug
+            sanitize: '--sanitize'
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_THREADS: '1'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.publish.outputs.source_sha }}
+          persist-credentials: false
+      - name: Instrumented registered regression suite
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/source.sha
+          test "$(git rev-parse HEAD)" = '${{ needs.publish.outputs.source_sha }}'
+          clang --version | tee evidence/compiler.txt
+          uname -a > evidence/os.txt
+          lscpu > evidence/cpu.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --build-directory build-z13-tests --cc clang --ci --linker DEFAULT ${{ matrix.sanitize }} -- -DBUSTER_BENCH_ALLOCATIONS=ON -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee evidence/configure.log
+          "$RUNNER_TEMP/buster-build" build --build-directory build-z13-tests --config ${{ matrix.config }} -t test_all -- -j1 2>&1 | tee evidence/tests.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: z13-registered-${{ matrix.config }}-${{ github.run_id }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+  replay:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.publish.outputs.source_sha }}
+          persist-credentials: false
+      - name: Build ordinary and diagnostic trusted compilers sequentially
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          test "$(git rev-parse HEAD)" = '${{ needs.publish.outputs.source_sha }}'
+          git rev-parse HEAD > evidence/source.sha
+          clang --version > evidence/compiler.txt
+          uname -a > evidence/os.txt
+          lscpu > evidence/cpu.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/buster-build"
+          for mode in ordinary diagnostic; do
+            flag=OFF
+            test "$mode" != diagnostic || flag=ON
+            "$RUNNER_TEMP/buster-build" generate --build-directory "build-z13-$mode" --cc clang --ci --linker DEFAULT -- -DBUSTER_BENCH_ALLOCATIONS="$flag" -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF 2>&1 | tee "evidence/configure-$mode.log"
+            "$RUNNER_TEMP/buster-build" build --build-directory "build-z13-$mode" --config Release -t ide -- -j1 2>&1 | tee "evidence/build-$mode.log"
+          done
+          sha256sum build-z13-{ordinary,diagnostic}/Release/ide > evidence/compiler-hashes.txt
+          nm build-z13-ordinary/Release/ide > evidence/ordinary-symbols.txt
+          ! grep -q machine_quality_census evidence/ordinary-symbols.txt
+      - name: Existing native harness allocation replays and mode identity
+        run: |
+          set -euo pipefail
+          ordinary="$PWD/build-z13-ordinary/Release/ide"
+          diagnostic="$PWD/build-z13-diagnostic/Release/ide"
+          "$RUNNER_TEMP/buster-build" bench_throughput self-test 2>&1 | tee evidence/harness-self-test.log
+          "$RUNNER_TEMP/buster-build" bench_throughput run --baseline "$ordinary" --candidate "$ordinary" --baseline-id '${{ needs.publish.outputs.source_sha }}:ordinary-identity' --candidate-id '${{ needs.publish.outputs.source_sha }}:ordinary-identity' --allocation-baseline "$diagnostic" --allocation-candidate "$diagnostic" --output evidence/native-replay --profile smoke --mode all --pairs 2 --warmups 1 --timeout 120 --cpu auto --no-guard 2>&1 | tee evidence/replay.log
+          printf 'This is an identity/diagnostic integration replay, not a speedup experiment. Instrumented binaries are not timing subjects. The ordinary PR throughput guard remains separate and unchanged.\n' > evidence/INTERPRETATION.txt
+      - name: Existing loop-pressure controls and frozen compiler source
+        run: |
+          set -euo pipefail
+          ordinary="$PWD/build-z13-ordinary/Release/ide"
+          diagnostic="$PWD/build-z13-diagnostic/Release/ide"
+          for source in tests/basic_c_operations.c tests/basic_c_register_pressure.c tests/basic_c_vector_register_pressure.c; do
+            name=$(basename "$source" .c)
+            sha256sum "$source" >> evidence/input-hashes.txt
+            for subject in ordinary diagnostic; do
+              binary="$ordinary"
+              test "$subject" != diagnostic || binary="$diagnostic"
+              "$binary" cc -g0 -O0 -fregister-allocator=quality -fsource-metrics="evidence/$name-$subject.metrics" -c "$source" -o "evidence/$name-$subject.o" > "evidence/$name-$subject.log" 2>&1
+            done
+            cmp "evidence/$name-ordinary.o" "evidence/$name-diagnostic.o"
+          done
+          # One frozen source and generated include tree for both subjects.
+          # This is untimed census/output identity, not self-built-stage timing.
+          sha256sum src/buster/apps/ide/ide.c >> evidence/input-hashes.txt
+          for subject in ordinary diagnostic; do
+            binary="$ordinary"
+            test "$subject" != diagnostic || binary="$diagnostic"
+            "$binary" cc -g0 -O0 -Isrc -Ibuild-z13-ordinary/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -fregister-allocator=quality -fsource-metrics="evidence/compiler-$subject.metrics" -c src/buster/apps/ide/ide.c -o "evidence/compiler-$subject.o" > "evidence/compiler-$subject.log" 2>&1
+          done
+          cmp evidence/compiler-ordinary.o evidence/compiler-diagnostic.o
+          sha256sum evidence/*.o > evidence/output-hashes.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: z13-replay-${{ github.run_id }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
