@@ -1,0 +1,69 @@
+name: Z09 source and evidence transport
+on:
+  push:
+    branches: [astra/z09-pass-census-transport-20260909]
+    paths: [.github/workflows/z09-transport.yml]
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          persist-credentials: false
+      - name: Capture source and paginated repository evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/z09"
+          git archive HEAD | gzip > "$RUNNER_TEMP/z09/source.tar.gz"
+          python3 - <<'PY'
+          import json, os, pathlib, urllib.request
+          from urllib.parse import urlencode
+          root = 'https://api.github.com/repos/buster14a/buster'
+          def get(url):
+              request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          def pages(path, **query):
+              rows = []
+              page = 1
+              while True:
+                  batch = get(root + path + '?' + urlencode(dict(query, per_page=100, page=page)))
+                  rows.extend(batch)
+                  if len(batch) < 100:
+                      break
+                  page += 1
+              return {'pages': page, 'rows': rows}
+          data = {'main': get(root + '/branches/main')}
+          data['open_issues'] = pages('/issues', state='open', sort='created', direction='asc')
+          data['open_prs'] = pages('/pulls', state='open', sort='created', direction='asc')
+          data['issues'] = {}
+          for number in (33, 34, 38, 40, 46, 49, 50, 52, 56, 122, 125, 128, 131, 132, 133):
+              data['issues'][number] = {'issue': get(root + '/issues/' + str(number)), 'comments': pages('/issues/' + str(number) + '/comments')}
+          data['prs'] = {}
+          for row in data['open_prs']['rows']:
+              number = row['number']
+              data['prs'][number] = {'info': row, 'files': pages('/pulls/' + str(number) + '/files'), 'comments': pages('/issues/' + str(number) + '/comments'), 'reviews': pages('/pulls/' + str(number) + '/reviews'), 'review_comments': pages('/pulls/' + str(number) + '/comments')}
+          data['recent_ir_commits'] = pages('/commits', path='src/buster/lib/compiler/ir/ir_promote.c', per_page_unused=0)
+          destination = pathlib.Path(os.environ['RUNNER_TEMP']) / 'z09' / 'evidence.json'
+          destination.write_text(json.dumps(data, indent=2))
+          for name in ('open_issues', 'open_prs'):
+              print(name, 'pages=', data[name]['pages'], 'count=', len(data[name]['rows']))
+              for row in data[name]['rows']:
+                  print(row['number'], row['title'])
+          print('main', data['main']['commit']['sha'])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: z09-pinned-source-evidence
+          path: ${{ runner.temp }}/z09
+          if-no-files-found: error
+          retention-days: 7
