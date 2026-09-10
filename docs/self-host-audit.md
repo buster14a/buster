@@ -9,7 +9,7 @@ The native build driver owns this gate. On a configured Linux x86-64 tree:
 
 Run `./build.sh generate` once before the second command on a fresh checkout.
 Do not regenerate the tree or change compiler sources while an audit is running.
-The new `.github/workflows/self-host-audit.yml` job uses the documented hosted
+The `.github/workflows/self-host-audit.yml` job uses the documented hosted
 Clang bootstrap exception. The existing multi-platform/configuration matrix and
 ordinary `test_self_host` gate remain in place.
 
@@ -43,11 +43,18 @@ both the ordinary comparator and this audit.
 C0 and every generated compiler also compile and execute the same behavioral
 fixture in `none`, `mir-stack`, `fast` and `quality` modes. It covers pointer
 joins, integer width/sign handling, floating/integer aggregate arguments and
-returns, and register/stack argument boundaries. Compare those mode-specific
-phase traces, binaries, outputs and statuses against C0. An invalid-source
-fixture must be rejected without crashing, timing out or producing an
-executable, with identical diagnostics and status across generations. Captured
-sanitizer findings are failures even when the child exits zero.
+returns, and register/stack argument boundaries. Variadic checks include named
+integer/floating parameters, default integer/float promotions, ordered integer
+and floating arguments exhausting both register files, and independent
+`va_copy` cursors created before consumption and at an integer-register
+boundary. Each copy remains usable after the original list is consumed and
+ended. The fixture uses variadic builtins directly: it does not introduce host
+resource headers into the exact per-probe token and source-metric comparisons.
+Compare those mode-specific phase traces, binaries, outputs and statuses
+against C0. An invalid-source fixture must be rejected without crashing,
+timing out or producing an executable, with identical diagnostics and status
+across generations. Captured sanitizer findings are failures even when the
+child exits zero.
 
 This is a finite, same-host, same-source, same-configuration empirical invariant,
 not proof of compiler correctness, reproducibility across different SDKs/hosts,
@@ -57,6 +64,37 @@ behavioral probes, not falsely described as four full bootstrap fixed points.
 The existing ordinary gate additionally exercises its supported alternate
 backend builds. The stronger trace audit is currently Linux x86-64 only;
 ordinary Linux/Windows x86-64 and macOS self-host coverage is unchanged.
+
+## Independent behavioral evidence
+
+C0 is still Buster, even when built by Clang. Agreement with C0 alone can retain
+a semantic error shared by every generation. After the existing bootstrap and
+regression gates, the dedicated CI job also passes the same fixture to the
+existing native differential runner:
+
+```sh
+./build.sh test_differential --self-test
+./build.sh test_differential --ide build/Release/ide --cc clang --source tests/self_host_bootstrap_probe.c --sanitize-oracle --out build/self-host-audit/probe-oracle
+```
+
+`--source` selects this one explicit input instead of the generated/default
+corpus. The driver owns the discovered allocator/optimization/promotion matrix,
+including `none`, `mir-stack`, `fast` and `quality`, and keeps code-generation
+verification enabled. Independent Clang O0/O2 executions use address and
+undefined-behavior sanitizers; their observations must agree before they can
+serve as the reference for Buster. The ordinary audit separately requires the
+fixture's successful exit and output, so an agreed nonzero exit in the general
+differential runner cannot substitute for bootstrap success.
+
+Choose a fresh output directory when repeating the command. Compiler identities
+and hashes, configuration inventory, copied source, exact command vectors,
+diagnostics and process statuses remain in the differential evidence under the
+existing CI artifact. The comparison is behavioral: Clang and Buster binaries
+are not expected to be byte-identical. This independent finite test strengthens
+semantic evidence but is not a language-wide correctness proof, a public
+cross-compiler `va_list` ABI test, or resource-header compatibility coverage.
+It adds no worker fan-out. A single compiler invocation is currently serial;
+test-worker settings are not evidence of compiler-lane determinism.
 
 ## Failure evidence
 
