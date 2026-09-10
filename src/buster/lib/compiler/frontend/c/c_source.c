@@ -4707,6 +4707,21 @@ BUSTER_C_SHARED u32 c_integer_msvc_suffix_width(String8 suffix)
     return width;
 }
 
+BUSTER_C_SHARED u32 c_integer_msvc_literal_width(String8 spelling, bool* is_unsigned)
+{
+    u32 width = 0;
+    for (u32 length = 2; !width && length <= 3 && length <= spelling.length; length += 1)
+    {
+        u64 start = spelling.length - length;
+        width = c_integer_msvc_suffix_width((String8){.pointer = spelling.pointer + start, .length = length});
+        if (width)
+        {
+            *is_unsigned = start && (spelling.pointer[start - 1] == 'u' || spelling.pointer[start - 1] == 'U');
+        }
+    }
+    return width;
+}
+
 BUSTER_C_INTERNAL bool c_integer_suffix_valid(String8 suffix)
 {
     bool valid = !suffix.length;

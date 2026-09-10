@@ -7821,23 +7821,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder,
     bool is_unsigned = false;
     u32 long_count = 0;
     u64 suffix_start = spelling.length;
-    u32 msvc_width = 0;
-    for (u32 suffix_length = 2; !msvc_width && suffix_length <= 3 && suffix_length <= spelling.length; suffix_length += 1)
-    {
-        u64 candidate_start = spelling.length - suffix_length;
-        msvc_width = c_integer_msvc_suffix_width((String8){.pointer = spelling.pointer + candidate_start, .length = suffix_length});
-        if (msvc_width)
-        {
-            suffix_start = candidate_start;
-        }
-    }
+    u32 msvc_width = c_integer_msvc_literal_width(spelling, &is_unsigned);
     if (msvc_width)
     {
-        if (suffix_start && (spelling.pointer[suffix_start - 1] == 'u' || spelling.pointer[suffix_start - 1] == 'U'))
-        {
-            is_unsigned = true;
-            suffix_start -= 1;
-        }
         long_count = 2;
     }
     while (!msvc_width && suffix_start)

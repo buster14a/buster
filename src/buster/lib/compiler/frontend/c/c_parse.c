@@ -2861,7 +2861,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
         {
             bool is_unsigned = false;
             u32 long_count = 0;
-            for (u64 index = first_spelling.length; index != 0; index -= 1)
+            u32 msvc_width = c_integer_msvc_literal_width(first_spelling, &is_unsigned);
+            for (u64 index = first_spelling.length; !msvc_width && index != 0; index -= 1)
             {
                 u8 byte = first_spelling.pointer[index - 1];
                 if (byte == 'u' || byte == 'U')
@@ -2881,6 +2882,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
                    : long_count == 1 ? (is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG)
                    : is_unsigned     ? C_TYPE_UNSIGNED_INT
                                      : C_TYPE_INT;
+            if (msvc_width)
+            {
+                kind = msvc_width == 8 ? (is_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR)
+                       : msvc_width == 16 ? (is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT)
+                       : msvc_width == 32 ? (is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT)
+                                          : (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG);
+            }
         }
         return end == start + 1 ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
     }

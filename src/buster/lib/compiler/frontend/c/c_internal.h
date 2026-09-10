@@ -147,6 +147,7 @@ BUSTER_C_EXTERN bool c_preprocess_dialect_is_gnu(CPreprocessDialect dialect);
 // consumes the complete bounded spelling and leaves value unchanged on failure.
 BUSTER_C_EXTERN bool c_conditional_number(String8 spelling, u64* value);
 BUSTER_C_EXTERN u32 c_integer_msvc_suffix_width(String8 suffix);
+BUSTER_C_EXTERN u32 c_integer_msvc_literal_width(String8 spelling, bool* is_unsigned);
 BUSTER_C_EXTERN bool c_number_is_float(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_auto_type_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
