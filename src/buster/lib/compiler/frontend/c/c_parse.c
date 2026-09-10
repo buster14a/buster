@@ -15715,7 +15715,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
                                                                    .is_const = true,
                                                                });
             }
-            c_parse_validate_constexpr_declaration(&machine, arena, &result, preprocess, declaration);
+            // Object bounds may name a preceding constexpr. Validate them
+            // with the ordered initializer walk, after those values exist.
+            if (declaration->kind != C_DECLARATION_OBJECT)
+            {
+                c_parse_validate_constexpr_declaration(&machine, arena, &result, preprocess, declaration);
+            }
             if (kind == C_DECLARATION_TYPEDEF && c_parse_variable_argument_list_name(declaration->name))
             {
                 declaration->type = c_parse_variable_argument_list_type(&result);
@@ -16019,6 +16024,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         {
             continue;
         }
+        // This walk is in declaration order: an earlier integer constexpr
+        // has its value before a later object's bound is checked. File-scope
+        // objects do not own a function scope, so use the lexical scope here.
+        CDeclaration scoped_declaration = *declaration;
+        scoped_declaration.scope = (CScopeId){.value = 0};
+        c_parse_validate_constexpr_declaration(&machine, arena, &result, preprocess, &scoped_declaration);
         u32 end = declaration->token_start + declaration->token_count;
         u32 initializer_start = end;
         u32 depth = 0;
