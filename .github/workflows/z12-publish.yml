@@ -1,0 +1,112 @@
+name: Z12 candidate publication and validation
+
+on:
+  push:
+    branches: [astra/z12-130-transport-20260910]
+    paths: [.github/workflows/z12-publish.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: z12-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 2
+  UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+jobs:
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+      issues: read
+    outputs:
+      candidate: ${{ steps.publish.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ed803c583ea43fce9a7c74b17560ad636c558c0a
+          path: transport
+          persist-credentials: false
+      - name: Recheck competing work and publish only the reviewed source tree
+        id: publish
+        working-directory: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/z12-publication"
+          mkdir -p "$out"
+          test "$(gh api repos/buster14a/buster/branches/main --jq .commit.sha)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          gh api --paginate --slurp 'repos/buster14a/buster/pulls?state=open&per_page=100' > "$out/open-pr-pages.json"
+          gh api --paginate --slurp 'repos/buster14a/buster/issues/130/comments?per_page=100' > "$out/issue-130-comments.json"
+          for pr in $(gh api --paginate 'repos/buster14a/buster/pulls?state=open&per_page=100' --jq '.[].number'); do
+            gh api --paginate "repos/buster14a/buster/pulls/$pr/files?per_page=100" --jq '.[].filename' > "$out/pr-$pr-files.txt"
+            if grep -q 'register_allocator_fast' "$out/pr-$pr-files.txt"; then
+              echo "Competing FAST source changes in PR $pr; stop for review."
+              exit 1
+            fi
+          done
+          echo 'a52c38d386375ffc64b7e08370ef9d2c75d5ce68172fea72e3edea38c934d9ed  ../transport/.github/z12/candidate.patch' | sha256sum -c -
+          git apply --check ../transport/.github/z12/candidate.patch
+          git apply --index ../transport/.github/z12/candidate.patch
+          git diff --cached --check
+          test "$(git write-tree)" = 93ee044324a732e92ed5aff0e872235c3bd94b47
+          git diff --cached > "$out/candidate.patch"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'codegen: specialize existence-only sparse FAST owner queries'
+          branch=astra/130-sparse-owner-membership
+          test -z "$(git ls-remote --heads origin "refs/heads/$branch")"
+          test "$(gh api repos/buster14a/buster/branches/main --jq .commit.sha)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin "HEAD:refs/heads/$branch"
+          sha=$(git rev-parse HEAD)
+          printf '%s\n' "$sha" > "$out/candidate.sha"
+          printf 'candidate=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+          printf 'Published hypothesis SHA `%s`, source tree `93ee044324a732e92ed5aff0e872235c3bd94b47`. Validation and performance acceptance remain separate; no merge performed.\n' "$sha" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: z12-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/z12-publication/
+          retention-days: 7
+          if-no-files-found: error
+
+  validate:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.publish.outputs.candidate }}
+          persist-credentials: false
+      - name: Bootstrap driver outside the generated build directory
+        run: |
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/z12-build"
+      - name: Configure
+        run: '"$RUNNER_TEMP/z12-build" generate --cc clang --ci --linker DEFAULT'
+      - name: Compiler regressions and guarded owner-query cases
+        run: '"$RUNNER_TEMP/z12-build" build --config Release -t test_all -- -j2'
+      - name: Ordinary self-host and alternate backend gates
+        run: '"$RUNNER_TEMP/z12-build" test_self_host --config Release'
+      - name: Repeated verified self-host generations
+        run: '"$RUNNER_TEMP/z12-build" test_self_host_audit --config Release'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: z12-published-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/self-host-audit/
+          retention-days: 7
+          if-no-files-found: warn
