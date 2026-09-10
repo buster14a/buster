@@ -294,7 +294,18 @@ for LINT_RESULT in success failure cancelled skipped ''; do
 done
 printf '%s\n' "$checked"
 """
-            result = subprocess.run(["bash", "-c", script], env=environment,
+            # Windows CreateProcess can choose System32/bash.exe (WSL)
+            # before PATH. Use an absolute shell path; on Windows select
+            # the installed Git Bash, not an unrelated WSL distribution.
+            bash = shutil.which("bash")
+            if os.name == "nt":
+                git = shutil.which("git")
+                self.assertIsNotNone(git, "Git for Windows is a CI prerequisite")
+                bash = next((str(parent / "bin/bash.exe")
+                             for parent in Path(git).resolve().parents
+                             if (parent / "bin/bash.exe").is_file()), None)
+            self.assertIsNotNone(bash, "Bash is a CI prerequisite")
+            result = subprocess.run([bash, "--noprofile", "--norc", "-c", script], env=environment,
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(result.stdout.strip(), "125")
