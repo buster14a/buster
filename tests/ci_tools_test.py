@@ -245,9 +245,37 @@ class WorkflowPolicyTests(unittest.TestCase):
             "test_self_host_audit --config Release",
             "build --config Release -t test_all",
         ])
-        gates = text.split("      - name: Test the bootstrap checker", 1)[1].split(
+        gates = text[text.index("      - name: Test the bootstrap checker"):].split(
             "      - name: Retain stage evidence even on failure", 1)[0]
-        self.assertNotRegex(gates, r"(?m)^\s*(if|continue-on-error):")
+        self.assertNotRegex(gates, r"(?m)^\s*continue-on-error:")
+        blocks = re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", gates)
+        self.assertEqual([name for name, _ in blocks], [
+            "Test the bootstrap checker",
+            "Configure production compiler",
+            "Preserve ordinary bootstrap and alternate-backend gates",
+            "Verify each generation and repeat",
+            "Run compiler regressions",
+            "Check the bootstrap probe against independent compiler oracles",
+        ])
+        evidence_gates = {
+            "Run compiler regressions",
+            "Check the bootstrap probe against independent compiler oracles",
+        }
+        for name, block in blocks:
+            with self.subTest(gate=name):
+                conditions = re.findall(r"(?m)^        if: (.+)$", block)
+                # These two independent results survive an audit failure, but
+                # cannot run before ordinary bootstrap or after cancellation.
+                expected = (["${{ !cancelled() && steps.ordinary_bootstrap.outcome == 'success' }}"]
+                            if name in evidence_gates else [])
+                self.assertEqual(conditions, expected)
+        self.assertIn("        id: ordinary_bootstrap\n", dict(blocks)[
+            "Preserve ordinary bootstrap and alternate-backend gates"])
+        oracle = dict(blocks)["Check the bootstrap probe against independent compiler oracles"]
+        self.assertIn('"$RUNNER_TEMP/buster-build" test_differential --self-test', oracle)
+        self.assertIn('"$RUNNER_TEMP/buster-build" test_differential --ide build/Release/ide '
+                      '--cc clang --source tests/self_host_bootstrap_probe.c --sanitize-oracle '
+                      '--out build/self-host-audit/probe-oracle', oracle)
         self.assertNotIn("needs:", text)
         self.assertIn("name: Linux x86-64 bootstrap evidence", text)
         self.assertIn("runs-on: ubuntu-26.04", text)
