@@ -12267,29 +12267,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         S8("x86_64-apple-macos"),
         S8("x86_64-apple-ios"),
     };
-    String8 sources[] = {
-        S8("long double cast_value = (long double)1; int main(void) { return 0; }"),
-        S8("long double conditional_value = 1.0L ? 2.0L : 3.0L; int main(void) { return 0; }"),
-        S8("long double integer_arithmetic = 1 + 2; int main(void) { return 0; }"),
-        S8("void atomic_local(void) { _Atomic(long double) value = 0.0L; (void)value; } int main(void) { return 0; }"),
-        S8("long double atomic_load(_Atomic(long double) *value) { return __c11_atomic_load(value, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
-        S8("void atomic_store(_Atomic(long double) *value) { __c11_atomic_store(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
-        S8("long double atomic_exchange(_Atomic(long double) *value) { return __c11_atomic_exchange(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
-        S8("int atomic_compare(_Atomic(long double) *value, long double *expected) { return __c11_atomic_compare_exchange_strong(value, expected, 0.0L, __ATOMIC_RELAXED, __ATOMIC_RELAXED); } int main(void) { return 0; }"),
-        S8("void fixed_f80_variadic(long double value, ...) { (void)value; } int main(void) { return 0; }"),
+    struct
+    {
+        String8 source;
+        bool invalid_integer;
+    } sources[] = {
+        {S8("long double cast_value = (long double)1; int main(void) { return 0; }"), false},
+        {S8("long double conditional_value = 1.0L ? 2.0L : 3.0L; int main(void) { return 0; }"), false},
+        {S8("long double integer_arithmetic = 1 + 2; int main(void) { return 0; }"), false},
+        {S8("void atomic_local(void) { _Atomic(long double) value = 0.0L; (void)value; } int main(void) { return 0; }"), false},
+        {S8("long double atomic_load(_Atomic(long double) *value) { return __c11_atomic_load(value, __ATOMIC_RELAXED); } int main(void) { return 0; }"), false},
+        {S8("void atomic_store(_Atomic(long double) *value) { __c11_atomic_store(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"), false},
+        {S8("long double atomic_exchange(_Atomic(long double) *value) { return __c11_atomic_exchange(value, 0.0L, __ATOMIC_RELAXED); } int main(void) { return 0; }"), false},
+        {S8("int atomic_compare(_Atomic(long double) *value, long double *expected) { return __c11_atomic_compare_exchange_strong(value, expected, 0.0L, __ATOMIC_RELAXED, __ATOMIC_RELAXED); } int main(void) { return 0; }"), false},
+        {S8("void fixed_f80_variadic(long double value, ...) { (void)value; } int main(void) { return 0; }"), false},
         // `va_arg` reads a wide value back in the two shapes the argument side
         // passes one in; the shapes past the two eightbytes its copy covers --
         // a `long double _Complex`, an aggregate with a tail behind the
         // payload -- are named here rather than at code generation.
-        S8("typedef void *va_list; int take(int count, ...) { va_list arguments; long double _Complex value = __builtin_va_arg(arguments, long double _Complex); return value != 0; } int main(void) { return 0; }"),
-        S8("typedef void *va_list; struct ldlarge { long double f; int tail; }; int take(int count, ...) { va_list arguments; struct ldlarge value = __builtin_va_arg(arguments, struct ldlarge); return value.tail; } int main(void) { return 0; }"),
-        S8("long double malformed_exponent = 0x1pL; int main(void) { return 0; }"),
-        S8("long double invalid_i_suffix = 123i; int main(void) { return 0; }"),
-        S8("long double invalid_i65_suffix = 123i65; int main(void) { return 0; }"),
-        S8("long double invalid_u64_suffix = 123u64; int main(void) { return 0; }"),
-        S8("long double invalid_lUl_suffix = 123lUl; int main(void) { return 0; }"),
-        S8("long double invalid_lL_suffix = 123lL; int main(void) { return 0; }"),
-        S8("long double invalid_uLl_suffix = 123uLl; int main(void) { return 0; }"),
+        {S8("typedef void *va_list; int take(int count, ...) { va_list arguments; long double _Complex value = __builtin_va_arg(arguments, long double _Complex); return value != 0; } int main(void) { return 0; }"), false},
+        {S8("typedef void *va_list; struct ldlarge { long double f; int tail; }; int take(int count, ...) { va_list arguments; struct ldlarge value = __builtin_va_arg(arguments, struct ldlarge); return value.tail; } int main(void) { return 0; }"), false},
+        {S8("long double malformed_exponent = 0x1pL; int main(void) { return 0; }"), false},
+        {S8("long double invalid_i_suffix = 123i; int main(void) { return 0; }"), true},
+        {S8("long double invalid_i65_suffix = 123i65; int main(void) { return 0; }"), true},
+        {S8("long double invalid_u64_suffix = 123u64; int main(void) { return 0; }"), true},
+        {S8("long double invalid_lUl_suffix = 123lUl; int main(void) { return 0; }"), true},
+        {S8("long double invalid_lL_suffix = 123lL; int main(void) { return 0; }"), true},
+        {S8("long double invalid_uLl_suffix = 123uLl; int main(void) { return 0; }"), true},
     };
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
     {
@@ -12304,14 +12308,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
             TemporalArena temporary = scratch_begin(0, 0);
             CPreprocessResult preprocess = {0};
             CParseResult parse = {0};
-            CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[source_index], target_triples[target_index],
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[source_index].source, target_triples[target_index],
                                                          parsed_target.target, &preprocess, &parse);
             BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
-            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-            BUSTER_TEST(arguments, lowered.diagnostic_count == 1);
-            if (lowered.diagnostic_count == 1)
+            if (sources[source_index].invalid_integer)
             {
-                BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                // Invalid integer spellings fail during parsing, before
+                // wide-float lowering or any unevaluated-operand shortcut.
+                BUSTER_TEST(arguments, parse.diagnostic_count == 1);
+                if (parse.diagnostic_count == 1)
+                {
+                    BUSTER_TEST(arguments, parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_INTEGER_LITERAL);
+                }
+                BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+                BUSTER_TEST(arguments, lowered.program == 0);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+                BUSTER_TEST(arguments, lowered.diagnostic_count == 1);
+                if (lowered.diagnostic_count == 1)
+                {
+                    BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                }
             }
             scratch_end(temporary);
         }
