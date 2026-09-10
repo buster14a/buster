@@ -33,10 +33,9 @@ jobs:
           set -euo pipefail
           mkdir -p evidence
           python3 - <<'PY'
-          import hashlib, json, pathlib, urllib.request, zlib
-          import os
+          import hashlib, json, pathlib, urllib.request, zlib, os
           data = bytearray(pathlib.Path('transport/.github/z13-transfer.bin').read_bytes())
-          # Restore one transfer byte; the decoded patch and final tree are checked independently.
+          # Restore one transfer byte; decoded patch and final tree have independent checks.
           assert len(data) == 12554 and data[296] == 94
           data[296] = 30
           patch = zlib.decompress(data)
@@ -60,10 +59,13 @@ jobs:
           prs = pages('pulls?state=open')
           pathlib.Path('evidence/open-prs.json').write_text(json.dumps(prs, indent=2))
           protected = {'src/buster/lib/compiler/codegen/register_allocator_quality.c', 'src/buster/lib/compiler/codegen/register_allocator_quality_internal.h'}
+          # Reviewed compatible predicate-only overlap, recorded in #125 and #369.
+          reviewed = {369: '69c4e675534d654f793e30af503ff9782fb4abc5'}
           for pr in prs:
               files = pages('pulls/' + str(pr['number']) + '/files')
               pathlib.Path('evidence/pr-' + str(pr['number']) + '-files.json').write_text(json.dumps(files, indent=2))
-              assert not protected.intersection(x['filename'] for x in files), 'Competing QUALITY implementation: inspect before publication'
+              overlap = protected.intersection(x['filename'] for x in files)
+              assert not overlap or reviewed.get(pr['number']) == pr['head']['sha'], 'Unreviewed QUALITY overlap: ' + str(pr['number'])
           PY
           cd source
           test "$(git rev-parse HEAD)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
@@ -89,7 +91,7 @@ jobs:
           git push origin "HEAD:refs/heads/$branch"
           printf '%s\n' "$sha" > ../evidence/source.sha
           echo "source_sha=$sha" >> "$GITHUB_OUTPUT"
-          printf 'Published source `%s`; tree `ff812bd83a70a530970eb4db13788f7303facd0e`. Validation below checks this source, not the transport SHA.\n' "$sha" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Published source `%s`; tree `ff812bd83a70a530970eb4db13788f7303facd0e`. Validation checks this source, not the transport SHA.\n' "$sha" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -111,7 +113,8 @@ jobs:
             sanitize: '--sanitize'
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: '1'
-      BUSTER_TEST_THREADS: '1'
+      BUSTER_TEST_JOBS: '2'
+      BUSTER_MATRIX_THREADS: '2'
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
       ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
     steps:
@@ -175,7 +178,7 @@ jobs:
           diagnostic="$PWD/build-z13-diagnostic/Release/ide"
           "$RUNNER_TEMP/buster-build" bench_throughput self-test 2>&1 | tee evidence/harness-self-test.log
           "$RUNNER_TEMP/buster-build" bench_throughput run --baseline "$ordinary" --candidate "$ordinary" --baseline-id '${{ needs.publish.outputs.source_sha }}:ordinary-identity' --candidate-id '${{ needs.publish.outputs.source_sha }}:ordinary-identity' --allocation-baseline "$diagnostic" --allocation-candidate "$diagnostic" --output evidence/native-replay --profile smoke --mode all --pairs 2 --warmups 1 --timeout 120 --cpu auto --no-guard 2>&1 | tee evidence/replay.log
-          printf 'This is an identity/diagnostic integration replay, not a speedup experiment. Instrumented binaries are not timing subjects. The ordinary PR throughput guard remains separate and unchanged.\n' > evidence/INTERPRETATION.txt
+          printf 'Identity/diagnostic integration replay, not a speedup experiment. Instrumented binaries are not timing subjects. The ordinary PR throughput guard remains separate and unchanged.\n' > evidence/INTERPRETATION.txt
       - name: Existing loop-pressure controls and frozen compiler source
         run: |
           set -euo pipefail
@@ -191,8 +194,6 @@ jobs:
             done
             cmp "evidence/$name-ordinary.o" "evidence/$name-diagnostic.o"
           done
-          # One frozen source and generated include tree for both subjects.
-          # This is untimed census/output identity, not self-built-stage timing.
           sha256sum src/buster/apps/ide/ide.c >> evidence/input-hashes.txt
           for subject in ordinary diagnostic; do
             binary="$ordinary"
