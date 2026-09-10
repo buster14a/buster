@@ -138,6 +138,22 @@ existing interpreter, with separate 32- and 64-bit multiplication cases in its
 existing compiler tests. An interpreter refusal is reported as a runner failure,
 not incorrectly classified as a successful guest result or a proven compiler bug.
 
+The local aggregate-copy relation is lowered by both nonnative backends.
+Wasm64 uses private shadow-stack snapshots and bulk memory operations; eBPF
+allocates each snapshot within its existing 512-byte frame and copies exact
+bytes without over-reading packed objects. Neither representation aliases a
+mutable source object. The canonical IR and aggregate function ABI contracts
+are unchanged. Aggregate block parameters and bit-field aggregate construction
+remain explicit unsupported cases; eBPF snapshot alignment is at most eight
+bytes, and oversized frames still fail with a diagnostic.
+
+The same five repository-relative C cases cover plain, packed, nested and union
+copies plus independent mutations. The ordinary driver suite checks both
+frontend forms through Node for Wasm64; the existing codegen test module checks
+eBPF output in its bounded VM, including all input pairs at the signed boundary
+and wraparound. Negative cases retain eBPF aggregate ABI, alignment and frame
+limits. VM execution does not certify kernel verifier/JIT acceptance.
+
 Wasm32 is not supported by the current driver. The external SPIR-V, NVPTX,
 AMDGCN, Metal and DXIL pipelines accept different source-language/toolchain
 contracts and reject native allocator options. They are **not covered** by this

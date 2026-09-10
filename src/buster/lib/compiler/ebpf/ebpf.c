@@ -3,6 +3,10 @@
 // Linux eBPF direct backend. The emitter deliberately owns its instruction,
 // ELF, relocation, and BTF encoders: canonical IR remains target-neutral and
 // the native Machine IR does not acquire verifier-specific constraints.
+// Local aggregate SSA snapshots occupy private frame bytes. Copies happen at
+// the defining instruction, never by aliasing mutable C storage. All storage
+// still counts toward the existing 512-byte frame limit; aggregate ABIs and
+// aggregate block parameters remain explicit unsupported cases.
 
 typedef struct EbpfBuffer EbpfBuffer;
 struct EbpfBuffer
@@ -479,6 +483,12 @@ static bool ebpf_type_is_integer(IrType* type)
 static bool ebpf_type_is_scalar(IrType* type)
 {
     return type && (ebpf_type_is_integer(type) || type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION);
+}
+
+BUSTER_GLOBAL_LOCAL bool ebpf_type_is_local_aggregate(IrType* type)
+{
+    return type && !type->is_atomic && type->layout.resolved && type->layout.size &&
+           (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION);
 }
 
 static u32 ebpf_type_bits(IrType* type)
@@ -1023,7 +1033,15 @@ static void ebpf_fe_emit_value(EbpfFunctionEmitter* emitter, u8 destination, IrV
                       emitter->function, 0, definition, IR_SYMBOL_ID_INVALID);
             return;
         }
-        ebpf_fe_load_stack(emitter, destination, slot);
+        if (emitter->function->values[value.value].category == IR_VALUE_VALUE && ebpf_type_is_local_aggregate(ebpf_fe_value_type(emitter, value)))
+        {
+            ebpf_fe_mov_reg(emitter, destination, EBPF_REG_FP);
+            ebpf_fe_alu_imm(emitter, EBPF_OP_ADD, destination, slot);
+        }
+        else
+        {
+            ebpf_fe_load_stack(emitter, destination, slot);
+        }
     }
     break;
     }
@@ -1170,7 +1188,8 @@ static bool ebpf_fe_allocate(EbpfFunctionEmitter* emitter)
             continue;
         }
         IrType* type = ebpf_type(context, instruction->canonical_type);
-        if (!ebpf_type_is_scalar(type))
+        bool aggregate = ebpf_type_is_local_aggregate(type);
+        if (!ebpf_type_is_scalar(type) && !aggregate)
         {
             if (instruction->opcode == IR_OPCODE_LOAD && !emitter->use_counts[instruction->result.value] && !instruction->volatile_access)
             {
@@ -1180,7 +1199,15 @@ static bool ebpf_fe_allocate(EbpfFunctionEmitter* emitter)
                       instruction, IR_SYMBOL_ID_INVALID);
             return false;
         }
-        cursor = ebpf_align_up(cursor, 8) + 8;
+        u64 slot_size = aggregate ? type->layout.size : 8;
+        if (aggregate && (slot_size > 512 || !type->layout.alignment || type->layout.alignment > 8 ||
+                          (type->layout.alignment & (type->layout.alignment - 1))))
+        {
+            ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_AGGREGATE, ebpf_s8("invalid eBPF local aggregate snapshot layout"), function, 0,
+                      instruction, IR_SYMBOL_ID_INVALID);
+            return false;
+        }
+        cursor = ebpf_align_up(cursor, 8) + ebpf_align_up(slot_size, 8);
         if (cursor > 512)
         {
             ebpf_fail(context, EBPF_ERROR_STACK_LIMIT, ebpf_s8("eBPF function exceeds the 512-byte verifier stack limit"), function, 0,
@@ -1607,6 +1634,82 @@ static void ebpf_fe_emit_switch(EbpfFunctionEmitter* emitter, IrBlock* predecess
     }
 }
 
+BUSTER_GLOBAL_LOCAL void ebpf_fe_copy_bytes(EbpfFunctionEmitter* emitter, u32 size)
+{
+    // R1 is the destination, R2 the source. Byte accesses preserve packed
+    // alignment and never read beyond the object. The frame bounds size to 512.
+    for (u32 offset = 0; offset < size; offset += 1)
+    {
+        ebpf_fe_load_memory(emitter, EBPF_REG_0, EBPF_REG_2, (s16)offset, 1);
+        ebpf_fe_store_memory(emitter, EBPF_REG_1, (s16)offset, EBPF_REG_0, 1);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ebpf_fe_emit_aggregate(EbpfFunctionEmitter* emitter, IrBlock* block, IrInstruction* instruction, IrType* type)
+{
+    bool valid = ebpf_type_is_local_aggregate(type) && type->layout.size <= 512;
+    bool materialized = instruction->result.value < emitter->function->value_count &&
+                        emitter->value_slots[instruction->result.value] != EBPF_SLOT_NONE;
+    if (valid && materialized)
+    {
+        // Define every private byte, including padding, before copying it.
+        ebpf_fe_emit_value(emitter, EBPF_REG_1, instruction->result);
+        ebpf_fe_mov_imm(emitter, EBPF_REG_0, 0);
+        for (u32 offset = 0; offset < type->layout.size; offset += 1)
+        {
+            ebpf_fe_store_memory(emitter, EBPF_REG_1, (s16)offset, EBPF_REG_0, 1);
+        }
+    }
+    for (u32 index = 0; valid && materialized && index < instruction->operand_count; index += 1)
+    {
+        IrValueId operand = instruction->operands[index];
+        IrType* operand_type = ebpf_fe_value_type(emitter, operand);
+        u64 offset = 0;
+        valid = operand_type && operand_type->layout.resolved &&
+                emitter->function->values[operand.value].category == IR_VALUE_VALUE &&
+                (ebpf_type_is_scalar(operand_type) || ebpf_type_is_local_aggregate(operand_type));
+        if (valid && instruction->opcode == IR_OPCODE_AGGREGATE)
+        {
+            u64 field_index = instruction->immediates[index];
+            valid = field_index < type->field_count && !type->fields[field_index].is_bit_field;
+            if (valid)
+            {
+                offset = type->fields[field_index].offset;
+            }
+        }
+        else if (valid)
+        {
+            valid = operand_type->layout.size <= UINT64_MAX / (index ? index : 1);
+            if (valid)
+            {
+                offset = (u64)index * operand_type->layout.size;
+            }
+        }
+        valid = valid && offset <= type->layout.size && operand_type->layout.size <= type->layout.size - offset;
+        if (valid)
+        {
+            ebpf_fe_emit_value(emitter, EBPF_REG_1, instruction->result);
+            ebpf_fe_alu_imm(emitter, EBPF_OP_ADD, EBPF_REG_1, (s32)offset);
+            if (ebpf_type_is_local_aggregate(operand_type))
+            {
+                ebpf_fe_emit_value(emitter, EBPF_REG_2, operand);
+                ebpf_fe_copy_bytes(emitter, (u32)operand_type->layout.size);
+            }
+            else
+            {
+                ebpf_fe_emit_value(emitter, EBPF_REG_0, operand);
+                ebpf_fe_store_memory(emitter, EBPF_REG_1, 0, EBPF_REG_0, ebpf_type_size(operand_type));
+            }
+        }
+    }
+    if (!valid)
+    {
+        ebpf_fail(emitter->context, EBPF_ERROR_UNSUPPORTED_AGGREGATE,
+                  ebpf_s8("unsupported eBPF local aggregate construction or member layout"), emitter->function, block, instruction,
+                  IR_SYMBOL_ID_INVALID);
+    }
+}
+
 static void ebpf_fe_emit_instruction(EbpfFunctionEmitter* emitter, IrBlock* block, IrInstruction* instruction)
 {
     EbpfContext* context = emitter->context;
@@ -1627,9 +1730,29 @@ static void ebpf_fe_emit_instruction(EbpfFunctionEmitter* emitter, IrBlock* bloc
     case IR_OPCODE_ADDRESS_OF:
     case IR_OPCODE_DEREFERENCE:
         // These values are captured in the prologue or rematerialized at use.
+        if (instruction->opcode == IR_OPCODE_UNDEFINED && ebpf_type_is_local_aggregate(type))
+        {
+            ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_AGGREGATE, ebpf_s8("aggregate eBPF undefined values are unsupported"), emitter->function,
+                      block, instruction, IR_SYMBOL_ID_INVALID);
+        }
         break;
     case IR_OPCODE_LOAD:
     {
+        if (ebpf_type_is_local_aggregate(type))
+        {
+            if (instruction->result.value < emitter->function->value_count && emitter->value_slots[instruction->result.value] != EBPF_SLOT_NONE)
+            {
+                ebpf_fe_emit_value(emitter, EBPF_REG_1, instruction->result);
+                ebpf_fe_emit_value(emitter, EBPF_REG_2, instruction->operands[0]);
+                ebpf_fe_copy_bytes(emitter, (u32)type->layout.size);
+            }
+            else if (instruction->volatile_access)
+            {
+                ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_AGGREGATE, ebpf_s8("unused volatile eBPF aggregate loads require a snapshot"),
+                          emitter->function, block, instruction, IR_SYMBOL_ID_INVALID);
+            }
+            break;
+        }
         if (!type || !ebpf_type_is_scalar(type))
         {
             bool unused = instruction->result.value == IR_ID_UNDERLYING_INVALID ||
@@ -1669,6 +1792,13 @@ static void ebpf_fe_emit_instruction(EbpfFunctionEmitter* emitter, IrBlock* bloc
         }
         IrType* stored_type = ebpf_fe_value_type(emitter, instruction->operands[1]);
         u32 size = ebpf_type_size(stored_type);
+        if (ebpf_type_is_local_aggregate(stored_type) && size && size <= 512)
+        {
+            ebpf_fe_emit_value(emitter, EBPF_REG_1, instruction->operands[0]);
+            ebpf_fe_emit_value(emitter, EBPF_REG_2, instruction->operands[1]);
+            ebpf_fe_copy_bytes(emitter, size);
+            break;
+        }
         if (!ebpf_type_is_scalar(stored_type) || !size || size > 8)
         {
             ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_AGGREGATE, ebpf_s8("aggregate eBPF stores are unsupported"), emitter->function, block,
@@ -1760,6 +1890,8 @@ static void ebpf_fe_emit_instruction(EbpfFunctionEmitter* emitter, IrBlock* bloc
         break;
     case IR_OPCODE_ARRAY:
     case IR_OPCODE_AGGREGATE:
+        ebpf_fe_emit_aggregate(emitter, block, instruction, type);
+        break;
     case IR_OPCODE_SLICE:
     case IR_OPCODE_REVERSE:
         ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_AGGREGATE, ebpf_s8("aggregate eBPF SSA construction is unsupported"), emitter->function,
