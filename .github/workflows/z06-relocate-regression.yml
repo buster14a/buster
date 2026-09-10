@@ -1,0 +1,68 @@
+name: Z06 regression placement
+on:
+  push:
+    branches: [astra/z06-20260910-transport]
+    paths: [.github/workflows/z06-relocate-regression.yml]
+permissions:
+  contents: read
+jobs:
+  source-object:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 0c396624e0479247e4c53eba7826493f6cdd4220
+          persist-credentials: false
+      - name: Relocate only the helper and its registration; upload an unreferenced blob
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os
+          from pathlib import Path
+          import subprocess, urllib.request
+          path = 'src/buster/tests/compiler/frontend/c/c_test.c'
+          p = Path(path)
+          data = p.read_bytes()
+          assert hashlib.sha256(data).hexdigest() == 'cf38ac1bcb7cb11482c57772025ab765eb26f13daa129bfa0ba4322dd422d135'
+          s = data.decode()
+          start = s.index('// Shared macro tasks must preserve context floors')
+          end = s.index('UnitTestResult c_frontend_tests(', start)
+          helper = s[start:end]
+          s = s[:start] + s[end:]
+          anchor = 'BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArguments* arguments)'
+          assert s.count(anchor) == 1
+          s = s.replace(anchor, helper + anchor)
+          call = '    c_test_result_add(&result, c_test_macro_task_batches(arguments));\n'
+          assert s.count(call) == 1
+          s = s.replace(call, '')
+          anchor = '    c_test_result_add(&result, c_test_pasted_keyword_body_walk(arguments));\n'
+          assert s.count(anchor) == 1
+          s = s.replace(anchor, anchor + call)
+          data = s.encode()
+          assert hashlib.sha256(data).hexdigest() == '75dba245cb6b2d664f00334ce65e1f54960ef974b1c1182688ceccb5c8134165'
+          p.write_bytes(data)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          out = Path(os.environ['RUNNER_TEMP']) / 'z06-regression-placement'
+          out.mkdir()
+          with (out / 'placement.patch').open('wb') as patch:
+              subprocess.run(['git', 'diff', '--', path], stdout=patch, check=True)
+          payload = json.dumps({'content': base64.b64encode(data).decode(), 'encoding': 'base64'}).encode()
+          request = urllib.request.Request('https://api.github.com/repos/buster14a/buster/git/blobs', data=payload, method='POST', headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'})
+          with urllib.request.urlopen(request, timeout=60) as response:
+              blob = json.load(response)
+          assert blob['sha'] == 'b92397a986e56399c0f51bcb460ea8e53c1ce890'
+          manifest = {'path': path, 'sha': blob['sha'], 'sha256': hashlib.sha256(data).hexdigest()}
+          (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps(manifest, indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: z06-regression-placement-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/z06-regression-placement
+          if-no-files-found: error
+          retention-days: 7
