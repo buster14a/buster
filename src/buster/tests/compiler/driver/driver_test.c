@@ -2176,6 +2176,42 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
 
+    for (u32 ssa = 0; ssa < 2; ssa += 1)
+    {
+        String8 aggregate_output = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-local-aggregate"), S8(".wasm"));
+        String8 aggregate_command[] = {
+            S8("-target"), S8("wasm64-unknown-freestanding"), S8("-nostdinc"), S8("-o"), aggregate_output,
+            ssa ? S8("-ffrontend-ssa") : S8("-fno-frontend-ssa"), S8("tests/basic_c_local_aggregate_copy.c"),
+        };
+        CompilerDriverResult aggregate = compiler_driver_execute_invocation(
+            arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(aggregate_command)));
+        if (aggregate.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("Wasm64 aggregate error: {S8}\n"), aggregate.diagnostic);
+        }
+        BUSTER_TEST(arguments, aggregate.error == COMPILER_DRIVER_ERROR_NONE && aggregate.has_wasm64 && aggregate.wasm64.stats.memory64);
+        if (aggregate.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+            if (node.length)
+            {
+                String8 node_arguments[] = {node, S8("tests/wasm_local_aggregate_execution.js"), aggregate_output};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
+                                                           (ProcessSpawnOptions){.use_process_environment = 1});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                    BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            else
+            {
+                arguments->show(arguments, S8("Wasm64 local aggregate engine execution unavailable: Node is not installed\n"));
+            }
+        }
+    }
+
     // Each scalar opcode is checked independently by a separate engine.
     // In particular, the wrong i64.ge_u byte can make the entire module invalid.
     String8 wasm64_integer_output = buster_test_temporary_path(arguments->arena, S8("buster-wasm64-integer-opcodes"), S8(".wasm"));
