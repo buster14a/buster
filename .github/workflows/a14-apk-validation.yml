@@ -1,0 +1,43 @@
+name: A14 Android asset validation
+
+on:
+  push:
+    branches: [astra/a14-apk-validation-20260909]
+  workflow_dispatch:
+
+# The write permission is used only to store reviewed immutable Git blobs.
+# This preparation workflow never updates a product ref or opens a PR.
+permissions:
+  contents: write
+
+jobs:
+  graph:
+    if: github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: source
+          persist-credentials: false
+      - name: Record existing build-graph prerequisites
+        run: |
+          cmake --version
+          ninja --version
+          python3 --version
+      - name: Reproduce baseline and validate reviewed candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -u tools/a14_materialize.py
+      - name: Retain exact baseline, candidate, inventory and source evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: a14-apk-evidence-${{ github.sha }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
