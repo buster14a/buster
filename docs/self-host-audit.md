@@ -68,14 +68,19 @@ ordinary Linux/Windows x86-64 and macOS self-host coverage is unchanged.
 ## Independent behavioral evidence
 
 C0 is still Buster, even when built by Clang. Agreement with C0 alone can retain
-a semantic error shared by every generation. After the existing bootstrap and
-regression gates, the dedicated CI job also passes the same fixture to the
-existing native differential runner:
+a semantic error shared by every generation. The dedicated CI job also passes
+the same fixture to the existing native differential runner:
 
 ```sh
 ./build.sh test_differential --self-test
 ./build.sh test_differential --ide build/Release/ide --cc clang --source tests/self_host_bootstrap_probe.c --sanitize-oracle --out build/self-host-audit/probe-oracle
 ```
+
+Once ordinary bootstrap succeeds, full compiler regressions and this independent
+check still run when the enhanced audit fails. Each failure remains a job
+failure; there is no `continue-on-error`. This separates semantic reference
+evidence from the potentially failing generation comparison without bypassing
+the latter. Cancellation does not start another test phase.
 
 `--source` selects this one explicit input instead of the generated/default
 corpus. The driver owns the discovered allocator/optimization/promotion matrix,
