@@ -7,72 +7,108 @@ on:
 
 permissions:
   contents: read
-  issues: read
-  pull-requests: read
-  actions: read
 
 concurrency:
   group: z05-literal-engineering-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
-  snapshot:
+  census:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 35
+    env:
+      BUSTER_TEST_JOBS: '1'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Read pinned source and repository coordination records
+      - name: Pin baseline, bootstrap and record environment
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          out="$RUNNER_TEMP/z05-snapshot"
-          mkdir -p "$out"
-          git cat-file -e ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae^{commit}
-          git bundle create "$out/buster.bundle" --all
-          git archive --format=tar.gz --output="$out/source.tar.gz" ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
-          gh api --paginate --slurp 'repos/buster14a/buster/issues?state=all&per_page=100' > "$out/issues-pages.json"
-          gh api --paginate --slurp 'repos/buster14a/buster/pulls?state=all&per_page=100' > "$out/pulls-pages.json"
-          gh api --paginate --slurp 'repos/buster14a/buster/issues/comments?per_page=100' > "$out/issue-comments-pages.json"
-          gh api --paginate --slurp 'repos/buster14a/buster/pulls/comments?per_page=100' > "$out/review-comments-pages.json"
-          gh api --paginate --slurp 'repos/buster14a/buster/actions/workflows?per_page=100' > "$out/workflows-pages.json"
-          gh api 'repos/buster14a/buster/branches/main' > "$out/main.json"
-          for pr in $(gh api --paginate 'repos/buster14a/buster/pulls?state=open&per_page=100' --jq '.[].number'); do
-            gh api --paginate --slurp "repos/buster14a/buster/pulls/$pr/files?per_page=100" > "$out/pr-$pr-files.json"
-            gh api --paginate --slurp "repos/buster14a/buster/pulls/$pr/reviews?per_page=100" > "$out/pr-$pr-reviews.json"
-          done
+          out="$RUNNER_TEMP/z05-evidence"
+          mkdir -p "$out" "$RUNNER_TEMP/z05-frozen"
+          git worktree add --detach "$RUNNER_TEMP/z05-base" ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          git archive ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae | tar -x -C "$RUNNER_TEMP/z05-frozen"
           {
             date --utc --iso-8601=seconds
-            printf 'baseline=ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae\ntransport=%s\n' "$GITHUB_SHA"
-            sha256sum "$out/source.tar.gz" "$out/buster.bundle"
-            lscpu
+            git rev-parse HEAD
+            clang --version
             uname -a
-          } > "$out/provenance.txt"
-          python3 - "$out" <<'PY'
-          import json
-          import pathlib
-          import sys
-          root = pathlib.Path(sys.argv[1])
-          with (root / 'enumeration.txt').open('w') as out:
-              for name in ('issues', 'pulls', 'issue-comments', 'review-comments'):
-                  pages = json.loads((root / (name + '-pages.json')).read_text())
-                  rows = [row for page in pages for row in page]
-                  print(name, 'pages=', [len(page) for page in pages], 'records=', len(rows), file=out)
-                  if name in ('issues', 'pulls'):
-                      for row in rows:
-                          if row['state'] == 'open' and (name == 'pulls' or 'pull_request' not in row):
-                              print(row['number'], row['title'], file=out)
-          print((root / 'enumeration.txt').read_text())
-          PY
-          printf 'Read-only source/history snapshot; baseline ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae. No compiler build, test, or performance result is implied.\n' >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+            lscpu
+            taskset -pc $$
+            free -b
+            cat /sys/devices/system/cpu/smt/active || true
+          } > "$out/environment.txt"
+          cd "$RUNNER_TEMP/z05-base"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/z05-build"
+      - name: Build untouched trusted Clang baseline and reproduce its fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/z05-evidence"
+          cd "$RUNNER_TEMP/z05-base"
+          "$RUNNER_TEMP/z05-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF 2>&1 | tee "$out/baseline-configure.log"
+          "$RUNNER_TEMP/z05-build" build --config Release -t ide -- -j2 2>&1 | tee "$out/baseline-build.log"
+          cp build/Release/ide "$out/baseline-ide"
+          cp build/CMakeCache.txt "$out/baseline-CMakeCache.txt"
+          "$RUNNER_TEMP/z05-build" test_self_host --config Release 2>&1 | tee "$out/baseline-self-host.log"
+          mkdir -p "$RUNNER_TEMP/z05-frozen/build"
+          cp -a build/generated "$RUNNER_TEMP/z05-frozen/build/generated"
+          find "$RUNNER_TEMP/z05-frozen/src" "$RUNNER_TEMP/z05-frozen/build/generated" -type f -print0 | sort -z | xargs -0 sha256sum > "$out/frozen-inputs.sha256"
+          objdump -d --disassemble=c_ir_decode_string_literal_range_for_target "$out/baseline-ide" > "$out/baseline-range.asm"
+          size -A "$out/baseline-ide" > "$out/baseline-sections.txt"
+      - name: Build the separate untimed observer after all baseline work finishes
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/z05-evidence"
+          python3 tools/z05_literal_probe.py "$RUNNER_TEMP/z05-base"
+          cd "$RUNNER_TEMP/z05-base"
+          git diff --check
+          git diff > "$out/census.patch"
+          "$RUNNER_TEMP/z05-build" generate --build-directory build-probe --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1 | tee "$out/probe-configure.log"
+          "$RUNNER_TEMP/z05-build" build --build-directory build-probe --config Release -t ide -- -j2 2>&1 | tee "$out/probe-build.log"
+          cp build-probe/CMakeCache.txt "$out/probe-CMakeCache.txt"
+          sha256sum "$out/baseline-ide" build-probe/Release/ide > "$out/compiler-sha256.txt"
+      - name: Observe production calls and require identical output on frozen inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/z05-evidence"
+          normal="$out/baseline-ide"
+          probe="$RUNNER_TEMP/z05-base/build-probe/Release/ide"
+          cd "$RUNNER_TEMP/z05-frozen"
+          for name in basic_c_operations basic_c_string_concat basic_c_nested_string_initializers basic_c_plain_char_literal_sign basic_c_float_literal basic_c_static_float_literal compiler; do
+            source="tests/$name.c"
+            flags=(-g0 -O0 -fregister-allocator=none -c)
+            if [[ "$name" == compiler ]]; then
+              source=src/buster/apps/ide/ide.c
+              flags+=(-Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0)
+            fi
+            printf '%q ' "$normal" cc "${flags[@]}" "$source" -o "$out/current.o" >> "$out/commands.txt"
+            printf '\n' >> "$out/commands.txt"
+            "$normal" cc "${flags[@]}" "$source" -o "$out/current.o" > "$out/$name.normal.stdout" 2> "$out/$name.normal.stderr"
+            cp "$out/current.o" "$out/$name.reference.o"
+            printf '%q ' env "BUSTER_Z05_TRACE=$out/$name.trace" BUSTER_ALLOCATION_CENSUS=1 "$probe" cc "${flags[@]}" "$source" -o "$out/current.o" >> "$out/commands.txt"
+            printf '\n' >> "$out/commands.txt"
+            BUSTER_Z05_TRACE="$out/$name.trace" BUSTER_ALLOCATION_CENSUS=1 "$probe" cc "${flags[@]}" "$source" -o "$out/current.o" > "$out/$name.probe.stdout" 2> "$out/$name.census"
+            cmp "$out/current.o" "$out/$name.reference.o"
+            sha256sum "$out/current.o" "$out/$name.trace" > "$out/$name.complete"
+            python3 tools/allocation_census.py --input "$out/$name.census" --output "$out/$name.allocations" --label "$name frozen baseline"
+            rm "$out/$name.reference.o"
+          done
+          sha256sum --check "$out/frozen-inputs.sha256" > "$out/frozen-input-check.log"
+          printf 'Untimed diagnostic runs completed with identical normal/observer object bytes. No throughput or Zen 5 acceptance is implied.\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain diagnostic evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: z05-snapshot-${{ github.run_id }}
-          path: ${{ runner.temp }}/z05-snapshot
+          name: z05-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/z05-evidence
           if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
+          retention-days: 7
+          compression-level: 6
