@@ -1,0 +1,35 @@
+name: A07 inspection
+on:
+  push:
+    branches: [astra/a07-280-inspection]
+    paths: [.github/workflows/a07-inspect.yml]
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Snapshot pinned source and complete issue inventories
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a07"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/a07/source.tar.gz" ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          gh api --paginate --slurp 'repos/buster14a/buster/issues?state=all&per_page=100&sort=created&direction=asc' > "$RUNNER_TEMP/a07/issues.json"
+          gh api --paginate --slurp 'repos/buster14a/buster/pulls?state=open&per_page=100' > "$RUNNER_TEMP/a07/open-prs.json"
+          gh api 'repos/buster14a/buster/branches/main' > "$RUNNER_TEMP/a07/main.json"
+          sha256sum "$RUNNER_TEMP/a07/"* > "$RUNNER_TEMP/a07/SHA256SUMS"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: a07-inspection-${{ github.sha }}
+          path: ${{ runner.temp }}/a07
+          if-no-files-found: error
+          retention-days: 7
