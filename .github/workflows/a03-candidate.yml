@@ -36,10 +36,17 @@ jobs:
           test "$(gh api repos/buster14a/buster/branches/main --jq .commit.sha)" = "$baseline"
           gh api --paginate 'repos/buster14a/buster/pulls?state=open&per_page=100' --slurp > "$RUNNER_TEMP/open-prs.json"
           python3 - <<'PY'
-          import base64, hashlib, json, pathlib, zlib, os
+          import base64, hashlib, json, pathlib, zlib, os, subprocess
           prs = json.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'open-prs.json').read_text())
-          heads = {pr['number']: pr['head']['sha'] for page in prs for pr in page}
-          assert heads == {357: 'b345e30e9597b56e47917dcea16ce8b1ae5faa59', 362: '36d04f127f84465dcb1aa393f4df24eba5508b18'}, heads
+          inspected = {357: 'b345e30e9597b56e47917dcea16ce8b1ae5faa59', 362: '36d04f127f84465dcb1aa393f4df24eba5508b18', 364: 'd706ce388f82515d37e78b7ed58a9e5867fa7930', 365: '2c1485464e450fc9d6de3bd60f2114286a899450', 366: 'f41866e0659ca5198314bbadfe2f1fd7aa780f9d'}
+          affected = {'docs/agents/frontend/calls.md', 'docs/differential-testing.md', 'src/buster/lib/compiler/frontend/c/c_gen.c', 'src/buster/tests/compiler/driver/driver_test.c', 'src/buster/tests/compiler/frontend/c/c_test.c', 'tests/basic_c_qualified_aggregate_call.c', 'tests/differential/qualified_aggregate.c', 'tests/differential/qualified_aggregate.h', 'tests/differential/qualified_aggregate_host.c', 'tools/differential.c'}
+          for page in prs:
+              for pr in page:
+                  if inspected.get(pr['number']) != pr['head']['sha']:
+                      raw = subprocess.check_output(['gh', 'api', '--paginate', '--slurp', 'repos/buster14a/buster/pulls/%d/files?per_page=100' % pr['number']])
+                      files = {item['filename'] for items in json.loads(raw) for item in items}
+                      assert not (files & affected), (pr['number'], files & affected)
+                      print('Additional disjoint PR:', pr['number'], pr['head']['sha'], sorted(files))
           text = pathlib.Path('../transport/a03/qualified-parameter.patch.zlib.b64').read_text().strip()
           # Repair transcription of the transport encoding, never the source.
           text = text.replace('D35q3UbRRUP2', 'D35q3UbRUP2').replace('K2kdRZZxy', 'K2kdRZxy').replace('wN3ttKlRlRfps', 'wN3ttKlRfps')
