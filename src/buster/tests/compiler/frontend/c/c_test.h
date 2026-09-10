@@ -7,6 +7,7 @@
 #include <buster/lib/string.h>
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL bool c_conditional_number(String8 spelling, u64* value);
 BUSTER_F_DECL CType* c_type_from_id(CParseResult* parse, CTypeId id);
 BUSTER_F_DECL CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name);
 BUSTER_F_DECL CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* result, String8 name);

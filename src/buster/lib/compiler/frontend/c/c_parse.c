@@ -5,6 +5,8 @@
 //   CParserDeclaration records — token extents, the name token, the body
 //   range, and typedef/constexpr/variadic flags — by delimiter counting
 //   alone. It builds no tree; every later consumer re-walks token ranges.
+//   The same top-level/body walks validate active integer token spellings,
+//   including unevaluated operands, before any type-only shortcut can hide one.
 //   A function body is split into statements the same way, and the one fact
 //   kept about them is the token range of each _Static_assert statement
 //   (CParserStaticAssert), which c_parse_bind_function_static_asserts
@@ -14420,6 +14422,17 @@ BUSTER_C_INTERNAL void c_parser_diagnostic(CParserResult* result, CSourceLocatio
     };
 }
 
+BUSTER_C_INTERNAL void c_parser_validate_integer_token(CParserResult* result, CPreprocessResult const* preprocess, CToken token)
+{
+    String8 spelling = c_token_spelling(preprocess->spelling_base, token);
+    u64 value = 0;
+    if (!c_number_is_float(spelling) && !c_conditional_number(spelling, &value))
+    {
+        c_parser_diagnostic(result, c_preprocess_token_location(preprocess, token), C_DIAGNOSTIC_INVALID_INTEGER_LITERAL,
+                            S8("invalid integer literal or value outside the supported 64-bit range"));
+    }
+}
+
 typedef struct CParserBlockFrame CParserBlockFrame;
 struct CParserBlockFrame
 {
@@ -14839,6 +14852,10 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                 {
                     break;
                 }
+                if (shape == C_TOKEN_PREPROCESSING_NUMBER)
+                {
+                    c_parser_validate_integer_token(&result, &preprocess, token);
+                }
                 u32 asm_label_end = 0;
                 if (shape == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ASM_KEYWORDS) && index > start &&
                     !delimiter_count && !seen_equal && c_parse_asm_label_at(preprocess, index, token_count, &asm_label_end))
@@ -14905,7 +14922,12 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                         index += 1;
                         while (index < token_count)
                         {
-                            CPunctuator body_punctuator = c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index));
+                            CTokenShape body_shape = c_preprocess_token_shape_at(token_shapes, &preprocess, index);
+                            if (body_shape == C_TOKEN_PREPROCESSING_NUMBER)
+                            {
+                                c_parser_validate_integer_token(&result, &preprocess, preprocess.tokens[index]);
+                            }
+                            CPunctuator body_punctuator = c_token_shape_punctuator(body_shape);
                             if (body_punctuator == C_PUNCTUATOR_LEFT_BRACE)
                             {
                                 brace_depth += 1;

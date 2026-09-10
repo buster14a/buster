@@ -9116,6 +9116,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // and empty macro arguments across the same allocator matrix.
     String8 c_quickjs_regression_paths[] = {
         S8("tests/basic_c_aggregate_attribute.c"),
+        S8("tests/basic_c_integer_literals.c"),
         S8("tests/basic_c_local_enum_declarator.c"),
         S8("tests/basic_c_attribute_short_spelling.c"),
         S8("tests/basic_c_atomic_specifier.c"),
@@ -9132,6 +9133,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     };
     String8 c_quickjs_regression_names[] = {
         S8("buster-c-aggregate-attribute"),
+        S8("buster-c-integer-literals"),
         S8("buster-c-local-enum-declarator"),
         S8("buster-c-attribute-short-spelling"),
         S8("buster-c-atomic-specifier"),

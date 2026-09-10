@@ -7952,20 +7952,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer(CIntegerIrBuilder* builder, CToken
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_number_is_float(String8 spelling)
-{
-    bool hexadecimal = spelling.length >= 2 && spelling.pointer[0] == '0' && (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X');
-    for (u64 index = 0; index < spelling.length; index += 1)
-    {
-        u8 byte = spelling.pointer[index];
-        if (byte == '.' || byte == 'p' || byte == 'P' || (!hexadecimal && (byte == 'e' || byte == 'E')))
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 // The imaginary suffix of a floating literal. C's suffixes are `f`/`l` and
 // GNU adds `i`/`j` for an imaginary constant, in either order and either
 // case, so the run of trailing letters is scanned rather than just the last
@@ -9172,99 +9158,6 @@ BUSTER_C_INTERNAL u8 c_ir_ext80_parse_long_literal(String8 spelling, bool negati
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_ext80_integer_suffix_valid(String8 suffix)
-{
-    if (!suffix.length)
-    {
-        return true;
-    }
-    bool msvc_i64 = suffix.length == 3 && (suffix.pointer[0] == 'i' || suffix.pointer[0] == 'I') && suffix.pointer[1] == '6' && suffix.pointer[2] == '4';
-    bool msvc_ui64 = suffix.length == 4 && (suffix.pointer[0] == 'u' || suffix.pointer[0] == 'U') && (suffix.pointer[1] == 'i' || suffix.pointer[1] == 'I') &&
-                     suffix.pointer[2] == '6' && suffix.pointer[3] == '4';
-    if (msvc_i64 || msvc_ui64)
-    {
-        return true;
-    }
-    bool first_unsigned = suffix.pointer[0] == 'u' || suffix.pointer[0] == 'U';
-    bool first_long = suffix.pointer[0] == 'l' || suffix.pointer[0] == 'L';
-    if (suffix.length == 1)
-    {
-        return first_unsigned || first_long;
-    }
-    bool second_unsigned = suffix.pointer[1] == 'u' || suffix.pointer[1] == 'U';
-    bool second_long = suffix.pointer[1] == 'l' || suffix.pointer[1] == 'L';
-    if (suffix.length == 2)
-    {
-        bool long_pair = first_long && second_long && suffix.pointer[0] == suffix.pointer[1];
-        return long_pair || (first_unsigned && second_long) || (first_long && second_unsigned);
-    }
-    if (suffix.length == 3)
-    {
-        bool third_unsigned = suffix.pointer[2] == 'u' || suffix.pointer[2] == 'U';
-        bool third_long = suffix.pointer[2] == 'l' || suffix.pointer[2] == 'L';
-        bool leading_unsigned = first_unsigned && second_long && third_long && suffix.pointer[1] == suffix.pointer[2];
-        bool trailing_unsigned = first_long && second_long && third_unsigned && suffix.pointer[0] == suffix.pointer[1];
-        return leading_unsigned || trailing_unsigned;
-    }
-    return false;
-}
-
-BUSTER_C_INTERNAL bool c_ir_ext80_parse_integer(String8 spelling, u64* value_out)
-{
-    u32 base = 10;
-    u64 index = 0;
-    if (spelling.length >= 2 && spelling.pointer[0] == '0')
-    {
-        if (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X')
-        {
-            base = 16;
-            index = 2;
-        }
-        else if (spelling.pointer[1] == 'b' || spelling.pointer[1] == 'B')
-        {
-            base = 2;
-            index = 2;
-        }
-        else
-        {
-            base = 8;
-        }
-    }
-    u64 value = 0;
-    bool saw_digit = false;
-    while (index < spelling.length)
-    {
-        u8 byte = spelling.pointer[index];
-        if (byte == '\'')
-        {
-            index += 1;
-            continue;
-        }
-        u32 digit = c_ir_ext80_digit(byte);
-        if (digit >= base)
-        {
-            break;
-        }
-        if (value > (UINT64_MAX - digit) / base)
-        {
-            return false;
-        }
-        value = value * base + digit;
-        saw_digit = true;
-        index += 1;
-    }
-    if (!saw_digit)
-    {
-        return false;
-    }
-    if (!c_ir_ext80_integer_suffix_valid((String8){.pointer = spelling.pointer + index, .length = spelling.length - index}))
-    {
-        return false;
-    }
-    *value_out = value;
-    return true;
-}
-
 // The x87 encoding spells an infinity as the explicit integer bit alone and a
 // quiet NaN as that bit plus the leading fraction bit.  Both are written here
 // and matched here, so neither is a respelled literal.
@@ -9689,7 +9582,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 to
     String8 spelling = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index]);
     u64 significand = 0;
     u16 exponent_sign = 0;
-    bool floating = c_ir_number_is_float(spelling);
+    bool floating = c_number_is_float(spelling);
     char8 suffix = spelling.length ? spelling.pointer[spelling.length - 1] : 0;
     bool long_suffix = suffix == 'l' || suffix == 'L';
     u8 status = C_IR_ROUND_FAILED;
@@ -9729,7 +9622,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 to
     else
     {
         u64 integer = 0;
-        if (c_ir_ext80_parse_integer(spelling, &integer))
+        if (c_conditional_number(spelling, &integer))
         {
             IrTypeId integer_type_id = c_ir_integer_literal_type(builder, spelling, integer);
             IrType* integer_type = ir_type_from_id(&builder->program->types, integer_type_id);
@@ -23874,7 +23767,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     if (first.kind == C_TOKEN_PREPROCESSING_NUMBER &&
         (start + 1 == end || c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACKET)))
     {
-        if (c_ir_number_is_float(c_token_spelling(builder->preprocess.spelling_base, first)))
+        if (c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, first)))
         {
             *type_out = c_ir_float_literal_type(builder, c_token_spelling(builder->preprocess.spelling_base, first));
             return start + 1 == end;
@@ -25439,7 +25332,7 @@ c_ir_expression_core_loop:
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
-            IrValueId value = c_ir_number_is_float(c_token_spelling(builder->preprocess.spelling_base, token)) ? c_ir_emit_float(builder, token) : c_ir_emit_integer(builder, token);
+            IrValueId value = c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, token)) ? c_ir_emit_float(builder, token) : c_ir_emit_integer(builder, token);
             if (value.value == IR_ID_UNDERLYING_INVALID)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -28341,7 +28234,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         {
             IrTypeId candidate = builder->s32_type;
             String8 number_spelling = c_token_spelling(builder->preprocess.spelling_base, token);
-            if (c_ir_number_is_float(number_spelling))
+            if (c_number_is_float(number_spelling))
             {
                 candidate = c_ir_float_literal_type(builder, number_spelling);
             }
@@ -39390,7 +39283,7 @@ BUSTER_C_INTERNAL u8 c_ir_constant_initializer_leaf_class(CIntegerIrBuilder* bui
         bool float_child = child->kind == IR_TYPE_FLOAT && ((child->bit_width == 32 && size == 4) || (child->bit_width == 64 && size == 8));
         if (literal.kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
-            bool floating = c_ir_number_is_float(c_token_spelling(builder->preprocess.spelling_base, literal));
+            bool floating = c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, literal));
             if (integer_child && !floating)
             {
                 leaf_class = C_IR_INITIALIZER_LEAF_INTEGER_TO_INTEGER;
@@ -41940,7 +41833,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
             if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
             {
                 CIrConstantValue value = {0};
-                if (c_ir_number_is_float(c_token_spelling(builder->preprocess.spelling_base, token)))
+                if (c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, token)))
                 {
                     f64 floating = 0.0;
                     char8 suffix = 0;
