@@ -2528,7 +2528,17 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestAr
             valid &= case_valid;
         }
     }
+    // The census's old dword-qualified ZMM VMOVNTDQA was not valid source.
+    // Check the legal full tuple separately before its rejection control.
+    u8 const stream_expected[] = {0x62, 0xf2, 0x7d, 0x48, 0x2a, 0x00};
+    AssemblyEncodeResult stream_encoded = assembly_encode(arguments->arena,
+        S8("vmovntdqa zmm0, zmmword ptr [rax]\n"),
+        (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    valid &= stream_encoded.diagnostic_count == 0 && stream_encoded.relocation_count == 0 &&
+        x86_64_metadata_test_bytes_equal(stream_encoded.bytes.pointer, (u32)stream_encoded.bytes.length,
+                                        stream_expected, sizeof(stream_expected));
     String8 const invalid_widths[] = {
+        S8("vmovntdqa zmm0, dword ptr [rax]\n"),
         S8("vcvtps2pd xmm0{k1}, dword ptr [rax]\n"),
         S8("vcvtps2pd ymm0{k1}, qword ptr [rax]\n"),
         S8("vcvtps2pd ymm0{k1}, ymmword ptr [rax]\n"),

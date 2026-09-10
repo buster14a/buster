@@ -1,7 +1,8 @@
 // x86 instruction-byte authority: generated form normalization, checked
 // selection/emission, and derived exact-machine specializations live here.
 // Map: buster_x86_metadata_encode (checked request), emit_form_to_scratch
-// (general packing), emit_machine_fast (derived hot plans), tls_prepare
+// (general packing), select_form/prepare_source_tuple_query (source contracts),
+// emit_machine_fast (derived hot plans), tls_prepare
 // and forwarding_prepare/got_prepare (fixed-envelope recipes), prewarm_all_forms
 // (worker publication).
 // Parsing, allocation, scheduling and object-format relocation policy remain
@@ -8945,15 +8946,10 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
             bool selected_x87_no_rexw = false;
             u16 inferred_source_tuple_width = 0;
             bool ambiguous_source_tuple = false;
-            // The three memory-topology probes below run once per candidate, but each
-            // one first rejects on conditions that depend only on the query, which is
-            // loop-invariant.  Hoist those here so a query that can satisfy neither
-            // shape skips all three calls outright instead of re-deriving the same
-            // answer for every candidate considered.  These are the callees' own
-            // query-side tests, so this is a necessary condition and can only skip a
-            // call that would have returned false.  The two families are mutually
-            // exclusive by construction: the topology pair requires no decorator at
-            // all, the typed probe requires the broadcast decorator.
+            // Hoist query-only rejection before the per-candidate memory probes.
+            // Aggregate/block topology requires undecorated operands; the typed
+            // probe requires broadcast. Source-semantic tuple projection also
+            // covers ordinary EVEX loads and validates the explicit source size.
             bool topology_query_possible =
                 query.operands && query.operand_count == 2 && query.address_size == 64 &&
                 query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64 && !query.attributes.lock &&
