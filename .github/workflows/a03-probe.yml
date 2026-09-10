@@ -1,0 +1,82 @@
+name: A03 baseline probe
+on:
+  push:
+    branches: [astra/a03-20260909-ci-inspection]
+    paths: [.github/workflows/a03-probe.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630cea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          persist-credentials: false
+      - name: Build frozen baseline with repository driver
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          clang --version | tee "$RUNNER_TEMP/evidence/clang.txt"
+          gcc --version | tee "$RUNNER_TEMP/evidence/gcc.txt"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/evidence/source-sha.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j1 2>&1 | tee "$RUNNER_TEMP/evidence/build.txt"
+      - name: Independent controls and baseline strict verification
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/evidence/qualified.c" <<'EOF'
+          struct Value { unsigned char bytes[3]; };
+          int read_value(volatile struct Value value)
+          {
+              value.bytes[0] = 7;
+              return value.bytes[0];
+          }
+          int main(void)
+          {
+              struct Value value = {{1, 2, 3}};
+              return read_value(value) != 7;
+          }
+          EOF
+          for cc in clang gcc; do
+            "$cc" -std=c17 -Wall -Wextra -Werror "$RUNNER_TEMP/evidence/qualified.c" -o "$RUNNER_TEMP/control"
+            "$RUNNER_TEMP/control"
+          done
+          build/Release/ide cc "$RUNNER_TEMP/evidence/qualified.c" -o "$RUNNER_TEMP/plain"
+          "$RUNNER_TEMP/plain"
+          for mode in none mir-stack fast quality; do
+            for ssa in -ffrontend-ssa -fno-frontend-ssa; do
+              log="$RUNNER_TEMP/evidence/${mode}${ssa}.txt"
+              set +e
+              build/Release/ide cc -fverify-codegen -fregister-allocator="$mode" "$ssa" -c "$RUNNER_TEMP/evidence/qualified.c" -o "$RUNNER_TEMP/probe.o" > "$log" 2>&1
+              status=$?
+              set -e
+              cat "$log"
+              test "$status" -eq 1
+              grep -q 'canonical C IR validation failed: error 9' "$log"
+            done
+          done
+          "$RUNNER_TEMP/buster-build" test_differential --self-test 2>&1 | tee "$RUNNER_TEMP/evidence/differential-self-test.txt"
+      - name: Preserve baseline self-host gate
+        if: ${{ matrix.runner == 'ubuntu-26.04' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/evidence/self-host.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a03-baseline-${{ matrix.runner }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 7
+          if-no-files-found: error
