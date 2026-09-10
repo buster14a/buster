@@ -1,0 +1,126 @@
+name: Z07 independent fixture and storage diagnosis
+
+on:
+  push:
+    branches: [astra/z07-semantic-queries-transport]
+    paths: [.github/workflows/z07-diagnose.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: z07-diagnose-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 14741d52ca7bd8d04cbdcd703e7934cac06b5939
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Reference controls and exact trusted candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/z07-diagnose"
+          { git rev-parse HEAD; uname -a; lscpu; clang --version; gcc --version; } > "$RUNNER_TEMP/z07-diagnose/provenance.txt"
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'z07-diagnose'
+          records = []
+          for level in [0, 2]:
+              output = root / ('gcc-O' + str(level))
+              command = ['gcc', '-std=c23', '-O' + str(level), '-Wall', '-Wextra', '-Werror', '-Wpedantic', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char', 'tests/basic_c_constexpr_leaf.c', '-o', str(output)]
+              result = subprocess.run(command, capture_output=True, text=True)
+              record = {'command': command, 'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}
+              if result.returncode == 0:
+                  executed = subprocess.run([str(output)], capture_output=True, text=True)
+                  record['execute'] = {'returncode': executed.returncode, 'stdout': executed.stdout, 'stderr': executed.stderr}
+              records.append(record)
+          (root / 'gcc-controls.json').write_text(json.dumps(records, indent=2))
+          print(json.dumps(records, indent=2), flush=True)
+          PY
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/z07-build"
+          "$RUNNER_TEMP/z07-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/z07-build" build --config Release -t ide -- -j2
+          sha256sum build/Release/ide > "$RUNNER_TEMP/z07-diagnose/candidate.sha256"
+          cp build/Release/ide "$RUNNER_TEMP/z07-diagnose/trusted-candidate"
+      - name: Diagnose candidate and exact baseline with unchanged tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/z07-query.py" <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+          label = sys.argv[1]
+          root = Path(os.environ['RUNNER_TEMP']) / 'z07-diagnose'
+          records = []
+          for mode in ['none', 'mir-stack', 'fast', 'quality']:
+              output = root / (label + '-' + mode)
+              command = ['build/Release/ide', 'cc', '-std=c23', '-fregister-allocator=' + mode, 'tests/basic_c_constexpr_leaf.c', '-o', str(output)]
+              result = subprocess.run(command, capture_output=True, text=True)
+              record = {'command': command, 'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}
+              if result.returncode == 0:
+                  executed = subprocess.run([str(output)], capture_output=True, text=True)
+                  record['execute'] = {'returncode': executed.returncode, 'stdout': executed.stdout, 'stderr': executed.stderr}
+              records.append(record)
+          (root / (label + '-fixture.json')).write_text(json.dumps(records, indent=2))
+          print(json.dumps(records, indent=2), flush=True)
+          with (root / (label + '-tests.log')).open('w') as log:
+              result = subprocess.run(['build/Release/ide', 'test', '--ci=1'], stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, BUSTER_CONSTEXPR_CENSUS='1'))
+          (root / (label + '-tests.status')).write_text(str(result.returncode) + '\n')
+          PY
+          python3 "$RUNNER_TEMP/z07-query.py" candidate
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          path = 'src/buster/lib/compiler/frontend/c/c_parse.c'
+          source = Path(path).read_text()
+          baseline = subprocess.check_output(['git', 'show', 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae:' + path], text=True)
+          first = 'BUSTER_C_SHARED bool c_parse_validate_constexpr_declaration('
+          last = '\ntypedef struct CTypePair CTypePair;'
+          wrapper = '\n#if BUSTER_INCLUDE_TESTS\nbool c_test_validate_constexpr_declaration(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration)\n{\n    return c_parse_validate_constexpr_declaration(0, arena, result, preprocess, declaration);\n}\n#endif\n'
+          Path(path).write_text(source[:source.index(first)] + baseline[baseline.index(first):baseline.index(last)] + wrapper + source[source.index(last):])
+          PY
+          "$RUNNER_TEMP/z07-build" build --config Release -t ide -- -j2
+          python3 "$RUNNER_TEMP/z07-query.py" baseline
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'z07-diagnose'
+          pattern = r'CONSTEXPR_LEAF_CENSUS types=(\d+) declaration=(\d+) scratch_growth=(\d+)'
+          before = re.findall(pattern, (root / 'baseline-tests.log').read_text(errors='replace'))
+          after = re.findall(pattern, (root / 'candidate-tests.log').read_text(errors='replace'))
+          result = {'baseline': before, 'candidate': after}
+          result['same_32_queries'] = len(before) == len(after) == 32 and [(t,d) for t,d,g in before] == [(t,d) for t,d,g in after]
+          result['baseline_positive_candidate_zero'] = bool(before) and all(int(g)>0 for t,d,g in before) and all(int(g)==0 for t,d,g in after)
+          (root / 'storage-comparison.json').write_text(json.dumps(result, indent=2))
+          print(json.dumps(result, indent=2), flush=True)
+          if not result['same_32_queries'] or not result['baseline_positive_candidate_zero']:
+              raise SystemExit('Storage comparison failed')
+          PY
+      - name: Restore submitted source and run existing mode matrix
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git restore --source=HEAD -- src/buster/lib/compiler/frontend/c/c_parse.c
+          git diff --exit-code
+          "$RUNNER_TEMP/z07-build" build --config Release -t ide -- -j2
+          "$RUNNER_TEMP/z07-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/z07-diagnose/mode-matrix.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: z07-diagnose-${{ github.run_id }}
+          path: ${{ runner.temp }}/z07-diagnose/
+          if-no-files-found: error
+          retention-days: 7
