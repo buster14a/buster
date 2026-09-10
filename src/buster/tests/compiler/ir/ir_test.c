@@ -1,5 +1,6 @@
 #include <buster/tests/compiler/ir/ir_test.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/time.h>
 #if BUSTER_INCLUDE_TESTS
 
@@ -262,9 +263,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_call_validation(UnitTestArg
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_construction_appends(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrFunction function = {0};
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters before = ir_construction_counters();
+#endif
+    BUSTER_TEST(arguments, ir_function_add_block(0, &function, (IrBlock){0}) == 0);
+    BUSTER_TEST(arguments, ir_function_add_value(arguments->arena, 0, (IrValue){0}).value == IR_ID_UNDERLYING_INVALID);
+    BUSTER_TEST(arguments, ir_function_add_instruction(0, &function, (IrInstruction){0}, (IrSourceRange){0}).value == IR_ID_UNDERLYING_INVALID);
+    // Initial zero capacity, exact powers of two, and repeated growth
+    // retain row identity and the parallel canonical source array.
+    for (u32 index = 0; index < 65; index += 1)
+    {
+        IrBlock* block = ir_function_add_block(arguments->arena, &function, (IrBlock){.sealed = true});
+        IrValueId value = ir_function_add_value(arguments->arena, &function, (IrValue){.definition = {.value = index}});
+        IrInstructionId instruction = ir_function_add_instruction(arguments->arena, &function,
+            (IrInstruction){.opcode = IR_OPCODE_CONSTANT_INTEGER, .result = value, .next = IR_INSTRUCTION_ID_INVALID},
+            (IrSourceRange){.source = {.value = 7}, .offset = index * 3, .length = 2});
+        BUSTER_TEST(arguments, block && block->id.value == index);
+        BUSTER_TEST(arguments, value.value == index && instruction.value == index);
+        BUSTER_TEST(arguments, function.block_count == index + 1 && function.instruction_count == index + 1 && function.value_count == index + 1);
+    }
+    BUSTER_TEST(arguments, function.block_capacity == 128 && function.instruction_capacity == 128 && function.value_capacity == 128);
+    for (u32 index = 0; index < 65; index += 1)
+    {
+        BUSTER_TEST(arguments, function.blocks[index].id.value == index && function.blocks[index].sealed);
+        BUSTER_TEST(arguments, function.values[index].definition.value == index);
+        BUSTER_TEST(arguments, function.instructions[index].opcode == IR_OPCODE_CONSTANT_INTEGER && function.instructions[index].result.value == index);
+        BUSTER_TEST(arguments, function.instructions[index].next.value == IR_ID_UNDERLYING_INVALID);
+        IrSourceRange source = function.instruction_canonical_sources[index];
+        BUSTER_TEST(arguments, source.source.value == 7 && source.offset == index * 3 && source.length == 2);
+    }
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters after = ir_construction_counters();
+    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+#define IR_CONSTRUCTION_EXPECT(counter, expected) \
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_##counter] - before.values[IR_CONSTRUCTION_##counter] == (expected))
+    IR_CONSTRUCTION_EXPECT(BLOCK_APPENDS, 65);
+    IR_CONSTRUCTION_EXPECT(VALUE_APPENDS, 65);
+    IR_CONSTRUCTION_EXPECT(INSTRUCTION_APPENDS, 65);
+    IR_CONSTRUCTION_EXPECT(OPERAND_SLOTS_APPENDED, 0);
+    IR_CONSTRUCTION_EXPECT(BLOCK_GROWS, 5);
+    IR_CONSTRUCTION_EXPECT(VALUE_GROWS, 4);
+    IR_CONSTRUCTION_EXPECT(INSTRUCTION_GROWS, 4);
+    IR_CONSTRUCTION_EXPECT(BLOCK_ROWS_COPIED, 120);
+    IR_CONSTRUCTION_EXPECT(VALUE_ROWS_COPIED, 112);
+    IR_CONSTRUCTION_EXPECT(INSTRUCTION_ROWS_COPIED, 112);
+    IR_CONSTRUCTION_EXPECT(SOURCE_ROWS_COPIED, 112);
+    IR_CONSTRUCTION_EXPECT(SOURCE_ROWS_CLEARED, 240);
+#undef IR_CONSTRUCTION_EXPECT
+    for (u32 index = 0; index < IR_CONSTRUCTION_COUNT; index += 1)
+    {
+        BUSTER_TEST(arguments, ir_construction_counter_name((IrConstructionCounter)index).length != 0);
+    }
+    BUSTER_TEST(arguments, ir_construction_counter_name(IR_CONSTRUCTION_COUNT).length == 0);
+#endif
+    return result;
+}
+
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_promotion_tests(arguments);
+    UnitTestResult construction = ir_test_construction_appends(arguments);
+    result.test_count += construction.test_count;
+    result.succeeded_test_count += construction.succeeded_test_count;
 
     UnitTestResult call_validation = ir_test_canonical_call_validation(arguments);
     result.succeeded_test_count += call_validation.succeeded_test_count;

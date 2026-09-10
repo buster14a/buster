@@ -180,6 +180,10 @@ BUSTER_F_DECL void x64_emit_vector_native_memory(X64Builder* builder, bool store
 BUSTER_F_DECL void x64_emit_vector_native_binary_operation(X64Builder* builder, u8 prefix, u8 opcode, u32 size, X64Register base);
 BUSTER_F_DECL void x64_emit_vzeroupper(X64Builder* builder);
 BUSTER_F_DECL void codegen_canonical_x64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract);
+// Shared Win64 large-frame probe. R10/R11 walk the stack without changing
+// RSP; the final instruction reserves the complete frame in one action.
+BUSTER_F_DECL bool codegen_x64_emit_windows_stack_allocate(CodegenBuffer* buffer, u32 size, CodegenFunctionDescriptor* descriptor,
+                                                          u32 action_capacity, u32 function_offset);
 BUSTER_F_DECL void codegen_canonical_a64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract);
 BUSTER_F_DECL void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_number, u32 base_register, u32 byte_offset);
 BUSTER_F_DECL bool codegen_canonical_a64_frame_memory_operation(CodegenBuffer* buffer, u32 register_number, u32 offset, u32 size, bool store,

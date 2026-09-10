@@ -1,5 +1,20 @@
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/simd.h>
+#include <buster/lib/compiler/codegen/register_allocator_quality_internal.h>
+
+#if BUSTER_BENCH_ALLOCATIONS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL MachineQualityCensus machine_quality_census_totals;
+
+MachineQualityCensus machine_quality_census_snapshot(void)
+{
+    return machine_quality_census_totals;
+}
+
+#define BUSTER_QUALITY_COUNT(name, amount) BUSTER_VALIDATE(machine_quality_census_try_add(&machine_quality_census_totals.name, (u64)(amount)))
+#else
+// Arguments are not evaluated in ordinary or self-hosted builds.
+#define BUSTER_QUALITY_COUNT(name, amount) ((void)0)
+#endif
 
 // QRA stages 7 and 8: global assignment over the machine IR. A live
 // interval per virtual register, a weight that pays for keeping it in a
@@ -153,6 +168,8 @@ BUSTER_GLOBAL_LOCAL u32* machine_quality_foreclosure_prefix_ensure(u32* foreclos
     u32* prefix = foreclosure_prefix + (u64)pin_register * (instruction_count + 1);
     if (!((*prefix_built_mask >> pin_register) & 1u))
     {
+        BUSTER_QUALITY_COUNT(prefix_rows_built, 1);
+        BUSTER_QUALITY_COUNT(prefix_cells_written, (u64)instruction_count + 1);
         *prefix_built_mask |= 1u << pin_register;
         prefix[0] = 0;
         for (u32 instruction_index = 0; instruction_index < instruction_count; instruction_index += 1)
@@ -165,9 +182,11 @@ BUSTER_GLOBAL_LOCAL u32* machine_quality_foreclosure_prefix_ensure(u32* foreclos
 
 MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunction* function)
 {
+    BUSTER_QUALITY_COUNT(functions, 1);
     MachineTargetDescription const* description = function->target;
     if (!description)
     {
+        BUSTER_QUALITY_COUNT(invalid_target_functions, 1);
         return (MachineStackPlacement){0};
     }
     // A switch's targets live in the case table rather than in block-ref
@@ -176,6 +195,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     // case table keep the local allocator alone.
     if (function->switch_case_count)
     {
+        BUSTER_QUALITY_COUNT(switch_fallback_functions, 1);
         return machine_fast_placement_build(arena, function);
     }
     // Frequency classes are consumed only by the economics below, so only
@@ -197,12 +217,30 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     MachineFastPrepass prepass = machine_fast_prepass_build(scratch.arena, function, true);
     if (!prepass.valid)
     {
+        BUSTER_QUALITY_COUNT(prepass_failures, 1);
         scratch_end(scratch);
         return (MachineStackPlacement){0};
     }
     u32* interval_starts = prepass.interval_starts;
     u32* interval_ends = prepass.interval_ends;
     u8* disqualified = prepass.disqualified;
+    BUSTER_QUALITY_COUNT(prepassed_functions, 1);
+    BUSTER_QUALITY_COUNT(rows, function->instruction_count);
+    BUSTER_QUALITY_COUNT(global_values, register_count);
+#if BUSTER_BENCH_ALLOCATIONS
+    // Count real touch intervals, not the global ID universe. This extra walk
+    // belongs only to the diagnostic replay and is never timed as production.
+    u32 local_value_count = 0;
+    for (u32 register_index = 0; register_index < register_count; register_index += 1)
+    {
+        local_value_count += interval_starts[register_index] != UINT32_MAX;
+    }
+    BUSTER_QUALITY_COUNT(local_values, local_value_count);
+    BUSTER_QUALITY_COUNT(local_values_zero_functions, local_value_count == 0);
+    BUSTER_QUALITY_COUNT(local_values_small_functions, local_value_count > 0 && local_value_count <= 64);
+    BUSTER_QUALITY_COUNT(local_values_tiled_functions, local_value_count > 64 && local_value_count <= 512);
+    BUSTER_QUALITY_COUNT(local_values_large_functions, local_value_count > 512);
+#endif
     // Loop extension: a backward edge can re-run everything between its
     // target and itself, so any interval meeting that span must cover the
     // whole span or two values alive in different iterations could share a
@@ -263,10 +301,16 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         loop_spans[merged_span_count] = ((u64)span_start << 32) | span_end;
         merged_span_count += 1;
     }
+    BUSTER_QUALITY_COUNT(raw_loop_spans, loop_span_count);
+    BUSTER_QUALITY_COUNT(merged_regions, merged_span_count);
+    BUSTER_QUALITY_COUNT(closure_value_tests, (u64)merged_span_count * register_count);
     for (u32 span_index = 0; span_index < merged_span_count; span_index += 1)
     {
         u32 loop_start = (u32)(loop_spans[span_index] >> 32);
         u32 loop_end = (u32)loop_spans[span_index];
+#if BUSTER_BENCH_ALLOCATIONS
+        u32 region_value_count = 0;
+#endif
         for (u32 register_index = 0; register_index < register_count; register_index += 1)
         {
             if (interval_starts[register_index] == UINT32_MAX || interval_starts[register_index] > loop_end ||
@@ -274,9 +318,19 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             {
                 continue;
             }
+            BUSTER_QUALITY_COUNT(closure_intersections, 1);
+#if BUSTER_BENCH_ALLOCATIONS
+            region_value_count += 1;
+#endif
             interval_starts[register_index] = BUSTER_MIN(interval_starts[register_index], loop_start);
             interval_ends[register_index] = BUSTER_MAX(interval_ends[register_index], loop_end);
         }
+#if BUSTER_BENCH_ALLOCATIONS
+        BUSTER_QUALITY_COUNT(region_values_zero_regions, region_value_count == 0);
+        BUSTER_QUALITY_COUNT(region_values_small_regions, region_value_count > 0 && region_value_count <= 64);
+        BUSTER_QUALITY_COUNT(region_values_tiled_regions, region_value_count > 64 && region_value_count <= 512);
+        BUSTER_QUALITY_COUNT(region_values_large_regions, region_value_count > 512);
+#endif
     }
     // Rather than guess which values would spill, run the local scan once
     // and count what it actually did. A pin's benefit is the memory
@@ -336,6 +390,9 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     {
         candidate_indices[register_index] = UINT32_MAX;
     }
+    // Two traffic arrays and the inverse candidate map have now been cleared.
+    // The durable pin array's initial clear is deliberately excluded here.
+    BUSTER_QUALITY_COUNT(initial_value_clear_bytes, (u64)register_count * 3 * sizeof(u32));
     MachineQualityInterval* heap = arena_allocate(scratch.arena, MachineQualityInterval, MACHINE_QUALITY_MAXIMUM_CANDIDATES);
     u32 heap_count = 0;
     for (u32 register_index = 0; register_index < register_count && heap_count < MACHINE_QUALITY_MAXIMUM_CANDIDATES; register_index += 1)
@@ -376,8 +433,11 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     {
         machine_quality_heap_sift(heap, heap_count, root - 1);
     }
+    BUSTER_QUALITY_COUNT(candidates, heap_count);
+    BUSTER_QUALITY_COUNT(candidate_cap_functions, heap_count == MACHINE_QUALITY_MAXIMUM_CANDIDATES);
     if (!heap_count || !function->instruction_count)
     {
+        BUSTER_QUALITY_COUNT(empty_candidate_functions, 1);
         scratch_end(scratch);
         return baseline;
     }
@@ -442,7 +502,9 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             foreclosed |= caller_saved_allocatable;
         }
         bool legacy_constrained = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) != 0;
-        bool constrained = legacy_constrained || info->fixed_register_mask || info->early_clobber_mask || info->fixed_register_set;
+        // A tie alone does not force scratch registers: unlike the shared
+        // constraint predicate, this predicate controls the pin budget.
+        bool constrained = legacy_constrained || info->fixed_register_mask || info->early_clobber_mask;
         u32 register_operand_slots = 0;
         for (u32 slot = 0; slot < info->operand_count; slot += 1)
         {
@@ -677,6 +739,8 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         // compares against the boundary work — never a reorder of the
         // priority heap, which 2026-08-10l measured as wrong at every
         // weight.
+        BUSTER_QUALITY_COUNT(candidate_region_cells, (u64)heap_count * merged_span_count);
+        BUSTER_QUALITY_COUNT(candidate_region_clear_bytes, (u64)heap_count * merged_span_count * sizeof(u32));
         candidate_region_traffic = arena_allocate(scratch.arena, u32, (u64)heap_count * merged_span_count);
         for (u64 cell_index = 0; cell_index < (u64)heap_count * merged_span_count; cell_index += 1)
         {
@@ -698,10 +762,30 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             u32 region_index = machine_quality_region_find(loop_spans, merged_span_count, edit_instruction);
             if (region_index != UINT32_MAX)
             {
+                BUSTER_QUALITY_COUNT(candidate_region_updates, 1);
                 candidate_region_traffic[(u64)candidate_slot * merged_span_count + region_index] += instruction_weights[edit_instruction];
             }
         }
     }
+#if BUSTER_BENCH_ALLOCATIONS
+    if (candidate_region_traffic)
+    {
+        u64 cells = (u64)heap_count * merged_span_count;
+        u64 nonzero = 0;
+        for (u64 cell_index = 0; cell_index < cells; cell_index += 1)
+        {
+            nonzero += candidate_region_traffic[cell_index] != 0;
+        }
+        // Density describes the stored u32 table, including current wraparound
+        // semantics (#298). It is not a claim about unbounded weighted benefit.
+        BUSTER_QUALITY_COUNT(candidate_region_nonzero_cells, nonzero);
+        BUSTER_QUALITY_COUNT(region_table_zero_functions, nonzero == 0);
+        BUSTER_QUALITY_COUNT(region_table_sparse_functions, nonzero > 0 && nonzero <= cells / 8);
+        BUSTER_QUALITY_COUNT(region_table_mixed_functions, nonzero > cells / 8 && nonzero <= cells / 2);
+        BUSTER_QUALITY_COUNT(region_table_dense_functions, nonzero > cells / 2);
+    }
+#endif
+    BUSTER_QUALITY_COUNT(heap_snapshot_bytes, (u64)heap_count * sizeof(MachineQualityInterval));
     MachineQualityInterval* heap_backup = arena_allocate(scratch.arena, MachineQualityInterval, heap_count);
     for (u32 backup_index = 0; backup_index < heap_count; backup_index += 1)
     {
@@ -735,6 +819,10 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         {
             continue;
         }
+        BUSTER_QUALITY_COUNT(attempts, 1);
+        BUSTER_QUALITY_COUNT(attempt_reset_bytes, (u64)register_count * 3 * sizeof(u32) +
+                                                    (u64)attempt_file_count * 2 * sizeof(u32) + function->instruction_count);
+        BUSTER_QUALITY_COUNT(heap_restore_bytes, (u64)heap_backup_count * sizeof(MachineQualityInterval));
         for (u32 register_index = 0; register_index < register_count; register_index += 1)
         {
             pinned_registers[register_index] = UINT32_MAX;
@@ -760,6 +848,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         u32 split_store_count = 0;
         while (heap_count)
         {
+            BUSTER_QUALITY_COUNT(candidate_pops, 1);
             MachineQualityInterval candidate = heap[0];
             heap_count -= 1;
             heap[0] = heap[heap_count];
@@ -788,6 +877,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                 }
                 if (!caller_saved_open)
                 {
+                    BUSTER_QUALITY_COUNT(marginal_rejections, 1);
                     continue;
                 }
             }
@@ -797,8 +887,10 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             bool over_budget = false;
             for (u32 instruction_index = candidate.start; instruction_index <= candidate.end && !over_budget; instruction_index += 1)
             {
+                BUSTER_QUALITY_COUNT(whole_budget_rows, 1);
                 over_budget = pin_depths[instruction_index] >= pin_budgets[instruction_index];
             }
+            BUSTER_QUALITY_COUNT(whole_budget_rejections, over_budget);
             bool assigned = false;
             if (!over_budget)
             {
@@ -815,8 +907,10 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                     }
                     u32* prefix = machine_quality_foreclosure_prefix_ensure(foreclosure_prefix, &prefix_built_mask, foreclosed_masks,
                                                                             function->instruction_count, pin_register);
+                    BUSTER_QUALITY_COUNT(whole_register_probes, 1);
                     if (prefix[candidate.end + 1] != prefix[candidate.start])
                     {
+                        BUSTER_QUALITY_COUNT(whole_foreclosure_rejections, 1);
                         continue;
                     }
                     bool overlaps = false;
@@ -830,11 +924,13 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                     }
                     if (overlaps)
                     {
+                        BUSTER_QUALITY_COUNT(whole_overlap_rejections, 1);
                         continue;
                     }
                     assigned_starts[file_index][assigned_counts[file_index]] = candidate.start;
                     assigned_ends[file_index][assigned_counts[file_index]] = candidate.end;
                     assigned_counts[file_index] += 1;
+                    BUSTER_QUALITY_COUNT(whole_assignments, 1);
                     pinned_registers[candidate.virtual_register] = pin_register;
                     pinned_mask |= 1ull << pin_register;
                     for (u32 instruction_index = candidate.start; instruction_index <= candidate.end; instruction_index += 1)
@@ -864,10 +960,13 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             // prologue always prices at. A marginal candidate keeps its
             // caller-saved-only restriction here too, for the reason
             // candidacy imposed it.
+            BUSTER_QUALITY_COUNT(split_candidates, 1);
             u32 previous_traffic = UINT32_MAX;
             u32 previous_region = UINT32_MAX;
             while (!assigned)
             {
+                BUSTER_QUALITY_COUNT(region_selection_passes, 1);
+                BUSTER_QUALITY_COUNT(region_selection_cells, merged_span_count);
                 u32 best_region = UINT32_MAX;
                 u32 best_traffic = 0;
                 for (u32 region_index = 0; region_index < merged_span_count; region_index += 1)
@@ -887,6 +986,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                 {
                     break;
                 }
+                BUSTER_QUALITY_COUNT(selected_regions, 1);
                 previous_traffic = best_traffic;
                 previous_region = best_region;
                 u32 region_start = (u32)(loop_spans[best_region] >> 32);
@@ -896,6 +996,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                 // which meeting it guarantees through the extension.
                 if (!region_ok[best_region] || candidate.start >= region_start || candidate.end < region_end)
                 {
+                    BUSTER_QUALITY_COUNT(region_legality_rejections, 1);
                     continue;
                 }
                 // The prepass's raw last-use — never loop-extended — is
@@ -906,15 +1007,18 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                 bool lives_past = prepass.last_use[candidate.virtual_register] > region_end;
                 if (lives_past && !region_exit_ok[best_region])
                 {
+                    BUSTER_QUALITY_COUNT(region_legality_rejections, 1);
                     continue;
                 }
                 bool region_over_budget = false;
                 for (u32 instruction_index = region_start; instruction_index <= region_end && !region_over_budget; instruction_index += 1)
                 {
+                    BUSTER_QUALITY_COUNT(split_budget_rows, 1);
                     region_over_budget = pin_depths[instruction_index] >= pin_budgets[instruction_index];
                 }
                 if (region_over_budget)
                 {
+                    BUSTER_QUALITY_COUNT(split_budget_rejections, 1);
                     continue;
                 }
                 u32 entry_count = region_entry_counts[best_region];
@@ -944,8 +1048,10 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                     }
                     u32* prefix = machine_quality_foreclosure_prefix_ensure(foreclosure_prefix, &prefix_built_mask, foreclosed_masks,
                                                                             function->instruction_count, pin_register);
+                    BUSTER_QUALITY_COUNT(split_register_probes, 1);
                     if (prefix[region_end + 1] != prefix[region_start])
                     {
+                        BUSTER_QUALITY_COUNT(split_foreclosure_rejections, 1);
                         continue;
                     }
                     bool conflicts = false;
@@ -972,6 +1078,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                     }
                     if (conflicts)
                     {
+                        BUSTER_QUALITY_COUNT(split_overlap_rejections, 1);
                         continue;
                     }
                     u32 prologue_cost = ((description->callee_saved_mask >> pin_register) & 1u) && !((baseline.callee_saved_mask >> pin_register) & 1u)
@@ -979,6 +1086,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                                             : 0u;
                     if (best_traffic <= entry_weight + exit_weight + prologue_cost)
                     {
+                        BUSTER_QUALITY_COUNT(split_cost_rejections, 1);
                         continue;
                     }
                     assigned_starts[file_index][assigned_counts[file_index]] = region_start;
@@ -986,6 +1094,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
                     assigned_counts[file_index] += 1;
                     pinned_registers[candidate.virtual_register] = pin_register;
                     pinned_mask |= 1ull << pin_register;
+                    BUSTER_QUALITY_COUNT(split_assignments, 1);
                     span_starts[candidate.virtual_register] = region_start;
                     span_ends[candidate.virtual_register] = region_end;
                     for (u32 instruction_index = region_start; instruction_index <= region_end; instruction_index += 1)
@@ -1031,6 +1140,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         // everywhere outside. The entry masks mark each span's first
         // instruction, the one point where a spill naming the register is
         // legitimate — the eviction that hands it over.
+        BUSTER_QUALITY_COUNT(pin_mask_clear_bytes, (u64)function->instruction_count * 2 * sizeof(u64));
         for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
             pin_active_masks[instruction_index] = 0;
@@ -1061,6 +1171,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             }
             split_stores[store_slot] = moved;
         }
+        BUSTER_QUALITY_COUNT(placement_probes, 1);
         MachineStackPlacement placement = machine_fast_placement_build_prepassed(arena, function, &prepass, pinned_registers, pinned_mask,
                                                                                   pin_active_masks, span_starts, span_ends, split_entries,
                                                                                   split_entry_count, split_stores, split_store_count);
@@ -1098,6 +1209,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         }
         if (!placement.valid || placement_traffic_total + added_prologue_cost >= baseline_traffic_total)
         {
+            BUSTER_QUALITY_COUNT(placement_cost_rejections, 1);
             if (attempt == 0 && split_entry_count)
             {
                 // Retrying without splits is a genuinely different pack;
@@ -1158,6 +1270,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
         }
         if (!pins_hold)
         {
+            BUSTER_QUALITY_COUNT(pin_verification_rejections, 1);
             if (attempt == 0 && split_entry_count)
             {
                 continue;
@@ -1175,9 +1288,12 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
             placement.pinned_register_count += pinned_registers[register_index] != UINT32_MAX;
         }
         placement.split_register_count = split_entry_count;
+        BUSTER_QUALITY_COUNT(accepted_placements, 1);
         scratch_end(scratch);
         return placement;
     }
     scratch_end(scratch);
     return baseline;
 }
+
+#undef BUSTER_QUALITY_COUNT
