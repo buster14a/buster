@@ -12,125 +12,87 @@ concurrency:
   group: z05-literal-engineering-${{ github.run_id }}
   cancel-in-progress: false
 
+env:
+  BUSTER_TEST_JOBS: '1'
+  CMAKE_BUILD_PARALLEL_LEVEL: '2'
+  UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+  Z05_BASE: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+  Z05_HEAD: 5f21adb57917ca726b3d443dbd2dc8d7de8bd447
+
 jobs:
-  prepare:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      pull-requests: read
-      issues: read
-    outputs:
-      candidate: ${{ steps.prepare.outputs.candidate }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Apply the reviewed patch to the pinned baseline and create Git objects only
-        id: prepare
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          out="$RUNNER_TEMP/z05-publication"
-          mkdir -p "$out"
-          test "$(gh api repos/buster14a/buster/git/ref/heads/main --jq .object.sha)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
-          gh api --paginate --slurp 'repos/buster14a/buster/pulls?state=open&per_page=100' > "$out/open-pulls.json"
-          gh api --paginate --slurp 'repos/buster14a/buster/issues/148/comments?per_page=100' > "$out/numeric-coordination.json"
-          git worktree add --detach "$RUNNER_TEMP/z05-candidate" ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
-          # Normalize the transport envelope, then require the reviewed patch hash.
-          sed 's/^ diff --git /diff --git /' tools/z05_single_fragment.patch > "$out/source.patch"
-          printf '8c24d9007887e713adcb62389f273d74e6a9e60be3f399449ee51ca2334bd6a4  %s/source.patch\n' "$out" | sha256sum --check
-          git -C "$RUNNER_TEMP/z05-candidate" apply --check "$out/source.patch"
-          git -C "$RUNNER_TEMP/z05-candidate" apply "$out/source.patch"
-          cp tools/z05_audit.md "$RUNNER_TEMP/z05-candidate/docs/performance-audits/2026-09-10T011012Z.md"
-          python3 - "$RUNNER_TEMP/z05-candidate" "$out" <<'PY'
-          import base64
-          import json
-          import os
-          import pathlib
-          import subprocess
-          import sys
-          root, out = map(pathlib.Path, sys.argv[1:])
-          baseline = 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae'
-          index = root / 'PERFORMANCE_AUDITS.md'
-          text = index.read_text()
-          insertion = text.index('- [', text.index('## Audits, newest first'))
-          row = '- [`2026-09-10T011012Z`](docs/performance-audits/2026-09-10T011012Z.md) — Z05 literal-call census and single-fragment scratch candidate\n'
-          index.write_text(text[:insertion] + row + text[insertion:])
-          expected = {
-              'src/buster/lib/compiler/frontend/c/c_gen.c': '0ce05c2469d4adbc5294667e783335633808fc16',
-              'src/buster/tests/compiler/frontend/c/c_test.c': '155ef1d927eba6912268c1ade6f4c74e3ab97d01',
-          }
-          paths = list(expected) + ['PERFORMANCE_AUDITS.md', 'docs/performance-audits/2026-09-10T011012Z.md']
-          subprocess.run(['git', 'diff', '--check'], cwd=root, check=True)
-          (out / 'candidate.diff').write_bytes(subprocess.check_output(['git', 'diff'], cwd=root))
-          def api(endpoint, payload):
-              result = subprocess.run(['gh', 'api', '--method', 'POST', 'repos/buster14a/buster/git/' + endpoint, '--input', '-'], input=json.dumps(payload), text=True, capture_output=True, check=True)
-              return json.loads(result.stdout)
-          elements = []
-          for path in paths:
-              digest = subprocess.check_output(['git', 'hash-object', path], cwd=root, text=True).strip()
-              if path in expected:
-                  assert digest == expected[path], (path, digest)
-              blob = api('blobs', {'content': base64.b64encode((root / path).read_bytes()).decode('ascii'), 'encoding': 'base64'})
-              assert blob['sha'] == digest
-              elements.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': digest})
-          tree = api('trees', {'base_tree': '093b374996f3aecca200fe2968539554fc67bf55', 'tree': elements})
-          commit = api('commits', {'message': 'c: avoid arena bookkeeping for single-fragment string decoding\n\nReuse the existing decoded descriptor for one fragment; retain arrays for concatenation. Extend the existing differential gate with storage and failure-publication checks. Record the frozen Z05 population census. Performance acceptance remains pending.\n\nRefs #57, #128; leaves #148 parser work independent.', 'tree': tree['sha'], 'parents': [baseline]})
-          record = {'baseline': baseline, 'candidate': commit['sha'], 'tree': tree['sha'], 'files': elements, 'transport': os.environ['GITHUB_SHA']}
-          (out / 'publication.json').write_text(json.dumps(record, indent=2) + '\n')
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              print('candidate=' + commit['sha'], file=output)
-          print(json.dumps(record, indent=2))
-          PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: z05-publication-${{ github.run_id }}
-          path: ${{ runner.temp }}/z05-publication
-          if-no-files-found: error
-          retention-days: 7
   validate:
-    needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 35
-    env:
-      BUSTER_TEST_JOBS: '1'
-      CMAKE_BUILD_PARALLEL_LEVEL: '2'
-      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ needs.prepare.outputs.candidate }}
+          ref: 5f21adb57917ca726b3d443dbd2dc8d7de8bd447
           persist-credentials: false
-      - name: Build and run registered Release regressions on the immutable candidate
+      - name: Record exact source and audit checker provenance
         shell: bash
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/z05-validation"
           mkdir -p "$out"
-          git rev-parse HEAD > "$out/commit.txt"
-          clang --version > "$out/clang.txt"
-          lscpu > "$out/cpu.txt"
+          exec > >(tee "$out/provenance.log") 2>&1
+          test "$(git rev-parse HEAD)" = "$Z05_HEAD"
+          git rev-parse HEAD HEAD^{tree}
+          git status --porcelain
+          git ls-tree HEAD tools/new_audit.py src/buster/lib/compiler/frontend/c/c_gen.c src/buster/tests/compiler/frontend/c/c_test.c
+          git hash-object tools/new_audit.py src/buster/lib/compiler/frontend/c/c_gen.c src/buster/tests/compiler/frontend/c/c_test.c
+          git show HEAD:tools/new_audit.py > "$out/new_audit.from-git.py"
+          cmp tools/new_audit.py "$out/new_audit.from-git.py"
+          sha256sum tools/new_audit.py
+          python3 tools/new_audit.py --help | tee "$out/new-audit-help.txt"
+          if grep -q -- '--check' "$out/new-audit-help.txt"; then
+            python3 tools/new_audit.py --check
+          else
+            python3 - <<'PY'
+          import pathlib
+          import re
+          root = pathlib.Path('.')
+          text = (root / 'PERFORMANCE_AUDITS.md').read_text()
+          entries = re.findall(r'^- \[`([^`]+)`\]\(docs/performance-audits/([^)]+)\.md\)', text, re.M)
+          ids = [entry[0] for entry in entries]
+          assert len(ids) == len(set(ids)), 'Duplicate audit IDs'
+          files = {path.stem for path in (root / 'docs/performance-audits').glob('*.md')}
+          assert set(ids) == files, 'Audit files and index differ'
+          for name, target in entries:
+              assert name == target
+              assert (root / 'docs/performance-audits' / (name + '.md')).read_text().startswith('`' + name + '` ('), name
+          assert ids.count('2026-09-10T011012Z') == 1
+          print('Read-only complete audit index/file identity verification passed; native --check absent in this checkout')
+          PY
+          fi
+          git diff --exit-code
+          clang --version
+          gcc --version
+          uname -a
+          lscpu
+          free -b
+      - name: Build and run all registered Release tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/z05-validation"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/z05-build"
           "$RUNNER_TEMP/z05-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee "$out/configure.log"
           "$RUNNER_TEMP/z05-build" build --config Release -t test_all -- -j2 2>&1 | tee "$out/test-all.log"
           cp build/CMakeCache.txt "$out/CMakeCache.txt"
           objdump -d --disassemble=c_ir_decode_string_literal_range_for_target build/Release/ide > "$out/candidate-range.asm"
           size -A build/Release/ide > "$out/candidate-sections.txt"
-          python3 tools/new_audit.py --check
-      - name: Native mode matrix and self-host gates
+      - name: Native none, mir-stack, fast and quality mode matrix
         shell: bash
         run: |
           set -euo pipefail
-          out="$RUNNER_TEMP/z05-validation"
-          "$RUNNER_TEMP/z05-build" test_mode_matrix --config Release 2>&1 | tee "$out/mode-matrix.log"
-          "$RUNNER_TEMP/z05-build" test_self_host --config Release 2>&1 | tee "$out/self-host.log"
-          "$RUNNER_TEMP/z05-build" test_self_host_audit --config Release 2>&1 | tee "$out/self-host-audit.log"
-      - name: Independent compiler controls and all four Buster modes
+          "$RUNNER_TEMP/z05-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/z05-validation/mode-matrix.log"
+      - name: Ordinary self-host and strengthened bootstrap audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/z05-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/z05-validation/self-host.log"
+          "$RUNNER_TEMP/z05-build" test_self_host_audit --config Release 2>&1 | tee "$RUNNER_TEMP/z05-validation/self-host-audit.log"
+      - name: Independent GNU C23 compiler controls and all four Buster modes
         shell: bash
         run: |
           set -euo pipefail
@@ -139,20 +101,91 @@ jobs:
           set -x
           for source in tests/basic_c_string_concat.c tests/basic_c_nested_string_initializers.c tests/basic_c_plain_char_literal_sign.c tests/basic_c_float_literal.c tests/basic_c_static_float_literal.c; do
             for cc in clang gcc; do
-              "$cc" -std=gnu17 -O0 "$source" -o "$out/control"
+              "$cc" -std=gnu2x -O0 -funsigned-char -fwrapv -fno-strict-aliasing "$source" -o "$out/control"
               "$out/control"
             done
             for mode in none mir-stack fast quality; do
-              build/Release/ide cc -std=gnu17 -O0 -fregister-allocator="$mode" "$source" -o "$out/control"
+              build/Release/ide cc -std=gnu2x -O0 -funsigned-char -fwrapv -fno-strict-aliasing -fregister-allocator="$mode" "$source" -o "$out/control"
               "$out/control"
             done
           done
+          test "$(git rev-parse HEAD)" = "$Z05_HEAD"
+          git diff --exit-code
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: z05-validation-${{ github.run_id }}
+          name: z05-final-validation-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/z05-validation
             build/self-host-audit
+          if-no-files-found: error
+          retention-days: 7
+  allocations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 5f21adb57917ca726b3d443dbd2dc8d7de8bd447
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build sequential matched allocation observers on a frozen source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/z05-allocations"
+          mkdir -p "$out" "$RUNNER_TEMP/z05-frozen"
+          git worktree add --detach "$RUNNER_TEMP/z05-base" "$Z05_BASE"
+          git worktree add --detach "$RUNNER_TEMP/z05-head" "$Z05_HEAD"
+          git archive "$Z05_BASE" | tar -x -C "$RUNNER_TEMP/z05-frozen"
+          { uname -a; clang --version; lscpu; free -b; } > "$out/environment.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/z05-build"
+          for variant in base head; do
+            cd "$RUNNER_TEMP/z05-$variant"
+            git rev-parse HEAD > "$out/$variant.sha"
+            "$RUNNER_TEMP/z05-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1 | tee "$out/$variant.configure.log"
+            "$RUNNER_TEMP/z05-build" build --config Release -t ide -- -j2 2>&1 | tee "$out/$variant.build.log"
+            cp build/CMakeCache.txt "$out/$variant.CMakeCache.txt"
+            sha256sum build/Release/ide > "$out/$variant.compiler.sha256"
+          done
+          mkdir -p "$RUNNER_TEMP/z05-frozen/build"
+          cp -a "$RUNNER_TEMP/z05-base/build/generated" "$RUNNER_TEMP/z05-frozen/build/generated"
+          find "$RUNNER_TEMP/z05-frozen/src" "$RUNNER_TEMP/z05-frozen/build/generated" -type f -print0 | sort -z | xargs -0 sha256sum > "$out/frozen-inputs.sha256"
+      - name: Require identical objects and complete native allocation reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/z05-allocations"
+          cd "$RUNNER_TEMP/z05-frozen"
+          for name in basic_c_operations basic_c_string_concat basic_c_nested_string_initializers basic_c_plain_char_literal_sign basic_c_float_literal basic_c_static_float_literal compiler; do
+            source="tests/$name.c"
+            flags=(-g0 -O0 -fregister-allocator=none -c)
+            if [[ "$name" == compiler ]]; then
+              source=src/buster/apps/ide/ide.c
+              flags+=(-Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0)
+            fi
+            for variant in base head; do
+              compiler="$RUNNER_TEMP/z05-$variant/build/Release/ide"
+              printf '%q ' env BUSTER_ALLOCATION_CENSUS=1 "$compiler" cc "${flags[@]}" "$source" -o "$out/current.o" >> "$out/commands.txt"
+              printf '\n' >> "$out/commands.txt"
+              BUSTER_ALLOCATION_CENSUS=1 "$compiler" cc "${flags[@]}" "$source" -o "$out/current.o" > "$out/$name.$variant.stdout" 2> "$out/$name.$variant.census"
+              python3 tools/allocation_census.py --input "$out/$name.$variant.census" --output "$out/$name.$variant.allocations" --label "Z05 $variant $name"
+              if [[ "$variant" == base ]]; then
+                cp "$out/current.o" "$out/reference.o"
+              else
+                cmp "$out/current.o" "$out/reference.o"
+              fi
+              sha256sum "$out/current.o" > "$out/$name.$variant.object.sha256"
+            done
+            printf 'identical objects and complete allocation reports\n' > "$out/$name.complete"
+          done
+          rm "$out/current.o" "$out/reference.o"
+          sha256sum --check "$out/frozen-inputs.sha256" > "$out/frozen-input-check.log"
+          printf 'Matched allocation observers completed. This is allocation/output evidence, not timing or physical Zen 5 evidence.\n' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: z05-final-allocations-${{ github.run_id }}
+          path: ${{ runner.temp }}/z05-allocations
           if-no-files-found: error
           retention-days: 7
