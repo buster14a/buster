@@ -4,198 +4,108 @@ on:
     branches: [astra/z09-pass-census-transport-20260909]
     paths: [.github/workflows/z09-transport.yml]
 permissions:
-  contents: write
-  issues: read
-  pull-requests: read
+  contents: read
 jobs:
-  snapshot:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+  diagnostics:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      BUSTER_TEST_JOBS: 1
+      BUSTER_MATRIX_THREADS: 1
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          ref: d60fd28ae58e8a2af18e0d37f659d51ea2ef6aa8
           persist-credentials: false
-      - name: Reconstruct reviewed tree and publish unreferenced Git objects
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Build the pinned trusted diagnostic compiler
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/z09-publish"
+          mkdir -p build "$RUNNER_TEMP/z09-diagnostics"
+          test "$(git rev-parse HEAD)" = d60fd28ae58e8a2af18e0d37f659d51ea2ef6aa8
+          clang --version | tee "$RUNNER_TEMP/z09-diagnostics/clang.txt"
+          lscpu > "$RUNNER_TEMP/z09-diagnostics/cpu.txt"
+          uname -a > "$RUNNER_TEMP/z09-diagnostics/os.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/z09-build
+          ./build/z09-build generate --build-directory build/z09-diagnostic --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF -DCMAKE_LINKER_TYPE=DEFAULT
+          ./build/z09-build build --build-directory build/z09-diagnostic --config Release -t ide -- -j1
+      - name: Record untimed work census and independent behavior
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
-          import base64, json, os, pathlib, subprocess, urllib.request
-          root = 'https://api.github.com/repos/buster14a/buster'
-          baseline = 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae'
-          expected_tree = 'c549e63cdfc6f77af3ff33274b6459d4216b0117'
-          def request(endpoint, payload=None):
-              body = None if payload is None else json.dumps(payload).encode()
-              req = urllib.request.Request(root + endpoint, data=body, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'})
-              with urllib.request.urlopen(req, timeout=60) as response:
-                  return json.load(response)
-          def pages(endpoint):
-              result = []
-              page = 1
-              while True:
-                  separator = '&' if '?' in endpoint else '?'
-                  batch = request(endpoint + separator + 'per_page=100&page=' + str(page))
-                  result.extend(batch)
-                  if len(batch) < 100:
-                      break
-                  page += 1
-              return result
-          def git(*args):
-              return subprocess.check_output(['git', *args], text=True).strip()
-          paths = set()
-          def replace(path, old, new):
-              p = pathlib.Path(path)
-              text = p.read_text()
-              assert text.count(old) == 1, path
-              p.write_text(text.replace(old, new))
-              paths.add(path)
-          replace('src/buster/lib/compiler/ir/ir.h', '    u64 values_after;\n};\n\ntypedef struct IrModule IrModule;', '''    u64 values_after;
-              // Trivial-parameter cleanup work, including the final unchanged sweep.
-              // Visits are not unique rows. Incoming visits stop at the first conflict;
-              // pre-existing parameters are visited but are not candidates for removal.
-              u64 parameter_sweeps;
-              u64 parameter_block_visits;
-              u64 parameter_visits;
-              u64 parameter_incoming_visits;
-          };
-
-          typedef struct IrModule IrModule;''')
-          replace('src/buster/lib/compiler/ir/ir_promote.c', '''    while (changed)
-              {
-                  changed = false;
-                  for (u32 block = 0; block < function->block_count; block += 1)''', '''    while (changed)
-              {
-                  changed = false;
-                  statistics->parameter_sweeps += 1;
-                  statistics->parameter_block_visits += function->block_count;
-                  for (u32 block = 0; block < function->block_count; block += 1)''')
-          replace('src/buster/lib/compiler/ir/ir_promote.c', '''            while (*link)
-                      {
-                          IrBlockParameter* parameter = *link;''', '''            while (*link)
-                      {
-                          statistics->parameter_visits += 1;
-                          IrBlockParameter* parameter = *link;''')
-          replace('src/buster/lib/compiler/ir/ir_promote.c', '''                for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
-                          {
-                              u32 value = ir_promote_root(replacements, incoming->value.value);''', '''                for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
-                          {
-                              statistics->parameter_incoming_visits += 1;
-                              u32 value = ir_promote_root(replacements, incoming->value.value);''')
-          replace('src/buster/lib/compiler/driver/driver.c', '''        result.local_promotion.values_after += unit.local_promotion.values_after;
-                  codegen_statistics_add''', '''        result.local_promotion.values_after += unit.local_promotion.values_after;
-                  result.local_promotion.parameter_sweeps += unit.local_promotion.parameter_sweeps;
-                  result.local_promotion.parameter_block_visits += unit.local_promotion.parameter_block_visits;
-                  result.local_promotion.parameter_visits += unit.local_promotion.parameter_visits;
-                  result.local_promotion.parameter_incoming_visits += unit.local_promotion.parameter_incoming_visits;
-                  codegen_statistics_add''')
-          replace('src/buster/apps/ide/ide.c', '''                     p.instructions_before, p.instructions_after, p.values_before, p.values_after);
-              }
-              if (compile.error''', '''                     p.instructions_before, p.instructions_after, p.values_before, p.values_after);
-                  string_print(S8("IR_LOCAL_PROMOTION_WORK parameter_sweeps={u64} block_visits={u64} parameter_visits={u64} incoming_visits={u64}\\n"),
-                               p.parameter_sweeps, p.parameter_block_visits, p.parameter_visits, p.parameter_incoming_visits);
-              }
-              if (compile.error''')
-          replace('src/buster/tests/compiler/ir/ir_promotion_test.c', '''    } fixtures[] = {
-                  {S8("int test(void){int x=3;x+=4;return x;}"),''', '''    } fixtures[] = {
-                  {S8("int test(void){return 7;}"), true, false, false, false, false},
-                  {S8("int test(void){int x=3;x+=4;return x;}"),''')
-          replace('src/buster/tests/compiler/ir/ir_promotion_test.c', '''                program->disable_local_promotion = false;
-                          IrValidationResult valid''', '''                BUSTER_TEST(arguments, module->local_promotion.parameter_sweeps == 0);
-                          BUSTER_TEST(arguments, module->local_promotion.parameter_block_visits == 0);
-                          BUSTER_TEST(arguments, module->local_promotion.parameter_visits == 0);
-                          BUSTER_TEST(arguments, module->local_promotion.parameter_incoming_visits == 0);
-                          program->disable_local_promotion = false;
-                          IrValidationResult valid''')
-          replace('src/buster/tests/compiler/ir/ir_promotion_test.c', '''                BUSTER_TEST(arguments, stats.instructions_before - stats.instructions_after == stats.promoted_locals + stats.removed_loads + stats.removed_stores);
-                          BUSTER_TEST(arguments, ir_prepare_canonical_module''', '''                BUSTER_TEST(arguments, stats.instructions_before - stats.instructions_after == stats.promoted_locals + stats.removed_loads + stats.removed_stores);
-                          // Each fixture has one lowered function. The declaration-only
-                          // callees contribute no sweeps, and promotion preserves blocks.
-                          BUSTER_TEST(arguments, stats.parameter_block_visits == stats.parameter_sweeps * function->block_count);
-                          if (stats.promoted_locals)
-                          {
-                              // Every changing sweep removes at least one parameter;
-                              // convergence includes one final sweep with no removals.
-                              BUSTER_TEST(arguments, stats.parameter_sweeps >= 1);
-                              BUSTER_TEST(arguments, stats.parameter_sweeps <= stats.removed_parameters + 1);
-                              BUSTER_TEST(arguments, stats.parameter_visits >= stats.inserted_parameters);
-                              if (fixture.trivial)
-                              {
-                                  // Only v is live at this diamond's join; both incoming
-                                  // definitions are x. Its sole parameter is removed on
-                                  // the first sweep and absent from the convergence sweep.
-                                  BUSTER_TEST(arguments, stats.inserted_parameters == 1);
-                                  BUSTER_TEST(arguments, stats.removed_parameters == 1);
-                                  BUSTER_TEST(arguments, stats.parameter_sweeps == 2);
-                                  BUSTER_TEST(arguments, stats.parameter_visits == 1);
-                                  BUSTER_TEST(arguments, stats.parameter_incoming_visits == 2);
-                              }
-                              if (!stats.inserted_parameters && !joins)
-                              {
-                                  // Compaction with no parameters still visits each block
-                                  // once, but has no parameter or incoming-list work.
-                                  BUSTER_TEST(arguments, stats.parameter_sweeps == 1);
-                                  BUSTER_TEST(arguments, stats.parameter_visits == 0);
-                                  BUSTER_TEST(arguments, stats.parameter_incoming_visits == 0);
-                              }
-                              if (!stats.removed_parameters)
-                              {
-                                  BUSTER_TEST(arguments, stats.parameter_sweeps == 1);
-                                  BUSTER_TEST(arguments, stats.parameter_visits == joins);
-                              }
-                              if (fixture.joins)
-                              {
-                                  BUSTER_TEST(arguments, stats.parameter_visits > 0);
-                                  BUSTER_TEST(arguments, stats.parameter_incoming_visits > 0);
-                              }
-                          }
-                          else
-                          {
-                              BUSTER_TEST(arguments, stats.parameter_sweeps == 0);
-                              BUSTER_TEST(arguments, stats.parameter_block_visits == 0);
-                              BUSTER_TEST(arguments, stats.parameter_visits == 0);
-                              BUSTER_TEST(arguments, stats.parameter_incoming_visits == 0);
-                          }
-                          BUSTER_TEST(arguments, ir_prepare_canonical_module''')
-          replace('docs/agents/driver.md', '[frontend ownership contract](frontend/foundations.md#direct-local-ssa-github-34).\n', '''[frontend ownership contract](frontend/foundations.md#direct-local-ssa-github-34).
-          `IR_LOCAL_PROMOTION_WORK` reports shared-promotion parameter-cleanup sweeps and
-          actual visits, separately from removed rows. The [middle-end pass map](../middle-end-pass-map.md)
-          defines their scope, invalidation rules and separate diagnostic replay protocol.
-          ''')
-          assert git('rev-parse', 'HEAD') == baseline
-          subprocess.run(['git', 'add', '--', *sorted(paths)], check=True)
-          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
-          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'z09-publish'
-          (out / 'code.patch').write_bytes(subprocess.check_output(['git', 'diff', '--cached', '--binary']))
-          assert git('write-tree') == expected_tree, git('write-tree')
-          main = request('/branches/main')['commit']['sha']
-          assert main == baseline, ('main moved', main)
-          evidence = {'main': main, 'paths': sorted(paths), 'open_prs': [], 'issue40_comments': pages('/issues/40/comments')}
-          for pr in pages('/pulls?state=open&sort=created&direction=asc'):
-              changed = pages('/pulls/' + str(pr['number']) + '/files')
-              overlap = sorted(paths.intersection(row['filename'] for row in changed))
-              evidence['open_prs'].append({'number': pr['number'], 'head': pr['head']['sha'], 'files': changed, 'overlap': overlap})
-          (out / 'coordination.json').write_text(json.dumps(evidence, indent=2))
-          assert not any(pr['overlap'] for pr in evidence['open_prs']), 'New shared-file overlap requires review'
-          entries = []
-          for path in sorted(paths):
-              blob = request('/git/blobs', {'content': base64.b64encode(pathlib.Path(path).read_bytes()).decode(), 'encoding': 'base64'})
-              assert blob['sha'] == git('hash-object', path)
-              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
-          tree = request('/git/trees', {'base_tree': '093b374996f3aecca200fe2968539554fc67bf55', 'tree': entries})
-          assert tree['sha'] == expected_tree
-          (out / 'manifest.json').write_text(json.dumps({'baseline': baseline, 'tree': tree['sha'], 'paths': sorted(paths)}, indent=2))
-          print('VERIFIED_TREE', tree['sha'])
-          print('BASELINE', baseline)
-          print('No branch or pull request was modified by this job.')
+          import hashlib, json, os, pathlib, re, subprocess
+          repo = pathlib.Path.cwd()
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'z09-diagnostics'
+          ide = str(repo / 'build/z09-diagnostic/Release/ide')
+          records = []
+          def digest(path):
+              return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+          def run(label, command):
+              process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+              (out / (label + '.log')).write_bytes(process.stdout)
+              records.append({'label': label, 'command': command, 'returncode': process.returncode})
+              (out / 'commands.json').write_text(json.dumps(records, indent=2))
+              assert process.returncode == 0, (label, process.returncode, process.stdout.decode(errors='replace')[-6000:])
+              return process.stdout
+          def fields(output, prefix):
+              lines = [line for line in output.decode().splitlines() if line.startswith(prefix + ' ')]
+              assert len(lines) == 1, (prefix, lines)
+              return {key: int(value) for key, value in re.findall(r'([a-z_]+)=([0-9]+)', lines[0])}
+          flags = ['-std=gnu11', '-g0', '-O0', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char']
+          fixtures = ['basic_c_local_promotion.c', 'basic_c_frontend_ssa.c', 'basic_c_operations.c']
+          rows = []
+          for fixture in fixtures:
+              source = str(repo / 'tests' / fixture)
+              oracle = out / (fixture + '.clang')
+              run(fixture + '-oracle-build', ['clang', *flags, source, '-o', str(oracle)])
+              expected = run(fixture + '-oracle-execute', [str(oracle)])
+              for frontend in ('direct', 'memory'):
+                  frontend_flags = [] if frontend == 'direct' else ['-fno-frontend-ssa']
+                  for mode in ('none', 'mir-stack', 'fast', 'quality'):
+                      label = fixture + '-' + frontend + '-' + mode
+                      executable = out / (label + '.program')
+                      command = [ide, 'cc', *flags, *frontend_flags, '-fno-target-local-promotion', '-fregister-allocator=' + mode, source, '-o', str(executable)]
+                      run(label + '-build', command)
+                      quiet_hash = digest(executable)
+                      verbose = run(label + '-verbose', [*command, '-v'])
+                      assert quiet_hash == digest(executable), ('verbose changed output', label)
+                      actual = run(label + '-execute', [str(executable)])
+                      assert actual == expected, ('oracle output mismatch', label)
+                      rows.append({'fixture': fixture, 'input_sha256': digest(source), 'frontend': frontend, 'mode': mode, 'output_sha256': quiet_hash,
+                                   'work': fields(verbose, 'IR_LOCAL_PROMOTION_WORK'), 'promotion': fields(verbose, 'IR_LOCAL_PROMOTION'),
+                                   'frontend_ssa': fields(verbose, 'IR_FRONTEND_SSA'), 'clang_runtime_agreement': True, 'verbose_output_identical': True})
+                      (out / 'census.json').write_text(json.dumps(rows, indent=2))
+                      print(label, rows[-1]['work'], 'removed=', rows[-1]['promotion']['parameters_removed'])
+          # Exercise the existing driver aggregation without an alternate test
+          # framework. Each input is also compiled independently with identical flags.
+          a = out / 'sum-a.c'
+          b = out / 'sum-b.c'
+          a.write_text('int first(int c,int x){int v=x;if(c)c+=1;return v;}\n')
+          b.write_text('int second(int c){int v;if(c)v=11;else v=29;return v;}\n')
+          sums = []
+          for mode in ('none', 'mir-stack', 'fast', 'quality'):
+              common = [ide, 'cc', *flags, '-fno-frontend-ssa', '-fno-target-local-promotion', '-fregister-allocator=' + mode, '-v', '-c']
+              single = []
+              for source in (a, b):
+                  output = run(mode + '-' + source.stem, [*common, str(source), '-o', str(source.with_suffix('.o'))])
+                  single.append(fields(output, 'IR_LOCAL_PROMOTION_WORK'))
+              output = run(mode + '-multi-input', [*common, str(a), str(b)])
+              total = fields(output, 'IR_LOCAL_PROMOTION_WORK')
+              assert total == {key: single[0][key] + single[1][key] for key in total}, (mode, single, total)
+              sums.append({'mode': mode, 'inputs': single, 'sum': total})
+          (out / 'aggregation.json').write_text(json.dumps(sums, indent=2))
+          (out / 'manifest.json').write_text(json.dumps({'compiler_sha': 'd60fd28ae58e8a2af18e0d37f659d51ea2ef6aa8', 'compiler_sha256': digest(ide),
+                                                       'scope': 'Untimed diagnostic fixtures; no performance or Zen 5 evidence', 'cases': len(rows), 'aggregate_cases': len(sums)}, indent=2))
+          print('DIAGNOSTIC_CASES', len(rows), 'MULTI_INPUT_CASES', len(sums))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
-          name: z09-verified-tree
-          path: ${{ runner.temp }}/z09-publish
+          name: z09-final-head-diagnostics
+          path: |
+            ${{ runner.temp }}/z09-diagnostics
+            build/z09-diagnostic/CMakeCache.txt
+            build/z09-diagnostic/compile_commands.json
           if-no-files-found: error
           retention-days: 7
