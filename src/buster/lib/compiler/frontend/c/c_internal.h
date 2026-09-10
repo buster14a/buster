@@ -24,15 +24,9 @@
 #define BUSTER_C_LEX_COMPACT 0
 #endif
 
-#if BUSTER_CPU_ARCH_X86_64 && defined(__AVX512F__) && defined(__AVX512BW__) && !defined(__BUSTER__) && !BUSTER_COMPILER_MSVC
-#define BUSTER_C_TRANSLATE_AVX512 1
-#else
-#define BUSTER_C_TRANSLATE_AVX512 0
-#endif
-
-#if BUSTER_C_LEX_COMPACT || BUSTER_C_TRANSLATE_AVX512
-#include <immintrin.h>
-#endif
+// The translator uses only the basic F/BW vocabulary. Compact lexing above
+// still needs the full feature set and its remaining host-only intrinsics.
+#define BUSTER_C_TRANSLATE_AVX512 BUSTER_SIMD_512_BASE
 
 #if BUSTER_UNITY_BUILD
 #define BUSTER_C_INTERNAL BUSTER_GLOBAL_LOCAL

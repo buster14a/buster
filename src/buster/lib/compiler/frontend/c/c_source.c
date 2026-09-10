@@ -472,26 +472,32 @@ BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_swar(String8 
 }
 
 #if BUSTER_C_TRANSLATE_AVX512
-BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_avx512(String8 source, u64 offset)
+BUSTER_C_INTERNAL u64 c_translate_plain_run_end_avx512(String8 source, u64 offset)
 {
-    if (source.length - offset >= 64)
+    Simd512 carriage_return = simd512_splat('\r');
+    Simd512 line_feed = simd512_splat('\n');
+    Simd512 backslash = simd512_splat('\\');
+    bool stopped = false;
+    while (!stopped && source.length - offset >= 64)
     {
-        __m512i carriage = _mm512_set1_epi8('\r');
-        __m512i newline = _mm512_set1_epi8('\n');
-        __m512i backslash = _mm512_set1_epi8('\\');
-        do
+        Simd512 chunk = simd512_load(source.pointer + offset);
+        Mask64 stop_mask = simd512_equal_byte(chunk, carriage_return) | simd512_equal_byte(chunk, line_feed) |
+                           simd512_equal_byte(chunk, backslash);
+        if (stop_mask)
         {
-            __m512i chunk = _mm512_loadu_si512((const void*)(source.pointer + offset));
-            __mmask64 found = _mm512_cmpeq_epi8_mask(chunk, carriage) | _mm512_cmpeq_epi8_mask(chunk, newline) |
-                               _mm512_cmpeq_epi8_mask(chunk, backslash);
-            if (found)
-            {
-                return offset + (u64)__builtin_ctzll((u64)found);
-            }
+            offset += mask64_first_set(stop_mask);
+            stopped = true;
+        }
+        else
+        {
             offset += 64;
-        } while (source.length - offset >= 64);
+        }
     }
-    return c_translate_plain_run_end_swar(source, offset);
+    if (!stopped)
+    {
+        offset = c_translate_plain_run_end_swar(source, offset);
+    }
+    return offset;
 }
 #endif
 
@@ -568,9 +574,6 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
         // The next output byte starts a new linear run; initially true so the
         // first byte records the first checkpoint.
         bool run_broken = true;
-#if !BUSTER_C_TRANSLATE_AVX512
-        BUSTER_UNUSED(force_scalar);
-#endif
         while (input < source.length)
         {
 #if BUSTER_C_TRANSLATE_AVX512
@@ -587,10 +590,10 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             {
                 while (source.length - input >= 64)
                 {
-                    __m512i chunk = _mm512_loadu_si512((const void*)(source.pointer + input));
-                    u64 carriage = (u64)_mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\r'));
-                    u64 line_feed = (u64)_mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\n'));
-                    u64 backslash = (u64)_mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\\'));
+                    Simd512 chunk = simd512_load(source.pointer + input);
+                    Mask64 carriage = simd512_equal_byte(chunk, simd512_splat('\r'));
+                    Mask64 line_feed = simd512_equal_byte(chunk, simd512_splat('\n'));
+                    Mask64 backslash = simd512_equal_byte(chunk, simd512_splat('\\'));
                     u64 stops = carriage | (backslash & ((line_feed | carriage) >> 1)) | (backslash & (UINT64_C(1) << 63));
                     u64 limit = stops ? (u64)__builtin_ctzll(stops) : 64;
                     if (!limit)
@@ -598,7 +601,7 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                         break;
                     }
                     u64 newlines = line_feed & (limit >= 64 ? ~UINT64_C(0) : ((UINT64_C(1) << limit) - 1));
-                    _mm512_storeu_si512((void*)(translated + output), chunk);
+                    simd512_store(translated + output, chunk);
                     if (run_broken)
                     {
                         checkpoints[checkpoint_count] = (IrSourceCheckpoint){
@@ -659,11 +662,29 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             // so it copies through whole and only those three bytes reach the exact
             // scalar handling below. Native AVX-512 hosts classify 64 bytes at a
             // time; every fallback retains the previous eight-byte SWAR scan.
+            u64 plain_end = input;
+            if (force_scalar)
+            {
+                // The reference must not share the vector plain-run scanner with
+                // the dispatched path: disabling only the fused loop was weaker.
+                while (plain_end < source.length)
+                {
+                    char8 character = source.pointer[plain_end];
+                    if (character == '\r' || character == '\n' || character == '\\')
+                    {
+                        break;
+                    }
+                    plain_end += 1;
+                }
+            }
+            else
+            {
 #if BUSTER_C_TRANSLATE_AVX512
-            u64 plain_end = c_translate_plain_run_end_avx512(source, input);
+                plain_end = c_translate_plain_run_end_avx512(source, input);
 #else
-            u64 plain_end = c_translate_plain_run_end_swar(source, input);
+                plain_end = c_translate_plain_run_end_swar(source, input);
 #endif
+            }
             if (plain_end > input)
             {
                 if (run_broken)

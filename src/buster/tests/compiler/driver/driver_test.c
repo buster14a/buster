@@ -6536,6 +6536,56 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_static_array_parameter_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // The translator uses the production header, including its scalar and
+    // partial-feature fallbacks; its body must never preprocess away. Execute
+    // every supported allocator on this host, then explicitly select the
+    // baseline, F/BW-only and full x86 feature tiers for code-generation checks.
+    String8 translate_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(translate_allocators); allocator_index += 1)
+    {
+        TemporalArena translate_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* translate_arena = translate_temporary.arena;
+        String8 translate_path = buster_test_temporary_path(translate_arena, S8("buster-c-simd-translate"),
+#if BUSTER_WINDOWS
+                                                            S8(".exe"));
+#else
+                                                            S8(""));
+#endif
+        String8 allocator = string_format(translate_arena, S8("-fregister-allocator={S8}"), translate_allocators[allocator_index]);
+        String8 translate_command_line[] = {S8("-Isrc"), allocator, S8("-o"), translate_path, S8("tests/basic_c_simd_translate.c")};
+        CompilerDriverResult translate = compiler_driver_execute_invocation(
+            translate_arena, compiler_driver_parse_arguments(translate_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(translate_command_line)));
+        BUSTER_TEST(arguments, translate.error == COMPILER_DRIVER_ERROR_NONE);
+        if (translate.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 run_arguments[] = {translate_path};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, spawned.handle != 0);
+            if (spawned.handle)
+            {
+                ProcessWaitResult waited = os_process_wait_sync(translate_arena, spawned);
+                BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(translate_temporary);
+    }
+    String8 translate_cpus[] = {S8("baseline"), S8("skylake-avx512"), S8("znver5")};
+    for (u32 cpu_index = 0; cpu_index < BUSTER_ARRAY_LENGTH(translate_cpus); cpu_index += 1)
+    {
+        TemporalArena translate_temporary = scratch_begin(&arguments->arena, 1);
+        Arena* translate_arena = translate_temporary.arena;
+        String8 translate_path = buster_test_temporary_path(translate_arena, S8("buster-c-simd-translate-tier"), S8(".o"));
+        String8 translate_command_line[] = {
+            S8("-Isrc"), S8("-c"), S8("--target=x86_64-linux"), string_format(translate_arena, S8("-march={S8}"), translate_cpus[cpu_index]),
+            S8("-o"), translate_path, S8("tests/basic_c_simd_translate.c"),
+        };
+        CompilerDriverResult translate = compiler_driver_execute_invocation(
+            translate_arena, compiler_driver_parse_arguments(translate_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(translate_command_line)));
+        BUSTER_TEST(arguments, translate.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST(arguments, (translate.codegen_statistics.simd_operation_count != 0) == (cpu_index != 0));
+        scratch_end(translate_temporary);
+    }
     // The 512-bit vocabulary. The fixture is self-contained and guards itself
     // on the predefined feature macros, so it builds for every target and
     // compiles its body out where the vocabulary is unavailable; that is what

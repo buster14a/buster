@@ -2687,6 +2687,43 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
         }
     }
 
+    // Exact logical EOF at an inaccessible page catches full-width tail
+    // reads. Every length moves the input alignment; edits straddle both
+    // vector boundaries and the last readable byte. Keep the independent
+    // translated-byte oracle as well as all lexer/checkpoint comparisons.
+    u64 page_size = os_get_page_size();
+    char8* pages = (char8*)os_reserve(0, page_size * 2, (ProtectionFlags){0},
+                                     (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
+    BUSTER_TEST(arguments, pages != 0);
+    bool committed = pages && os_commit(pages, page_size, (ProtectionFlags){.read = true, .write = true}, false);
+    BUSTER_TEST(arguments, committed);
+    if (committed)
+    {
+        for (u64 length = 0; length <= 193; length += 1)
+        {
+            char8* bytes = pages + page_size - length;
+            for (u64 index = 0; index < length; index += 1)
+            {
+                bytes[index] = 'a';
+            }
+            String8 source = {bytes, length};
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
+            BUSTER_TEST(arguments, c_test_translate_source_paths_agree(arena, source));
+            for (u64 index = 0; index < length; index += 1)
+            {
+                // CRLF and both splice forms, with their starts on lane 63.
+                u64 lane = index % 64;
+                bytes[index] = lane == 63 ? '\\' : lane == 0 ? '\r' : lane == 1 ? '\n' : 'a';
+            }
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
+            BUSTER_TEST(arguments, c_test_translate_source_paths_agree(arena, source));
+        }
+    }
+    if (pages)
+    {
+        BUSTER_TEST(arguments, os_unreserve(pages, page_size * 2));
+    }
+
     // Single items that cross or fill whole windows, which is the shape that
     // sends the emitter to the scalar whole-token fallback.
     {
