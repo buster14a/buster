@@ -1215,25 +1215,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
             }
         }
     }
-    // AArch64's scalar lane expansion complements its NEON forms. Keep the
-    // full fixture strict so a later operation cannot silently restore fallback.
-    String8 vector_corpus[] = {S8("tests/basic_c_vector.c"), S8("tests/basic_c_vector_lane_edges.c")};
+    // Keep complete AArch64 vector and integer-pair fixtures strict so a
+    // later operation cannot silently restore per-function fallback.
+    String8 aarch64_corpus[] = {S8("tests/basic_c_vector.c"), S8("tests/basic_c_vector_lane_edges.c"),
+                                 S8("tests/basic_c_x86_64_i128_binary.c"), S8("tests/basic_c_i128_shift_edges.c")};
     for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
     {
-        for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(vector_corpus); fixture += 1)
+        for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(aarch64_corpus); fixture += 1)
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             String8 output = buster_test_temporary_path(temporary.arena, S8("buster-mir-vector-lanes"), S8(".o"));
             String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), S8("aarch64-linux"), modes[mode], S8("-fno-machine-fallback"),
-                                 S8("-fverify-codegen"), S8("-o"), output, vector_corpus[fixture]};
+                                 S8("-fverify-codegen"), S8("-o"), output, aarch64_corpus[fixture]};
             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
                 compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
             BUSTER_TEST(arguments, compiled.codegen_statistics.function_count != 0 && compiled.codegen_statistics.fallback_function_count == 0);
-#if BUSTER_CPU_ARCH_AARCH64 && (BUSTER_LINUX || BUSTER_MACOS)
+#if BUSTER_CPU_ARCH_AARCH64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
             String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-vector-lanes-run"), S8(""));
             String8 native_command[] = {modes[mode], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
-                                        S8("-o"), executable, vector_corpus[fixture]};
+                                        S8("-o"), executable, aarch64_corpus[fixture]};
             CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena,
                 compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command)));
             BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
@@ -1254,14 +1255,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-vector-lane-edges-run"), S8(".exe"));
         String8 command[] = {vector_reference_modes[mode], S8("-fverify-codegen"), S8("-o"), executable,
-                             S8("tests/basic_c_vector_lane_edges.c")};
+                             S8("tests/basic_c_vector_lane_edges.c"),
+#if BUSTER_ANDROID || BUSTER_IOS
+                             // Mobile app sandboxes use object validation;
+                             // child executable tests belong to desktop hosts.
+                             S8("-c"),
+#endif
+        };
         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
             compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
         BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+        BUSTER_TEST(arguments, compiled.has_object);
+#if !BUSTER_ANDROID && !BUSTER_IOS
         if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
         {
             BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
         }
+#endif
         scratch_end(temporary);
     }
     String8 fallback_targets[] = {S8("x86_64-unknown-windows"), S8("aarch64-apple-macos"), S8("aarch64-unknown-windows")};
@@ -6144,15 +6154,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 i128_binary_temporary.arena,
                 compiler_driver_parse_arguments(i128_binary_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(i128_binary_command_line)));
             BUSTER_TEST(arguments, i128_binary.error == COMPILER_DRIVER_ERROR_NONE);
-            // NONE is the canonical emitter and reports no fallbacks by
-            // definition. Under the machine modes x86-64 carries the whole
-            // file; AArch64 carries all of it but `multiply_checks`, which is
-            // why the multiply has a function of its own -- it needs a UMULH
-            // row and that mnemonic has no generated form id yet (#810). The
-            // day it lands this expectation becomes an unconditional zero.
-            bool machine_mode = allocator_index != 0;
-            u32 expected_i128_fallbacks = target_index == 1 && machine_mode ? 1u : 0u;
-            BUSTER_TEST(arguments, i128_binary.codegen_statistics.fallback_function_count == expected_i128_fallbacks);
+            BUSTER_TEST(arguments, i128_binary.codegen_statistics.fallback_function_count == 0);
             bool native_x64 = target_index == 0 && BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64;
             bool emulated_a64 = target_index == 1 && aarch64_i128_qemu_available;
             if (i128_binary.error == COMPILER_DRIVER_ERROR_NONE && (native_x64 || emulated_a64))

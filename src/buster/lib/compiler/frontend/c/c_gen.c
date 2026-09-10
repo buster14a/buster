@@ -6712,6 +6712,38 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_atomic_aggregate_conversion(CIntegerIrBuil
     return c_ir_emit_load_place_raw(builder, slot, atomic_type, source);
 }
 
+// Compatible vector typedefs can have distinct canonical IDs. Reinterpret
+// their identical lane representation through typed views of a private slot;
+// every load/store remains type-correct without inventing an identity cast.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_vector_alias_conversion(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source)
+{
+    IrTypeId source_type = builder->function->values[value.value].canonical_type;
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrValueId slot = c_ir_emit_temporary(builder, source_type, source);
+    if (slot.value != IR_ID_UNDERLYING_INVALID)
+    {
+        IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
+        operands[0] = slot;
+        operands[1] = value;
+        IrInstruction store = c_ir_instruction_initialize(IR_OPCODE_STORE, builder->void_type);
+        store.operands = operands;
+        store.operand_count = 2;
+        c_ir_append_instruction(builder, store, source);
+        IrValueId address = c_ir_emit_address_of_place(builder, slot, source_type, source);
+        IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, target_type);
+        if (address.value != IR_ID_UNDERLYING_INVALID && pointer_type.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrValueId pointer = c_ir_emit_cast_instruction(builder, address, pointer_type, IR_CONVERSION_POINTER_REINTERPRET, source);
+            IrValueId place = pointer.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, pointer, source) : IR_VALUE_ID_INVALID;
+            if (place.value != IR_ID_UNDERLYING_INVALID)
+            {
+                result = c_ir_emit_load_place_raw(builder, place, target_type, source);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source)
 {
     if (value.value >= builder->function->value_count)
@@ -6762,6 +6794,18 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
             builder->function->values[value.value].points_to_read_only = false;
         }
         return value;
+    }
+    if (source_value->kind == IR_TYPE_VECTOR && target_value->kind == IR_TYPE_VECTOR &&
+        source_value->layout.resolved && target_value->layout.resolved && source_value->layout.size == target_value->layout.size &&
+        source_value->element_count == target_value->element_count)
+    {
+        IrType* source_element = ir_type_from_id(&builder->program->types, source_value->element_type);
+        IrType* target_element = ir_type_from_id(&builder->program->types, target_value->element_type);
+        if (source_element && target_element && source_element->kind == target_element->kind &&
+            source_element->bit_width == target_element->bit_width && source_element->is_signed == target_element->is_signed)
+        {
+            return c_ir_emit_vector_alias_conversion(builder, value, target_type, source);
+        }
     }
     // Two types that differ only in a `volatile` qualifier are one type as far
     // as a value is concerned: the qualifier constrains how the object behind a
@@ -19248,48 +19292,63 @@ BUSTER_C_INTERNAL bool c_ir_operation(CConditionalOperator operation, IrUnaryOpe
     return false;
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_vector_mask_type(IrProgram* program, IrType* vector)
+BUSTER_C_INTERNAL IrTypeId c_ir_vector_mask_type(CIntegerIrBuilder* builder, IrType* vector)
 {
+    IrProgram* program = builder->program;
     IrType* element = vector ? ir_type_from_id(&program->types, vector->element_type) : 0;
-    if (!element || (element->kind != IR_TYPE_INTEGER && element->kind != IR_TYPE_FLOAT))
+    IrTypeId result = IR_TYPE_ID_INVALID;
+    if (element && (element->kind == IR_TYPE_INTEGER || element->kind == IR_TYPE_FLOAT))
     {
-        return IR_TYPE_ID_INVALID;
-    }
-    // Signed integer comparisons retain the lane's own type. Another
-    // same-width integer (notably plain char) need not be C-compatible.
-    IrTypeId integer = element->kind == IR_TYPE_INTEGER && element->is_signed ? vector->element_type : IR_TYPE_ID_INVALID;
-    for (u32 type_index = 0; integer.value == IR_ID_UNDERLYING_INVALID && type_index < program->types.count; type_index += 1)
-    {
-        IrType* candidate = program->types.types + type_index;
-        if (candidate->kind == IR_TYPE_INTEGER && candidate->is_signed && !candidate->is_atomic && !candidate->is_volatile &&
-            candidate->bit_width == element->bit_width)
+        // Use the C scalar map rather than the first same-width IR integer:
+        // internal i64, plain char, and qualified types need not have the
+        // identity of the target's public signed C lane type.
+        CTypeKind signed_kinds[] = {C_TYPE_SIGNED_CHAR, C_TYPE_SHORT, C_TYPE_INT, C_TYPE_LONG, C_TYPE_LONG_LONG};
+        CTypeKind unsigned_kinds[] = {C_TYPE_UNSIGNED_CHAR, C_TYPE_UNSIGNED_SHORT, C_TYPE_UNSIGNED_INT,
+                                      C_TYPE_UNSIGNED_LONG, C_TYPE_UNSIGNED_LONG_LONG};
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(signed_kinds) == BUSTER_ARRAY_LENGTH(unsigned_kinds));
+        IrTypeId integer = element->kind == IR_TYPE_INTEGER && element->is_signed ? vector->element_type : IR_TYPE_ID_INVALID;
+        u32 width = element->bit_width;
+        bool unsigned_integer = element->kind == IR_TYPE_INTEGER && !element->is_signed;
+        for (u32 index = 0; integer.value == IR_ID_UNDERLYING_INVALID && index < BUSTER_ARRAY_LENGTH(signed_kinds); index += 1)
         {
-            integer = candidate->id;
-            break;
+            IrTypeId candidate_id = c_ir_builder_scalar_type(builder, signed_kinds[index]);
+            IrType* candidate = ir_type_from_id(&program->types, candidate_id);
+            bool matches = candidate && candidate->bit_width == width;
+            if (matches && unsigned_integer)
+            {
+                matches = c_ir_builder_scalar_type(builder, unsigned_kinds[index]).value == vector->element_type.value;
+            }
+            if (matches)
+            {
+                integer = candidate_id;
+            }
+        }
+        if (integer.value != IR_ID_UNDERLYING_INVALID)
+        {
+            for (u32 type_index = 0; result.value == IR_ID_UNDERLYING_INVALID && type_index < program->types.count; type_index += 1)
+            {
+                IrType* candidate = program->types.types + type_index;
+                if (candidate->kind == IR_TYPE_VECTOR && candidate->element_type.value == integer.value &&
+                    candidate->element_count == vector->element_count && candidate->layout.size == vector->layout.size)
+                {
+                    result = candidate->id;
+                }
+            }
+            if (result.value == IR_ID_UNDERLYING_INVALID)
+            {
+                result = ir_program_add_type(program, (IrType){
+                    .name = S8("GNU vector mask"),
+                    .element_type = integer,
+                    .return_type = IR_TYPE_ID_INVALID,
+                    .layout = vector->layout,
+                    .kind = IR_TYPE_VECTOR,
+                    .element_count = vector->element_count,
+                    .bit_width = vector->bit_width,
+                });
+            }
         }
     }
-    if (integer.value == IR_ID_UNDERLYING_INVALID)
-    {
-        return IR_TYPE_ID_INVALID;
-    }
-    for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
-    {
-        IrType* candidate = program->types.types + type_index;
-        if (candidate->kind == IR_TYPE_VECTOR && candidate->element_type.value == integer.value && candidate->element_count == vector->element_count &&
-            candidate->layout.size == vector->layout.size)
-        {
-            return candidate->id;
-        }
-    }
-    return ir_program_add_type(program, (IrType){
-                                            .name = S8("GNU vector mask"),
-                                            .element_type = integer,
-                                            .return_type = IR_TYPE_ID_INVALID,
-                                            .layout = vector->layout,
-                                            .kind = IR_TYPE_VECTOR,
-                                            .element_count = vector->element_count,
-                                            .bit_width = vector->bit_width,
-                                        });
+    return result;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_vector_splat(CIntegerIrBuilder* builder, IrValueId value, IrTypeId vector_type, IrSourceRange source)
@@ -19461,7 +19520,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_vector_operation(CIntegerIrBuilder* builder, I
             return false;
         }
     }
-    IrTypeId result_type = comparison ? c_ir_vector_mask_type(builder->program, vector) : vector_type;
+    IrTypeId result_type = comparison ? c_ir_vector_mask_type(builder, vector) : vector_type;
     if (result_type.value == IR_ID_UNDERLYING_INVALID)
     {
         return false;

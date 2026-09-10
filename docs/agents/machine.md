@@ -152,6 +152,14 @@
   the scalar arithmetic rules. Keep the entire vector fixture strict in
   MIR_STACK, FAST and QUALITY; scalar expansion must remain visible to MIR
   validation and register allocation.
+- AArch64 128-bit multiplication combines the low-limb product, its generated
+  UMULH high half, and the two cross products. Negation propagates the low
+  limb's borrow. Variable shifts use masks at the 64-bit boundary and suppress
+  the cross term at count zero. These are scalar MIR rows, with synthesized
+  registers created at their actual defining row; creating several registers
+  ahead of their definitions publishes incorrect verifier metadata.
+  `basic_c_x86_64_i128_binary.c` and `basic_c_i128_shift_edges.c` require strict
+  MIR selection and cover product carries and counts below, at and above 64.
 - AArch64 fixed frames are not limited by the scaled callee-save offset.
   Above that offset's reach, the prologue and each epilogue derive the compact
   save-area base from X29 in reserved X16, then use small unsigned offsets.

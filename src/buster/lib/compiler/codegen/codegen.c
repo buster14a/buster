@@ -7839,7 +7839,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_vector_operation(CodegenBuffer* b
                     encoded = 0x9b0aa569;
                     break;
                 case IR_BINARY_VECTOR_UNSIGNED_REMAINDER:
-                    codegen_emit_u32(buffer, 0x9aca096b);
+                    codegen_emit_u32(buffer, 0x9aca092b); // udiv x11, x9, x10
                     encoded = 0x9b0aa569;
                     break;
                 case IR_BINARY_VECTOR_SHIFT_LEFT:

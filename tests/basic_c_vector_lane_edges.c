@@ -4,6 +4,8 @@ typedef signed char Bytes __attribute__((vector_size(8)));
 typedef short Shorts __attribute__((vector_size(16)));
 typedef long long Longs __attribute__((vector_size(16)));
 typedef __INT64_TYPE__ Masks __attribute__((vector_size(16)));
+typedef __INT64_TYPE__ OtherMasks __attribute__((vector_size(16)));
+typedef unsigned int UnsignedWords __attribute__((vector_size(16)));
 typedef double Doubles __attribute__((vector_size(16)));
 
 static volatile int seed = 3;
@@ -53,6 +55,16 @@ int main(void)
         result |= lq[index] != la[index] / lb[index];
         result |= lr[index] != la[index] % lb[index];
     }
+    UnsignedWords ua = {0xfffffff0U, 0x80000000U, 0xffffffffU, 2000000000U};
+    UnsignedWords ub = {7U, 65537U, 11U, 17U};
+    ua[0] += (unsigned)seed;
+    UnsignedWords uq = ua / ub;
+    UnsignedWords ur = ua % ub;
+    for (int index = 0; index < 4; index += 1)
+    {
+        result |= uq[index] != ua[index] / ub[index];
+        result |= ur[index] != ua[index] % ub[index];
+    }
     union FloatBits
     {
         Doubles vector;
@@ -65,6 +77,8 @@ int main(void)
     Masks below_equal = floating.vector <= zeros;
     Masks above = floating.vector > zeros;
     Masks above_equal = floating.vector >= zeros;
+    OtherMasks alias = equal;
+    Masks alias_round_trip = alias;
     union FloatBits sign = {.vector = -floating.vector};
     result |= equal[0] != 0 || equal[1] != -1;
     result |= unequal[0] != -1 || unequal[1] != 0;
@@ -72,6 +86,7 @@ int main(void)
     result |= below_equal[0] != 0 || below_equal[1] != -1;
     result |= above[0] != 0 || above[1] != 0;
     result |= above_equal[0] != 0 || above_equal[1] != -1;
+    result |= alias_round_trip[0] != 0 || alias_round_trip[1] != -1;
     result |= sign.bits[0] != 0xfff8000000000042ULL || sign.bits[1] != 0;
     return result;
 }

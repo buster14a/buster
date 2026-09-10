@@ -1035,7 +1035,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast_i128(MachineA64Selector* select
                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low_register)},
                                                      .opcode = MACHINE_A64_STORE_FRAME64,
                                                  });
-                u32 high_register = machine_a64_synthesize_register(selector);
+                u32 high_register;
                 if (sign_extend)
                 {
                     // The high half of a signed extension is the sign bit
@@ -1047,6 +1047,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast_i128(MachineA64Selector* select
                                                                       machine_ref_make(MACHINE_REF_IMMEDIATE, machine_a64_append_immediate(selector, 63))},
                                                          .opcode = MACHINE_A64_MOV_RI,
                                                      });
+                    high_register = machine_a64_synthesize_register(selector);
                     machine_a64_select_row(selector, (MachineInstruction){
                                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register),
                                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low_register),
@@ -1056,6 +1057,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast_i128(MachineA64Selector* select
                 }
                 else
                 {
+                    high_register = machine_a64_synthesize_register(selector);
                     machine_a64_select_row(selector, (MachineInstruction){
                                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high_register),
                                                                       machine_ref_make(MACHINE_REF_IMMEDIATE, machine_a64_append_immediate(selector, 0))},
@@ -1456,14 +1458,26 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_constant_shift_amount(MachineA64Selector* s
     return result;
 }
 
+// One three-register row into a fresh synthesized register.
+BUSTER_GLOBAL_LOCAL u32 machine_a64_select_arithmetic_row(MachineA64Selector* selector, u16 opcode, u32 left_register, u32 right_register)
+{
+    u32 result = machine_a64_synthesize_register(selector);
+    machine_a64_select_row(selector, (MachineInstruction){
+                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result),
+                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
+                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
+                                         .opcode = opcode,
+                                     });
+    return result;
+}
+
 // A 128-bit shift whose amount is a compile-time constant, in all three
 // directions. Both halves ride the ordinary 64-bit shift rows: below 64
 // the cross bits transfer through the inverse shift, at 64 and above the
 // surviving half shifts by amount-64 (the variable shift's mod-64 wrap
 // makes exactly 64 an identity move of that half), and the signed form
 // fills the vacated high half with the sign replicated by an arithmetic
-// shift of 63. Variable amounts stay canonical, whose CSEL composites own
-// the runtime-amount blends.
+// shift of 63. Variable amounts use the separate masked MIR expansion.
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_shift(MachineA64Selector* selector, IrInstruction* instruction, u32 amount)
 {
     IrFunction* function = selector->function;
@@ -1492,71 +1506,16 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_shift(MachineA64Selector* selec
             u32 high = machine_a64_select_frame_load64(selector, source_slot, 8);
             u32 count = machine_a64_select_immediate_register(selector, amount);
             u32 inverse_count = machine_a64_select_immediate_register(selector, 64 - amount);
-            u32 shifted = machine_a64_synthesize_register(selector);
-            u32 cross = machine_a64_synthesize_register(selector);
-            u32 filled = machine_a64_synthesize_register(selector);
-            u32 kept = machine_a64_synthesize_register(selector);
-            if (operation == IR_BINARY_SHIFT_LEFT)
-            {
-                // low' = low << a; high' = high << a | low >> (64 - a).
-                machine_a64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, shifted),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count)},
-                                                     .opcode = MACHINE_A64_LSL64,
-                                                 });
-                machine_a64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, inverse_count)},
-                                                     .opcode = MACHINE_A64_LSR64,
-                                                 });
-                machine_a64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, filled),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, shifted),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross)},
-                                                     .opcode = MACHINE_A64_ORR64,
-                                                 });
-                machine_a64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, kept),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count)},
-                                                     .opcode = MACHINE_A64_LSL64,
-                                                 });
-                machine_a64_select_frame_store64(selector, result_slot, 0, kept);
-                machine_a64_select_frame_store64(selector, result_slot, 8, filled);
-            }
-            else
-            {
-                // low' = low >> a | high << (64 - a); high' = high >> a,
-                // logical or arithmetic per the operation.
-                machine_a64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, shifted),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, low),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count)},
-                                                     .opcode = MACHINE_A64_LSR64,
-                                                 });
-                machine_a64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, inverse_count)},
-                                                     .opcode = MACHINE_A64_LSL64,
-                                                 });
-                machine_a64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, filled),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, shifted),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, cross)},
-                                                     .opcode = MACHINE_A64_ORR64,
-                                                 });
-                machine_a64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, kept),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, high),
-                                                                  machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, count)},
-                                                     .opcode = (u16)(operation == IR_BINARY_SIGNED_SHIFT_RIGHT ? MACHINE_A64_ASR64 : MACHINE_A64_LSR64),
-                                                 });
-                machine_a64_select_frame_store64(selector, result_slot, 0, filled);
-                machine_a64_select_frame_store64(selector, result_slot, 8, kept);
-            }
+            bool left = operation == IR_BINARY_SHIFT_LEFT;
+            u32 shifted = machine_a64_select_arithmetic_row(selector, left ? MACHINE_A64_LSL64 : MACHINE_A64_LSR64,
+                                                            left ? high : low, count);
+            u32 cross = machine_a64_select_arithmetic_row(selector, left ? MACHINE_A64_LSR64 : MACHINE_A64_LSL64,
+                                                          left ? low : high, inverse_count);
+            u32 filled = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, shifted, cross);
+            u16 kept_opcode = left ? MACHINE_A64_LSL64 : operation == IR_BINARY_SIGNED_SHIFT_RIGHT ? MACHINE_A64_ASR64 : MACHINE_A64_LSR64;
+            u32 kept = machine_a64_select_arithmetic_row(selector, kept_opcode, left ? low : high, count);
+            machine_a64_select_frame_store64(selector, result_slot, 0, left ? kept : filled);
+            machine_a64_select_frame_store64(selector, result_slot, 8, left ? filled : kept);
         }
         else if (operation == IR_BINARY_SHIFT_LEFT)
         {
@@ -1649,19 +1608,6 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_halves(MachineA64Selector* sele
     return selected;
 }
 
-// One three-register row into a fresh synthesized register.
-BUSTER_GLOBAL_LOCAL u32 machine_a64_select_arithmetic_row(MachineA64Selector* selector, u16 opcode, u32 left_register, u32 right_register)
-{
-    u32 result = machine_a64_synthesize_register(selector);
-    machine_a64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result),
-                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, left_register),
-                                                      machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, right_register)},
-                                         .opcode = opcode,
-                                     });
-    return result;
-}
-
 // One CMP64 + CSET pair into a fresh synthesized register. The compare is
 // re-issued per CSET so every flags read sits directly behind its producer,
 // the shape the scheduler's flag chain already models.
@@ -1681,13 +1627,103 @@ BUSTER_GLOBAL_LOCAL u32 machine_a64_select_compare_set(MachineA64Selector* selec
     return result;
 }
 
+// Unary pair arithmetic stays in ordinary scalar rows. The low half's
+// nonzero test supplies the borrow for two's-complement negation.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_unary(MachineA64Selector* selector, IrInstruction* instruction)
+{
+    IrFunction* function = selector->function;
+    u32 source_slot = instruction->operand_count == 1 && instruction->operands[0].value < function->value_count
+                          ? selector->value_stack_slots[instruction->operands[0].value] : UINT32_MAX;
+    u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+    bool negate = instruction->unary_operation == IR_UNARY_INTEGER_NEGATE;
+    bool selected = source_slot != UINT32_MAX && result_slot != UINT32_MAX &&
+                    (negate || instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT);
+    if (selected)
+    {
+        u32 low = machine_a64_select_frame_load64(selector, source_slot, 0);
+        u32 high = machine_a64_select_frame_load64(selector, source_slot, 8);
+        u32 constant = machine_a64_select_immediate_register(selector, negate ? 0 : UINT64_MAX);
+        u16 opcode = negate ? MACHINE_A64_SUB64 : MACHINE_A64_EOR64;
+        u32 result_low = machine_a64_select_arithmetic_row(selector, opcode, constant, low);
+        u32 result_high = machine_a64_select_arithmetic_row(selector, opcode, constant, high);
+        if (negate)
+        {
+            u32 borrow = machine_a64_select_compare_set(selector, low, constant, MACHINE_A64_CONDITION_NOT_EQUAL);
+            result_high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, result_high, borrow);
+        }
+        machine_a64_select_frame_store64(selector, result_slot, 0, result_low);
+        machine_a64_select_frame_store64(selector, result_slot, 8, result_high);
+    }
+    return selected;
+}
+
+// Variable shifts use disjoint masks for counts below/above 64. A separate
+// nonzero mask suppresses the cross term at count zero, where the hardware
+// shift would otherwise wrap 64 to zero. All defined C counts (0..127) use
+// the same bounded straight-line MIR expansion.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_variable_shift(MachineA64Selector* selector, IrInstruction* instruction)
+{
+    u32 source_slot = selector->value_stack_slots[instruction->operands[0].value];
+    u32 result_slot = selector->value_stack_slots[instruction->result.value];
+    u32 count_slot = selector->value_stack_slots[instruction->operands[1].value];
+    u32 count = UINT32_MAX;
+    bool selected = source_slot != UINT32_MAX && result_slot != UINT32_MAX;
+    if (selected)
+    {
+        if (count_slot != UINT32_MAX)
+        {
+            count = machine_a64_select_frame_load64(selector, count_slot, 0);
+        }
+        else
+        {
+            selected = machine_a64_operand_register(selector, instruction->operands[1], &count);
+        }
+    }
+    if (selected)
+    {
+        u32 low = machine_a64_select_frame_load64(selector, source_slot, 0);
+        u32 high = machine_a64_select_frame_load64(selector, source_slot, 8);
+        u32 zero = machine_a64_select_immediate_register(selector, 0);
+        u32 width = machine_a64_select_immediate_register(selector, 64);
+        u32 ones = machine_a64_select_immediate_register(selector, UINT64_MAX);
+        u32 small = machine_a64_select_compare_set(selector, count, width, MACHINE_A64_CONDITION_BELOW);
+        u32 small_mask = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, zero, small);
+        u32 large_mask = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, small_mask, ones);
+        u32 nonzero = machine_a64_select_compare_set(selector, count, zero, MACHINE_A64_CONDITION_NOT_EQUAL);
+        u32 nonzero_mask = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, zero, nonzero);
+        u32 inverse = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, width, count);
+        bool left = instruction->binary_operation == IR_BINARY_SHIFT_LEFT;
+        bool signed_right = instruction->binary_operation == IR_BINARY_SIGNED_SHIFT_RIGHT;
+        u32 kept = machine_a64_select_arithmetic_row(selector, left ? MACHINE_A64_LSL64 : (signed_right ? MACHINE_A64_ASR64 : MACHINE_A64_LSR64),
+                                                     left ? low : high, count);
+        u32 shifted = machine_a64_select_arithmetic_row(selector, left ? MACHINE_A64_LSL64 : MACHINE_A64_LSR64, left ? high : low, count);
+        u32 cross = machine_a64_select_arithmetic_row(selector, left ? MACHINE_A64_LSR64 : MACHINE_A64_LSL64, left ? low : high, inverse);
+        cross = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, cross, nonzero_mask);
+        u32 filled = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, shifted, cross);
+        filled = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, filled, small_mask);
+        u32 transferred = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, kept, large_mask);
+        filled = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, filled, transferred);
+        u32 surviving = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, kept, small_mask);
+        if (signed_right)
+        {
+            u32 sign_count = machine_a64_select_immediate_register(selector, 63);
+            u32 sign = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ASR64, high, sign_count);
+            sign = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, sign, large_mask);
+            surviving = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, surviving, sign);
+        }
+        machine_a64_select_frame_store64(selector, result_slot, 0, left ? surviving : filled);
+        machine_a64_select_frame_store64(selector, result_slot, 8, left ? filled : surviving);
+    }
+    return selected;
+}
+
 // The 128-bit binary subset over slot-backed pairs: the bitwise trio and
 // add/subtract per half (the carry and borrow are CSET booleans off the
 // low halves, so no flags-carrying add row is needed), equality through
 // per-half XOR, and the ordered comparisons as the strict high-half
 // relation blended with the unsigned low-half relation behind high-half
-// equality. Multiplies, divides, remainders, and variable-amount shifts
-// keep the canonical pair lowerings.
+// equality. Multiply adds the cross products to UMULH of the low halves.
+// Divides and remainders still need their pair lowerings.
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_binary(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrFunction* function = selector->function;
@@ -1698,8 +1734,9 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_binary(MachineA64Selector* sele
     if (machine_a64_binary_is_i128_shift(selector, instruction))
     {
         u32 amount;
-        selected = machine_a64_constant_shift_amount(selector, instruction->operands[1], &amount) &&
-                   machine_a64_select_i128_shift(selector, instruction, amount);
+        selected = machine_a64_constant_shift_amount(selector, instruction->operands[1], &amount)
+                       ? machine_a64_select_i128_shift(selector, instruction, amount)
+                       : machine_a64_select_i128_variable_shift(selector, instruction);
     }
     else if ((operation == IR_BINARY_INTEGER_BITWISE_AND || operation == IR_BINARY_INTEGER_BITWISE_OR || operation == IR_BINARY_INTEGER_BITWISE_XOR) &&
              result_slot != UINT32_MAX)
@@ -1745,6 +1782,25 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_binary(MachineA64Selector* sele
                 machine_a64_select_frame_store64(selector, result_slot, 8,
                                                  machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, difference_high, borrow));
             }
+            selected = true;
+        }
+    }
+    else if (operation == IR_BINARY_INTEGER_MULTIPLY && result_slot != UINT32_MAX)
+    {
+        u32 left_low;
+        u32 left_high;
+        u32 right_low;
+        u32 right_high;
+        if (machine_a64_select_i128_halves(selector, instruction, &left_low, &left_high, &right_low, &right_high))
+        {
+            u32 low = machine_a64_select_arithmetic_row(selector, MACHINE_A64_MUL64, left_low, right_low);
+            u32 high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_UMULH64, left_low, right_low);
+            u32 cross_left = machine_a64_select_arithmetic_row(selector, MACHINE_A64_MUL64, left_low, right_high);
+            u32 cross_right = machine_a64_select_arithmetic_row(selector, MACHINE_A64_MUL64, left_high, right_low);
+            high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ADD64, high, cross_left);
+            high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ADD64, high, cross_right);
+            machine_a64_select_frame_store64(selector, result_slot, 0, low);
+            machine_a64_select_frame_store64(selector, result_slot, 8, high);
             selected = true;
         }
     }
@@ -4182,6 +4238,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
             IrType* unary_type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
             selected = unary_type && unary_type->kind == IR_TYPE_VECTOR
                            ? machine_a64_select_vector_lanes(selector, instruction, unary_type)
+                           : unary_type && unary_type->kind == IR_TYPE_INTEGER && unary_type->bit_width == 128
+                                 ? machine_a64_select_i128_unary(selector, instruction)
                            : machine_a64_select_unary(selector, instruction, result_register);
         }
         break;
@@ -5700,6 +5758,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_emit_generated_opcode(MachineA64Encoder* en
         fields[3] = operand2;
         field_count = 4;
         break;
+    case MACHINE_A64_UMULH64:
+        form_id = BUSTER_AARCH64_GENERATED_FORM_UMULHRR;
+        fields[0] = operand0;
+        fields[1] = operand1;
+        fields[2] = operand2;
+        field_count = 3;
+        break;
     case MACHINE_A64_SDIV32:
     case MACHINE_A64_SDIV64:
     case MACHINE_A64_UDIV32:
@@ -6897,6 +6962,7 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             case MACHINE_A64_EOR64:
             case MACHINE_A64_MUL32:
             case MACHINE_A64_MUL64:
+            case MACHINE_A64_UMULH64:
             case MACHINE_A64_SDIV32:
             case MACHINE_A64_SDIV64:
             case MACHINE_A64_UDIV32:

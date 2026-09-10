@@ -19,6 +19,10 @@ all-ones/zero mask. `c_ir_vector_mask_type` must not substitute another
 same-width C type such as plain `char`; mask lookup for unsigned or floating
 lanes excludes qualified integer types. `basic_c_vector_lane_edges.c` checks
 narrow signed masks alongside arithmetic in all native backend modes.
+Compatible vector aliases can still have distinct canonical type IDs.
+`c_ir_emit_vector_alias_conversion` preserves their equal lane representation
+through typed views of a private slot, with ordinary validated memory
+operations; do not mutate an existing value's type or weaken cast validation.
 
 Eligibility is per owner, not a function-wide token blacklist. Normal calls,
 address-taking, aggregates beside scalar locals, adjusted array parameters,

@@ -2572,8 +2572,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 241);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 242);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
+        [MACHINE_A64_UMULH64] = 0, // Pure GPR dataflow; no implicit chain.
         [MACHINE_OPCODE_SKELETON_RETURN] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
@@ -2872,7 +2873,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, recipe_indices_in_range);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 99);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 86);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
@@ -3183,7 +3184,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     {
         a64_counts[machine_emit_recipe_category(machine_opcode_emit_recipe(opcode))] += 1;
     }
-    BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 51);
+    BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 52);
     BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 3);
     BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 19);
 
@@ -6969,15 +6970,14 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 machine_select_canonical_function(arguments->arena, machine_a64_program, a64_nine_function, machine_a64_target);
             BUSTER_TEST(arguments, a64_nine_selected.supported);
         }
-        // Module wiring: MIR_STACK on the AArch64 target routes the subset
-        // through the machine path and counts the rest.
+        // Every function in this module now uses the AArch64 machine path.
         CodegenModule a64_mir_module = codegen_generate_canonical_module(arguments->arena, machine_a64_program, machine_a64_module, machine_a64_target,
                                                                          (CodegenModuleOptions){
                                                                              .register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
                                                                          });
         BUSTER_TEST(arguments, a64_mir_module.error == CODEGEN_ERROR_NONE);
         BUSTER_TEST(arguments, a64_none_module.statistics.fallback_function_count == 0);
-        BUSTER_TEST(arguments, a64_mir_module.statistics.fallback_function_count > 0);
+        BUSTER_TEST(arguments, a64_mir_module.statistics.fallback_function_count == 0);
         IrFunction* a64_mir_add = machine_test_ir_function_find(machine_a64_module, S8("add"));
         if (a64_mir_add)
         {

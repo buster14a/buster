@@ -477,6 +477,7 @@ typedef enum MachineOpcode
     MACHINE_A64_EOR64,
     MACHINE_A64_MUL32,
     MACHINE_A64_MUL64,
+    MACHINE_A64_UMULH64, // def, use, use; high half of unsigned 64 x 64
     MACHINE_A64_SDIV32,
     MACHINE_A64_SDIV64,
     MACHINE_A64_UDIV32,
