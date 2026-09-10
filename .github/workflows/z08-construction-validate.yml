@@ -1,0 +1,143 @@
+name: Z08 construction validation
+on:
+  push:
+    branches: [astra/z08-ir-inspection-20260909]
+    paths: [.github/workflows/z08-construction-validate.yml]
+permissions:
+  contents: read
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: '1'
+  BUSTER_TEST_JOBS: '1'
+  UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+jobs:
+  diagnostic:
+    name: Exact-source construction census and output parity
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: e045c046cfb8871ad2fa1b5f174a7d74bba7680d
+          persist-credentials: false
+      - name: Bootstrap and record provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p z08-evidence
+          test "$(git rev-parse HEAD)" = e045c046cfb8871ad2fa1b5f174a7d74bba7680d
+          git rev-parse HEAD HEAD^{tree} > z08-evidence/revisions.txt
+          clang --version > z08-evidence/clang.txt
+          uname -a > z08-evidence/kernel.txt
+          lscpu > z08-evidence/cpu.txt
+          cat /proc/meminfo > z08-evidence/memory.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/z08-build"
+      - name: Build and test ordinary Release compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/z08-build" generate --build-directory build/z08-normal --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF 2>&1 | tee z08-evidence/normal-configure.log
+          "$RUNNER_TEMP/z08-build" build --build-directory build/z08-normal --config Release -t test_all -- -j1 2>&1 | tee z08-evidence/normal-tests.log
+      - name: Build and test optional allocation-probe compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/z08-build" generate --build-directory build/z08-probe --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1 | tee z08-evidence/probe-configure.log
+          "$RUNNER_TEMP/z08-build" build --build-directory build/z08-probe --config Release -t test_all -- -j1 2>&1 | tee z08-evidence/probe-tests.log
+      - name: Verify construction hooks are absent from normal compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          nm build/z08-normal/Release/ide > z08-evidence/normal-symbols.txt
+          nm build/z08-probe/Release/ide > z08-evidence/probe-symbols.txt
+          if grep -q ' ir_construction_' z08-evidence/normal-symbols.txt; then
+            echo 'Unexpected construction hook in ordinary compiler' >&2
+            exit 1
+          fi
+          grep ' ir_construction_' z08-evidence/probe-symbols.txt > z08-evidence/probe-construction-symbols.txt
+          size build/z08-normal/Release/ide build/z08-probe/Release/ide > z08-evidence/size.txt
+          objdump -d --disassemble=ir_construction_record build/z08-probe/Release/ide > z08-evidence/record-disassembly.txt
+          sha256sum build/z08-normal/Release/ide build/z08-probe/Release/ide > z08-evidence/binaries.sha256
+      - name: Existing native harness diagnostic replays across all modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/z08-build" bench_throughput self-test 2>&1 | tee z08-evidence/harness-self-test.log
+          "$RUNNER_TEMP/z08-build" bench_throughput run \
+            --baseline "$PWD/build/z08-normal/Release/ide" \
+            --candidate "$PWD/build/z08-normal/Release/ide" \
+            --allocation-baseline "$PWD/build/z08-probe/Release/ide" \
+            --allocation-candidate "$PWD/build/z08-probe/Release/ide" \
+            --baseline-id e045c046cfb8871ad2fa1b5f174a7d74bba7680d \
+            --candidate-id e045c046cfb8871ad2fa1b5f174a7d74bba7680d \
+            --output build/z08-census-results --profile ci --mode all \
+            --pairs 2 --warmups 1 --timeout 120 --cpu auto --pmu \
+            --require-identical-output --no-guard 2>&1 | tee z08-evidence/census-run.log
+          # A/A timing is diagnostic only; allocation replays independently enforce
+          # probe-versus-normal output equality. PR CI owns the ordinary A/B guard.
+          python3 - <<'PY'
+          import json, pathlib
+          root = pathlib.Path('build/z08-census-results')
+          rows = []
+          for path in sorted(root.rglob('*')):
+              if path.is_file() and (path.suffix in ('.metrics', '.txt') or 'metrics' in path.name):
+                  try:
+                      text = path.read_text()
+                  except (UnicodeError, OSError):
+                      continue
+                  if 'ir_construction.version=1' not in text:
+                      continue
+                  fields = {}
+                  for line in text.splitlines():
+                      if line.startswith('ir_construction.'):
+                          key, value = line.split('=', 1)
+                          fields[key] = int(value)
+                  if fields.get('ir_construction.overflowed') != 0:
+                      raise SystemExit('Invalid overflow marker: ' + str(path))
+                  rows.append({'path': str(path), 'fields': fields})
+          if not rows:
+              raise SystemExit('No construction diagnostic metrics retained')
+          pathlib.Path('z08-evidence/construction-census.json').write_text(json.dumps(rows, indent=2) + '\n')
+          print('Retained construction metric files:', len(rows))
+          PY
+      - name: Retain exact-source evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: z08-construction-e045c046-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            z08-evidence/
+            build/z08-census-results/
+            build/z08-normal/CMakeCache.txt
+            build/z08-normal/compile_commands.json
+            build/z08-probe/CMakeCache.txt
+            build/z08-probe/compile_commands.json
+          retention-days: 7
+          if-no-files-found: error
+  sanitized-probe:
+    name: Exact-source Debug ASan UBSan allocation probe
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: e045c046cfb8871ad2fa1b5f174a7d74bba7680d
+          persist-credentials: false
+      - name: Build and test sanitized optional diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p z08-evidence
+          git rev-parse HEAD HEAD^{tree} > z08-evidence/revisions.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/z08-build"
+          "$RUNNER_TEMP/z08-build" generate --cc clang --ci --sanitize --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1 | tee z08-evidence/sanitizer-configure.log
+          "$RUNNER_TEMP/z08-build" build --config Debug -t test_all -- -j1 2>&1 | tee z08-evidence/sanitizer-tests.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: z08-construction-sanitizer-e045c046-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            z08-evidence/
+            build/CMakeCache.txt
+            build/compile_commands.json
+          retention-days: 7
+          if-no-files-found: error
