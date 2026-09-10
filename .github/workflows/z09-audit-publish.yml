@@ -16,7 +16,7 @@ jobs:
         with:
           ref: d60fd28ae58e8a2af18e0d37f659d51ea2ef6aa8
           persist-credentials: false
-      - name: Verify audit and publish unreferenced documentation tree
+      - name: Compare audit checks and publish unreferenced documentation tree
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -49,7 +49,13 @@ jobs:
               return rows
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
+          def audit_check(label):
+              result = subprocess.run(['python3', 'tools/new_audit.py', '--check'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+              (out / (label + '.log')).write_text(result.stdout)
+              print(label, 'exit=', result.returncode, result.stdout)
+              return result
           assert git('rev-parse', 'HEAD') == parent
+          before = audit_check('audit-before')
           spec = importlib.util.spec_from_file_location('audit_tool', 'tools/new_audit.py')
           tool = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(tool)
@@ -59,7 +65,9 @@ jobs:
           path.write_bytes(base64.b64decode(blob['content']))
           assert git('hash-object', str(path)) == audit_blob
           assert git('hash-object', 'PERFORMANCE_AUDITS.md') == '6f3af6993173b8e2dcf71ff5c7c12b711c302431'
-          subprocess.run(['python3', 'tools/new_audit.py', '--check'], check=True)
+          after = audit_check('audit-after')
+          (out / 'audit-checks.json').write_text(json.dumps({'before_exit': before.returncode, 'after_exit': after.returncode, 'before': before.stdout, 'after': after.stdout}, indent=2))
+          assert (before.returncode, before.stdout) == (after.returncode, after.stdout), 'New audit-check failure'
           subprocess.run(['git', 'add', 'PERFORMANCE_AUDITS.md', str(path)], check=True)
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
           assert git('write-tree') == expected_tree
@@ -75,8 +83,6 @@ jobs:
           (out / 'coordination.json').write_text(json.dumps(evidence, indent=2))
           assert evidence['main'] == baseline, ('Main moved', evidence['main'])
           assert evidence['candidate'] == parent, ('PR head moved', evidence['candidate'])
-          # Distinct append-only audit lines coexist via the repository's union
-          # merge rule. Any other overlap requires manual inspection, not overwrite.
           assert not any(set(pr['overlap']) - {'PERFORMANCE_AUDITS.md'} for pr in evidence['open_prs']), 'Shared production overlap requires review'
           index = request('/git/blobs', {'content': pathlib.Path('PERFORMANCE_AUDITS.md').read_text(), 'encoding': 'utf-8'})
           assert index['sha'] == '6f3af6993173b8e2dcf71ff5c7c12b711c302431'
@@ -84,9 +90,12 @@ jobs:
               {'path': 'PERFORMANCE_AUDITS.md', 'mode': '100644', 'type': 'blob', 'sha': index['sha']},
               {'path': 'docs/performance-audits/' + audit_id + '.md', 'mode': '100644', 'type': 'blob', 'sha': audit_blob}]})
           assert tree['sha'] == expected_tree
-          (out / 'manifest.json').write_text(json.dumps({'parent': parent, 'tree': tree['sha'], 'main': evidence['main']}, indent=2))
+          (out / 'manifest.json').write_text(json.dumps({'parent': parent, 'tree': tree['sha'], 'main': evidence['main'], 'audit_check_exit': after.returncode}, indent=2))
           print('VERIFIED_TREE', tree['sha'])
           print('No branch refs or pull requests were changed by this job.')
+          # Preserve the full check's failure: matching a pre-existing problem
+          # is provenance evidence, not permission to turn a failing check green.
+          raise SystemExit(after.returncode)
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
