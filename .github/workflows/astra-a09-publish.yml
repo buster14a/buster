@@ -1,0 +1,265 @@
+name: A09 binding publication and exact-SHA evidence
+
+on:
+  push:
+    branches: [astra/a09-memory-transport-20260909]
+    paths: [.github/workflows/astra-a09-publish.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a09-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: read
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: source
+          persist-credentials: false
+      - name: Verify patch bytes, source files and current coordination
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a09-publication"
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, zlib
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'a09-publication'
+          root = pathlib.Path('transport/.github/astra-a09')
+          names = ['fresh-bindings.patch.zlib.b64'] + [f'fresh-bindings.patch.part{i}.b64' for i in [2, 3, 4]]
+          encoded = ''.join((root / name).read_text().strip() for name in names)
+          patch = zlib.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '860aff8aa5b9c4867fe579f44bd5480f1a90118a2395fb947ed6ea0618739114'
+          path = out / 'source.patch'
+          path.write_bytes(patch)
+          subprocess.run(['git', '-C', 'source', 'apply', '--check', str(path)], check=True)
+          subprocess.run(['git', '-C', 'source', 'apply', '--index', str(path)], check=True)
+          expected = {
+              'PERFORMANCE_AUDITS.md': 'bf13de934a3f43e6ec12b3a7d57ecd9971056282',
+              'docs/agents/frontend/foundations.md': 'ffbfc1c9dec0c98bfa31e53824cbaeed7aea828f',
+              'docs/performance-audits/2026-09-10T005633Z-baseline-counts.json': '3558273acd9df8e2bdcfa625dc0d79d53effaf8c',
+              'docs/performance-audits/2026-09-10T005633Z.md': 'aed2f4e3f59719f4653dbbad4ca05903a75bd335',
+              'src/buster/lib/compiler/frontend/c/c_parse.c': 'b7020d503900fe26357ce664fcc68c1f46fe22d8',
+              'src/buster/lib/compiler/frontend/c/c_parse_internal.h': '13a48e9c7d22b74088922cfbeac27e79568a8de2',
+              'src/buster/tests/compiler/driver/driver_test.c': '5bc1bfc307d9200ca7e281c4bf903197c39d6a4a',
+              'src/buster/tests/compiler/frontend/c/c_test.c': 'f95dc1f0c324169de7de42ef3dce879c4e4a6c06',
+              'tests/basic_c_fresh_binding_publication.c': '7b452112a9372ff26c4d7dba170768e647e528cf',
+              'tools/benchmark_frontend_scaling.py': '7b308d69d45ee2757c64a0d764445370844b0bed',
+          }
+          actual = subprocess.check_output(['git', '-C', 'source', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          assert sorted(actual) == sorted(expected)
+          for name, digest in expected.items():
+              assert subprocess.check_output(['git', '-C', 'source', 'hash-object', name], text=True).strip() == digest, name
+          def pages(endpoint):
+              return [item for page in json.loads(subprocess.check_output(['gh', 'api', '--paginate', '--slurp', endpoint], text=True)) for item in page]
+          pulls = pages('repos/buster14a/buster/pulls?state=open&per_page=100')
+          (out / 'open-pr-recheck.json').write_text(json.dumps(pulls, indent=2))
+          comments = pages('repos/buster14a/buster/issues/302/comments?per_page=100')
+          (out / 'issue-302-recheck.json').write_text(json.dumps(comments, indent=2))
+          for pr in pulls:
+              files = pages(f"repos/buster14a/buster/pulls/{pr['number']}/files?per_page=100")
+              (out / f"pr-{pr['number']}-files.json").write_text(json.dumps(files, indent=2))
+              overlap = set(expected) & {file['filename'] for file in files}
+              if pr['number'] not in [357, 362, 365] and overlap:
+                  raise SystemExit(f"Unreviewed competing change: PR {pr['number']}: {sorted(overlap)}")
+          (out / 'source-manifest.json').write_text(json.dumps(expected, indent=2))
+          PY
+          git -C source diff --cached --check
+      - name: Publish only a new source branch from the frozen base
+        id: publish
+        working-directory: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          base=ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          branch=astra/a09-302-fresh-binding-publication
+          test "$(git rev-parse HEAD)" = "$base"
+          test "$(gh api repos/buster14a/buster/git/ref/heads/main --jq .object.sha)" = "$base"
+          set +e
+          git ls-remote --exit-code --heads origin "refs/heads/$branch"
+          status=$?
+          set -e
+          test "$status" = 2
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'c: avoid unrelated undo scans for fresh file-scope bindings (#302)'
+          sha=$(git rev-parse HEAD)
+          gh auth setup-git
+          git push origin "HEAD:refs/heads/$branch"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "$sha" > "$RUNNER_TEMP/a09-publication/submitted.sha"
+          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/a09-publication/submitted.tree"
+          printf 'Source branch: `%s`\n\nSubmitted SHA: `%s`\n' "$branch" "$sha" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: a09-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/a09-publication/
+          if-no-files-found: error
+          retention-days: 14
+
+  compare:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+      CANDIDATE_SHA: ${{ needs.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630cea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.publish.outputs.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Build identical trusted configurations sequentially
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a09-comparison"
+          clang --version > "$RUNNER_TEMP/a09-comparison/compiler.txt"
+          lscpu > "$RUNNER_TEMP/a09-comparison/cpu.txt"
+          free -b > "$RUNNER_TEMP/a09-comparison/memory.txt"
+          for variant in baseline candidate; do
+            (
+              cd "$variant"
+              git rev-parse HEAD > "$RUNNER_TEMP/a09-comparison/$variant.sha"
+              clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g0 build.c -o "$RUNNER_TEMP/build-$variant"
+              "$RUNNER_TEMP/build-$variant" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF
+              "$RUNNER_TEMP/build-$variant" build --config Release -t ide
+            ) 2>&1 | tee "$RUNNER_TEMP/a09-comparison/$variant-build.log"
+          done
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - name: Frozen fresh-binding timing, object identity and independent runtime controls
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for compiler in clang gcc; do
+            "$compiler" -std=c17 -Wall -Wextra -Werror -O0 tests/basic_c_fresh_binding_publication.c -o "$RUNNER_TEMP/binding-$compiler"
+            "$RUNNER_TEMP/binding-$compiler"
+          done
+          python3 tools/new_audit.py --check
+          python3 tools/benchmark_frontend_scaling.py --baseline ../baseline/build/Release/ide --candidate build/Release/ide --suite bindings --warmups 2 --repetitions 9 --out "$RUNNER_TEMP/a09-comparison/bindings" 2>&1 | tee "$RUNNER_TEMP/a09-comparison/bindings.log"
+      - name: Existing native all-mode throughput and independent peak-RSS diagnostics
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/build-candidate" bench_throughput run --baseline "$GITHUB_WORKSPACE/baseline/build/Release/ide" --candidate "$GITHUB_WORKSPACE/candidate/build/Release/ide" --baseline-id ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae --candidate-id "$CANDIDATE_SHA" --output "$RUNNER_TEMP/a09-comparison/native" --profile smoke --mode all --pairs 3 --warmups 1 --require-identical-output --no-guard 2>&1 | tee "$RUNNER_TEMP/a09-comparison/native.log"
+      - name: Separate candidate observer for exact operation and allocation counts
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+          path = pathlib.Path('src/buster/lib/compiler/frontend/c/c_parse.c')
+          text = '#include <stdio.h>\nstatic unsigned long long a09_binding_calls;\nstatic unsigned long long a09_binding_visits;\n' + path.read_text()
+          start = text.index('BUSTER_C_INTERNAL u32 c_parse_binding_bind(')
+          end = text.index('// Restores every binding', start)
+          body = text[start:end]
+          body = body.replace('    u32 scan_count = 0;', '    a09_binding_calls += 1;\n    u32 scan_count = 0;', 1)
+          body = body.replace('    return scan_count;', '    a09_binding_visits += scan_count;\n    return scan_count;', 1)
+          text = text[:start] + body + text[end:]
+          start = text.index('BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(')
+          end = text.index('\nCParseResult c_parse(', start)
+          body = text[start:end]
+          position = body.rfind('    return result;')
+          assert position >= 0
+          body = body[:position] + '    fprintf(stderr, "A09_BIND calls=%llu visits=%llu\\n", a09_binding_calls, a09_binding_visits);\n' + body[position:]
+          path.write_text(text[:start] + body + text[end:])
+          PY
+          git diff > "$RUNNER_TEMP/a09-comparison/observer-only.patch"
+          "$RUNNER_TEMP/build-candidate" generate --build-directory build-observer --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1 | tee "$RUNNER_TEMP/a09-comparison/observer-configure.log"
+          "$RUNNER_TEMP/build-candidate" build --build-directory build-observer --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/a09-comparison/observer-build.log"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'a09-comparison'
+          rows = []
+          for count in [0, 1, 4, 16, 64, 256, 1024, 4096, 16384]:
+              source = out / 'bindings' / f'fresh-bindings-{count}.c'
+              command = ['build-observer/Release/ide', 'cc', '-std=c17', '-g0', '-fsyntax-only', str(source)]
+              environment = dict(os.environ)
+              if count in [0, 4096]:
+                  environment['BUSTER_ALLOCATION_CENSUS'] = '1'
+              result = subprocess.run(command, text=True, capture_output=True, timeout=120, env=environment)
+              (out / f'observer-{count}.log').write_text(result.stdout + result.stderr)
+              assert result.returncode == 0, (count, result.stderr)
+              match = re.findall(r'A09_BIND calls=(\d+) visits=(\d+)', result.stderr)
+              assert len(match) == 1, match
+              calls, visits = map(int, match[0])
+              rows.append(dict(count=count, calls=calls, visits=visits, source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(), command=command))
+              (out / 'candidate-operation-counts.json').write_text(json.dumps(rows, indent=2) + '\n')
+              assert calls == 2 * count + 1 and visits == 0, rows[-1]
+          PY
+          python3 tools/allocation_census.py --input "$RUNNER_TEMP/a09-comparison/observer-0.log" --output "$RUNNER_TEMP/a09-comparison/small-census"
+          python3 tools/allocation_census.py --input "$RUNNER_TEMP/a09-comparison/observer-4096.log" --output "$RUNNER_TEMP/a09-comparison/large-census"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: a09-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/a09-comparison/
+          if-no-files-found: error
+          retention-days: 14
+
+  correctness:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.publish.outputs.sha }}
+          persist-credentials: false
+      - name: Exact-SHA Release regressions, modes and canonical self-host gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a09-correctness"
+          git rev-parse HEAD > "$RUNNER_TEMP/a09-correctness/tested.sha"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g0 build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee "$RUNNER_TEMP/a09-correctness/configure.log"
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/a09-correctness/test-all.log"
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/a09-correctness/modes.log"
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/a09-correctness/self-host.log"
+          "$RUNNER_TEMP/buster-build" test_self_host_audit --config Release 2>&1 | tee "$RUNNER_TEMP/a09-correctness/self-host-audit.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: a09-correctness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/a09-correctness/
+            build/self-host-audit/
+          if-no-files-found: error
+          retention-days: 14
