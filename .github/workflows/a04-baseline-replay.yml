@@ -1,0 +1,121 @@
+name: A04 frozen-main aggregate replay
+
+# Temporary evidence transport; not part of PR #366.
+on:
+  push:
+    branches: [astra/20260909-a04-transport]
+    paths: ['.github/workflows/a04-baseline-replay.yml']
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BASE: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          persist-credentials: false
+      - name: Recover identical observed inputs and verify their archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/a04-baseline/retained"
+          test "$(git rev-parse HEAD)" = "$BASE"
+          git rev-parse HEAD > "$RUNNER_TEMP/a04-baseline/baseline-sha.txt"
+          cd "$RUNNER_TEMP/a04-baseline"
+          gh api repos/buster14a/buster/actions/artifacts/10131835180/zip > original.zip
+          printf '%s  original.zip\n' a8d70d416fde6bb619171e98b843372a6a9beeaafa6ad40a1b0dee348eca9198 | sha256sum -c -
+          python3 -m zipfile -e original.zip retained
+          test "$(cat retained/source-sha.txt)" = f41866e0659ca5198314bbadfe2f1fd7aa780f9d
+      - name: Build frozen main without source changes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          exec > >(tee "$RUNNER_TEMP/a04-baseline/build.log") 2>&1
+          clang --version
+          gcc --version
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          ./build/build generate --build-directory build-baseline --cc clang --config Release --linker DEFAULT --ci
+          ./build/build build --build-directory build-baseline --config Release -t ide -- -j1
+          test -z "$(git diff --name-only)"
+      - name: Independent C execution and native baseline controls
+        shell: bash
+        run: |
+          set -euxo pipefail
+          exec > >(tee "$RUNNER_TEMP/a04-baseline/native-controls.log") 2>&1
+          input="$RUNNER_TEMP/a04-baseline/retained/targets/failure-0"
+          output="$RUNNER_TEMP/a04-baseline/control.exe"
+          for compiler in clang gcc; do
+            for optimization in 0 2; do
+              for form in base transformed; do
+                timeout 10s "$compiler" -std=c11 "-O$optimization" -nostdinc -fwrapv -fno-strict-aliasing -funsigned-char "$input/observed-$form.c" -o "$output"
+                timeout 10s "$output"
+              done
+            done
+          done
+          for frontend in -ffrontend-ssa -fno-frontend-ssa; do
+            for mode in none mir-stack fast quality; do
+              for form in base transformed; do
+                timeout 10s build-baseline/Release/ide cc -std=c11 -O0 -nostdinc -fwrapv -fno-strict-aliasing -funsigned-char "$frontend" "-fregister-allocator=$mode" "$input/observed-$form.c" -o "$output"
+                timeout 10s "$output"
+              done
+            done
+          done
+      - name: Classify baseline target diagnostics without executing invalid output
+        shell: bash
+        run: |
+          set -euxo pipefail
+          evidence="$RUNNER_TEMP/a04-baseline"
+          exec > >(tee "$evidence/target-replay.log") 2>&1
+          printf 'target\tfrontend\tmode\tbase_exit\ttransformed_exit\tclassification\n' > "$evidence/target-replay.tsv"
+          for row in wasm64 ebpf; do
+            if [ "$row" = wasm64 ]; then
+              target=wasm64-unknown-freestanding
+              bundle=failure-0
+              diagnostic='aggregate Wasm64 SSA value is unsupported'
+            else
+              target=bpfel-unknown-linux
+              bundle=failure-1
+              diagnostic='aggregate eBPF SSA values are unsupported'
+            fi
+            input="$evidence/retained/targets/$bundle"
+            for frontend in -ffrontend-ssa -fno-frontend-ssa; do
+              for mode in none mir-stack fast quality; do
+                prefix="$evidence/$row-$frontend-$mode"
+                timeout 10s build-baseline/Release/ide cc -std=c11 -O0 -nostdinc -fwrapv -fno-strict-aliasing -funsigned-char "$frontend" "-fregister-allocator=$mode" -target "$target" "$input/observed-base.c" -o "$prefix-base.artifact" > "$prefix-base.log" 2>&1
+                status=0
+                timeout 10s build-baseline/Release/ide cc -std=c11 -O0 -nostdinc -fwrapv -fno-strict-aliasing -funsigned-char "$frontend" "-fregister-allocator=$mode" -target "$target" "$input/observed-transformed.c" -o "$prefix-transformed.artifact" > "$prefix-transformed.log" 2>&1 || status=$?
+                classification=compiled-not-executed
+                if [ "$status" != 0 ]; then
+                  test "$status" = 1
+                  grep -F "$diagnostic" "$prefix-transformed.log"
+                  classification=unsupported-with-diagnostic
+                fi
+                # Freeze the actually observed SSA-on rejection. SSA-off is a
+                # separately labelled probe, never mistaken for runtime proof.
+                if [ "$frontend" = -ffrontend-ssa ]; then
+                  test "$status" = 1
+                fi
+                printf '%s\t%s\t%s\t0\t%s\t%s\n' "$row" "$frontend" "$mode" "$status" "$classification" >> "$evidence/target-replay.tsv"
+              done
+            done
+          done
+          cat "$evidence/target-replay.tsv"
+      - name: Preserve baseline and independent evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: a04-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/a04-baseline
+          retention-days: 7
+          if-no-files-found: error
