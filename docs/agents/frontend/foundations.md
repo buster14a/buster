@@ -102,6 +102,28 @@ independent legacy mutable-register and pressure-census contracts.
   named parameters and ordinary macros retain it.
   `tests/basic_c_macro_empty_paste.c` covers empty operands, chained pastes,
   surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
+- `c_conditional_number` admits the complete bounded integer spelling, checks
+  overflow before accumulation, and leaves its output unchanged on failure.
+  Ordinary constants and the x87 initializer folder share it; do not restore a
+  second integer parser. U/L/LL (with same-case LL), the MS i8/i16/i32/i64 suffixes (including unsigned forms),
+  binary digits and between-digit separators retain their existing admission
+  policy. Fixed-width Microsoft suffixes retain their signed/unsigned literal type, including the Windows SDK limits. This does not add C23 bit-precise suffixes.
+  The syntax pass validates integer tokens in its existing declaration/body
+  walks, including unused functions and unevaluated operands. Inactive macro
+  definitions and stringized tokens are not C integer tokens and remain valid.
+  Language diagnostics name the offending token with
+  `C_DIAGNOSTIC_INVALID_INTEGER_LITERAL`; preprocessing keeps the conditional
+  directive diagnostic. `c_test_integer_spelling_consistency` and
+  `tests/basic_c_integer_literals.c` cover these contracts (GitHub #148).
+- Preprocessing integer-expression reductions carry signedness and a deferred
+  arithmetic-fault bit in the same byte. Division by zero and signed
+  `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
+  `&&`, `||` and `?:` propagate faults only from evaluated operands; the
+  conditional's common unsigned type still depends on both arms. Syntax
+  validation remains unconditional. `c_test_preprocessor_short_circuit` covers
+  generated `#if`/`#elif`, live-fault and malformed-dead-operand controls;
+  `tests/basic_c_preprocessor_short_circuit.c` runs in the existing native
+  allocator matrix (GitHub #147, #258).
 - A folded conditional expression converts its selected value to the common
   type of both arms before any enclosing operator consumes it. Constant and
   runtime typing share `c_ir_conditional_pointer_type`; arithmetic uses the
@@ -381,6 +403,13 @@ immutable language types. `ir_type_abi_value` remains the shared call-lowering
 query used by native consumers and the frontend; explicit contexts use
 `ir_abi_context_value`. Wasm, eBPF and LLVM do not acquire a native cache merely
 by existing; only an actual ABI query creates it.
+
+`IrAbiContext.sysv_unnamed_bitfields_integer` selects the narrow SysV unnamed
+bit-field policy. It defaults to false, preserving historical Buster behavior.
+`CIRLowerOptions` sets the requested context before lowering can make an ABI
+query. Independent contexts can classify the same immutable types with different
+policies. Changing a context's policy after a query requires invalidating that
+context, just as changing layout does; neither selection mutates `IrType`.
 
 Cache pages contain 64 types for one use, with a resolution mask; values are
 initialized before their bit is published. Variadic arguments reuse argument

@@ -86,6 +86,58 @@ that is what makes its legs *execute* rather than fall back to the disassembly
 oracle: x86-64 ELF and Mach-O on the Intel runners, AArch64 ELF and Mach-O on
 the Arm ones. Windows is excluded from it as it is on Forgejo.
 
+## Supplementary bootstrap scheduling and tested revision
+
+`Self-host fixed point` supplies the independent **Linux x86-64 bootstrap
+evidence** check (spelled `Linux x86-64 bootstrap evidence` in GitHub). It
+preserves the ordinary fixed point and alternate-backend gates, then runs the
+three-generation repeated audit and full compiler regressions. It has no
+prerequisite on the platform matrix and does not replace that matrix's
+per-platform self-host coverage.
+
+Both workflows have the same event policy:
+
+| Event | Checkout/tested revision | Scheduling |
+| --- | --- | --- |
+| Pull request opened, synchronized or reopened, including forks | GitHub's `refs/pull/<number>/merge` revision (`GITHUB_SHA`), not merely the head SHA | One run of each workflow per event; a new revision supersedes that PR's older run |
+| Push to `main` | Pushed commit | Every run retained, including pending runs |
+| Tag push | Commit selected by the tag event | Every run retained |
+| Merge group | GitHub's generated merge-group revision | Coalesced only within that workflow and merge-group ref |
+| Explicit workflow dispatch | Revision selected for that workflow dispatch | Independent run-ID group; no automatic coalescing |
+| Other branch push | No automatic run | Open/update its PR, or deliberately dispatch a fixed-revision measurement |
+
+GitHub supplies the PR merge revision to both default checkouts. Check the
+actual run/checkout SHA: the REST run's `head_sha` can identify the PR head,
+while the runner checks out the merge revision. The separate head and merge
+SHAs must not be substituted for one another in validation reports. Re-running
+a job retains the original event SHA; a newer PR head requires its own run.
+Branch protection should require **both `CI complete` and
+`Linux x86-64 bootstrap evidence`** when the stronger audit is mandatory.
+`CI complete` aggregates only its own lint, desktop and mobile jobs; it is not
+a proxy for the separate bootstrap result. No same-name skipped check is
+introduced to stand in for a missing run, and this documentation does not
+change repository rules.
+
+Each workflow uses its own name and event in the concurrency key. Only PR and
+merge-group runs permit cancellation. Main, tag and manual runs include their
+run ID: `cancel-in-progress: false` alone would still allow a newer pending run
+to replace an older pending run. The bootstrap workflow no longer starts an
+expensive audit just because an inspection/transport branch is published.
+This avoids automatic work on non-PR feature pushes, not deliberate main,
+tag or manual validation. It does not establish a measured latency speedup.
+
+Fork validation uses only standard hosted runners, read-only contents access,
+non-persisted checkout credentials, and no secrets or bootstrap caches.
+GitHub's normal approval requirements still apply. The trusted cancellation
+recovery workflow remains scoped to `Buster CI` and eligible same-repository
+PRs; this change does not broaden recovery or the source-free broker.
+
+`python3 tests/ci_tools_test.py -v` checks the shared event/concurrency contract,
+retained bootstrap command order, and the actual `CI complete` shell predicate
+under all 125 combinations of success, failure, cancellation, skip and missing
+results. These checks validate the checked-in policy; they are not evidence
+that a live fork, merge queue, manual dispatch or cancellation race was run.
+
 ## Bootstrapping and prerequisites
 
 `build.c` is compiled with the Clang already installed on the image rather than
@@ -197,6 +249,29 @@ Desktop and mobile summaries use `tools/ci_summary.py`, explicitly requiring eac
 applicable suite. Missing, skipped, cancelled or failed work fails the summary.
 Diagnostic uploads do not start after cancellation. The aggregate `CI complete`
 continues to require all six desktop jobs, three mobile jobs and workflow lint.
+
+The iOS launcher retains separate signing logs for each Debug/Release bundle
+and one shutdown log under `BUSTER_IOS_CONSOLE_LOG`; the GitHub mobile job
+places these in `RUNNER_TEMP/buster-ci/`, inside its existing artifact. Each
+phase keeps the first 64 KiB of combined raw stdout/stderr while draining the
+remaining output, reports truncation, and records the exact shell-quoted
+command, helper status, native command status when available, elapsed time
+and unchanged deadline. Native exit 124 is an ordinary command failure;
+helper exit 124 without a native completion record is a timeout. Status 137
+without that record remains ambiguous between timeout escalation and a signal.
+The first failed phase also retains bounded source SHA, Xcode/SDK, selected
+device and runtime context. Shutdown records the prior batch status and cannot
+erase an earlier failure or turn otherwise successful tests green.
+
+`bash tests/mobile_ci_scripts_test.sh` covers nonzero and hanging commands,
+bounded output, independent batch results and cleanup failure propagation.
+The macOS lifecycle job additionally invokes real codesign against an empty
+app and real simctl shutdown against an invalid device ID. These intentional,
+bounded rejections retain native diagnostics and Xcode/runtime provenance;
+they do not diagnose the intermittent signing/shutdown stalls from #394.
+Set `BUSTER_MOBILE_TEST_EVIDENCE_DIR` to retain each case's files; the lifecycle
+workflow includes them alongside its established console-log artifact. The
+attached launch-monitor ownership suite continues to use macOS `/bin/bash`.
 
 Collect timing using `python3 tools/github_ci_time.py collect --branch main --limit 30 --output /tmp/before.json`
 and summarize using `python3 tools/github_ci_time.py summarize /tmp/before.json`.

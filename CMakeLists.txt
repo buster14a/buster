@@ -1482,6 +1482,7 @@ function(executable_add name is_buster_program main_file)
         BUSTER_USE_SLANG_SHADERS=$<IF:$<BOOL:${BUSTER_USE_SLANG_SHADERS_DEFINE}>,1,0>
         BUSTER_COMPILER_ZIG=$<IF:$<BOOL:${C_COMPILER_ZIG}>,1,0>
         BUSTER_HOST_C_COMPILER="${CMAKE_C_COMPILER}"
+        BUSTER_HOST_C_COMPILER_ID="${CMAKE_C_COMPILER_ID}"
         BUSTER_HOST_C_COMPILER_ARG1="${CMAKE_C_COMPILER_ARG1}"
         BUSTER_HOST_C_RESOURCE_INCLUDE="${BUSTER_HOST_C_RESOURCE_INCLUDE}"
         BUSTER_HOST_C_COMPILER_MSVC=$<IF:$<BOOL:${C_COMPILER_MSVC}>,1,0>
@@ -1912,37 +1913,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android")
         list(APPEND BUSTER_ANDROID_SHADER_ASSET_DEPENDS ${BUSTER_SHADER_TARGET_DEPENDS})
     endif()
 
-    add_custom_command(
-        OUTPUT "${BUSTER_APK}"
-        # 0. Stage test data and, only for an explicitly enabled renderer, shaders.
-        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${CMAKE_BINARY_DIR}/assets"
-        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/tests" "${CMAKE_BINARY_DIR}/assets/tests"
-        ${BUSTER_ANDROID_SHADER_ASSET_COMMANDS}
-        # 1. Compile the manifest + assets into a base APK (binary manifest + resources.arsc).
-        COMMAND "${BUSTER_AAPT2}" link
-            -I "${BUSTER_ANDROID_JAR}"
-            --manifest "${BUSTER_ANDROID_MANIFEST}"
-            -A "${CMAKE_BINARY_DIR}/assets"
-            --min-sdk-version 24 --target-sdk-version 35
-            -o "${CMAKE_BINARY_DIR}/buster-base.apk"
-        # 2. Stage the native library under lib/<abi>/.
-        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${BUSTER_APK_STAGE}"
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${BUSTER_APK_STAGE}/lib/${ANDROID_ABI}"
-        COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:ide>" "${BUSTER_APK_STAGE}/lib/${ANDROID_ABI}/libide.so"
-        # 3. Add the native library into the APK.
-        COMMAND "${BUSTER_JAR}" uf "${CMAKE_BINARY_DIR}/buster-base.apk" -C "${BUSTER_APK_STAGE}" "lib/${ANDROID_ABI}/libide.so"
-        # 4. Align before signing, then sign with APK Signature Scheme v2/v3.
-        COMMAND "${BUSTER_BASH_EXECUTABLE}" "${BUSTER_ANDROID_SIGN_SCRIPT}"
-            "${BUSTER_APKSIGNER}"
-            "${BUSTER_ZIPALIGN}"
-            "${BUSTER_KEYSTORE}"
-            "${CMAKE_BINARY_DIR}/buster-base.apk"
-            "${BUSTER_APK}"
-        DEPENDS ide "${BUSTER_ANDROID_MANIFEST}" "${BUSTER_ANDROID_SIGN_SCRIPT}" ${BUSTER_ANDROID_SHADER_ASSET_DEPENDS}
-        COMMENT "Packaging buster.apk"
-        VERBATIM
-    )
-    add_custom_target(apk DEPENDS "${BUSTER_APK}")
+    include(cmake/AndroidApk.cmake)
 
     if (BUSTER_ADB_EXECUTABLE AND BUSTER_BASH_EXECUTABLE)
         # Install, launch, and wait for the on-device compiler test result.

@@ -805,6 +805,20 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !a64_mc_decode(UINT32_C(0xd503201f), 0));
 
     u32 patched = 0;
+    u32 add_immediate = 0;
+    BUSTER_TEST(arguments, a64_add_lo12_read(UINT32_C(0x913ffd08), &add_immediate) && add_immediate == 4095);
+    BUSTER_TEST(arguments, a64_add_lo12_patch(UINT32_C(0x913ffd08), 0, &patched) && patched == UINT32_C(0x91000108));
+    BUSTER_TEST(arguments, a64_add_lo12_patch(UINT32_C(0x11000117), 1, &patched) && patched == UINT32_C(0x11000517));
+    BUSTER_TEST(arguments, a64_add_lo12_read(UINT32_C(0x11000517), &add_immediate) && add_immediate == 1);
+    BUSTER_TEST(arguments, !a64_add_lo12_patch(UINT32_C(0x91000000), 4096, &patched));
+    u32 invalid_add_words[] = {UINT32_C(0x91400400), UINT32_C(0xb1000000), UINT32_C(0xd1000000), UINT32_C(0xf9400000), UINT32_C(0x91800000)};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_add_words); index += 1)
+    {
+        BUSTER_TEST(arguments, !a64_add_lo12_read(invalid_add_words[index], &add_immediate));
+        BUSTER_TEST(arguments, !a64_add_lo12_patch(invalid_add_words[index], 0, &patched));
+    }
+    BUSTER_TEST(arguments, !a64_add_lo12_read(UINT32_C(0x91000000), 0));
+    BUSTER_TEST(arguments, !a64_add_lo12_patch(UINT32_C(0x91000000), 0, 0));
     BUSTER_TEST(arguments, a64_pc_relative_patch(A64_OPCODE_B, UINT32_C(0x14000000), -4, &patched) && patched == UINT32_C(0x17ffffff));
     BUSTER_TEST(arguments, a64_pc_relative_patch(A64_OPCODE_BL, UINT32_C(0x94000000), 8, &patched) && patched == UINT32_C(0x94000002));
     BUSTER_TEST(arguments, a64_pc_relative_patch(A64_OPCODE_B_COND, UINT32_C(0x5400000d), 4, &patched) && patched == UINT32_C(0x5400002d));

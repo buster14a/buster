@@ -4,7 +4,7 @@ static int calls;
 static unsigned char large_zero_storage[1024 * 1024];
 static const unsigned char constant_zero_storage[64];
 
-typedef void* va_list;
+typedef __builtin_va_list va_list;
 typedef char char8;
 typedef unsigned char u8;
 

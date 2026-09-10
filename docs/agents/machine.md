@@ -118,12 +118,32 @@
   parameter consumes one slot, and a hidden return pointer consumes the first.
   Pointer-sized `va_list` copies use eight bytes and `va_end` emits no write.
   Scalar and aggregate `va_arg` reads advance one slot, dereferencing indirect
-  aggregates according to the canonical ABI classification. Existing indirect
-  argument/vector signature exclusions still apply to callers.
+  aggregates according to the canonical ABI classification. Reads remain
+  limited to sixteen bytes; vector and 128-bit integer signatures remain excluded.
   Variadic callers duplicate scalar float bits into positional GPRs during the
   integer staging pass, after all XMM bridges, and omit the System V AL count.
   Cross-compiler regressions cover both call directions, register exhaustion,
   copied lists, small/indirect aggregates, and hidden result pointers.
+- Windows/UEFI x86-64 indirect aggregate arguments occupy one pointer slot.
+  Callers copy exact value bytes into storage aligned to sixteen bytes after
+  their shadow and stack-argument area; every call site reuses the maximum outgoing
+  reservation. Fixed and variadic arguments share this ABI placement. Callees
+  capture incoming register pointers before floating bridges, capture stack
+  pointers next, and materialize parameter objects after all incoming captures.
+  Parameter writes affect the private value copy. Complete outgoing sizes are
+  checked before narrowing frame displacements. Alignment requirements above
+  sixteen bytes remain outside this subset. Cross-compiler tests cover odd
+  sizes, larger aggregates, hidden returns, indirect calls, large anonymous
+  arguments, mixed floating parameters and caller-value preservation.
+- Windows/UEFI x86-64 MIR frames larger than one page reuse
+  `codegen_x64_emit_windows_stack_allocate`, the direct emitter's bounded
+  R10/R11 probe loop. RSP stays unchanged until the final allocation, so a
+  large frame requires one allocation unwind action and a bounded prologue.
+  `MachineEncodeResult.frame_allocation_offset` supplies its actual byte offset
+  to unwind construction without widening the result on 64-bit hosts.
+  Keep object creation and native Windows execution of
+  `tests/basic_c_win64_large_frame.c` covered in every allocator mode; page
+  probing must preserve all incoming argument registers and private copies.
 - ELF AArch64 variadic definitions capture X0-X7 and Q0-Q7 into a 192-byte
   save area before argument capture. Named parameters consume their ABI's
   independent integer and floating-point register files. The existing private
@@ -154,6 +174,13 @@
   format**. Both x86 emitters use `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
   `CODEGEN_F64_SIGNED64_LIMIT_BITS`; the source width does not change which
   integer bit the final bias restores.
+- AArch64 symbol addresses on macOS/iOS use ADRP/ADD with Mach-O PAGE21 and
+  PAGEOFF12 relocations in every allocator. The selector records the page
+  reference beside the call target, and the encoder publishes both instruction
+  sites. Absolute inline pointer literals in executable text are rejected by
+  Apple's linker. Direct calls retain CALL26; ELF/PE address and TLS forms
+  retain their existing target contracts. The qualified-aggregate differential
+  corpus checks native Apple linking and execution across allocator modes.
 - `-fPIC` is a code model, not an accepted flag. It reaches code generation as
   `CodegenModuleOptions.position_independent`, and generation resolves it for
   the target: x86-64 ELF, where the relocations it changes are the ones `ld`

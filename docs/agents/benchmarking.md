@@ -382,3 +382,15 @@ unchanged classification count establish the hit rate; timings never gate tests.
 `bytes` includes page payloads and the TypeId page directories, and `type_bytes`
 is the occupied language-type pool. This small corpus prices the query service;
 use paired same-source compiler runs for end-to-end time and peak RSS.
+
+## Canonical construction work populations
+
+For #38/#50/#52/#306, use the existing allocation diagnostic build and its
+additive `ir_construction.*` source-metrics fields. The
+[construction census contract](../../tools/throughput/README.md#canonical-construction-census-in-allocation-probes)
+defines append/growth, frontend finish, place retraction and shared native
+edge populations. Keep this instrumented compiler off the timing path,
+require its output hash to match the ordinary compiler, and retain raw
+metrics. These calling-thread counters do not aggregate persistent lanes,
+time appends, or cover every operand decoder. They do not establish a
+Zen 5 speedup, live memory reduction, or whole-pipeline cost.
