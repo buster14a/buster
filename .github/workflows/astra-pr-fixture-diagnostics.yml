@@ -15,10 +15,10 @@ jobs:
             source: d72cd8dd28283f89cac78b0e49b0d8529c5405b3
           - pr: 374
             runner: ubuntu-26.04
-            source: 14741d52ca7bd8d04cbdcd703e7934cac06b5939
+            source: c0517fb8bd3accf4c0f6020fad52bc0ddc4570fb
           - pr: 376
             runner: macos-26
-            source: 3b24b00f8b0ac3590f8c5df968a6497235152171
+            source: c3d5072d7c4097ae2680da3cafaeff01151e5728
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     steps:
@@ -60,3 +60,33 @@ jobs:
               failed |= r.returncode != 0
           raise SystemExit(1 if failed else 0)
           PY
+
+  quality-census:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - config: Release
+            sanitize: ''
+          - config: Debug
+            sanitize: --sanitize
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 1
+      BUSTER_TEST_JOBS: 1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: f5c0074b903055f86ed422ca1328b3e9bcef755b
+          persist-credentials: false
+      - name: Validate registered allocation-census tests
+        env:
+          AUDIT_CONFIG: ${{ matrix.config }}
+          AUDIT_SANITIZE: ${{ matrix.sanitize }}
+        run: |
+          git rev-parse HEAD
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT $AUDIT_SANITIZE -- -DBUSTER_BENCH_ALLOCATIONS=ON
+          "$RUNNER_TEMP/buster-build" build --config "$AUDIT_CONFIG" -t test_all -- -j1
