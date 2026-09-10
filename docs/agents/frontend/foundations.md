@@ -14,6 +14,12 @@ promotion. Ordinary pointers, supported integers/floats and fixed vectors are
 eligible. Narrow-normalizing, volatile/atomic, static, thread-local and
 cleanup-managed owners retain memory form.
 
+Signed integer vector comparisons retain their operand's lane type for the
+all-ones/zero mask. `c_ir_vector_mask_type` must not substitute another
+same-width C type such as plain `char`; mask lookup for unsigned or floating
+lanes excludes qualified integer types. `basic_c_vector_lane_edges.c` checks
+narrow signed masks alongside arithmetic in all native backend modes.
+
 Eligibility is per owner, not a function-wide token blacklist. Normal calls,
 address-taking, aggregates beside scalar locals, adjusted array parameters,
 field/index expressions, scalar compound literals, statement expressions,
@@ -48,6 +54,10 @@ incoming values, forwarding through single-predecessor chains. Trivial
 parameters and unused parameter cycles are removed. Disconnected empty label
 blocks have no outgoing edge. Publication includes **every** predecessor edge,
 including parameter-free destinations; selectors must never see a partial CFG.
+Nested GNU statement-expression body walks reuse the function's label block at
+the same source token. Allocating a second block leaves the predeclared label
+unterminated and separates ordinary goto from label-address provenance. The
+strict `basic_c_statement_expression_value.c` corpus checks both goto arms.
 
 Existing current-value queries do not grow the sparse table. A missing-key
 insertion owns capacity growth, and parameter creation reuses the slot its

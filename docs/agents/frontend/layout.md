@@ -12,6 +12,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Keep the ordinary sixteen-byte path and the existing save/restore lifetime
   semantics; test real addresses across different incoming stack residues and
   page-crossing sizes.
+- Partial subscripting of a pointer-to-VLA already yields a decayed row pointer.
+  `c_ir_lower_expression_core_consume_place` loads only `IR_VALUE_PLACE`
+  operands; loading the decayed value creates invalid IR and forces both native
+  selectors to reject the function. `tests/basic_c_pointer_to_vla.c` covers row
+  addresses, runtime strides, local arrays and indirect comparison calls.
 - **`__attribute__((packed))` and `__attribute__((aligned(N)))`** decide object
   representation, so ignoring them is an ABI divergence rather than a missing
   optimization: a Buster-only program agrees with itself whatever it agrees on,
@@ -59,9 +64,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   them and read-modify-writes each one in turn, reaching the bytes past the
   first through a `unsigned char*` taken from the member place, and the
   constant folds deposit the bits one byte at a time because no integer is nine
-  bytes wide. The `IR_OPCODE_AGGREGATE` selectors decline a span that is not a
-  single unit and the canonical emitters take it, which is a per-function
-  fallback the statistics already count. **A `_Bool` bit-field is extracted
+  bytes wide. Both native `IR_OPCODE_AGGREGATE` selectors walk the same pieces,
+  merging only each field's intersection with the current piece. Siblings
+  sharing the complete storage unit accumulate together; zero-width separators
+  emit no stores. Keep the packed, anonymous and unnamed initializer fixtures
+  in the strict MIR corpus. **A `_Bool` bit-field is extracted
   like any other**: its declared type is not an integer, so it used to skip the
   extraction and hand back the whole `_Bool` unit -- every neighbour's bits with
   it, normalized to one, which is why a `_Bool` that was the only set bit still
@@ -150,7 +157,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   remain initializable subobjects. Indexed places inherit both the enclosing
   place's volatility and the field type's volatility. The frontend IR check
   and `tests/basic_c_unnamed_initializer_members.c` cover these rules under all
-  four allocators (GitHub #323).
+  four allocators (GitHub #323). Bit extraction uses the unqualified value
+  type returned by the load, including its shift and mask constants. Volatility
+  remains on the memory access; it must not create mismatched arithmetic types.
+  The strict driver corpus independently validates the complete canonical IR.
   A bit-field declarator carries a list of its own in exactly one place, *after*
   the width -- Clang rejects `int b __attribute__((packed)) : 5` -- so
   `c_type_parse_aggregate_segment_step` trims the width's token range with

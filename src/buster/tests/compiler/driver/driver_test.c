@@ -495,19 +495,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_pe_tls_director
     return true;
 }
 
-#if BUSTER_WINDOWS
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_process_success(Arena* arena, String8 path)
 {
     String8 run_arguments[] = {path};
     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
                                                 (ProcessSpawnOptions){.use_process_environment = true});
-    if (!spawn.handle)
-    {
-        return false;
-    }
-    return os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;
+    return spawn.handle && os_process_wait_sync(arena, spawn).result == PROCESS_RESULT_SUCCESS;
 }
-#endif
 
 #if BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_windows_x64_unwind_records(ObjectFile* object, bool* has_frame_register)
@@ -1191,7 +1185,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
     UnitTestResult result = {0};
     String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
     String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
-    String8 corpus[] = {S8("tests/basic_c_operations.c"), S8("tests/basic_c_explicit_allocator_sticks.c"), S8("tests/basic_c_call_abi.c")};
+    String8 corpus[] = {S8("tests/basic_c_operations.c"), S8("tests/basic_c_explicit_allocator_sticks.c"), S8("tests/basic_c_call_abi.c"),
+                         S8("tests/basic_c_pointer_to_vla.c"), S8("tests/basic_c_anonymous_bit_field_initializer.c"),
+                         S8("tests/basic_c_unnamed_initializer_members.c"), S8("tests/basic_c_packed_layout.c"),
+                         S8("tests/basic_c_large_frame.c"), S8("tests/basic_c_win64_large_frame.c"),
+                         S8("tests/basic_c_statement_expression_value.c")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -1201,7 +1199,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 String8 output = buster_test_temporary_path(temporary.arena, S8("buster-mir-strict-corpus"), S8(".o"));
                 String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], S8("-fno-machine-fallback"),
-                                     S8("-o"), output, corpus[fixture]};
+                                     S8("-fverify-codegen"), S8("-o"), output, corpus[fixture]};
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
                     compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object,
@@ -1216,6 +1214,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
                 scratch_end(temporary);
             }
         }
+    }
+    // AArch64's scalar lane expansion complements its NEON forms. Keep the
+    // full fixture strict so a later operation cannot silently restore fallback.
+    String8 vector_corpus[] = {S8("tests/basic_c_vector.c"), S8("tests/basic_c_vector_lane_edges.c")};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(vector_corpus); fixture += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("buster-mir-vector-lanes"), S8(".o"));
+            String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), S8("aarch64-linux"), modes[mode], S8("-fno-machine-fallback"),
+                                 S8("-fverify-codegen"), S8("-o"), output, vector_corpus[fixture]};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+            BUSTER_TEST(arguments, compiled.codegen_statistics.function_count != 0 && compiled.codegen_statistics.fallback_function_count == 0);
+#if BUSTER_CPU_ARCH_AARCH64 && (BUSTER_LINUX || BUSTER_MACOS)
+            String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-vector-lanes-run"), S8(""));
+            String8 native_command[] = {modes[mode], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                                        S8("-o"), executable, vector_corpus[fixture]};
+            CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena,
+                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command)));
+            BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
+            if (native.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+            }
+#endif
+            scratch_end(temporary);
+        }
+    }
+    // Keep the direct reference honest while it is the differential oracle:
+    // narrow signed shifts, division and comparisons need sign extension.
+    String8 vector_reference_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(vector_reference_modes); mode += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-vector-lane-edges-run"), S8(".exe"));
+        String8 command[] = {vector_reference_modes[mode], S8("-fverify-codegen"), S8("-o"), executable,
+                             S8("tests/basic_c_vector_lane_edges.c")};
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+        }
+        scratch_end(temporary);
     }
     String8 fallback_targets[] = {S8("x86_64-unknown-windows"), S8("aarch64-apple-macos"), S8("aarch64-unknown-windows")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(fallback_targets); target += 1)
@@ -9701,6 +9748,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_created_nan_sign.c"),
         S8("tests/basic_c_static_compound_literal.c"),
         S8("tests/basic_c_typeof_conditional.c"),
+        S8("tests/basic_c_qualified_aggregate_call.c"),
+        S8("tests/basic_c_qualified_compound.c"),
     };
     String8 c_musl_shape_fixture_names[] = {
         S8("buster-c-reversed-subscript"),
@@ -9716,6 +9765,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-created-nan-sign"),
         S8("buster-c-static-compound-literal"),
         S8("buster-c-typeof-conditional"),
+        S8("buster-c-qualified-aggregate-call"),
+        S8("buster-c-qualified-compound"),
     };
     String8 c_musl_shape_allocator_flags[] = {
         S8("-fregister-allocator=none"),

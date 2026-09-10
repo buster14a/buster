@@ -144,6 +144,21 @@
   Keep object creation and native Windows execution of
   `tests/basic_c_win64_large_frame.c` covered in every allocator mode; page
   probing must preserve all incoming argument registers and private copies.
+- AArch64 vector bodies use NEON when an exact form exists and otherwise
+  expand into scalar MIR lanes before allocation. Exact-width lane loads
+  preserve signed narrow operands; comparisons produce all-ones true lanes,
+  and floating negation toggles the sign bit. Division, remainder, shifts,
+  comparisons, 64-bit-lane multiplication and vector unary operations share
+  the scalar arithmetic rules. Keep the entire vector fixture strict in
+  MIR_STACK, FAST and QUALITY; scalar expansion must remain visible to MIR
+  validation and register allocation.
+- AArch64 fixed frames are not limited by the scaled callee-save offset.
+  Above that offset's reach, the prologue and each epilogue derive the compact
+  save-area base from X29 in reserved X16, then use small unsigned offsets.
+  Module unwind construction counts both setup words and retains the actual
+  SP-relative save locations. Capacity planning includes large-offset body
+  transfers and aggregate-copy pieces; frame-size sums are checked before
+  narrowing. Keep strict large-frame and packed-layout tests in all MIR modes.
 - ELF AArch64 variadic definitions capture X0-X7 and Q0-Q7 into a 192-byte
   save area before argument capture. Named parameters consume their ABI's
   independent integer and floating-point register files. The existing private
@@ -174,6 +189,13 @@
   format**. Both x86 emitters use `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
   `CODEGEN_F64_SIGNED64_LIMIT_BITS`; the source width does not change which
   integer bit the final bias restores.
+- AArch64 symbol addresses on macOS/iOS use ADRP/ADD with Mach-O PAGE21 and
+  PAGEOFF12 relocations in every allocator. The selector records the page
+  reference beside the call target, and the encoder publishes both instruction
+  sites. Absolute inline pointer literals in executable text are rejected by
+  Apple's linker. Direct calls retain CALL26; ELF/PE address and TLS forms
+  retain their existing target contracts. The qualified-aggregate differential
+  corpus checks native Apple linking and execution across allocator modes.
 - `-fPIC` is a code model, not an accepted flag. It reaches code generation as
   `CodegenModuleOptions.position_independent`, and generation resolves it for
   the target: x86-64 ELF, where the relocations it changes are the ones `ld`

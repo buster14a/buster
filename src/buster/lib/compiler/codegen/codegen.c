@@ -6309,7 +6309,7 @@ BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_sign_extend(CodegenBuffer* buffer
             codegen_canonical_x64_metadata_immediate(64 - width, 8),
         };
         (void)codegen_canonical_x64_metadata_emit(buffer, S8("SHL"), operands, BUSTER_ARRAY_LENGTH(operands));
-        (void)codegen_canonical_x64_metadata_emit(buffer, S8("SHR"), operands, BUSTER_ARRAY_LENGTH(operands));
+        (void)codegen_canonical_x64_metadata_emit(buffer, S8("SAR"), operands, BUSTER_ARRAY_LENGTH(operands));
     }
 }
 
@@ -7198,6 +7198,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_vector_operation(CodegenBuffer* o
             }
             IrBinaryOperation operation = instruction->binary_operation;
             bool signed_semantics = operation == IR_BINARY_VECTOR_SIGNED_DIVIDE || operation == IR_BINARY_VECTOR_SIGNED_REMAINDER ||
+                                    operation == IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT ||
                                     (operation >= IR_BINARY_VECTOR_SIGNED_LESS && operation <= IR_BINARY_VECTOR_SIGNED_GREATER_EQUAL);
             if (signed_semantics)
             {
@@ -7806,6 +7807,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_a64_vector_operation(CodegenBuffer* b
         else
         {
             bool signed_semantics = operation == IR_BINARY_VECTOR_SIGNED_DIVIDE || operation == IR_BINARY_VECTOR_SIGNED_REMAINDER ||
+                                    operation == IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT ||
                                     (operation >= IR_BINARY_VECTOR_SIGNED_LESS && operation <= IR_BINARY_VECTOR_SIGNED_GREATER_EQUAL);
             if (!codegen_canonical_a64_memory_operation(buffer, 9, left_offset, lane_size, false, signed_semantics) ||
                 !codegen_canonical_a64_memory_operation(buffer, 10, right_offset, lane_size, false, signed_semantics))
@@ -9769,6 +9771,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             machine_prologue_cursor += 4;
                             machine_frame_remaining -= machine_frame_chunk;
                         }
+                        // A large frame materializes the nearby callee-save
+                        // base from X29 in two words before the stores.
+                        if (machine_frame_area > A64_IMM12_MAX * 8u)
+                        {
+                            machine_prologue_cursor += 8;
+                        }
                         u32 machine_save_slot = 0;
                         for (u32 saved_register = 0; saved_register < 32u; saved_register += 1)
                         {
@@ -9808,6 +9816,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                      ? (encoded.call_sites[site_index].thread_local_low
                                                             ? CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
                                                             : CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12)
+                                                     : encoded.call_sites[site_index].page_relative
+                                                         ? (encoded.call_sites[site_index].page_low
+                                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12
+                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21)
                                                      : encoded.call_sites[site_index].absolute ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
                                                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_CALL26),
                                     .aarch64 = encoded.call_sites[site_index].absolute == 0,

@@ -6,6 +6,8 @@
 // identifiers through the parse result's scopes and answering structure
 // questions from a prebuilt matching-delimiter index
 // (c_ir_build_delimiter_index).
+// c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
+// separate from the declared qualification of parameter objects.
 //
 // Source-dependent recursion is forbidden (AGENTS.md), so anything that
 // would recurse runs on an explicit machine owned by CIntegerIrBuilder:
@@ -896,6 +898,21 @@ BUSTER_C_INTERNAL IrTypeId c_ir_add_qualified_type(IrProgram* program, IrTypeId 
     return ir_program_add_type(program, qualified);
 }
 
+// A parameter's value type does not carry its object's top-level volatile
+// qualifier. Keep pointee/member qualifiers and the settled atomic ABI shape;
+// the definition still materializes the separately qualified parameter object.
+BUSTER_C_INTERNAL IrTypeId c_ir_parameter_value_type(IrProgram* program, IrTypeId type)
+{
+    IrTypeId result = type;
+    IrType* parameter = ir_type_from_id(&program->types, type);
+    if (parameter && parameter->is_volatile)
+    {
+        result = parameter->is_atomic ? c_ir_add_qualified_type(program, parameter->unqualified_type, true, false)
+                                      : parameter->unqualified_type;
+    }
+    return result;
+}
+
 // A copy of `base` whose alignment is the one a typedef declarator asked for
 // on the name it declares.  GNU `aligned` on a type replaces the natural
 // alignment rather than raising it, and leaves the size alone -- Clang and GCC
@@ -1590,6 +1607,7 @@ BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* 
                     {
                         result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, result.parameter_types[parameter_index]);
                     }
+                    result.parameter_types[parameter_index] = c_ir_parameter_value_type(program, result.parameter_types[parameter_index]);
                     if (result.parameter_types[parameter_index].value == IR_ID_UNDERLYING_INVALID)
                     {
                         return (CIrSignature){0};
@@ -6426,8 +6444,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place(CIntegerIrBuilder* builder, IrV
         // 16-bit `shl`/`sar` pair executes at 32 bits and the sign bit of a
         // `short a : 9` never reaches the top. Promoting here is also what C
         // does with the value, and the result narrows back on the way out.
-        IrTypeId extract_type = type;
-        IrType* extract_type_value = value_type;
+        // The memory load removes object qualifiers. Extraction and its
+        // constants must use that same value type, including volatile fields.
+        IrTypeId result_type = value_type->is_atomic || value_type->is_volatile ? value_type->unqualified_type : type;
+        IrTypeId extract_type = result_type;
+        IrType* extract_type_value = ir_type_from_id(&builder->program->types, extract_type);
         if (value_type->bit_width < 32)
         {
             extract_type = value_type->is_signed ? builder->s32_type : builder->scalar_types[C_TYPE_UNSIGNED_INT];
@@ -6453,9 +6474,9 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place(CIntegerIrBuilder* builder, IrV
             value = c_ir_emit_binary_value(builder, value, sign_shift_value, extract_type, IR_BINARY_SHIFT_LEFT, source);
             value = c_ir_emit_binary_value(builder, value, sign_shift_value, extract_type, IR_BINARY_SIGNED_SHIFT_RIGHT, source);
         }
-        if (extract_type.value != type.value)
+        if (extract_type.value != result_type.value)
         {
-            value = c_ir_emit_cast(builder, value, type, source);
+            value = c_ir_emit_cast(builder, value, result_type, source);
         }
         c_ir_mark_unsigned_bit_field_value(builder, value, field);
     }
@@ -7690,15 +7711,15 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_arrow_operand_from_place(CIntegerIrBuilder
     return c_ir_emit_load_place(builder, place, type, source);
 }
 
-BUSTER_C_INTERNAL bool c_ir_emit_parameter(CIntegerIrBuilder* builder, CToken name, u32 argument_index, IrTypeId type, CEntityId entity)
+BUSTER_C_INTERNAL bool c_ir_emit_parameter(CIntegerIrBuilder* builder, CToken name, u32 argument_index, IrTypeId type, IrTypeId object_type, CEntityId entity)
 {
     // A by-value parameter is a local object, not the caller's ABI slot.
     // Carry its type alignment just as an ordinary declaration does: native
     // lowering uses the place's alignment to reserve and materialize storage
     // beyond the frame pointer's guaranteed alignment.
-    IrType* parameter_type = ir_type_from_id(&builder->program->types, type);
+    IrType* parameter_type = ir_type_from_id(&builder->program->types, object_type);
     u32 alignment = parameter_type ? parameter_type->layout.alignment : 0;
-    IrValueId place = c_ir_emit_local(builder, name, type, entity, alignment);
+    IrValueId place = c_ir_emit_local(builder, name, object_type, entity, alignment);
     CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
     if (place.value == IR_ID_UNDERLYING_INVALID || !local)
     {
@@ -19234,11 +19255,14 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vector_mask_type(IrProgram* program, IrType* vec
     {
         return IR_TYPE_ID_INVALID;
     }
-    IrTypeId integer = IR_TYPE_ID_INVALID;
-    for (u32 type_index = 0; type_index < program->types.count; type_index += 1)
+    // Signed integer comparisons retain the lane's own type. Another
+    // same-width integer (notably plain char) need not be C-compatible.
+    IrTypeId integer = element->kind == IR_TYPE_INTEGER && element->is_signed ? vector->element_type : IR_TYPE_ID_INVALID;
+    for (u32 type_index = 0; integer.value == IR_ID_UNDERLYING_INVALID && type_index < program->types.count; type_index += 1)
     {
         IrType* candidate = program->types.types + type_index;
-        if (candidate->kind == IR_TYPE_INTEGER && candidate->is_signed && candidate->bit_width == element->bit_width)
+        if (candidate->kind == IR_TYPE_INTEGER && candidate->is_signed && !candidate->is_atomic && !candidate->is_volatile &&
+            candidate->bit_width == element->bit_width)
         {
             integer = candidate->id;
             break;
@@ -20763,7 +20787,9 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
 {
     IrType* place_type = ir_type_from_id(&builder->program->types, type);
     bool atomic = place_type && place_type->is_atomic;
-    IrTypeId value_type = atomic ? place_type->unqualified_type : type;
+    // The operation consumes an unqualified value even when the destination
+    // place is volatile. Loads and stores retain that place's access flags.
+    IrTypeId value_type = place_type && (atomic || place_type->is_volatile) ? place_type->unqualified_type : type;
     IrType* unqualified = ir_type_from_id(&builder->program->types, value_type);
     bool pointer_arithmetic = unqualified && unqualified->kind == IR_TYPE_POINTER && (operation == C_CONDITIONAL_ADD || operation == C_CONDITIONAL_SUBTRACT);
     IrValueId previous = IR_VALUE_ID_INVALID;
@@ -21368,7 +21394,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_function_type(CIntegerIrBuilder* build
                 valid = false;
                 break;
             }
-            parameter_types[parameter_count++] = parameter;
+            parameter_types[parameter_count++] = c_ir_parameter_value_type(builder->program, parameter);
         }
         parameter_start = parameter_end + 1;
     }
@@ -24647,9 +24673,11 @@ BUSTER_C_INTERNAL bool c_ir_lower_expression_core_consume_place(CIntegerIrBuilde
             u32 consumed = state->pending_end - 1;
             bool postfix = consumed + 1 < end && (c_token_is_punctuator(&builder->preprocess.tokens[consumed + 1], C_PUNCTUATOR_PLUS_PLUS) ||
                                                   c_token_is_punctuator(&builder->preprocess.tokens[consumed + 1], C_PUNCTUATOR_MINUS_MINUS));
-            value = place_type && (place_type->kind == IR_TYPE_ARRAY || (place_type->is_atomic && postfix))
-                        ? place
-                        : c_ir_emit_load_place(builder, place, type, source);
+            // Partial VLA subscripting already decays the row to a pointer
+            // value. Only an actual place needs an lvalue-to-rvalue load.
+            bool load_place = builder->function->values[place.value].category == IR_VALUE_PLACE &&
+                              !(place_type && (place_type->kind == IR_TYPE_ARRAY || (place_type->is_atomic && postfix)));
+            value = load_place ? c_ir_emit_load_place(builder, place, type, source) : place;
             if (value.value != IR_ID_UNDERLYING_INVALID && postfix)
             {
                 value = c_ir_emit_increment(builder, place, type, value, builder->preprocess.tokens[consumed + 1], false);
@@ -33862,7 +33890,11 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CI
             builder->failure_token_index = index;
             return false;
         }
-        IrBlockId block = c_ir_block_create(builder);
+        // Labels have function scope, including labels inside a GNU
+        // statement expression. Its nested body walk must reuse the block
+        // already published by the outer walk at this exact source token.
+        CIrLabel* existing_label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, token));
+        IrBlockId block = existing_label && existing_label->token_index == index ? existing_label->block : c_ir_block_create(builder);
         if (block.value == IR_ID_UNDERLYING_INVALID)
         {
             return false;
@@ -44407,7 +44439,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                         {
                             parameter_type = c_ir_add_pointer_type(program, &pointer_types, parameter_type);
                         }
-                        parameter_types[parameter_index] = parameter_type;
+                        parameter_types[parameter_index] = c_ir_parameter_value_type(program, parameter_type);
                     }
                     c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
                                                                                  .name = S8("C function"),
@@ -46259,8 +46291,17 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         for (u32 parameter_index = 0; parameter_index < signature.parameter_count; parameter_index += 1)
         {
             CParameter parameter = signature.parameters[parameter_index];
+            IrTypeId value_type = signature.parameter_types[parameter_index];
+            IrTypeId object_type = parameter.type.value < parse.type_count ? c_type_ir_map[parameter.type.value] : IR_TYPE_ID_INVALID;
+            // Arrays, function parameters and ABI-specific va_list shapes keep
+            // their adjusted type. Ordinary qualified objects retain the type
+            // of the definition, independently of the callable value type.
+            if (c_ir_parameter_value_type(program, object_type).value != value_type.value)
+            {
+                object_type = value_type;
+            }
             if (!c_ir_emit_parameter(&builder, c_ir_space_name_token(&builder, parameter.name), parameter_index,
-                                     signature.parameter_types[parameter_index], parameter.entity))
+                                     value_type, object_type, parameter.entity))
             {
                 parameters_lowered = false;
                 break;
