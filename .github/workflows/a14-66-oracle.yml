@@ -1,0 +1,76 @@
+name: A14 external compiler fixture oracle
+
+on:
+  push:
+    branches: [astra/a14-66-fixture-ci]
+    paths: [.github/workflows/a14-66-oracle.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a14-66-oracle-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  oracle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          persist-credentials: false
+      - name: Reproduce baseline and retain independent relocation evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/a14-66"
+          mkdir -p "$out"
+          git rev-parse HEAD | tee "$out/source-sha.txt"
+          clang --version | tee "$out/clang.txt"
+          gcc --version | tee "$out/gcc.txt"
+          if gcc -target x86_64-unknown-linux-gnu -nostdinc -fno-pic -g0 -c -o "$out/baseline.o" tests/basic_c_pic.c > "$out/baseline.txt" 2>&1; then
+            echo 'Expected the frozen GCC command to reject the Clang-only target option' >&2
+            exit 1
+          fi
+          grep -F -- '-target' "$out/baseline.txt"
+          cat > "$out/indexed.c" <<'EOF'
+          int buster_pic_global;
+          int buster_pic_values[2] = {11, 23};
+          int *buster_pic_address(void) { return &buster_pic_global; }
+          int buster_pic_read(void) { return buster_pic_global; }
+          int buster_pic_index(int index) { return buster_pic_values[index]; }
+          int main(void)
+          {
+              buster_pic_global = 7;
+              return buster_pic_address() != &buster_pic_global || buster_pic_read() != 7 ||
+                     buster_pic_index(0) != 11 || buster_pic_index(1) != 23;
+          }
+          EOF
+          for compiler in gcc clang; do
+            for model in no-pic pic; do
+              flags=(-fno-pic -fno-pie)
+              if test "$model" = pic; then flags=(-fPIC); fi
+              "$compiler" -nostdinc "${flags[@]}" -g0 -c tests/basic_c_pic.c -o "$out/old-$compiler-$model.o"
+              readelf -rW "$out/old-$compiler-$model.o" | tee "$out/old-$compiler-$model-relocations.txt"
+              "$compiler" -std=c11 -Wall -Wextra -Werror -nostdinc "${flags[@]}" -g0 -c "$out/indexed.c" -o "$out/indexed-$compiler-$model.o"
+              readelf -rW "$out/indexed-$compiler-$model.o" | tee "$out/indexed-$compiler-$model-relocations.txt"
+              objdump -dr "$out/indexed-$compiler-$model.o" > "$out/indexed-$compiler-$model-disassembly.txt"
+              if test "$model" = no-pic; then
+                grep -F R_X86_64_32S "$out/indexed-$compiler-$model-relocations.txt"
+              else
+                grep -E 'R_X86_64_(REX_)?GOTPCREL(X)?' "$out/indexed-$compiler-$model-relocations.txt"
+              fi
+              "$compiler" -no-pie "$out/indexed-$compiler-$model.o" -o "$out/indexed-$compiler-$model"
+              "$out/indexed-$compiler-$model"
+            done
+          done
+          echo 'Frozen baseline rejects -target; both independent compilers retain signed-absolute and GOT relocations and their indexed fixtures execute successfully.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: a14-66-oracle-${{ github.run_id }}
+          path: ${{ runner.temp }}/a14-66/
+          if-no-files-found: error
+          retention-days: 7
