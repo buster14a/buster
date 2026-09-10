@@ -1,0 +1,57 @@
+name: Z13 exact-source self-host gates
+on:
+  push:
+    branches: [astra/z13-125-transport]
+    paths: [.github/workflows/z13-self-host.yml]
+permissions:
+  contents: read
+concurrency:
+  group: z13-self-host-e99d1697
+  cancel-in-progress: false
+jobs:
+  bootstrap:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: e99d1697f2422c3c30f2c0ef6868e151e63d9b23
+          persist-credentials: false
+      - name: Bootstrap and verify exact production source
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/source.sha
+          test "$(git rev-parse HEAD)" = e99d1697f2422c3c30f2c0ef6868e151e63d9b23
+          test "$(git rev-parse HEAD^{tree})" = ff812bd83a70a530970eb4db13788f7303facd0e
+          clang --version | tee evidence/compiler.txt
+          uname -a > evidence/os.txt
+          lscpu > evidence/cpu.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" self_host_audit_self_test 2>&1 | tee evidence/checker.log
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee evidence/configure.log
+      - name: Ordinary self-host and alternate backends
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee evidence/self-host.log
+      - name: Strict generation and repeated fixed-point evidence
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host_audit --config Release 2>&1 | tee evidence/self-host-audit.log
+      - name: Full registered regressions
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all -- -j1 2>&1 | tee evidence/tests.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: z13-self-host-e99d1697-${{ github.run_id }}
+          path: |
+            evidence
+            build/self-host-audit
+          retention-days: 7
+          if-no-files-found: error
