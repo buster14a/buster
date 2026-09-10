@@ -72,6 +72,38 @@
   root is `src/`).
   `compile_commands.json` is exported to `build/` by default.
 
+## Configured external compiler fixtures
+
+The registered driver PIC fixture uses `BUSTER_HOST_C_COMPILER_ID`, supplied
+from CMake's configured compiler identity, rather than assuming that the host
+compiler accepts Clang flags. Clang/AppleClang use `-target`; native GCC does
+not. The executable path and optional `BUSTER_HOST_C_COMPILER_ARG1` remain
+separate arguments, including `zig` with `cc`. An unknown family fails the
+fixture with an explicit diagnostic instead of inheriting Clang's options.
+The argument-policy regression runs on every test host; real ELF fixture
+compilation, relocation inspection, linking and execution are native Linux
+x86-64 checks. They preserve signed absolute `R_X86_64_32S` and GOTPCREL
+coverage; the indexed fixture makes both GCC and Clang produce those forms.
+For x86-64 Linux, the native linker removes an undefined
+`_GLOBAL_OFFSET_TABLE_` marker only when no relocation or explicit entry request
+uses it. It copies the symbol/relocation view before remapping indices, preserving
+the input object. Real GOT-base references and ordinary unresolved imports keep
+their errors. The registered link tests cover these boundaries and byte-identical
+output relative to an object without the unused marker.
+
+For the user-level GCC workflow, with the selected build directory idle:
+
+```sh
+./build.sh generate --cc gcc --ci --linker DEFAULT
+BUSTER_TEST_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=1 ./build.sh build --config Debug -t test_all
+```
+
+Repeat with `--cc clang` on an idle tree. `generate` recreates the tree; do not
+run the two configurations concurrently in it. The ordinary combination
+matrix's GCC row is compile-only, so a green row alone does not certify this
+runtime workflow. Run the full registered suite explicitly; unrelated test
+failures remain failures and must not be hidden by this fixture repair.
+
 ## Native differential matrix
 
 `build.c` exposes `test_differential` (implementation: `tools/differential.c`).

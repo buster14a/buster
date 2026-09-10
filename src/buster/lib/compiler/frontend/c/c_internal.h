@@ -136,14 +136,19 @@ typedef struct CIrDecodedString CIrDecodedString;
 #define C_DECLARATION_KEYWORD_SLOT_COUNT 256
 
 /* Source/preprocessor tables consumed by the parser's keyword classifier. */
-BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[72];
+BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[73];
 BUSTER_C_EXTERN u8 c_declaration_keyword_slots[C_DECLARATION_KEYWORD_SLOT_COUNT];
 BUSTER_C_EXTERN bool c_declaration_keyword_slots_built;
 BUSTER_C_EXTERN void c_declaration_keyword_slots_build(void);
 BUSTER_C_EXTERN u64 c_macro_name_hash(String8 name);
 BUSTER_C_EXTERN bool c_preprocess_dialect_is_c23(CPreprocessDialect dialect);
 BUSTER_C_EXTERN bool c_preprocess_dialect_is_gnu(CPreprocessDialect dialect);
+// Integer spelling admission is shared with parsing and lowering. The reader
+// consumes the complete bounded spelling and leaves value unchanged on failure.
 BUSTER_C_EXTERN bool c_conditional_number(String8 spelling, u64* value);
+BUSTER_C_EXTERN u32 c_integer_msvc_suffix_width(String8 suffix);
+BUSTER_C_EXTERN u32 c_integer_msvc_literal_width(String8 spelling, bool* is_unsigned);
+BUSTER_C_EXTERN bool c_number_is_float(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_auto_type_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
 BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);

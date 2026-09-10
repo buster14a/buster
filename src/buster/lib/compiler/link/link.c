@@ -11,7 +11,9 @@
 // veneers, ELF .eh_frame table construction, PE export/import plumbing,
 // CodeView/PDB resolution (link_pe_resolved_codeview), SHA-256 for build
 // ids — but each owns its image layout whole, because the formats agree
-// on almost nothing.
+// on almost nothing. Before x86-64 Linux writer selection,
+// link_elf_without_unused_got_marker removes only unreferenced reserved markers
+// from a private symbol/relocation view; the input object is never changed.
 //
 // One rule crosses every writer that synthesizes an entry point: C 5.1.2.2.3
 // makes a return from `main` equivalent to calling `exit` with that value, so
@@ -10645,6 +10647,75 @@ String8 link_error_name(LinkError error)
     return error < LINK_ERROR_COUNT ? names[error] : S8("unknown error");
 }
 
+// GCC's x86-64 PIC objects carry this reserved undefined marker even when
+// their GOTPCREL relocations name only the actual data symbols. An unused
+// marker requests no GOT address. Remove it from a private symbol view before
+// selecting the writer; real references and explicit entry requests stay strict.
+BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_without_unused_got_marker(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
+{
+    LinkObjectResult result = {.object = *object};
+    String8 marker = S8("_GLOBAL_OFFSET_TABLE_");
+    bool has_marker = false;
+    for (u32 index = 0; !has_marker && index < object->symbol_count; index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + index;
+        has_marker = symbol->global && symbol->section == OBJECT_SECTION_UNDEFINED && string_equal(symbol->name, marker);
+    }
+    if (has_marker && !string_equal(options.entry_symbol, marker))
+    {
+        TemporalArena temporary = scratch_begin(&arena, 1);
+        u32* remap = arena_allocate(temporary.arena, u32, object->symbol_count);
+        for (u32 index = 0; index < object->symbol_count; index += 1)
+        {
+            ObjectSymbol* symbol = object->symbols + index;
+            bool unused_marker = symbol->global && symbol->section == OBJECT_SECTION_UNDEFINED && string_equal(symbol->name, marker);
+            remap[index] = unused_marker ? UINT32_MAX : 0;
+        }
+        for (u32 index = 0; result.error == LINK_ERROR_NONE && index < object->relocation_count; index += 1)
+        {
+            u32 symbol = object->relocations[index].symbol;
+            if (symbol >= object->symbol_count)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+            }
+            else
+            {
+                remap[symbol] = 0;
+            }
+        }
+        u32 retained = 0;
+        for (u32 index = 0; result.error == LINK_ERROR_NONE && index < object->symbol_count; index += 1)
+        {
+            if (remap[index] != UINT32_MAX)
+            {
+                remap[index] = retained++;
+            }
+        }
+        if (result.error == LINK_ERROR_NONE && retained != object->symbol_count)
+        {
+            result.object.symbols = arena_allocate(arena, ObjectSymbol, retained);
+            result.object.symbol_count = retained;
+            result.object.relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count);
+            for (u32 index = 0; index < object->symbol_count; index += 1)
+            {
+                if (remap[index] != UINT32_MAX)
+                {
+                    result.object.symbols[remap[index]] = object->symbols[index];
+                }
+            }
+            for (u32 index = 0; index < object->relocation_count; index += 1)
+            {
+                ObjectRelocation relocation = object->relocations[index];
+                relocation.symbol = remap[relocation.symbol];
+                result.object.relocations[index] = relocation;
+            }
+        }
+        scratch_end(temporary);
+    }
+
+    return result;
+}
+
 NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
@@ -10654,65 +10725,58 @@ NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* obje
         (options.framework_count && !options.frameworks) || (options.linker_argument_count && !options.linker_arguments))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
-        return result;
     }
-    if (object->target.os == OPERATING_SYSTEM_LINUX && object->target.cpu_arch == CPU_ARCH_X86_64)
+    else if (object->target.os == OPERATING_SYSTEM_LINUX &&
+             (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        if (options.dynamic_library_count)
+        LinkObjectResult normalized = {.object = *object};
+        if (object->target.cpu_arch == CPU_ARCH_X86_64)
         {
-            return link_native_executable_elf64_x86_64_dynamic(arena, object, options);
+            normalized = link_elf_without_unused_got_marker(arena, object, options);
         }
-        if (object->section_count > OBJECT_SECTION_THREAD_LOCAL_DATA && object->sections &&
-            (object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length || object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size))
+        result.error = normalized.error;
+        if (result.error == LINK_ERROR_NONE)
         {
-            return link_native_executable_elf64_x86_64_dynamic(arena, object, options);
-        }
-        for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
-        {
-            if (link_elf_symbol_needs_dynamic_import(options, &object->symbols[symbol_index]))
+            object = &normalized.object;
+            bool dynamic_image = options.dynamic_library_count || object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
+                                 object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
+            for (u32 index = 0; !dynamic_image && index < object->symbol_count; index += 1)
             {
-                return link_native_executable_elf64_x86_64_dynamic(arena, object, options);
+                dynamic_image = link_elf_symbol_needs_dynamic_import(options, object->symbols + index);
+            }
+            if (object->target.cpu_arch == CPU_ARCH_X86_64)
+            {
+                result = dynamic_image ? link_native_executable_elf64_x86_64_dynamic(arena, object, options)
+                                       : link_native_executable_elf64_x86_64(arena, object, options);
+            }
+            else
+            {
+                result = dynamic_image ? link_native_executable_elf64_aarch64_dynamic(arena, object, options)
+                                       : link_native_executable_elf64_aarch64(arena, object, options);
             }
         }
-        return link_native_executable_elf64_x86_64(arena, object, options);
     }
-    if (object->target.os == OPERATING_SYSTEM_WINDOWS && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
+    else if (object->target.os == OPERATING_SYSTEM_WINDOWS && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        return link_native_executable_pe64(arena, object, options);
+        result = link_native_executable_pe64(arena, object, options);
     }
-    if (object->target.os == OPERATING_SYSTEM_UEFI && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
+    else if (object->target.os == OPERATING_SYSTEM_UEFI && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        return link_native_executable_uefi_pe64(arena, object, options);
+        result = link_native_executable_uefi_pe64(arena, object, options);
     }
-    if ((object->target.os == OPERATING_SYSTEM_MACOS || object->target.os == OPERATING_SYSTEM_IOS) &&
-        (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
+    else if ((object->target.os == OPERATING_SYSTEM_MACOS || object->target.os == OPERATING_SYSTEM_IOS) &&
+             (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        return link_native_executable_mach_o64(arena, object, options);
+        result = link_native_executable_mach_o64(arena, object, options);
     }
-    if (object->target.os == OPERATING_SYSTEM_ANDROID && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
+    else if (object->target.os == OPERATING_SYSTEM_ANDROID && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        return link_native_executable_android_elf64(arena, object, options);
+        result = link_native_executable_android_elf64(arena, object, options);
     }
-    if (object->target.os == OPERATING_SYSTEM_LINUX && object->target.cpu_arch == CPU_ARCH_AARCH64)
+    else
     {
-        if (options.dynamic_library_count)
-        {
-            return link_native_executable_elf64_aarch64_dynamic(arena, object, options);
-        }
-        if (object->section_count > OBJECT_SECTION_THREAD_LOCAL_DATA && object->sections &&
-            (object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length || object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size))
-        {
-            return link_native_executable_elf64_aarch64_dynamic(arena, object, options);
-        }
-        for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
-        {
-            if (link_elf_symbol_needs_dynamic_import(options, &object->symbols[symbol_index]))
-            {
-                return link_native_executable_elf64_aarch64_dynamic(arena, object, options);
-            }
-        }
-        return link_native_executable_elf64_aarch64(arena, object, options);
+        result.error = LINK_ERROR_UNSUPPORTED_HOST;
     }
-    result.error = LINK_ERROR_UNSUPPORTED_HOST;
+
     return result;
 }

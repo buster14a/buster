@@ -2913,20 +2913,19 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_is_complex_x87(IrProgram* program, IrTy
 // and GCC compile; the class is always INTEGER because C admits no bit-field
 // of floating type.
 //
-// An *unnamed* bit-field is padding and contributes no class at all, which the
-// reference compilers agree on and which is observable: clang returns
-// `struct { float f; int : 20; }` in `xmm0` and `struct { float f; int x : 20; }`
-// in `rax`, because only the named field merges INTEGER into the eightbyte the
-// float already claimed.
+// The context selects the versioned unnamed-field policy (#391). Historical
+// Buster/Clang treat it as padding; GCC merges INTEGER for nonzero widths.
+// In `struct { float f; int : 20; }` this changes XMM0 to RAX on return.
+// Zero-width fields contribute no class under either policy.
 //
 // `offset` is the byte offset of the aggregate holding the field, so the bits
 // are `(offset + field->offset) * 8 + field->bit_offset`; the storage-unit
 // slide that packing performs moves those two halves against each other and
 // leaves that sum alone.
-BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classify_bit_field(IrField const* field, u64 offset, IrAbiClass classes[2])
+BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classify_bit_field(IrField const* field, u64 offset, IrAbiClass classes[2], bool unnamed_integer)
 {
     bool result = true;
-    if (field->name.length && field->bit_width)
+    if ((field->name.length || unnamed_integer) && field->bit_width)
     {
         u64 start = (offset + field->offset) * 8 + field->bit_offset;
         u64 first = start / 64;
@@ -2974,7 +2973,7 @@ BUSTER_GLOBAL_LOCAL bool ir_abi_tasks_reserve(TemporalArena* temporary, IrAbiCla
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId root_type, IrAbiClass classes[2])
+BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId root_type, IrAbiClass classes[2], bool unnamed_integer)
 {
     IrType* root = ir_type_from_id(&program->types, root_type);
     bool result;
@@ -3021,7 +3020,7 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
                     IrField* field = type->fields + index;
                     if (field->is_bit_field)
                     {
-                        valid = ir_system_v_abi_classify_bit_field(field, task.offset, classes);
+                        valid = ir_system_v_abi_classify_bit_field(field, task.offset, classes, unnamed_integer);
                         if (!valid)
                         {
                             break;
@@ -3308,7 +3307,7 @@ BUSTER_GLOBAL_LOCAL bool ir_homogeneous_float_abi(IrProgram* program, IrTypeId r
 }
 
 BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, bool is_result,
-                                                      bool variadic_argument)
+                                                      bool variadic_argument, bool unnamed_integer)
 {
     IrAbiValue value = {0};
     IrType* type = ir_type_from_id(&program->types, type_id);
@@ -3644,7 +3643,7 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                 return value;
             }
             IrAbiClass classes[2] = {0};
-            if (!ir_system_v_abi_classes(program, type_id, classes))
+            if (!ir_system_v_abi_classes(program, type_id, classes, unnamed_integer))
             {
                 value.part_count = 1;
                 value.indirect = is_result;
@@ -3791,7 +3790,7 @@ IrAbiValue ir_abi_context_value(IrProgram* program, IrAbiContext* context, IrTyp
         if (!(page->resolved & mask) && program->types.types[type_id.value].layout.resolved)
         {
             page->values[slot] = ir_classify_abi_value(program, type_id, context->convention, use == IR_ABI_USE_RESULT,
-                                                      use == IR_ABI_USE_VARIADIC_ARGUMENT);
+                                                      use == IR_ABI_USE_VARIADIC_ARGUMENT, context->sysv_unnamed_bitfields_integer);
             page->resolved |= mask;
             context->classified_values += 1;
         }
@@ -3887,7 +3886,8 @@ IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConventi
 IrAbiValue ir_test_abi_reference(IrProgram* program, IrTypeId type, IrAbiConvention convention, IrAbiUse use)
 {
     return ir_classify_abi_value(program, type, convention, use == IR_ABI_USE_RESULT,
-                                 convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && use == IR_ABI_USE_VARIADIC_ARGUMENT);
+                                 convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && use == IR_ABI_USE_VARIADIC_ARGUMENT,
+                                 program && convention < IR_ABI_CONVENTION_COUNT && program->abi_contexts[convention].sysv_unnamed_bitfields_integer);
 }
 #endif
 

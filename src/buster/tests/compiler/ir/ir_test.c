@@ -462,6 +462,60 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         }
     }
 
+    // Independent ABI contexts share immutable types but not unnamed-field
+    // policy or cached classifications. Cover both eightbytes and ABI uses.
+    {
+        IrProgram bitfields = ir_program_initialize(arguments->arena, 0, 8, 0, 0);
+        IrTypeId scalar = ir_program_add_type(&bitfields, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 32,
+            .layout = {.size = 4, .alignment = 4, .resolved = true}});
+        IrTypeId integer_type = ir_program_add_type(&bitfields, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 32,
+            .layout = {.size = 4, .alignment = 4, .resolved = true}});
+        IrField fields[3][2] = {0};
+        IrTypeId records[3];
+        for (u32 shape = 0; shape < 3; shape += 1)
+        {
+            fields[shape][0] = (IrField){.name = S8("lead"), .type = scalar};
+            fields[shape][1] = (IrField){.name = shape == 2 ? S8("named") : (String8){0}, .type = integer_type,
+                .offset = 4, .is_bit_field = true, .bit_width = shape == 1 ? 0 : 20};
+            records[shape] = ir_program_add_type(&bitfields, (IrType){.kind = IR_TYPE_STRUCT, .fields = fields[shape], .field_count = 2,
+                .layout = {.size = 8, .alignment = 4, .resolved = true}});
+        }
+        IrTypeId array = ir_program_add_type(&bitfields, (IrType){.kind = IR_TYPE_ARRAY, .element_type = records[0], .element_count = 2,
+            .layout = {.size = 16, .alignment = 4, .resolved = true}});
+        IrField nested_field = {.name = S8("nested"), .type = records[0]};
+        IrTypeId nested = ir_program_add_type(&bitfields, (IrType){.kind = IR_TYPE_STRUCT, .fields = &nested_field, .field_count = 1,
+            .layout = {.size = 8, .alignment = 4, .resolved = true}});
+        IrType original_types[8];
+        memcpy(original_types, bitfields.types.types, bitfields.types.count * sizeof(*original_types));
+        IrAbiContext padding = ir_abi_context_initialize(arguments->arena, &bitfields.types, IR_ABI_CONVENTION_SYSTEMV_X86_64);
+        IrAbiContext integer = ir_abi_context_initialize(arguments->arena, &bitfields.types, IR_ABI_CONVENTION_SYSTEMV_X86_64);
+        integer.sysv_unnamed_bitfields_integer = true;
+        for (u32 use = 0; use < IR_ABI_USE_COUNT; use += 1)
+        {
+            for (u32 shape = 0; shape < 3; shape += 1)
+            {
+                IrAbiValue old_value = ir_abi_context_value(&bitfields, &padding, records[shape], (IrAbiUse)use);
+                IrAbiValue new_value = ir_abi_context_value(&bitfields, &integer, records[shape], (IrAbiUse)use);
+                BUSTER_TEST(arguments, old_value.part_count == 1 && old_value.parts[0].abi_class ==
+                                      (shape == 2 ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_FLOAT));
+                BUSTER_TEST(arguments, new_value.part_count == 1 && new_value.parts[0].abi_class ==
+                                      (shape == 1 ? IR_ABI_CLASS_FLOAT : IR_ABI_CLASS_INTEGER));
+            }
+            IrAbiValue old_array = ir_abi_context_value(&bitfields, &padding, array, (IrAbiUse)use);
+            IrAbiValue new_array = ir_abi_context_value(&bitfields, &integer, array, (IrAbiUse)use);
+            BUSTER_TEST(arguments, old_array.part_count == 2 && old_array.parts[0].abi_class == IR_ABI_CLASS_FLOAT &&
+                                  old_array.parts[1].abi_class == IR_ABI_CLASS_FLOAT);
+            BUSTER_TEST(arguments, new_array.part_count == 2 && new_array.parts[0].abi_class == IR_ABI_CLASS_INTEGER &&
+                                  new_array.parts[1].abi_class == IR_ABI_CLASS_INTEGER);
+            BUSTER_TEST(arguments, ir_abi_context_value(&bitfields, &padding, nested, (IrAbiUse)use).parts[0].abi_class == IR_ABI_CLASS_FLOAT);
+            BUSTER_TEST(arguments, ir_abi_context_value(&bitfields, &integer, nested, (IrAbiUse)use).parts[0].abi_class == IR_ABI_CLASS_INTEGER);
+        }
+        integer.sysv_unnamed_bitfields_integer = false;
+        ir_abi_context_invalidate(&integer);
+        BUSTER_TEST(arguments, ir_abi_context_value(&bitfields, &integer, records[0], IR_ABI_USE_RESULT).parts[0].abi_class == IR_ABI_CLASS_FLOAT);
+        BUSTER_TEST(arguments, memcmp(original_types, bitfields.types.types, bitfields.types.count * sizeof(*original_types)) == 0);
+    }
+
     IrProgram abi_program = ir_program_initialize(arguments->arena, 0, 32, 0, 0);
     IrTypeId abi_f32 = ir_program_add_type(&abi_program, (IrType){
         .kind = IR_TYPE_FLOAT,

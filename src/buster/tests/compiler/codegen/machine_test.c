@@ -3915,7 +3915,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                   "MachineWideUnsigned u128_shr127(MachineWideUnsigned v) { return v >> 127; }\n");
     String8 machine_c_source_variadic = S8(
                                   "#if defined(__x86_64__)\n"
-                                  "typedef void *va_list;\n"
+                                  "typedef __builtin_va_list va_list;\n"
                                   "long variadic_observe(int first, ...) { va_list arguments; long total = first; __builtin_va_start(arguments, first);\n"
                                   "    total += __builtin_va_arg(arguments, int); total += __builtin_va_arg(arguments, int);\n"
                                   "    total += __builtin_va_arg(arguments, int); total += __builtin_va_arg(arguments, int);\n"
@@ -3945,7 +3945,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // exercise both the register path and the overflow tail of the
     // canonical four-word va_list model the machine subset mirrors.
     String8 machine_c_source_a64_variadic = S8(
-                                  "typedef void *va_list;\n"
+                                  "typedef __builtin_va_list va_list;\n"
                                   "long vsum(int count, ...) { va_list arguments; long total = 0; __builtin_va_start(arguments, count);\n"
                                   "    for (int index = 0; index < count; index += 1) { total += __builtin_va_arg(arguments, long); }\n"
                                   "    __builtin_va_end(arguments); return total; }\n"
