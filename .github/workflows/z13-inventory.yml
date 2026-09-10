@@ -1,0 +1,94 @@
+name: Z13 pinned source and overlap inventory
+on:
+  push:
+    branches: [astra/z13-125-transport]
+    paths: [.github/workflows/z13-inventory.yml]
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+concurrency:
+  group: z13-inventory-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          persist-credentials: false
+      - name: Export immutable source and paginated repository evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/z13"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/z13/source.tar.gz" HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/z13/source.sha"
+          python3 - <<'PY'
+          import json, os, pathlib, urllib.parse, urllib.request
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'z13'
+          api = 'https://api.github.com/repos/buster14a/buster/'
+          def get(url):
+              req = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'User-Agent': 'Buster-Z13-inventory'})
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  return json.load(response)
+          def pages(path):
+              rows = []
+              for page in range(1, 101):
+                  sep = '&' if '?' in path else '?'
+                  batch = get(api + path + sep + 'per_page=100&page=' + str(page))
+                  rows.extend(batch)
+                  if len(batch) < 100:
+                      return rows
+              raise RuntimeError('Pagination limit reached: ' + path)
+          issues = pages('issues?state=open&sort=created&direction=asc')
+          pulls = pages('pulls?state=open')
+          (out / 'open-issues.json').write_text(json.dumps(issues, indent=2))
+          (out / 'open-pulls.json').write_text(json.dumps(pulls, indent=2))
+          summary = ['OPEN ISSUES / PRs (all pages)']
+          summary += [str(x['number']) + ' ' + ('PR ' if 'pull_request' in x else 'issue ') + x['title'] for x in issues]
+          for pr in pulls:
+              n = pr['number']
+              for sub in ['files', 'reviews', 'comments']:
+                  rows = pages('pulls/' + str(n) + '/' + sub)
+                  (out / ('pr-' + str(n) + '-' + sub + '.json')).write_text(json.dumps(rows, indent=2))
+              rows = pages('issues/' + str(n) + '/comments')
+              (out / ('pr-' + str(n) + '-conversation.json')).write_text(json.dumps(rows, indent=2))
+          seen = set()
+          for term in ['QUALITY', 'foreclosure', 'candidate_region_traffic', 'machine_quality', 'scratch allocator']:
+              query = 'repo:buster14a/buster is:closed ' + term
+              found = []
+              for page in range(1, 11):
+                  url = 'https://api.github.com/search/issues?' + urllib.parse.urlencode({'q': query, 'per_page': 100, 'page': page})
+                  data = get(url)
+                  if data.get('incomplete_results'):
+                      raise RuntimeError('Incomplete search: ' + query)
+                  found.extend(data['items'])
+                  if len(found) >= data['total_count']:
+                      break
+              else:
+                  raise RuntimeError('Search pagination limit: ' + query)
+              for x in found:
+                  if x['number'] not in seen:
+                      seen.add(x['number'])
+                      summary.append('CLOSED ' + str(x['number']) + ' ' + x['title'])
+                      (out / ('closed-' + str(x['number']) + '.json')).write_text(json.dumps(x, indent=2))
+          commits = pages('commits?path=src/buster/lib/compiler/codegen/register_allocator_quality.c&sha=ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae')
+          (out / 'quality-commits.json').write_text(json.dumps(commits, indent=2))
+          summary += ['COMMIT ' + x['sha'] + ' ' + x['commit']['message'].splitlines()[0] for x in commits]
+          (out / 'summary.txt').write_text('\n'.join(summary) + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+              stream.write('Pinned source and read-only evidence exported. No compilation, test or performance verdict.\n')
+              stream.write(str(len(issues)) + ' open issue/PR rows; ' + str(len(pulls)) + ' open PRs; ' + str(len(seen)) + ' relevant closed search hits.\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: z13-inventory-${{ github.run_id }}
+          path: ${{ runner.temp }}/z13
+          retention-days: 3
+          if-no-files-found: error
