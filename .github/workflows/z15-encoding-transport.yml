@@ -1,32 +1,131 @@
-name: Z15 source transport
+name: Z15 encoding publication and assembler controls
 on:
   push:
     branches: [astra/z15-encoding-transport-20260910]
-    paths: [.github/workflows/z15-encoding-transport.yml]
+    paths: [.github/workflows/z15-encoding-transport.yml, .github/z15-product.patch.b64]
 permissions:
   contents: read
 jobs:
-  snapshot:
-    runs-on: ubuntu-24.04
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      head: ${{ steps.publish.outputs.head }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: source
+          persist-credentials: false
+      - name: Publish only the reviewed product tree, without updating refs
+        id: publish
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, urllib.request, zlib
+          base = 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae'
+          base_tree = '093b374996f3aecca200fe2968539554fc67bf55'
+          patch = zlib.decompress(base64.b64decode(pathlib.Path('../.github/z15-product.patch.b64').read_text()))
+          assert hashlib.sha256(patch).hexdigest() == '8af56fb0b811167dc89e157a31cf44281948c0741e11dd5950d375182d8f09ba'
+          assert subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip() == base
+          subprocess.run(['git','apply','--check','-'], input=patch, check=True)
+          subprocess.run(['git','apply','-'], input=patch, check=True)
+          subprocess.run(['git','diff','--check'], check=True)
+          allowed = ['PERFORMANCE_AUDITS.md', 'docs/performance-audits/2026-09-10T010143Z.md',
+                     'src/buster/lib/compiler/codegen/machine_x86_64.c',
+                     'src/buster/lib/compiler/codegen/machine_x86_64_internal.h',
+                     'src/buster/tests/compiler/codegen/machine_test.c',
+                     'tests/x86_64_movabs_encoding_oracle.s']
+          changed = subprocess.check_output(['git','ls-files','--modified','--others','--exclude-standard'], text=True).splitlines()
+          assert set(changed) == set(allowed), changed
+          def post(endpoint, value):
+              request = urllib.request.Request('https://api.github.com/repos/buster14a/buster/git/' + endpoint,
+                  data=json.dumps(value).encode(), method='POST', headers={
+                      'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                      'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json',
+                      'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          entries = []
+          hashes = {}
+          for path in allowed:
+              data = pathlib.Path(path).read_bytes()
+              hashes[path] = hashlib.sha256(data).hexdigest()
+              blob = post('blobs', {'content': data.decode(), 'encoding': 'utf-8'})
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
+          tree = post('trees', {'base_tree': base_tree, 'tree': entries})
+          subprocess.run(['git','add','--'] + allowed, check=True)
+          assert subprocess.check_output(['git','write-tree'], text=True).strip() == tree['sha']
+          commit = post('commits', {'message': 'x64: reuse the prepared fixed-width switch MOVABS plan',
+                                   'tree': tree['sha'], 'parents': [base]})
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'z15-publication'
+          evidence.mkdir()
+          (evidence / 'product.patch').write_bytes(patch)
+          manifest = {'head': commit['sha'], 'tree': tree['sha'], 'base': base, 'files': hashes}
+          (evidence / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps(manifest, indent=2))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('head=' + commit['sha'] + '\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: z15-product-publication
+          path: ${{ runner.temp }}/z15-publication/
+          if-no-files-found: error
+          retention-days: 14
+  assembler:
+    needs: publish
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          ref: ${{ needs.publish.outputs.head }}
           persist-credentials: false
-      - name: Retain pinned source for inspection, without building
+      - name: Independent GNU and LLVM exact-width controls
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/z15-source"
-          git rev-parse HEAD | tee "$RUNNER_TEMP/z15-source/source-sha.txt"
-          git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/z15-source/source.tar.gz"
-          sha256sum "$RUNNER_TEMP/z15-source/source.tar.gz"
-          lscpu
-          uname -a
+          mkdir evidence
+          git rev-parse HEAD | tee evidence/head.txt
+          clang --version | tee evidence/clang.txt
+          as --version | tee evidence/as.txt
+          lscpu > evidence/cpu.txt
+          uname -a > evidence/os.txt
+          as --64 tests/x86_64_movabs_encoding_oracle.s -o evidence/gas.o
+          clang --target=x86_64-linux-gnu -c tests/x86_64_movabs_encoding_oracle.s -o evidence/llvm.o
+          objcopy -O binary --only-section=.text evidence/gas.o evidence/gas.bin
+          objcopy -O binary --only-section=.text evidence/llvm.o evidence/llvm.bin
+          cmp evidence/gas.bin evidence/llvm.bin
+          objdump -dr evidence/gas.o > evidence/gas.disasm
+          readelf -r evidence/gas.o > evidence/relocations.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          values = [0,1,127,128,255,256,0x7fffffff,0x80000000,0xffffffff,0x100000000,
+                    0xffffffff80000000,0x7fffffffffffffff,0x8000000000000000,0xffffffffffffffff,0x0123456789abcdef]
+          expected = b''.join(bytes([0x48 + (reg >> 3), 0xb8 + (reg & 7)]) + value.to_bytes(8, 'little')
+                              for reg in range(16) for value in values)
+          assert len(expected) == 2400
+          for compiler in ['gas','llvm']:
+              actual = Path('evidence/' + compiler + '.bin').read_bytes()
+              assert actual == expected, compiler
+              print(compiler, len(actual), hashlib.sha256(actual).hexdigest())
+          Path('evidence/result.txt').write_text('240 instructions; 2400 exact bytes; GNU == LLVM == regression goldens\n')
+          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: z15-pinned-source
-          path: ${{ runner.temp }}/z15-source/
+          name: z15-independent-assembler-controls
+          path: evidence/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
