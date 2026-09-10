@@ -1,0 +1,156 @@
+name: Z02 audit record
+on:
+  push:
+    branches: [astra/z02-ci-stage-ef99ec72]
+    paths: [.github/workflows/z02-audit.yml]
+permissions:
+  contents: write
+jobs:
+  record:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 1ba5031a7ec04264ebf6be5db2072ddc2a93a457
+          persist-credentials: false
+      - name: Mint and archive an evidence-only audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/new_audit.py --platform 'Linux x86_64, hosted EPYC 7763 VM, Clang 21.1.8' 'Z02: exact process diagnostics without changing the throughput guard'
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess, urllib.request
+          from pathlib import Path
+          root = 'https://api.github.com/repos/buster14a/buster/'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}
+          new = subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard'], text=True).splitlines()
+          assert len(new) == 1 and new[0].startswith('docs/performance-audits/') and new[0].endswith('.md')
+          audit = Path(new[0])
+          with audit.open('a') as out:
+              out.write('''
+          ## Scope and baseline
+
+          Verified measurement feature gap, not a compiler optimization or a
+          demonstrated speedup. Addresses #345 under #46 and #128; #346's optional
+          macro/aggregate workloads and #116's assembly-output selection remain
+          separate. Frozen main: `ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae`.
+          Implementation: `1ba5031a7ec04264ebf6be5db2072ddc2a93a457`.
+
+          `tp_process` already obtains Linux child `wait4` usage, but discarded
+          page faults and context switches. Retain minor/major faults and
+          voluntary/involuntary switches after the existing wall timer stops.
+          No new syscall, instrumentation, callback or sampling loop enters a
+          timing trial. Raw uint64 fields and availability bits distinguish
+          observed zero from unavailable; macOS/Windows remain unavailable.
+          CSV/replay and JSON summaries retain timing and independent probe
+          observations. Missing optional OS fields do not invalidate complete
+          requested allocation probes; missing allocation metrics still fail.
+
+          Result schema 2 explicitly rejects old result bundles. Independent
+          input schema 1 keeps all generated source bytes unchanged. The six
+          workloads, four modes, two rounds, adjacent pairs, minimum 20 pairs,
+          warmups, exact sign tests, 1% Bonferroni family, 15%/2 ms wall margin,
+          20%/16 MiB RSS margin and inconclusive policy are unchanged. Diagnostic
+          counts are not additional gates or grounds for discarding samples.
+          No compiler source, canonical/machine rows, persistent lanes or SIMD
+          implementation changes. The measured native record sizes are 208 bytes
+          (`TpProcess`) and 328 bytes (`TpRow`); the fixed additions are bounded
+          harness storage, not compiler memory growth.
+
+          ## CI evidence and its limits
+
+          Source validation job:
+          https://github.com/buster14a/buster/actions/runs/34424783956/job/102707579835
+
+          Baseline: 30 core and 92 integration assertions, zero failures.
+          Candidate: 30 core and 195 integration assertions, zero failures.
+          Candidate ASan/UBSan: the same 30 + 195 assertions, zero failures.
+          Six generated input files compared byte-for-byte identical, including
+          the existing pinned backend-pressure SHA-256
+          `e1148b330b3d11a02937cbb0c474e203dd7a988608595f300d36b3965a5be9ee`.
+
+          Exact native compiler command (baseline and candidate):
+
+          ```sh
+          clang -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic -fwrapv -fno-strict-aliasing -funsigned-char tools/throughput/tests.c -lm -o "$RUNNER_TEMP/z02/candidate-tests"
+          "$RUNNER_TEMP/z02/candidate-tests" "$RUNNER_TEMP/z02/candidate"
+          # Sanitized run adds -fsanitize=address,undefined -fno-sanitize-recover=all,
+          # using separate sanitized-tests/sanitized paths, with:
+          # ASAN_OPTIONS=halt_on_error=1:detect_leaks=1
+          # UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+          ```
+
+          Tests cover exact UINT64_MAX/zero/NA replay, malformed/negative/
+          fractional/overflowed counts, explicit legacy rejection, partial-probe
+          availability, and unchanged guard decisions when synthetic diagnostic
+          counts increase by twelve orders of magnitude. The allocation/sleep
+          child's native wait result (24673 minor, 0 major, 2 voluntary, 0
+          involuntary) exactly matched an independent `getrusage(RUSAGE_CHILDREN)`
+          before/after delta with no other child between. Sanitized child counts
+          were 32294/0/8/1. These are test observations, not Buster performance
+          samples, and are not compared as a speedup.
+
+          The overall preparation workflow FAILED after those successful checks
+          because its Git-tree publication request returned HTTP 403. Its source
+          and evidence artifact was uploaded successfully. The linked connection
+          then created the exact tested implementation; all five source SHA-256
+          hashes were independently matched to the CI manifest. No repository
+          settings or existing contributor branch were changed.
+
+          Artifact:
+          https://github.com/buster14a/buster/actions/runs/34424783956/artifacts/10132223830
+          ZIP SHA-256:
+          `263e84174913f68f8b6632bc6faca316299982c800fe426153277f1984c43468`.
+          It contains raw synthetic bundles, source hashes, six input hashes,
+          normal/sanitized logs and host facts. Final-head ordinary PR and
+          self-host checks remain separate requirements; this record does not
+          attribute an earlier revision's green result to the submitted head.
+
+          ## Hardware and acceptance still unavailable
+
+          Actual host: Ubuntu 26.04.1, Linux 7.0.0-1012-azure, Clang 21.1.8,
+          Microsoft-hypervisor guest reporting AMD EPYC 7763, four virtual CPUs,
+          two threads per exposed core, SMT active, perf_event_paranoid=4, no
+          AVX-512 flag. Native unit children inherited affinity. No physical
+          core isolation, Zen 5/Zen 4 access, instruction-specific throughput,
+          emitted-ISA assessment or end-to-end paired compiler improvement was
+          established. PMU availability is not inferred from a hosted label or
+          a policy sysctl; unavailable observations remain unavailable.
+
+          Current `bench_throughput_ci_add` builds both Clang Release compilers
+          sequentially with identical options, tests/unity/allocation observer
+          disabled and -j2, then shares candidate-generated files and flags for
+          the all-mode paired run. Compiler binary hashes and exact commands are
+          retained; revision labels alone are not source-provenance proof.
+          Default tiny/many/large/symbol/control-flow/backend cases exist; frozen
+          self-host stages are optional and separate. Dedicated preprocessing
+          and debug-output default cases remain gaps, not manufactured coverage.
+          Representation-only changes must request cross-variant output identity;
+          per-variant determinism alone is not cross-variant correctness.
+
+          Initial connector enumeration reached terminal open collection pages
+          but large displays were truncated; historical searches were bounded.
+          Reused a frozen existing source snapshot to inspect current build.c.
+          The CI pre-edit snapshot enumerated all 17 open PRs and every changed
+          file page through #378, with no overlap at that moment. Read Z16/#116's
+          complementary scope comment; publication requires a further recheck.
+          Forgejo #601 maps to current GitHub #46; current numbers are unchanged.
+          The recovered #338 harness and #349 observer remain the authorities;
+          prior rejected SIMD experiments are not revived.
+          ''')
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          entries = []
+          for path in ['PERFORMANCE_AUDITS.md', str(audit)]:
+              data = Path(path).read_bytes()
+              payload = json.dumps({'content': base64.b64encode(data).decode(), 'encoding': 'base64'}).encode()
+              req = urllib.request.Request(root + 'git/blobs', headers=headers, data=payload, method='POST')
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  sha = json.load(response)['sha']
+              assert sha == hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': sha})
+          print('AUDIT_BLOBS', json.dumps(entries))
+          # No trees, commits or refs are changed by this evidence-only job.
+          PY
