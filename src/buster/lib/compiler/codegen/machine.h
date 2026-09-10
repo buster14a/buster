@@ -477,6 +477,7 @@ typedef enum MachineOpcode
     MACHINE_A64_EOR64,
     MACHINE_A64_MUL32,
     MACHINE_A64_MUL64,
+    MACHINE_A64_UMULH64, // def, use, use; high half of unsigned 64 x 64
     MACHINE_A64_SDIV32,
     MACHINE_A64_SDIV64,
     MACHINE_A64_UDIV32,
@@ -1252,7 +1253,10 @@ struct MachineFunction
     // that introduce volatile accesses must clear it; scheduling and CFG/SSA
     // rewrites only copy/reorder rows and preserve the proof.
     bool nonvolatile_memory_certified;
-    u8 reserved[7];
+    // PE AArch64 uses a compact frame-chain/save area above the ordinary
+    // placement slots. Keep the platform fact through allocation/scheduling.
+    bool windows_aarch64_frame;
+    u8 reserved[6];
 };
 
 // AArch64 physical general registers in encoding order; 31 encodes SP or

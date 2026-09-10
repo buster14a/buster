@@ -1459,7 +1459,9 @@ BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_arm64_xdata(ObjectFile* objec
         {
             u8 operation = codes[cursor];
             u32 operation_bytes = 0;
-            if (operation <= 0x1f || operation == 0x81 || operation == 0xe1 || operation == 0xe3 || operation == 0xe4)
+            // SAVE_FPLR_X carries a six-bit allocation immediate. MIR's
+            // compact save prefix is larger than the canonical 16 bytes.
+            if (operation <= 0x1f || (operation & 0xc0) == 0x80 || operation == 0xe1 || operation == 0xe3 || operation == 0xe4)
             {
                 operation_bytes = 1;
             }
@@ -1587,6 +1589,43 @@ BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_xdata(ObjectFile* object, boo
         }
     }
     return record_count != 0 && *has_frame_register && *has_large_allocation;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_windows_arm64_xdata_frame_prefix(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // One packed-epilogue record: ALLOC_M 4112, SET_FP, SAVE_REG X28 at
+    // SP+16, SAVE_FPLR_X, END, padding. The record is independent of the
+    // object writer, so changing a producer cannot change the expected bytes.
+    u8 record[] = {0x10, 0, 0x20, 0x10, 0xc1, 1, 0xe1, 0xd2, 0x42, 0x83, 0xe4, 0};
+    ObjectRelocation relocation = {.section = OBJECT_SECTION_WINDOWS_PDATA, .offset = 4};
+    ObjectFile object = link_test_object_make(arguments->arena, (Target){.cpu_arch = CPU_ARCH_AARCH64}, (ByteSlice){0},
+                                              0, 0, &relocation, 1);
+    ObjectSection* xdata = object.sections + OBJECT_SECTION_WINDOWS_XDATA;
+    xdata->data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(record);
+    bool has_frame_register = false;
+    bool has_large_allocation = false;
+    for (u32 prefix = 0x80; prefix <= 0xbf; prefix += 1)
+    {
+        record[9] = (u8)prefix;
+        BUSTER_TEST(arguments, link_test_runtime_windows_xdata(&object, &has_frame_register, &has_large_allocation));
+    }
+    // A save-prefix immediate must not satisfy the large-allocation gate.
+    record[4] = 0xc0;
+    BUSTER_TEST(arguments, !link_test_runtime_windows_xdata(&object, &has_frame_register, &has_large_allocation));
+    BUSTER_TEST(arguments, has_frame_register && !has_large_allocation);
+    record[4] = 0xc1;
+    record[9] = 0xe7; // Reserved operation remains invalid.
+    BUSTER_TEST(arguments, !link_test_runtime_windows_xdata(&object, &has_frame_register, &has_large_allocation));
+    record[9] = 0x83;
+    xdata->data.length -= 1;
+    BUSTER_TEST(arguments, !link_test_runtime_windows_xdata(&object, &has_frame_register, &has_large_allocation));
+    xdata->data.length = sizeof(record);
+    record[11] = 0xd2; // A two-byte save is truncated at the code-array end.
+    BUSTER_TEST(arguments, !link_test_runtime_windows_xdata(&object, &has_frame_register, &has_large_allocation));
+    record[11] = 0xe0; // A four-byte allocation is also truncated there.
+    BUSTER_TEST(arguments, !link_test_runtime_windows_xdata(&object, &has_frame_register, &has_large_allocation));
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_windows_xdata_save_slots(UnitTestArguments* arguments)
@@ -1890,8 +1929,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk(UnitTestArgument
 #if BUSTER_WINDOWS
     String8 output_suffix = S8(".exe");
     UnitTestResult save_slots = link_test_runtime_windows_xdata_save_slots(arguments);
-    result.succeeded_test_count += save_slots.succeeded_test_count;
-    result.test_count += save_slots.test_count;
+    UnitTestResult frame_prefix = link_test_runtime_windows_arm64_xdata_frame_prefix(arguments);
+    result.succeeded_test_count += save_slots.succeeded_test_count + frame_prefix.succeeded_test_count;
+    result.test_count += save_slots.test_count + frame_prefix.test_count;
 #else
     String8 output_suffix = S8("");
 #endif

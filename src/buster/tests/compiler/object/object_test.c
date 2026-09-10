@@ -2362,6 +2362,61 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, windows_arm64_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
     }
 
+    // MIR saves precede X29 establishment. Its epilog shares the suffix
+    // starting at SET_FP, including sparse allocator saves in reverse order.
+    u8 windows_arm64_machine_code[80] = {0};
+    u32 windows_arm64_machine_epilog = 56;
+    CodegenUnwindAction windows_arm64_machine_actions[] = {
+        {.code_offset = 4, .value = 48, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+        {.code_offset = 4, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 29},
+        {.code_offset = 4, .value = 8, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 30},
+        {.code_offset = 8, .value = 16, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 19},
+        {.code_offset = 12, .value = 24, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 27},
+        {.code_offset = 16, .value = 32, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 28},
+        {.code_offset = 20, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 29},
+        {.code_offset = 24, .value = 64, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+        {.code_offset = 28, .kind = CODEGEN_UNWIND_ACTION_NOP},
+        {.code_offset = 32, .kind = CODEGEN_UNWIND_ACTION_NOP},
+    };
+    CodegenFunctionDescriptor windows_arm64_machine_function = {
+        .unwind_actions = windows_arm64_machine_actions,
+        .epilog_offsets = &windows_arm64_machine_epilog,
+        .code_size = sizeof(windows_arm64_machine_code),
+        .prolog_size = 32,
+        .unwind_action_count = BUSTER_ARRAY_LENGTH(windows_arm64_machine_actions),
+        .epilog_count = 1,
+    };
+    CodegenModule windows_arm64_machine_module = windows_arm64_module;
+    windows_arm64_machine_module.code = (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_arm64_machine_code);
+    windows_arm64_machine_module.functions = &windows_arm64_machine_function;
+    ObjectFile windows_arm64_machine_object =
+        object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_arm64_machine_module, windows_arm64_target);
+    BUSTER_TEST(arguments, windows_arm64_machine_object.error == OBJECT_ERROR_NONE);
+    u8 expected_windows_arm64_machine_xdata[] = {
+        0x14, 0x00, 0x40, 0x18, 0x0e, 0x00, 0xc0, 0x00,
+        0xe3, 0xe3, 0x04, 0xe1, 0xd2, 0x44, 0xd2, 0x03, 0xd0, 0x02, 0x85, 0xe4,
+    };
+    ByteSlice windows_arm64_machine_xdata = windows_arm64_machine_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+    BUSTER_TEST(arguments, windows_arm64_machine_xdata.length == sizeof(expected_windows_arm64_machine_xdata) &&
+                               memcmp(windows_arm64_machine_xdata.pointer, expected_windows_arm64_machine_xdata,
+                                      sizeof(expected_windows_arm64_machine_xdata)) == 0);
+    for (u32 malformed = 0; malformed < 5; malformed += 1)
+    {
+        CodegenUnwindAction invalid_actions[BUSTER_ARRAY_LENGTH(windows_arm64_machine_actions)];
+        memcpy(invalid_actions, windows_arm64_machine_actions, sizeof(invalid_actions));
+        CodegenFunctionDescriptor invalid_function = windows_arm64_machine_function;
+        invalid_function.unwind_actions = invalid_actions;
+        if (malformed == 0) { invalid_actions[5].value += 8; }
+        if (malformed == 1) { invalid_actions[4].register_index = 19; }
+        if (malformed == 2) { invalid_actions[7].code_offset += 4; }
+        if (malformed == 3) { invalid_actions[6].kind = CODEGEN_UNWIND_ACTION_NOP; }
+        if (malformed == 4) { invalid_function.prolog_size += 4; }
+        CodegenModule invalid_module = windows_arm64_machine_module;
+        invalid_module.functions = &invalid_function;
+        ObjectFile invalid_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &invalid_module, windows_arm64_target);
+        BUSTER_TEST(arguments, invalid_object.error != OBJECT_ERROR_NONE);
+    }
+
     CodegenModule mach_cfi_module = separate_module;
     mach_cfi_module.relocations = 0;
     mach_cfi_module.relocation_count = 0;

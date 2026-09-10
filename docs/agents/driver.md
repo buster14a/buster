@@ -103,10 +103,11 @@ and linked prebuilt objects have no canonical C functions to gate.
 For example, `build/Release/ide cc -fregister-allocator=mir-stack -fno-machine-fallback -target aarch64-unknown-linux -c tests/basic_c_call_abi.c -o build/mir-coverage.o`.
 `compiler_driver_test_machine_fallback` runs a curated arithmetic, control-flow
 and call-ABI corpus through this gate for x86-64 and AArch64 Linux under all
-three machine allocators in `test_all`, including CI. Deliberate PE AArch64
-target exclusion, Win64 indirect aggregate parameters, and Darwin AArch64
-variadic signatures are separate
-negative tests. This corpus is a coverage floor, not a claim of complete MIR
+three machine allocators in `test_all`, including CI. Unsupported Win64
+signature shapes and Darwin/Windows AArch64 variadic signatures have separate
+negative tests. Windows and UEFI large-frame tests cover both architectures,
+and Windows ARM64 MIR unwind boundaries execute against the native OS API.
+This corpus is a coverage floor, not a claim of complete MIR
 lowering or permission to retire the canonical oracle.
 
 A `.s` input, or any input under `-x assembler`, is an assembly translation

@@ -52,9 +52,12 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-10T162615Z`](docs/performance-audits/2026-09-10T162615Z.md) — Native MIR follow-up differential and matched throughput evidence
+- [`2026-09-10T160033Z`](docs/performance-audits/2026-09-10T160033Z.md) — Native backend retirement coverage and verification checkpoint
 - [`2026-09-10T180045Z`](docs/performance-audits/2026-09-10T180045Z.md) — SysV unnamed-bitfield interoperability with unchanged default classification (#66, #391)
 - [`2026-09-09T174124Z`](docs/performance-audits/2026-09-09T174124Z.md) — Lower Win64 indirect aggregate arguments through MIR (#36)
 - [`2026-09-10T010600Z`](docs/performance-audits/2026-09-10T010600Z.md) — QUALITY scratch census through existing diagnostic replays; no optimization claim
+- [`2026-09-09T174124Z`](docs/performance-audits/2026-09-09T174124Z.md) — Lower Win64 indirect aggregate arguments through MIR (#36)
 - [`2026-09-09T163649Z`](docs/performance-audits/2026-09-09T163649Z.md) — Repair ELF AArch64 variadic register cursors and HFA overflow (#36)
 - [`2026-09-09T151546Z`](docs/performance-audits/2026-09-09T151546Z.md) — Lower Windows x86-64 variadic calls through MIR (#36)
 - [`2026-09-09T141413Z`](docs/performance-audits/2026-09-09T141413Z.md) — Select fixed CPU queries in MIR without self-host fallback (#36)
