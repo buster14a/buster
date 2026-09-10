@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-10T162615Z`](docs/performance-audits/2026-09-10T162615Z.md) — Native MIR follow-up differential and matched throughput evidence
 - [`2026-09-10T160033Z`](docs/performance-audits/2026-09-10T160033Z.md) — Native backend retirement coverage and verification checkpoint
 - [`2026-09-10T010600Z`](docs/performance-audits/2026-09-10T010600Z.md) — QUALITY scratch census through existing diagnostic replays; no optimization claim
 - [`2026-09-09T174124Z`](docs/performance-audits/2026-09-09T174124Z.md) — Lower Win64 indirect aggregate arguments through MIR (#36)
