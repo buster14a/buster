@@ -46,6 +46,7 @@ jobs:
 
           root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'z07-export'
           api = 'https://api.github.com/repos/buster14a/buster'
+          numeric_api = 'https://api.github.com/repositories/1071732997'
           headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
                      'Accept': 'application/vnd.github+json',
                      'X-GitHub-Api-Version': '2022-11-28'}
@@ -67,7 +68,7 @@ jobs:
                   for link in links.split(','):
                       if 'rel="next"' in link:
                           next_url = link.split('>')[0].strip()[1:]
-                  if next_url and not next_url.startswith(api + '/'):
+                  if next_url and not next_url.startswith((api + '/', numeric_api + '/')):
                       raise RuntimeError('Unexpected pagination destination')
                   url = next_url
                   if url:
@@ -76,7 +77,8 @@ jobs:
                           raise RuntimeError('Pagination budget exceeded; incomplete export')
               (root / (name + '.json')).write_text(json.dumps(result, indent=2), encoding='utf-8')
               manifest['collections'][name] = {'path': path, 'pages': page, 'count': len(result), 'complete': True}
-              print(name, 'pages=' + str(page), 'count=' + str(len(result)))
+              (root / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+              print(name, 'pages=' + str(page), 'count=' + str(len(result)), flush=True)
               return result
 
           collection('/issues?state=all&sort=created&direction=asc', 'issues-all')
@@ -90,10 +92,10 @@ jobs:
               collection(prefix + '/comments', 'pr-' + str(number) + '-review-comments')
               collection('/issues/' + str(number) + '/comments', 'pr-' + str(number) + '-comments')
           collection('/commits?sha=ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae&path=src/buster/lib/compiler/frontend/c/c_parse.c', 'parser-commits')
-          (root / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
           PY
           printf 'Pinned source and paginated read-only coordination export. No compilation, test, or performance result.\n' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
         with:
           name: z07-source-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/z07-export/
