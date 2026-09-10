@@ -16,7 +16,10 @@ jobs:
             source: d6b54495cddc9ee9a50accbaf8269eab19afd11b
           - pr: 372
             runner: windows-2025
-            source: 5ee277f956ea637c95c28ec3b220bbda63aea774
+            source: f2eda36c7233b4b801d37b9abae5774a4809f1a3
+          - pr: 376
+            runner: macos-26
+            source: 515c12c8525ee16cd770a288883f30691f2d7d30
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -85,7 +88,7 @@ jobs:
               376: [["-Isrc", "-c", "tests/basic_c_simd_translate.c"],
                     ["-Isrc", "-DBUSTER_KERNEL=1", "-c", "tests/basic_c_simd_translate.c"],
                     ["-Isrc", "--target=x86_64-linux-gnu", "-c", "tests/basic_c_simd_translate.c"]],
-              372: [["-c", str(tmp / "stdint.c")], ["-c", str(tmp / "paste.c")], ["-nostdinc", *sum([["-isystem", path] for path in (tmp / "vs-includes.txt").read_text(encoding="utf-8-sig").strip().split(";") if path], []), "-c", str(tmp / "stdint.c")]],
+              372: [["-c", str(tmp / "stdint.c")], ["-c", str(tmp / "paste.c")], ["-nostdinc", *(sum([["-isystem", path] for path in (tmp / "vs-includes.txt").read_text(encoding="utf-8-sig").strip().split(";") if path], []) if pr == 372 else []), "-c", str(tmp / "stdint.c")]],
               368: [["-target", "wasm64-unknown-freestanding", "-nostdinc", "tests/basic_c_wasm64_integer_ops.c"]],
           }[pr]
           failed = False
@@ -112,6 +115,23 @@ jobs:
                   if r.returncode == 0:
                       r = subprocess.run([str(exe)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
                       print("CONSTEXPR RUN", mode, r.returncode, r.stdout, flush=True)
+                  failed |= r.returncode != 0
+          if pr == 376:
+              source = Path("tests/basic_c_simd_translate.c").read_text()
+              source = source.replace("int failure = observed_stops != expected_stops || observed_newlines != expected_newlines;", "int failure = (observed_stops != expected_stops) | ((observed_newlines != expected_newlines) << 1);")
+              source = source.replace("failure |= destination[0] != 0xA5 || destination[65] != 0x5A;", "failure |= (destination[0] != 0xA5 || destination[65] != 0x5A) << 2;")
+              source = source.replace("failure |= destination[lane + 1] != source[lane];", "failure |= (destination[lane + 1] != source[lane]) << 3;")
+              source = source.replace("failure |= packed[0] != 'a';", "failure |= (packed[0] != 'a') << 4;").replace("failure |= packed[lane] != 0;", "failure |= (packed[lane] != 0) << 5;")
+              probe = tmp / "simd-runtime.c"
+              probe.write_text(source)
+              for mode in ["clang", "none", "mir-stack", "fast", "quality"]:
+                  exe = tmp / ("simd-" + mode)
+                  cmd = (["clang", "-Isrc", str(probe), "-o", str(exe)] if mode == "clang" else [ide, "cc", "-Isrc", "-fregister-allocator="+mode, str(probe), "-o", str(exe)])
+                  r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+                  print("SIMD BUILD", mode, r.returncode, r.stdout, flush=True)
+                  if r.returncode == 0:
+                      r = subprocess.run([str(exe)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+                      print("SIMD RUN", mode, r.returncode, r.stdout, flush=True)
                   failed |= r.returncode != 0
           raise SystemExit(1 if failed else 0)
           PY
