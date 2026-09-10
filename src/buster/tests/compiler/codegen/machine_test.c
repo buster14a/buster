@@ -1015,6 +1015,8 @@ typedef enum MachineAliasTestKind
     MACHINE_ALIAS_TEST_UNCERTIFIED,
     MACHINE_ALIAS_TEST_SHORT_SLOT,
     MACHINE_ALIAS_TEST_INVALID_OFFSET,
+    MACHINE_ALIAS_TEST_INCOMING,
+    MACHINE_ALIAS_TEST_INCOMING_UNCERTIFIED,
     MACHINE_ALIAS_TEST_VECTOR,
     MACHINE_ALIAS_TEST_COUNT,
 } MachineAliasTestKind;
@@ -1025,6 +1027,7 @@ typedef enum MachineAliasTestKind
 BUSTER_GLOBAL_LOCAL MachineFunction machine_test_alias_function(Arena* arena, bool aarch64, u32 variant)
 {
     bool vector = variant == MACHINE_ALIAS_TEST_VECTOR;
+    bool incoming = variant == MACHINE_ALIAS_TEST_INCOMING || variant == MACHINE_ALIAS_TEST_INCOMING_UNCERTIFIED;
     MachineFunctionBuilder builder = machine_function_builder_begin(arena);
     u32 pointer = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
         .definition_point = MACHINE_POINT_INVALID, .register_class = MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID});
@@ -1039,15 +1042,18 @@ BUSTER_GLOBAL_LOCAL MachineFunction machine_test_alias_function(Arena* arena, bo
             .definition_point = machine_point_make(builder.instructions.total_count, MACHINE_POINT_AFTER),
             .register_class = vector ? MACHINE_REGISTER_CLASS_VECTOR : MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID});
         machine_builder_instruction(&builder, (MachineInstruction){
-            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[leaf]), machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
-            .payload = offset, .opcode = vector ? MACHINE_X64_VLOAD_FRAME : aarch64 ? MACHINE_A64_LOAD_FRAME : MACHINE_X64_LOAD_FRAME});
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[leaf]), incoming ? 0 : machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
+            .payload = incoming ? (aarch64 ? 16u : 0u) + leaf * 8u : offset,
+            .opcode = incoming ? (aarch64 ? MACHINE_A64_LOAD_INCOMING : MACHINE_X64_LOAD_INCOMING) :
+                      vector ? MACHINE_X64_VLOAD_FRAME : aarch64 ? MACHINE_A64_LOAD_FRAME : MACHINE_X64_LOAD_FRAME});
         machine_builder_instruction(&builder, (MachineInstruction){
             .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[leaf])},
             .payload = offset, .opcode = vector ? MACHINE_X64_VSTORE_FRAME : aarch64 ? MACHINE_A64_STORE_FRAME64 : MACHINE_X64_STORE_FRAME64});
-        if ((leaf == 15 || leaf == 31 || leaf == 47) && variant >= MACHINE_ALIAS_TEST_UNKNOWN_POINTER && variant <= MACHINE_ALIAS_TEST_AGGREGATE)
+        if ((leaf == 15 || leaf == 31 || leaf == 47) &&
+            ((variant >= MACHINE_ALIAS_TEST_UNKNOWN_POINTER && variant <= MACHINE_ALIAS_TEST_AGGREGATE) || incoming))
         {
             MachineInstruction inserted = {0};
-            if (variant == MACHINE_ALIAS_TEST_UNKNOWN_POINTER)
+            if (variant == MACHINE_ALIAS_TEST_UNKNOWN_POINTER || incoming)
             {
                 inserted = (MachineInstruction){.opcode = aarch64 ? MACHINE_A64_STORE_PTR64 : MACHINE_X64_STORE_PTR64,
                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[leaf])}};
@@ -1109,7 +1115,7 @@ BUSTER_GLOBAL_LOCAL MachineFunction machine_test_alias_function(Arena* arena, bo
     machine_builder_block_end(&builder, (MachineBlock){.parameter_count = 1});
     MachineFunction result = machine_function_builder_finish(arena, &builder);
     result.target = aarch64 ? machine_target_aarch64() : machine_target_x86_64();
-    result.nonvolatile_memory_certified = variant != MACHINE_ALIAS_TEST_UNCERTIFIED;
+    result.nonvolatile_memory_certified = variant != MACHINE_ALIAS_TEST_UNCERTIFIED && variant != MACHINE_ALIAS_TEST_INCOMING_UNCERTIFIED;
     result.stack_slot_count = 65;
     result.stack_slot_sizes = arena_allocate(arena, u32, result.stack_slot_count);
     for (u32 slot = 0; slot < result.stack_slot_count; slot += 1)
@@ -1130,6 +1136,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
     UnitTestResult result = {0};
     for (u32 architecture = 0; architecture < 2; architecture += 1)
     {
+        u16 incoming_opcode = architecture ? MACHINE_A64_LOAD_INCOMING : MACHINE_X64_LOAD_INCOMING;
+        BUSTER_TEST(arguments, machine_opcode_memory_effect(machine_opcode_info(incoming_opcode)) == MACHINE_MEMORY_EFFECT_READ);
+        BUSTER_TEST(arguments, (machine_opcode_row_table()[incoming_opcode].schedule_flags & MACHINE_SCHEDULE_UNIT_MEMORY) != 0);
         for (u32 variant = 0; variant < (architecture ? MACHINE_ALIAS_TEST_VECTOR : MACHINE_ALIAS_TEST_COUNT); variant += 1)
         {
             MachineFunction function = machine_test_alias_function(arguments->arena, architecture != 0, variant);
@@ -1146,6 +1155,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
                 MachineLineMark line = scheduled.function.line_marks[mark];
                 positions[line.instruction] = line.row;
             }
+            // Incoming reads are an independent oracle here, not inferred
+            // solely from the metadata whose missing READ effect is tested.
             bool memory_order = true;
             bool independent_memory_moved = false;
             for (u32 first = 0; first < function.instruction_count; first += 1)
@@ -1155,7 +1166,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
                 bool before_barrier = (before_info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS |
                                                                   MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) != 0;
                 bool before_memory = machine_opcode_is_memory(before_info) || before->opcode == MACHINE_X64_COPY_FRAME_FROM_FRAME ||
-                                     before->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME;
+                                     before->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME || before->opcode == MACHINE_X64_LOAD_INCOMING ||
+                                     before->opcode == MACHINE_A64_LOAD_INCOMING;
                 u32 before_slot = UINT32_MAX;
                 if (machine_ref_kind(before->operands[0]) == MACHINE_REF_STACK_SLOT) before_slot = machine_ref_payload(before->operands[0]);
                 if (machine_ref_kind(before->operands[1]) == MACHINE_REF_STACK_SLOT) before_slot = machine_ref_payload(before->operands[1]);
@@ -1166,7 +1178,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
                     bool after_barrier = (after_info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS |
                                                                     MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) != 0;
                     bool after_memory = machine_opcode_is_memory(after_info) || after->opcode == MACHINE_X64_COPY_FRAME_FROM_FRAME ||
-                                        after->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME;
+                                        after->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME || after->opcode == MACHINE_X64_LOAD_INCOMING ||
+                                        after->opcode == MACHINE_A64_LOAD_INCOMING;
                     u32 after_slot = UINT32_MAX;
                     if (machine_ref_kind(after->operands[0]) == MACHINE_REF_STACK_SLOT) after_slot = machine_ref_payload(after->operands[0]);
                     if (machine_ref_kind(after->operands[1]) == MACHINE_REF_STACK_SLOT) after_slot = machine_ref_payload(after->operands[1]);
@@ -1225,6 +1238,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
                 BUSTER_TEST(arguments, improved.valid && previous.valid);
                 BUSTER_TEST(arguments, improved.spill_count + improved.reload_count < previous.spill_count + previous.reload_count);
             }
+        }
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* incoming_program = source.pointer ? machine_test_compile_c_with_options(temporary.arena, S8("machine-incoming.c"),
+                (String8){.pointer = (char8*)source.pointer, .length = source.length}, target,
+                (CIRLowerOptions){.disable_direct_ssa = memory_form != 0}) : 0;
+            BUSTER_TEST(arguments, incoming_program && incoming_program->module_count == 1);
+            if (incoming_program && incoming_program->module_count == 1)
+            {
+                IrModule* module = incoming_program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(incoming_program, module).error == IR_VALIDATION_NONE);
+                IrFunction* incoming_function = machine_test_ir_function_find(module, S8("alias_incoming"));
+                BUSTER_TEST(arguments, incoming_function != 0);
+                if (incoming_function)
+                {
+                    MachineSelectResult selected = machine_select_canonical_function(temporary.arena, incoming_program, incoming_function, target);
+                    BUSTER_TEST(arguments, selected.supported && selected.function.nonvolatile_memory_certified);
+                    if (selected.supported)
+                    {
+                        u32 incoming_count = 0;
+                        u32 pointer_store_count = 0;
+                        for (u32 row = 0; row < selected.function.instruction_count; row += 1)
+                        {
+                            u32 opcode = selected.function.instructions[row].opcode;
+                            incoming_count += opcode == incoming_opcode;
+                            pointer_store_count += opcode == MACHINE_X64_STORE_PTR64 || opcode == MACHINE_A64_STORE_PTR64;
+                        }
+                        BUSTER_TEST(arguments, incoming_count >= 3 && pointer_store_count != 0);
+                        BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                        MachineScheduleResult scheduled = machine_schedule_function(temporary.arena, &selected.function);
+                        BUSTER_TEST(arguments, machine_verify_function(&scheduled.function).error == MACHINE_VERIFY_NONE);
+                        MachineStackPlacement placement = machine_fast_placement_build(temporary.arena, &scheduled.function);
+                        BUSTER_TEST(arguments, placement.valid);
+                    }
+                }
+            }
+            scratch_end(temporary);
         }
         IrProgram* volatile_program = machine_test_compile_c(arguments->arena, S8("volatile-alias.c"),
             S8("unsigned long f(void) { volatile unsigned long a = 1, b = 2; a = b; return a + b; }"), target);
@@ -2591,6 +2642,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_A64_CVT_U64_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_A64_CVT_F32_TO_U64] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_A64_CVT_F64_TO_U64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_LOAD_INCOMING] = MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_A64_VA_SAVE] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_A64_VA_ARG] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_A64_VLOAD_FRAME] = MACHINE_SCHEDULE_UNIT_MEMORY | MACHINE_SCHEDULE_UNIT_VECTOR,

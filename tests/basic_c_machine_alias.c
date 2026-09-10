@@ -204,6 +204,22 @@ unsigned long r63 = c63;
 return ((((((r0 + r32) + (r16 + r48)) + ((r8 + r40) + (r24 + r56))) + (((r4 + r36) + (r20 + r52)) + ((r12 + r44) + (r28 + r60)))) + ((((r2 + r34) + (r18 + r50)) + ((r10 + r42) + (r26 + r58))) + (((r6 + r38) + (r22 + r54)) + ((r14 + r46) + (r30 + r62))))) + (((((r1 + r33) + (r17 + r49)) + ((r9 + r41) + (r25 + r57))) + (((r5 + r37) + (r21 + r53)) + ((r13 + r45) + (r29 + r61)))) + ((((r3 + r35) + (r19 + r51)) + ((r11 + r43) + (r27 + r59))) + (((r7 + r39) + (r23 + r55)) + ((r15 + r47) + (r31 + r63))))));
 }
 
+// Arguments after the eight AArch64 integer registers are stack-passed.
+// The pointers designate ordinary caller objects, never fabricated ABI slots.
+// Their stores and delayed stack-argument uses exercise incoming-read metadata;
+// the forced-pressure MIR test, not this source, proves conservative ordering.
+unsigned long long alias_incoming(unsigned long long *left, unsigned long long *right,
+                                  unsigned long long a, unsigned long long b, unsigned long long c, unsigned long long d,
+                                  unsigned long long e, unsigned long long f, unsigned long long g, unsigned long long h,
+                                  unsigned long long last)
+{
+    unsigned long long first = a + b + c + d;
+    *left = first;
+    unsigned long long second = e + f + g + h;
+    *right = second;
+    return first + second + last + *left;
+}
+
 int main(void)
 {
     unsigned long inputs[] = {0, 1, 7, ~(unsigned long)0};
@@ -214,6 +230,19 @@ int main(void)
         {
             result = 1;
         }
+    }
+    unsigned long long left = 0;
+    unsigned long long right = 0;
+    unsigned long long first = alias_incoming(&left, &right, 1, 2, 3, 4, 5, 6, 7, 8, 0x100000001ull);
+    if (first != 0x10000002full || left != 10 || right != 26)
+    {
+        result = 2;
+    }
+    unsigned long long shared = 0;
+    unsigned long long second = alias_incoming(&shared, &shared, 1, 2, 3, 4, 5, 6, 7, 8, 0x8000000000000001ull);
+    if (second != 0x800000000000003full || shared != 26)
+    {
+        result = 3;
     }
     return result;
 }
