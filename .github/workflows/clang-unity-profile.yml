@@ -1,0 +1,95 @@
+name: Clang unity profile
+
+# Opt-in compiler-build diagnostics, not another mandatory CI matrix.
+# The branch-scoped push runs the initial investigation before this workflow
+# is available on main for workflow_dispatch. No production flags are changed.
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/clang-unity-profile-20260910]
+    paths: [.github/workflows/clang-unity-profile.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clang-unity-profile-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  profile:
+    name: Clang Release unity (Intel Mac)
+    runs-on: macos-26-intel
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Record inputs and bootstrap the native driver
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/clang-unity-profile/uninstrumented" "$RUNNER_TEMP/clang-unity-profile/traced"
+          {
+            git rev-parse HEAD
+            git rev-parse HEAD^{tree}
+            clang --version
+            cmake --version
+            ninja --version
+            sw_vers
+            sysctl hw.model machdep.cpu.brand_string hw.memsize hw.logicalcpu
+            printf 'CFLAGS=%s\n' "${CFLAGS:-}"
+            printf 'ImageVersion=%s\n' "${ImageVersion:-unknown}"
+          } > "$RUNNER_TEMP/clang-unity-profile/metadata.txt"
+          cat "$RUNNER_TEMP/clang-unity-profile/metadata.txt"
+          # generate recreates build/, so this driver must live outside it.
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+
+      - name: Uninstrumented CI Release unity baseline
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/clang-unity-profile/uninstrumented"
+          "$RUNNER_TEMP/buster-build" generate --ci --cc clang --config Release --linker DEFAULT --no-time-trace -- -DBUSTER_UNITY_BUILD=ON -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF -DBUSTER_DEVELOPER_TARGETS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON 2>&1 | tee "$evidence/configure.log"
+          /usr/bin/time -l "$RUNNER_TEMP/buster-build" build --config Release -t ide --verbose 2>&1 | tee "$evidence/build.log"
+          cp build/compile_commands.json build/CMakeCache.txt "$evidence/"
+          cp build/.ninja_log "$evidence/ninja.log"
+          shasum -a 256 build/Release/ide > "$evidence/executable.sha256"
+          "$RUNNER_TEMP/buster-build" ninja_log_summary build --limit 10 > "$evidence/ninja-summary.txt"
+
+      - name: Profile the identical unity workload
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/clang-unity-profile/traced"
+          # Instrumentation is measured separately from the baseline. Existing
+          # target options retain CI -O2 and all semantic/compiler-test flags.
+          CFLAGS="${CFLAGS:-} -ftime-report" "$RUNNER_TEMP/buster-build" generate --ci --cc clang --config Release --linker DEFAULT --time-trace -- -DBUSTER_UNITY_BUILD=ON -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF -DBUSTER_DEVELOPER_TARGETS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON 2>&1 | tee "$evidence/configure.log"
+          /usr/bin/time -l "$RUNNER_TEMP/buster-build" build --config Release -t ide --verbose 2>&1 | tee "$evidence/build.log"
+          cp build/compile_commands.json build/CMakeCache.txt "$evidence/"
+          cp build/.ninja_log "$evidence/ninja.log"
+          shasum -a 256 build/Release/ide > "$evidence/executable.sha256"
+          trace=build/CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.json
+          test -s "$trace"
+          cp "$trace" "$evidence/ide.c.json"
+          "$RUNNER_TEMP/buster-build" time_trace_summary "$trace" --limit 40 > "$evidence/trace-summary.txt"
+          "$RUNNER_TEMP/buster-build" ninja_log_summary build --limit 10 > "$evidence/ninja-summary.txt"
+          {
+            printf '## Clang Release unity profile\n\nOne translation unit; tests included; CI optimization policy unchanged.\n\n'
+            printf '### Uninstrumented Ninja timings\n\n```text\n'
+            cat "$RUNNER_TEMP/clang-unity-profile/uninstrumented/ninja-summary.txt"
+            printf '\n```\n\n### Instrumented Clang rollups\n\nNested totals overlap; do not sum them. These are diagnostic timings, not a speedup comparison.\n\n```text\n'
+            cat "$evidence/trace-summary.txt"
+            printf '\n```\n\nRaw pass timings, trace, commands, cache, resource usage and revision are retained in the artifact.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain profiling evidence even on failure
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: clang-unity-profile-macos-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clang-unity-profile/
+          if-no-files-found: error
+          retention-days: 7
