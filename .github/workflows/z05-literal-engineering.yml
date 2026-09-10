@@ -13,7 +13,88 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  census:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+      issues: read
+    outputs:
+      candidate: ${{ steps.prepare.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Apply the reviewed patch to the pinned baseline and create Git objects only
+        id: prepare
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/z05-publication"
+          mkdir -p "$out"
+          test "$(gh api repos/buster14a/buster/git/ref/heads/main --jq .object.sha)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          gh api --paginate --slurp 'repos/buster14a/buster/pulls?state=open&per_page=100' > "$out/open-pulls.json"
+          gh api --paginate --slurp 'repos/buster14a/buster/issues/148/comments?per_page=100' > "$out/numeric-coordination.json"
+          git worktree add --detach "$RUNNER_TEMP/z05-candidate" ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          # Normalize the transport envelope, then require the reviewed patch hash.
+          sed 's/^ diff --git /diff --git /' tools/z05_single_fragment.patch > "$out/source.patch"
+          printf '8c24d9007887e713adcb62389f273d74e6a9e60be3f399449ee51ca2334bd6a4  %s/source.patch\n' "$out" | sha256sum --check
+          git -C "$RUNNER_TEMP/z05-candidate" apply --check "$out/source.patch"
+          git -C "$RUNNER_TEMP/z05-candidate" apply "$out/source.patch"
+          cp tools/z05_audit.md "$RUNNER_TEMP/z05-candidate/docs/performance-audits/2026-09-10T011012Z.md"
+          python3 - "$RUNNER_TEMP/z05-candidate" "$out" <<'PY'
+          import base64
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import sys
+          root, out = map(pathlib.Path, sys.argv[1:])
+          baseline = 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae'
+          index = root / 'PERFORMANCE_AUDITS.md'
+          text = index.read_text()
+          insertion = text.index('- [', text.index('## Audits, newest first'))
+          row = '- [`2026-09-10T011012Z`](docs/performance-audits/2026-09-10T011012Z.md) — Z05 literal-call census and single-fragment scratch candidate\n'
+          index.write_text(text[:insertion] + row + text[insertion:])
+          expected = {
+              'src/buster/lib/compiler/frontend/c/c_gen.c': '0ce05c2469d4adbc5294667e783335633808fc16',
+              'src/buster/tests/compiler/frontend/c/c_test.c': '155ef1d927eba6912268c1ade6f4c74e3ab97d01',
+          }
+          paths = list(expected) + ['PERFORMANCE_AUDITS.md', 'docs/performance-audits/2026-09-10T011012Z.md']
+          subprocess.run(['git', 'diff', '--check'], cwd=root, check=True)
+          (out / 'candidate.diff').write_bytes(subprocess.check_output(['git', 'diff'], cwd=root))
+          def api(endpoint, payload):
+              result = subprocess.run(['gh', 'api', '--method', 'POST', 'repos/buster14a/buster/git/' + endpoint, '--input', '-'], input=json.dumps(payload), text=True, capture_output=True, check=True)
+              return json.loads(result.stdout)
+          elements = []
+          for path in paths:
+              digest = subprocess.check_output(['git', 'hash-object', path], cwd=root, text=True).strip()
+              if path in expected:
+                  assert digest == expected[path], (path, digest)
+              blob = api('blobs', {'content': base64.b64encode((root / path).read_bytes()).decode('ascii'), 'encoding': 'base64'})
+              assert blob['sha'] == digest
+              elements.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': digest})
+          tree = api('trees', {'base_tree': '093b374996f3aecca200fe2968539554fc67bf55', 'tree': elements})
+          commit = api('commits', {'message': 'c: avoid arena bookkeeping for single-fragment string decoding\n\nReuse the existing decoded descriptor for one fragment; retain arrays for concatenation. Extend the existing differential gate with storage and failure-publication checks. Record the frozen Z05 population census. Performance acceptance remains pending.\n\nRefs #57, #128; leaves #148 parser work independent.', 'tree': tree['sha'], 'parents': [baseline]})
+          record = {'baseline': baseline, 'candidate': commit['sha'], 'tree': tree['sha'], 'files': elements, 'transport': os.environ['GITHUB_SHA']}
+          (out / 'publication.json').write_text(json.dumps(record, indent=2) + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print('candidate=' + commit['sha'], file=output)
+          print(json.dumps(record, indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: z05-publication-${{ github.run_id }}
+          path: ${{ runner.temp }}/z05-publication
+          if-no-files-found: error
+          retention-days: 7
+  validate:
+    needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
@@ -23,92 +104,55 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.candidate }}
           persist-credentials: false
-      - name: Pin baseline, bootstrap and record environment
+      - name: Build and run registered Release regressions on the immutable candidate
         shell: bash
         run: |
           set -euo pipefail
-          out="$RUNNER_TEMP/z05-evidence"
-          mkdir -p "$out" "$RUNNER_TEMP/z05-frozen"
-          git worktree add --detach "$RUNNER_TEMP/z05-base" ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
-          git archive ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae | tar -x -C "$RUNNER_TEMP/z05-frozen"
-          {
-            date --utc --iso-8601=seconds
-            git rev-parse HEAD
-            clang --version
-            uname -a
-            lscpu
-            taskset -pc $$
-            free -b
-            cat /sys/devices/system/cpu/smt/active || true
-          } > "$out/environment.txt"
-          cd "$RUNNER_TEMP/z05-base"
+          out="$RUNNER_TEMP/z05-validation"
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/commit.txt"
+          clang --version > "$out/clang.txt"
+          lscpu > "$out/cpu.txt"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/z05-build"
-      - name: Build untouched trusted Clang baseline and reproduce its fixed point
+          "$RUNNER_TEMP/z05-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee "$out/configure.log"
+          "$RUNNER_TEMP/z05-build" build --config Release -t test_all -- -j2 2>&1 | tee "$out/test-all.log"
+          cp build/CMakeCache.txt "$out/CMakeCache.txt"
+          objdump -d --disassemble=c_ir_decode_string_literal_range_for_target build/Release/ide > "$out/candidate-range.asm"
+          size -A build/Release/ide > "$out/candidate-sections.txt"
+          python3 tools/new_audit.py --check
+      - name: Native mode matrix and self-host gates
         shell: bash
         run: |
           set -euo pipefail
-          out="$RUNNER_TEMP/z05-evidence"
-          cd "$RUNNER_TEMP/z05-base"
-          "$RUNNER_TEMP/z05-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF 2>&1 | tee "$out/baseline-configure.log"
-          "$RUNNER_TEMP/z05-build" build --config Release -t ide -- -j2 2>&1 | tee "$out/baseline-build.log"
-          cp build/Release/ide "$out/baseline-ide"
-          cp build/CMakeCache.txt "$out/baseline-CMakeCache.txt"
-          "$RUNNER_TEMP/z05-build" test_self_host --config Release 2>&1 | tee "$out/baseline-self-host.log"
-          mkdir -p "$RUNNER_TEMP/z05-frozen/build"
-          cp -a build/generated "$RUNNER_TEMP/z05-frozen/build/generated"
-          find "$RUNNER_TEMP/z05-frozen/src" "$RUNNER_TEMP/z05-frozen/build/generated" -type f -print0 | sort -z | xargs -0 sha256sum > "$out/frozen-inputs.sha256"
-          objdump -d --disassemble=c_ir_decode_string_literal_range_for_target "$out/baseline-ide" > "$out/baseline-range.asm"
-          size -A "$out/baseline-ide" > "$out/baseline-sections.txt"
-      - name: Build the separate untimed observer after all baseline work finishes
+          out="$RUNNER_TEMP/z05-validation"
+          "$RUNNER_TEMP/z05-build" test_mode_matrix --config Release 2>&1 | tee "$out/mode-matrix.log"
+          "$RUNNER_TEMP/z05-build" test_self_host --config Release 2>&1 | tee "$out/self-host.log"
+          "$RUNNER_TEMP/z05-build" test_self_host_audit --config Release 2>&1 | tee "$out/self-host-audit.log"
+      - name: Independent compiler controls and all four Buster modes
         shell: bash
         run: |
           set -euo pipefail
-          out="$RUNNER_TEMP/z05-evidence"
-          python3 tools/z05_literal_probe.py "$RUNNER_TEMP/z05-base"
-          cd "$RUNNER_TEMP/z05-base"
-          git diff --check
-          git diff > "$out/census.patch"
-          "$RUNNER_TEMP/z05-build" generate --build-directory build-probe --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1 | tee "$out/probe-configure.log"
-          "$RUNNER_TEMP/z05-build" build --build-directory build-probe --config Release -t ide -- -j2 2>&1 | tee "$out/probe-build.log"
-          cp build-probe/CMakeCache.txt "$out/probe-CMakeCache.txt"
-          sha256sum "$out/baseline-ide" build-probe/Release/ide > "$out/compiler-sha256.txt"
-      - name: Observe production calls and require identical output on frozen inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          out="$RUNNER_TEMP/z05-evidence"
-          normal="$out/baseline-ide"
-          probe="$RUNNER_TEMP/z05-base/build-probe/Release/ide"
-          cd "$RUNNER_TEMP/z05-frozen"
-          for name in basic_c_operations basic_c_string_concat basic_c_nested_string_initializers basic_c_plain_char_literal_sign basic_c_float_literal basic_c_static_float_literal compiler; do
-            source="tests/$name.c"
-            flags=(-g0 -O0 -fregister-allocator=none -c)
-            if [[ "$name" == compiler ]]; then
-              source=src/buster/apps/ide/ide.c
-              flags+=(-Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0)
-            fi
-            printf '%q ' "$normal" cc "${flags[@]}" "$source" -o "$out/current.o" >> "$out/commands.txt"
-            printf '\n' >> "$out/commands.txt"
-            "$normal" cc "${flags[@]}" "$source" -o "$out/current.o" > "$out/$name.normal.stdout" 2> "$out/$name.normal.stderr"
-            cp "$out/current.o" "$out/$name.reference.o"
-            printf '%q ' env "BUSTER_Z05_TRACE=$out/$name.trace" BUSTER_ALLOCATION_CENSUS=1 "$probe" cc "${flags[@]}" "$source" -o "$out/current.o" >> "$out/commands.txt"
-            printf '\n' >> "$out/commands.txt"
-            BUSTER_Z05_TRACE="$out/$name.trace" BUSTER_ALLOCATION_CENSUS=1 "$probe" cc "${flags[@]}" "$source" -o "$out/current.o" > "$out/$name.probe.stdout" 2> "$out/$name.census"
-            cmp "$out/current.o" "$out/$name.reference.o"
-            sha256sum "$out/current.o" "$out/$name.trace" > "$out/$name.complete"
-            python3 tools/allocation_census.py --input "$out/$name.census" --output "$out/$name.allocations" --label "$name frozen baseline"
-            rm "$out/$name.reference.o"
+          out="$RUNNER_TEMP/z05-validation"
+          exec > >(tee "$out/independent-controls.log") 2>&1
+          set -x
+          for source in tests/basic_c_string_concat.c tests/basic_c_nested_string_initializers.c tests/basic_c_plain_char_literal_sign.c tests/basic_c_float_literal.c tests/basic_c_static_float_literal.c; do
+            for cc in clang gcc; do
+              "$cc" -std=gnu17 -O0 "$source" -o "$out/control"
+              "$out/control"
+            done
+            for mode in none mir-stack fast quality; do
+              build/Release/ide cc -std=gnu17 -O0 -fregister-allocator="$mode" "$source" -o "$out/control"
+              "$out/control"
+            done
           done
-          sha256sum --check "$out/frozen-inputs.sha256" > "$out/frozen-input-check.log"
-          printf 'Untimed diagnostic runs completed with identical normal/observer object bytes. No throughput or Zen 5 acceptance is implied.\n' >> "$GITHUB_STEP_SUMMARY"
-      - name: Retain diagnostic evidence even on failure
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: z05-evidence-${{ github.run_id }}
-          path: ${{ runner.temp }}/z05-evidence
+          name: z05-validation-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/z05-validation
+            build/self-host-audit
           if-no-files-found: error
           retention-days: 7
-          compression-level: 6
