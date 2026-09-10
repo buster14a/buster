@@ -87,6 +87,16 @@ late escape, scalar temporaries, bitfields and dynamic-stack fallback. Native
 machine tests exercise vector block parameters as well as preserving the
 independent legacy mutable-register and pressure-census contracts.
 
+`ir_prepare_canonical_module` consumes an input-only producer certificate.
+Changed output is checked with the existing canonical verifier in debug,
+test and sanitizer builds; optimized production retains the pass-contract
+fast path. `BUSTER_VERIFY_IR_TRANSFORMS=1` also enables this check in an
+optimized production build. `IrValidationResult.boundary` distinguishes
+canonical input from local-promotion output, including successful hook calls;
+it is not a durable certificate. `local_promotion_complete` is only a pass
+completion marker. A later mutator must invalidate its own certificate and
+request validation again. See [the boundary inventory](../../ir-validation-boundaries.md).
+
 ## C frontend and canonical IR rules
 
 - The public frontend API is `compiler/frontend/c/c.h`. In non-unity builds the

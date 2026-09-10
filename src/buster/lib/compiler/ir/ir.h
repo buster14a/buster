@@ -9,6 +9,13 @@
 #include <buster/lib/compiler/ir/model.h>
 #include <buster/lib/target.h>
 
+// Opt in for optimized production measurements/diagnostics. Debug, test and
+// sanitizer builds always check changed IR; this flag cannot disable them.
+#ifndef BUSTER_VERIFY_IR_TRANSFORMS
+#define BUSTER_VERIFY_IR_TRANSFORMS 0
+#endif
+#define BUSTER_IR_TRANSFORM_CHECKS (!BUSTER_OPTIMIZE || BUSTER_INCLUDE_TESTS || BUSTER_SANITIZE || BUSTER_VERIFY_IR_TRANSFORMS)
+
 typedef struct IrFunctionId IrFunctionId;
 struct IrFunctionId
 {
@@ -789,6 +796,13 @@ typedef enum IrValidationError
     IR_VALIDATION_COUNT,
 } IrValidationError;
 
+typedef enum IrValidationBoundary
+{
+    IR_VALIDATION_BOUNDARY_UNSPECIFIED,
+    IR_VALIDATION_BOUNDARY_CANONICAL_INPUT,
+    IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT,
+} IrValidationBoundary;
+
 typedef struct IrValidationResult IrValidationResult;
 struct IrValidationResult
 {
@@ -796,6 +810,10 @@ struct IrValidationResult
     IrFunctionId function;
     IrBlockId block;
     IrInstructionId instruction;
+    // Last boundary checked by preparation, including successful checks.
+    // Direct verifier calls and unchecked certified preparation leave this
+    // UNSPECIFIED. This is diagnostic context, not a persistent certificate.
+    IrValidationBoundary boundary;
 };
 
 // The result of proving that every instruction of a function belongs to
@@ -894,12 +912,16 @@ BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrFunction* function, IrInstru
 BUSTER_F_DECL IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners);
 BUSTER_F_DECL IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module);
 
-// Validate (unless the producer supplied a certificate), promote eligible
-// locals once, and revalidate changed IR before publishing it to a consumer.
-// Mutates only arena-owned canonical rows and their side tables. Unsafe locals
-// remain in memory; there is no implicit zero/undef initialization.
 // Shared storage-normalization contract for canonical and frontend promotion.
 BUSTER_F_DECL bool ir_local_type_promotable(IrProgram* program, IrTypeId type);
 // The direct builder and reference pass share the conservative call-effect boundary.
 BUSTER_F_DECL bool ir_local_promotion_call_barrier(IrProgram* program, IrInstruction const* row);
-BUSTER_F_DECL IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool assume_validated);
+// The input certificate covers only the rows supplied to this call. Promotion
+// consumes that contract and may mutate arena-owned rows and side tables; it
+// does not extend the producer's proof to its output. Changed uncertified IR
+// is always revalidated. Debug/test/sanitizer builds also revalidate changed
+// certified IR; optimized production may trust the promotion implementation.
+// local_promotion_complete prevents rerunning the pass, not validation after a
+// later mutation. Consumers must pass false after mutating a prepared module.
+// Unsafe locals remain in memory; no implicit zero/undef initialization.
+BUSTER_F_DECL IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified);
