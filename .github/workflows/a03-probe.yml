@@ -19,7 +19,7 @@ jobs:
       BUSTER_MATRIX_THREADS: '1'
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630cea73d27597364c9af683
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
           persist-credentials: false
