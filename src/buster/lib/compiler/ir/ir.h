@@ -748,6 +748,9 @@ struct IrAbiContext
     u64 classified_values;
     u32 page_capacity;
     IrAbiConvention convention;
+    // Set before querying; changing this policy requires cache invalidation.
+    // False preserves Buster's historical unnamed-as-padding classification.
+    bool sysv_unnamed_bitfields_integer;
 };
 
 typedef struct IrProgram IrProgram;

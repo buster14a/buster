@@ -1240,6 +1240,7 @@ typedef struct CIRLowerOptions CIRLowerOptions;
 struct CIRLowerOptions
 {
     bool disable_direct_ssa;
+    bool sysv_unnamed_bitfields_integer;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;

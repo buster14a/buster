@@ -404,6 +404,13 @@ query used by native consumers and the frontend; explicit contexts use
 `ir_abi_context_value`. Wasm, eBPF and LLVM do not acquire a native cache merely
 by existing; only an actual ABI query creates it.
 
+`IrAbiContext.sysv_unnamed_bitfields_integer` selects the narrow SysV unnamed
+bit-field policy. It defaults to false, preserving historical Buster behavior.
+`CIRLowerOptions` sets the requested context before lowering can make an ABI
+query. Independent contexts can classify the same immutable types with different
+policies. Changing a context's policy after a query requires invalidating that
+context, just as changing layout does; neither selection mutates `IrType`.
+
 Cache pages contain 64 types for one use, with a resolution mask; values are
 initialized before their bit is published. Variadic arguments reuse argument
 classification except on Windows AArch64, whose convention distinguishes them.

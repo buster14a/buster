@@ -2342,9 +2342,85 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_merged_section_initialization(UnitT
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_unused_got_marker(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    u8 text[] = {0xe8, 0, 0, 0, 0, 0xc3, 0x31, 0xc0, 0xc3};
+    ObjectSymbol symbols[] = {
+        {.name = S8("main"), .size = 6, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("_GLOBAL_OFFSET_TABLE_"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("helper"), .value = 6, .size = 3, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+        {.name = S8("_GLOBAL_OFFSET_TABLE_"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+    };
+    ObjectRelocation relocation = {.offset = 1, .addend = -4, .section = OBJECT_SECTION_TEXT, .symbol = 2,
+                                   .kind = OBJECT_RELOCATION_X86_64_PC32};
+    ObjectFile object = link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(text),
+                                             symbols, BUSTER_ARRAY_LENGTH(symbols), &relocation, 1);
+    ObjectSymbol original_symbols[BUSTER_ARRAY_LENGTH(symbols)];
+    memcpy(original_symbols, symbols, sizeof(symbols));
+    NativeExecutableLinkOptions options = {.entry_symbol = S8("main"), .runtime_exports_known = true};
+    ObjectSymbol reference_symbols[] = {symbols[0], symbols[2]};
+    ObjectRelocation reference_relocation = relocation;
+    reference_relocation.symbol = 1;
+    ObjectFile reference = object;
+    reference.symbols = reference_symbols;
+    reference.symbol_count = BUSTER_ARRAY_LENGTH(reference_symbols);
+    reference.relocations = &reference_relocation;
+    NativeExecutableLinkResult expected = link_native_executable(arguments->arena, &reference, options);
+    NativeExecutableLinkResult actual = link_native_executable(arguments->arena, &object, options);
+    BUSTER_TEST(arguments, expected.error == LINK_ERROR_NONE);
+    BUSTER_TEST(arguments, actual.error == LINK_ERROR_NONE);
+    if (expected.error == LINK_ERROR_NONE && actual.error == LINK_ERROR_NONE)
+    {
+        BUSTER_TEST(arguments, expected.executable.length == actual.executable.length);
+        if (expected.executable.length == actual.executable.length)
+        {
+            BUSTER_TEST(arguments, memory_compare(expected.executable.pointer, actual.executable.pointer, actual.executable.length));
+        }
+    }
+    BUSTER_TEST(arguments, object.symbols == symbols && object.symbol_count == BUSTER_ARRAY_LENGTH(symbols));
+    BUSTER_TEST(arguments, object.relocations == &relocation && relocation.symbol == 2);
+    BUSTER_TEST(arguments, memory_compare(symbols, original_symbols, sizeof(symbols)));
+
+    // An actual GOT-base reference must retain its unresolved-symbol error.
+    relocation.symbol = 1;
+    NativeExecutableLinkResult referenced = link_native_executable(arguments->arena, &object, options);
+    BUSTER_TEST(arguments, referenced.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+    BUSTER_TEST(arguments, string_equal(referenced.symbol, S8("_GLOBAL_OFFSET_TABLE_")));
+    relocation.symbol = 2;
+    NativeExecutableLinkOptions explicit_entry = options;
+    explicit_entry.entry_symbol = S8("_GLOBAL_OFFSET_TABLE_");
+    BUSTER_TEST(arguments, link_native_executable(arguments->arena, &object, explicit_entry).error == LINK_ERROR_UNRESOLVED_SYMBOL);
+
+    // Only the reserved undefined marker is removable, not ordinary imports
+    // or a real definition bearing the same name.
+    symbols[1].name = S8("ordinary_missing_symbol");
+    NativeExecutableLinkResult ordinary = link_native_executable(arguments->arena, &object, options);
+    BUSTER_TEST(arguments, ordinary.error == LINK_ERROR_UNRESOLVED_SYMBOL);
+    BUSTER_TEST(arguments, string_equal(ordinary.symbol, symbols[1].name));
+    symbols[1] = symbols[2];
+    symbols[1].name = S8("_GLOBAL_OFFSET_TABLE_");
+    symbols[1].global = true;
+    relocation.symbol = 1;
+    BUSTER_TEST(arguments, link_native_executable(arguments->arena, &object, options).error == LINK_ERROR_NONE);
+
+    memcpy(symbols, original_symbols, sizeof(symbols));
+    relocation.symbol = object.symbol_count;
+    BUSTER_TEST(arguments, link_native_executable(arguments->arena, &object, options).error == LINK_ERROR_RELOCATION);
+    relocation.symbol = 2;
+    object.target.cpu_arch = CPU_ARCH_AARCH64;
+    BUSTER_TEST(arguments, link_native_executable(arguments->arena, &object, options).error == LINK_ERROR_UNRESOLVED_SYMBOL);
+
+    return result;
+}
+
 UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult got_marker = link_test_unused_got_marker(arguments);
+    result.succeeded_test_count += got_marker.succeeded_test_count;
+    result.test_count += got_marker.test_count;
     UnitTestResult initialized = link_test_merged_section_initialization(arguments);
     result.succeeded_test_count += initialized.succeeded_test_count;
     result.test_count += initialized.test_count;

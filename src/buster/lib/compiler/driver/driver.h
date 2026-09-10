@@ -135,6 +135,8 @@ struct CompilerDriverInvocation
     bool disable_local_promotion;
     bool disable_target_local_promotion;
     bool verify_codegen;
+    bool sysv_unnamed_bitfields_integer;
+    bool sysv_bitfield_abi_explicit;
     // A CodegenRegisterAllocatorMode value. FAST is the driver default;
     // -fregister-allocator= selects another mode and
     // -fno-register-allocator selects NONE.

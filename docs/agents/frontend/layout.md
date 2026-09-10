@@ -99,10 +99,18 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `struct __attribute__((packed)) { char lead; int value : 20; char tail; }`
   came back through a hidden pointer where System V returns them in `rax`
   (issue #721); a program agreed with itself and disagreed with the object
-  next to it. An *unnamed* bit-field is padding for this and contributes no
-  class at all, which is observable beside a float: clang returns
-  `struct { float f; int : 20; }` in `xmm0` and the same record with the field
-  named in `rax`. The class is always INTEGER, since C admits no bit-field of
+  next to it. An *unnamed* nonzero-width field has a versioned interoperability
+  boundary (GitHub #391): measured Clang 18.1.3 treats it as padding, while
+  GCC 13.3 merges INTEGER. For `struct { float f; int : 20; }`, that changes
+  an argument from `xmm0` to `rdi` and a result from `xmm0` to `rax`.
+  Buster preserves its historical padding default and exposes
+  `-fsysv-unnamed-bitfields=integer|padding` for explicit selection. Zero-width
+  fields remain padding. [LLVM #216777](https://github.com/llvm/llvm-project/pull/216777)
+  adopted GCC's behavior, and [LLVM #220788](https://github.com/llvm/llvm-project/pull/220788)
+  added `-fclang-abi-compat=23` to restore the older behavior; a compiler's major
+  version alone is therefore not proof of the selected convention. These are
+  upstream implementation records, not a claim that every Clang release has
+  the change. The class is always INTEGER, since C admits no bit-field of
   floating type. AArch64 never asked: its aggregates up to sixteen bytes take
   INTEGER parts by size once `ir_homogeneous_float_abi` declines them.
   **A union member starts at bit zero whichever kind it is**, so a union sizes

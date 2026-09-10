@@ -43766,6 +43766,12 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
     *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);
+    if (options.sysv_unnamed_bitfields_integer)
+    {
+        IrAbiContext* context = program->abi_contexts + IR_ABI_CONVENTION_SYSTEMV_X86_64;
+        *context = ir_abi_context_initialize(arena, &program->types, IR_ABI_CONVENTION_SYSTEMV_X86_64);
+        context->sysv_unnamed_bitfields_integer = true;
+    }
     program->data_layout = c_preprocess_detail(preprocess)->data_layout;
     if (!target_data_layout_is_valid(program->data_layout))
     {
