@@ -1,0 +1,186 @@
+name: A03 incoming-read correction evidence
+on:
+  push:
+    branches: [astra/a03-20260909-transport]
+    paths: [.github/workflows/a03-incoming-validation.yml]
+permissions:
+  contents: read
+env:
+  BASE: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+  BUSTER_TEST_JOBS: '1'
+  BUSTER_MATRIX_THREADS: '1'
+  CMAKE_BUILD_PARALLEL_LEVEL: '1'
+  UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+  TEST_PATCH: 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
+  FIX_PATCH: eNqVk21P2zAQx9/nU5zgDShNKwZiQ9OkZjSwSrSdCkJ70JQ69qWxcOzIdp828d13TlvYtCFtfeM69/S/352TJAHWc5b3ioXzaHtKFj1u6kYqunAjcI66VzNeSY1dHsVxDMV/+Pf7kFycnXXOIQ7Ha+j3I9j/uprVCO/g9k0+HA/vhunN8Es2PTpg52e5MkzkUlNqqecHx51fokyDlmmRc7PQnsJP/maUujRk+zFKLz8Mx1k++ZhN0/EgH2RX4Xqdjel+89iJ4qfQGmtjNzmWJfKQdx86ykaT6ec8u7rKLu/yaZYOdgUfd+fXvWdKwu/T/Da9z76F4v/W6pLlji0xNJm04xCGux4jkN49oazFjv0LxgD65OJV5xTicJyc7kgrqR+g2EBb3zJfoQVfMQ0FEliwuLLSe9RdGHq6KbZGRw4IfmVAaiEtwQiJfGWRiUQZzhTUNGjloGD8AbyB9mOCa+RQGtuGu7YeMmd0iD6aBSE5qjJvi+TbdHkbOTvuRnEUHx7CcDdwYHa+qKnHkEK4YH1vfAWzPelPxO1mkg6I5uVkNBxfz4Cm/mxP/7QL5IpZjOLZy4OddeGuQmlB1o2SXHooLTWSBM1eLhGYEBadg4o50CaKS7lGAc4TiMQp40EKUi39pgPObEHwCsVCBezUi2/h1kDhC/2gzUrDdu2C/CjmFZN67zIP/z3gEsncIM2CwLRFGOckogtjQ6BoBTzNaGExcQ1yWUp6ps9Vcc2x8dJokCQZUaBom9yJZkqSFo+OlOF627TaEHZu5lp+J1z7R7gdRdgJDGKoTfIzZdgmT014Jphnb8GEFVtJR6ygls6FSIGOW9l4Y6O4IKj0cpUAIR1rGmSWIJsaijDg34mFkUq/lQfGMq6wG/0E7s6Htg==
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Materialize hash-checked source changes on frozen baseline
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a03"
+          python3 - <<'PY'
+          import os, base64, zlib, hashlib
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'a03'
+          for name, expected in [('TEST', '2b3c616e9e6450fff68eb9850e4646367389800d740ddc987476901e0e5dbd3c'), ('FIX', 'd0538ceefed8bbc95c399b36a06ef645bc3f60daa07a78c04f6e9befee6ef30a')]:
+              data = zlib.decompress(base64.b64decode(os.environ[name + '_PATCH']))
+              assert hashlib.sha256(data).hexdigest() == expected
+              (root / (name.lower() + '.patch')).write_bytes(data)
+          PY
+          git checkout --detach "$BASE"
+          git apply "$RUNNER_TEMP/a03/test.patch"
+          git diff --check
+          clang --version | tee "$RUNNER_TEMP/a03/clang.txt"
+          gcc --version | tee "$RUNNER_TEMP/a03/gcc.txt"
+          uname -a | tee "$RUNNER_TEMP/a03/host.txt"
+      - name: Independent defined-C execution controls
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/a03/oracles.log") 2>&1
+          for cc in clang gcc; do
+            for opt in 0 2; do
+              "$cc" -std=c17 -O"$opt" -Wall -Wextra -Werror -fwrapv -funsigned-char -fno-strict-aliasing -fsanitize=address,undefined -fno-sanitize-recover=all tests/basic_c_machine_alias.c -o "$RUNNER_TEMP/a03/control-$cc-$opt"
+              "$RUNNER_TEMP/a03/control-$cc-$opt"
+              printf 'PASS %s O%s native execution\n' "$cc" "$opt"
+            done
+          done
+      - name: Build baseline with new invariants only
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/a03/baseline-build.log") 2>&1
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --config Release --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j1
+      - name: Require the baseline intermediate-invariant failure
+        run: |
+          set -euo pipefail
+          status=0
+          build/Release/ide test --verbose=1 --ci=1 > "$RUNNER_TEMP/a03/baseline-tests.log" 2>&1 || status=$?
+          printf '%s\n' "$status" > "$RUNNER_TEMP/a03/baseline-status.txt"
+          cat "$RUNNER_TEMP/a03/baseline-tests.log"
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'a03'
+          assert (root / 'baseline-status.txt').read_text().strip() == '1'
+          text = re.sub(r'\x1b\[[0-9;]*m', '', (root / 'baseline-tests.log').read_text())
+          failures = [line.split(' failed at ')[0].strip() for line in text.splitlines() if ' failed at ' in line]
+          required = {'machine_opcode_memory_effect(machine_opcode_info(incoming_opcode)) == MACHINE_MEMORY_EFFECT_READ', '(machine_opcode_row_table()[incoming_opcode].schedule_flags & MACHINE_SCHEDULE_UNIT_MEMORY) != 0', 'opcode_rows[opcode].schedule_flags == schedule_memberships[opcode]'}
+          assert required <= set(failures), failures
+          assert set(failures) <= required | {'memory_order'}, failures
+          (root / 'baseline-negative.txt').write_text('\n'.join(failures) + '\n')
+          PY
+      - name: Apply correction and run full Release regressions
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/a03/candidate-tests.log") 2>&1
+          git apply "$RUNNER_TEMP/a03/fix.patch"
+          git diff --check
+          git diff --binary > "$RUNNER_TEMP/a03/submitted.patch"
+          sha256sum src/buster/lib/compiler/codegen/machine.c src/buster/tests/compiler/codegen/machine_test.c tests/basic_c_machine_alias.c docs/agents/machine.md > "$RUNNER_TEMP/a03/source-sha256.txt"
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all -- -j1
+      - name: Existing native configuration differential harness
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/a03/differential.log") 2>&1
+          "$RUNNER_TEMP/buster-build" test_differential --self-test
+          "$RUNNER_TEMP/buster-build" test_differential --ide build/Release/ide --cc clang --source tests/basic_c_machine_alias.c --out "$RUNNER_TEMP/a03/differential" --sanitize-oracle
+      - name: Strict native machine-path execution in every mode
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/a03/strict-modes.log") 2>&1
+          for mode in none mir-stack fast quality; do
+            for ssa in -ffrontend-ssa -fno-frontend-ssa; do
+              extra=()
+              if [[ "$mode" != none ]]; then extra=(-fno-machine-fallback); fi
+              build/Release/ide cc -fverify-codegen -fregister-allocator="$mode" "$ssa" "${extra[@]}" tests/basic_c_machine_alias.c -o "$RUNNER_TEMP/a03/native-program"
+              "$RUNNER_TEMP/a03/native-program"
+              printf 'PASS %s %s native execution\n' "$mode" "$ssa"
+            done
+          done
+      - name: Existing target and execution-mode matrix
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/a03/modes.log"
+      - name: Supported x86-64 self-host gates
+        if: ${{ matrix.runner == 'ubuntu-26.04' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/a03/self-host.log"
+          "$RUNNER_TEMP/buster-build" test_self_host_audit --config Release 2>&1 | tee "$RUNNER_TEMP/a03/self-host-audit.log"
+      - name: Retain bounded evidence without executable outputs
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a03-evidence"
+          if [[ -d "$RUNNER_TEMP/a03" ]]; then
+            find "$RUNNER_TEMP/a03" -type f \( -name '*.log' -o -name '*.txt' -o -name '*.tsv' -o -name '*.argv' -o -name '*.stdout' -o -name '*.stderr' -o -name '*.c' -o -name '*.patch' \) -exec cp --parents '{}' "$RUNNER_TEMP/a03-evidence/" \;
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a03-incoming-${{ matrix.runner }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/a03-evidence
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Recheck baseline and publish a new implementation branch only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/buster14a/buster/branches/main --jq .commit.sha)" = "$BASE"
+          branch=astra/99-aarch64-incoming-read
+          existing=$(git ls-remote --heads origin "$branch")
+          test -z "$existing"
+          mkdir -p "$RUNNER_TEMP/a03-publish"
+          gh api --paginate --slurp 'repos/buster14a/buster/pulls?state=open&per_page=100' > "$RUNNER_TEMP/a03-publish/open-prs.json"
+          gh api --paginate --slurp 'repos/buster14a/buster/issues/99/comments?per_page=100' > "$RUNNER_TEMP/a03-publish/coordination.json"
+          python3 - <<'PY'
+          import os, base64, zlib, hashlib
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'a03-publish'
+          for name, expected in [('TEST', '2b3c616e9e6450fff68eb9850e4646367389800d740ddc987476901e0e5dbd3c'), ('FIX', 'd0538ceefed8bbc95c399b36a06ef645bc3f60daa07a78c04f6e9befee6ef30a')]:
+              data = zlib.decompress(base64.b64decode(os.environ[name + '_PATCH']))
+              assert hashlib.sha256(data).hexdigest() == expected
+              (root / (name.lower() + '.patch')).write_bytes(data)
+          PY
+          git checkout --detach "$BASE"
+          git apply "$RUNNER_TEMP/a03-publish/test.patch" "$RUNNER_TEMP/a03-publish/fix.patch"
+          git diff --check
+          git add src/buster/lib/compiler/codegen/machine.c src/buster/tests/compiler/codegen/machine_test.c tests/basic_c_machine_alias.c docs/agents/machine.md
+          git -c user.name=ChatGPT -c user.email=chatgpt@users.noreply.github.com commit -m 'aarch64: classify incoming argument loads as memory reads (#99)'
+          test "$(gh api repos/buster14a/buster/branches/main --jq .commit.sha)" = "$BASE"
+          git push origin "HEAD:refs/heads/$branch"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/a03-publish/submitted-sha.txt"
+          git show --stat --oneline HEAD >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a03-published-${{ github.run_id }}
+          path: ${{ runner.temp }}/a03-publish
+          if-no-files-found: error
+          retention-days: 7
