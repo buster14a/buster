@@ -31,7 +31,7 @@
 //   object_read_mach_o64, object_read              and their dispatcher
 //   object_bytes_are_object, object_archive_read   archives and detection
 //   object_symbol_name_slot                        symbol-name interning
-//   object_windows_x64_unwind_build                Windows unwind info from
+//   object_windows_x64_unwind_layout/build         Windows unwind info from
 //                                                  codegen unwind actions
 //   object_relocation_kind_from_codegen            codegen -> format
 //                                                  relocation mapping
@@ -8574,154 +8574,133 @@ struct ObjectWindowsUnwindResult
     u8 reserved[2];
 };
 
+// A frame register describes RSP at its establishment instruction, not at
+// the end of the prologue. Both current x64 producers establish it before
+// allocation only for fixed-RSP bodies. Those frames use PUSH/ALLOC/SAVE
+// alone, as large fixed frames already did; SAVE offsets remain relative to
+// the final RSP. Dynamic-stack functions establish RBP after fixed allocation
+// and must retain SET_FPREG, including its actual displacement.
+typedef struct ObjectWindowsX64UnwindLayout ObjectWindowsX64UnwindLayout;
+struct ObjectWindowsX64UnwindLayout
+{
+    u32 frame_action;
+    u32 frame_offset;
+    u32 slot_count;
+    bool encode_frame;
+    bool valid;
+};
+
+BUSTER_GLOBAL_LOCAL ObjectWindowsX64UnwindLayout object_windows_x64_unwind_layout(CodegenFunctionDescriptor* function)
+{
+    ObjectWindowsX64UnwindLayout result = {
+        .frame_action = UINT32_MAX,
+        .valid = function->prolog_size <= UINT8_MAX && (!function->unwind_action_count || function->unwind_actions),
+    };
+    bool allocation_after_frame = false;
+    u64 displaced_frame_offset = 0;
+    for (u32 action_index = 0; result.valid && action_index < function->unwind_action_count; action_index += 1)
+    {
+        CodegenUnwindAction* action = function->unwind_actions + action_index;
+        result.valid = action->code_offset <= UINT8_MAX && action->register_index <= 15;
+        if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
+        {
+            result.slot_count += 1;
+        }
+        else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
+        {
+            result.valid &= result.frame_action == UINT32_MAX;
+            result.frame_action = action_index;
+            result.frame_offset = action->value;
+            displaced_frame_offset = action->value;
+        }
+        else if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
+        {
+            result.valid &= action->value % 8 == 0;
+            result.slot_count += action->value <= 128 ? 1 : action->value <= 524280 ? 2 : 3;
+            if (result.frame_action != UINT32_MAX)
+            {
+                allocation_after_frame = true;
+                // Retain the existing overflow rejection without treating
+                // later allocation as part of the SET_FPREG displacement.
+                displaced_frame_offset += action->value;
+                result.valid &= displaced_frame_offset <= UINT32_MAX;
+            }
+        }
+        else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
+        {
+            result.valid &= action->value % 8 == 0;
+            result.slot_count += action->value <= 524280 ? 2 : 3;
+        }
+        else
+        {
+            result.valid = false;
+        }
+        result.valid &= result.slot_count <= UINT8_MAX;
+    }
+    result.encode_frame = result.frame_action != UINT32_MAX && !allocation_after_frame &&
+                          result.frame_offset <= 240 && result.frame_offset % 16 == 0;
+    result.slot_count += result.encode_frame;
+    result.valid &= result.slot_count <= UINT8_MAX;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Arena* arena, CodegenFunctionDescriptor* functions, u32 function_count)
 {
     ObjectWindowsUnwindResult result = {
         .function_count = function_count,
     };
-    if (arena && (!function_count || functions) && function_count <= UINT32_MAX / 12)
+    bool valid = arena && (!function_count || functions) && function_count <= UINT32_MAX / 12;
+    if (valid)
     {
         result.xdata_offsets = arena_allocate(arena, u32, function_count);
         u64 xdata_size = 0;
-        for (u32 function_index = 0; function_index < function_count; function_index += 1)
+        for (u32 function_index = 0; valid && function_index < function_count; function_index += 1)
+        {
+            ObjectWindowsX64UnwindLayout layout = object_windows_x64_unwind_layout(functions + function_index);
+            u64 record_size = align_forward(4 + (u64)layout.slot_count * 2, 4);
+            valid = layout.valid && xdata_size <= UINT32_MAX && record_size <= UINT32_MAX - xdata_size;
+            if (valid)
+            {
+                result.xdata_offsets[function_index] = (u32)xdata_size;
+                xdata_size += record_size;
+            }
+        }
+        if (valid)
+        {
+            result.pdata = (ByteSlice){
+                .pointer = arena_allocate(arena, u8, (u64)function_count * 12),
+                .length = (u64)function_count * 12,
+            };
+            result.xdata = (ByteSlice){
+                .pointer = arena_allocate(arena, u8, xdata_size),
+                .length = xdata_size,
+            };
+            if (result.pdata.length)
+            {
+                memset(result.pdata.pointer, 0, result.pdata.length);
+            }
+            if (result.xdata.length)
+            {
+                memset(result.xdata.pointer, 0, result.xdata.length);
+            }
+        }
+        for (u32 function_index = 0; valid && function_index < function_count; function_index += 1)
         {
             CodegenFunctionDescriptor* function = functions + function_index;
-            if (function->prolog_size > UINT8_MAX)
-            {
-                return result;
-            }
-            u32 frame_action = UINT32_MAX;
-            u32 frame_offset = 0;
-            u32 unwind_slot_count = 0;
-            for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
-            {
-                CodegenUnwindAction* action = function->unwind_actions + action_index;
-                if (action->code_offset > UINT8_MAX || action->register_index > 15)
-                {
-                    return result;
-                }
-                if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
-                {
-                    unwind_slot_count += 1;
-                }
-                else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
-                {
-                    if (frame_action != UINT32_MAX)
-                    {
-                        return result;
-                    }
-                    frame_action = action_index;
-                    frame_offset = action->value;
-                }
-                else if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
-                {
-                    if (action->value % 8)
-                    {
-                        return result;
-                    }
-                    unwind_slot_count += action->value <= 128 ? 1 : action->value <= 524280 ? 2 : 3;
-                    if (frame_action != UINT32_MAX)
-                    {
-                        if (action->value > UINT32_MAX - frame_offset)
-                        {
-                            return result;
-                        }
-                        frame_offset += action->value;
-                    }
-                }
-                else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
-                {
-                    if (action->value % 8)
-                    {
-                        return result;
-                    }
-                    unwind_slot_count += action->value <= 524280 ? 2 : 3;
-                }
-                else
-                {
-                    return result;
-                }
-                if (unwind_slot_count > UINT8_MAX)
-                {
-                    return result;
-                }
-            }
-            bool encode_frame = frame_action != UINT32_MAX && frame_offset <= 240 && frame_offset % 16 == 0;
-            unwind_slot_count += encode_frame;
-            if (unwind_slot_count > UINT8_MAX)
-            {
-                return result;
-            }
-            result.xdata_offsets[function_index] = (u32)xdata_size;
-            u64 record_size = align_forward(4 + (u64)unwind_slot_count * 2, 4);
-            if (xdata_size > UINT32_MAX || record_size > UINT32_MAX - xdata_size)
-            {
-                return result;
-            }
-            xdata_size += record_size;
-        }
-        result.pdata = (ByteSlice){
-            .pointer = arena_allocate(arena, u8, (u64)function_count * 12),
-            .length = (u64)function_count * 12,
-        };
-        result.xdata = (ByteSlice){
-            .pointer = arena_allocate(arena, u8, xdata_size),
-            .length = xdata_size,
-        };
-        if (result.pdata.length)
-        {
-            memset(result.pdata.pointer, 0, result.pdata.length);
-        }
-        if (result.xdata.length)
-        {
-            memset(result.xdata.pointer, 0, result.xdata.length);
-        }
-        for (u32 function_index = 0; function_index < function_count; function_index += 1)
-        {
-            CodegenFunctionDescriptor* function = functions + function_index;
-            u32 frame_action = UINT32_MAX;
-            u32 frame_offset = 0;
-            u32 unwind_slot_count = 0;
-            for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
-            {
-                CodegenUnwindAction* action = function->unwind_actions + action_index;
-                if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
-                {
-                    unwind_slot_count += 1;
-                }
-                else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
-                {
-                    frame_action = action_index;
-                    frame_offset = action->value;
-                }
-                else if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
-                {
-                    unwind_slot_count += action->value <= 128 ? 1 : action->value <= 524280 ? 2 : 3;
-                    if (frame_action != UINT32_MAX)
-                    {
-                        frame_offset += action->value;
-                    }
-                }
-                else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
-                {
-                    unwind_slot_count += action->value <= 524280 ? 2 : 3;
-                }
-            }
-            bool encode_frame = frame_action != UINT32_MAX && frame_offset <= 240 && frame_offset % 16 == 0;
-            unwind_slot_count += encode_frame;
+            ObjectWindowsX64UnwindLayout layout = object_windows_x64_unwind_layout(function);
             u8* record = result.xdata.pointer + result.xdata_offsets[function_index];
             record[0] = 1;
             record[1] = (u8)function->prolog_size;
-            record[2] = (u8)unwind_slot_count;
-            if (encode_frame)
+            record[2] = (u8)layout.slot_count;
+            if (layout.encode_frame)
             {
-                record[3] = (u8)(functions[function_index].unwind_actions[frame_action].register_index | ((frame_offset / 16) << 4));
+                record[3] = (u8)(functions[function_index].unwind_actions[layout.frame_action].register_index | ((layout.frame_offset / 16) << 4));
             }
             u32 cursor = 4;
             for (u32 action_index = function->unwind_action_count; action_index > 0; action_index -= 1)
             {
                 CodegenUnwindAction* action = function->unwind_actions + action_index - 1;
-                if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER && !encode_frame)
+                if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER && !layout.encode_frame)
                 {
                     continue;
                 }
@@ -8747,10 +8726,6 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Ar
                     }
                     else
                     {
-                        if (action->value > UINT32_MAX)
-                        {
-                            return result;
-                        }
                         record[cursor + 1] = (u8)((action->register_index << 4) | 5);
                         u32 far_offset = (u32)action->value;
                         memcpy(record + cursor + 2, &far_offset, sizeof(far_offset));
@@ -8776,14 +8751,10 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Ar
                     cursor += 6;
                 }
             }
-            if (cursor != 4 + unwind_slot_count * 2)
-            {
-                return (ObjectWindowsUnwindResult){0};
-            }
+            valid = cursor == 4 + layout.slot_count * 2;
         }
-        result.valid = true;
     }
-
+    result.valid = valid;
     return result;
 }
 

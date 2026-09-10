@@ -1062,6 +1062,202 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(Arena* arena)
               "        padding[0] != (unsigned char)pressure || padding[39999] != (unsigned char)(pressure >> 8)) { return -2; }"
               "    return frame_count;"
               "}"
+              ""),
+        S8("/* Native Windows checks use instruction bytes, not unwind codes, to construct\n"
+              "   each interrupted context. No test code executes on the synthetic stack. */\n"
+              "static RuntimeU64 runtime_fixed_boundaries;\n"
+              "static RuntimeU64 runtime_fixed_saved_mask;\n"
+              "static RuntimeU64 runtime_fixed_failure;\n"
+              "static RuntimeU64 runtime_fixed_original(RuntimeU32 reg)\n"
+              "{\n"
+              "    return 0x12340000ULL + reg;\n"
+              "}\n"
+              "static int runtime_fixed_at(RuntimeFunction* entry, RuntimeU64 image, RuntimeU64 pc, RuntimeU64* registers, RuntimeU64 entry_sp)\n"
+              "{\n"
+              "    RuntimeU64 storage[156];\n"
+              "    RuntimeContext* context = (RuntimeContext*)(((RuntimeU64)(void*)storage + 15) & ~(RuntimeU64)15);\n"
+              "    unsigned char* bytes = (unsigned char*)context;\n"
+              "    for (RuntimeU32 index = 0; index < sizeof(*context); index += 1) { bytes[index] = 0; }\n"
+              "    context->context_flags = 0x10000b;\n"
+              "    context->rbx = registers[3]; context->rsp = registers[4]; context->rbp = registers[5];\n"
+              "    context->rsi = registers[6]; context->rdi = registers[7];\n"
+              "    context->r12 = registers[12]; context->r13 = registers[13]; context->r14 = registers[14]; context->r15 = registers[15];\n"
+              "    context->rip = pc;\n"
+              "    void* handler_data = 0;\n"
+              "    RuntimeU64 establisher_frame = 0;\n"
+              "    RtlVirtualUnwind(0, image, pc, entry, context, &handler_data, &establisher_frame, 0);\n"
+              "    runtime_fixed_boundaries += 1;\n"
+              "    int valid = context->rip == (RuntimeU64)(void*)main + 16 && context->rsp == entry_sp + 8 &&\n"
+              "                context->rbx == runtime_fixed_original(3) && context->rbp == runtime_fixed_original(5) &&\n"
+              "                context->rsi == runtime_fixed_original(6) && context->rdi == runtime_fixed_original(7) &&\n"
+              "                context->r12 == runtime_fixed_original(12) && context->r13 == runtime_fixed_original(13) &&\n"
+              "                context->r14 == runtime_fixed_original(14) && context->r15 == runtime_fixed_original(15);\n"
+              "    if (!valid) { runtime_fixed_failure = pc - image - entry->begin_address + 1; }\n"
+              "    return valid;\n"
+              "}\n"
+              "static int runtime_fixed_function(void* function)\n"
+              "{\n"
+              "    RuntimeU64 image = 0;\n"
+              "    RuntimeFunction* entry = RtlLookupFunctionEntry((RuntimeU64)function + 1, &image, 0);\n"
+              "    int valid = entry != 0 && image != 0;\n"
+              "    if (valid)\n"
+              "    {\n"
+              "        unsigned char* code = (unsigned char*)(image + entry->begin_address);\n"
+              "        unsigned char* unwind = (unsigned char*)(image + entry->unwind_data);\n"
+              "        RuntimeU32 prolog = unwind[1];\n"),
+        S8("        RuntimeU32 length = entry->end_address - entry->begin_address;\n"
+              "        RuntimeU64 stack[2050];\n"
+              "        for (RuntimeU32 index = 0; index < 2050; index += 1) { stack[index] = (RuntimeU64)(void*)main + 16; }\n"
+              "        RuntimeU64 low = (RuntimeU64)(void*)stack;\n"
+              "        RuntimeU64 entry_sp = ((RuntimeU64)(void*)(stack + 2048) & ~(RuntimeU64)15) - 8;\n"
+              "        RuntimeU64 registers[16];\n"
+              "        for (RuntimeU32 reg = 0; reg < 16; reg += 1) { registers[reg] = runtime_fixed_original(reg); }\n"
+              "        registers[4] = entry_sp;\n"
+              "        RuntimeU32 pushed[16]; RuntimeU32 push_count = 0;\n"
+              "        RuntimeU32 pushed_mask = 0; RuntimeU32 saved_mask = 0;\n"
+              "        RuntimeU64 allocation = 0;\n"
+              "        RuntimeU32 offset = 0;\n"
+              "        valid = prolog > 0 && prolog < length;\n"
+              "        while (valid && offset <= prolog)\n"
+              "        {\n"
+              "            valid = runtime_fixed_at(entry, image, (RuntimeU64)(void*)(code + offset), registers, entry_sp);\n"
+              "            if (offset == prolog) { break; }\n"
+              "            RuntimeU32 cursor = offset;\n"
+              "            RuntimeU32 rex = 0;\n"
+              "            if (code[cursor] >= 0x40 && code[cursor] <= 0x4f) { rex = code[cursor++]; }\n"
+              "            valid = valid && cursor < prolog;\n"
+              "            if (valid && code[cursor] >= 0x50 && code[cursor] <= 0x57)\n"
+              "            {\n"
+              "                RuntimeU32 reg = (code[cursor] & 7) + ((rex & 1) ? 8 : 0);\n"
+              "                valid = push_count < 16 && registers[4] >= low + 8;\n"
+              "                if (valid)\n"
+              "                {\n"
+              "                    registers[4] -= 8;\n"
+              "                    *(RuntimeU64*)registers[4] = registers[reg];\n"
+              "                    pushed[push_count++] = reg;\n"
+              "                    pushed_mask |= 1u << reg;\n"
+              "                    offset = cursor + 1;\n"
+              "                }\n"
+              "            }\n"
+              "            else if (valid && rex == 0x48 && cursor + 2 <= prolog && code[cursor] == 0x89 && code[cursor + 1] == 0xe5)\n"
+              "            {\n"
+              "                registers[5] = registers[4]; offset = cursor + 2;\n"
+              "            }\n"
+              "            else if (valid && rex == 0x48 && cursor + 3 <= prolog &&\n"
+              "                     (code[cursor] == 0x81 || code[cursor] == 0x83) && code[cursor + 1] == 0xec)\n"
+              "            {\n"
+              "                RuntimeU32 immediate_size = code[cursor] == 0x81 ? 4 : 1;\n"
+              "                valid = cursor + 2 + immediate_size <= prolog;\n"
+              "                if (valid)\n"
+              "                {\n"),
+        S8("                    RuntimeU64 amount = immediate_size == 4 ? runtime_unwind_read_u32(code + cursor + 2) : code[cursor + 2];\n"
+              "                    valid = amount > 0 && amount <= registers[4] - low;\n"
+              "                    if (valid) { registers[4] -= amount; allocation += amount; offset = cursor + 2 + immediate_size; }\n"
+              "                }\n"
+              "            }\n"
+              "            else if (valid && !rex && cursor + 4 <= prolog && code[cursor] == 0xf6 && code[cursor + 1] == 4 && code[cursor + 2] == 0x24 && code[cursor + 3] == 0)\n"
+              "            {\n"
+              "                offset = cursor + 4;\n"
+              "            }\n"
+              "            else if (valid && (rex == 0x48 || rex == 0x4c) && cursor + 3 <= prolog && code[cursor] == 0x89 &&\n"
+              "                     ((code[cursor + 1] & 0xc7) == 0x45 || (code[cursor + 1] & 0xc7) == 0x85))\n"
+              "            {\n"
+              "                RuntimeU32 displacement_size = (code[cursor + 1] & 0xc0) == 0x40 ? 1 : 4;\n"
+              "                valid = cursor + 2 + displacement_size <= prolog;\n"
+              "                if (valid)\n"
+              "                {\n"
+              "                    int displacement = displacement_size == 1 ? (int)(signed char)code[cursor + 2] : (int)runtime_unwind_read_u32(code + cursor + 2);\n"
+              "                    RuntimeU32 reg = ((code[cursor + 1] >> 3) & 7) + ((rex & 4) ? 8 : 0);\n"
+              "                    RuntimeU64 address = registers[5] + (RuntimeU64)(long long)displacement;\n"
+              "                    valid = address >= low && address <= entry_sp - 8 && address % 8 == 0;\n"
+              "                    if (valid)\n"
+              "                    {\n"
+              "                        *(RuntimeU64*)address = registers[reg]; saved_mask |= 1u << reg;\n"
+              "                        offset = cursor + 2 + displacement_size;\n"
+              "                    }\n"
+              "                }\n"
+              "            }\n"
+              "            else { valid = 0; }\n"
+              "        }\n"
+              "        if (valid)\n"
+              "        {\n"
+              "            // The body may clobber saved registers; unwinding must recover\n"
+              "            // their originals from the actual push/store locations.\n"
+              "            for (RuntimeU32 reg = 0; reg < 16; reg += 1)\n"
+              "            {\n"
+              "                if (reg != 5 && ((pushed_mask | saved_mask) & (1u << reg))) { registers[reg] ^= 0x56780000ULL; }\n"
+              "            }\n"
+              "            runtime_fixed_saved_mask |= pushed_mask | saved_mask;\n"
+              "            valid = allocation > 0 && unwind[3] == 0 && runtime_fixed_at(entry, image, (RuntimeU64)(void*)(code + prolog), registers, entry_sp);\n"
+              "        }\n"
+              "        RuntimeU32 epilog = 0;\n"),
+        S8("        RuntimeU32 add_size = allocation <= 127 ? 4 : 7;\n"
+              "        // Match the actual fixed-stack epilogue, including every saved GPR.\n"
+              "        for (RuntimeU32 start = prolog; valid && start + add_size < length; start += 1)\n"
+              "        {\n"
+              "            RuntimeU32 cursor = start + add_size;\n"
+              "            int matches = code[start] == 0x48 && code[start + 1] == (add_size == 4 ? 0x83 : 0x81) && code[start + 2] == 0xc4 &&\n"
+              "                          (add_size == 4 ? code[start + 3] : runtime_unwind_read_u32(code + start + 3)) == allocation;\n"
+              "            for (RuntimeU32 index = push_count; matches && index > 0; index -= 1)\n"
+              "            {\n"
+              "                RuntimeU32 reg = pushed[index - 1];\n"
+              "                if (reg >= 8) { matches = cursor < length && code[cursor++] == 0x41; }\n"
+              "                matches = matches && cursor < length && code[cursor++] == 0x58 + (reg & 7);\n"
+              "            }\n"
+              "            if (matches && cursor < length && code[cursor] == 0xc3) { epilog = start; }\n"
+              "        }\n"
+              "        if (valid)\n"
+              "        {\n"
+              "            valid = epilog != 0;\n"
+              "            for (RuntimeU32 reg = 0; reg < 16; reg += 1)\n"
+              "            {\n"
+              "                if (saved_mask & (1u << reg)) { registers[reg] = runtime_fixed_original(reg); }\n"
+              "            }\n"
+              "            if (valid) { valid = runtime_fixed_at(entry, image, (RuntimeU64)(void*)(code + epilog), registers, entry_sp); }\n"
+              "            registers[4] += allocation;\n"
+              "            RuntimeU32 cursor = epilog + add_size;\n"
+              "            for (RuntimeU32 index = push_count; valid && index > 0; index -= 1)\n"
+              "            {\n"
+              "                valid = runtime_fixed_at(entry, image, (RuntimeU64)(void*)(code + cursor), registers, entry_sp);\n"
+              "                RuntimeU32 reg = pushed[index - 1];\n"
+              "                registers[reg] = *(RuntimeU64*)registers[4]; registers[4] += 8;\n"
+              "                cursor += reg >= 8 ? 2 : 1;\n"
+              "            }\n"
+              "            if (valid) { valid = runtime_fixed_at(entry, image, (RuntimeU64)(void*)(code + cursor), registers, entry_sp); }\n"
+              "        }\n"
+              "        if (!valid && !runtime_fixed_failure) { runtime_fixed_failure = 0x10000 + offset; }\n"
+              "    }\n"
+              "    return valid;\n"
+              "}\n"
+              "long long runtime_fixed_small(long long x)\n"
+              "{\n"
+              "    volatile long long y = x;\n"
+              "    return y + 1;\n"
+              "}\n"
+              "long long runtime_fixed_saved(long long x)\n"
+              "{\n"
+              "    return runtime_fixed_small(x) + x + runtime_fixed_small(x + 1);\n"
+              "}\n"
+              "long long runtime_fixed_large(long long x)\n"
+              "{\n"
+              "    volatile unsigned char padding[512];\n"),
+        S8("    padding[0] = (unsigned char)x; padding[511] = 7;\n"
+              "    return padding[0] + padding[511];\n"
+              "}\n"
+              "__int128 runtime_fixed_wide(__int128 x)\n"
+              "{\n"
+              "    return x * x;\n"
+              "}\n"
+              "static int runtime_fixed_frames(void)\n"
+              "{\n"
+              "    int valid = runtime_fixed_function((void*)runtime_fixed_small);\n"
+              "    valid = valid && runtime_fixed_function((void*)runtime_fixed_saved);\n"
+              "    valid = valid && runtime_fixed_function((void*)runtime_fixed_large);\n"
+              "    valid = valid && runtime_fixed_function((void*)runtime_fixed_wide);\n"
+              "    valid = valid && (runtime_fixed_saved_mask & ~(1u << 5)) != 0;\n"
+              "    return valid;\n"
+              "}\n"),
+        S8(
               "typedef struct RuntimeReport RuntimeReport;"
               "struct RuntimeReport"
               "{"
@@ -1071,11 +1267,14 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(Arena* arena)
               "    RuntimeU64 body_status; RuntimeU64 large_body_status;"
               "    RuntimeU64 epilog_status; RuntimeU64 epilog_unwind_pc;"
               "    RuntimeU64 large_epilog_status; RuntimeU64 large_epilog_unwind_pc;"
+              "    RuntimeU64 fixed_status; RuntimeU64 fixed_boundaries; RuntimeU64 fixed_saved_mask; RuntimeU64 fixed_failure;"
               "    void* normal_frames[64]; void* large_frames[64];"
               "};"
               "int main(void)"
               "{"
               "    RuntimeReport report;"
+              "    report.fixed_status = runtime_fixed_frames(); report.fixed_boundaries = runtime_fixed_boundaries;"
+              "    report.fixed_saved_mask = runtime_fixed_saved_mask; report.fixed_failure = runtime_fixed_failure;"
               "    report.normal_entry = (void*)stack_walk_normal; report.large_entry = (void*)stack_walk_large; report.main_entry = (void*)main;"
               "    int normal_count = stack_walk_normal(report.normal_frames, 64, 100, 23);"
               "    int large_count = stack_walk_large(report.large_frames, 64, 1, 2, 3, (RuntimeBig){4, 5, 6});"
@@ -1088,7 +1287,7 @@ BUSTER_GLOBAL_LOCAL String8 link_test_runtime_stack_walk_source(Arena* arena)
               "    unsigned long written = 0;"
               "    WriteFile(GetStdHandle(-11), &report, sizeof(report), &written, 0);"
               "    return normal_count > 0 && large_count > 0 && report.semantic_status != 0 && report.body_status != 0 && report.large_body_status != 0 &&"
-              "           report.epilog_status != 0 && report.large_epilog_status != 0 ? 0 : 1;"
+              "           report.epilog_status != 0 && report.large_epilog_status != 0 && report.fixed_status == 1 ? 0 : 1;"
               "}"),
     };
     return string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
@@ -1156,6 +1355,12 @@ struct LinkTestRuntimeReport
     u64 epilog_unwind_pc;
     u64 large_epilog_status;
     u64 large_epilog_unwind_pc;
+#if BUSTER_CPU_ARCH_X86_64
+    u64 fixed_status;
+    u64 fixed_boundaries;
+    u64 fixed_saved_mask;
+    u64 fixed_failure;
+#endif
 #endif
     u64 normal_frames[64];
     u64 large_frames[64];
@@ -1435,12 +1640,13 @@ BUSTER_GLOBAL_LOCAL bool link_test_runtime_frame_contains(u64 const* frames, u64
 }
 
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk_variant(UnitTestArguments* arguments, String8 source_path, String8 output_path,
-                                                                          bool debug_info)
+                                                                          bool debug_info, String8 allocator_option)
 {
     UnitTestResult result = {0};
     String8 command_line[8] = {0};
     u32 command_count = 0;
     command_line[command_count++] = debug_info ? S8("-g") : S8("-g0");
+    command_line[command_count++] = allocator_option;
 #if BUSTER_WINDOWS
     command_line[command_count++] = S8("-l");
     command_line[command_count++] = S8("ntdll");
@@ -1549,6 +1755,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk_variant(UnitTest
                                     (u32)wait.result, wait.platform_status, output.length, report.normal_count, report.large_count);
 #endif
                 }
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
+                if (wait.result != PROCESS_RESULT_SUCCESS)
+                {
+                    arguments->show(arguments, S8("fixed-stack unwind failure: status={u64} boundaries={u64} saved_mask={u64:x} offset={u64:x}\n"),
+                                    report.fixed_status, report.fixed_boundaries, report.fixed_saved_mask, report.fixed_failure);
+                }
+#endif
                 BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS);
                 BUSTER_TEST(arguments, report_size_valid);
                 if (wait.result != PROCESS_RESULT_SUCCESS || !report_size_valid)
@@ -1562,6 +1775,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk_variant(UnitTest
                 BUSTER_TEST(arguments, report.semantic_status == UINT64_C(0x535441434b434f50));
                 BUSTER_TEST(arguments, report.body_status == 1 && report.large_body_status == 1);
 #if BUSTER_CPU_ARCH_X86_64
+                arguments->show(arguments, S8("fixed-stack unwind: status={u64} boundaries={u64} saved_mask={u64:x} failure={u64:x}\n"),
+                                report.fixed_status, report.fixed_boundaries, report.fixed_saved_mask, report.fixed_failure);
+                BUSTER_TEST(arguments, report.fixed_status == 1 && report.fixed_boundaries != 0 && report.fixed_failure == 0);
+                BUSTER_TEST(arguments, (report.fixed_saved_mask & ~(UINT64_C(1) << 5)) != 0);
                 BUSTER_TEST(arguments, report.epilog_status == 1 && report.epilog_unwind_pc != 0);
                 BUSTER_TEST(arguments, report.large_epilog_status == 1 && report.large_epilog_unwind_pc != 0);
 #endif
@@ -1633,10 +1850,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk(UnitTestArgument
     {
         String8 debug_output = link_test_temporary_executable_path(arguments->arena, S8("buster-runtime-stack-walk-debug"), output_suffix);
         String8 no_debug_output = link_test_temporary_executable_path(arguments->arena, S8("buster-runtime-stack-walk-g0"), output_suffix);
-        UnitTestResult debug_result = link_test_runtime_stack_walk_variant(arguments, source_path, debug_output, true);
-        UnitTestResult no_debug_result = link_test_runtime_stack_walk_variant(arguments, source_path, no_debug_output, false);
-        result.succeeded_test_count = debug_result.succeeded_test_count + no_debug_result.succeeded_test_count;
-        result.test_count = debug_result.test_count + no_debug_result.test_count;
+        String8 allocator_options[] = {
+            S8("-fregister-allocator=fast"),
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
+            S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=quality"),
+#endif
+        };
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocator_options); mode += 1)
+        {
+            UnitTestResult debug_result = link_test_runtime_stack_walk_variant(arguments, source_path, debug_output, true, allocator_options[mode]);
+            UnitTestResult no_debug_result = link_test_runtime_stack_walk_variant(arguments, source_path, no_debug_output, false, allocator_options[mode]);
+            result.succeeded_test_count += debug_result.succeeded_test_count + no_debug_result.succeeded_test_count;
+            result.test_count += debug_result.test_count + no_debug_result.test_count;
+        }
     }
     else
     {

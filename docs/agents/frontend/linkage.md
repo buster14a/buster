@@ -4,6 +4,20 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- **Windows x64 frame records describe instruction-time RSP.**
+  `object_windows_x64_unwind_layout` retains SET_FPREG only when no fixed
+  allocation follows frame establishment; its displacement is the action's
+  own value. Current fixed-stack producers establish RBP before allocation
+  and keep RSP stable in the body. They therefore use PUSH/ALLOC/SAVE records
+  without a declared frame register, with SAVE slots relative to final RSP.
+  MIR emits the documented ADD/pops/RET fixed epilogue. The direct dynamic-stack
+  producer allocates first, then establishes RBP, and retains its frame record
+  and LEA epilogue. Do not drop that dynamic-frame information.
+  `object_test.c` pins both action orders, real nonzero frame offsets, saved
+  registers and small/large allocations. The existing native Windows x64
+  stack-walk fixture also checks fixed-frame instruction boundaries using
+  `RtlVirtualUnwind` in all four allocators, with and without debug information
+  (GitHub #363); object parsing alone is not runtime-unwind evidence.
 - **Merged file-backed sections have zeroed background bytes.** `link_objects`
   initializes alignment gaps and each input's virtual tail before copying its
   data, so reused arenas produce the same bytes as fresh mappings. The zeroed

@@ -2157,7 +2157,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 12);
     BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == 12);
     u8 expected_windows_xdata[] = {
-        1, 11, 4, 0x95, 11, 1, 18, 0, 4, 3, 1, 0x50,
+        1, 11, 3, 0, 11, 1, 18, 0, 1, 0x50, 0, 0,
     };
     BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_xdata) &&
                                memcmp(windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.pointer, expected_windows_xdata,
@@ -2181,6 +2181,72 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
         BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+    }
+    // #363: an early RBP establishment cannot be shifted to describe a
+    // later allocation. Pin both prologue orders, SAVE offsets, and the
+    // small/large allocation encodings through the public object path.
+    u32 fixed_sizes[] = {32, 48, 144, 256, 8192};
+    for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(fixed_sizes); size_index += 1)
+    {
+        u32 fixed_size = fixed_sizes[size_index];
+        CodegenUnwindAction actions[] = {
+            {.code_offset = 1, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 5},
+            {.code_offset = 2, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 12},
+            {.code_offset = 5, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 5},
+            {.code_offset = 12, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, .value = fixed_size},
+            {.code_offset = 16, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 3, .value = fixed_size - 8},
+        };
+        CodegenFunctionDescriptor descriptor = windows_unwind_function;
+        descriptor.unwind_actions = actions;
+        descriptor.unwind_action_count = BUSTER_ARRAY_LENGTH(actions);
+        descriptor.prolog_size = 16;
+        CodegenModule module = windows_unwind_module;
+        module.functions = &descriptor;
+        ObjectFile object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &module, windows_unwind_target);
+        u8 expected[16] = {1, 16, (u8)(fixed_size <= 128 ? 5 : 6), 0, 16, 0x34};
+        u16 save_offset = (u16)((fixed_size - 8) / 8);
+        memcpy(expected + 6, &save_offset, sizeof(save_offset));
+        expected[8] = 12;
+        u32 cursor;
+        if (fixed_size <= 128)
+        {
+            expected[9] = (u8)(((fixed_size / 8 - 1) << 4) | 2);
+            cursor = 10;
+        }
+        else
+        {
+            expected[9] = 1;
+            u16 allocation = (u16)(fixed_size / 8);
+            memcpy(expected + 10, &allocation, sizeof(allocation));
+            cursor = 12;
+        }
+        expected[cursor] = 2;
+        expected[cursor + 1] = 0xc0;
+        expected[cursor + 2] = 1;
+        expected[cursor + 3] = 0x50;
+        ByteSlice actual = object.error == OBJECT_ERROR_NONE ? object.sections[OBJECT_SECTION_WINDOWS_XDATA].data : (ByteSlice){0};
+        BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, actual.length == sizeof(expected) && memcmp(actual.pointer, expected, sizeof(expected)) == 0);
+    }
+    // Allocating first is the dynamic-stack producer's contract. The offset
+    // belongs to SET_FRAME_POINTER itself (zero and nonzero legal values).
+    for (u32 frame_offset = 0; frame_offset <= 32; frame_offset += 16)
+    {
+        CodegenUnwindAction actions[] = {
+            {.code_offset = 1, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 5},
+            {.code_offset = 8, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, .value = 144},
+            {.code_offset = 12, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 5, .value = frame_offset},
+        };
+        CodegenFunctionDescriptor descriptor = windows_unwind_function;
+        descriptor.unwind_actions = actions;
+        descriptor.prolog_size = 12;
+        CodegenModule module = windows_unwind_module;
+        module.functions = &descriptor;
+        ObjectFile object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &module, windows_unwind_target);
+        u8 expected[] = {1, 12, 4, (u8)(5 | ((frame_offset / 16) << 4)), 12, 3, 8, 1, 18, 0, 1, 0x50};
+        ByteSlice actual = object.error == OBJECT_ERROR_NONE ? object.sections[OBJECT_SECTION_WINDOWS_XDATA].data : (ByteSlice){0};
+        BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, actual.length == sizeof(expected) && memcmp(actual.pointer, expected, sizeof(expected)) == 0);
     }
     u8 windows_save_code[16] = {0};
     CodegenUnwindAction windows_save_actions[] = {
