@@ -168,7 +168,7 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_all_six_platforms_and_commands_remain(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         names = re.findall(r"^          - name: (.+)$", text, re.M)
-        self.assertEqual(sorted(names), sorted(github_ci_time.PLATFORMS + github_ci_time.MOBILE))
+        self.assertEqual(sorted(names), sorted(github_ci_time.PLATFORMS + github_ci_time.MOBILE + github_ci_time.NATIVE))
         self.assertIn("fail-fast: false", text)
         self.assertIn("test_all_combinations_ci --verbose=1", text)
         self.assertIn("test_mode_matrix --config Release", text)
@@ -202,8 +202,36 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("steps.combinations_", condition)
         mobile = text.split("\n  mobile:", 1)[1].split("\n  complete:", 1)[0]
         self.assertNotIn("needs:", mobile)
-        self.assertIn("needs: [lint, test, mobile]", text)
+        self.assertIn("needs: [lint, test, native, mobile]", text)
         self.assertIn("github.run_id", text.split("concurrency:", 1)[1].split("permissions:", 1)[0])
+
+    def test_native_suites_are_independent_and_keep_all_four_unix_runners(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        desktop = text.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
+        native = text.split("\n  native:", 1)[1].split("\n  mobile:", 1)[0]
+        self.assertNotIn("needs:", native)
+        self.assertNotIn("test_mode_matrix", desktop)
+        self.assertNotIn("test_differential", desktop)
+        self.assertNotIn("test_all_combinations_ci", native)
+        self.assertIn("fail-fast: false", native)
+        self.assertNotIn("actions/download-artifact", native)
+        self.assertIn("BUSTER_CI_REQUIRED: modes differential", native)
+        entries = re.findall(r"(?m)^          - name: (.+)\n            runner: (.+)$", native)
+        self.assertEqual(entries, list(zip(github_ci_time.NATIVE, (
+            "ubuntu-26.04", "ubuntu-26.04-arm", "macos-26-intel", "macos-26"))))
+        for suite in ("modes", "differential"):
+            condition = re.search(r"id: " + suite + r"\n        if: (.+)", native).group(1)
+            self.assertIn("!cancelled()", condition)
+            self.assertIn("steps.checkout.outcome == 'success'", condition)
+            self.assertNotIn("steps.modes", condition)
+            self.assertNotIn("steps.combinations", condition)
+        self.assertEqual(native.count('"$driver" generate --cc clang --config Release --linker DEFAULT'), 2)
+        self.assertIn('if [[ ! -f build/CMakeCache.txt ]]; then', native)
+        self.assertIn('"$driver" test_differential --self-test', native)
+        self.assertIn('"$driver" test_differential --ide build/Release/ide '
+                      '--out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle', native)
+        self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/program", native)
+        self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/subject.o", native)
 
     def test_platform_and_bootstrap_events_cover_the_same_revisions(self):
         expected = ("  pull_request:", "  push:", "    branches: [main]",
@@ -290,10 +318,10 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         aggregate = text.split("\n  complete:", 1)[1]
-        self.assertIn("needs: [lint, test, mobile]", aggregate)
+        self.assertIn("needs: [lint, test, native, mobile]", aggregate)
         self.assertIn("always()", aggregate)
         # Execute the workflow's real shell body, not a Python copy of its
-        # predicate. Subshells contain its exit statements; all 125 outcomes
+        # predicate. Subshells contain its exit statements; all 625 outcomes
         # include empty/missing dependency results as well as terminal states.
         body = aggregate.split("        run: |\n", 1)[1]
         body = textwrap.dedent(body)
@@ -307,16 +335,18 @@ set -eu
 checked=0
 for LINT_RESULT in success failure cancelled skipped ''; do
   for DESKTOP_RESULT in success failure cancelled skipped ''; do
-    for MOBILE_RESULT in success failure cancelled skipped ''; do
-      export LINT_RESULT DESKTOP_RESULT MOBILE_RESULT
+    for NATIVE_RESULT in success failure cancelled skipped ''; do
+     for MOBILE_RESULT in success failure cancelled skipped ''; do
+      export LINT_RESULT DESKTOP_RESULT NATIVE_RESULT MOBILE_RESULT
       actual=0
       ( . "$BUSTER_CI_GATE" ) >/dev/null 2>&1 || actual=$?
-      if [[ "$LINT_RESULT" == success && "$DESKTOP_RESULT" == success && "$MOBILE_RESULT" == success ]]; then
+      if [[ "$LINT_RESULT" == success && "$DESKTOP_RESULT" == success && "$NATIVE_RESULT" == success && "$MOBILE_RESULT" == success ]]; then
         [[ "$actual" -eq 0 ]] || exit 1
       else
         [[ "$actual" -ne 0 ]] || exit 1
       fi
       checked=$((checked + 1))
+     done
     done
   done
 done
@@ -336,7 +366,7 @@ printf '%s\n' "$checked"
             result = subprocess.run([bash, "--noprofile", "--norc", "-c", script], env=environment,
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.strip(), "125")
+            self.assertEqual(result.stdout.strip(), "625")
 
     @unittest.skipIf(os.name == "nt", "The failure-propagation probe uses the Unix Clang driver")
     def test_recoverable_ubsan_error_is_fatal_with_ci_environment(self):
@@ -405,6 +435,48 @@ class TimingTests(unittest.TestCase):
             run = self.sharded_sample()
             run["jobs"].pop(index)
             self.assertIsNone(github_ci_time.measure(run)[0])
+
+    def suite_sample(self):
+        run = self.sharded_sample()
+        for job in run["jobs"]:
+            job["steps"] = [step for step in job["steps"] if step["name"] != "Execution-mode matrix"]
+        for name in github_ci_time.NATIVE:
+            job = copy.deepcopy(run["jobs"][0])
+            job["name"] = name
+            job["steps"] = [{"name": step, "conclusion": "success"} for step in (
+                "Execution-mode matrix", "Native configuration differential matrix")]
+            run["jobs"].append(job)
+        return run
+
+    def test_suite_matrix_counts_all_fifteen_jobs(self):
+        sample, reason = github_ci_time.measure(self.suite_sample())
+        self.assertIsNone(reason)
+        self.assertEqual(sample["runner_seconds"], 900)
+        report = github_ci_time.summarize({"runs": [self.sharded_sample(),
+            dict(self.suite_sample(), id=2)]})
+        self.assertEqual(len(report["cohorts"]), 2)
+
+    def test_suite_matrix_rejects_missing_duplicate_failed_and_skipped_coverage(self):
+        for index in range(len(github_ci_time.SUITE_JOBS)):
+            run = self.suite_sample()
+            run["jobs"].pop(index)
+            self.assertIsNone(github_ci_time.measure(run)[0])
+            run = self.suite_sample()
+            run["jobs"].append(copy.deepcopy(run["jobs"][index]))
+            self.assertIsNone(github_ci_time.measure(run)[0])
+            for conclusion in ("failure", "cancelled", "skipped", None):
+                run = self.suite_sample()
+                run["jobs"][index]["conclusion"] = conclusion
+                self.assertIsNone(github_ci_time.measure(run)[0])
+        for index in range(len(github_ci_time.SHARDED_JOBS), len(github_ci_time.SUITE_JOBS)):
+            for step in range(2):
+                for conclusion in ("failure", "cancelled", "skipped", None):
+                    run = self.suite_sample()
+                    run["jobs"][index]["steps"][step]["conclusion"] = conclusion
+                    self.assertIsNone(github_ci_time.measure(run)[0])
+                run = self.suite_sample()
+                run["jobs"][index]["steps"].pop(step)
+                self.assertIsNone(github_ci_time.measure(run)[0])
 
     def test_known_median_and_queue_are_separate(self):
         data = {"runs": [self.sample(1, 40), self.sample(2, 60), self.sample(3, 80)]}
