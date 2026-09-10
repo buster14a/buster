@@ -1,0 +1,61 @@
+name: Astra PR fixture diagnostics
+on:
+  push:
+    branches: [codex/astra-pr-fixture-diagnostics]
+permissions:
+  contents: read
+jobs:
+  fixture:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: 370
+            runner: ubuntu-26.04
+            source: d72cd8dd28283f89cac78b0e49b0d8529c5405b3
+          - pr: 374
+            runner: ubuntu-26.04
+            source: 14741d52ca7bd8d04cbdcd703e7934cac06b5939
+          - pr: 376
+            runner: macos-26
+            source: 3b24b00f8b0ac3590f8c5df968a6497235152171
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ matrix.source }}
+          persist-credentials: false
+      - name: Compile exact candidate with the repository build driver
+        run: |
+          git rev-parse HEAD
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j1
+      - name: Print bounded fixture diagnostics
+        env:
+          AUDIT_PR: ${{ matrix.pr }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, subprocess
+          pr = int(os.environ["AUDIT_PR"])
+          ide = os.path.abspath("build/Release/ide")
+          cases = {
+              370: [["-c", "-Itests/differential", "tests/differential/qualified_aggregate.c"]],
+              374: [["-std=c23", "-c", "tests/basic_c_constexpr_leaf.c"]],
+              376: [["-Isrc", "-c", "tests/basic_c_simd_translate.c"],
+                    ["-Isrc", "-DBUSTER_KERNEL=1", "-c", "tests/basic_c_simd_translate.c"],
+                    ["-Isrc", "--target=x86_64-linux-gnu", "-c", "tests/basic_c_simd_translate.c"]],
+          }[pr]
+          failed = False
+          for i, args in enumerate(cases):
+              cmd = [ide, "cc", "-v", *args, "-o", os.path.join(os.environ["RUNNER_TEMP"], "fixture-%d.o" % i)]
+              print("COMMAND", cmd, flush=True)
+              r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+              print(r.stdout, flush=True)
+              print("EXIT", r.returncode, flush=True)
+              failed |= r.returncode != 0
+          raise SystemExit(1 if failed else 0)
+          PY
