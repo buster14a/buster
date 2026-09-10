@@ -79,6 +79,7 @@
 //   c_parse_ast, c_analyze_semantics, c_parse     the stage entry points
 
 #include "c_internal.h"
+#include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 
 BUSTER_C_INTERNAL bool c_declaration_keyword(String8 spelling)
 {
@@ -10578,114 +10579,134 @@ BUSTER_C_INTERNAL bool c_parse_integer_constant_range(CTypeParseMachine* machine
 BUSTER_C_SHARED bool c_parse_validate_constexpr_declaration(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                                 CPreprocessResult preprocess, CDeclaration* declaration)
 {
-    if (!declaration->is_constexpr)
-    {
-        return true;
-    }
-    CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]);
-    if (declaration->kind != C_DECLARATION_OBJECT)
-    {
-        c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_CONSTEXPR, S8("constexpr may only declare an object"));
-        return false;
-    }
-    if (!declaration->is_definition)
-    {
-        c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_CONSTEXPR, S8("constexpr object declaration requires an initializer"));
-        return false;
-    }
-    u32 end = declaration->token_start + declaration->token_count;
-    for (u32 index = declaration->token_start; index < end; index += 1)
-    {
-        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
-        if (string_equal(spelling, S8("extern")) || string_equal(spelling, S8("_Thread_local")) || string_equal(spelling, S8("__thread")))
-        {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[index]), C_DIAGNOSTIC_INVALID_CONSTEXPR,
-                               S8("constexpr cannot be combined with this storage-class specifier"));
-            return false;
-        }
-    }
-    if (declaration->type.value >= result->type_count)
-    {
-        c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_CONSTEXPR, S8("constexpr object has an invalid type"));
-        return false;
-    }
-    Arena* conflicts[] = {
-        arena,
-    };
-    TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-    CTypeId* work = arena_allocate(temporary.arena, CTypeId, result->type_count + result->member_count + 1);
-    bool* visited = arena_allocate(temporary.arena, bool, result->type_count + 1);
-    memset(visited, 0, sizeof(*visited) * (result->type_count + 1));
-    u32 work_count = 1;
-    work[0] = declaration->type;
     bool valid = true;
-    String8 message = {0};
-    while (work_count)
+    if (declaration->is_constexpr)
     {
-        CTypeId type_id = work[--work_count];
-        if (type_id.value >= result->type_count || visited[type_id.value])
+        CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]);
+        String8 message = {0};
+        if (declaration->kind != C_DECLARATION_OBJECT)
         {
-            continue;
+            message = S8("constexpr may only declare an object");
         }
-        visited[type_id.value] = true;
-        CType* type = &result->types[type_id.value];
-        if (type->is_atomic)
+        else if (!declaration->is_definition)
         {
-            valid = false;
-            message = S8("constexpr object or subobject cannot have atomic type");
-            break;
+            message = S8("constexpr object declaration requires an initializer");
         }
-        if (type->is_volatile || type->is_restrict)
+        else
         {
-            valid = false;
-            message = S8("constexpr object or subobject cannot be volatile or restrict-qualified");
-            break;
-        }
-        if (type->kind == C_TYPE_FUNCTION || type->kind == C_TYPE_VOID)
-        {
-            valid = false;
-            message = S8("constexpr requires a complete object type");
-            break;
-        }
-        if (type->kind == C_TYPE_ARRAY)
-        {
-            CTypeId element_type = type->element_type;
-            if (type->array_bound >= result->array_bound_count)
+            u32 end = declaration->token_start + declaration->token_count;
+            for (u32 index = declaration->token_start; index < end && !message.length; index += 1)
             {
-                valid = false;
-                message = S8("constexpr object cannot have variably modified type");
-                break;
+                String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+                if (string_equal(spelling, S8("extern")) || string_equal(spelling, S8("_Thread_local")) || string_equal(spelling, S8("__thread")))
+                {
+                    location = c_preprocess_token_location(&preprocess, preprocess.tokens[index]);
+                    message = S8("constexpr cannot be combined with this storage-class specifier");
+                }
             }
-            CArrayBound bound = result->array_bounds[type->array_bound];
-            u64 count = 0;
-            bool inferred_later = !bound.token_count && !bound.is_star;
-            if (bound.is_star || (!inferred_later && !bound.has_inferred_count &&
-                                  (!c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, declaration->scope, bound.token_start,
-                                                                  bound.token_start + bound.token_count, &count) ||
-                                   !count)))
+            if (!message.length && declaration->type.value >= result->type_count)
             {
-                valid = false;
-                message = S8("constexpr object cannot have variably modified type");
-                break;
-            }
-            work[work_count++] = element_type;
-            continue;
-        }
-        if (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION)
-        {
-            for (u32 member_index = 0; member_index < type->member_count; member_index += 1)
-            {
-                work[work_count++] = result->members[type->member_start + member_index].type;
+                message = S8("constexpr object has an invalid type");
             }
         }
-    }
-    scratch_end(temporary);
-    if (!valid)
-    {
-        c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_CONSTEXPR, message);
+        if (!message.length)
+        {
+            // A leaf has no subobjects to enqueue: validate the local root with
+            // the same checks as a graph entry, without clearing the type universe.
+            // Composite queries retain private rewindable scratch and no cached
+            // answers, so bound evaluation and type mutation keep their ordering.
+            CTypeId root = declaration->type;
+            CTypeId* work = &root;
+            bool* visited = 0;
+            TemporalArena temporary = {0};
+            CTypeKind root_kind = result->types[root.value].kind;
+            if (root_kind == C_TYPE_ARRAY || root_kind == C_TYPE_STRUCT || root_kind == C_TYPE_UNION)
+            {
+                Arena* conflicts[] = {arena};
+                temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                work = arena_allocate(temporary.arena, CTypeId, result->type_count + result->member_count + 1);
+                visited = arena_allocate(temporary.arena, bool, result->type_count + 1);
+                memset(visited, 0, sizeof(*visited) * (result->type_count + 1));
+                work[0] = root;
+            }
+            u32 work_count = 1;
+            while (work_count)
+            {
+                CTypeId type_id = work[--work_count];
+                if (type_id.value >= result->type_count || (visited && visited[type_id.value]))
+                {
+                    continue;
+                }
+                if (visited)
+                {
+                    visited[type_id.value] = true;
+                }
+                CType* type = &result->types[type_id.value];
+                if (type->is_atomic)
+                {
+                    message = S8("constexpr object or subobject cannot have atomic type");
+                    break;
+                }
+                if (type->is_volatile || type->is_restrict)
+                {
+                    message = S8("constexpr object or subobject cannot be volatile or restrict-qualified");
+                    break;
+                }
+                if (type->kind == C_TYPE_FUNCTION || type->kind == C_TYPE_VOID)
+                {
+                    message = S8("constexpr requires a complete object type");
+                    break;
+                }
+                if (type->kind == C_TYPE_ARRAY)
+                {
+                    CTypeId element_type = type->element_type;
+                    if (type->array_bound >= result->array_bound_count)
+                    {
+                        message = S8("constexpr object cannot have variably modified type");
+                        break;
+                    }
+                    CArrayBound bound = result->array_bounds[type->array_bound];
+                    u64 count = 0;
+                    bool inferred_later = !bound.token_count && !bound.is_star;
+                    if (bound.is_star || (!inferred_later && !bound.has_inferred_count &&
+                                          (!c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, declaration->scope, bound.token_start,
+                                                                          bound.token_start + bound.token_count, &count) ||
+                                           !count)))
+                    {
+                        message = S8("constexpr object cannot have variably modified type");
+                        break;
+                    }
+                    work[work_count++] = element_type;
+                    continue;
+                }
+                if (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION)
+                {
+                    for (u32 member_index = 0; member_index < type->member_count; member_index += 1)
+                    {
+                        work[work_count++] = result->members[type->member_start + member_index].type;
+                    }
+                }
+            }
+            if (temporary.arena)
+            {
+                scratch_end(temporary);
+            }
+        }
+        valid = !message.length;
+        if (!valid)
+        {
+            c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_CONSTEXPR, message);
+        }
     }
     return valid;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_validate_constexpr_declaration(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration)
+{
+    return c_parse_validate_constexpr_declaration(0, arena, result, preprocess, declaration);
+}
+#endif
 
 typedef struct CTypePair CTypePair;
 struct CTypePair

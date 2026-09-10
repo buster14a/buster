@@ -9217,6 +9217,32 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(c23_temporary);
         }
     }
+    // Keep the constexpr storage/semantic fixture in the existing native mode
+    // matrix. Unlike the attribute fixtures, constexpr requires the C23 dialect.
+    for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+    {
+        TemporalArena constexpr_temporary = scratch_begin(&arguments->arena, 1);
+        String8 fixture_path = buster_test_temporary_path(constexpr_temporary.arena, S8("buster-c-constexpr-leaf"), S8(""));
+        String8 fixture_command_line[] = {
+            S8("-std=c23"), c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, S8("tests/basic_c_constexpr_leaf.c"),
+        };
+        CompilerDriverResult fixture = compiler_driver_execute_invocation(
+            constexpr_temporary.arena,
+            compiler_driver_parse_arguments(constexpr_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+        BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+        if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 fixture_arguments[] = {fixture_path};
+            ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                (ProcessSpawnOptions){.use_process_environment = true});
+            BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+            if (fixture_spawn.handle)
+            {
+                BUSTER_TEST(arguments, os_process_wait_sync(constexpr_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(constexpr_temporary);
+    }
     // Running the fixture cannot tell whether [[noreturn]] was read: a caller
     // that ignored it still returns normally and still exits 0.  The proof is
     // that the call is followed by a trap rather than by a return sequence,
