@@ -3701,7 +3701,7 @@ void compiler_parallel_prewarm(void)
 
 BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)
 {
-    CompilerDriverUnitBatch* batch = argument;
+    CompilerDriverUnitBatch* batch = (CompilerDriverUnitBatch*)argument;
     if (lane_index() == 0)
     {
         batch->workers = (u32)lane_count();
