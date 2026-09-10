@@ -2189,64 +2189,64 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(fixed_sizes); size_index += 1)
     {
         u32 fixed_size = fixed_sizes[size_index];
-        CodegenUnwindAction actions[] = {
+        CodegenUnwindAction frame_order_actions[] = {
             {.code_offset = 1, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 5},
             {.code_offset = 2, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 12},
             {.code_offset = 5, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 5},
             {.code_offset = 12, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, .value = fixed_size},
             {.code_offset = 16, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 3, .value = fixed_size - 8},
         };
-        CodegenFunctionDescriptor descriptor = windows_unwind_function;
-        descriptor.unwind_actions = actions;
-        descriptor.unwind_action_count = BUSTER_ARRAY_LENGTH(actions);
-        descriptor.prolog_size = 16;
-        CodegenModule module = windows_unwind_module;
-        module.functions = &descriptor;
-        ObjectFile object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &module, windows_unwind_target);
-        u8 expected[16] = {1, 16, (u8)(fixed_size <= 128 ? 5 : 6), 0, 16, 0x34};
-        u16 save_offset = (u16)((fixed_size - 8) / 8);
-        memcpy(expected + 6, &save_offset, sizeof(save_offset));
-        expected[8] = 12;
-        u32 cursor;
+        CodegenFunctionDescriptor frame_order_descriptor = windows_unwind_function;
+        frame_order_descriptor.unwind_actions = frame_order_actions;
+        frame_order_descriptor.unwind_action_count = BUSTER_ARRAY_LENGTH(frame_order_actions);
+        frame_order_descriptor.prolog_size = 16;
+        CodegenModule frame_order_module = windows_unwind_module;
+        frame_order_module.functions = &frame_order_descriptor;
+        ObjectFile frame_order_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &frame_order_module, windows_unwind_target);
+        u8 frame_order_expected[16] = {1, 16, (u8)(fixed_size <= 128 ? 5 : 6), 0, 16, 0x34};
+        u16 frame_order_save_offset = (u16)((fixed_size - 8) / 8);
+        memcpy(frame_order_expected + 6, &frame_order_save_offset, sizeof(frame_order_save_offset));
+        frame_order_expected[8] = 12;
+        u32 frame_order_cursor;
         if (fixed_size <= 128)
         {
-            expected[9] = (u8)(((fixed_size / 8 - 1) << 4) | 2);
-            cursor = 10;
+            frame_order_expected[9] = (u8)(((fixed_size / 8 - 1) << 4) | 2);
+            frame_order_cursor = 10;
         }
         else
         {
-            expected[9] = 1;
-            u16 allocation = (u16)(fixed_size / 8);
-            memcpy(expected + 10, &allocation, sizeof(allocation));
-            cursor = 12;
+            frame_order_expected[9] = 1;
+            u16 frame_order_allocation = (u16)(fixed_size / 8);
+            memcpy(frame_order_expected + 10, &frame_order_allocation, sizeof(frame_order_allocation));
+            frame_order_cursor = 12;
         }
-        expected[cursor] = 2;
-        expected[cursor + 1] = 0xc0;
-        expected[cursor + 2] = 1;
-        expected[cursor + 3] = 0x50;
-        ByteSlice actual = object.error == OBJECT_ERROR_NONE ? object.sections[OBJECT_SECTION_WINDOWS_XDATA].data : (ByteSlice){0};
-        BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE);
-        BUSTER_TEST(arguments, actual.length == sizeof(expected) && memcmp(actual.pointer, expected, sizeof(expected)) == 0);
+        frame_order_expected[frame_order_cursor] = 2;
+        frame_order_expected[frame_order_cursor + 1] = 0xc0;
+        frame_order_expected[frame_order_cursor + 2] = 1;
+        frame_order_expected[frame_order_cursor + 3] = 0x50;
+        ByteSlice frame_order_actual = frame_order_object.error == OBJECT_ERROR_NONE ? frame_order_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data : (ByteSlice){0};
+        BUSTER_TEST(arguments, frame_order_object.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, frame_order_actual.length == sizeof(frame_order_expected) && memcmp(frame_order_actual.pointer, frame_order_expected, sizeof(frame_order_expected)) == 0);
     }
     // Allocating first is the dynamic-stack producer's contract. The offset
     // belongs to SET_FRAME_POINTER itself (zero and nonzero legal values).
     for (u32 frame_offset = 0; frame_offset <= 32; frame_offset += 16)
     {
-        CodegenUnwindAction actions[] = {
+        CodegenUnwindAction frame_order_actions[] = {
             {.code_offset = 1, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 5},
             {.code_offset = 8, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, .value = 144},
             {.code_offset = 12, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 5, .value = frame_offset},
         };
-        CodegenFunctionDescriptor descriptor = windows_unwind_function;
-        descriptor.unwind_actions = actions;
-        descriptor.prolog_size = 12;
-        CodegenModule module = windows_unwind_module;
-        module.functions = &descriptor;
-        ObjectFile object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &module, windows_unwind_target);
-        u8 expected[] = {1, 12, 4, (u8)(5 | ((frame_offset / 16) << 4)), 12, 3, 8, 1, 18, 0, 1, 0x50};
-        ByteSlice actual = object.error == OBJECT_ERROR_NONE ? object.sections[OBJECT_SECTION_WINDOWS_XDATA].data : (ByteSlice){0};
-        BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE);
-        BUSTER_TEST(arguments, actual.length == sizeof(expected) && memcmp(actual.pointer, expected, sizeof(expected)) == 0);
+        CodegenFunctionDescriptor frame_order_descriptor = windows_unwind_function;
+        frame_order_descriptor.unwind_actions = frame_order_actions;
+        frame_order_descriptor.prolog_size = 12;
+        CodegenModule frame_order_module = windows_unwind_module;
+        frame_order_module.functions = &frame_order_descriptor;
+        ObjectFile frame_order_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &frame_order_module, windows_unwind_target);
+        u8 frame_order_expected[] = {1, 12, 4, (u8)(5 | ((frame_offset / 16) << 4)), 12, 3, 8, 1, 18, 0, 1, 0x50};
+        ByteSlice frame_order_actual = frame_order_object.error == OBJECT_ERROR_NONE ? frame_order_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data : (ByteSlice){0};
+        BUSTER_TEST(arguments, frame_order_object.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, frame_order_actual.length == sizeof(frame_order_expected) && memcmp(frame_order_actual.pointer, frame_order_expected, sizeof(frame_order_expected)) == 0);
     }
     u8 windows_save_code[16] = {0};
     CodegenUnwindAction windows_save_actions[] = {
