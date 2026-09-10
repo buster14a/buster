@@ -3212,6 +3212,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         scratch_end(temporary);
     }
 
+    // Reused, deliberately dirty storage exercises descriptor ownership and
+    // output-on-failure independently of a fresh arena's zero-filled pages.
+    // The shared range gate also bounds single-fragment allocation to its
+    // output buffer. Test both wchar_t widths and both u8 element-kind rules.
+    {
+        struct
+        {
+            String8 source;
+            bool accepted;
+        } cases[] = {
+            {S8("\"\""), true},
+            {S8("u8\"\""), true},
+            {S8("u\"\""), true},
+            {S8("U\"\""), true},
+            {S8("L\"\""), true},
+            {S8("\"A\\0B\\n\""), true},
+            {S8("u8\"\\u00e9\""), true},
+            {S8("u\"\\U0001f600\""), true},
+            {S8("U\"\\U0001f600\""), true},
+            {S8("L\"\\U0001f600\""), true},
+            {S8("(\"paren\")"), true},
+            {S8("\"a\" \"b\""), true},
+            {S8("\"a\" u\"b\""), true},
+            {S8("\"\\x100\""), false},
+            {S8("u\"\\uD800\""), false},
+            {S8("U\"\\U00110000\""), false},
+            {S8("L\"\\x\""), false},
+            {S8("u8\"a\" u\"b\""), false},
+        };
+        Target targets[] = {
+            {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+            {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+            {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        };
+        CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
+        Arena* conflicts[] = {arena};
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        u64 temporary_position = temporary.arena->position;
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        {
+            for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+            {
+                for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+                {
+                    CPreprocessResult preprocess = c_preprocess(temporary.arena, cases[case_index].source, (CPreprocessOptions){
+                        .target = targets[target_index],
+                        .data_layout = target_data_layout(targets[target_index]),
+                        .dialect = dialects[dialect_index],
+                    });
+                    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+                    u64 decode_position = arena->position;
+                    memset(arena_allocate(arena, u8, 4096), 0xa5, 4096);
+                    arena_set_position(arena, decode_position);
+                    bool range_accepted = false;
+                    u32 end = (u32)preprocess.token_count;
+                    while (end && preprocess.tokens[end - 1].kind == C_TOKEN_END_OF_FILE)
+                    {
+                        end -= 1;
+                    }
+                    BUSTER_TEST(arguments, c_test_string_literal_range_paths_agree(arena, preprocess, 0, end, &range_accepted));
+                    BUSTER_TEST(arguments, range_accepted == cases[case_index].accepted);
+                    arena_set_position(arena, decode_position);
+                    arena_set_position(temporary.arena, temporary_position);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+
     arena_set_position(arena, position);
     return result;
 }
