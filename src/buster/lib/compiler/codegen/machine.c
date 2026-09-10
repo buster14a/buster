@@ -11,6 +11,7 @@
 // the end is the entry point codegen.c calls.
 
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
 
 #include <buster/lib/os.h>
@@ -1919,6 +1920,8 @@ u32 machine_builder_edge(MachineFunctionBuilder* builder, MachineEdge edge)
 // otherwise cross-block SSA uses are invisible to dominance and allocation.
 BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder* builder, IrFunction* function, u32 const* value_registers)
 {
+    IR_CONSTRUCTION_RECORD(CFG_BUILDS, 1);
+    IR_CONSTRUCTION_RECORD(CFG_SCRATCH_SLOTS, function->block_count);
     u32* last_source = arena_allocate(builder->arena, u32, function->block_count);
     memset(last_source, 0xff, sizeof(*last_source) * function->block_count);
     bool valid = true;
@@ -1934,6 +1937,7 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder*
             IrInstruction* terminator = function->instructions + block->last_instruction.value;
             for (u32 index = 0; valid && index < terminator->target_count; index += 1)
             {
+                IR_CONSTRUCTION_RECORD(CFG_TARGET_VISITS, 1);
                 u32 target = terminator->targets[index].value;
                 if (target >= function->block_count)
                 {
@@ -1941,20 +1945,25 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder*
                 }
                 else if (last_source[target] != source)
                 {
+                    IR_CONSTRUCTION_RECORD(CFG_UNIQUE_EDGES, 1);
                     last_source[target] = source;
                     IrBlock* destination = function->blocks + target;
                     valid = destination->parameter_count <= UINT16_MAX;
                     u32 copy_offset = builder->edge_copy_sources.total_count;
                     for (IrBlockParameter* parameter = destination->first_parameter; valid && parameter; parameter = parameter->next)
                     {
+                        IR_CONSTRUCTION_RECORD(CFG_PARAMETER_VISITS, 1);
                         IrIncoming* incoming = parameter->first_incoming;
                         while (incoming && incoming->predecessor.value != source)
                         {
+                            IR_CONSTRUCTION_RECORD(CFG_INCOMING_VISITS, 1);
                             incoming = incoming->next;
                         }
+                        IR_CONSTRUCTION_RECORD(CFG_INCOMING_VISITS, incoming != 0);
                         valid = incoming && incoming->value.value < function->value_count && value_registers[incoming->value.value] != UINT32_MAX;
                         if (valid)
                         {
+                            IR_CONSTRUCTION_RECORD(CFG_COPY_SOURCES, 1);
                             machine_builder_edge_copy_source(builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_registers[incoming->value.value]));
                         }
                     }
@@ -1967,6 +1976,7 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder*
             }
         }
     }
+    IR_CONSTRUCTION_RECORD(CFG_FAILURES, !valid);
     return valid;
 }
 
