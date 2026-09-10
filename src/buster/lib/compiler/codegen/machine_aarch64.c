@@ -147,6 +147,14 @@ struct MachineA64BranchFusion
     u8 reserved[2];
 };
 
+typedef struct MachineA64CallTarget MachineA64CallTarget;
+struct MachineA64CallTarget
+{
+    IrSymbolId symbol;
+    u8 reference;
+    u8 reserved[3];
+};
+
 typedef struct MachineA64Selector MachineA64Selector;
 struct MachineA64Selector
 {
@@ -2047,6 +2055,15 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_field(MachineA64Selector* selector, 
     return selected;
 }
 
+BUSTER_GLOBAL_LOCAL u32 machine_a64_call_target_append(MachineA64Selector* selector, IrSymbolId symbol, bool address)
+{
+    u32 target_index = selector->call_targets.total_count;
+    bool page = address && (selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS);
+    MachineA64CallTarget* row = (MachineA64CallTarget*)machine_stream_append(selector->arena, &selector->call_targets);
+    *row = (MachineA64CallTarget){.symbol = symbol, .reference = (u8)(page ? MACHINE_SYMBOL_REFERENCE_MACH_PAGE : MACHINE_SYMBOL_REFERENCE_DIRECT)};
+    return target_index;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_global_address(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
@@ -2060,9 +2077,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_global_address(MachineA64Selector* s
         selector->target.os == OPERATING_SYSTEM_LINUX || selector->target.os == OPERATING_SYSTEM_ANDROID;
     if (result_register != UINT32_MAX && symbol && thread_local_global && thread_local_supported)
     {
-        u32 target_index = selector->call_targets.total_count;
-        IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
-        *target_row = instruction->symbol;
+        u32 target_index = machine_a64_call_target_append(selector, instruction->symbol, false);
         u32 row = machine_a64_select_row(selector, (MachineInstruction){
                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
                                                        .payload = target_index,
@@ -2087,9 +2102,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_global_address(MachineA64Selector* s
         }
         else
         {
-            u32 target_index = selector->call_targets.total_count;
-            IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
-            *target_row = instruction->symbol;
+            u32 target_index = machine_a64_call_target_append(selector, instruction->symbol, true);
             u32 row = machine_a64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
                                                            .payload = target_index,
@@ -2779,9 +2792,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_call(MachineA64Selector* selector, I
         machine_a64_stage_call_arguments(selector, &plan);
         if (plan.direct_call)
         {
-            u32 target_index = selector->call_targets.total_count;
-            IrSymbolId* target_row = (IrSymbolId*)machine_stream_append(selector->arena, &selector->call_targets);
-            *target_row = instruction->symbol;
+            u32 target_index = machine_a64_call_target_append(selector, instruction->symbol, false);
             machine_a64_select_row(selector, (MachineInstruction){
                                                  .payload = target_index,
                                                  .opcode = MACHINE_A64_CALL_DIRECT,
@@ -4191,7 +4202,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         machine_stream_initialize(&selector.immediates, sizeof(u64));
         machine_stream_initialize(&selector.stack_slots, sizeof(u32));
         machine_stream_initialize(&selector.stack_slot_alignments, sizeof(u32));
-        machine_stream_initialize(&selector.call_targets, sizeof(IrSymbolId));
+        machine_stream_initialize(&selector.call_targets, sizeof(MachineA64CallTarget));
         machine_stream_initialize(&selector.va_args, sizeof(MachineVaArg));
         machine_stream_initialize(&selector.switch_cases, sizeof(MachineSwitchCase));
         MachineBuilderStream line_marks;
@@ -5225,8 +5236,19 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             result.function.stack_slot_sizes[selector.outgoing_slot] = selector.outgoing_bytes;
         }
         result.function.call_targets = arena_allocate(arena, IrSymbolId, selector.call_targets.total_count);
+        result.function.call_target_references = arena_allocate(arena, u8, selector.call_targets.total_count);
         result.function.call_target_count = selector.call_targets.total_count;
-        machine_stream_flatten(&selector.call_targets, result.function.call_targets);
+        u32 split_target = 0;
+        for (MachineBuilderChunk* chunk = selector.call_targets.first; chunk; chunk = chunk->next)
+        {
+            MachineA64CallTarget const* rows = (MachineA64CallTarget const*)(chunk + 1);
+            for (u32 row = 0; row < chunk->count; row += 1)
+            {
+                result.function.call_targets[split_target] = rows[row].symbol;
+                result.function.call_target_references[split_target] = rows[row].reference;
+                split_target += 1;
+            }
+        }
         result.function.va_args = arena_allocate(arena, MachineVaArg, selector.va_args.total_count);
         result.function.va_arg_count = selector.va_args.total_count;
         machine_stream_flatten(&selector.va_args, result.function.va_args);
@@ -7400,30 +7422,48 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 break;
             case MACHINE_A64_LEA_SYMBOL:
             {
-                // The canonical inline-literal form: load the eight-byte
-                // literal two words ahead, branch over it, and let the
-                // absolute relocation fill it.
-                machine_a64_emit_mc(&encoder, (A64MCInst){
-                                                   .operands = {
-                                                       {.value = operand_registers[0], .kind = A64_MC_OPERAND_REGISTER},
-                                                       {.value = 8, .kind = A64_MC_OPERAND_PC_RELATIVE},
-                                                   },
-                                                   .opcode = A64_OPCODE_LDR_LITERAL_64,
-                                                   .operand_count = 2,
-                                               });
-                machine_a64_emit_mc(&encoder, (A64MCInst){
-                                                   .operands = {{.value = 12, .kind = A64_MC_OPERAND_PC_RELATIVE}},
-                                                   .opcode = A64_OPCODE_B,
-                                                   .operand_count = 1,
-                                               });
-                MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
-                *site = (MachineCallSite){
-                    .code_offset = encoder.count,
-                    .target = instruction->payload,
-                    .absolute = 1,
-                };
-                machine_a64_emit(&encoder, 0);
-                machine_a64_emit(&encoder, 0);
+                bool page = function->call_target_references &&
+                            function->call_target_references[instruction->payload] == MACHINE_SYMBOL_REFERENCE_MACH_PAGE;
+                if (page)
+                {
+                    MachineCallSite* high = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                    *high = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload, .page_relative = 1};
+                    machine_a64_emit_mc(&encoder, (A64MCInst){
+                        .operands = {{.value = operand_registers[0], .kind = A64_MC_OPERAND_REGISTER},
+                                     {.kind = A64_MC_OPERAND_PC_RELATIVE}},
+                        .opcode = A64_OPCODE_ADRP,
+                        .operand_count = 2,
+                    });
+                    MachineCallSite* low = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                    *low = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload, .page_relative = 1, .page_low = 1};
+                    u32 fields[] = {operand_registers[0], operand_registers[0], 0};
+                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+                }
+                else
+                {
+                    // The other targets retain their canonical inline literal.
+                    machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                       .operands = {
+                                                           {.value = operand_registers[0], .kind = A64_MC_OPERAND_REGISTER},
+                                                           {.value = 8, .kind = A64_MC_OPERAND_PC_RELATIVE},
+                                                       },
+                                                       .opcode = A64_OPCODE_LDR_LITERAL_64,
+                                                       .operand_count = 2,
+                                                   });
+                    machine_a64_emit_mc(&encoder, (A64MCInst){
+                                                       .operands = {{.value = 12, .kind = A64_MC_OPERAND_PC_RELATIVE}},
+                                                       .opcode = A64_OPCODE_B,
+                                                       .operand_count = 1,
+                                                   });
+                    MachineCallSite* site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                    *site = (MachineCallSite){
+                        .code_offset = encoder.count,
+                        .target = instruction->payload,
+                        .absolute = 1,
+                    };
+                    machine_a64_emit(&encoder, 0);
+                    machine_a64_emit(&encoder, 0);
+                }
             }
             break;
             case MACHINE_A64_LEA_TLS:

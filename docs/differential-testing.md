@@ -120,6 +120,13 @@ isolate the callee's local copy, whose alignment fix already landed in
 [PR #282](https://github.com/buster14a/buster/pull/282). No alignment fix is
 part of this harness change.
 
+The qualified-aggregate fixture cross-links top-level const/volatile parameter
+objects with an independent host caller and callees. It checks private-copy
+semantics, compatible function pointers selected across a loop join, expression
+function-pointer types, large by-value objects, and nested pointer qualifiers.
+The minimal source regression and frontend invariant test independently retain
+strict fixed-argument type matching and volatile accesses (GitHub #361).
+
 The unsigned-switch fixture cross-links 32- and 64-bit switch functions with a
 Clang-built caller. It checks high-bit case constants, default edges, and values
 that share their low 32 bits but must remain distinct in a 64-bit comparison.
