@@ -38,6 +38,7 @@ jobs:
           import json, os, pathlib, re, urllib.request
           root = pathlib.Path('evidence')
           api = 'https://api.github.com/repos/buster14a/buster'
+          numeric_api = 'https://api.github.com/repositories/1071732997'
           headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
           manifest = []
           def get(url, accept=None):
@@ -60,15 +61,15 @@ jobs:
                   rows.extend(page)
                   match = re.search(r'<([^>]+)>; rel="next"', link)
                   url = match.group(1) if match else None
-                  if url and not url.startswith(api + '/'):
-                      raise RuntimeError('Unexpected pagination origin')
+                  if url and not url.startswith((api + '/', numeric_api + '/')):
+                      raise RuntimeError('Unexpected pagination repository')
               return rows
           def save(name, value):
               (root / name).write_text(json.dumps(value, indent=2) + '\n')
           try:
               issues = pages('/issues?state=all&per_page=100&sort=created&direction=asc')
-              pulls = pages('/pulls?state=all&per_page=100&sort=created&direction=asc')
               save('issues.json', issues)
+              pulls = pages('/pulls?state=all&per_page=100&sort=created&direction=asc')
               save('pulls.json', pulls)
               pattern = re.compile(r'(?:#|/issues/|/pull/)(?:38|50|52|306|128|132|34|33|294)\b|ir_function_add_instruction|c_ir_append_instruction|c_ir_recover_memory_place_from_value|machine_builder_canonical_edges|dense canonical|frontend SSA|instruction.append|capacity.estimat|operand.prewalk|whole.IR.SoA', re.I)
               numbers = {38, 50, 52, 306, 128, 132, 34, 33, 294, 46, 48}
