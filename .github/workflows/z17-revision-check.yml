@@ -1,0 +1,166 @@
+name: Z17 revision checks
+
+on:
+  push:
+    branches: [astra/z17-source-evidence-20260909]
+    paths: [.github/workflows/z17-revision-check.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 39232f3accbe6636d666f44dad847fcb59564859
+          persist-credentials: false
+      - name: Materialize the reviewed one-line correction without updating refs
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, json, os, pathlib, subprocess, urllib.request
+          parent = '39232f3accbe6636d666f44dad847fcb59564859'
+          def api(path, data=None):
+              request = urllib.request.Request('https://api.github.com/repos/buster14a/buster/' + path, data=None if data is None else json.dumps(data).encode(), headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          assert subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip() == parent
+          assert api('git/ref/heads/astra/z17-tu-cohorts-20260910')['object']['sha'] == parent
+          assert api('git/ref/heads/main')['object']['sha'] == 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae'
+          path = 'src/buster/lib/compiler/driver/driver.c'
+          file = pathlib.Path(path)
+          text = file.read_text()
+          old = '    CompilerDriverUnitBatch* batch = argument;'
+          assert text.count(old) == 1
+          file.write_text(text.replace(old, '    CompilerDriverUnitBatch* batch = (CompilerDriverUnitBatch*)argument;'))
+          subprocess.run(['git','diff','--check'], check=True)
+          blob = api('git/blobs', {'content': base64.b64encode(file.read_bytes()).decode(), 'encoding': 'base64'})['sha']
+          assert blob == '8e53d5e64e67b22a1b5b8d6bc7f1e1d9f3d26c24'
+          tree = api('git/trees', {'base_tree': '448110eaaea21f8cc29870b6ecdd8ea3631d9536', 'tree': [{'path': path,'mode': '100644','type': 'blob','sha': blob}]})['sha']
+          assert tree == '82f9dd9442bafb142c04b773b7ec2c39c954cfaf'
+          sha = api('git/commits', {'message': 'driver: explicitly cast the persistent-lane context', 'tree': tree, 'parents': [parent]})['sha']
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'z17-revision.json').write_text(json.dumps({'source': sha,'parent': parent,'tree': tree,'refs_updated': False}, indent=2))
+          print('Z17_SOURCE_SHA=' + sha)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('sha=' + sha + '\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: z17-revision-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/z17-revision.json
+          if-no-files-found: error
+          retention-days: 7
+
+  validate:
+    needs: source
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [release, sanitize, single-threaded, thread-sanitize]
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '2'
+      BUSTER_MATRIX_THREADS: '2'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - name: Exact source and host evidence
+        env:
+          EXPECTED_SOURCE: ${{ needs.source.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          mkdir -p "$RUNNER_TEMP/z17-results"
+          { git rev-parse HEAD; git rev-parse HEAD^{tree}; uname -a; lscpu; free -h; clang --version; gcc --version; } | tee "$RUNNER_TEMP/z17-results/host.txt"
+      - name: Configure and compile changed driver before full build
+        env:
+          CONFIGURATION: ${{ matrix.configuration }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/z17-results/build.log") 2>&1
+          set -x
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          config=Release
+          extra=(-DBUSTER_UNITY_BUILD=OFF)
+          sanitize=()
+          case "$CONFIGURATION" in
+            sanitize) config=Debug; sanitize=(--sanitize) ;;
+            single-threaded) extra+=(-DBUSTER_SINGLE_THREADED=ON) ;;
+            thread-sanitize) config=Debug; extra+=('-DCMAKE_C_FLAGS=-fsanitize=thread' '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread') ;;
+          esac
+          echo "BUSTER_Z17_CONFIGURATION=$config" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT "${sanitize[@]}" -- "${extra[@]}"
+          cmake --build build --config "$config" --target "CMakeFiles/ide.dir/$config/src/buster/lib/compiler/driver/driver.c.o" -- -j1
+          "$RUNNER_TEMP/buster-build" build --config "$config" -t ide -- -j1
+      - name: Complete registered suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/z17-results/full-suite.log") 2>&1
+          set -x
+          "$RUNNER_TEMP/buster-build" build --config "$BUSTER_Z17_CONFIGURATION" -t test_all -- -j1
+      - name: Fresh-process lanes, exact output and independent runtime controls
+        if: ${{ success() && (matrix.configuration == 'release' || matrix.configuration == 'single-threaded') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/z17-results/cold-process.log") 2>&1
+          set -x
+          evidence="$RUNNER_TEMP/z17-results"
+          output="$evidence/constructor"
+          for mode in none mir-stack fast quality; do
+            build/Release/ide cc -fcompile-jobs=1 -fregister-allocator="$mode" -g -nostdinc -o "$output" tests/basic_c_constructor_order.c tests/basic_c_constructor_order_second.c
+            cp "$output" "$evidence/serial-$mode"
+            "$output"
+            for jobs in 2 4 1; do
+              build/Release/ide cc -fcompile-jobs="$jobs" -fregister-allocator="$mode" -g -nostdinc -o "$output" tests/basic_c_constructor_order.c tests/basic_c_constructor_order_second.c
+              cmp "$output" "$evidence/serial-$mode"
+              "$output"
+            done
+          done
+          for cc in clang gcc; do
+            for level in 0 2; do
+              "$cc" -std=gnu11 -O"$level" -fwrapv -fno-strict-aliasing -funsigned-char tests/basic_c_constructor_order.c tests/basic_c_constructor_order_second.c -o "$evidence/$cc-$level"
+              "$evidence/$cc-$level"
+            done
+          done
+          sha256sum "$evidence"/serial-* tests/basic_c_constructor_order.c tests/basic_c_constructor_order_second.c
+      - name: Existing full modes and self-host gates
+        if: ${{ success() && matrix.configuration == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/z17-results/gates.log") 2>&1
+          set -x
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release
+          "$RUNNER_TEMP/buster-build" self_host_audit_self_test
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release
+          "$RUNNER_TEMP/buster-build" test_self_host_audit --config Release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: z17-results-${{ matrix.configuration }}-${{ needs.source.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/z17-results/
+            build/self-host-audit/
+          if-no-files-found: error
+          retention-days: 7
