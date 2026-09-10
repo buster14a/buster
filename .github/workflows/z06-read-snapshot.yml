@@ -1,5 +1,5 @@
 name: Z06 read-only investigation snapshot
-
+# Refresh open work before the focused implementation branch is published.
 on:
   push:
     branches: [astra/z06-20260910-transport]
