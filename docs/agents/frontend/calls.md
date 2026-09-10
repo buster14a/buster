@@ -109,6 +109,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   a deliberately mismatched call before shared promotion. The minimal fixture
   and the existing native differential corpus cover execution and compatible
   function pointers (GitHub #361).
+  Compound assignments likewise compute with the unqualified value type,
+  including when a narrower right operand needs promotion. Their original
+  place retains volatile load/store effects and the separate atomic update
+  path; `c_test_qualified_compound_values` checks both frontend forms.
 - A by-value parameter's local copy retains its type's natural alignment.
   `c_ir_emit_parameter` must pass the resolved layout alignment to
   `c_ir_emit_local`, just as an ordinary declaration does. Rounding a slot's

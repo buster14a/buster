@@ -12745,6 +12745,69 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_qualified_parameter_values(UnitTestArg
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_qualified_compound_values(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("int update(volatile int* value, const unsigned char* delta) { *value += delta[0]; return *value; }");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("qualified-compound.c"), tokens, parse, target,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && !lowered.diagnostic_count);
+            IrProgram* program = lowered.program;
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                IrFunction* function = c_test_find_ir_function(module, S8("update"));
+                BUSTER_TEST(arguments, function != 0);
+                if (function)
+                {
+                    u32 additions = 0;
+                    u32 volatile_loads = 0;
+                    u32 volatile_stores = 0;
+                    for (u32 index = 0; index < function->instruction_count; index += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + index;
+                        volatile_loads += instruction->opcode == IR_OPCODE_LOAD && instruction->volatile_access;
+                        volatile_stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
+                        if (instruction->opcode == IR_OPCODE_BINARY && instruction->binary_operation == IR_BINARY_INTEGER_ADD)
+                        {
+                            IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                            BUSTER_TEST(arguments, type && !type->is_volatile && !type->is_atomic);
+                            for (u32 operand = 0; operand < instruction->operand_count; operand += 1)
+                            {
+                                IrValueId value = instruction->operands[operand];
+                                BUSTER_TEST(arguments, value.value < function->value_count);
+                                if (value.value < function->value_count)
+                                {
+                                    BUSTER_TEST(arguments, function->values[value.value].canonical_type.value == instruction->canonical_type.value);
+                                }
+                            }
+                            additions += 1;
+                        }
+                    }
+                    BUSTER_TEST(arguments, additions == 1 && volatile_loads == 2 && volatile_stores == 1);
+                    BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // Parameter objects need the same effective alignment as ordinary local
 // declarations. Checking IR on every native target catches the frontend loss
 // even when a machine backend independently recovers the type's alignment.
@@ -14870,6 +14933,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_packed_and_aligned_layout(arguments));
     c_test_result_add(&result, c_test_parameter_local_alignment(arguments));
     c_test_result_add(&result, c_test_qualified_parameter_values(arguments));
+    c_test_result_add(&result, c_test_qualified_compound_values(arguments));
 
     TemporalArena nested_temporary = scratch_begin(0, 0);
     String8 nested_prefix = S8("static int identity(int value)"
