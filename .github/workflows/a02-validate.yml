@@ -43,7 +43,7 @@ jobs:
           encoded = base64.b64encode(raw).decode()
           for old, new in [('CVQ0qIG2', 'CVQ0wIG2'), ('Vvb5a3WwtxlF', 'Vvb5a3txlF'), ('GzWG6psh', 'GzWGpsh')]:
               encoded = encoded.replace(old, new)
-          encoded = encoded.rstrip('=')
+          encoded = encoded.rstrip('=') + 'w'
           encoded += '=' * (-len(encoded) % 4)
           repaired = base64.b64decode(encoded)
           (out / 'repaired.zlib').write_bytes(repaired)
