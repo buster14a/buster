@@ -102,6 +102,19 @@ independent legacy mutable-register and pressure-census contracts.
   named parameters and ordinary macros retain it.
   `tests/basic_c_macro_empty_paste.c` covers empty operands, chained pastes,
   surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
+- `c_conditional_number` admits the complete bounded integer spelling, checks
+  overflow before accumulation, and leaves its output unchanged on failure.
+  Ordinary constants and the x87 initializer folder share it; do not restore a
+  second integer parser. U/L/LL (with same-case LL), the MS i8/i16/i32/i64 suffixes (including unsigned forms),
+  binary digits and between-digit separators retain their existing admission
+  policy. Fixed-width Microsoft suffixes retain their signed/unsigned literal type, including the Windows SDK limits. This does not add C23 bit-precise suffixes.
+  The syntax pass validates integer tokens in its existing declaration/body
+  walks, including unused functions and unevaluated operands. Inactive macro
+  definitions and stringized tokens are not C integer tokens and remain valid.
+  Language diagnostics name the offending token with
+  `C_DIAGNOSTIC_INVALID_INTEGER_LITERAL`; preprocessing keeps the conditional
+  directive diagnostic. `c_test_integer_spelling_consistency` and
+  `tests/basic_c_integer_literals.c` cover these contracts (GitHub #148).
 - Preprocessing integer-expression reductions carry signedness and a deferred
   arithmetic-fault bit in the same byte. Division by zero and signed
   `INT64_MIN / -1` (including remainder) never execute as host arithmetic.

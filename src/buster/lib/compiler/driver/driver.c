@@ -3974,6 +3974,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.local_promotion.instructions_after += unit.local_promotion.instructions_after;
         result.local_promotion.values_before += unit.local_promotion.values_before;
         result.local_promotion.values_after += unit.local_promotion.values_after;
+        result.local_promotion.parameter_sweeps += unit.local_promotion.parameter_sweeps;
+        result.local_promotion.parameter_block_visits += unit.local_promotion.parameter_block_visits;
+        result.local_promotion.parameter_visits += unit.local_promotion.parameter_visits;
+        result.local_promotion.parameter_incoming_visits += unit.local_promotion.parameter_incoming_visits;
         codegen_statistics_add(&result.codegen_statistics, &unit.codegen_statistics);
         if (unit.error != COMPILER_DRIVER_ERROR_NONE)
         {
