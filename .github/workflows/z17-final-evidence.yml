@@ -1,0 +1,118 @@
+name: Z17 final-head evidence
+
+on:
+  push:
+    branches: [astra/z17-source-evidence-20260909]
+    paths: [.github/workflows/z17-final-evidence.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '2'
+      BUSTER_MATRIX_THREADS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 3bece2beec50260ac18a1541917033c67376d3bb
+          persist-credentials: false
+      - name: Build the frozen source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 3bece2beec50260ac18a1541917033c67376d3bb
+          mkdir -p "$RUNNER_TEMP/z17-gates"
+          { git rev-parse HEAD; uname -a; lscpu; free -h; clang --version; } | tee "$RUNNER_TEMP/z17-gates/host.txt"
+          exec > >(tee "$RUNNER_TEMP/z17-gates/build.log") 2>&1
+          set -x
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j1
+      - name: Complete execution-mode matrix
+        id: modes
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/z17-gates/modes.log"
+      - name: Existing self-host gates
+        if: ${{ !cancelled() && steps.modes.outcome != 'skipped' }}
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/z17-gates/self-host.log") 2>&1
+          set -x
+          "$RUNNER_TEMP/buster-build" self_host_audit_self_test
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release
+          "$RUNNER_TEMP/buster-build" test_self_host_audit --config Release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: z17-final-gates-3bece2be-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/z17-gates/
+            build/self-host-audit/
+          if-no-files-found: error
+          retention-days: 7
+
+  reference:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 3bece2beec50260ac18a1541917033c67376d3bb
+          persist-credentials: false
+      - name: Retain every original control and separate opaque-recorder controls
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/z17-reference"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'z17-reference'
+          first = pathlib.Path('tests/basic_c_constructor_order.c')
+          second = pathlib.Path('tests/basic_c_constructor_order_second.c')
+          text = second.read_text()
+          start = text.index('int constructor_order[8];')
+          end = text.index('__attribute__((constructor(101)))')
+          recorder = root / 'recorder.c'
+          recorder.write_text(text[start:end])
+          opaque = root / 'second-opaque.c'
+          opaque.write_text(text[:start] + 'void record_constructor(int identifier);\n\n' + text[end:])
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == '3bece2beec50260ac18a1541917033c67376d3bb'
+          results = []
+          for cc in ['clang', 'gcc']:
+              version = subprocess.check_output([cc, '--version'], text=True)
+              (root / (cc + '-version.txt')).write_text(version)
+              for level in ['0', '2']:
+                  for kind, sources in [('original', [first, second]), ('opaque', [first, opaque, recorder])]:
+                      name = cc + '-O' + level + '-' + kind
+                      binary = root / name
+                      command = [cc, '-std=gnu11', '-O' + level, '-fwrapv', '-fno-strict-aliasing', '-funsigned-char', *map(str, sources), '-o', str(binary)]
+                      compile_result = subprocess.run(command, text=True, capture_output=True)
+                      (root / (name + '-build.txt')).write_text(compile_result.stdout + compile_result.stderr)
+                      result = {'name': name, 'command': command, 'compile_exit': compile_result.returncode, 'run_exit': None, 'inputs': {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}}
+                      if compile_result.returncode == 0:
+                          run = subprocess.run([str(binary)], text=True, capture_output=True, timeout=15)
+                          result['run_exit'] = run.returncode
+                          (root / (name + '-run.txt')).write_text(run.stdout + run.stderr)
+                          for suffix, flags in [('disassembly', ['-d']), ('initializers', ['-s', '-j', '.data', '-j', '.init_array'])]:
+                              dump = subprocess.run(['objdump', *flags, str(binary)], text=True, capture_output=True, check=True)
+                              (root / (name + '-' + suffix + '.txt')).write_text(dump.stdout)
+                      results.append(result)
+                      print(json.dumps(result), flush=True)
+          (root / 'results.json').write_text(json.dumps(results, indent=2))
+          failed = [r['name'] for r in results if r['compile_exit'] != 0 or r['run_exit'] != 0]
+          print('FAILURES=' + json.dumps(failed), flush=True)
+          # Retain the original failing optimized reference; added opaque controls
+          # do not replace it or turn this reference investigation green.
+          raise SystemExit(bool(failed))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: z17-reference-3bece2be-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/z17-reference/
+          if-no-files-found: error
+          retention-days: 7
