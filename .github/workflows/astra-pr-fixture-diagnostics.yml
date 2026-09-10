@@ -11,15 +11,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - pr: 374
+          - pr: 370
+            runner: macos-26
+            source: cb8a5830b656f47bb250c00563ea47517af3d988
+          - pr: 367
             runner: ubuntu-26.04
-            source: d6b54495cddc9ee9a50accbaf8269eab19afd11b
-          - pr: 372
-            runner: windows-2025
-            source: f2eda36c7233b4b801d37b9abae5774a4809f1a3
+            source: 8403f0a75e44a78c3ef7c857f708158be4ea46e6
           - pr: 376
             runner: macos-26
             source: 515c12c8525ee16cd770a288883f30691f2d7d30
+          - pr: 372
+            runner: ubuntu-26.04
+            source: f2eda36c7233b4b801d37b9abae5774a4809f1a3
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -30,109 +33,77 @@ jobs:
         with:
           ref: ${{ matrix.source }}
           persist-credentials: false
-      - name: Instrument rejected token spelling for the Windows diagnostic only
-        if: ${{ matrix.pr == 372 }}
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("src/buster/lib/compiler/frontend/c/c_parse.c")
-          s = p.read_text()
-          s = s.replace("c_parser_validate_integer_token(CParserResult*", "c_parser_validate_integer_token(Arena* arena, CParserResult*")
-          s = s.replace("c_parser_validate_integer_token(&result,", "c_parser_validate_integer_token(arena, &result,")
-          s = s.replace('S8("invalid integer literal or value outside the supported 64-bit range")', 'string_format(arena, S8("invalid integer spelling: {S8}"), spelling)')
-          p.write_text(s)
-          PY
-      - name: Compile exact candidate with the repository build driver
-        if: ${{ matrix.pr != 372 }}
+      - name: Build candidate
         run: |
           git rev-parse HEAD
           clang --version
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
           "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
           "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j1
-      - name: Compile Windows diagnostic with the existing CI toolchain setup
-        if: ${{ matrix.pr == 372 }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $VsPath = (& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
-          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
-          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
-          & clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o $Driver
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $Driver generate --cc clang --ci --linker DEFAULT
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:INCLUDE | Out-File -FilePath (Join-Path $env:RUNNER_TEMP "vs-includes.txt") -Encoding utf8
-          & $Driver build --config Release -t ide -- -j1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Print bounded fixture diagnostics
+      - name: Diagnose exact candidate fixtures
         env:
           AUDIT_PR: ${{ matrix.pr }}
-        shell: bash
         run: |
           python3 - <<'PY'
           import os, subprocess
-          pr = int(os.environ["AUDIT_PR"])
-          ide = os.path.abspath("build/Release/ide" + (".exe" if os.name == "nt" else ""))
           from pathlib import Path
-          tmp = Path(os.environ["RUNNER_TEMP"])
-          if pr == 372:
-              (tmp / "stdint.c").write_text("#include <stdint.h>\n_Static_assert(12 <= UINT8_MAX, \"width\");\n")
-              (tmp / "paste.c").write_text("#define JOIN_(a,b) a##b\n#define JOIN(a,b) JOIN_(a,b)\ntypedef unsigned char JOIN(check_,__LINE__)[(12 == 12) ? 1 : -1];\n")
-          cases = {
-              370: [["-c", "-fverify-codegen", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", "-Itests/differential", "tests/differential/qualified_aggregate.c"],
-                    ["-c", "-fverify-codegen", "-fno-frontend-ssa", "-fno-canonical-local-promotion", "-fno-target-local-promotion", "-Itests/differential", "tests/differential/qualified_aggregate.c"]],
-              374: [["-std=c23", "-c", "tests/basic_c_constexpr_leaf.c"]],
-              376: [["-Isrc", "-c", "tests/basic_c_simd_translate.c"],
-                    ["-Isrc", "-DBUSTER_KERNEL=1", "-c", "tests/basic_c_simd_translate.c"],
-                    ["-Isrc", "--target=x86_64-linux-gnu", "-c", "tests/basic_c_simd_translate.c"]],
-              372: [["-c", str(tmp / "stdint.c")], ["-c", str(tmp / "paste.c")], ["-nostdinc", *(sum([["-isystem", path] for path in (tmp / "vs-includes.txt").read_text(encoding="utf-8-sig").strip().split(";") if path], []) if pr == 372 else []), "-c", str(tmp / "stdint.c")]],
-              368: [["-target", "wasm64-unknown-freestanding", "-nostdinc", "tests/basic_c_wasm64_integer_ops.c"]],
-          }[pr]
-          failed = False
-          for i, args in enumerate(cases):
-              cmd = [ide, "cc", "-v", *args, "-o", os.path.join(os.environ["RUNNER_TEMP"], "fixture-%d.o" % i)]
-              print("COMMAND", cmd, flush=True)
-              r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+          pr=int(os.environ['AUDIT_PR'])
+          tmp=Path(os.environ['RUNNER_TEMP'])
+          ide=str(Path('build/Release/ide').resolve())
+          failed=False
+          def run(args, required=True):
+              global failed
+              print('COMMAND', [str(x) for x in args], flush=True)
+              r=subprocess.run([str(x) for x in args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
               print(r.stdout, flush=True)
-              print("EXIT", r.returncode, flush=True)
-              failed |= r.returncode != 0
-          if pr == 368 and not failed:
-              r = subprocess.run(["node", "tests/wasm_integer_execution.js", str(tmp / "fixture-0.o")], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
-              print("NODE", subprocess.check_output(["node", "--version"], text=True), r.returncode, r.stdout, flush=True)
-              failed |= r.returncode != 0
-          if pr == 374:
-              source = Path("tests/basic_c_constexpr_leaf.c").read_text()
-              probe = tmp / "constexpr.c"
-              probe.write_text(source)
-              for mode in ["none", "mir-stack", "fast", "quality"]:
-                  exe = tmp / ("constexpr-" + mode)
-                  cmd = [ide, "cc", "-std=c23", "-fregister-allocator=" + mode, str(probe), "-o", str(exe)]
-                  r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
-                  print("CONSTEXPR BUILD", mode, r.returncode, r.stdout, flush=True)
-                  if r.returncode == 0:
-                      r = subprocess.run([str(exe)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
-                      print("CONSTEXPR RUN", mode, r.returncode, r.stdout, flush=True)
-                  failed |= r.returncode != 0
+              print('EXIT', r.returncode, flush=True)
+              if required: failed |= r.returncode != 0
+              return r.returncode
+          if pr == 372:
+              for suffix,size in [('i8',1),('ui8',1),('i16',2),('ui16',2),('i32',4),('ui32',4),('i64',8),('ui64',8)]:
+                  p=tmp/(suffix+'.c')
+                  p.write_text('_Static_assert(sizeof(1'+suffix+') == '+str(size)+', "'+suffix+' width");\n')
+                  run([ide,'cc','-c',p,'-o',tmp/(suffix+'.o')])
+              p=tmp/'limits.c'
+              p.write_text('_Static_assert(0xffui8 == 255 && 0xffffui16 == 65535 && 0xffffffffui32 == 4294967295u, "SDK limits");\n')
+              run([ide,'cc','-c',p,'-o',tmp/'limits.o'])
+          if pr == 370:
+              flags=['-O0','-fwrapv','-fno-strict-aliasing','-funsigned-char']
+              for mode in ['none','mir-stack','fast','quality']:
+                  obj=tmp/('qualified-'+mode+'.o')
+                  exe=tmp/('qualified-'+mode)
+                  if run([ide,'cc','-c','-fverify-codegen','-fregister-allocator='+mode,*flags,'tests/differential/qualified_aggregate.c','-o',obj])==0:
+                      run(['nm','-u',obj])
+                      if run(['clang',*flags,'tests/differential/qualified_aggregate_host.c',obj,'-o',exe])==0:
+                          run([exe])
+          if pr == 367:
+              for cc in ['gcc','clang']:
+                  obj=tmp/(cc+'-pic.o')
+                  if run([cc,'-fPIC','-O0','-c','tests/basic_c_pic.c','-o',obj])==0:
+                      run(['readelf','-sWr',obj])
+                      exe=tmp/(cc+'-pic')
+                      if run([ide,'cc',obj,'-o',exe])==0: run([exe])
+                      if run([cc,obj,'-o',tmp/(cc+'-control')])==0: run([tmp/(cc+'-control')])
           if pr == 376:
-              source = Path("tests/basic_c_simd_translate.c").read_text()
-              source = source.replace("int failure = observed_stops != expected_stops || observed_newlines != expected_newlines;", "int failure = (observed_stops != expected_stops) | ((observed_newlines != expected_newlines) << 1);")
-              source = source.replace("failure |= destination[0] != 0xA5 || destination[65] != 0x5A;", "failure |= (destination[0] != 0xA5 || destination[65] != 0x5A) << 2;")
-              source = source.replace("failure |= destination[lane + 1] != source[lane];", "failure |= (destination[lane + 1] != source[lane]) << 3;")
-              source = source.replace("failure |= packed[0] != 'a';", "failure |= (packed[0] != 'a') << 4;").replace("failure |= packed[lane] != 0;", "failure |= (packed[lane] != 0) << 5;")
-              probe = tmp / "simd-runtime.c"
-              probe.write_text(source)
-              for mode in ["clang", "none", "mir-stack", "fast", "quality"]:
-                  exe = tmp / ("simd-" + mode)
-                  cmd = (["clang", "-Isrc", str(probe), "-o", str(exe)] if mode == "clang" else [ide, "cc", "-Isrc", "-fregister-allocator="+mode, str(probe), "-o", str(exe)])
-                  r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
-                  print("SIMD BUILD", mode, r.returncode, r.stdout, flush=True)
-                  if r.returncode == 0:
-                      r = subprocess.run([str(exe)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
-                      print("SIMD RUN", mode, r.returncode, r.stdout, flush=True)
-                  failed |= r.returncode != 0
+              host=tmp/'report.c'
+              host.write_text('#include <stdio.h>\nvoid report(unsigned tag, unsigned long long observed, unsigned long long expected) { printf("MASK %u %llu %llu\\n", tag, observed, expected); }\n')
+              source=Path('tests/basic_c_simd_translate.c').read_text()
+              source=source.replace('static int check_block', 'void report(unsigned, unsigned long long, unsigned long long);\nstatic int check_block')
+              needle='int failure = observed_stops != expected_stops || observed_newlines != expected_newlines;'
+              diagnostic='''static unsigned reports = 0;
+              if (reports < 12 && (observed_stops != expected_stops || observed_newlines != expected_newlines)) {
+                  report(reports * 2, observed_stops, expected_stops);
+                  report(reports * 2 + 1, observed_newlines, expected_newlines);
+                  reports += 1;
+              }
+              '''+needle
+              assert needle in source
+              source=source.replace(needle,diagnostic)
+              p=tmp/'simd-report.c';p.write_text(source)
+              for mode in ['clang','none','mir-stack','fast','quality']:
+                  obj=tmp/('simd-'+mode+'.o');exe=tmp/('simd-'+mode)
+                  compiler=['clang','-O0'] if mode=='clang' else [ide,'cc','-fregister-allocator='+mode]
+                  if run([*compiler,'-Isrc','-c',p,'-o',obj])==0:
+                      if run(['clang',host,obj,'-o',exe])==0:run([exe])
           raise SystemExit(1 if failed else 0)
           PY
-
