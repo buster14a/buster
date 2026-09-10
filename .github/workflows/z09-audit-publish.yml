@@ -73,17 +73,33 @@ jobs:
           assert git('write-tree') == expected_tree
           evidence = {'main': request('/branches/main')['commit']['sha'], 'candidate': request('/pulls/371')['head']['sha'], 'open_prs': [], 'issue40_comments': pages('/issues/40/comments')}
           owned = {'src/buster/lib/compiler/ir/ir.h', 'src/buster/lib/compiler/ir/ir_promote.c', 'src/buster/lib/compiler/driver/driver.c', 'src/buster/apps/ide/ide.c', 'src/buster/tests/compiler/ir/ir_promotion_test.c', 'docs/agents/driver.md', 'docs/middle-end-pass-map.md', 'PERFORMANCE_AUDITS.md', str(path.relative_to(pathlib.Path.cwd()))}
+          reviewed = {
+              373: ('2035d127c6606b8dec0438b8d18afaae7ba99715', {'docs/agents/driver.md'}),
+              381: ('e99d1697f2422c3c30f2c0ef6868e151e63d9b23', {'src/buster/apps/ide/ide.c'}),
+              386: ('e045c046cfb8871ad2fa1b5f174a7d74bba7680d', {'src/buster/apps/ide/ide.c'}),
+          }
           for pr in pages('/pulls?state=open&sort=created&direction=asc'):
-              if pr['number'] == 371:
+              number = pr['number']
+              if number == 371:
                   continue
-              files = pages('/pulls/' + str(pr['number']) + '/files')
+              files = pages('/pulls/' + str(number) + '/files')
               overlap = sorted(owned.intersection(row['filename'] for row in files))
-              evidence['open_prs'].append({'number': pr['number'], 'head': pr['head']['sha'], 'files': files, 'overlap': overlap})
-              print('PR', pr['number'], 'overlap', overlap)
+              row = {'number': number, 'head': pr['head']['sha'], 'files': files, 'overlap': overlap}
+              if number in reviewed:
+                  row['comments'] = pages('/issues/' + str(number) + '/comments')
+                  row['reviews'] = pages('/pulls/' + str(number) + '/reviews')
+                  row['review_comments'] = pages('/pulls/' + str(number) + '/comments')
+              evidence['open_prs'].append(row)
+              print('PR', number, 'overlap', overlap)
           (out / 'coordination.json').write_text(json.dumps(evidence, indent=2))
           assert evidence['main'] == baseline, ('Main moved', evidence['main'])
           assert evidence['candidate'] == parent, ('PR head moved', evidence['candidate'])
-          assert not any(set(pr['overlap']) - {'PERFORMANCE_AUDITS.md'} for pr in evidence['open_prs']), 'Shared production overlap requires review'
+          for pr in evidence['open_prs']:
+              overlap = set(pr['overlap']) - {'PERFORMANCE_AUDITS.md'}
+              if overlap:
+                  assert pr['number'] in reviewed, ('Unreviewed shared-file overlap', pr['number'])
+                  head, compatible = reviewed[pr['number']]
+                  assert pr['head'] == head and overlap <= compatible, ('Reviewed overlap changed', pr['number'])
           index = request('/git/blobs', {'content': pathlib.Path('PERFORMANCE_AUDITS.md').read_text(), 'encoding': 'utf-8'})
           assert index['sha'] == '6f3af6993173b8e2dcf71ff5c7c12b711c302431'
           tree = request('/git/trees', {'base_tree': 'c6afd57f05e4acee8f9b49f73cdad4a194ee1a89', 'tree': [
