@@ -1,0 +1,153 @@
+name: A03 candidate validation
+on:
+  push:
+    branches: [astra/a03-20260909-ci-inspection]
+    paths: [.github/workflows/a03-candidate.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: astra/a03-361-qualified-parameter-values
+          path: source
+          persist-credentials: false
+      - name: Apply immutable reviewed patch to the new owned branch
+        id: publish
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          baseline=ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          test "$(git rev-parse HEAD)" = "$baseline"
+          test "$(gh api repos/buster14a/buster/branches/main --jq .commit.sha)" = "$baseline"
+          gh api --paginate 'repos/buster14a/buster/pulls?state=open&per_page=100' --slurp > "$RUNNER_TEMP/open-prs.json"
+          python3 - <<'PY'
+          import base64, hashlib, json, pathlib, zlib, os
+          prs = json.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'open-prs.json').read_text())
+          heads = {pr['number']: pr['head']['sha'] for page in prs for pr in page}
+          assert heads == {357: 'b345e30e9597b56e47917dcea16ce8b1ae5faa59', 362: '36d04f127f84465dcb1aa393f4df24eba5508b18'}, heads
+          text = pathlib.Path('../transport/a03/qualified-parameter.patch.zlib.b64').read_text().strip()
+          # Repair transcription of the transport encoding, never the source.
+          text = text.replace('D35q3UbRRUP2', 'D35q3UbRUP2').replace('K2kdRZZxy', 'K2kdRZxy').replace('wN3ttKlRlRfps', 'wN3ttKlRfps')
+          patch = zlib.decompress(base64.b64decode(text, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'cde7e143f19008c91a72a56fbfdc630bc91866ecfacd3d43d0d3d86bb7ac3874'
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'a03.patch').write_bytes(patch)
+          PY
+          git apply --check "$RUNNER_TEMP/a03.patch"
+          git apply "$RUNNER_TEMP/a03.patch"
+          git diff --check
+          git add docs/agents/frontend/calls.md docs/differential-testing.md src/buster/lib/compiler/frontend/c/c_gen.c src/buster/tests/compiler/driver/driver_test.c src/buster/tests/compiler/frontend/c/c_test.c tests/basic_c_qualified_aggregate_call.c tests/differential/qualified_aggregate.c tests/differential/qualified_aggregate.h tests/differential/qualified_aggregate_host.c tools/differential.c
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'c: separate qualified parameter objects from callable values (#361)'
+          test "$(gh api repos/buster14a/buster/branches/main --jq .commit.sha)" = "$baseline"
+          gh auth setup-git
+          git push origin HEAD:refs/heads/astra/a03-361-qualified-parameter-values
+          printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD
+  native:
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.publish.outputs.sha }}
+          persist-credentials: false
+      - name: Build exact submitted source
+        id: build
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/evidence/source-sha.txt"
+          clang --version | tee "$RUNNER_TEMP/evidence/clang.txt"
+          gcc --version | tee "$RUNNER_TEMP/evidence/gcc.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j1 2>&1 | tee "$RUNNER_TEMP/evidence/build.txt"
+      - name: Full Release suite including canonical negative control
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all -- -j1 2>&1 | tee "$RUNNER_TEMP/evidence/test-all.txt"
+      - name: Native mixed-compiler differential matrix
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_differential --self-test 2>&1 | tee "$RUNNER_TEMP/evidence/differential-self-test.txt"
+          "$RUNNER_TEMP/buster-build" test_differential --ide build/Release/ide --source tests/differential/qualified_aggregate.c --host tests/differential/qualified_aggregate_host.c --out "$RUNNER_TEMP/differential" --sanitize-oracle 2>&1 | tee "$RUNNER_TEMP/evidence/differential.txt"
+      - name: Minimal strict execution and independent GCC control
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          gcc -std=c17 -Wall -Wextra -Werror -fwrapv -fno-strict-aliasing -funsigned-char tests/differential/qualified_aggregate.c tests/differential/qualified_aggregate_host.c -o "$RUNNER_TEMP/gcc-control"
+          "$RUNNER_TEMP/gcc-control" | tee "$RUNNER_TEMP/evidence/gcc-control.txt"
+          for mode in none mir-stack fast quality; do
+            for ssa in -ffrontend-ssa -fno-frontend-ssa; do
+              build/Release/ide cc -fverify-codegen -fregister-allocator="$mode" "$ssa" tests/basic_c_qualified_aggregate_call.c -o "$RUNNER_TEMP/minimal" 2>&1 | tee -a "$RUNNER_TEMP/evidence/minimal-strict.txt"
+              "$RUNNER_TEMP/minimal"
+            done
+          done
+      - name: Existing cross-target execution mode matrix
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/evidence/mode-matrix.txt"
+      - name: Supported self-host gates
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.runner == 'ubuntu-26.04' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/evidence/self-host.txt"
+          "$RUNNER_TEMP/buster-build" test_self_host_audit --config Release 2>&1 | tee "$RUNNER_TEMP/evidence/self-host-audit.txt"
+      - name: Sanitized full suite and qualified-call matrix
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" generate --sanitize --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/buster-build" build --config Debug -t test_all -- -j1 2>&1 | tee "$RUNNER_TEMP/evidence/sanitized-all.txt"
+          "$RUNNER_TEMP/buster-build" test_differential --ide build/Debug/ide --source tests/differential/qualified_aggregate.c --host tests/differential/qualified_aggregate_host.c --out "$RUNNER_TEMP/differential-sanitized" --sanitize-oracle 2>&1 | tee "$RUNNER_TEMP/evidence/differential-sanitized.txt"
+      - name: Collect textual observations
+        if: ${{ always() }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, shutil
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          for name in ('differential', 'differential-sanitized'):
+              source = root / name
+              if source.is_dir():
+                  for path in source.rglob('*'):
+                      if path.is_file() and path.suffix in ('.txt', '.tsv', '.argv', '.stdout', '.stderr', '.c', '.h'):
+                          target = root / 'evidence' / name / path.relative_to(source)
+                          target.parent.mkdir(parents=True, exist_ok=True)
+                          shutil.copyfile(path, target)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a03-candidate-${{ matrix.runner }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 7
+          if-no-files-found: error
