@@ -1050,6 +1050,8 @@ struct CParserResult
 {
     CParserDeclaration* first_declaration;
     CParserDeclaration* last_declaration;
+    // Null until the first syntax diagnostic; capacity is the logical limit,
+    // not allocated storage. Nonempty rows retain the parse arena's lifetime.
     CDiagnostic* diagnostics;
     u32 declaration_count;
     u32 diagnostic_count;
