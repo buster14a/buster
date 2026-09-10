@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-10T011438Z`](docs/performance-audits/2026-09-10T011438Z.md) — Z01 compiler census and first-error syntax storage (#128, #248)
 - [`2026-09-09T163649Z`](docs/performance-audits/2026-09-09T163649Z.md) — Repair ELF AArch64 variadic register cursors and HFA overflow (#36)
 - [`2026-09-09T151546Z`](docs/performance-audits/2026-09-09T151546Z.md) — Lower Windows x86-64 variadic calls through MIR (#36)
 - [`2026-09-09T141413Z`](docs/performance-audits/2026-09-09T141413Z.md) — Select fixed CPU queries in MIR without self-host fallback (#36)
