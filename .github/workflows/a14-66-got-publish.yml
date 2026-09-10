@@ -1,0 +1,117 @@
+name: A14 publish unused GOT marker dependency
+
+on:
+  push:
+    branches: [astra/a14-66-fixture-ci]
+    paths: [.github/workflows/a14-66-got-publish.yml]
+
+permissions: {}
+
+concurrency:
+  group: a14-66-got-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 8403f0a75e44a78c3ef7c857f708158be4ea46e6
+          path: source
+          persist-credentials: false
+      - name: Verify the patch and all original and replacement blobs
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, gzip, hashlib, pathlib, subprocess
+          data = gzip.decompress(base64.b64decode(pathlib.Path('../transport/.github/a14-66/got.patch.gz.b64').read_text()))
+          assert hashlib.sha256(data).hexdigest() == '6e4b119cb973b4561c729cc2bc85b8da91cdacd143e1bcf2eef99e7f4a994332'
+          pathlib.Path('../got.patch').write_bytes(data)
+          expected = {
+              'src/buster/lib/compiler/link/link.c': ('ffbd71c01a2eb55db280e82f51e191db4aa96de1', 'b34764527a43f2a516f45ed14b3311490e0f50e0'),
+              'src/buster/tests/compiler/link/link_test.c': ('658df59eb9e6e3aa89eff62df87f48b0cf294d95', '2029e211e0db08426cec5a72fe06c3e812c1152d'),
+          }
+          for path, hashes in expected.items():
+              assert subprocess.check_output(['git', 'hash-object', path], text=True).strip() == hashes[0], path
+          subprocess.run(['git', 'apply', '--check', '../got.patch'], check=True)
+          subprocess.run(['git', 'apply', '../got.patch'], check=True)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          assert set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()) == set(expected)
+          for path, hashes in expected.items():
+              assert subprocess.check_output(['git', 'hash-object', path], text=True).strip() == hashes[1], path
+          PY
+      - name: Check live competing file changes across every open PR
+        working-directory: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, urllib.request
+          base = 'https://api.github.com/repos/buster14a/buster/'
+          def pages(path):
+              result = []
+              for page in range(1, 1001):
+                  separator = '&' if '?' in path else '?'
+                  url = base + path + separator + 'per_page=100&page=' + str(page)
+                  request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      rows = json.load(response)
+                  assert isinstance(rows, list)
+                  result.extend(rows)
+                  if len(rows) < 100:
+                      return result
+              raise RuntimeError('pagination bound reached')
+          touched = {'src/buster/lib/compiler/link/link.c', 'src/buster/tests/compiler/link/link_test.c'}
+          inventory = []
+          overlap = []
+          for pr in pages('pulls?state=open'):
+              files = pages('pulls/' + str(pr['number']) + '/files')
+              names = [row['filename'] for row in files]
+              inventory.append({'number': pr['number'], 'head': pr['head']['sha'], 'files': names})
+              matches = sorted(touched.intersection(names))
+              if pr['number'] != 367 and matches:
+                  overlap.append({'number': pr['number'], 'files': matches})
+          pathlib.Path('../open-pr-inventory.json').write_text(json.dumps(inventory, indent=2))
+          print('Rechecked open PRs:', [row['number'] for row in inventory])
+          assert not overlap, overlap
+          PY
+      - name: Fast-forward only this session-owned source branch
+        working-directory: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          test "$(git ls-remote origin refs/heads/fix/a14-66-host-compiler-fixtures | cut -f1)" = 8403f0a75e44a78c3ef7c857f708158be4ea46e6
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/buster/lib/compiler/link/link.c src/buster/tests/compiler/link/link_test.c
+          git diff --cached --check
+          git commit -m 'link: discard only unused x86-64 ELF GOT markers'
+          git -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' push origin HEAD:refs/heads/fix/a14-66-host-compiler-fixtures
+          git rev-parse HEAD | tee ../source-sha.txt
+          echo "Published linker source: $(git rev-parse HEAD). Compilation and execution are not validated by publication." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() && !cancelled() }}
+        with:
+          name: a14-got-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            got.patch
+            open-pr-inventory.json
+            source-sha.txt
+          if-no-files-found: error
+          retention-days: 7
