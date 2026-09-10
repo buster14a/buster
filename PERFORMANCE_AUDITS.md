@@ -54,6 +54,7 @@ keep current.
 
 - [`2026-09-10T184045Z`](docs/performance-audits/2026-09-10T184045Z.md) — Local aggregate-copy completion for the wider metamorphic campaign (#366)
 - [`2026-09-10T180045Z`](docs/performance-audits/2026-09-10T180045Z.md) — SysV unnamed-bitfield interoperability with unchanged default classification (#66, #391)
+- [`2026-09-10T164337Z`](docs/performance-audits/2026-09-10T164337Z.md) — Import ordinary AArch64 ELF page addresses (#355)
 - [`2026-09-09T174124Z`](docs/performance-audits/2026-09-09T174124Z.md) — Lower Win64 indirect aggregate arguments through MIR (#36)
 - [`2026-09-10T010600Z`](docs/performance-audits/2026-09-10T010600Z.md) — QUALITY scratch census through existing diagnostic replays; no optimization claim
 - [`2026-09-09T163649Z`](docs/performance-audits/2026-09-09T163649Z.md) — Repair ELF AArch64 variadic register cursors and HFA overflow (#36)

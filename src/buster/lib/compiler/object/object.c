@@ -283,6 +283,30 @@ BUSTER_GLOBAL_LOCAL bool object_absolute32s_value(u64 address, s64 addend, s32* 
     return valid;
 }
 
+// AAELF64 275/277 use Page(S+A)-Page(P) and the low twelve bits of S+A.
+// Share the checked address arithmetic and instruction authority between
+// the in-memory linker and both native ELF executable writers.
+bool object_aarch64_elf_page_relocate(ObjectRelocationKind kind, u32 word, u64 place, u64 target, s64 addend, u32* patched)
+{
+    u64 address = 0;
+    bool valid = patched && !(place & 3) && object_address_addend(target, addend, &address);
+    if (valid && kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21)
+    {
+        s64 displacement = 0;
+        valid = a64_pc_relative_displacement(address & ~UINT64_C(0xfff), place & ~UINT64_C(0xfff), 0, &displacement) &&
+                a64_pc_relative_patch(A64_OPCODE_ADRP, word, displacement, patched);
+    }
+    else if (valid && kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+    {
+        valid = a64_add_lo12_patch(word, (u32)(address & A64_IMM12_MAX), patched);
+    }
+    else
+    {
+        valid = false;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool object_apply_aarch64_mach_page_relocation(ObjectRelocationKind kind, u8* patch, u64 place, u64 target, s64 addend)
 {
     if (patch && !(place & 3))
@@ -897,6 +921,11 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_aarch64_immediate_relocation(Objec
 {
     u32 word = 0;
     memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
+    u32 immediate = 0;
+    if (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12 && !a64_add_lo12_read(word, &immediate))
+    {
+        return false;
+    }
     if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
     {
         u32 shift = 0;
@@ -1046,13 +1075,16 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_string(buffer, S8("\n"));
             return true;
         }
+        case OBJECT_RELOCATION_AARCH64_ELF_PAGE21:
         case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
         case OBJECT_RELOCATION_AARCH64_MACH_PAGE21:
         case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
         {
             u32 word = 0;
             memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
-            if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && !object_mach_page21_instruction_valid(word))
+            u32 canonical = 0;
+            if ((relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 && !a64_pc_relative_patch(A64_OPCODE_ADRP, word, 0, &canonical)) ||
+                (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && !object_mach_page21_instruction_valid(word)))
             {
                 return false;
             }
@@ -1074,6 +1106,7 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_string(buffer, S8("\n"));
             return true;
         }
+        case OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12:
         case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
         case OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12:
         case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
@@ -4400,12 +4433,17 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 // cross-object resolution; the weak bit says it loses to a
                 // strong definition instead of colliding with it.
                 u8 binding = (u8)(information >> 4);
+                // AArch64 assembly need not annotate exported code labels
+                // with .type. Preserve explicit STT_OBJECT, but admit an
+                // untyped exported text label as a callable entry point.
+                bool untyped_code = target.cpu_arch == CPU_ARCH_AARCH64 && symbol_type == 0 && binding != 0 &&
+                                    section_index && section_kinds[section_index] == OBJECT_SECTION_TEXT;
                 *destination = (ObjectSymbol){
                     .name = string_duplicate_arena(arena, name, false),
                     .value = symbol_value,
                     .size = size,
                     .section = section_index ? section_kinds[section_index] : OBJECT_SECTION_UNDEFINED,
-                    .kind = symbol_type == 2 ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
+                    .kind = symbol_type == 2 || untyped_code ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
                     .global = binding != 0,
                     .weak = binding == 2,
                     // st_other's low two bits are st_visibility; STV_HIDDEN
@@ -4573,6 +4611,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             kind = relocation_type == 257                             ? OBJECT_RELOCATION_ABSOLUTE64
                                    : relocation_type == 258                           ? OBJECT_RELOCATION_ABSOLUTE32
                                    : relocation_type == 261                           ? OBJECT_RELOCATION_AARCH64_PREL32
+                                   : relocation_type == 275                           ? OBJECT_RELOCATION_AARCH64_ELF_PAGE21
+                                   : relocation_type == 277                           ? OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12
                                    : relocation_type == 282                           ? OBJECT_RELOCATION_AARCH64_JUMP26
                                    : relocation_type == 283                           ? OBJECT_RELOCATION_AARCH64_CALL26
                                    : relocation_type == 549                           ? OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12
@@ -4620,7 +4660,38 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     }
                     if (read_ok)
                     {
-                        if (kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26)
+                        if (kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+                        {
+                            u64 instruction_offset = section_bases[target_section] + source_offset;
+                            u32 instruction = 0;
+                            u32 canonical = 0;
+                            u32 immediate = 0;
+                            A64MCInst decoded = {0};
+                            bool page = kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21;
+                            read_ok = !(instruction_offset & 3) && target_section_data->alignment >= 4 &&
+                                      object_read_u32(target_section_data->data, instruction_offset, &instruction);
+                            if (read_ok)
+                            {
+                                read_ok = page ? a64_mc_decode(instruction, &decoded) && decoded.opcode == A64_OPCODE_ADRP &&
+                                                 a64_pc_relative_patch(A64_OPCODE_ADRP, instruction, 0, &canonical)
+                                               : a64_add_lo12_read(instruction, &immediate) && a64_add_lo12_patch(instruction, 0, &canonical);
+                            }
+                            if (read_ok)
+                            {
+                                // REL ADRP stores an unscaled signed imm21 addend,
+                                // unlike its executed displacement and Mach-O's rule.
+                                if (section_type == 9)
+                                {
+                                    addend = page ? decoded.operands[1].value / 4096 : (s64)immediate;
+                                }
+                                memcpy(target_section_data->data.pointer + instruction_offset, &canonical, sizeof(canonical));
+                            }
+                            else
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                            }
+                        }
+                        else if (kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26)
                         {
                             u64 instruction_offset = section_bases[target_section] + source_offset;
                             u32 instruction = 0;
@@ -9784,6 +9855,8 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
     return kind == OBJECT_RELOCATION_AARCH64_JUMP26                 ? 282
            : kind == OBJECT_RELOCATION_AARCH64_CALL26               ? 283
            : kind == OBJECT_RELOCATION_AARCH64_PREL32               ? 261
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21            ? 275
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12          ? 277
            : kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ? 549
            : kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 ? 551
            : kind == OBJECT_RELOCATION_ABSOLUTE64                   ? 257
@@ -10785,6 +10858,19 @@ ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat forma
             result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
             return result;
         }
+        if (source->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || source->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+        {
+            u32 word = 0;
+            u32 canonical = 0;
+            memcpy(&word, object->sections[source->section].data.pointer + source->offset, sizeof(word));
+            if (format != OBJECT_FORMAT_ELF64 || object->target.cpu_arch != CPU_ARCH_AARCH64 ||
+                object->sections[source->section].alignment < 4 ||
+                !object_aarch64_elf_page_relocate(source->kind, word, source->offset, source->offset, 0, &canonical))
+            {
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                return result;
+            }
+        }
         if (source->kind == OBJECT_RELOCATION_AARCH64_CALL26 || source->kind == OBJECT_RELOCATION_AARCH64_JUMP26)
         {
             u32 instruction = 0;
@@ -11033,6 +11119,19 @@ ObjectExecutable object_link_executable(ObjectFile* object)
                 break;
             }
             memcpy(patch, &value, sizeof(value));
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+        {
+            u32 word = 0;
+            u32 patched = 0;
+            memcpy(&word, patch, sizeof(word));
+            if (!object_aarch64_elf_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
+                                                relocation->addend, &patched))
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+            memcpy(patch, &patched, sizeof(patched));
         }
         else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
         {
