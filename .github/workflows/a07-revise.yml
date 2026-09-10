@@ -1,0 +1,181 @@
+name: A07 tuple ambiguity and census
+on:
+  push:
+    branches: [astra/a07-280-inspection]
+    paths: [.github/workflows/a07-revise.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      sha: ${{ steps.patch.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Recheck competing work and publish normal descendant
+        id: patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          PARENT: e3ceee1a8f79ca40a8355584717a1f36a55a0de7
+          OWN_BRANCH: astra/a07-280-evex-tuples
+        run: |
+          set -euo pipefail
+          cp .a07/ambiguity.patch "$RUNNER_TEMP/a07.patch"
+          echo 'd3f84a7d37a26dcbfcc09ccb9b7d00873f23b98d91a8209e8bfca6a91cdf567f  '"$RUNNER_TEMP/a07.patch" | sha256sum --check
+          git fetch origin main "$OWN_BRANCH"
+          test "$(git rev-parse origin/main)" = "$MAIN"
+          test "$(git rev-parse "origin/$OWN_BRANCH")" = "$PARENT"
+          gh api --paginate --slurp 'repos/buster14a/buster/pulls?state=open&per_page=100' > "$RUNNER_TEMP/a07-open-prs.json"
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          paths = {'docs/agents/driver.md', 'src/buster/lib/compiler/assembly/assembly.c', 'src/buster/lib/compiler/assembly/x86_64_metadata.c', 'src/buster/tests/compiler/assembly/x86_64_metadata_test.c', 'src/buster/tests/compiler/assembly/x86_64_completion_census_test.c'}
+          for page in json.loads((Path(os.environ['RUNNER_TEMP'])/'a07-open-prs.json').read_text()):
+              for pr in page:
+                  if pr['head']['ref'] == os.environ['OWN_BRANCH']:
+                      continue
+                  files = json.loads(subprocess.check_output(['gh','api','--paginate','--slurp',f"repos/buster14a/buster/pulls/{pr['number']}/files?per_page=100"]))
+                  overlap = paths.intersection(f['filename'] for page in files for f in page)
+                  print(pr['number'], pr['head']['sha'], pr['title'], 'overlap', sorted(overlap))
+                  if overlap:
+                      raise SystemExit('Competing changes require review before publication')
+          PY
+          git checkout --detach "$PARENT"
+          git apply --check "$RUNNER_TEMP/a07.patch"
+          git apply "$RUNNER_TEMP/a07.patch"
+          git diff --check
+          git add docs/agents/driver.md src/buster/lib/compiler/assembly/x86_64_metadata.c src/buster/tests/compiler/assembly/x86_64_metadata_test.c
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'assembly: reject ambiguous inferred source tuple sizes' -m 'Refs #280. A shorter displacement must not choose how many source elements an unsized narrowing load reads.'
+          git push origin "HEAD:refs/heads/$OWN_BRANCH"
+          printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  validate:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      BUSTER_TEST_JOBS: 1
+      BUSTER_MATRIX_THREADS: 1
+      CMAKE_BUILD_PARALLEL_LEVEL: 1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+      TESTED_SHA: ${{ needs.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.publish.outputs.sha }}
+          persist-credentials: false
+      - name: Capture frozen audit inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRANSPORT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a07-final"
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+          git rev-parse HEAD > "$RUNNER_TEMP/a07-final/tested-sha.txt"
+          for file in oracle.py refine-audit.py; do
+            gh api "repos/buster14a/buster/contents/.a07/$file?ref=$TRANSPORT_SHA" --jq .content | base64 -d > "$RUNNER_TEMP/a07-final/$file"
+          done
+          python3 "$RUNNER_TEMP/a07-final/refine-audit.py" "$RUNNER_TEMP/a07-final/oracle.py"
+          clang --version > "$RUNNER_TEMP/a07-final/clang.txt"
+          as --version > "$RUNNER_TEMP/a07-final/gas.txt"
+      - name: Build exact Release head with one worker
+        id: build
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/a07-final/build.log") 2>&1
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/a07-driver"
+          "$RUNNER_TEMP/a07-driver" generate --ci --cc clang --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/a07-driver" build --config Release -t ide -- -j1
+      - name: Existing exact-head census report
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          build/Release/ide x86_64_completion_census --output="$RUNNER_TEMP/a07-final/census.txt" 2>&1 | tee "$RUNNER_TEMP/a07-final/census.log"
+      - name: Independent byte, rejection, ELF link and execution audit
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/a07-final/oracle.py" 2>&1 | tee "$RUNNER_TEMP/a07-final/oracle.log"
+      - name: Full Release suite
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/a07-driver" build --config Release -t test_all -- -j1 2>&1 | tee "$RUNNER_TEMP/a07-final/full.log"
+      - name: All supported mode and format legs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/a07-driver" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/a07-final/modes.log"
+      - name: Ordinary self host
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/a07-driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/a07-final/self-host.log"
+      - name: Full sanitized Debug suite in a separate tree
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/a07-final/sanitized.log") 2>&1
+          "$RUNNER_TEMP/a07-driver" generate --ci --cc clang --linker DEFAULT --sanitize --build-dir "$RUNNER_TEMP/a07-sanitized" -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/a07-driver" build --build-dir "$RUNNER_TEMP/a07-sanitized" --config Debug -t test_all -- -j1
+      - name: Record unchanged source revision
+        if: ${{ always() }}
+        run: |
+          git status --short > "$RUNNER_TEMP/a07-final/final-status.txt"
+          git rev-parse HEAD >> "$RUNNER_TEMP/a07-final/tested-sha.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a07-revision-${{ needs.publish.outputs.sha }}
+          path: ${{ runner.temp }}/a07-final
+          if-no-files-found: error
+          retention-days: 7
+  census-observation:
+    needs: publish
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        version: [baseline, candidate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 1
+      BUSTER_TEST_JOBS: 1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ matrix.version == 'baseline' && 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae' || needs.publish.outputs.sha }}
+          persist-credentials: false
+      - name: Observe rows through existing census in disposable instrumented checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRANSPORT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/census"
+          git rev-parse HEAD > "$RUNNER_TEMP/census/source-sha.txt"
+          gh api "repos/buster14a/buster/contents/.a07/census-instrument.py?ref=$TRANSPORT_SHA" --jq .content | base64 -d > "$RUNNER_TEMP/census/instrument.py"
+          python3 "$RUNNER_TEMP/census/instrument.py"
+          git diff > "$RUNNER_TEMP/census/observation-only.patch"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/a07-driver"
+          "$RUNNER_TEMP/a07-driver" generate --ci --cc clang --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF > "$RUNNER_TEMP/census/generate.log" 2>&1
+          "$RUNNER_TEMP/a07-driver" build --config Release -t ide -- -j1 > "$RUNNER_TEMP/census/build.log" 2>&1
+          build/Release/ide x86_64_completion_census --output="$RUNNER_TEMP/census/counts.txt" > "$RUNNER_TEMP/census/rows.log" 2>&1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a07-census-${{ matrix.version }}-${{ needs.publish.outputs.sha }}
+          path: ${{ runner.temp }}/census
+          if-no-files-found: error
+          retention-days: 7
