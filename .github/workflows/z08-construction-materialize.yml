@@ -16,40 +16,408 @@ jobs:
         with:
           ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
           persist-credentials: false
-      - name: Apply hash-pinned source patch and publish detached blobs only
+      - name: Materialize source and detached Git blobs
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
-          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
-          # Source transport only. No branch, pull request, settings, or permission APIs.
-          payload = '''H4sIAAAAAAAC/8U9a3fbtpLf/SuQ+pxcyXrY8itOXWer2E6qc107K9vddrM5NCVCEjcUqUtSdtzU/31nBgAJkiBFJe7dnDaxCWAwGAwGM4PBoNPpsG2H32/7S8/baLVabLQdhePt0TKKebjtuaPtcTBfuB784uJ/1jjwozhcjmM38LuzjZ9/Zp2d9g5r9dqv9tnPP2+0NhehPZ3bLPDHfKO10dreZqe257n+tBPPQm47TAfBHoLwc5sFDz532OiRuWF3zGzfYYuQR9yPAYwHX30WzzjB4l/cKAZgDGAGY5tgOK499QP4PGajpes5XXYzg9bMDjkbL+dLD6rdc8bvAeB2GDwABks/jtoE0A9iFrtzABm1mYf15nwehI9t7KHj2T5ncRDbHpQGIbNZxAF/hw2GLOQSScKiS9Aug3BuewKN9gQaEXMCAs/vbe9pxRxaTINAh7APp8s5NI0QaMhjG4ZIWPGQRXEAJOQA cNP1x97S4ewn bUJ GdsS7szdI2013wt7eXt+cD62355env1r7h83Va f9mcXV5DqcOn7qA/GFqn8OFmeHuKJbDL7SU0uW783mT/s9Fi8Of3xnto+E+r/+HD+eXZdZuNgLifLXux4L4TadV+61/cnqfVcGDcUG2gdZdUdtNpNzS5+nA+7F+eWd cXVzfXstH5GRB9wUNgCCvygjiS7bhTwPz98Oq/ErynMMlFrGU VgXO+io6xrKjjm68uOsV6QM4PA0RUdI31YJEs3AyOAoFMdYGGu bqOTKaRjpK56fXV7fA011UULMMxr9Pg4rw/LLTwOCwkvc m720uB2/VNf3gDlJosfYFTFNthnKHT1dkf1s3VP88vcXIC59GKg8/c16t86A/7v54jQ7bZwg7tOQdOz07N4GbQv7AEzYk/kBJu7NqeJahOzGFootMy11AnZVlzMW25hmLi8k2ur/vWO2h3/Yt1CqsQ6keRbcH6c6OZNQZRUlL5XX9wcTs8z9af2K63BNmiE/L83dUQcIGWKe8BSfkkCAEbaJvyn7lZnqkyjfOMZQaRsnGmccrKWrP+OxRLeXztCUxuObppoyK2adMKZFMAOq5pUyOqMBV59oKJKGUuUd3AWqJRFWOJphmG o3MTPXhog9L8+Kqf2YNz2+GfeoNl4lnw+r0AtuxYO8Ibeqs2LB/c/Xr4LS0vR0Hc3dcBQbpODzPt0Y64kZe2ffw/EMfNh7Ymz4kHcKGaYM KATvZQm9w+u699fZ2cIF7xHg ytcTmma uQrhOsYlggWOn6dNi/gW1QkhZrRuPQjsezAm mxOkiv9+c31m+D64GqDvJrymPr3o3cQvXby8F/wryd n71XaCx9918wbd yZFlBJpFoGfCLfzD0MLk9hxi7fZ9qADhAge mJuAjL+D0vIcFkfJP yjJQR41EQtIX5ccFAFGPeXczYITzX161SoHButr+Xqwvnl7a8N12kzH1BvFoo3N6FMYFSqaJhAAm qbSx/xMpVWAITOnszDO NZHKwrNFaOSzwCgshnRCRFbHu6LDTz6aMTx07GoNwoCjwX3PJx4wQN34OsTISmVtnfW2fnpBbsPXIfldGtL6IoNIyJKVWwTIvYcf2se58GWD D3fkYQVNRCNIpTrOA TmOyprZiFXVGOJM MuYa3h+ejU8ayTjkWMppUaB+ZKWDSBFsyHbI3NxL+Lrd9wQZNg hCL7jTjY6YC PZ1VZRd1zHdoJaaC712gdoLh2itcTIOvID3wUVgRHromWhD73N+m8HbOzZUeROXGHxtMlEAgZ0Hfp9owNwGvPA4V53hsZUhPaSNDdYNLMXHMwXwGBG3/sfBk2ykTI dkf2yLhDzPBEoghAs8DOMbVxhA6b2W2RAC2mkFMyINaDHRRhMQY5aUiNz/+SIV/LZdhxri77AYJYelx8IEHxMlFX63CQrMZ6h/WUv7LEbP3bGMz7+DDMhjZRjGm+0HIF2C0Ytm/GQC2ARe5jZM UOxDPpQ/M A5Gap sEgbAVTBF OE34YWQDQAD1o9SsO3N7wbwg+LxcCJ44bPfQiH7VPiArm m0wo+2XYyiwAuvUA0JB AcwCmY11GmSt/Del+EygTTkWkTt3KkpJsNSyZGXJ+4urt6A+YcGFqn3zCyko9G0tsSeM epLGzyN/k80BhtJoLPd2m8qg/8m8kTVFdd lKbitbYl9hJyUId8W2w1oKh+O0OXYskGFv2O3g8uZw3/q1/zvr sC1q1Uyrap3iny3VadrqOFujBJt0b4PGUMi1Zk/pj0IWV3feOpGULIKQ/6RQNAhrIgag nnDOv2lzTKYYNN9l6JfzFHXxDDtn0qGCBTrv0oth SF93nuSI ogcXFFzWSNtICpVtfZegmGoK3diOuFGr+zHt7fqo sUm1j9kI5PdnbYpqK33YbbnSh6UpUKhhQ88/Znp7ytBe4CZoLX dqkFKD8AY20S2kOe6mFkhi2CdwGeP3G3vkQWGM/7Rl3QEsfZhZI BgK4v2jo/Yr1j rY25Mb9AYz9Am odL Bog5kkEyx9mnO1r4P4ha0PtqEo4vOR9ygwox29ofDFT02Bw c7hIfTd2u/1dtpHhIOYT6Yvc7WJdd4IG3UsVv0JKxTITa2Zts8tvxLN K ONW6zWP12iUcT4ZM QVwOjQimcKU lQ+C/Ud50RbbZT+yoxzgQfgWq20J71wEsGG7921Leo95g35tq3rtBIs8hqVEV7P26rWYtd0DYCA1a+pPV8lXI4h2WvlJ6zZXN/po bNxqfQK49KFiVWbmJ/HI9vRRJov9Zb2OYVvpfZLtn2AtCDK8lsy7v1eHeY Xbw8C8suBbmTfj8K3LvAYnrRHT2sybHUSGeXNFgnl7hwXu/Q3rSZ2ginupXl3u1ccio q23I7n34Kg e92ogWq2V/CtNZdcRkJBh6YfVDJs7bzAzrOvk2bC3L8fz+nUdNnTzu3OWGTPF38qShgOGuoxZehxQMYLaTGoaXIZVjRVKGXaQ1t7SjyuqmHegW7v1WLg4XjnxwMCvYeJ3YfPs9Qqc/DX7q0D5mkyyoe1PY aWlu7Z0oVXgrTUsxxv/zPk84nGjALvNdtpgPf7Jg0ljq1DaZFs61FYBczO3GA90qrCroGwBpWJrA0nlkMeLR9OQa3a1gjDVrN8yoVSHXusvLCl38n9qjhK4q/At18GT5GypYOzu6T urYQZq9pyRxvlSDYWnlTL aeNibkW0lDcuOfDW8u+r4t0B7s/Svd tYpv8z2eHtsTbm/0m9naICTcYT u uxb8faSceIyNLdD5p14wIoVfOaZCWHoWmqFgjwRQQ2EvKkaJg8gJXTB YM36WH8aa3+YH4ST5Js+NtFFOrQEaZpdgoZBbm hB2+DhwuPWvZRBzp9FHybbFpIBTNme04OS7a7PlEVhmnjt3yffx9jHm1547Bqk5gh8jK1jSDAl+fX1AR IJ/9wwqBRmukd15Q0EZS qE8Yb3jknp04FRZjY6NeNh5Y1YvRavaQtR48tVrFtZm/kexWg96r49w9Ae7Oz307AlLsm oi0tPf xukApn3KQ7BJxJC21Nja7HQwPHNDPo6vI/saA0/Ia7rFouRnMmVbK4aWP alO1mqZ1VBy9lwkeNbEqwnTcDBdhFwq5VfDz5xaVzKJmt7TQZhQeQv5Dy0s1dKhE pwwWZsmkZzxiasp2VdfYOOXL02tLVhkI487QnM5ONwl+X5wuHfY7u0VFkyKuDj6tOYcYEy5cM78IMA yGC4jaYMxRjAkz6EAJJCVgXfPmc1QhfGE8v1D89jAv TU5Jz2OfUEjXzEb5mCA72KgqlCBZ+A fcyDBS vapAmkIMyinQE7vq wRpCEVYRYF1wGfCFcopyB M wpcuMuIM8ZmJf2H21s7+HsYIt+OnglYw axC3Udhzg06gTTLZBeRyhF3SGYXHw38XS/kfEQIX2XU/ YonN7HAbNrkm mSmN44AjB in582FotEdVniUgEcgsSpE ppm4KS/nMQrR21tOmTNI3fnKxiDdFONtfoA5QX9B2cwRDgx8HZsaj0JP7J+gAs8um6dGxW3iceD2joHeeQ1oB03qBJ MwXKsJO TFBmK4SjF WQeaYKkZcUCvtAeLxGKx3/RnDb1Ms0raGgzAb6dwxmhdReGMUdtiBpQl+Nq7SCfZR WZ2ZHk2Hg6QXgQN5P5R0JUy36KPRV2K9T51Ke5JeW9OKlBF2uf7/usvfT46b4IFqorsBbHJ1YfTqzMRmoSorKqn RSI1EXC2v qb hY7Me1Eh n0cQSLajzoh5bYG/6Si1vqi uLOgJlMjr6mJSMl2GIpKfv0qrqenYU68FgEoEXxnkw97gWiGdaAAOKvb53gyUap9BW310KEJBxEnRVu0wI3Gc/ePCLuGl9VLbPYk ongHlQefRhNqIgNC/eWjM3ccMs3Y/Tzh5mYG yxhugjnQ+k05l1C/br8OIPjOC SZMLFka9bPne5geXoJOAcZ8urBqtLqo86Fp+6Pv8Sa5Ce0h9xRr8L45Vcp3X4lHKRGmgq rspoWmSmZ5voGhxf xYmr5iA7RjEL9bt8LkEEPS pEjnOQ16h avtjRvWwDeY4zCgzKFdS92IlJ+kcf dz7J+qAKYgyQYANQHqYB6DMYQMPigHw l0hEbhBinzjD2xrNH3ANMQdHzKURnv o ziBBpa QNEyvMe7HQDC4dE4dEe cYndg qw tlV7H9mYuQJ+gUZ+ZHspds hwUTZvsJuGD0v2hqzQJP3ORgdy9fEgJ3SoVlYzsMXQJmx2zOY9uxY7utnD0JpFTjFTVDThQSSFDPD2TCuf4MLLoYhk oghhiUhThgiFLE7AS eI IN CYoHnzQ6O2E58gl1GtA1BF77njqKx6HDmTm dcI1vgJ6TmTkJq4C7QFWUTZBd5OQfKQ0SIzta7hs0hZVpC01JkSfSZymWUayMPlOoCJ2UokSuaOlBLlJhBkjtp xfIsaiNas1r+qo4mUYk5lMGWLKrED2oUuC2TtfLTSmMlH2TzLEZI Jk5pPUOkLHQoGXy+i1zsUUmX6c9VlDGYGmX4fJ8Z1Ko4Sn sOqyQDv7Z1kmn1/2WlFJGQdj10/iKPD/RqslxOCpZLwRIp1stYL iCkjCdLBVMlb9WcoFWTsZOyxsxJTWNmBQJ5Q+dkpaGzAuAz2z7m2a2NxFpQj6tXZj0bp5U/J5Vc18yWfC3iX9swa hUPVI3EqG8wtYrHk4VP2YDMFV3/OwwsY8d/l7Fl7Ox rOROWuEdNN516ZafPJcZcad3vMuyMUJ/Mn1NBmqFdrVVlAPv0nYtmHTuwLgP/m+zDZ194z29P1kHxb7EzW7Wles1mdezPVpHXpb5YaoIWmmTMUZAxYPqEfBmRm cMGeIEfLD SjAYqGpxFeYoGi3URzdi/C98T5PlmVvm4dSsMQEwZ0SzGUt zF1s06adGQ1ovEW LewQlOHEhkPSd1fsXavttrqs+7fZcN+x nCpsuzpLpXJjKN67raO UrhHpteKW7zqq7XEtMVBmz9 ZpuyIW46ns0kcx9J6tcer3fcd9FMhy2OuJSJZD jO3u7WaO5uuHedUKIlx5WlsWXGtpsZ1090hFASQFFYG5q+OKKw57VwV5FZJF1IkMy6SNcPjYs0ORZCVNIVGM9StbJVp+icid+naMN8c/alBhC3H4l0/d9HZ2XdjG1BSrzvJrwDMlF6h1kF8D djb7wIpT/OIdCnEzLX OJkr4rnlEl7Q225p+G7Kj5de2mFKW+lr bWXhEqiOJyyv3tuT2euT5fGSlYrE/3Okl ywN+vVJQD bvl4M1R6UMVWvAhckIoSRHdMl2Wj7upboPlOv/l651rdWF+ODq3DfYvP3RgE7dQFWI9Vt0SDCEuJHq97FOXUe727kwZPBkCJ8MEFzWQcBqDxCD7DWKZlBNIJL+i6PmY/AJ2LPPiYD4HULFRs0kRQXfN9LHI XKdy lsNdENGVvaPwqyt9J7jVtDqosDT5ui7B6pKZyjQp6YAKbVXF4etqLV RF4huQW lfeqAK0t0u7kBlSU8MkOLZcttFgBUwax a1D bbOfLZJIGamtF2RBtAzRD0JxgkL19wSB7rwxhozm nKNAZOS EmO7nUF0q9l3mPcgGdEwDVoAt8uCUA1J1jieXLl/LbT1q3nTcyYQiN7VjWaIF609xYpZFWTHUuMUnPFHOOSIrOkYAFjKKPc lMzjVIp+bL9m5J7acZofzFL+732Ll5Yf71/0N49MIb3GoLiE1e8xikfBRKf0FkjeWejrm+mgoTZ ZC1GCuIfEyIKj5ImyXYIZlyMRBc7Td5YBsYTAEvAKN7XoIBRm9VA2E/iRn bvUNzINgISImjxaAWTSUTckKxtFG2ZfDBd uqEsudUMjlaAHOMHhc5Wmpkrj7LYdZNib blo3/TWyc+dN2j7Ns1orO+NM2fdKZ15JU5Ech28qyR+ymKodApRVgFKuioTKCQu xM/kqwB1E4x53TNZyuw1SLC CDIU8QpVUI GmQjj5FW/gSS9s8fdMUFXBLuga a7FThqVaMmcbZA86y0478Lv3RCICEF S68vd2K h acdZdIN8uefx2xyp5WTmNdx8su/kSgzqmbIJ9bc/sw bv/ZPfxlc ojP7HUzM8OY WtKfh+fsBalPt mkRrNi u ZpeSz2E8OX4ld/9WhYdd/WjNO PZsvLAlQLwtLLhgC9mIRbbsOx/9Nin+uHEdA+QJae+qqS7U+rRIBbEtFWrmfa qji+aZY4HFhCnI/WkZ1c8L8XbaCw0fLqfh7fctijRbKWJKGxZG4PXG0tyNn4CsCqs gpQ8xA953ecn88m9vh5yQJSGpRpK6RkaqVpgRJdHZzKpFMiqOT8swi yJkqgYWe6iMWznxK9CHuQYmknM AtoTtWqVAtTC3Re ImV20yk1LEmmIQ2VgY5Xg+5h46g05Ovo Cw8/Y//Q7MtvETy7iNsm cPB6bX1bnBx bv12PrwGEuFqJsruE2sfgaInr6WspqsZ04nLPUdhJT FG5FJyI170hUhOVjB+0uajK1JpHj9nP3R5Ld9PyP+1BDWHO6JYzfV6PebmX HUrZwN/7T0r4DTpDX7JrNy0SPVoMnWUhWNM6pI1b/IhQt89gMo0OeY8OU1CqNmu3mCTE9Ugb/wpI6mZZJjJrES5V2CSK+shdMFqXt jxrK2Y//piAGvn5sp6+8fNufitg SOkffCpuK0AG8VR XrziR9MeU1W5kEWuIDLLW//7UoYZG8XuXEn5RIiARnhxew aUPL++uVbXhA538R7/7iHsqKnH3XQWYEwO duu78Q0Md yjO++Tgs/wls7s1VN2+Ssm9lWbnThMw5SAa8jClDqJE+0zKq9ObVWwiIsvuiu1D5T8iQC ovGhCzkYyjXeKz3Wmn2V7amgN256mJZ0U7amHU BCqOWJIKiXNph2DTWQLBrnG2v17H mlunOCbNZYS90zft1GVNjORpq7zi zf7kYdBJDl+EfOBf7HHMFngCE2HwcPwQiODfOfCMC/oaw3Ti8SwB KMLjxKGxTAaPaepBvfRjBKt ui aNh6nncS+/rS7ELHBvaj93Vgv3woFqK1/b156fYyE bdi Nte koHtKXNIkT1rM/RUxkzZniRTdTPxkV+TjDU01q dcz9loJjevppVyVhUu2S0oz3Vddf6qHb/SBt u/vKEzzPdoZnWz4azwYVV Ax1Ox3wxndxP3b0qSV7ACu omvSDD DNtuDjx73p/EMPu5mCFayBgWH4N1m4V9NwvlOJNQaMH SjXTUTZr0hyK8u0CTYXU9WlUBviUjMpFLxTLu0qu5K0Cs1swnqa qKV HNjCQtw9Ksep ol7+6Jdq1NHvVomBWkNIXMyFmc8gma0rJMI6s5jR1LqFkO1vYYxMEJUEbIqQyC/RsklKgIgF/MyYo RC ovz8VchqxRAaU8Fc hMQx1uxppUV+KmBTBVxT1LT4qMaPJGa1UyRsQONoS+mZdieLIV6lKFeN5IZQtPXUo4PpChKdn7afSXOm/fzg/vUmzSvMvC7qnk yRtL+laC4EvZhRPklx/Yh2pENaoClRtJN03zf4yiW4uK+DhQdlppKyfS8q2sr4xQdDKVmXZgXZ WtMs krqw3FFl5f41x1GxiSIjZ292phVS2UW93DeTWbGrKgLVmK5VnbHefBleW2Z9a/i3uh3JD4RudCko6vdDMoKdVRklFnl9jBmhNBO7kDTlDntuNEsN2lRGrUoSVGbEief o8EEmMCWDa+thoABe9m+UWdgGW3CZlC1SnYFIzDoS0KNskWo7HnDvcsSoamyodq1S++XGAQWWlmfT1oSQbY65OZjysDnLZ9iX4CX9RHARetB3PwmA5nS2W8TZmofr1vDt3pI+oooLIJC/iJ+ CffeE4eYfPlvkUpowh0xG9uubGs2AZi3ufQfC5TRdsF0EoH1yLZ26kP6uGd WD54V3SDRZxtENjjvHOIy5Om4/VW2dzbkdLyqiPV18D4GYXX3bDO nhZFTsUr60xfMcMndcY59Ta3NzUHkLIMJc418BrptqTb9R1hEnR0BiPYIWxu zKl4U5170UBw6CliN3lHVZbd4xclQASOrrrTFSe fuHOvKN3CUIKqvYD9Qac8oDhODk+5CY Hj7zBwqXvw56+0bqNuH5tGQ8lBeHSN+DsEagXxwCZH o+T9FH QE7/A3Hb9j dbSF9obt uROlw3tByawJEelCJeyPcyX9iidCdxRl3R98RLezA59HkX/gNH aYexO7DHKL/R C MOSL6YyixTVyR8v53A4fcWIQYCS4hIxgEay2TV7yLk7InTps6N1JD8bElXeas/Mqc53fQyejpQfgu+w uVbOgOc6FXDYKAPH Cj6ptBDMPQpKe1rMxiAzZDrAFOvgxIPgQg gjCRwbYOcB93GipPmE abf1pwK2t7PsUW1vi0T8AhWFmMF94es/oeTMtTH+jhdm4eO45CzuO+XwRR+pStz2ecRF/j8uIOIloR+tFPTIIMzGdhn yKQ5WPYIg7FsBsoUtrQjIb0 ERNy1xeWcc3KMbBgmO83GTpgchMPUXUTFZHPgKd0HPBXMT5Uz0yxKAjHmEUsizxPMb4kiIQDsgKLKtuLt BafpgFHu9o6IhnFQX2kW8vohkMEA MdAU1fAQw5ihmgHB1Si accYS05eMtf5irjeGPhUU1yl13Csv0Sh7ZkOPk+ oriJIU9piPP+Yh+CxVIO9i+Gkd7hApeA+IAVUMjKv/HXu8w7h3dtdpd50RA/GF4tvAMQ1yjDowi ozeRzIR15uq6eDdGvc+CDY4yuqKbX NEBkiqRt5LtjdMAQpXwhgHQlnlviBUJEaEt/yA8/GB7rQwzf80DKBYWY8DqKoMlxvCSmQiDbshVL38Y8JiQSzwKtbpRwC25/ximi hS1fy lQ45l4BRNS0F//w1/R5P0FZ8aD elnicC3E+pTcCO0kKOwFJ+T/dMHG7YgTS HNdKm2QT4B7QQqXnM23KRJDmPBD o5d/jI9IV39 wjtNO37QS18WP6iFz6TTz epg3gnXr5RUAV8b3b/IuL/mDFm2JA9FFS2OUZdpFSRcIgbI+1N3CwGKuBpHkujHhm3yPTCIhq4eEyhBX iilU15bAZ2brjmFB3/xRrA2ZWcGeiBiq qmZ+ao8msekRO ETf/TlzaUH8MDinXFxwpL27A6AVzUR4MIA5GA9PLQYA0KA5RW70SS5fA OroTFzrDLQilNwLvst8CpLsnw4UJYZ C qc9vHfJm04oC0M/SVOG rY+JD aFq3zGa0MuXEm5O tgbE2y4lMZiL4cyUjAmeLtOXYHZs4dIx5pq5hN8Zhb m4kn5KRHZFsWImUitY9g8o00fk61S4KgfNA9IjxymNNG30i5aI6d86gpSIVxQExdR0EtiLSHd4LTki1LaBlS9CYiah tG3VEkgEGC8hEmr9sie wqFUZJD0dD8cqsQnnNK qiI/kXj8h3rpVb3OS8Ale dQVvbZkUyk5UV4JuUmP85KGs6TUgQDdw QeoYuCZ OaMst0gSy okihOpGayBlCeFH NJILTl+p4m4sqLETTruxnF2QU2Di2pjlRam+G61oOSJGR0Tmb ARr1IFdNsAUhiJ2TU VhMjI1o7zOLOhBQ/THj23YxWf4Ng u emaZTVU5sguqRY jnsMejpRFLPS2eoy5TuqV5NBpA87AAH6eqo1KqAy6g77TUuIkpW4STe5GCMiN0/0UrQ1RS6Qp2dEFIBwKLdmeIpWJ9Fc1RJ5OM2SjDZ mF6YO8sF7ODZx5MX+L6y0LswS8+j9noysZz9YIuTMXli5nNXqoBulGp6SlkA3ZpUMKF+IJD+h0FXs zmQlzz7EayiNhu ciaF77oQj9UlPzkgJUEkEAZKjXs1aQlCS80hHER OHKgoDMwe2iD+535FeWbCBJp0Zzh7sW1PoCc zUu7u7aCbtQScYR9tQAHTdTmKQUKVNDMKqGhSad rTb3mMt/KcnIrXvaDu/kxsOx1RBUzxcfCRZm5w2yt dxqFA suCB0leS9o0dsBKANdZslGI+XqFCgPjld QrsO1oL1FHhyOyIeAA4IF0ucYVdlOwJGgRkGVffepcBrUGQlp5Fx p6iVsBtYV4LPYMF04qCD6wZnSu wKqKQMr69J KSw3LPHpcX2tY200ljf3jrY3D3bg/93tzb2dQ1y+yMZTJeGXuVVV9RY5cI68fGs7jk sS1GR8Zs1NaYu SJr3R+mg yh9ESQ1nzqdHtb sN/5W6BzXTT0gF1BCDYO Tt5yxTDHoSDO5IyaVuoju30ZTs hKuXLr iz d4WkCosymiVslCJ6U0F32T84XYs/IyJZkeoPJ RHcViGN1VPZdtMFjmCpYpzBKT EUzwy tBt NcJHkQRI WxVAaytCwl60 TBnMXeFE0ESFiDmHysk26qd mii p3bRAUxe0DJBnaEKJt QFmq6znK5GOrBmK9+NlNyCrhVR Tu57IxI7WD uUkc/0JmhIbrf8G0+lACcnMC/UwJke9mgGghTxauAv y qoh dAS++ChNOGWcb/we336b+838AAA='''
-          # Spaces in the transport literal are insignificant; the digest is authoritative.
-          patch = gzip.decompress(base64.b64decode(''.join(payload.split()), validate=True))
-          expected = '07b7c9fd0149105b185439fdb9689337e77f135a3fac5ac80b76e833378da7a8'
-          if hashlib.sha256(patch).hexdigest() != expected:
-              raise SystemExit('Source patch digest mismatch')
-          out = pathlib.Path('z08-evidence'); out.mkdir()
-          patch_path = out / 'construction.patch'; patch_path.write_bytes(patch)
-          subprocess.run(['git', 'apply', '--check', str(patch_path)], check=True)
-          subprocess.run(['git', 'apply', str(patch_path)], check=True)
+          import base64, difflib, hashlib, json, os, pathlib, subprocess, urllib.request
+          root = pathlib.Path('.')
+          changed = {}
+          def one(s, old, new):
+              if s.count(old) != 1:
+                  raise RuntimeError('Non-unique source anchor: ' + old[:100])
+              return s.replace(old, new, 1)
+          def region(s, start, end, change):
+              begin = s.index(start); finish = s.index(end, begin)
+              return s[:begin] + change(s[begin:finish]) + s[finish:]
+          def edit(name, change):
+              p = root / name; old = p.read_text(); new = change(old)
+              if new == old: raise RuntimeError('No change: ' + name)
+              changed[name] = old; p.write_text(new)
+          fields = '''block_appends value_appends instruction_appends operand_slots_appended
+          block_grows value_grows instruction_grows block_rows_copied value_rows_copied instruction_rows_copied
+          source_rows_copied source_rows_cleared function_starts body_tokens parameters
+          initial_block_slots initial_instruction_slots initial_value_slots ssa_finish_calls ssa_finish_failures
+          before_ssa_block_rows before_ssa_instruction_rows before_ssa_value_rows
+          after_ssa_block_rows after_ssa_instruction_rows after_ssa_value_rows
+          final_block_slots final_instruction_slots final_value_slots
+          place_load_retractions place_atomic_load_retractions ssa_read_retractions place_repair_steps
+          cfg_builds cfg_failures cfg_scratch_slots cfg_target_visits cfg_unique_edges
+          cfg_parameter_visits cfg_incoming_visits cfg_copy_sources'''.split()
+          header = '''#pragma once
+
+          // Calling-thread construction work, owned by ir.c and present only in the
+          // existing allocation diagnostic build. These are cumulative event/row counts,
+          // not timings, live memory, all-lane totals, or a second IR representation.
+          // Normal builds do not evaluate recording arguments or retain counter storage.
+          #include <buster/lib/base.h>
+
+          #if BUSTER_BENCH_ALLOCATIONS
+          #define IR_CONSTRUCTION_COUNTERS(X) \\
+          '''
+          header += '\n'.join('    X(' + name.upper() + ', ' + name + ')' + (' \\' if index + 1 < len(fields) else '') for index, name in enumerate(fields))
+          header += '''
+
+          typedef enum IrConstructionCounter
+          {
+          #define IR_CONSTRUCTION_ENUM(id, name) IR_CONSTRUCTION_##id,
+              IR_CONSTRUCTION_COUNTERS(IR_CONSTRUCTION_ENUM)
+          #undef IR_CONSTRUCTION_ENUM
+              IR_CONSTRUCTION_COUNT,
+          } IrConstructionCounter;
+
+          typedef struct IrConstructionCounters IrConstructionCounters;
+          struct IrConstructionCounters
+          {
+              u64 values[IR_CONSTRUCTION_COUNT];
+              bool overflowed;
+          };
+
+          BUSTER_F_DECL void ir_construction_record(IrConstructionCounter counter, u64 amount);
+          BUSTER_F_DECL IrConstructionCounters ir_construction_counters(void);
+          BUSTER_F_DECL String8 ir_construction_counter_name(IrConstructionCounter counter);
+          #define IR_CONSTRUCTION_RECORD(counter, amount) ir_construction_record(IR_CONSTRUCTION_##counter, (u64)(amount))
+          #else
+          #define IR_CONSTRUCTION_RECORD(counter, amount) ((void)0)
+          #endif
+          '''
+          name = 'src/buster/lib/compiler/ir/ir_construction.h'
+          changed[name] = ''; (root / name).write_text(header)
+          implementation = '''#if BUSTER_BENCH_ALLOCATIONS
+          BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL IrConstructionCounters ir_construction_totals;
+
+          void ir_construction_record(IrConstructionCounter counter, u64 amount)
+          {
+              if ((u32)counter < IR_CONSTRUCTION_COUNT)
+              {
+                  u64* value = ir_construction_totals.values + counter;
+                  if (amount > UINT64_MAX - *value)
+                  {
+                      *value = UINT64_MAX;
+                      ir_construction_totals.overflowed = true;
+                  }
+                  else
+                  {
+                      *value += amount;
+                  }
+              }
+              else
+              {
+                  ir_construction_totals.overflowed = true;
+              }
+              return;
+          }
+
+          IrConstructionCounters ir_construction_counters(void)
+          {
+              return ir_construction_totals;
+          }
+
+          String8 ir_construction_counter_name(IrConstructionCounter counter)
+          {
+              String8 result = {0};
+              switch (counter)
+              {
+          #define IR_CONSTRUCTION_NAME(id, name) case IR_CONSTRUCTION_##id: result = S8(#name); break;
+                  IR_CONSTRUCTION_COUNTERS(IR_CONSTRUCTION_NAME)
+          #undef IR_CONSTRUCTION_NAME
+                  default: break;
+              }
+              return result;
+          }
+          #endif
+
+          '''
+          def ir_change(s):
+              s = one(s, '#include <buster/lib/compiler/ir/ir_internal.h>', '#include <buster/lib/compiler/ir/ir_internal.h>\n#include <buster/lib/compiler/ir/ir_construction.h>')
+              s = one(s, 'IrType* ir_type_from_id', implementation + 'IrType* ir_type_from_id')
+              s = one(s, '// (model.h owns the record shapes, ir.h the API). The construction', '// (model.h owns the record shapes, ir.h the API). ir_construction_record\n// owns optional calling-thread construction diagnostics. The construction')
+              for kind, begin, end in [('block', 'IrBlock* ir_function_add_block', 'IrValueId ir_function_add_value'), ('value', 'IrValueId ir_function_add_value', 'IrInstructionId ir_instruction_self_id'), ('instruction', 'IrInstructionId ir_function_add_instruction', 'BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_error')]:
+                  def change(q):
+                      marker = '            u32 capacity = function->' + kind + '_capacity ?'
+                      q = one(q, marker, '            IR_CONSTRUCTION_RECORD(' + kind.upper() + '_GROWS, 1);\n            IR_CONSTRUCTION_RECORD(' + kind.upper() + '_ROWS_COPIED, function->' + kind + '_count);\n' + marker)
+                      if kind == 'instruction':
+                          marker = '                memset(canonical_sources, 0, sizeof(*canonical_sources) * capacity);'
+                          q = one(q, marker, marker + '\n                IR_CONSTRUCTION_RECORD(SOURCE_ROWS_CLEARED, capacity);')
+                          marker = '                    memcpy(canonical_sources, function->instruction_canonical_sources, sizeof(*canonical_sources) * function->instruction_count);'
+                          q = one(q, marker, marker + '\n                    IR_CONSTRUCTION_RECORD(SOURCE_ROWS_COPIED, function->instruction_count);')
+                          q = one(q, '        result = id;', '        IR_CONSTRUCTION_RECORD(INSTRUCTION_APPENDS, 1);\n        IR_CONSTRUCTION_RECORD(OPERAND_SLOTS_APPENDED, instruction.operand_count);\n        result = id;')
+                      elif kind == 'value':
+                          q = one(q, '        result = id;', '        IR_CONSTRUCTION_RECORD(VALUE_APPENDS, 1);\n        result = id;')
+                      else:
+                          q = one(q, '        result = &function->blocks[function->block_count - 1];', '        IR_CONSTRUCTION_RECORD(BLOCK_APPENDS, 1);\n        result = &function->blocks[function->block_count - 1];')
+                      return q
+                  s = region(s, begin, end, change)
+              return s
+          edit('src/buster/lib/compiler/ir/ir.c', ir_change)
+          recovery = '''BUSTER_C_INTERNAL IrValueId c_ir_recover_memory_place_from_value(CIntegerIrBuilder* builder, IrValueId value)
+          {
+              IrValueId result = IR_VALUE_ID_INVALID;
+              if (value.value < builder->function->value_count)
+              {
+                  IrValue* value_definition = builder->function->values + value.value;
+                  if (value_definition->category == IR_VALUE_PLACE)
+                  {
+                      result = value;
+                  }
+                  else if (value_definition->definition.value < builder->function->instruction_count)
+                  {
+                      IrInstructionId definition_id = value_definition->definition;
+                      IrInstruction* definition = builder->function->instructions + definition_id.value;
+                      CIrDirectSsa* ssa = builder->direct_ssa;
+                      bool has_later_event = ssa && ssa->event_count && ssa->events[ssa->event_count - 1].after.value == definition_id.value;
+                      bool recover = !has_later_event && (definition->opcode == IR_OPCODE_LOAD || definition->opcode == IR_OPCODE_ATOMIC_LOAD) &&
+                                     definition->operand_count == 1 && definition_id.value + 1 == builder->function->instruction_count &&
+                                     value.value + 1 == builder->function->value_count &&
+                                     builder->function->blocks[builder->current_block.value].last_instruction.value == definition_id.value &&
+                                     builder->last_instruction.value == definition_id.value;
+                      IrInstructionId previous = IR_INSTRUCTION_ID_INVALID;
+                      if (recover)
+                      {
+                          if (builder->previous_instruction_known)
+                          {
+                              previous = builder->previous_instruction;
+                          }
+                          else
+                          {
+                              IrInstructionId cursor = builder->function->blocks[builder->current_block.value].first_instruction;
+                              while (cursor.value != IR_ID_UNDERLYING_INVALID && cursor.value != definition_id.value)
+                              {
+                                  IR_CONSTRUCTION_RECORD(PLACE_REPAIR_STEPS, 1);
+                                  previous = cursor;
+                                  cursor = builder->function->instructions[cursor.value].next;
+                              }
+                              recover = cursor.value == definition_id.value;
+                          }
+                      }
+                      if (recover)
+                      {
+                          if (previous.value == IR_ID_UNDERLYING_INVALID)
+                          {
+                              builder->function->blocks[builder->current_block.value].first_instruction = IR_INSTRUCTION_ID_INVALID;
+                          }
+                          else
+                          {
+                              builder->function->instructions[previous.value].next = IR_INSTRUCTION_ID_INVALID;
+                          }
+                          builder->function->blocks[builder->current_block.value].last_instruction = previous;
+                          builder->last_instruction = previous;
+                          builder->previous_instruction_known = false;
+                          result = definition->operands[0];
+                          // The value ID is reusable. Its old label provenance must not
+                          // describe the next value, including an address-of replacement.
+                          // The retracted value is highest and its sparse entry is last.
+                          if (builder->function->label_metadata_count &&
+                              builder->function->label_metadata_values[builder->function->label_metadata_count - 1].value == value.value)
+                          {
+                              builder->function->label_metadata_count -= 1;
+                          }
+                          IR_CONSTRUCTION_RECORD(PLACE_LOAD_RETRACTIONS, definition->opcode == IR_OPCODE_LOAD);
+                          IR_CONSTRUCTION_RECORD(PLACE_ATOMIC_LOAD_RETRACTIONS, definition->opcode == IR_OPCODE_ATOMIC_LOAD);
+                          builder->function->instruction_count -= 1;
+                          builder->function->value_count -= 1;
+                      }
+                  }
+              }
+              return result;
+          }
+
+          '''
+          def c_change(s):
+              s = one(s, '#include "c_internal.h"', '#include "c_internal.h"\n#include <buster/lib/compiler/ir/ir_construction.h>')
+              def read_place(q):
+                  return one(q, '                builder->function->value_count -= 1;', '                builder->function->value_count -= 1;\n                IR_CONSTRUCTION_RECORD(SSA_READ_RETRACTIONS, 1);')
+              s = region(s, 'BUSTER_C_INTERNAL IrValueId c_ir_ssa_read_place', 'BUSTER_C_INTERNAL u32 c_ir_ssa_root', read_place)
+              def finish(q):
+                  prefix = '    IR_CONSTRUCTION_RECORD(SSA_FINISH_CALLS, 1);\n'
+                  for kind in ['block', 'instruction', 'value']:
+                      prefix += '    IR_CONSTRUCTION_RECORD(BEFORE_SSA_' + kind.upper() + '_ROWS, builder->function->' + kind + '_count);\n'
+                  q = one(q, '    CIrDirectSsa* ssa = builder->direct_ssa;', prefix + '    CIrDirectSsa* ssa = builder->direct_ssa;')
+                  suffix = '    IR_CONSTRUCTION_RECORD(SSA_FINISH_FAILURES, !valid);\n'
+                  for kind in ['block', 'instruction', 'value']:
+                      suffix += '    IR_CONSTRUCTION_RECORD(AFTER_SSA_' + kind.upper() + '_ROWS, builder->function->' + kind + '_count);\n'
+                  for kind in ['block', 'instruction', 'value']:
+                      suffix += '    IR_CONSTRUCTION_RECORD(FINAL_' + kind.upper() + '_SLOTS, builder->function->' + kind + '_capacity);\n'
+                  return one(q, '    return valid;', suffix + '    return valid;')
+              s = region(s, 'BUSTER_C_INTERNAL bool c_ir_ssa_finish', 'BUSTER_C_INTERNAL void c_ir_mark_local_read_only', finish)
+              s = region(s, 'BUSTER_C_INTERNAL IrValueId c_ir_recover_memory_place_from_value', 'BUSTER_C_INTERNAL IrValueId c_ir_recover_place_from_value', lambda q: recovery)
+              marker = '        function->values = arena_allocate(arena, IrValue, function->value_capacity);'
+              extra = '\n        IR_CONSTRUCTION_RECORD(FUNCTION_STARTS, 1);\n        IR_CONSTRUCTION_RECORD(BODY_TOKENS, declaration.body_token_count);\n        IR_CONSTRUCTION_RECORD(PARAMETERS, signatures[declaration_index].parameter_count);\n'
+              extra += '\n'.join('        IR_CONSTRUCTION_RECORD(INITIAL_' + kind.upper() + '_SLOTS, function->' + kind + '_capacity);' for kind in ['block', 'instruction', 'value'])
+              return one(s, marker, marker + extra)
+          edit('src/buster/lib/compiler/frontend/c/c_gen.c', c_change)
+          def machine_change(s):
+              s = one(s, '#include <buster/lib/compiler/codegen/machine.h>', '#include <buster/lib/compiler/codegen/machine.h>\n#include <buster/lib/compiler/ir/ir_construction.h>')
+              def edges(q):
+                  q = one(q, '    u32* last_source =', '    IR_CONSTRUCTION_RECORD(CFG_BUILDS, 1);\n    IR_CONSTRUCTION_RECORD(CFG_SCRATCH_SLOTS, function->block_count);\n    u32* last_source =')
+                  for marker, record in [('                u32 target = terminator->targets[index].value;', '                IR_CONSTRUCTION_RECORD(CFG_TARGET_VISITS, 1);'), ('                    last_source[target] = source;', '                    IR_CONSTRUCTION_RECORD(CFG_UNIQUE_EDGES, 1);'), ('                        IrIncoming* incoming =', '                        IR_CONSTRUCTION_RECORD(CFG_PARAMETER_VISITS, 1);'), ('                            incoming = incoming->next;', '                            IR_CONSTRUCTION_RECORD(CFG_INCOMING_VISITS, 1);'), ('                        valid = incoming && incoming->value.value', '                        IR_CONSTRUCTION_RECORD(CFG_INCOMING_VISITS, incoming != 0);'), ('                            machine_builder_edge_copy_source(builder,', '                            IR_CONSTRUCTION_RECORD(CFG_COPY_SOURCES, 1);')]:
+                      q = one(q, marker, record + '\n' + marker)
+                  return one(q, '    return valid;', '    IR_CONSTRUCTION_RECORD(CFG_FAILURES, !valid);\n    return valid;')
+              return region(s, 'BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges', 'MachineFunction machine_function_builder_finish', edges)
+          edit('src/buster/lib/compiler/codegen/machine.c', machine_change)
+          def ide_change(s):
+              s = one(s, '#include <buster/lib/compiler/ir/ir.h>', '#include <buster/lib/compiler/ir/ir.h>\n#include <buster/lib/compiler/ir/ir_construction.h>')
+              s = one(s, '    ArenaBenchmarkCounters allocations = arena_benchmark_counters();', '    ArenaBenchmarkCounters allocations = arena_benchmark_counters();\n    IrConstructionCounters construction = ir_construction_counters();')
+              marker = '    source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_bytes"), allocations.requested_bytes);'
+              return one(s, marker, marker + '''
+              source_metrics_append_field(arena, &text, S8("ir_construction"), S8("version"), 1);
+              source_metrics_append_field(arena, &text, S8("ir_construction"), S8("overflowed"), construction.overflowed);
+              for (u32 index = 0; index < IR_CONSTRUCTION_COUNT; index += 1)
+              {
+                  source_metrics_append_field(arena, &text, S8("ir_construction"), ir_construction_counter_name((IrConstructionCounter)index),
+                                              construction.values[index]);
+              }''')
+          edit('src/buster/apps/ide/ide.c', ide_change)
+          test = '''BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_construction_appends(UnitTestArguments* arguments)
+          {
+              UnitTestResult result = {0};
+              IrFunction function = {0};
+          #if BUSTER_BENCH_ALLOCATIONS
+              IrConstructionCounters before = ir_construction_counters();
+          #endif
+              BUSTER_TEST(arguments, ir_function_add_block(0, &function, (IrBlock){0}) == 0);
+              BUSTER_TEST(arguments, ir_function_add_value(arguments->arena, 0, (IrValue){0}).value == IR_ID_UNDERLYING_INVALID);
+              BUSTER_TEST(arguments, ir_function_add_instruction(0, &function, (IrInstruction){0}, (IrSourceRange){0}).value == IR_ID_UNDERLYING_INVALID);
+              // Initial zero capacity, exact powers of two, and repeated growth
+              // retain row identity and the parallel canonical source array.
+              for (u32 index = 0; index < 65; index += 1)
+              {
+                  IrBlock* block = ir_function_add_block(arguments->arena, &function, (IrBlock){.sealed = true});
+                  IrValueId value = ir_function_add_value(arguments->arena, &function, (IrValue){.definition = {.value = index}});
+                  IrInstructionId instruction = ir_function_add_instruction(arguments->arena, &function,
+                      (IrInstruction){.opcode = IR_OPCODE_CONSTANT_INTEGER, .result = value, .next = IR_INSTRUCTION_ID_INVALID},
+                      (IrSourceRange){.source = {.value = 7}, .offset = index * 3, .length = 2});
+                  BUSTER_TEST(arguments, block && block->id.value == index);
+                  BUSTER_TEST(arguments, value.value == index && instruction.value == index);
+                  BUSTER_TEST(arguments, function.block_count == index + 1 && function.instruction_count == index + 1 && function.value_count == index + 1);
+              }
+              BUSTER_TEST(arguments, function.block_capacity == 128 && function.instruction_capacity == 128 && function.value_capacity == 128);
+              for (u32 index = 0; index < 65; index += 1)
+              {
+                  BUSTER_TEST(arguments, function.blocks[index].id.value == index && function.blocks[index].sealed);
+                  BUSTER_TEST(arguments, function.values[index].definition.value == index);
+                  BUSTER_TEST(arguments, function.instructions[index].opcode == IR_OPCODE_CONSTANT_INTEGER && function.instructions[index].result.value == index);
+                  BUSTER_TEST(arguments, function.instructions[index].next.value == IR_ID_UNDERLYING_INVALID);
+                  IrSourceRange source = function.instruction_canonical_sources[index];
+                  BUSTER_TEST(arguments, source.source.value == 7 && source.offset == index * 3 && source.length == 2);
+              }
+          #if BUSTER_BENCH_ALLOCATIONS
+              IrConstructionCounters after = ir_construction_counters();
+              BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+          #define IR_CONSTRUCTION_EXPECT(counter, expected) \\
+              BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_##counter] - before.values[IR_CONSTRUCTION_##counter] == (expected))
+              IR_CONSTRUCTION_EXPECT(BLOCK_APPENDS, 65);
+              IR_CONSTRUCTION_EXPECT(VALUE_APPENDS, 65);
+              IR_CONSTRUCTION_EXPECT(INSTRUCTION_APPENDS, 65);
+              IR_CONSTRUCTION_EXPECT(OPERAND_SLOTS_APPENDED, 0);
+              IR_CONSTRUCTION_EXPECT(BLOCK_GROWS, 5);
+              IR_CONSTRUCTION_EXPECT(VALUE_GROWS, 4);
+              IR_CONSTRUCTION_EXPECT(INSTRUCTION_GROWS, 4);
+              IR_CONSTRUCTION_EXPECT(BLOCK_ROWS_COPIED, 120);
+              IR_CONSTRUCTION_EXPECT(VALUE_ROWS_COPIED, 112);
+              IR_CONSTRUCTION_EXPECT(INSTRUCTION_ROWS_COPIED, 112);
+              IR_CONSTRUCTION_EXPECT(SOURCE_ROWS_COPIED, 112);
+              IR_CONSTRUCTION_EXPECT(SOURCE_ROWS_CLEARED, 240);
+          #undef IR_CONSTRUCTION_EXPECT
+              for (u32 index = 0; index < IR_CONSTRUCTION_COUNT; index += 1)
+              {
+                  BUSTER_TEST(arguments, ir_construction_counter_name((IrConstructionCounter)index).length != 0);
+              }
+              BUSTER_TEST(arguments, ir_construction_counter_name(IR_CONSTRUCTION_COUNT).length == 0);
+          #endif
+              return result;
+          }
+
+          '''
+          def tests_change(s):
+              s = one(s, '#include <buster/lib/compiler/ir/ir_internal.h>', '#include <buster/lib/compiler/ir/ir_internal.h>\n#include <buster/lib/compiler/ir/ir_construction.h>')
+              s = one(s, 'UnitTestResult ir_tests(UnitTestArguments* arguments)', test + 'UnitTestResult ir_tests(UnitTestArguments* arguments)')
+              return one(s, '    UnitTestResult result = ir_promotion_tests(arguments);', '    UnitTestResult result = ir_promotion_tests(arguments);\n    UnitTestResult construction = ir_test_construction_appends(arguments);\n    result.test_count += construction.test_count;\n    result.succeeded_test_count += construction.succeeded_test_count;')
+          edit('src/buster/tests/compiler/ir/ir_test.c', tests_change)
+          documentation = '''### Canonical construction census in allocation probes
+
+          The same `BUSTER_BENCH_ALLOCATIONS` build emits `ir_construction.*` fields
+          in `-fsource-metrics`. Use the existing allocation-probe arguments above;
+          normal timing compilers must remain uninstrumented. Raw metric files are
+          retained in the native harness artifacts even though its allocation summary
+          contains only arena calls/bytes. There is no second measurement runner.
+
+          `version=1` identifies the construction vocabulary. `overflowed=1` invalidates
+          the census: counters saturate rather than wrapping. Counts are cumulative
+          **calling-thread** totals since process start, including failed attempts
+          that reached each hook. They are not all-lane aggregates. The compiler is
+          currently serial; future parallel compilation must explicitly aggregate
+          lane-owned results. The snapshot precedes report formatting and resets
+          nothing. No extra arena storage or whole-function row stream is retained.
+
+          - `block_appends`, `value_appends`, `instruction_appends` count successful
+            checked-builder appends, including later-retracted rows; direct writes
+            to arrays do not count as appends.
+          - `*_grows`, `*_rows_copied`, `source_rows_cleared` count builder growth
+            and copied/cleared rows, not capacity bytes or peak resident memory.
+          - `function_starts`, `body_tokens`, `parameters`, `initial_*_slots` count
+            C body-lowering starts and initial estimates, once per started function.
+          - `ssa_finish_calls`, `ssa_finish_failures`, `before_ssa_*_rows`,
+            `after_ssa_*_rows`, `final_*_slots` describe frontend finish entry/exit,
+            including failed finish calls. Earlier failures have no exit snapshot.
+            This is not general canonical finalization or later promotion.
+          - `place_load_retractions`, `place_atomic_load_retractions`,
+            `ssa_read_retractions`, `place_repair_steps` count recovered memory
+            loads, SSA read aliases, and previous-instruction traversal steps.
+          - `cfg_*` count shared native edge-builder calls/failures, scratch `u32`
+            slots, target visits, attempted unique source/target pairs, parameter
+            visits, incoming nodes examined including matches, and emitted copy
+            sources. Direct/non-native consumers do not call this builder: zero
+            means no work at this hook, not absence of all CFG work.
+          - `operand_slots_appended` sums appended rows' operand counts. It does
+            not count unique operands or repeated downstream decoding passes.
+
+          Initial estimates and finish populations cover different failure boundaries;
+          do not subtract them blindly on invalid sources. Counts do not measure
+          append latency, phase times, retained arena memory, or all-consumer cost.
+          Reuse per-site allocation diagnostics and uninstrumented paired experiments.
+          A smaller count is not a speedup. Normal builds preprocess recording calls
+          away and retain neither counter storage nor reporting API. Row layout,
+          IDs, source/label provenance, and arena lifetimes are unchanged.
+
+          '''
+          edit('tools/throughput/README.md', lambda s: one(s, '## Frozen-source self-host stages', documentation + '## Frozen-source self-host stages'))
+          edit('docs/agents/benchmarking.md', lambda s: s + '''
+          ## Canonical construction work populations
+
+          For #38/#50/#52/#306, use the existing allocation diagnostic build and its
+          additive `ir_construction.*` source-metrics fields. The
+          [construction census contract](../../tools/throughput/README.md#canonical-construction-census-in-allocation-probes)
+          defines append/growth, frontend finish, place retraction and shared native
+          edge populations. Keep this instrumented compiler off the timing path,
+          require its output hash to match the ordinary compiler, and retain raw
+          metrics. These calling-thread counters do not aggregate persistent lanes,
+          time appends, or cover every operand decoder. They do not establish a
+          Zen 5 speedup, live memory reduction, or whole-pipeline cost.
+          ''')
           subprocess.run(['git', 'diff', '--check'], check=True)
-          paths = ['src/buster/lib/compiler/ir/ir_construction.h', 'src/buster/lib/compiler/ir/ir.c', 'src/buster/lib/compiler/frontend/c/c_gen.c', 'src/buster/lib/compiler/codegen/machine.c', 'src/buster/apps/ide/ide.c', 'src/buster/tests/compiler/ir/ir_test.c', 'tools/throughput/README.md', 'docs/agents/benchmarking.md']
+          out = pathlib.Path('z08-evidence'); out.mkdir()
+          patch = ''.join(''.join(difflib.unified_diff(old.splitlines(True), (root / name).read_text().splitlines(True), fromfile='a/' + name if old else '/dev/null', tofile='b/' + name)) for name, old in changed.items())
+          (out / 'construction.patch').write_text(patch)
           headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'}
-          result = []
-          for name in paths:
-              content = pathlib.Path(name).read_bytes()
+          entries = []; identities = {}
+          for name in changed:
+              content = (root / name).read_bytes()
               local_sha = subprocess.check_output(['git', 'hash-object', name], text=True).strip()
               data = json.dumps({'content': base64.b64encode(content).decode(), 'encoding': 'base64'}).encode()
               request = urllib.request.Request('https://api.github.com/repos/buster14a/buster/git/blobs', data=data, headers=headers, method='POST')
               with urllib.request.urlopen(request, timeout=60) as response:
                   remote = json.load(response)
-              if remote['sha'] != local_sha:
-                  raise SystemExit('Blob identity mismatch: ' + name)
-              result.append({'path': name, 'mode': '100644', 'type': 'blob', 'sha': local_sha})
+              if remote['sha'] != local_sha: raise RuntimeError('Blob identity mismatch: ' + name)
+              entries.append({'path': name, 'mode': '100644', 'type': 'blob', 'sha': local_sha})
+              identities[name] = hashlib.sha256(content).hexdigest()
               print('BLOB', name, local_sha, flush=True)
-          (out / 'tree-entries.json').write_text(json.dumps(result, indent=2) + '\n')
+          (out / 'tree-entries.json').write_text(json.dumps(entries, indent=2) + '\n')
+          (out / 'source-sha256.json').write_text(json.dumps(identities, indent=2) + '\n')
+          subprocess.run(['tar', '-czf', str(out / 'changed-source.tar.gz'), *changed], check=True)
+          # This job never creates or updates refs, PRs, settings, or repository permissions.
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ always() }}
