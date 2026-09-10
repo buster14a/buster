@@ -13,7 +13,7 @@ From the repository root, build `ide` normally and use a **new** output director
 ./build.sh test_differential --ide build/Release/ide --cc clang --out build/differential-release --sanitize-oracle
 ```
 
-The defaults use twelve permanent cases and four generated cases, seed 1, a
+The defaults use thirteen permanent cases and four generated cases, seed 1, a
 10-second deadline per child, and at most 64 reduction trials for the first
 runtime mismatch in each case. A reference compiler must be available; its
 absence is a failure, not a skip. `--cc` accepts a Clang/GCC-style executable,
@@ -119,6 +119,13 @@ Outgoing over-aligned Buster calls are a distinct issue; these regressions
 isolate the callee's local copy, whose alignment fix already landed in
 [PR #282](https://github.com/buster14a/buster/pull/282). No alignment fix is
 part of this harness change.
+
+The qualified-aggregate fixture cross-links top-level const/volatile parameter
+objects with an independent host caller and callees. It checks private-copy
+semantics, compatible function pointers selected across a loop join, expression
+function-pointer types, large by-value objects, and nested pointer qualifiers.
+The minimal source regression and frontend invariant test independently retain
+strict fixed-argument type matching and volatile accesses (GitHub #361).
 
 The unsigned-switch fixture cross-links 32- and 64-bit switch functions with a
 Clang-built caller. It checks high-bit case constants, default edges, and values

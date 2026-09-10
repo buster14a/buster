@@ -545,9 +545,9 @@ typedef enum MachineOpcode
     // neither the argument registers nor any allocatable register can
     // clobber it, mirroring the canonical blr form.
     MACHINE_A64_CALL_INDIRECT, // use callee pointer
-    // Symbol address through the canonical inline-literal form: an
-    // ldr-literal over a branch over an absolute eight-byte relocation.
-    // The payload indexes call_targets.
+    // Symbol address through the target's canonical form: Darwin uses
+    // ADRP/ADD page relocations; other targets use an inline literal.
+    // The payload indexes call_targets and call_target_references.
     MACHINE_A64_LEA_SYMBOL, // def
     // Scalar float operations, the x86-64 FARITH/FCMP analog: float values
     // travel as IEEE bit patterns in general registers and slots exactly
@@ -1375,17 +1375,17 @@ typedef enum MachineEditKind
 // Result of selecting one canonical typed-IR function into machine IR.
 // `supported` false is an explicit per-function fallback: `failed_opcode`
 // names the first construct outside the selected subset.
-// How the relocation at a call-target site resolves. DIRECT is rip-relative
-// to the symbol, which is every reference outside the position-independent
-// code model and every one inside it to a symbol nothing can interpose. GOT
+// How the relocation at a call-target site resolves. DIRECT uses the target's
+// default form (rip-relative on x86-64). GOT
 // names the linker-owned slot holding the symbol's address, PLT its procedure
 // linkage entry; the object layer turns them into R_X86_64_GOTPCREL and
-// R_X86_64_PLT32.
+// R_X86_64_PLT32. MACH_PAGE selects Darwin AArch64's ADRP/ADD address pair.
 typedef enum MachineSymbolReference
 {
     MACHINE_SYMBOL_REFERENCE_DIRECT,
     MACHINE_SYMBOL_REFERENCE_GOT,
     MACHINE_SYMBOL_REFERENCE_PLT,
+    MACHINE_SYMBOL_REFERENCE_MACH_PAGE,
     MACHINE_SYMBOL_REFERENCE_COUNT,
 } MachineSymbolReference;
 
@@ -1499,13 +1499,16 @@ typedef enum MachineThreadLocalSite
 // A relocation site: the function-relative offset of the field to patch
 // and the call-target index it must resolve to. x86-64 sites are rel32
 // fields; AArch64 sites are branch words, or eight-byte inline literals
-// when `absolute` is set.
+// when `absolute` is set. Darwin page pairs identify both instruction sites.
 typedef struct MachineCallSite MachineCallSite;
 struct MachineCallSite
 {
     u32 code_offset;
     u32 target;
-    u32 absolute;
+    u8 absolute;
+    u8 page_relative;
+    u8 page_low;
+    u8 reserved;
     // The patched field resolves thread-locally (x86-64 TPOFF, AArch64
     // TPREL); the module relocation row carries the flag through
     // unchanged.

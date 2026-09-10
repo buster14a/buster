@@ -1,3 +1,12 @@
+// Simulate the CRT declaration that precedes stdarg.h through stdint.h.
+#if defined(_WIN32)
+#ifndef _VA_LIST_DEFINED
+#define _VA_LIST_DEFINED
+typedef char *va_list;
+#endif
+#endif
+#include <stdarg.h>
+
 // Every list lives entirely in one compiler; this checks frontend places
 // without depending on the separate public AArch64 va_list ABI issue.
 typedef __builtin_va_list custom_list;
@@ -48,8 +57,22 @@ static int places(int count, ...)
     __builtin_va_end(final);
     return index != 2 || destination_calls != 1 || source_calls != 4 || a != 10 || b != 10 || c != 10 || d != 20 || e != 10 || f != 10;
 }
+static int public_list(int count, ...)
+{
+    struct { va_list ap; } state;
+    va_list copies[1];
+    int index = 0;
+    va_start(state.ap, count);
+    va_copy(copies[index++], state.ap);
+    int first = va_arg(state.ap, int);
+    int second = va_arg(copies[0], int);
+    va_end(state.ap);
+    va_end(copies[0]);
+    return index != 1 || first != 42 || second != 42;
+}
+
 int main(void)
 {
     _Static_assert(sizeof(custom_list) == sizeof(__builtin_va_list), "alias layout");
-    return direct(1, 42) != 42 || places(2, 10, 20);
+    return direct(1, 42) != 42 || places(2, 10, 20) || public_list(1, 42);
 }

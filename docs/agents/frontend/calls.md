@@ -97,6 +97,22 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   is never set in that dialect and the call is refused as an arity error --
   which every dialect now reports by naming the callee and its parameter
   count rather than as "could not prepare C calls" (issue #666).
+- **A callable parameter type is separate from its local object's type.**
+  `c_ir_parameter_value_type` strips only top-level `volatile` from fixed
+  parameter values in declaration and expression-built function types. It
+  retains the existing atomic ABI shape and never strips pointee or member
+  qualifiers. `c_ir_emit_parameter` receives both types: its `ARGUMENT` matches
+  the callable signature exactly, while its local copy keeps the definition's
+  qualifiers, alignment and volatile accesses. Array/function/va_list
+  adjustments remain intact. The strict call-signature validator is unchanged;
+  `c_test_qualified_parameter_values` checks the producer, parameter object and
+  a deliberately mismatched call before shared promotion. The minimal fixture
+  and the existing native differential corpus cover execution and compatible
+  function pointers (GitHub #361).
+  Compound assignments likewise compute with the unqualified value type,
+  including when a narrower right operand needs promotion. Their original
+  place retains volatile load/store effects and the separate atomic update
+  path; `c_test_qualified_compound_values` checks both frontend forms.
 - A by-value parameter's local copy retains its type's natural alignment.
   `c_ir_emit_parameter` must pass the resolved layout alignment to
   `c_ir_emit_local`, just as an ordinary declaration does. Rounding a slot's
@@ -122,3 +138,9 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   conversion as named objects; every operand is evaluated once. Invalid list
   types and nonmodifiable destinations fail in the frontend before VA IR is
   published. This does not change target layouts or the public AArch64 list ABI.
+
+  The builtin Windows `stdarg.h` honors the CRT's `_VA_LIST_DEFINED` guard.
+  Its public `va_list` has the CRT pointer representation; macros address that
+  storage through an explicit builtin-list place cast. This supports either
+  header order without turning ordinary pointer typedefs into builtin types.
+  The modern CRT `__crt_va_*` macros use the same bridge when already defined.

@@ -9808,6 +9808,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                      ? (encoded.call_sites[site_index].thread_local_low
                                                             ? CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
                                                             : CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12)
+                                                     : encoded.call_sites[site_index].page_relative
+                                                         ? (encoded.call_sites[site_index].page_low
+                                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12
+                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21)
                                                      : encoded.call_sites[site_index].absolute ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
                                                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_CALL26),
                                     .aarch64 = encoded.call_sites[site_index].absolute == 0,

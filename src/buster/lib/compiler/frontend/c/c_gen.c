@@ -6,6 +6,8 @@
 // identifiers through the parse result's scopes and answering structure
 // questions from a prebuilt matching-delimiter index
 // (c_ir_build_delimiter_index).
+// c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
+// separate from the declared qualification of parameter objects.
 //
 // Source-dependent recursion is forbidden (AGENTS.md), so anything that
 // would recurse runs on an explicit machine owned by CIntegerIrBuilder:
@@ -896,6 +898,21 @@ BUSTER_C_INTERNAL IrTypeId c_ir_add_qualified_type(IrProgram* program, IrTypeId 
     return ir_program_add_type(program, qualified);
 }
 
+// A parameter's value type does not carry its object's top-level volatile
+// qualifier. Keep pointee/member qualifiers and the settled atomic ABI shape;
+// the definition still materializes the separately qualified parameter object.
+BUSTER_C_INTERNAL IrTypeId c_ir_parameter_value_type(IrProgram* program, IrTypeId type)
+{
+    IrTypeId result = type;
+    IrType* parameter = ir_type_from_id(&program->types, type);
+    if (parameter && parameter->is_volatile)
+    {
+        result = parameter->is_atomic ? c_ir_add_qualified_type(program, parameter->unqualified_type, true, false)
+                                      : parameter->unqualified_type;
+    }
+    return result;
+}
+
 // A copy of `base` whose alignment is the one a typedef declarator asked for
 // on the name it declares.  GNU `aligned` on a type replaces the natural
 // alignment rather than raising it, and leaves the size alone -- Clang and GCC
@@ -1590,6 +1607,7 @@ BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* 
                     {
                         result.parameter_types[parameter_index] = c_ir_add_pointer_type(program, pointer_types, result.parameter_types[parameter_index]);
                     }
+                    result.parameter_types[parameter_index] = c_ir_parameter_value_type(program, result.parameter_types[parameter_index]);
                     if (result.parameter_types[parameter_index].value == IR_ID_UNDERLYING_INVALID)
                     {
                         return (CIrSignature){0};
@@ -7690,15 +7708,15 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_arrow_operand_from_place(CIntegerIrBuilder
     return c_ir_emit_load_place(builder, place, type, source);
 }
 
-BUSTER_C_INTERNAL bool c_ir_emit_parameter(CIntegerIrBuilder* builder, CToken name, u32 argument_index, IrTypeId type, CEntityId entity)
+BUSTER_C_INTERNAL bool c_ir_emit_parameter(CIntegerIrBuilder* builder, CToken name, u32 argument_index, IrTypeId type, IrTypeId object_type, CEntityId entity)
 {
     // A by-value parameter is a local object, not the caller's ABI slot.
     // Carry its type alignment just as an ordinary declaration does: native
     // lowering uses the place's alignment to reserve and materialize storage
     // beyond the frame pointer's guaranteed alignment.
-    IrType* parameter_type = ir_type_from_id(&builder->program->types, type);
+    IrType* parameter_type = ir_type_from_id(&builder->program->types, object_type);
     u32 alignment = parameter_type ? parameter_type->layout.alignment : 0;
-    IrValueId place = c_ir_emit_local(builder, name, type, entity, alignment);
+    IrValueId place = c_ir_emit_local(builder, name, object_type, entity, alignment);
     CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
     if (place.value == IR_ID_UNDERLYING_INVALID || !local)
     {
@@ -7828,23 +7846,18 @@ BUSTER_C_INTERNAL bool c_ir_integer_literal_fits(CIntegerIrBuilder* builder, CTy
 
 BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder, String8 spelling, u64 value)
 {
+    IrTypeId result = IR_TYPE_ID_INVALID;
+    bool suffix_valid = true;
     bool decimal = !spelling.length || spelling.pointer[0] != '0';
     bool is_unsigned = false;
     u32 long_count = 0;
     u64 suffix_start = spelling.length;
-    bool msvc_i64_suffix = spelling.length >= 3 && (spelling.pointer[spelling.length - 3] == 'i' || spelling.pointer[spelling.length - 3] == 'I') &&
-                             spelling.pointer[spelling.length - 2] == '6' && spelling.pointer[spelling.length - 1] == '4';
-    if (msvc_i64_suffix)
+    u32 msvc_width = c_integer_msvc_literal_width(spelling, &is_unsigned);
+    if (msvc_width)
     {
-        suffix_start = spelling.length - 3;
-        if (suffix_start && (spelling.pointer[suffix_start - 1] == 'u' || spelling.pointer[suffix_start - 1] == 'U'))
-        {
-            is_unsigned = true;
-            suffix_start -= 1;
-        }
         long_count = 2;
     }
-    while (!msvc_i64_suffix && suffix_start)
+    while (!msvc_width && suffix_start)
     {
         u8 byte = spelling.pointer[suffix_start - 1];
         if (byte != 'u' && byte != 'U' && byte != 'l' && byte != 'L')
@@ -7853,14 +7866,14 @@ BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder,
         }
         suffix_start -= 1;
     }
-    for (u64 index = suffix_start; !msvc_i64_suffix && index < spelling.length;)
+    for (u64 index = suffix_start; suffix_valid && !msvc_width && index < spelling.length;)
     {
         u8 byte = spelling.pointer[index];
         if (byte == 'u' || byte == 'U')
         {
             if (is_unsigned)
             {
-                return IR_TYPE_ID_INVALID;
+                suffix_valid = false;
             }
             is_unsigned = true;
             index += 1;
@@ -7870,7 +7883,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder,
             u32 count = index + 1 < spelling.length && (spelling.pointer[index + 1] == 'l' || spelling.pointer[index + 1] == 'L') ? 2 : 1;
             if (long_count || count > 2)
             {
-                return IR_TYPE_ID_INVALID;
+                suffix_valid = false;
             }
             long_count = count;
             index += count;
@@ -7879,69 +7892,78 @@ BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder,
     CTypeKind candidates[6] = {0};
     u32 candidate_count = 0;
 #define C_INTEGER_LITERAL_CANDIDATE(kind) candidates[candidate_count++] = (kind)
-    if (!long_count && !is_unsigned)
+    if (suffix_valid)
     {
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_INT);
-        if (!decimal)
+        if (msvc_width && msvc_width < 64)
+        {
+            CTypeKind signed_kind = msvc_width == 8 ? C_TYPE_SIGNED_CHAR : msvc_width == 16 ? C_TYPE_SHORT : C_TYPE_INT;
+            CTypeKind unsigned_kind = msvc_width == 8 ? C_TYPE_UNSIGNED_CHAR : msvc_width == 16 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_INT;
+            C_INTEGER_LITERAL_CANDIDATE(is_unsigned ? unsigned_kind : signed_kind);
+        }
+        else if (!long_count && !is_unsigned)
+        {
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_INT);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+            }
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+            }
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+            }
+        }
+        else if (!long_count)
         {
             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
         }
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
-        if (!decimal)
+        else if (long_count == 1 && !is_unsigned)
+        {
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+            }
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+            }
+        }
+        else if (long_count == 1)
         {
             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
         }
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
-        if (!decimal)
+        else if (!is_unsigned)
+        {
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+            }
+        }
+        else
         {
             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
         }
-    }
-    else if (!long_count)
-    {
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
-    }
-    else if (long_count == 1 && !is_unsigned)
-    {
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
-        if (!decimal)
-        {
-            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
-        }
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
-        if (!decimal)
-        {
-            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
-        }
-    }
-    else if (long_count == 1)
-    {
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
-    }
-    else if (!is_unsigned)
-    {
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
-        if (!decimal)
-        {
-            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
-        }
-    }
-    else
-    {
-        C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
     }
 #undef C_INTEGER_LITERAL_CANDIDATE
-    for (u32 index = 0; index < candidate_count; index += 1)
+    for (u32 index = 0; result.value == IR_ID_UNDERLYING_INVALID && index < candidate_count; index += 1)
     {
         if (c_ir_integer_literal_fits(builder, candidates[index], value))
         {
-            return builder->scalar_types[candidates[index]];
+            result = builder->scalar_types[candidates[index]];
         }
     }
-    return IR_TYPE_ID_INVALID;
+    return result;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_integer(CIntegerIrBuilder* builder, CToken token)
@@ -7963,20 +7985,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer(CIntegerIrBuilder* builder, CToken
     }
 
     return result;
-}
-
-BUSTER_C_INTERNAL bool c_ir_number_is_float(String8 spelling)
-{
-    bool hexadecimal = spelling.length >= 2 && spelling.pointer[0] == '0' && (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X');
-    for (u64 index = 0; index < spelling.length; index += 1)
-    {
-        u8 byte = spelling.pointer[index];
-        if (byte == '.' || byte == 'p' || byte == 'P' || (!hexadecimal && (byte == 'e' || byte == 'E')))
-        {
-            return true;
-        }
-    }
-    return false;
 }
 
 // The imaginary suffix of a floating literal. C's suffixes are `f`/`l` and
@@ -9185,99 +9193,6 @@ BUSTER_C_INTERNAL u8 c_ir_ext80_parse_long_literal(String8 spelling, bool negati
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_ext80_integer_suffix_valid(String8 suffix)
-{
-    if (!suffix.length)
-    {
-        return true;
-    }
-    bool msvc_i64 = suffix.length == 3 && (suffix.pointer[0] == 'i' || suffix.pointer[0] == 'I') && suffix.pointer[1] == '6' && suffix.pointer[2] == '4';
-    bool msvc_ui64 = suffix.length == 4 && (suffix.pointer[0] == 'u' || suffix.pointer[0] == 'U') && (suffix.pointer[1] == 'i' || suffix.pointer[1] == 'I') &&
-                     suffix.pointer[2] == '6' && suffix.pointer[3] == '4';
-    if (msvc_i64 || msvc_ui64)
-    {
-        return true;
-    }
-    bool first_unsigned = suffix.pointer[0] == 'u' || suffix.pointer[0] == 'U';
-    bool first_long = suffix.pointer[0] == 'l' || suffix.pointer[0] == 'L';
-    if (suffix.length == 1)
-    {
-        return first_unsigned || first_long;
-    }
-    bool second_unsigned = suffix.pointer[1] == 'u' || suffix.pointer[1] == 'U';
-    bool second_long = suffix.pointer[1] == 'l' || suffix.pointer[1] == 'L';
-    if (suffix.length == 2)
-    {
-        bool long_pair = first_long && second_long && suffix.pointer[0] == suffix.pointer[1];
-        return long_pair || (first_unsigned && second_long) || (first_long && second_unsigned);
-    }
-    if (suffix.length == 3)
-    {
-        bool third_unsigned = suffix.pointer[2] == 'u' || suffix.pointer[2] == 'U';
-        bool third_long = suffix.pointer[2] == 'l' || suffix.pointer[2] == 'L';
-        bool leading_unsigned = first_unsigned && second_long && third_long && suffix.pointer[1] == suffix.pointer[2];
-        bool trailing_unsigned = first_long && second_long && third_unsigned && suffix.pointer[0] == suffix.pointer[1];
-        return leading_unsigned || trailing_unsigned;
-    }
-    return false;
-}
-
-BUSTER_C_INTERNAL bool c_ir_ext80_parse_integer(String8 spelling, u64* value_out)
-{
-    u32 base = 10;
-    u64 index = 0;
-    if (spelling.length >= 2 && spelling.pointer[0] == '0')
-    {
-        if (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X')
-        {
-            base = 16;
-            index = 2;
-        }
-        else if (spelling.pointer[1] == 'b' || spelling.pointer[1] == 'B')
-        {
-            base = 2;
-            index = 2;
-        }
-        else
-        {
-            base = 8;
-        }
-    }
-    u64 value = 0;
-    bool saw_digit = false;
-    while (index < spelling.length)
-    {
-        u8 byte = spelling.pointer[index];
-        if (byte == '\'')
-        {
-            index += 1;
-            continue;
-        }
-        u32 digit = c_ir_ext80_digit(byte);
-        if (digit >= base)
-        {
-            break;
-        }
-        if (value > (UINT64_MAX - digit) / base)
-        {
-            return false;
-        }
-        value = value * base + digit;
-        saw_digit = true;
-        index += 1;
-    }
-    if (!saw_digit)
-    {
-        return false;
-    }
-    if (!c_ir_ext80_integer_suffix_valid((String8){.pointer = spelling.pointer + index, .length = spelling.length - index}))
-    {
-        return false;
-    }
-    *value_out = value;
-    return true;
-}
-
 // The x87 encoding spells an infinity as the explicit integer bit alone and a
 // quiet NaN as that bit plus the leading fraction bit.  Both are written here
 // and matched here, so neither is a respelled literal.
@@ -9702,7 +9617,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 to
     String8 spelling = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index]);
     u64 significand = 0;
     u16 exponent_sign = 0;
-    bool floating = c_ir_number_is_float(spelling);
+    bool floating = c_number_is_float(spelling);
     char8 suffix = spelling.length ? spelling.pointer[spelling.length - 1] : 0;
     bool long_suffix = suffix == 'l' || suffix == 'L';
     u8 status = C_IR_ROUND_FAILED;
@@ -9742,7 +9657,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 to
     else
     {
         u64 integer = 0;
-        if (c_ir_ext80_parse_integer(spelling, &integer))
+        if (c_conditional_number(spelling, &integer))
         {
             IrTypeId integer_type_id = c_ir_integer_literal_type(builder, spelling, integer);
             IrType* integer_type = ir_type_from_id(&builder->program->types, integer_type_id);
@@ -20778,7 +20693,9 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
 {
     IrType* place_type = ir_type_from_id(&builder->program->types, type);
     bool atomic = place_type && place_type->is_atomic;
-    IrTypeId value_type = atomic ? place_type->unqualified_type : type;
+    // The operation consumes an unqualified value even when the destination
+    // place is volatile. Loads and stores retain that place's access flags.
+    IrTypeId value_type = place_type && (atomic || place_type->is_volatile) ? place_type->unqualified_type : type;
     IrType* unqualified = ir_type_from_id(&builder->program->types, value_type);
     bool pointer_arithmetic = unqualified && unqualified->kind == IR_TYPE_POINTER && (operation == C_CONDITIONAL_ADD || operation == C_CONDITIONAL_SUBTRACT);
     IrValueId previous = IR_VALUE_ID_INVALID;
@@ -21383,7 +21300,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_function_type(CIntegerIrBuilder* build
                 valid = false;
                 break;
             }
-            parameter_types[parameter_count++] = parameter;
+            parameter_types[parameter_count++] = c_ir_parameter_value_type(builder->program, parameter);
         }
         parameter_start = parameter_end + 1;
     }
@@ -23902,7 +23819,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder*
     if (first.kind == C_TOKEN_PREPROCESSING_NUMBER &&
         (start + 1 == end || c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_BRACKET)))
     {
-        if (c_ir_number_is_float(c_token_spelling(builder->preprocess.spelling_base, first)))
+        if (c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, first)))
         {
             *type_out = c_ir_float_literal_type(builder, c_token_spelling(builder->preprocess.spelling_base, first));
             return start + 1 == end;
@@ -25476,7 +25393,7 @@ c_ir_expression_core_loop:
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
-            IrValueId value = c_ir_number_is_float(c_token_spelling(builder->preprocess.spelling_base, token)) ? c_ir_emit_float(builder, token) : c_ir_emit_integer(builder, token);
+            IrValueId value = c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, token)) ? c_ir_emit_float(builder, token) : c_ir_emit_integer(builder, token);
             if (value.value == IR_ID_UNDERLYING_INVALID)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -28378,7 +28295,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
         {
             IrTypeId candidate = builder->s32_type;
             String8 number_spelling = c_token_spelling(builder->preprocess.spelling_base, token);
-            if (c_ir_number_is_float(number_spelling))
+            if (c_number_is_float(number_spelling))
             {
                 candidate = c_ir_float_literal_type(builder, number_spelling);
             }
@@ -39427,7 +39344,7 @@ BUSTER_C_INTERNAL u8 c_ir_constant_initializer_leaf_class(CIntegerIrBuilder* bui
         bool float_child = child->kind == IR_TYPE_FLOAT && ((child->bit_width == 32 && size == 4) || (child->bit_width == 64 && size == 8));
         if (literal.kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
-            bool floating = c_ir_number_is_float(c_token_spelling(builder->preprocess.spelling_base, literal));
+            bool floating = c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, literal));
             if (integer_child && !floating)
             {
                 leaf_class = C_IR_INITIALIZER_LEAF_INTEGER_TO_INTEGER;
@@ -41977,7 +41894,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
             if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
             {
                 CIrConstantValue value = {0};
-                if (c_ir_number_is_float(c_token_spelling(builder->preprocess.spelling_base, token)))
+                if (c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, token)))
                 {
                     f64 floating = 0.0;
                     char8 suffix = 0;
@@ -44431,7 +44348,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                         {
                             parameter_type = c_ir_add_pointer_type(program, &pointer_types, parameter_type);
                         }
-                        parameter_types[parameter_index] = parameter_type;
+                        parameter_types[parameter_index] = c_ir_parameter_value_type(program, parameter_type);
                     }
                     c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
                                                                                  .name = S8("C function"),
@@ -46283,8 +46200,17 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         for (u32 parameter_index = 0; parameter_index < signature.parameter_count; parameter_index += 1)
         {
             CParameter parameter = signature.parameters[parameter_index];
+            IrTypeId value_type = signature.parameter_types[parameter_index];
+            IrTypeId object_type = parameter.type.value < parse.type_count ? c_type_ir_map[parameter.type.value] : IR_TYPE_ID_INVALID;
+            // Arrays, function parameters and ABI-specific va_list shapes keep
+            // their adjusted type. Ordinary qualified objects retain the type
+            // of the definition, independently of the callable value type.
+            if (c_ir_parameter_value_type(program, object_type).value != value_type.value)
+            {
+                object_type = value_type;
+            }
             if (!c_ir_emit_parameter(&builder, c_ir_space_name_token(&builder, parameter.name), parameter_index,
-                                     signature.parameter_types[parameter_index], parameter.entity))
+                                     value_type, object_type, parameter.entity))
             {
                 parameters_lowered = false;
                 break;
