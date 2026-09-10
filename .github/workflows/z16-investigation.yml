@@ -1,4 +1,4 @@
-name: Z16 source and coordination evidence
+name: Z16 frozen baseline output measurements
 
 on:
   push:
@@ -8,100 +8,73 @@ permissions:
   contents: read
 
 jobs:
-  source-and-history:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+  baseline-output:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      BUSTER_TEST_JOBS: 1
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
-          fetch-depth: 0
+          path: transport
           persist-credentials: false
-      - name: Freeze source and environment
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: baseline
+          persist-credentials: false
+      - name: Apply harness-only operation selector
+        working-directory: baseline
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/z16-evidence"
-          git rev-parse HEAD | tee "$RUNNER_TEMP/z16-evidence/baseline-sha.txt"
-          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/z16-evidence/baseline-source.tar.gz"
+          mkdir -p "$RUNNER_TEMP/z16-baseline"
+          python3 ../transport/.github/z16/prepare_harness.py .
+          git diff --check
+          git diff --stat
+          git diff -- src/buster > "$RUNNER_TEMP/z16-baseline/compiler-source.diff"
+          test ! -s "$RUNNER_TEMP/z16-baseline/compiler-source.diff"
+          git diff > "$RUNNER_TEMP/z16-baseline/harness.patch"
           {
+            git rev-parse HEAD
             uname -a
             lscpu
             free -h
             clang --version
             cmake --version
             ninja --version
-            gh --version
-          } > "$RUNNER_TEMP/z16-evidence/environment.txt"
-          git log -40 --format=fuller -- src/buster/lib/compiler/object/object.c src/buster/tests/compiler/object/object_test.c tools/throughput > "$RUNNER_TEMP/z16-evidence/recent-commits.txt"
-      - name: Paginate repository coordination evidence
+          } > "$RUNNER_TEMP/z16-baseline/environment.txt"
+      - name: Build driver and test native harness
+        working-directory: baseline
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json, os, pathlib, re, subprocess, urllib.parse
-          root = 'repos/buster14a/buster'
-          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'z16-evidence'
-          def get(path):
-              return json.loads(subprocess.check_output(['gh', 'api', path], text=True))
-          def pages(path):
-              result = []
-              page = 1
-              while True:
-                  sep = '&' if '?' in path else '?'
-                  rows = get(f'{path}{sep}per_page=100&page={page}')
-                  if not isinstance(rows, list):
-                      raise RuntimeError(f'Expected a list from {path}')
-                  result.extend(rows)
-                  if not rows:
-                      break
-                  page += 1
-              return result, page
-          issues, issue_pages = pages(root + '/issues?state=open')
-          prs, pr_pages = pages(root + '/pulls?state=open')
-          result = {'baseline': 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae', 'main_at_retrieval': get(root + '/branches/main'), 'open_issues_including_prs': issues, 'open_prs': prs, 'issue_pages_including_empty': issue_pages, 'pr_pages_including_empty': pr_pages, 'searches': [], 'details': {}}
-          selected = {116, 117, 128, 293, 314, 46, 103, 104, 107, 82, 83, 193, 201, 202, 203, 204, 226, 243, 315, 343, 345, 346}
-          for term in ['object_assembly', 'archive extraction', 'dynamic-data', 'source map', 'CodeView', 'writer', 'string table']:
-              query = 'repo:buster14a/buster is:closed "' + term + '"'
-              hits = []
-              page = 1
-              total = None
-              while True:
-                  data = get('search/issues?' + urllib.parse.urlencode({'q': query, 'per_page': 100, 'page': page}))
-                  total = data['total_count']
-                  hits.extend(data['items'])
-                  if len(hits) >= min(total, 1000) or not data['items']:
-                      break
-                  page += 1
-              result['searches'].append({'query': query, 'total_count': total, 'incomplete': bool(data.get('incomplete_results')) or total > len(hits), 'items': hits})
-              selected.update(item['number'] for item in hits)
-          pattern = re.compile(r'assembly.print|object_assembly|archive.*(extract|index)|dynamic.data|source.map|CodeView|writer|string.table|relocation|stable.*sort', re.I)
-          selected.update(item['number'] for item in issues if pattern.search(item['title'] + '\n' + (item.get('body') or '')))
-          selected.update(item['number'] for item in prs)
-          for number in sorted(selected):
-              issue = get(f'{root}/issues/{number}')
-              comments, count = pages(f'{root}/issues/{number}/comments')
-              detail = {'issue': issue, 'comments': comments, 'comment_pages_including_empty': count}
-              if 'pull_request' in issue:
-                  detail['pr'] = get(f'{root}/pulls/{number}')
-                  detail['files'], _ = pages(f'{root}/pulls/{number}/files')
-                  detail['reviews'], _ = pages(f'{root}/pulls/{number}/reviews')
-                  detail['review_comments'], _ = pages(f'{root}/pulls/{number}/comments')
-              result['details'][str(number)] = detail
-          (out / 'coordination.json').write_text(json.dumps(result, indent=2))
-          lines = [f'Baseline: {result["baseline"]}', f'Open issue endpoint: {len(issues)} entries across {issue_pages} pages including empty terminator', f'Open pull endpoint: {len(prs)} entries across {pr_pages} pages including empty terminator']
-          lines += [f'{item["number"]}: {item["title"]}' for item in issues]
-          lines += [f'Search {item["query"]}: {len(item["items"])}/{item["total_count"]}; incomplete={item["incomplete"]}' for item in result['searches']]
-          (out / 'coordination-summary.txt').write_text('\n'.join(lines) + '\n')
-          print('\n'.join(lines))
-          PY
-      - name: Retain frozen inspection evidence
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" bench_throughput self-test 2>&1 | tee "$RUNNER_TEMP/z16-baseline/harness-tests.log"
+      - name: Build frozen trusted compiler with bounded parallelism
+        working-directory: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" generate --build-directory build/throughput-ci-compiler --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF -DCMAKE_LINKER_TYPE=DEFAULT
+          "$RUNNER_TEMP/buster-build" build --build-directory build/throughput-ci-compiler --config Release -t ide -- -j2
+          sha256sum build/throughput-ci-compiler/Release/ide > "$RUNNER_TEMP/z16-baseline/compiler-sha256.txt"
+          cp build/throughput-ci-compiler/CMakeCache.txt build/throughput-ci-compiler/compile_commands.json "$RUNNER_TEMP/z16-baseline/"
+      - name: Measure frozen object and assembly output separately
+        working-directory: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          ide="$PWD/build/throughput-ci-compiler/Release/ide"
+          for emit in object assembly; do
+            "$RUNNER_TEMP/buster-build" bench_throughput run --baseline "$ide" --candidate "$ide" --baseline-id ef99ec72 --candidate-id ef99ec72 --output "$RUNNER_TEMP/z16-baseline/$emit" --profile ci --scale 2 --mode fast --emit "$emit" --pairs 2 --warmups 1 --no-guard --cpu auto --require-identical-output
+          done
+      - name: Retain evidence even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: z16-source-coordination-${{ github.run_id }}
-          path: ${{ runner.temp }}/z16-evidence
+          name: z16-baseline-output-${{ github.run_id }}
+          path: ${{ runner.temp }}/z16-baseline
           if-no-files-found: error
           retention-days: 14
