@@ -1,0 +1,60 @@
+name: A08 Wasm baseline
+on:
+  push:
+    branches: [astra/a08-capability-evidence-20260909]
+    paths: [.github/workflows/a08-wasm-baseline.yml]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 1
+      BUSTER_TEST_JOBS: 1
+      BUSTER_MATRIX_THREADS: 1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+      - name: Build frozen compiler through the native build driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build "$RUNNER_TEMP/a08-baseline"
+          clang --version
+          node --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          build/build generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF '-DCMAKE_C_FLAGS_RELEASE=-O1 -DNDEBUG'
+          build/build build --config Release -t ide -- -j1
+      - name: Reproduce independent current capability boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/a08-baseline"
+          printf '%s\n' 'int invoke(int (*callback)(int), int value) { return callback(value); }' > "$root/indirect.c"
+          printf '%s\n' 'int twice(int value) { return value + value; }' 'int (*saved)(int) = twice;' 'int run(int value) { return saved(value); }' > "$root/relocation.c"
+          clang -std=c17 -Wall -Wextra -Werror -fsyntax-only "$root/indirect.c" "$root/relocation.c"
+          for name in indirect relocation; do
+            printf 'retained-output\n' > "$root/$name.wasm"
+            set +e
+            build/Release/ide cc -target wasm64-unknown-freestanding -nostdinc -o "$root/$name.wasm" "$root/$name.c" > "$root/$name.log" 2>&1
+            status=$?
+            set -e
+            cat "$root/$name.log"
+            test "$status" -eq 1
+            grep -E 'indirect calls are unsupported|function-address relocations are unsupported' "$root/$name.log"
+            printf 'BASELINE_REFUSAL case=%s exit=%s\n' "$name" "$status"
+          done
+          build/Release/ide cc -target wasm64-unknown-freestanding -nostdinc -o "$root/control.wasm" tests/basic_c_wasm64_integer_ops.c
+          node tests/wasm_integer_execution.js "$root/control.wasm"
+          sha256sum "$root"/*.c "$root/control.wasm" build/Release/ide | tee "$root/hashes.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a08-wasm-baseline
+          path: ${{ runner.temp }}/a08-baseline
+          if-no-files-found: error
+          retention-days: 7
