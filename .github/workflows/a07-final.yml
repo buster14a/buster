@@ -1,0 +1,165 @@
+name: A07 final interoperability validation
+on:
+  push:
+    branches: [astra/a07-280-inspection]
+    paths: [.github/workflows/a07-final.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+      actions: write
+    outputs:
+      sha: ${{ steps.patch.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Independently verify the exact changed census row and ambiguity
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a07-preflight"
+          python3 .a07/preserve-oracle-inputs.py --preflight 2>&1 | tee "$RUNNER_TEMP/a07-preflight/preflight.log"
+      - name: Recheck competing work and publish only the reviewed descendant
+        id: patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          PARENT: 2035d127c6606b8dec0438b8d18afaae7ba99715
+          OWN_BRANCH: astra/a07-280-evex-tuples
+        run: |
+          set -euo pipefail
+          cp .a07/census-final.patch "$RUNNER_TEMP/a07.patch"
+          echo '7e8a5b2621eba1fb92a3484227fa9b5491d140bc252ec0cf7cec3bc83e8099d9  '"$RUNNER_TEMP/a07.patch" | sha256sum --check
+          git fetch origin main "$OWN_BRANCH"
+          test "$(git rev-parse origin/main)" = "$MAIN"
+          test "$(git rev-parse "origin/$OWN_BRANCH")" = "$PARENT"
+          gh api --paginate --slurp 'repos/buster14a/buster/pulls?state=open&per_page=100' > "$RUNNER_TEMP/a07-preflight/open-prs.json"
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          paths = {'docs/agents/driver.md', 'src/buster/lib/compiler/assembly/assembly.c', 'src/buster/lib/compiler/assembly/x86_64_metadata.c', 'src/buster/tests/compiler/assembly/x86_64_metadata_test.c', 'src/buster/tests/compiler/assembly/x86_64_completion_census_test.c'}
+          for page in json.loads((Path(os.environ['RUNNER_TEMP'])/'a07-preflight/open-prs.json').read_text()):
+              for pr in page:
+                  if pr['head']['ref'] == os.environ['OWN_BRANCH']:
+                      continue
+                  files = json.loads(subprocess.check_output(['gh','api','--paginate','--slurp',f"repos/buster14a/buster/pulls/{pr['number']}/files?per_page=100"]))
+                  overlap = paths.intersection(f['filename'] for page in files for f in page)
+                  reviewed = pr['number'] == 371 and pr['head']['sha'] == 'd60fd28ae58e8a2af18e0d37f659d51ea2ef6aa8' and overlap == {'docs/agents/driver.md'}
+                  print(pr['number'], pr['head']['sha'], 'overlap', sorted(overlap), 'reviewed_disjoint', reviewed)
+                  if overlap and not reviewed:
+                      raise SystemExit('Competing changes require review before publication')
+          PY
+          git checkout --detach "$PARENT"
+          git apply --check "$RUNNER_TEMP/a07.patch"
+          git apply "$RUNNER_TEMP/a07.patch"
+          git diff --check
+          git add src/buster/lib/compiler/assembly/x86_64_metadata.c src/buster/tests/compiler/assembly/x86_64_metadata_test.c src/buster/tests/compiler/assembly/x86_64_completion_census_test.c
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'test: pin the explained EVEX source tuple census rejection' -m 'Refs #280. Across 11013 observed rows only form 7468 changes: invalid dword-qualified ZMM VMOVNTDQA rejects instead of emitting wrong bytes. Preserve all exact counts, assert the changed key, and independently check valid/invalid source controls.'
+          git push origin "HEAD:refs/heads/$OWN_BRANCH"
+          printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > "$RUNNER_TEMP/a07-preflight/published-sha.txt"
+          gh workflow run ci.yml --ref "$OWN_BRANCH"
+          printf 'Dispatched existing complete ci.yml on %s at %s\n' "$OWN_BRANCH" "$(git rev-parse HEAD)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a07-final-preflight-${{ github.sha }}
+          path: ${{ runner.temp }}/a07-preflight
+          if-no-files-found: error
+          retention-days: 7
+  validate:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      BUSTER_TEST_JOBS: 1
+      BUSTER_MATRIX_THREADS: 1
+      CMAKE_BUILD_PARALLEL_LEVEL: 1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+      TESTED_SHA: ${{ needs.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.publish.outputs.sha }}
+          persist-credentials: false
+      - name: Capture frozen audit inputs and exact source revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRANSPORT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a07-final"
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+          git rev-parse HEAD > "$RUNNER_TEMP/a07-final/tested-sha.txt"
+          for file in oracle.py refine-audit.py preserve-oracle-inputs.py; do
+            gh api "repos/buster14a/buster/contents/.a07/$file?ref=$TRANSPORT_SHA" --jq .content | base64 -d > "$RUNNER_TEMP/a07-final/$file"
+          done
+          python3 "$RUNNER_TEMP/a07-final/refine-audit.py" "$RUNNER_TEMP/a07-final/oracle.py"
+          python3 "$RUNNER_TEMP/a07-final/preserve-oracle-inputs.py" "$RUNNER_TEMP/a07-final/oracle.py"
+          clang --version > "$RUNNER_TEMP/a07-final/clang.txt"
+          as --version > "$RUNNER_TEMP/a07-final/gas.txt"
+      - name: Build exact Release head with one worker
+        id: build
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/a07-final/build.log") 2>&1
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/a07-driver"
+          "$RUNNER_TEMP/a07-driver" generate --ci --cc clang --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/a07-driver" build --config Release -t ide -- -j1
+      - name: Exact source bytes, rejection, metadata, mixed linking and execution
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/a07-final/oracle.py" 2>&1 | tee "$RUNNER_TEMP/a07-final/oracle.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a07-final-oracle-${{ needs.publish.outputs.sha }}
+          path: ${{ runner.temp }}/a07-final
+          if-no-files-found: error
+          retention-days: 7
+      - name: Full Release suite
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/a07-driver" build --config Release -t test_all -- -j1 2>&1 | tee "$RUNNER_TEMP/a07-final/full.log"
+      - name: All supported mode and target-format legs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/a07-driver" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/a07-final/modes.log"
+      - name: Ordinary self-host fixed point
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/a07-driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/a07-final/self-host.log"
+      - name: Full sanitized Debug suite in a separate tree
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/a07-final/sanitized.log") 2>&1
+          "$RUNNER_TEMP/a07-driver" generate --ci --cc clang --linker DEFAULT --sanitize --build-dir "$RUNNER_TEMP/a07-sanitized" -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/a07-driver" build --build-dir "$RUNNER_TEMP/a07-sanitized" --config Debug -t test_all -- -j1
+      - name: Record exact-head census and unchanged source integrity
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          build/Release/ide x86_64_completion_census --output="$RUNNER_TEMP/a07-final/census.txt" > "$RUNNER_TEMP/a07-final/census.log" 2>&1
+          git status --short > "$RUNNER_TEMP/a07-final/final-status.txt"
+          git rev-parse HEAD >> "$RUNNER_TEMP/a07-final/tested-sha.txt"
+          git diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a07-final-validation-${{ needs.publish.outputs.sha }}
+          path: ${{ runner.temp }}/a07-final
+          if-no-files-found: error
+          retention-days: 7
