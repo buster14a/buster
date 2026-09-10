@@ -1,0 +1,229 @@
+name: Z07 publish and validate constexpr leaves
+
+on:
+  push:
+    branches: [astra/z07-semantic-queries-transport]
+    paths: [.github/workflows/z07-apply.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: z07-apply-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: read
+    outputs:
+      candidate: ${{ steps.publish.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: source
+          persist-credentials: false
+      - name: Apply exact reviewed source and publish only a new branch
+        id: publish
+        working-directory: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          python3 ../transport/.github/z07-install.py
+          cp ../transport/.github/z07-audit.md docs/performance-audits/2026-09-10T010336Z.md
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import urllib.error
+          import urllib.request
+
+          expected = {
+              'docs/agents/frontend/foundations.md': 'bd677a69b00a6fbba10fb393c239e75332c35b73e4226f7b085207b669b90c95',
+              'src/buster/lib/compiler/frontend/c/c_parse.c': '786af3ca03d0c2d9566b1db62a8f70bbfced173c775169b991c182b926fda502',
+              'src/buster/lib/compiler/frontend/c/c_parse_internal.h': 'b4d842b1b6d6a339b22ffe47812876da4f6cb30e49addaa0a3ed82d0dd24618b',
+              'src/buster/tests/compiler/driver/driver_test.c': '9e70254c28e69ddaa01cb91e2909ac59a25399e72256e2d1db4b7f156462c4d9',
+              'src/buster/tests/compiler/frontend/c/c_test.c': '6234099920f3a81892fa8ced2885f0d33c54e680d0cac5b37bd9824c3ccc347d',
+              'tests/basic_c_constexpr_leaf.c': 'f4a15b208219759889c8f8a6073ef43e30355ce39d35690a7ef90a6ea2da384e',
+          }
+          for path, digest in expected.items():
+              actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+              if actual != digest:
+                  raise RuntimeError('Reviewed source mismatch: ' + path + ' ' + actual)
+          index = Path('PERFORMANCE_AUDITS.md')
+          text = index.read_text()
+          position = text.index('- [`', text.index('## Audits, newest first'))
+          line = '- [`2026-09-10T010336Z`](docs/performance-audits/2026-09-10T010336Z.md) — Z07 semantic-query census and constexpr leaf storage candidate (#259)\n'
+          index.write_text(text[:position] + line + text[position:])
+          paths = sorted(list(expected) + ['PERFORMANCE_AUDITS.md', 'docs/performance-audits/2026-09-10T010336Z.md'])
+          subprocess.run(['git', 'add', '--'] + paths, check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          if changed != paths:
+              raise RuntimeError('Unexpected changed paths')
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'z07-publish'
+          evidence.mkdir()
+          (evidence / 'candidate.patch').write_bytes(subprocess.check_output(['git', 'diff', '--cached', '--binary']))
+          api_root = 'https://api.github.com/repos/buster14a/buster'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
+          def api(path, body=None):
+              request = urllib.request.Request(api_root + path, headers=headers, data=None if body is None else json.dumps(body).encode(), method='GET' if body is None else 'POST')
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          base = 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae'
+          branch = 'astra/z07-259-constexpr-leaf'
+          if api('/branches/main')['commit']['sha'] != base:
+              raise RuntimeError('Main advanced: re-review before publishing')
+          try:
+              api('/git/ref/heads/' + branch)
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+          else:
+              raise RuntimeError('Ref already exists: refuse to overwrite')
+          open_prs = []
+          page = 1
+          while True:
+              rows = api('/pulls?state=open&per_page=100&page=' + str(page))
+              open_prs.extend(rows)
+              if len(rows) < 100:
+                  break
+              page += 1
+          (evidence / 'open-prs-before-publication.json').write_text(json.dumps(open_prs, indent=2))
+          comments = api('/issues/259/comments?per_page=100')
+          (evidence / 'issue-259-before-publication.json').write_text(json.dumps(comments, indent=2))
+          for pr in open_prs:
+              description = (pr['title'] + '\n' + (pr['body'] or '')).lower()
+              if 'constexpr' in description or '#259' in description:
+                  raise RuntimeError('Potential competing constexpr PR: ' + str(pr['number']))
+          tree = api('/git/trees', {'base_tree': '093b374996f3aecca200fe2968539554fc67bf55', 'tree': [
+              {'path': path, 'mode': '100644', 'type': 'blob', 'content': Path(path).read_text()} for path in paths]})
+          commit = api('/git/commits', {'message': 'c: avoid universe-sized scratch for constexpr leaf queries (#259)', 'tree': tree['sha'], 'parents': [base]})
+          if api('/branches/main')['commit']['sha'] != base:
+              raise RuntimeError('Main advanced before final publication')
+          api('/git/refs', {'ref': 'refs/heads/' + branch, 'sha': commit['sha']})
+          (evidence / 'published.json').write_text(json.dumps({'base': base, 'candidate': commit['sha'], 'tree': tree['sha'], 'branch': branch, 'hashes': expected}, indent=2))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('candidate=' + commit['sha'] + '\n')
+          print('Published candidate ' + commit['sha'], flush=True)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: z07-publication-${{ github.run_id }}
+          path: ${{ runner.temp }}/z07-publish/
+          if-no-files-found: warn
+          retention-days: 7
+
+  validate:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.publish.outputs.candidate }}
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Record host and build exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/z07-validation"
+          { git rev-parse HEAD; uname -a; lscpu; clang --version; gcc --version; } > "$RUNNER_TEMP/z07-validation/provenance.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/z07-build"
+          "$RUNNER_TEMP/z07-build" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/z07-build" build --config Release -t ide -- -j2
+          sha256sum build/Release/ide > "$RUNNER_TEMP/z07-validation/candidate.sha256"
+      - name: Candidate full regression and mode matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUSTER_CONSTEXPR_CENSUS=1 "$RUNNER_TEMP/z07-build" build --config Release -t test_all -- -j2 2>&1 | tee "$RUNNER_TEMP/z07-validation/candidate-tests.log"
+          "$RUNNER_TEMP/z07-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/z07-validation/mode-matrix.log"
+      - name: Independent C23 control at O0 and O2
+        shell: bash
+        run: |
+          set -euo pipefail
+          for level in 0 2; do
+            gcc -std=c23 -O"$level" -Wall -Wextra -Werror -Wpedantic -fwrapv -fno-strict-aliasing -funsigned-char tests/basic_c_constexpr_leaf.c -o "$RUNNER_TEMP/z07-validation/gcc-O$level"
+            "$RUNNER_TEMP/z07-validation/gcc-O$level"
+          done
+          printf 'GCC C23 O0 and O2 fixture controls passed.\n' | tee "$RUNNER_TEMP/z07-validation/reference.txt"
+      - name: Reproduce the baseline storage failure with the same tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp src/buster/lib/compiler/frontend/c/c_parse.c "$RUNNER_TEMP/z07-validation/candidate-c_parse.c"
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          path = 'src/buster/lib/compiler/frontend/c/c_parse.c'
+          source = Path(path).read_text()
+          baseline = subprocess.check_output(['git', 'show', 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae:' + path], text=True)
+          first = 'BUSTER_C_SHARED bool c_parse_validate_constexpr_declaration('
+          last = '\ntypedef struct CTypePair CTypePair;'
+          wrapper = '\n#if BUSTER_INCLUDE_TESTS\nbool c_test_validate_constexpr_declaration(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration)\n{\n    return c_parse_validate_constexpr_declaration(0, arena, result, preprocess, declaration);\n}\n#endif\n'
+          Path(path).write_text(source[:source.index(first)] + baseline[baseline.index(first):baseline.index(last)] + wrapper + source[source.index(last):])
+          PY
+          "$RUNNER_TEMP/z07-build" build --config Release -t ide -- -j2
+          set +e
+          BUSTER_CONSTEXPR_CENSUS=1 build/Release/ide test --ci=1 > "$RUNNER_TEMP/z07-validation/baseline-regression.log" 2>&1
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$RUNNER_TEMP/z07-validation/baseline-regression.status"
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'z07-validation'
+          before = re.findall(r'CONSTEXPR_LEAF_CENSUS types=(\d+) declaration=(\d+) scratch_growth=(\d+)', (root / 'baseline-regression.log').read_text(errors='replace'))
+          after = re.findall(r'CONSTEXPR_LEAF_CENSUS types=(\d+) declaration=(\d+) scratch_growth=(\d+)', (root / 'candidate-tests.log').read_text(errors='replace'))
+          if int((root / 'baseline-regression.status').read_text()) == 0 or len(before) != 32 or len(after) != 32:
+              raise SystemExit('Missing baseline failure or exact 32-query census')
+          if [(t, d) for t, d, _ in before] != [(t, d) for t, d, _ in after]:
+              raise SystemExit('Mismatched query population')
+          if not all(int(growth) > 0 for _, _, growth in before) or not all(int(growth) == 0 for _, _, growth in after):
+              raise SystemExit('Storage regression was not reproduced and eliminated')
+          (root / 'storage-comparison.txt').write_text('Same 32 queries: baseline scratch growth > 0; candidate scratch growth == 0. This is requested scratch work, not timing or RSS.\n')
+          print((root / 'storage-comparison.txt').read_text())
+          PY
+      - name: Restore final submitted source and run self-host gates
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git restore --source=HEAD -- src/buster/lib/compiler/frontend/c/c_parse.c
+          git diff --exit-code
+          "$RUNNER_TEMP/z07-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/z07-validation/self-host.log"
+          "$RUNNER_TEMP/z07-build" test_self_host_audit --config Release 2>&1 | tee "$RUNNER_TEMP/z07-validation/self-host-audit.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: z07-validation-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/z07-validation/
+            build/self-host-audit/
+            build/CMakeCache.txt
+            build/compile_commands.json
+          if-no-files-found: warn
+          retention-days: 7
