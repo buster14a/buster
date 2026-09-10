@@ -1,0 +1,94 @@
+name: A02 frozen baseline semantic probes
+on:
+  push:
+    branches: [astra/a02-20260909-transport]
+    paths: [.github/workflows/a02-baseline.yml]
+permissions:
+  contents: read
+concurrency:
+  group: a02-baseline-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  baseline:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          persist-credentials: false
+      - name: Build frozen trusted compiler using existing build driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a02-baseline"
+          exec > >(tee "$RUNNER_TEMP/a02-baseline/build.log") 2>&1
+          git rev-parse HEAD
+          clang --version
+          gcc --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+      - name: Record matching-dialect independent controls and current behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'a02-baseline'
+          cases = {
+              'octal-local': 'int main(void) { return 09; }\n',
+              'octal-static': 'static int value = 09; int main(void) { return value; }\n',
+              'octal-pp': '#if 09 == 0\nint main(void) { return 0; }\n#else\n#error incorrect value\n#endif\n',
+              'overflow-local': 'int main(void) { return 18446744073709551616ULL != 0; }\n',
+              'overflow-static': 'static unsigned long long value = 18446744073709551616ULL; int main(void) { return value != 0; }\n',
+              'overflow-pp': '#if 18446744073709551616ULL == 0\nint main(void) { return 0; }\n#else\n#error incorrect value\n#endif\n',
+              'suffix-local': 'int main(void) { return 1lL != 1; }\n',
+              'suffix-pp': '#if 1uu == 1\nint main(void) { return 0; }\n#else\n#error incorrect value\n#endif\n',
+              'valid-boundary': 'static unsigned long long value = 18446744073709551615ULL; int main(void) { return value != 0xffffffffffffffffULL || 077 != 63 || 0xFFuLL != 255; }\n',
+              'enum-183': 'enum Flags { NONE=0, HIGH=0x80000000 }; enum Wide { VALUE=4294967296LL }; int main(void) { return !(HIGH > 0 && VALUE == 4294967296LL && sizeof(enum Wide) == 8); }\n',
+              'sizeof-271': 'int main(void) { return sizeof(++42); }\n',
+              'assert-274': '_Static_assert(1.0, "integer expression"); int main(void) { return 0; }\n',
+              'aggregate-341': 'struct Inner { int member; }; struct Outer { struct Inner inner; }; static int value(void) { return 7; } int main(void) { struct Outer object = {value()}; return object.inner.member != 7; }\n',
+          }
+          rows = []
+          for name, source in cases.items():
+              path = out / (name + '.c')
+              path.write_text(source)
+              for compiler in ('clang', 'gcc', 'buster'):
+                  prefix = ['build/Release/ide', 'cc'] if compiler == 'buster' else [compiler]
+                  binary = out / (name + '-' + compiler)
+                  command = prefix + ['-std=gnu17', '-g0', str(path), '-o', str(binary)]
+                  result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+                  row = {'case': name, 'compiler': compiler, 'command': command, 'compile_exit': result.returncode, 'output': result.stdout}
+                  if result.returncode == 0:
+                      run = subprocess.run([str(binary)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+                      row.update(runtime_exit=run.returncode, runtime_output=run.stdout)
+                  rows.append(row)
+                  print(json.dumps(row), flush=True)
+          (out / 'probes.json').write_text(json.dumps(rows, indent=2))
+          selected = {(r['case'],r['compiler']):r for r in rows}
+          for case in ('octal-local','octal-static','octal-pp'):
+              assert selected[(case,'buster')]['compile_exit'] == 0, (case, 'baseline behavior changed')
+              assert selected[(case,'clang')]['compile_exit'] != 0 and selected[(case,'gcc')]['compile_exit'] != 0
+          for compiler in ('clang','gcc','buster'):
+              assert selected[('valid-boundary',compiler)]['compile_exit'] == 0
+              assert selected[('valid-boundary',compiler)]['runtime_exit'] == 0
+          PY
+      - name: Preserve ordinary baseline self-host gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/a02-baseline/self-host.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a02-baseline-${{ github.run_id }}
+          path: ${{ runner.temp }}/a02-baseline
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
