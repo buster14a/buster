@@ -1,6 +1,12 @@
 // Exercise the source translator's production vocabulary, including the real
 // scalar header fallback. Unlike basic_c_simd.c, no target guards erase the
 // test body. Keep this function externally visible for independent ISA checks.
+// This cross-target fixture needs the production SIMD vocabulary without a
+// platform SDK. The base header's inline copies still need the C declaration;
+// native execution links the ordinary runtime implementation.
+#define BUSTER_KERNEL 1
+#include <stddef.h>
+void* memcpy(void* restrict destination, void const* restrict source, size_t count);
 #include <buster/lib/simd.h>
 
 u64 buster_simd_translate_block(u8* destination, u8 const* source, u64* newlines)
