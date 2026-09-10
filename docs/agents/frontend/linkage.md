@@ -18,6 +18,8 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   stack-walk fixture also checks fixed-frame instruction boundaries using
   `RtlVirtualUnwind` in all four allocators, with and without debug information
   (GitHub #363); object parsing alone is not runtime-unwind evidence.
+  Its metadata checker accepts both SAVE_NONVOL slot widths, rejects truncated
+  saves, and keeps saved-register offsets separate from stack-allocation sizes.
 - **Merged file-backed sections have zeroed background bytes.** `link_objects`
   initializes alignment gaps and each input's virtual tail before copying its
   data, so reused arenas produce the same bytes as fresh mappings. The zeroed

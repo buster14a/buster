@@ -1558,7 +1558,7 @@ BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_xdata(ObjectFile* object, boo
             {
                 code_index += 1;
             }
-            else if (operation == 1 && information == 0)
+            else if ((operation == 1 && information == 0) || operation == 4)
             {
                 if (code_index + 1 >= record[2])
                 {
@@ -1566,10 +1566,10 @@ BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_xdata(ObjectFile* object, boo
                 }
                 u16 scaled = 0;
                 memcpy(&scaled, record + 6 + code_index * 2, sizeof(scaled));
-                *has_large_allocation |= (u32)scaled * 8 > 4096;
+                *has_large_allocation |= operation == 1 && (u32)scaled * 8 > 4096;
                 code_index += 2;
             }
-            else if (operation == 1 && information == 1)
+            else if ((operation == 1 && information == 1) || operation == 5)
             {
                 if (code_index + 2 >= record[2])
                 {
@@ -1577,7 +1577,7 @@ BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_xdata(ObjectFile* object, boo
                 }
                 u32 size = 0;
                 memcpy(&size, record + 6 + code_index * 2, sizeof(size));
-                *has_large_allocation |= size > 4096;
+                *has_large_allocation |= operation == 1 && size > 4096;
                 code_index += 3;
             }
             else
@@ -1587,6 +1587,53 @@ BUSTER_GLOBAL_LOCAL bool link_test_runtime_windows_xdata(ObjectFile* object, boo
         }
     }
     return record_count != 0 && *has_frame_register && *has_large_allocation;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_windows_xdata_save_slots(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // The first record preserves the dynamic-frame and large-allocation
+    // prerequisites. The second exercises fixed-frame register saves without
+    // mistaking their stack offsets for allocation sizes.
+    u8 records[] = {
+        1, 12, 4, 5, 12, 3, 8, 1, 1, 4, 1, 0x50,
+        1, 8, 3, 0, 8, 0x34, 0, 0, 0, 0, 0, 0,
+    };
+    ObjectRelocation relocations[] = {
+        {.section = OBJECT_SECTION_WINDOWS_PDATA, .offset = 8},
+        {.section = OBJECT_SECTION_WINDOWS_PDATA, .offset = 20, .addend = 12},
+    };
+    ObjectFile object = link_test_object_make(arguments->arena, (Target){.cpu_arch = CPU_ARCH_X86_64}, (ByteSlice){0},
+                                              0, 0, relocations, BUSTER_ARRAY_LENGTH(relocations));
+    ObjectSection* xdata = object.sections + OBJECT_SECTION_WINDOWS_XDATA;
+    xdata->data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(records);
+    bool has_frame_register = false;
+    bool has_large_allocation = false;
+    for (u8 slots = 2; slots <= 3; slots += 1)
+    {
+        records[14] = slots;
+        records[17] = (u8)(0x30 | (slots == 2 ? 4 : 5));
+        records[18] = 0xff;
+        records[19] = 0xff;
+        BUSTER_TEST(arguments, link_test_runtime_windows_xdata(&object, &has_frame_register, &has_large_allocation));
+        // A save offset alone must not satisfy the allocation prerequisite.
+        records[9] = 0;
+        BUSTER_TEST(arguments, !link_test_runtime_windows_xdata(&object, &has_frame_register, &has_large_allocation));
+        BUSTER_TEST(arguments, has_frame_register && !has_large_allocation);
+        records[9] = 4;
+        for (u8 available = 1; available < slots; available += 1)
+        {
+            records[14] = available;
+            BUSTER_TEST(arguments, !link_test_runtime_windows_xdata(&object, &has_frame_register, &has_large_allocation));
+        }
+        records[14] = slots;
+        xdata->data.length = 16 + (u64)slots * 2 - 1;
+        BUSTER_TEST(arguments, !link_test_runtime_windows_xdata(&object, &has_frame_register, &has_large_allocation));
+        xdata->data.length = sizeof(records);
+    }
+    records[17] = 6; // Reserved unwind operation remains invalid.
+    BUSTER_TEST(arguments, !link_test_runtime_windows_xdata(&object, &has_frame_register, &has_large_allocation));
+    return result;
 }
 #endif
 
@@ -1842,6 +1889,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk(UnitTestArgument
     String8 source_path = link_test_temporary_executable_path(arguments->arena, S8("buster-runtime-stack-walk"), S8(".c"));
 #if BUSTER_WINDOWS
     String8 output_suffix = S8(".exe");
+    UnitTestResult save_slots = link_test_runtime_windows_xdata_save_slots(arguments);
+    result.succeeded_test_count += save_slots.succeeded_test_count;
+    result.test_count += save_slots.test_count;
 #else
     String8 output_suffix = S8("");
 #endif
