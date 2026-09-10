@@ -759,6 +759,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                             {S8("clear-cache"), S8("tests/differential/clear_cache.c"), S8("tests/differential/clear_cache_host.c"), false, {0}, true},
                             {S8("cpu-queries"), S8("tests/differential/cpu_queries.c"), S8("tests/differential/cpu_queries_host.c"), false, {0}, true},
                             {S8("native-variadic"), S8("tests/differential/native_variadic.c"), S8("tests/differential/native_variadic_host.c"), false, {0}, true},
+                            {S8("native-aggregate"), S8("tests/differential/native_aggregate.c"), S8("tests/differential/native_aggregate_host.c"), false, {0}, true},
                             {S8("reject-type"), S8("tests/differential/reject_type.c"), {0}, true},
                             {S8("reject-syntax"), S8("tests/differential/reject_syntax.c"), {0}, true},
                         };

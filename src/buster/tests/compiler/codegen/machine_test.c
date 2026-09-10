@@ -24,6 +24,7 @@ BUSTER_CT_CHECK(sizeof(MachineVirtualRegister) == 16);
 BUSTER_CT_CHECK(sizeof(MachineBlock) == 32);
 BUSTER_CT_CHECK(sizeof(MachineEdge) == 16);
 BUSTER_CT_CHECK(sizeof(MachineEdit) == 16);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(MachineEncodeResult) == 72);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
@@ -2161,9 +2162,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_variadic(UnitTestArgument
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_native_aggregate(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice input = file_read(arguments->arena, S8("tests/differential/native_aggregate.c"), (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    BUSTER_TEST(arguments, input.length != 0);
+    OperatingSystem systems[] = {OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_UEFI, OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_MACOS};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        bool windows = system < 2;
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = systems[system]};
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("native-aggregate.c"), tokens, syntax, target,
+                                                            (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, tokens.error_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+            IrProgram* program = lowered.program;
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                u32 definitions = 0;
+                for (u32 index = 0; index < module->function_count; index += 1)
+                {
+                    IrFunction* function = module->functions + index;
+                    if (function->state == IR_FUNCTION_DECLARATION) { continue; }
+                    definitions += 1;
+                    MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                    BUSTER_TEST_RAW(arguments, selected.supported, function->name);
+                    if (selected.supported)
+                    {
+                        BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                        MachineStackPlacement placement = machine_stack_placement_build(temporary.arena, &selected.function);
+                        BUSTER_TEST(arguments, placement.valid);
+                        if (windows && string_equal(function->name, S8("native_aggregate_call_host")))
+                        {
+                            // The largest call needs 80 bytes of homes/stack
+                            // pointers and 128 bytes of aligned value copies.
+                            // Smaller calls reuse the same reservation.
+                            BUSTER_TEST(arguments, selected.function.outgoing_bytes == 208);
+                            u32 slot = selected.function.outgoing_slot;
+                            BUSTER_TEST(arguments, slot < selected.function.stack_slot_count);
+                            if (slot < selected.function.stack_slot_count)
+                            {
+                                BUSTER_TEST(arguments, selected.function.stack_slot_sizes[slot] == 208);
+                                BUSTER_TEST(arguments, selected.function.stack_slot_alignments[slot] == 16);
+                                for (u32 row = 0; row < selected.function.instruction_count; row += 1)
+                                {
+                                    MachineInstruction* instruction = selected.function.instructions + row;
+                                    if (instruction->opcode == MACHINE_X64_LEA_FRAME &&
+                                        instruction->operands[1] == machine_ref_make(MACHINE_REF_STACK_SLOT, slot))
+                                    {
+                                        BUSTER_TEST(arguments, instruction->payload >= 32 && instruction->payload < 208 &&
+                                                               (instruction->payload & 15) == 0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, definitions == 5);
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                    BUSTER_TEST(arguments, generated.statistics.function_count == 5);
+                    BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult aggregate_result = machine_test_native_aggregate(arguments);
+    result.test_count += aggregate_result.test_count;
+    result.succeeded_test_count += aggregate_result.succeeded_test_count;
     UnitTestResult variadic_result = machine_test_native_variadic(arguments);
     result.test_count += variadic_result.test_count;
     result.succeeded_test_count += variadic_result.succeeded_test_count;

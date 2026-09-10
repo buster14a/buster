@@ -1524,6 +1524,9 @@ struct MachineEncodeResult
 {
     u8* bytes;
     u32 byte_count;
+    // End of the single RSP adjustment after a Win64 large-frame probe;
+    // zero for the ordinary chunked prologue. Occupies existing padding.
+    u32 frame_allocation_offset;
     u32* block_offsets;
     // Function-relative offset of every instruction row's first byte,
     // ahead of its reload edits, parallel to the instruction array.
