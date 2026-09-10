@@ -21,6 +21,12 @@ struct CodegenBuffer
     CodegenError error;
 };
 
+// Shared bounded AArch64 Windows probe. Returns false for a small or
+// misaligned request; a handled request reports emission errors in buffer.
+BUSTER_F_DECL bool codegen_a64_windows_large_stack_adjust(CodegenBuffer* buffer, u32 size, bool subtract,
+                                                         CodegenFunctionDescriptor* descriptor, u32 action_capacity);
+BUSTER_F_DECL u32 codegen_a64_windows_save_area_size(u32 saved_register_count);
+
 typedef struct CodegenRelocation CodegenRelocation;
 struct CodegenRelocation
 {

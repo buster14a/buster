@@ -160,13 +160,26 @@
   ahead of their definitions publishes incorrect verifier metadata.
   `basic_c_x86_64_i128_binary.c` and `basic_c_i128_shift_edges.c` require strict
   MIR selection and cover product carries and counts below, at and above 64.
-- AArch64 fixed frames are not limited by the scaled callee-save offset.
+- ELF/Mach-O AArch64 fixed frames are not limited by the scaled callee-save offset.
   Above that offset's reach, the prologue and each epilogue derive the compact
   save-area base from X29 in reserved X16, then use small unsigned offsets.
   Module unwind construction counts both setup words and retains the actual
   SP-relative save locations. Capacity planning includes large-offset body
   transfers and aggregate-copy pieces; frame-size sums are checked before
   narrowing. Keep strict large-frame and packed-layout tests in all MIR modes.
+- Windows/UEFI AArch64 MIR saves FP/LR, allocator-owned X19-X27, and X28 in
+  a compact, sixteen-aligned prefix before establishing X29. Fixed body
+  slots remain X28-relative; incoming stack arguments are relative to X29
+  plus the complete prefix size. The shared bounded Windows probe leaves
+  SP unchanged until its final allocation. Unwind actions describe every
+  prologue instruction, and every epilogue shares the unwind suffix starting
+  at SET_FP: restore SP from X29, reload X28 and allocator saves in reverse
+  order, then restore FP/LR and release the prefix. This also discards VLA
+  allocations. The native `windows_arm64_mir_unwind.c` test derives synthetic
+  boundary contexts from instruction effects and checks RtlVirtualUnwind's
+  restored registers; object-only checks are not native unwind acceptance.
+  Windows variadic signatures and calls remain explicit signature/opcode
+  misses pending their distinct integer-register and pointer-list ABI.
 - ELF AArch64 variadic definitions capture X0-X7 and Q0-Q7 into a 192-byte
   save area before argument capture. Named parameters consume their ABI's
   independent integer and floating-point register files. The existing private

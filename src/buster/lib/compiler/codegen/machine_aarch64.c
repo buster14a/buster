@@ -7,9 +7,9 @@
 // symbol addresses, aggregate/array literal construction into frame slots,
 // scalar float bodies (arithmetic, comparison, negation, and conversions
 // over the bit-image model, riding V0/V1 internally), scalar stack
-// arguments through a fixed outgoing area at the frame bottom, non-Darwin
+// arguments through a fixed outgoing area at the frame bottom, ELF
 // variadic definitions over the canonical four-word va_list model
-// (Darwin's anonymous-arguments-on-stack convention stays canonical),
+// (Darwin and Windows variadic conventions stay canonical),
 // sixteen-byte short-vector arguments and results as slot-backed values
 // touching the V file only at the ABI edges, indirect arguments — any
 // aggregate or vector past sixteen bytes — behind a caller-side defensive
@@ -31,6 +31,7 @@
 // named-parameter walk is the variadic model's defining simulation, and
 // VA_START must run the exact same one.
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
 #include <buster/lib/os.h>
@@ -2665,11 +2666,12 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
     {
         plan->argument_count = instruction->operand_count - 1;
         bool variadic_call = callee_type && callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic;
-        // Darwin passes every anonymous argument on the stack, which the
-        // subset does not stage yet; AAPCS64 variadic scalars travel in
-        // the same registers as named ones.
-        bool darwin = selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS;
-        planned = !(variadic_call && darwin) && callee_type && callee_type->kind == IR_TYPE_FUNCTION &&
+        // Darwin's anonymous stack arguments and Windows' integer-only
+        // variadic register file need distinct placement. ELF variadic
+        // scalars travel in the same registers as named ones.
+        bool separate_variadic_abi = selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS ||
+                                     target_uses_pe_unwind(selector->target);
+        planned = !(variadic_call && separate_variadic_abi) && callee_type && callee_type->kind == IR_TYPE_FUNCTION &&
                   (variadic_call ? plan->argument_count >= callee_type->parameter_count : callee_type->parameter_count == plan->argument_count) &&
                   plan->argument_count <= MACHINE_A64_MAX_ARGUMENTS;
     }
@@ -4355,14 +4357,14 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         function->entry.value == 0)
     {
         IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
-        // Darwin's variadic definition ABI places every anonymous argument
-        // on the stack and stays on the canonical path even when the body
-        // ignores its tail; AAPCS64 bodies continue through ordinary
+        // Darwin and Windows variadic definition ABIs need distinct list
+        // storage and stay canonical even when the body ignores its tail;
+        // ELF AAPCS64 bodies continue through ordinary
         // selection, so the first va_* the subset cannot shape (or any
         // earlier unsupported operation) reports in true IR order.
-        bool variadic_darwin = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+        bool separate_variadic_abi = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS || target_uses_pe_unwind(target);
         result.signature_rejected = function_type && function_type->kind == IR_TYPE_FUNCTION;
-        if (!function_type || function_type->kind != IR_TYPE_FUNCTION || (function_type->is_variadic && variadic_darwin) ||
+        if (!function_type || function_type->kind != IR_TYPE_FUNCTION || (function_type->is_variadic && separate_variadic_abi) ||
             function_type->parameter_count > MACHINE_A64_MAX_ARGUMENTS)
         {
             return result;
@@ -5451,6 +5453,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         result.function = machine_function_builder_finish(arena, &selector.builder);
         result.function.target = &machine_aarch64_description;
+        result.function.windows_aarch64_frame = target_uses_pe_unwind(target);
         result.function.immediates = arena_allocate(arena, u64, selector.immediates.total_count);
         result.function.immediate_count = selector.immediates.total_count;
         machine_stream_flatten(&selector.immediates, result.function.immediates);
@@ -6743,6 +6746,12 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
         return result;
     }
     u32 frame_area = (u32)frame_area64;
+    bool windows_frame = function->windows_aarch64_frame;
+    u32 windows_save_area = codegen_a64_windows_save_area_size(push_count);
+    if (windows_frame && frame_area > UINT32_MAX - windows_save_area)
+    {
+        return result;
+    }
     u32 frame_total = frame_area + 16;
     bool large_save_offset = frame_area > MACHINE_A64_DIRECT_SAVE_MAX;
     // Per-row worst-case byte budget: constants and remainders expand, the
@@ -6848,48 +6857,81 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
     machine_stream_initialize(&epilogs, sizeof(u32));
     result.block_offsets = arena_allocate(arena, u32, function->block_count);
     result.row_offsets = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
-    // Prologue, byte-for-byte the canonical AArch64 shape so the module
-    // wiring's unwind actions keep their exact meaning: save the
-    // frame-pointer pair, establish x29, allocate the frame in probed
-    // chunks, save the caller's x28 and repoint it at the frame base.
-    machine_a64_emit(&encoder, 0xa9bf7bfd);
+    // PE keeps saves beside the frame chain before establishing X29.
+    // ELF/Mach-O retain the existing frame, with saves above the body slots.
+    // Module unwind actions describe the instructions of the selected shape.
+    if (windows_frame)
     {
-        u32 fields[] = {MACHINE_A64_X29, MACHINE_A64_SP, 0};
-        machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
-    }
-    u32 frame_remaining = frame_total;
-    while (frame_remaining)
-    {
-        u32 frame_chunk = BUSTER_MIN(frame_remaining, A64_SP_ADJUST_CHUNK);
-        machine_a64_emit(&encoder, 0xd10003ff | (frame_chunk << 10));
-        machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_SP, MACHINE_A64_SP, 0, 8, true);
-        frame_remaining -= frame_chunk;
-    }
-    u32 save_base = MACHINE_A64_SP;
-    if (large_save_offset)
-    {
-        // X29 remains at the saved FP/LR pair. The save area is immediately
-        // below it regardless of frame size; X16 is reserved from allocation.
-        machine_a64_emit_immediate(&encoder, MACHINE_A64_X16, 16u + 8u * push_count);
-        u32 fields[] = {MACHINE_A64_X16, MACHINE_A64_X29, 0, MACHINE_A64_X16};
-        machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_SUBXRS, fields, BUSTER_ARRAY_LENGTH(fields));
-        save_base = MACHINE_A64_X16;
-    }
-    u32 save_slot = 0;
-    for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
-    {
-        if (!((placement->callee_saved_mask >> saved_register) & 1u))
+        // Put every save within the unwind format's small SP-relative range.
+        // X29 points at this frame chain throughout the body, including VLA
+        // allocations. Its value also recovers SP directly in each epilogue.
+        u32 chain_fields[] = {MACHINE_A64_X29, MACHINE_A64_SP, MACHINE_A64_X30, (0u - windows_save_area / 8u) & 0x7fu};
+        machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_STPXPRE, chain_fields, BUSTER_ARRAY_LENGTH(chain_fields));
+        u32 slot = 16;
+        for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
         {
-            continue;
+            if ((placement->callee_saved_mask >> saved_register) & 1u)
+            {
+                machine_a64_emit_generated_unsigned_memory(&encoder, saved_register, MACHINE_A64_SP, slot, 8, true);
+                slot += 8;
+            }
         }
-        save_slot += 1;
-        machine_a64_emit_generated_unsigned_memory(&encoder, saved_register, save_base,
-                                                    large_save_offset ? 8u * (push_count - save_slot) : frame_area - 8u * save_slot, 8, true);
+        machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_X28, MACHINE_A64_SP, slot, 8, true);
+        u32 frame_fields[] = {MACHINE_A64_X29, MACHINE_A64_SP, 0};
+        machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, frame_fields, BUSTER_ARRAY_LENGTH(frame_fields));
+        CodegenBuffer probe = {.bytes = encoder.bytes, .count = encoder.count, .capacity = encoder.capacity};
+        bool large_probe = codegen_a64_windows_large_stack_adjust(&probe, frame_area, true, 0, 0);
+        encoder.count = (u32)probe.count;
+        encoder.overflow |= probe.error != CODEGEN_ERROR_NONE;
+        if (!large_probe && frame_area)
+        {
+            machine_a64_emit(&encoder, 0xd10003ffu | (frame_area << 10));
+            machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_SP, MACHINE_A64_SP, 0, 8, true);
+        }
+        u32 base_fields[] = {MACHINE_A64_X28, MACHINE_A64_SP, 0};
+        machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, base_fields, BUSTER_ARRAY_LENGTH(base_fields));
     }
-    machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_X28, save_base, large_save_offset ? 8u * push_count : frame_area, 8, true);
+    else
     {
-        u32 fields[] = {MACHINE_A64_X28, MACHINE_A64_SP, 0};
-        machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+        machine_a64_emit(&encoder, 0xa9bf7bfd);
+        {
+            u32 fields[] = {MACHINE_A64_X29, MACHINE_A64_SP, 0};
+            machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+        }
+        u32 frame_remaining = frame_total;
+        while (frame_remaining)
+        {
+            u32 frame_chunk = BUSTER_MIN(frame_remaining, A64_SP_ADJUST_CHUNK);
+            machine_a64_emit(&encoder, 0xd10003ff | (frame_chunk << 10));
+            machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_SP, MACHINE_A64_SP, 0, 8, true);
+            frame_remaining -= frame_chunk;
+        }
+        u32 save_base = MACHINE_A64_SP;
+        if (large_save_offset)
+        {
+            // X29 remains at the saved FP/LR pair. The save area is immediately
+            // below it regardless of frame size; X16 is reserved from allocation.
+            machine_a64_emit_immediate(&encoder, MACHINE_A64_X16, 16u + 8u * push_count);
+            u32 fields[] = {MACHINE_A64_X16, MACHINE_A64_X29, 0, MACHINE_A64_X16};
+            machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_SUBXRS, fields, BUSTER_ARRAY_LENGTH(fields));
+            save_base = MACHINE_A64_X16;
+        }
+        u32 save_slot = 0;
+        for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
+        {
+            if (!((placement->callee_saved_mask >> saved_register) & 1u))
+            {
+                continue;
+            }
+            save_slot += 1;
+            machine_a64_emit_generated_unsigned_memory(&encoder, saved_register, save_base,
+                                                        large_save_offset ? 8u * (push_count - save_slot) : frame_area - 8u * save_slot, 8, true);
+        }
+        machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_X28, save_base, large_save_offset ? 8u * push_count : frame_area, 8, true);
+        {
+            u32 fields[] = {MACHINE_A64_X28, MACHINE_A64_SP, 0};
+            machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+        }
     }
     u32 edit_cursor = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
@@ -7218,7 +7260,8 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 // The payload already carries the X29-relative byte offset,
                 // sixteen bytes past the frame-pointer pair like the
                 // canonical parameter capture.
-                machine_a64_emit_generated_unsigned_memory(&encoder, operand_registers[0], MACHINE_A64_X29, instruction->payload, 8, false);
+                machine_a64_emit_generated_unsigned_memory(&encoder, operand_registers[0], MACHINE_A64_X29,
+                                                            instruction->payload + (windows_frame ? windows_save_area - 16u : 0u), 8, false);
                 break;
             case MACHINE_A64_VLOAD_FRAME:
             case MACHINE_A64_VSTORE_FRAME:
@@ -7616,40 +7659,60 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 // epilogue start is recorded for the Windows unwind data.
                 u32* epilog = (u32*)machine_stream_append(arena, &epilogs);
                 *epilog = encoder.count;
+                if (windows_frame)
                 {
-                    u32 fields[] = {MACHINE_A64_SP, MACHINE_A64_X28, 0};
-                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
-                }
-                u32 restore_base = MACHINE_A64_SP;
-                if (large_save_offset)
-                {
-                    machine_a64_emit_immediate(&encoder, MACHINE_A64_X16, 16u + 8u * push_count);
-                    u32 fields[] = {MACHINE_A64_X16, MACHINE_A64_X29, 0, MACHINE_A64_X16};
-                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_SUBXRS, fields, BUSTER_ARRAY_LENGTH(fields));
-                    restore_base = MACHINE_A64_X16;
-                }
-                u32 restore_slot = 0;
-                for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
-                {
-                    if (!((placement->callee_saved_mask >> saved_register) & 1u))
+                    u32 frame_fields[] = {MACHINE_A64_SP, MACHINE_A64_X29, 0};
+                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, frame_fields, BUSTER_ARRAY_LENGTH(frame_fields));
+                    u32 slot = 16u + 8u * push_count;
+                    machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_X28, MACHINE_A64_SP, slot, 8, false);
+                    for (u32 saved_register = MACHINE_A64_REGISTER_COUNT; saved_register > 0; saved_register -= 1)
                     {
-                        continue;
+                        if ((placement->callee_saved_mask >> (saved_register - 1u)) & 1u)
+                        {
+                            slot -= 8;
+                            machine_a64_emit_generated_unsigned_memory(&encoder, saved_register - 1u, MACHINE_A64_SP, slot, 8, false);
+                        }
                     }
-                    restore_slot += 1;
-                    machine_a64_emit_generated_unsigned_memory(&encoder, saved_register, restore_base,
-                                                                large_save_offset ? 8u * (push_count - restore_slot) : frame_area - 8u * restore_slot, 8, false);
+                    u32 chain_fields[] = {MACHINE_A64_X29, MACHINE_A64_SP, MACHINE_A64_X30, windows_save_area / 8u};
+                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_LDPXPOST, chain_fields, BUSTER_ARRAY_LENGTH(chain_fields));
                 }
-                machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_X28, restore_base,
-                                                            large_save_offset ? 8u * push_count : frame_area, 8, false);
-                u32 release_remaining = frame_total;
-                while (release_remaining)
+                else
                 {
-                    u32 release_chunk = BUSTER_MIN(release_remaining, A64_SP_ADJUST_CHUNK);
-                    u32 fields[] = {MACHINE_A64_SP, MACHINE_A64_SP, release_chunk};
-                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
-                    release_remaining -= release_chunk;
+                    {
+                        u32 fields[] = {MACHINE_A64_SP, MACHINE_A64_X28, 0};
+                        machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+                    }
+                    u32 restore_base = MACHINE_A64_SP;
+                    if (large_save_offset)
+                    {
+                        machine_a64_emit_immediate(&encoder, MACHINE_A64_X16, 16u + 8u * push_count);
+                        u32 fields[] = {MACHINE_A64_X16, MACHINE_A64_X29, 0, MACHINE_A64_X16};
+                        machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_SUBXRS, fields, BUSTER_ARRAY_LENGTH(fields));
+                        restore_base = MACHINE_A64_X16;
+                    }
+                    u32 restore_slot = 0;
+                    for (u32 saved_register = 0; saved_register < MACHINE_A64_REGISTER_COUNT; saved_register += 1)
+                    {
+                        if (!((placement->callee_saved_mask >> saved_register) & 1u))
+                        {
+                            continue;
+                        }
+                        restore_slot += 1;
+                        machine_a64_emit_generated_unsigned_memory(&encoder, saved_register, restore_base,
+                                                                    large_save_offset ? 8u * (push_count - restore_slot) : frame_area - 8u * restore_slot, 8, false);
+                    }
+                    machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_X28, restore_base,
+                                                                large_save_offset ? 8u * push_count : frame_area, 8, false);
+                    u32 release_remaining = frame_total;
+                    while (release_remaining)
+                    {
+                        u32 release_chunk = BUSTER_MIN(release_remaining, A64_SP_ADJUST_CHUNK);
+                        u32 fields[] = {MACHINE_A64_SP, MACHINE_A64_SP, release_chunk};
+                        machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, fields, BUSTER_ARRAY_LENGTH(fields));
+                        release_remaining -= release_chunk;
+                    }
+                    machine_a64_emit(&encoder, 0xa8c17bfd);
                 }
-                machine_a64_emit(&encoder, 0xa8c17bfd);
                 machine_a64_emit_generated_opcode(&encoder, instruction->opcode, operand_registers[0], operand_registers[1], operand_registers[2],
                                                   instruction->payload);
             }

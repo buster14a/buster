@@ -3340,80 +3340,90 @@ BUSTER_GLOBAL_LOCAL void a64_emit_constant_compact(CodegenBuffer* buffer, u32 ta
     }
 }
 
-BUSTER_GLOBAL_LOCAL bool a64_emit_windows_large_stack_adjust(CodegenBuffer* buffer, u32 size, bool subtract,
-                                                             CodegenFunctionDescriptor* descriptor, u32 action_capacity)
+u32 codegen_a64_windows_save_area_size(u32 saved_register_count)
 {
-    if (size <= A64_SP_ADJUST_CHUNK || size % 16)
+    // FP/LR form the chain at the bottom, followed by allocator saves and
+    // the reserved X28 frame base. The final padding keeps SP aligned.
+    return (16u + 8u * (saved_register_count + 1u) + 15u) & ~15u;
+}
+
+bool codegen_a64_windows_large_stack_adjust(CodegenBuffer* buffer, u32 size, bool subtract,
+                                           CodegenFunctionDescriptor* descriptor, u32 action_capacity)
+{
+    bool handled = size > A64_SP_ADJUST_CHUNK && size % 16 == 0;
+    if (handled)
     {
-        return false;
-    }
-    u32 units = size / 16;
-    if (!subtract)
-    {
-        a64_emit_constant(buffer, 15, units);
-        a64_emit_instruction_word(buffer, 0x8b2f73ff);
-        return true;
-    }
-    u32 instruction_offsets[13] = {0};
-    for (u32 shift = 0; shift < 64; shift += 16)
-    {
-        a64_emit_instruction_word(buffer,
-                                  (shift ? 0xf2800000 : 0xd2800000) | ((shift / 16) << 21) |
-                                      ((u32)(((u64)units >> shift) & 0xffff) << 5) | 15);
-        instruction_offsets[shift / 16] = (u32)buffer->count;
-    }
-    a64_emit_instruction_word(buffer, 0x910003f0);
-    instruction_offsets[4] = (u32)buffer->count;
-    a64_emit_instruction_word(buffer, 0xcb0f1210);
-    instruction_offsets[5] = (u32)buffer->count;
-    a64_emit_instruction_word(buffer, 0x910003f1);
-    instruction_offsets[6] = (u32)buffer->count;
-    u32 loop_offset = (u32)buffer->count;
-    a64_emit_instruction_word(buffer, 0xd1400631);
-    instruction_offsets[7] = (u32)buffer->count;
-    a64_emit_instruction_word(buffer, 0xeb10023f);
-    instruction_offsets[8] = (u32)buffer->count;
-    u32 final_branch = (u32)buffer->count;
-    a64_emit_instruction_word(buffer, 0x54000009);
-    instruction_offsets[9] = (u32)buffer->count;
-    a64_emit_instruction_word(buffer, 0xf900023f);
-    instruction_offsets[10] = (u32)buffer->count;
-    u32 loop_branch = (u32)buffer->count;
-    a64_emit_instruction_word(buffer, 0x14000000);
-    instruction_offsets[11] = (u32)buffer->count;
-    u32 final_offset = (u32)buffer->count;
-    a64_emit_instruction_word(buffer, 0xf900021f);
-    instruction_offsets[12] = (u32)buffer->count;
-    a64_emit_instruction_word(buffer, 0xcb2f73ff);
-    if (buffer->error != CODEGEN_ERROR_NONE || (final_offset - final_branch) % 4 || (loop_offset - loop_branch) % 4)
-    {
-        buffer->error = CODEGEN_ERROR_CAPACITY;
-        return true;
-    }
-    u32 final_words = (final_offset - final_branch) / 4;
-    s32 loop_words = ((s32)loop_offset - (s32)loop_branch) / 4;
-    u32 final_instruction = 0x54000009 | ((final_words & 0x7ffff) << 5);
-    u32 loop_instruction = 0x14000000 | ((u32)loop_words & 0x03ffffff);
-    memcpy(buffer->bytes + final_branch, &final_instruction, sizeof(final_instruction));
-    memcpy(buffer->bytes + loop_branch, &loop_instruction, sizeof(loop_instruction));
-    if (descriptor)
-    {
-        for (u32 instruction_index = 0; instruction_index < BUSTER_ARRAY_LENGTH(instruction_offsets); instruction_index += 1)
+        u32 units = size / 16;
+        if (!subtract)
         {
-            if (!codegen_unwind_action_append(descriptor, action_capacity, instruction_offsets[instruction_index] - descriptor->code_offset,
-                                              CODEGEN_UNWIND_ACTION_NOP, 0, 0))
+            a64_emit_constant(buffer, 15, units);
+            a64_emit_instruction_word(buffer, 0x8b2f73ff);
+        }
+        else
+        {
+            u32 instruction_offsets[13] = {0};
+            for (u32 shift = 0; shift < 64; shift += 16)
+            {
+                a64_emit_instruction_word(buffer,
+                                          (shift ? 0xf2800000 : 0xd2800000) | ((shift / 16) << 21) |
+                                              ((u32)(((u64)units >> shift) & 0xffff) << 5) | 15);
+                instruction_offsets[shift / 16] = (u32)buffer->count;
+            }
+            a64_emit_instruction_word(buffer, 0x910003f0);
+            instruction_offsets[4] = (u32)buffer->count;
+            a64_emit_instruction_word(buffer, 0xcb0f1210);
+            instruction_offsets[5] = (u32)buffer->count;
+            a64_emit_instruction_word(buffer, 0x910003f1);
+            instruction_offsets[6] = (u32)buffer->count;
+            u32 loop_offset = (u32)buffer->count;
+            a64_emit_instruction_word(buffer, 0xd1400631);
+            instruction_offsets[7] = (u32)buffer->count;
+            a64_emit_instruction_word(buffer, 0xeb10023f);
+            instruction_offsets[8] = (u32)buffer->count;
+            u32 final_branch = (u32)buffer->count;
+            a64_emit_instruction_word(buffer, 0x54000009);
+            instruction_offsets[9] = (u32)buffer->count;
+            a64_emit_instruction_word(buffer, 0xf900023f);
+            instruction_offsets[10] = (u32)buffer->count;
+            u32 loop_branch = (u32)buffer->count;
+            a64_emit_instruction_word(buffer, 0x14000000);
+            instruction_offsets[11] = (u32)buffer->count;
+            u32 final_offset = (u32)buffer->count;
+            a64_emit_instruction_word(buffer, 0xf900021f);
+            instruction_offsets[12] = (u32)buffer->count;
+            a64_emit_instruction_word(buffer, 0xcb2f73ff);
+            if (buffer->error != CODEGEN_ERROR_NONE || (final_offset - final_branch) % 4 || (loop_offset - loop_branch) % 4)
             {
                 buffer->error = CODEGEN_ERROR_CAPACITY;
-                return true;
+            }
+            else
+            {
+                u32 final_words = (final_offset - final_branch) / 4;
+                s32 loop_words = ((s32)loop_offset - (s32)loop_branch) / 4;
+                u32 final_instruction = 0x54000009 | ((final_words & 0x7ffff) << 5);
+                u32 loop_instruction = 0x14000000 | ((u32)loop_words & 0x03ffffff);
+                memcpy(buffer->bytes + final_branch, &final_instruction, sizeof(final_instruction));
+                memcpy(buffer->bytes + loop_branch, &loop_instruction, sizeof(loop_instruction));
+                if (descriptor)
+                {
+                    for (u32 instruction_index = 0; instruction_index < BUSTER_ARRAY_LENGTH(instruction_offsets) && buffer->error == CODEGEN_ERROR_NONE; instruction_index += 1)
+                    {
+                        if (!codegen_unwind_action_append(descriptor, action_capacity, instruction_offsets[instruction_index] - descriptor->code_offset,
+                                                          CODEGEN_UNWIND_ACTION_NOP, 0, 0))
+                        {
+                            buffer->error = CODEGEN_ERROR_CAPACITY;
+                        }
+                    }
+                    if (buffer->error == CODEGEN_ERROR_NONE && !codegen_unwind_action_append(descriptor, action_capacity, (u32)buffer->count - descriptor->code_offset,
+                                                      CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, size))
+                    {
+                        buffer->error = CODEGEN_ERROR_CAPACITY;
+                    }
+                }
             }
         }
-        if (!codegen_unwind_action_append(descriptor, action_capacity, (u32)buffer->count - descriptor->code_offset,
-                                          CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, size))
-        {
-            buffer->error = CODEGEN_ERROR_CAPACITY;
-        }
     }
-    return true;
+    return handled;
 }
 
 
@@ -4673,7 +4683,7 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
 BUSTER_GLOBAL_LOCAL void codegen_canonical_a64_adjust_stack_described(CodegenBuffer* buffer, u32 byte_count, bool subtract,
                                                                       CodegenFunctionDescriptor* descriptor, u32 action_capacity, bool windows)
 {
-    if (!windows || !a64_emit_windows_large_stack_adjust(buffer, byte_count, subtract, descriptor, action_capacity))
+    if (!windows || !codegen_a64_windows_large_stack_adjust(buffer, byte_count, subtract, descriptor, action_capacity))
     {
         while (byte_count)
         {
@@ -9548,15 +9558,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // canonical fallback fills the same shell after its sizing pass.
         // MIR_STACK routes eligible functions through machine selection,
         // stack placement, and the machine encoder; everything else falls
-        // back to the canonical path below and is counted. The machine
-        // prologue byte-for-byte matches the canonical plain prologue of
-        // its architecture, so the descriptor's unwind actions keep their
-        // exact meaning. PE-unwind AArch64 targets stay canonical: their
-        // unwind data wants the packed-epilogue and probe-NOP shapes the machine
-        // wiring does not model yet.
+        // back to the canonical path below and is counted. ELF/Mach-O frames
+        // retain their established shape. PE AArch64
+        // uses a compact chain/save area and bounded probe, with every
+        // prologue instruction represented in its unwind description.
         if ((options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_MIR_STACK || options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST ||
              options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY) &&
-            (target.cpu_arch == CPU_ARCH_X86_64 || (target.cpu_arch == CPU_ARCH_AARCH64 && !target_uses_pe_unwind(target))))
+            (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64))
         {
             TemporalArena machine_scratch = scratch_begin(&arena, 1);
             MachineSelectResult selected = {0};
@@ -9725,7 +9733,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             u32 machine_frame_total = placement.frame_size + 16u + 8u * machine_saved_register_count;
                             u32 machine_frame_chunks = machine_frame_total / A64_SP_ADJUST_CHUNK +
                                                        (machine_frame_total % A64_SP_ADJUST_CHUNK != 0);
-                            machine_unwind_capacity = 6u + machine_frame_chunks + machine_saved_register_count + function->instruction_count;
+                            machine_unwind_capacity = target_uses_pe_unwind(target)
+                                                          ? 22u + machine_saved_register_count
+                                                          : 6u + machine_frame_chunks + machine_saved_register_count + function->instruction_count;
                         }
                         unwind_action_capacity = machine_unwind_capacity;
                         descriptor->unwind_actions = arena_allocate(arena, CodegenUnwindAction, machine_unwind_capacity);
@@ -9747,55 +9757,109 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             machine_push_count += (placement.callee_saved_mask >> saved_register) & 1u;
                         }
                         u32 machine_frame_area = placement.frame_size + 8 * machine_push_count;
-                        u32 machine_frame_total = machine_frame_area + 16;
+                        bool machine_windows_frame = selected.function.windows_aarch64_frame;
+                        u32 machine_chain_size = machine_windows_frame ? codegen_a64_windows_save_area_size(machine_push_count) : 16u;
+                        u32 machine_frame_total = machine_frame_area + machine_chain_size;
                         bool machine_unwind_valid =
-                            codegen_unwind_action_append(descriptor, unwind_action_capacity, 4, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, 16);
+                            codegen_unwind_action_append(descriptor, unwind_action_capacity, 4, CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, machine_chain_size);
                         machine_unwind_valid =
                             codegen_unwind_action_append(descriptor, unwind_action_capacity, 4, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, 29, 0) &&
                             machine_unwind_valid;
                         machine_unwind_valid =
                             codegen_unwind_action_append(descriptor, unwind_action_capacity, 4, CODEGEN_UNWIND_ACTION_SAVE_REGISTER, 30, 8) &&
                             machine_unwind_valid;
-                        machine_unwind_valid =
-                            codegen_unwind_action_append(descriptor, unwind_action_capacity, 8, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, 29, 0) &&
-                            machine_unwind_valid;
-                        u32 machine_prologue_cursor = 8;
-                        u32 machine_frame_remaining = machine_frame_total;
-                        while (machine_frame_remaining)
+                        u32 machine_prologue_cursor;
+                        if (machine_windows_frame)
                         {
-                            u32 machine_frame_chunk = BUSTER_MIN(machine_frame_remaining, A64_SP_ADJUST_CHUNK);
-                            machine_prologue_cursor += 4;
-                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
-                                                                                CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, machine_frame_chunk) &&
-                                                   machine_unwind_valid;
-                            machine_prologue_cursor += 4;
-                            machine_frame_remaining -= machine_frame_chunk;
-                        }
-                        // A large frame materializes the nearby callee-save
-                        // base from X29 in two words before the stores.
-                        if (machine_frame_area > A64_IMM12_MAX * 8u)
-                        {
-                            machine_prologue_cursor += 8;
-                        }
-                        u32 machine_save_slot = 0;
-                        for (u32 saved_register = 0; saved_register < 32u; saved_register += 1)
-                        {
-                            if (!((placement.callee_saved_mask >> saved_register) & 1u))
+                            machine_prologue_cursor = 4;
+                            u32 save_offset = 16;
+                            for (u32 saved_register = 0; saved_register < 32u; saved_register += 1)
                             {
-                                continue;
+                                if ((placement.callee_saved_mask >> saved_register) & 1u)
+                                {
+                                    machine_prologue_cursor += 4;
+                                    machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                        CODEGEN_UNWIND_ACTION_SAVE_REGISTER, (u8)saved_register,
+                                                                                        save_offset) && machine_unwind_valid;
+                                    save_offset += 8;
+                                }
                             }
-                            machine_save_slot += 1;
                             machine_prologue_cursor += 4;
                             machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
-                                                                                CODEGEN_UNWIND_ACTION_SAVE_REGISTER, (u8)saved_register,
-                                                                                machine_frame_area - 8 * machine_save_slot) &&
-                                                   machine_unwind_valid;
+                                                                                CODEGEN_UNWIND_ACTION_SAVE_REGISTER, 28, save_offset) && machine_unwind_valid;
+                            machine_prologue_cursor += 4;
+                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, 29, 0) && machine_unwind_valid;
+                            if (machine_frame_area > A64_SP_ADJUST_CHUNK)
+                            {
+                                // The shared compact probe keeps SP unchanged
+                                // through thirteen words, then allocates once.
+                                for (u32 probe_word = 0; probe_word < 13; probe_word += 1)
+                                {
+                                    machine_prologue_cursor += 4;
+                                    machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                        CODEGEN_UNWIND_ACTION_NOP, 0, 0) && machine_unwind_valid;
+                                }
+                                machine_prologue_cursor += 4;
+                                machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                    CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, machine_frame_area) && machine_unwind_valid;
+                            }
+                            else if (machine_frame_area)
+                            {
+                                machine_prologue_cursor += 4;
+                                machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                    CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, machine_frame_area) && machine_unwind_valid;
+                                machine_prologue_cursor += 4;
+                                machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                    CODEGEN_UNWIND_ACTION_NOP, 0, 0) && machine_unwind_valid;
+                            }
+                            machine_prologue_cursor += 4;
+                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                CODEGEN_UNWIND_ACTION_NOP, 0, 0) && machine_unwind_valid;
                         }
-                        machine_prologue_cursor += 4;
-                        machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
-                                                                            CODEGEN_UNWIND_ACTION_SAVE_REGISTER, 28, machine_frame_area) &&
-                                               machine_unwind_valid;
-                        machine_prologue_cursor += 4;
+                        else
+                        {
+                            machine_unwind_valid =
+                                codegen_unwind_action_append(descriptor, unwind_action_capacity, 8, CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, 29, 0) &&
+                                machine_unwind_valid;
+                            machine_prologue_cursor = 8;
+                            u32 machine_frame_remaining = machine_frame_total;
+                            while (machine_frame_remaining)
+                            {
+                                u32 machine_frame_chunk = BUSTER_MIN(machine_frame_remaining, A64_SP_ADJUST_CHUNK);
+                                machine_prologue_cursor += 4;
+                                machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                    CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, machine_frame_chunk) &&
+                                                       machine_unwind_valid;
+                                machine_prologue_cursor += 4;
+                                machine_frame_remaining -= machine_frame_chunk;
+                            }
+                            // A large frame materializes the nearby callee-save
+                            // base from X29 in two words before the stores.
+                            if (machine_frame_area > A64_IMM12_MAX * 8u)
+                            {
+                                machine_prologue_cursor += 8;
+                            }
+                            u32 machine_save_slot = 0;
+                            for (u32 saved_register = 0; saved_register < 32u; saved_register += 1)
+                            {
+                                if (!((placement.callee_saved_mask >> saved_register) & 1u))
+                                {
+                                    continue;
+                                }
+                                machine_save_slot += 1;
+                                machine_prologue_cursor += 4;
+                                machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                    CODEGEN_UNWIND_ACTION_SAVE_REGISTER, (u8)saved_register,
+                                                                                    machine_frame_area - 8 * machine_save_slot) &&
+                                                       machine_unwind_valid;
+                            }
+                            machine_prologue_cursor += 4;
+                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                CODEGEN_UNWIND_ACTION_SAVE_REGISTER, 28, machine_frame_area) &&
+                                                   machine_unwind_valid;
+                            machine_prologue_cursor += 4;
+                        }
                         for (u32 epilog_index = 0; epilog_index < encoded.epilog_count; epilog_index += 1)
                         {
                             machine_unwind_valid =
