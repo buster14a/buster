@@ -89,6 +89,15 @@ independent legacy mutable-register and pressure-census contracts.
 
 ## C frontend and canonical IR rules
 
+- `c_parse_binding_bind` publishes a previously unbound enclosing-scope name
+  without scanning unrelated undo records. A live undo record implies a valid
+  current binding: bind installs the new entity, and unwind removes its record
+  before restoring the previous one. Bound names retain the oldest-record
+  search and shadow restoration; the authoritative scope/symbol chains and
+  type-parser rollback contract are unchanged. The private test seam observes
+  the existing search cursor and verifies geometric work counts without adding
+  a production counter, allocation, or mutable cache.
+
 - The public frontend API is `compiler/frontend/c/c.h`. In non-unity builds the
   implementation is split across `c_source.c`, `c_parse.c`, and `c_gen.c`;
   `c.c` preserves the unity include order and diagnostic mapping.

@@ -79,6 +79,7 @@
 //   c_parse_ast, c_analyze_semantics, c_parse     the stage entry points
 
 #include "c_internal.h"
+#include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 
 BUSTER_C_INTERNAL bool c_declaration_keyword(String8 spelling)
 {
@@ -11339,17 +11340,27 @@ BUSTER_C_SHARED u64 c_parse_name_hash(u32 symbol, String8 name)
 // close, so it goes into the oldest record for the symbol -- the value the
 // outermost restore puts back -- or into the slot itself when nothing has
 // shadowed it.  The scan is over the bindings the function body has open,
-// which the reset at each definition keeps to that body's own.
-BUSTER_C_INTERNAL void c_parse_binding_bind(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol)
+// which the reset at each definition keeps to that body's own. Fresh names
+// need no scan. The returned loop cursor exposes examined records to tests;
+// production callers discard it, without maintaining an additional counter.
+BUSTER_C_INTERNAL u32 c_parse_binding_bind(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol)
 {
+    u32 scan_count = 0;
     if (result->binding_by_symbol && symbol && symbol < result->binding_capacity)
     {
         if (scope.value != result->binding_scope.value)
         {
             u32 oldest = UINT32_MAX;
-            for (u32 index = 0; index < result->binding_undo_count && oldest == UINT32_MAX; index += 1)
+            // A live undo record for this symbol always has a valid current
+            // binding: bind installs one, and unwind removes its record before
+            // restoring the previous value. A fresh name therefore cannot
+            // occur in this log, however many unrelated locals it contains.
+            if (result->binding_by_symbol[symbol].value != C_ID_UNDERLYING_INVALID)
             {
-                oldest = result->binding_undo[index].symbol == symbol ? index : UINT32_MAX;
+                for (; scan_count < result->binding_undo_count && oldest == UINT32_MAX; scan_count += 1)
+                {
+                    oldest = result->binding_undo[scan_count].symbol == symbol ? scan_count : UINT32_MAX;
+                }
             }
             if (oldest == UINT32_MAX)
             {
@@ -11373,6 +11384,7 @@ BUSTER_C_INTERNAL void c_parse_binding_bind(CParseResult* result, CScopeId scope
             result->binding_by_symbol[symbol] = entity;
         }
     }
+    return scan_count;
 }
 
 // Restores every binding shadowed since `mark`, newest first.
@@ -11384,6 +11396,18 @@ BUSTER_C_INTERNAL void c_parse_binding_unwind(CParseResult* result, u32 mark)
         result->binding_by_symbol[record.symbol] = record.previous;
     }
 }
+
+#if BUSTER_INCLUDE_TESTS
+u32 c_test_parse_binding_bind(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol)
+{
+    return c_parse_binding_bind(result, scope, entity, symbol);
+}
+
+void c_test_parse_binding_unwind(CParseResult* result, u32 mark)
+{
+    c_parse_binding_unwind(result, mark);
+}
+#endif
 
 BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol)
 {
