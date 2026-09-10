@@ -81,6 +81,7 @@
 //   c_ir_global_initializer, c_lower_to_ir        globals and the driver
 
 #include "c_internal.h"
+#include <buster/lib/compiler/ir/ir_construction.h>
 
 BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
 
@@ -4951,6 +4952,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_ssa_read_place(CIntegerIrBuilder* builder, IrVa
                 ssa->event_count -= 1;
                 ssa->read_count -= 1;
                 builder->function->value_count -= 1;
+                IR_CONSTRUCTION_RECORD(SSA_READ_RETRACTIONS, 1);
             }
         }
     }
@@ -5198,6 +5200,10 @@ BUSTER_C_INTERNAL bool c_ir_ssa_restore_memory(CIntegerIrBuilder* builder, u8* m
 
 BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaStatistics* statistics)
 {
+    IR_CONSTRUCTION_RECORD(SSA_FINISH_CALLS, 1);
+    IR_CONSTRUCTION_RECORD(BEFORE_SSA_BLOCK_ROWS, builder->function->block_count);
+    IR_CONSTRUCTION_RECORD(BEFORE_SSA_INSTRUCTION_ROWS, builder->function->instruction_count);
+    IR_CONSTRUCTION_RECORD(BEFORE_SSA_VALUE_ROWS, builder->function->value_count);
     CIrDirectSsa* ssa = builder->direct_ssa;
     bool valid = true;
     if (!ssa && builder->direct_ssa_enabled)
@@ -5629,6 +5635,13 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
             builder->failure_message = S8("direct SSA lowering could not resolve a local value");
         }
     }
+    IR_CONSTRUCTION_RECORD(SSA_FINISH_FAILURES, !valid);
+    IR_CONSTRUCTION_RECORD(AFTER_SSA_BLOCK_ROWS, builder->function->block_count);
+    IR_CONSTRUCTION_RECORD(AFTER_SSA_INSTRUCTION_ROWS, builder->function->instruction_count);
+    IR_CONSTRUCTION_RECORD(AFTER_SSA_VALUE_ROWS, builder->function->value_count);
+    IR_CONSTRUCTION_RECORD(FINAL_BLOCK_SLOTS, builder->function->block_capacity);
+    IR_CONSTRUCTION_RECORD(FINAL_INSTRUCTION_SLOTS, builder->function->instruction_capacity);
+    IR_CONSTRUCTION_RECORD(FINAL_VALUE_SLOTS, builder->function->value_capacity);
     return valid;
 }
 
@@ -27043,74 +27056,74 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_request_place(CIntegerIrB
 // address-of/member chain in Lua's setnilvalue macro).
 BUSTER_C_INTERNAL IrValueId c_ir_recover_memory_place_from_value(CIntegerIrBuilder* builder, IrValueId value)
 {
-    if (value.value >= builder->function->value_count)
+    IrValueId result = IR_VALUE_ID_INVALID;
+    if (value.value < builder->function->value_count)
     {
-        return IR_VALUE_ID_INVALID;
-    }
-    IrValue* value_definition = builder->function->values + value.value;
-    if (value_definition->category == IR_VALUE_PLACE)
-    {
-        return value;
-    }
-    IrInstructionId definition_id = value_definition->definition;
-    if (definition_id.value >= builder->function->instruction_count)
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    IrInstruction* definition = builder->function->instructions + definition_id.value;
-    CIrDirectSsa* ssa = builder->direct_ssa;
-    bool has_later_event = ssa && ssa->event_count && ssa->events[ssa->event_count - 1].after.value == definition_id.value;
-    if (has_later_event || (definition->opcode != IR_OPCODE_LOAD && definition->opcode != IR_OPCODE_ATOMIC_LOAD) || definition->operand_count != 1 ||
-        definition_id.value + 1 != builder->function->instruction_count || value.value + 1 != builder->function->value_count ||
-        builder->function->blocks[builder->current_block.value].last_instruction.value != definition_id.value ||
-        builder->last_instruction.value != definition_id.value)
-    {
-        return IR_VALUE_ID_INVALID;
-    }
-    IrInstructionId previous = IR_INSTRUCTION_ID_INVALID;
-    if (builder->previous_instruction_known)
-    {
-        previous = builder->previous_instruction;
-    }
-    else
-    {
-        IrInstructionId cursor = builder->function->blocks[builder->current_block.value].first_instruction;
-        while (cursor.value != IR_ID_UNDERLYING_INVALID && cursor.value != definition_id.value)
+        IrValue* value_definition = builder->function->values + value.value;
+        if (value_definition->category == IR_VALUE_PLACE)
         {
-            previous = cursor;
-            cursor = builder->function->instructions[cursor.value].next;
+            result = value;
         }
-        if (cursor.value != definition_id.value)
+        else if (value_definition->definition.value < builder->function->instruction_count)
         {
-            return IR_VALUE_ID_INVALID;
+            IrInstructionId definition_id = value_definition->definition;
+            IrInstruction* definition = builder->function->instructions + definition_id.value;
+            CIrDirectSsa* ssa = builder->direct_ssa;
+            bool has_later_event = ssa && ssa->event_count && ssa->events[ssa->event_count - 1].after.value == definition_id.value;
+            bool recover = !has_later_event && (definition->opcode == IR_OPCODE_LOAD || definition->opcode == IR_OPCODE_ATOMIC_LOAD) &&
+                           definition->operand_count == 1 && definition_id.value + 1 == builder->function->instruction_count &&
+                           value.value + 1 == builder->function->value_count &&
+                           builder->function->blocks[builder->current_block.value].last_instruction.value == definition_id.value &&
+                           builder->last_instruction.value == definition_id.value;
+            IrInstructionId previous = IR_INSTRUCTION_ID_INVALID;
+            if (recover)
+            {
+                if (builder->previous_instruction_known)
+                {
+                    previous = builder->previous_instruction;
+                }
+                else
+                {
+                    IrInstructionId cursor = builder->function->blocks[builder->current_block.value].first_instruction;
+                    while (cursor.value != IR_ID_UNDERLYING_INVALID && cursor.value != definition_id.value)
+                    {
+                        IR_CONSTRUCTION_RECORD(PLACE_REPAIR_STEPS, 1);
+                        previous = cursor;
+                        cursor = builder->function->instructions[cursor.value].next;
+                    }
+                    recover = cursor.value == definition_id.value;
+                }
+            }
+            if (recover)
+            {
+                if (previous.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    builder->function->blocks[builder->current_block.value].first_instruction = IR_INSTRUCTION_ID_INVALID;
+                }
+                else
+                {
+                    builder->function->instructions[previous.value].next = IR_INSTRUCTION_ID_INVALID;
+                }
+                builder->function->blocks[builder->current_block.value].last_instruction = previous;
+                builder->last_instruction = previous;
+                builder->previous_instruction_known = false;
+                result = definition->operands[0];
+                // The value ID is reusable. Its old label provenance must not
+                // describe the next value, including an address-of replacement.
+                // The retracted value is highest and its sparse entry is last.
+                if (builder->function->label_metadata_count &&
+                    builder->function->label_metadata_values[builder->function->label_metadata_count - 1].value == value.value)
+                {
+                    builder->function->label_metadata_count -= 1;
+                }
+                IR_CONSTRUCTION_RECORD(PLACE_LOAD_RETRACTIONS, definition->opcode == IR_OPCODE_LOAD);
+                IR_CONSTRUCTION_RECORD(PLACE_ATOMIC_LOAD_RETRACTIONS, definition->opcode == IR_OPCODE_ATOMIC_LOAD);
+                builder->function->instruction_count -= 1;
+                builder->function->value_count -= 1;
+            }
         }
     }
-    if (previous.value == IR_ID_UNDERLYING_INVALID)
-    {
-        builder->function->blocks[builder->current_block.value].first_instruction = IR_INSTRUCTION_ID_INVALID;
-    }
-    else
-    {
-        builder->function->instructions[previous.value].next = IR_INSTRUCTION_ID_INVALID;
-    }
-    builder->function->blocks[builder->current_block.value].last_instruction = previous;
-    builder->last_instruction = previous;
-    builder->previous_instruction_known = false;
-    IrValueId place = definition->operands[0];
-    // The value id goes back to the allocator, so its label provenance must
-    // not survive to describe whatever value takes the id next: a load of an
-    // object holding a `&&label` address carries that metadata, and the
-    // address-of that replaces the load would inherit it and be rejected as a
-    // label address passed to a function.  The removed value is the highest
-    // one allocated, so its entry is the last in the sorted table.
-    if (builder->function->label_metadata_count &&
-        builder->function->label_metadata_values[builder->function->label_metadata_count - 1].value == value.value)
-    {
-        builder->function->label_metadata_count -= 1;
-    }
-    builder->function->instruction_count -= 1;
-    builder->function->value_count -= 1;
-    return place;
+    return result;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_recover_place_from_value(CIntegerIrBuilder* builder, IrValueId value)
@@ -46111,6 +46124,12 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         function->instruction_canonical_sources = arena_allocate(arena, IrSourceRange, function->instruction_capacity);
         function->value_capacity = (u32)lowering_capacity;
         function->values = arena_allocate(arena, IrValue, function->value_capacity);
+        IR_CONSTRUCTION_RECORD(FUNCTION_STARTS, 1);
+        IR_CONSTRUCTION_RECORD(BODY_TOKENS, declaration.body_token_count);
+        IR_CONSTRUCTION_RECORD(PARAMETERS, signatures[declaration_index].parameter_count);
+        IR_CONSTRUCTION_RECORD(INITIAL_BLOCK_SLOTS, function->block_capacity);
+        IR_CONSTRUCTION_RECORD(INITIAL_INSTRUCTION_SLOTS, function->instruction_capacity);
+        IR_CONSTRUCTION_RECORD(INITIAL_VALUE_SLOTS, function->value_capacity);
         IrBlock* block = ir_function_add_block(arena, function,
                                                (IrBlock){
                                                    .first_instruction = IR_INSTRUCTION_ID_INVALID,

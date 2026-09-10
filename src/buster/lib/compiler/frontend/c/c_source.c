@@ -4716,169 +4716,179 @@ BUSTER_C_SHARED bool c_conditional_number(String8 spelling, u64* value)
     return any;
 }
 
-// C11 6.10.1p4: conditional-inclusion arithmetic runs in intmax_t, or
-// uintmax_t where an operand is unsigned -- a `u` suffix, or a literal too
-// large for the signed type.  The evaluator's values ride u64 bit patterns
-// with a signedness flag beside each, and only the operations whose answers
-// differ consult it: the comparisons, division and remainder, and the right
-// shift.  An all-unsigned evaluator read `#if -1 < 0` as false, which is how
-// CPython's `static_assert(_Py_IS_TYPE_SIGNED(pid_t))` failed.
-BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* values, bool* unsigned_values, u32* value_count)
+// C11 6.10.1p4: conditional-inclusion arithmetic uses intmax_t or
+// uintmax_t. Keep signedness and deferred arithmetic faults in the existing
+// one-byte-per-value sidecar. Reductions still validate every operand's syntax,
+// but &&, || and ?: discard faults from operands they do not evaluate.
+// A fault always follows an evaluated condition/left operand, even when its
+// placeholder value makes a later logical expression appear to succeed.
+enum
 {
+    C_CONDITIONAL_VALUE_UNSIGNED = 1,
+    C_CONDITIONAL_VALUE_FAULT = 2,
+};
+
+BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* values, u8* value_flags, u32* value_count)
+{
+    bool valid = true;
     if (c_conditional_is_unary(operation))
     {
         if (!*value_count)
         {
-            return false;
+            valid = false;
         }
-        u64* value = values + *value_count - 1;
-        switch (operation)
+        else
         {
-        case C_CONDITIONAL_UNARY_PLUS:
-            break;
-        case C_CONDITIONAL_UNARY_MINUS:
-            *value = 0 - *value;
-            break;
-        case C_CONDITIONAL_LOGICAL_NOT:
-            *value = !*value;
-            unsigned_values[*value_count - 1] = false;
-            break;
-        case C_CONDITIONAL_BITWISE_NOT:
-            *value = ~*value;
-            break;
-        default:
-            return false;
+            u32 index = *value_count - 1;
+            u64* value = values + index;
+            switch (operation)
+            {
+            case C_CONDITIONAL_UNARY_PLUS:
+                break;
+            case C_CONDITIONAL_UNARY_MINUS:
+                *value = 0 - *value;
+                break;
+            case C_CONDITIONAL_LOGICAL_NOT:
+                *value = !*value;
+                value_flags[index] &= C_CONDITIONAL_VALUE_FAULT;
+                break;
+            case C_CONDITIONAL_BITWISE_NOT:
+                *value = ~*value;
+                break;
+            default:
+                valid = false;
+                break;
+            }
         }
-        return true;
     }
-    if (operation == C_CONDITIONAL_SELECT)
+    else if (operation == C_CONDITIONAL_SELECT)
     {
         if (*value_count < 3)
         {
-            return false;
+            valid = false;
         }
-        u64 false_value = values[--*value_count];
-        bool false_unsigned = unsigned_values[*value_count];
-        u64 true_value = values[--*value_count];
-        bool true_unsigned = unsigned_values[*value_count];
-        u64* condition = values + *value_count - 1;
-        *condition = *condition ? true_value : false_value;
-        unsigned_values[*value_count - 1] = true_unsigned || false_unsigned;
-        return true;
+        else
+        {
+            u64 false_value = values[--*value_count];
+            u8 false_flags = value_flags[*value_count];
+            u64 true_value = values[--*value_count];
+            u8 true_flags = value_flags[*value_count];
+            u32 index = *value_count - 1;
+            u64* condition = values + index;
+            u8 selected_flags = *condition ? true_flags : false_flags;
+            // Both arms determine the common type, but only the selected
+            // arm and the always-evaluated condition contribute faults.
+            value_flags[index] = (u8)(((true_flags | false_flags) & C_CONDITIONAL_VALUE_UNSIGNED) |
+                                     ((value_flags[index] | selected_flags) & C_CONDITIONAL_VALUE_FAULT));
+            *condition = *condition ? true_value : false_value;
+        }
     }
-    if (*value_count < 2)
+    else if (*value_count < 2)
     {
-        return false;
+        valid = false;
     }
-    u64 right = values[--*value_count];
-    bool right_unsigned = unsigned_values[*value_count];
-    u64* left = values + *value_count - 1;
-    bool mixed_unsigned = unsigned_values[*value_count - 1] || right_unsigned;
-    switch (operation)
+    else
     {
-    case C_CONDITIONAL_MULTIPLY:
-        *left *= right;
-        unsigned_values[*value_count - 1] = mixed_unsigned;
-        break;
-    case C_CONDITIONAL_DIVIDE:
-        if (!right)
-            return false;
-        if (mixed_unsigned)
+        u64 right = values[--*value_count];
+        u8 right_flags = value_flags[*value_count];
+        u32 index = *value_count - 1;
+        u64* left = values + index;
+        u8 left_flags = value_flags[index];
+        u8 flags = (u8)(left_flags | right_flags);
+        bool mixed_unsigned = (flags & C_CONDITIONAL_VALUE_UNSIGNED) != 0;
+        switch (operation)
         {
-            *left /= right;
+        case C_CONDITIONAL_MULTIPLY:
+            *left *= right;
+            break;
+        case C_CONDITIONAL_DIVIDE:
+        case C_CONDITIONAL_REMAINDER:
+            // Never execute an invalid host division, even in a subtree
+            // whose fault will be discarded by an enclosing short circuit.
+            if ((flags & C_CONDITIONAL_VALUE_FAULT) || !right ||
+                (!mixed_unsigned && (s64)*left == INT64_MIN && (s64)right == -1))
+            {
+                flags |= C_CONDITIONAL_VALUE_FAULT;
+                *left = 0;
+            }
+            else if (mixed_unsigned)
+            {
+                *left = operation == C_CONDITIONAL_DIVIDE ? *left / right : *left % right;
+            }
+            else
+            {
+                *left = operation == C_CONDITIONAL_DIVIDE ? (u64)((s64)*left / (s64)right) : (u64)((s64)*left % (s64)right);
+            }
+            break;
+        case C_CONDITIONAL_ADD:
+            *left += right;
+            break;
+        case C_CONDITIONAL_SUBTRACT:
+            *left -= right;
+            break;
+        case C_CONDITIONAL_SHIFT_LEFT:
+            *left = right < 64 ? *left << right : 0;
+            flags = (u8)((flags & C_CONDITIONAL_VALUE_FAULT) | (left_flags & C_CONDITIONAL_VALUE_UNSIGNED));
+            break;
+        case C_CONDITIONAL_SHIFT_RIGHT:
+            if (left_flags & C_CONDITIONAL_VALUE_UNSIGNED)
+            {
+                *left = right < 64 ? *left >> right : 0;
+            }
+            else
+            {
+                *left = right < 64 ? (u64)((s64)*left >> right) : (u64)((s64)*left >> 63);
+            }
+            flags = (u8)((flags & C_CONDITIONAL_VALUE_FAULT) | (left_flags & C_CONDITIONAL_VALUE_UNSIGNED));
+            break;
+        case C_CONDITIONAL_LESS:
+            *left = mixed_unsigned ? *left < right : (s64)*left < (s64)right;
+            flags &= C_CONDITIONAL_VALUE_FAULT;
+            break;
+        case C_CONDITIONAL_LESS_EQUAL:
+            *left = mixed_unsigned ? *left <= right : (s64)*left <= (s64)right;
+            flags &= C_CONDITIONAL_VALUE_FAULT;
+            break;
+        case C_CONDITIONAL_GREATER:
+            *left = mixed_unsigned ? *left > right : (s64)*left > (s64)right;
+            flags &= C_CONDITIONAL_VALUE_FAULT;
+            break;
+        case C_CONDITIONAL_GREATER_EQUAL:
+            *left = mixed_unsigned ? *left >= right : (s64)*left >= (s64)right;
+            flags &= C_CONDITIONAL_VALUE_FAULT;
+            break;
+        case C_CONDITIONAL_EQUAL:
+            *left = *left == right;
+            flags &= C_CONDITIONAL_VALUE_FAULT;
+            break;
+        case C_CONDITIONAL_NOT_EQUAL:
+            *left = *left != right;
+            flags &= C_CONDITIONAL_VALUE_FAULT;
+            break;
+        case C_CONDITIONAL_BITWISE_AND:
+            *left &= right;
+            break;
+        case C_CONDITIONAL_BITWISE_XOR:
+            *left ^= right;
+            break;
+        case C_CONDITIONAL_BITWISE_OR:
+            *left |= right;
+            break;
+        case C_CONDITIONAL_LOGICAL_AND:
+            flags = (u8)((left_flags | (*left ? right_flags : 0)) & C_CONDITIONAL_VALUE_FAULT);
+            *left = *left && right;
+            break;
+        case C_CONDITIONAL_LOGICAL_OR:
+            flags = (u8)((left_flags | (*left ? 0 : right_flags)) & C_CONDITIONAL_VALUE_FAULT);
+            *left = *left || right;
+            break;
+        default:
+            valid = false;
+            break;
         }
-        else
-        {
-            if ((s64)*left == INT64_MIN && (s64)right == -1)
-                return false;
-            *left = (u64)((s64)*left / (s64)right);
-        }
-        unsigned_values[*value_count - 1] = mixed_unsigned;
-        break;
-    case C_CONDITIONAL_REMAINDER:
-        if (!right)
-            return false;
-        if (mixed_unsigned)
-        {
-            *left %= right;
-        }
-        else
-        {
-            if ((s64)*left == INT64_MIN && (s64)right == -1)
-                return false;
-            *left = (u64)((s64)*left % (s64)right);
-        }
-        unsigned_values[*value_count - 1] = mixed_unsigned;
-        break;
-    case C_CONDITIONAL_ADD:
-        *left += right;
-        unsigned_values[*value_count - 1] = mixed_unsigned;
-        break;
-    case C_CONDITIONAL_SUBTRACT:
-        *left -= right;
-        unsigned_values[*value_count - 1] = mixed_unsigned;
-        break;
-    case C_CONDITIONAL_SHIFT_LEFT:
-        *left = right < 64 ? *left << right : 0;
-        break;
-    case C_CONDITIONAL_SHIFT_RIGHT:
-        if (unsigned_values[*value_count - 1])
-        {
-            *left = right < 64 ? *left >> right : 0;
-        }
-        else
-        {
-            *left = right < 64 ? (u64)((s64)*left >> right) : (u64)((s64)*left >> 63);
-        }
-        break;
-    case C_CONDITIONAL_LESS:
-        *left = mixed_unsigned ? *left < right : (s64)*left < (s64)right;
-        unsigned_values[*value_count - 1] = false;
-        break;
-    case C_CONDITIONAL_LESS_EQUAL:
-        *left = mixed_unsigned ? *left <= right : (s64)*left <= (s64)right;
-        unsigned_values[*value_count - 1] = false;
-        break;
-    case C_CONDITIONAL_GREATER:
-        *left = mixed_unsigned ? *left > right : (s64)*left > (s64)right;
-        unsigned_values[*value_count - 1] = false;
-        break;
-    case C_CONDITIONAL_GREATER_EQUAL:
-        *left = mixed_unsigned ? *left >= right : (s64)*left >= (s64)right;
-        unsigned_values[*value_count - 1] = false;
-        break;
-    case C_CONDITIONAL_EQUAL:
-        *left = *left == right;
-        unsigned_values[*value_count - 1] = false;
-        break;
-    case C_CONDITIONAL_NOT_EQUAL:
-        *left = *left != right;
-        unsigned_values[*value_count - 1] = false;
-        break;
-    case C_CONDITIONAL_BITWISE_AND:
-        *left &= right;
-        unsigned_values[*value_count - 1] = mixed_unsigned;
-        break;
-    case C_CONDITIONAL_BITWISE_XOR:
-        *left ^= right;
-        unsigned_values[*value_count - 1] = mixed_unsigned;
-        break;
-    case C_CONDITIONAL_BITWISE_OR:
-        *left |= right;
-        unsigned_values[*value_count - 1] = mixed_unsigned;
-        break;
-    case C_CONDITIONAL_LOGICAL_AND:
-        *left = *left && right;
-        unsigned_values[*value_count - 1] = false;
-        break;
-    case C_CONDITIONAL_LOGICAL_OR:
-        *left = *left || right;
-        unsigned_values[*value_count - 1] = false;
-        break;
-    default:
-        return false;
+        value_flags[index] = flags;
     }
-    return true;
+    return valid;
 }
 
 typedef enum CIncludeSearchKind
@@ -5109,10 +5119,11 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
                                                                      CPreprocessOptions* options, String8 including_path,
                                                                      CIncludeSearchOrigin including_origin, u64* value_out)
 {
+    bool valid = true;
     char8 const* base = space->base;
     CPpToken* transformed = arena_allocate(arena, CPpToken, token_count);
     u32 transformed_count = 0;
-    for (u32 token_index = 0; token_index < token_count; token_index += 1)
+    for (u32 token_index = 0; valid && token_index < token_count; token_index += 1)
     {
         CPpToken token = tokens[token_index];
         if (token.token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token.token, S8("defined")))
@@ -5122,215 +5133,190 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
             name_index += parenthesized;
             if (name_index >= token_count || tokens[name_index].token.kind != C_TOKEN_IDENTIFIER)
             {
-                return false;
+                valid = false;
             }
-            CMacro* macro = c_macro_find_token(first_macro, symbols, base, &tokens[name_index].token);
-            CPpToken replacement = token;
-            replacement.token.kind = C_TOKEN_PREPROCESSING_NUMBER;
-            replacement.token.punctuator = C_PUNCTUATOR_NONE;
-            replacement.token.offset = macro && macro->definition.defined ? C_SPELLING_ONE : C_SPELLING_ZERO;
-            replacement.token.length = 1;
-            replacement.token.symbol = 0;
-            transformed[transformed_count++] = replacement;
-            token_index = name_index;
-            if (parenthesized)
+            else
             {
-                if (token_index + 1 >= token_count || !c_token_is_punctuator(&tokens[token_index + 1].token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                CMacro* macro = c_macro_find_token(first_macro, symbols, base, &tokens[name_index].token);
+                CPpToken replacement = token;
+                replacement.token.kind = C_TOKEN_PREPROCESSING_NUMBER;
+                replacement.token.punctuator = C_PUNCTUATOR_NONE;
+                replacement.token.offset = macro && macro->definition.defined ? C_SPELLING_ONE : C_SPELLING_ZERO;
+                replacement.token.length = 1;
+                replacement.token.symbol = 0;
+                transformed[transformed_count++] = replacement;
+                token_index = name_index;
+                if (parenthesized)
                 {
-                    return false;
+                    valid = token_index + 1 < token_count && c_token_is_punctuator(&tokens[token_index + 1].token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    token_index += 1;
                 }
-                token_index += 1;
             }
-            continue;
         }
-        transformed[transformed_count++] = token;
+        else
+        {
+            transformed[transformed_count++] = token;
+        }
     }
     CPreprocessTokenNode* first_expanded = 0;
     CPreprocessTokenNode* last_expanded = 0;
     u64 expanded_count = 0;
-    if (!c_preprocess_expand(arena, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded, &last_expanded, &expanded_count, expansion_limit, result))
+    if (valid)
     {
-        return false;
+        valid = c_preprocess_expand(arena, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded,
+                                    &last_expanded, &expanded_count, expansion_limit, result);
     }
-    if (!c_conditional_feature_operators(arena, space, symbols, first_macro, first_expanded, options, including_path, including_origin))
+    if (valid)
     {
-        return false;
+        valid = c_conditional_feature_operators(arena, space, symbols, first_macro, first_expanded, options, including_path, including_origin);
     }
-    u64* values = arena_allocate(arena, u64, expanded_count + 1);
-    bool* unsigned_values = arena_allocate(arena, bool, expanded_count + 1);
-    CConditionalOperator* operations = arena_allocate(arena, CConditionalOperator, expanded_count + 1);
-    u32 value_count = 0;
-    u32 operation_count = 0;
-    bool expect_operand = true;
-    for (CPreprocessTokenNode* node = first_expanded; node; node = node->next)
+    if (valid)
     {
-        CToken token = node->token.token;
-        if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
+        u64* values = arena_allocate(arena, u64, expanded_count + 1);
+        u8* value_flags = arena_allocate(arena, u8, expanded_count + 1);
+        CConditionalOperator* operations = arena_allocate(arena, CConditionalOperator, expanded_count + 1);
+        u32 value_count = 0;
+        u32 operation_count = 0;
+        bool expect_operand = true;
+        for (CPreprocessTokenNode* node = first_expanded; valid && node; node = node->next)
         {
-            u64 value = 0;
-            String8 number_spelling = c_token_spelling(base, token);
-            if (!expect_operand || !c_conditional_number(number_spelling, &value))
+            CToken token = node->token.token;
+            if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
             {
-                return false;
-            }
-            // The literal is uintmax_t when it says so or when its value
-            // does not fit the signed type; everything else -- including
-            // every character constant and keyword below -- is intmax_t.
-            bool literal_unsigned = value > (u64)INT64_MAX;
-            for (u64 suffix_index = 0; suffix_index < number_spelling.length; suffix_index += 1)
-            {
-                literal_unsigned |= number_spelling.pointer[suffix_index] == 'u' || number_spelling.pointer[suffix_index] == 'U';
-            }
-            unsigned_values[value_count] = literal_unsigned;
-            values[value_count++] = value;
-            expect_operand = false;
-            continue;
-        }
-        if (token.kind == C_TOKEN_CHARACTER_LITERAL)
-        {
-            u64 character = 0;
-            CTypeKind character_kind = C_TYPE_INVALID;
-            if (!expect_operand || !c_ir_decode_character_value(arena, base, token, result->target, &character, &character_kind))
-            {
-                return false;
-            }
-            (void)character_kind;
-            unsigned_values[value_count] = false;
-            values[value_count++] = character;
-            expect_operand = false;
-            continue;
-        }
-        if (token.kind == C_TOKEN_IDENTIFIER)
-        {
-            if (!expect_operand)
-            {
-                return false;
-            }
-            unsigned_values[value_count] = false;
-            values[value_count++] = c_preprocess_dialect_is_c23(result->dialect) && c_token_spelling_equal(base, token, S8("true"));
-            expect_operand = false;
-            continue;
-        }
-        if (token.kind != C_TOKEN_PUNCTUATOR)
-        {
-            return false;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
-        {
-            if (!expect_operand)
-            {
-                return false;
-            }
-            operations[operation_count++] = C_CONDITIONAL_OPEN;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-        {
-            if (expect_operand)
-            {
-                return false;
-            }
-            while (operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN)
-            {
-                if (!c_conditional_apply(operations[--operation_count], values, unsigned_values, &value_count))
+                u64 value = 0;
+                String8 number_spelling = c_token_spelling(base, token);
+                valid = expect_operand && c_conditional_number(number_spelling, &value);
+                if (valid)
                 {
-                    return false;
+                    // The literal is uintmax_t when it says so or when its
+                    // value does not fit intmax_t. Characters and keywords
+                    // below remain signed regardless of their bit patterns.
+                    bool literal_unsigned = value > (u64)INT64_MAX;
+                    for (u64 suffix_index = 0; suffix_index < number_spelling.length; suffix_index += 1)
+                    {
+                        literal_unsigned |= number_spelling.pointer[suffix_index] == 'u' || number_spelling.pointer[suffix_index] == 'U';
+                    }
+                    value_flags[value_count] = literal_unsigned ? C_CONDITIONAL_VALUE_UNSIGNED : 0;
+                    values[value_count++] = value;
+                    expect_operand = false;
                 }
             }
-            if (!operation_count)
+            else if (token.kind == C_TOKEN_CHARACTER_LITERAL)
             {
-                return false;
-            }
-            operation_count -= 1;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
-        {
-            if (expect_operand)
-            {
-                return false;
-            }
-            u32 precedence = c_conditional_precedence(C_CONDITIONAL_QUESTION);
-            while (operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN &&
-                   c_conditional_precedence(operations[operation_count - 1]) > precedence)
-            {
-                if (!c_conditional_apply(operations[--operation_count], values, unsigned_values, &value_count))
+                u64 character = 0;
+                CTypeKind character_kind = C_TYPE_INVALID;
+                valid = expect_operand && c_ir_decode_character_value(arena, base, token, result->target, &character, &character_kind);
+                if (valid)
                 {
-                    return false;
+                    value_flags[value_count] = 0;
+                    values[value_count++] = character;
+                    expect_operand = false;
                 }
             }
-            operations[operation_count++] = C_CONDITIONAL_QUESTION;
-            expect_operand = true;
-            continue;
-        }
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
-        {
-            if (expect_operand)
+            else if (token.kind == C_TOKEN_IDENTIFIER)
             {
-                return false;
-            }
-            while (operation_count && operations[operation_count - 1] != C_CONDITIONAL_QUESTION)
-            {
-                CConditionalOperator previous = operations[--operation_count];
-                if (previous == C_CONDITIONAL_OPEN || !c_conditional_apply(previous, values, unsigned_values, &value_count))
+                valid = expect_operand;
+                if (valid)
                 {
-                    return false;
+                    value_flags[value_count] = 0;
+                    values[value_count++] = c_preprocess_dialect_is_c23(result->dialect) && c_token_spelling_equal(base, token, S8("true"));
+                    expect_operand = false;
                 }
             }
-            if (!operation_count)
+            else if (token.kind != C_TOKEN_PUNCTUATOR)
             {
-                return false;
+                valid = false;
             }
-            operations[operation_count - 1] = C_CONDITIONAL_SELECT;
-            expect_operand = true;
-            continue;
-        }
-        CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
-        if (!c_conditional_operator(token, expect_operand, &operation))
-        {
-            return false;
-        }
-        bool unary = c_conditional_is_unary(operation);
-        if (expect_operand != unary)
-        {
-            return false;
-        }
-        u32 precedence = c_conditional_precedence(operation);
-        while (operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN)
-        {
-            CConditionalOperator previous = operations[operation_count - 1];
-            u32 previous_precedence = c_conditional_precedence(previous);
-            if (previous_precedence < precedence || (unary && previous_precedence == precedence))
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
-                break;
+                valid = expect_operand;
+                if (valid)
+                {
+                    operations[operation_count++] = C_CONDITIONAL_OPEN;
+                }
             }
-            operation_count -= 1;
-            if (!c_conditional_apply(previous, values, unsigned_values, &value_count))
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
-                return false;
+                valid = !expect_operand;
+                while (valid && operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN)
+                {
+                    valid = c_conditional_apply(operations[--operation_count], values, value_flags, &value_count);
+                }
+                valid = valid && operation_count != 0;
+                if (valid)
+                {
+                    operation_count -= 1;
+                }
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+            {
+                valid = !expect_operand;
+                u32 precedence = c_conditional_precedence(C_CONDITIONAL_QUESTION);
+                while (valid && operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN &&
+                       c_conditional_precedence(operations[operation_count - 1]) > precedence)
+                {
+                    valid = c_conditional_apply(operations[--operation_count], values, value_flags, &value_count);
+                }
+                if (valid)
+                {
+                    operations[operation_count++] = C_CONDITIONAL_QUESTION;
+                    expect_operand = true;
+                }
+            }
+            else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+            {
+                valid = !expect_operand;
+                while (valid && operation_count && operations[operation_count - 1] != C_CONDITIONAL_QUESTION)
+                {
+                    CConditionalOperator previous = operations[--operation_count];
+                    valid = previous != C_CONDITIONAL_OPEN && c_conditional_apply(previous, values, value_flags, &value_count);
+                }
+                valid = valid && operation_count != 0;
+                if (valid)
+                {
+                    operations[operation_count - 1] = C_CONDITIONAL_SELECT;
+                    expect_operand = true;
+                }
+            }
+            else
+            {
+                CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
+                valid = c_conditional_operator(token, expect_operand, &operation);
+                bool unary = c_conditional_is_unary(operation);
+                valid = valid && expect_operand == unary;
+                u32 precedence = c_conditional_precedence(operation);
+                while (valid && operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN)
+                {
+                    CConditionalOperator previous = operations[operation_count - 1];
+                    u32 previous_precedence = c_conditional_precedence(previous);
+                    if (previous_precedence < precedence || (unary && previous_precedence == precedence))
+                    {
+                        break;
+                    }
+                    operation_count -= 1;
+                    valid = c_conditional_apply(previous, values, value_flags, &value_count);
+                }
+                if (valid)
+                {
+                    operations[operation_count++] = operation;
+                    expect_operand = true;
+                }
             }
         }
-        operations[operation_count++] = operation;
-        expect_operand = true;
-    }
-    if (expect_operand)
-    {
-        return false;
-    }
-    while (operation_count)
-    {
-        CConditionalOperator operation = operations[--operation_count];
-        if (operation == C_CONDITIONAL_OPEN || operation == C_CONDITIONAL_QUESTION || !c_conditional_apply(operation, values, unsigned_values, &value_count))
+        valid = valid && !expect_operand;
+        while (valid && operation_count)
         {
-            return false;
+            CConditionalOperator operation = operations[--operation_count];
+            valid = operation != C_CONDITIONAL_OPEN && operation != C_CONDITIONAL_QUESTION &&
+                    c_conditional_apply(operation, values, value_flags, &value_count);
+        }
+        valid = valid && value_count == 1 && !(value_flags[0] & C_CONDITIONAL_VALUE_FAULT);
+        if (valid)
+        {
+            *value_out = values[0];
         }
     }
-    if (value_count != 1)
-    {
-        return false;
-    }
-    *value_out = values[0];
-    return true;
+    return valid;
 }
 
 // The parse-side entry point: no macro table, so expansion is a pass-through

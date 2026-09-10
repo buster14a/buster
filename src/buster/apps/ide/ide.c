@@ -33,6 +33,7 @@
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/assembly/x86_64_completion_census.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/codegen.h>
@@ -831,6 +832,7 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
 #if BUSTER_BENCH_ALLOCATIONS
     ArenaBenchmarkCounters allocations = arena_benchmark_counters();
     MachineQualityCensus quality = machine_quality_census_snapshot();
+    IrConstructionCounters construction = ir_construction_counters();
 #endif
     String8 text = {0};
     source_metrics_append_line(&text, string_format(arena, S8("version={u32}\n"), (u32)SOURCE_METRICS_FILE_VERSION));
@@ -849,6 +851,13 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
 #define BUSTER_QUALITY_WRITE_FIELD(name) source_metrics_append_field(arena, &text, S8("quality_census"), S8(#name), quality.name);
     BUSTER_QUALITY_CENSUS_FIELDS(BUSTER_QUALITY_WRITE_FIELD)
 #undef BUSTER_QUALITY_WRITE_FIELD
+    source_metrics_append_field(arena, &text, S8("ir_construction"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("ir_construction"), S8("overflowed"), construction.overflowed);
+    for (u32 index = 0; index < IR_CONSTRUCTION_COUNT; index += 1)
+    {
+        source_metrics_append_field(arena, &text, S8("ir_construction"), ir_construction_counter_name((IrConstructionCounter)index),
+                                    construction.values[index]);
+    }
 #endif
     return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
 }

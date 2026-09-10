@@ -164,6 +164,52 @@ counterpart. Instrumented compilers are rejected as timing baselines/candidates.
 For an old revision without the hook, backport only this diagnostic hook into a
 separate probe build; do not measure that modified build as the timing baseline.
 
+### Canonical construction census in allocation probes
+
+The same `BUSTER_BENCH_ALLOCATIONS` build emits `ir_construction.*` fields
+in `-fsource-metrics`. Use the existing allocation-probe arguments above;
+normal timing compilers must remain uninstrumented. Raw metric files are
+retained in the native harness artifacts even though its allocation summary
+contains only arena calls/bytes. There is no second measurement runner.
+
+`version=1` identifies the construction vocabulary. `overflowed=1` invalidates
+the census: counters saturate rather than wrapping. Counts are cumulative
+**calling-thread** totals since process start, including failed attempts
+that reached each hook. They are not all-lane aggregates. The compiler is
+currently serial; future parallel compilation must explicitly aggregate
+lane-owned results. The snapshot precedes report formatting and resets
+nothing. No extra arena storage or whole-function row stream is retained.
+
+- `block_appends`, `value_appends`, `instruction_appends` count successful
+  checked-builder appends, including later-retracted rows; direct writes
+  to arrays do not count as appends.
+- `*_grows`, `*_rows_copied`, `source_rows_cleared` count builder growth
+  and copied/cleared rows, not capacity bytes or peak resident memory.
+- `function_starts`, `body_tokens`, `parameters`, `initial_*_slots` count
+  C body-lowering starts and initial estimates, once per started function.
+- `ssa_finish_calls`, `ssa_finish_failures`, `before_ssa_*_rows`,
+  `after_ssa_*_rows`, `final_*_slots` describe frontend finish entry/exit,
+  including failed finish calls. Earlier failures have no exit snapshot.
+  This is not general canonical finalization or later promotion.
+- `place_load_retractions`, `place_atomic_load_retractions`,
+  `ssa_read_retractions`, `place_repair_steps` count recovered memory
+  loads, SSA read aliases, and previous-instruction traversal steps.
+- `cfg_*` count shared native edge-builder calls/failures, scratch `u32`
+  slots, target visits, attempted unique source/target pairs, parameter
+  visits, incoming nodes examined including matches, and emitted copy
+  sources. Direct/non-native consumers do not call this builder: zero
+  means no work at this hook, not absence of all CFG work.
+- `operand_slots_appended` sums appended rows' operand counts. It does
+  not count unique operands or repeated downstream decoding passes.
+
+Initial estimates and finish populations cover different failure boundaries;
+do not subtract them blindly on invalid sources. Counts do not measure
+append latency, phase times, retained arena memory, or all-consumer cost.
+Reuse per-site allocation diagnostics and uninstrumented paired experiments.
+A smaller count is not a speedup. Normal builds preprocess recording calls
+away and retain neither counter storage nor reporting API. Row layout,
+IDs, source/label provenance, and arena lifetimes are unchanged.
+
 ## Frozen-source self-host stages
 
 ```sh

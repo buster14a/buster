@@ -2614,7 +2614,70 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     for (u16 opcode = 0; opcode < MACHINE_OPCODE_COUNT; opcode += 1)
     {
         BUSTER_TEST(arguments, opcode_rows[opcode].schedule_flags == schedule_memberships[opcode]);
+        // Whole-domain equivalence with the explicit constraint authority.
+        // This also runs unchanged on the pre-removal table: a legacy-only
+        // constraint would disagree with both the helper and its projection.
+        MachineOpcodeInfo const* info = machine_opcode_info(opcode);
+        bool constrained = info->tied_pair || info->early_clobber_mask || info->fixed_register_mask ||
+                           (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED);
+        BUSTER_TEST(arguments, machine_opcode_has_constraints(info) == constrained);
+        BUSTER_TEST(arguments, ((opcode_rows[opcode].flags & MACHINE_OPCODE_ROW_CONSTRAINED) != 0) == constrained);
+        for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(info->fixed_registers); slot += 1)
+        {
+            u32 expected = (info->fixed_register_mask & (1u << slot)) ? info->fixed_registers[slot] : UINT32_MAX;
+            BUSTER_TEST(arguments, machine_opcode_fixed_register(info, slot) == expected);
+        }
     }
+
+    // The complete SHIFT/DIVIDE/MULTIPLY_HIGH family that formerly repeated
+    // an RAX/RCX register set in addition to its two explicit slot bindings.
+    u16 const fixed_pair_opcodes[] = {
+        MACHINE_X64_SHL32, MACHINE_X64_SHL64, MACHINE_X64_SAR32, MACHINE_X64_SAR64, MACHINE_X64_SHR32, MACHINE_X64_SHR64,
+        MACHINE_X64_SDIV32, MACHINE_X64_SDIV64, MACHINE_X64_UDIV32, MACHINE_X64_UDIV64,
+        MACHINE_X64_SREM32, MACHINE_X64_SREM64, MACHINE_X64_UREM32, MACHINE_X64_UREM64, MACHINE_X64_MULH64,
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(fixed_pair_opcodes) == 15);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixed_pair_opcodes); index += 1)
+    {
+        MachineOpcodeInfo const* info = machine_opcode_info(fixed_pair_opcodes[index]);
+        BUSTER_TEST(arguments, info->operand_count == 2 && info->fixed_register_mask == 3);
+        BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 0) == MACHINE_X64_RAX);
+        BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 1) == MACHINE_X64_RCX);
+        BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 2) == UINT32_MAX);
+        BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 3) == UINT32_MAX);
+        BUSTER_TEST(arguments, (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) != 0);
+    }
+
+    // A register byte has no meaning without its mask bit. In particular,
+    // fixed RAX (register zero) is not the absence of an assignment.
+    MachineOpcodeInfo fixed_probe = {0};
+    BUSTER_TEST(arguments, !machine_opcode_has_constraints(&fixed_probe));
+    for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(fixed_probe.fixed_registers); slot += 1)
+    {
+        fixed_probe.fixed_registers[slot] = MACHINE_X64_RCX;
+        BUSTER_TEST(arguments, machine_opcode_fixed_register(&fixed_probe, slot) == UINT32_MAX);
+    }
+    BUSTER_TEST(arguments, !machine_opcode_has_constraints(&fixed_probe));
+    fixed_probe.fixed_register_mask = 1;
+    fixed_probe.fixed_registers[0] = MACHINE_X64_RAX;
+    BUSTER_TEST(arguments, machine_opcode_has_constraints(&fixed_probe));
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(&fixed_probe, 0) == MACHINE_X64_RAX);
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(&fixed_probe, 1) == UINT32_MAX);
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(&fixed_probe, 4) == UINT32_MAX);
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(&fixed_probe, UINT32_MAX) == UINT32_MAX);
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(0, 0) == UINT32_MAX);
+    BUSTER_TEST(arguments, !machine_opcode_has_constraints(0));
+    fixed_probe.fixed_register_mask = 0;
+    fixed_probe.early_clobber_mask = 1;
+    BUSTER_TEST(arguments, machine_opcode_has_constraints(&fixed_probe));
+    fixed_probe.early_clobber_mask = 0;
+    fixed_probe.attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED;
+    BUSTER_TEST(arguments, machine_opcode_has_constraints(&fixed_probe));
+    fixed_probe.attributes = 0;
+    fixed_probe.tied_pair = (u8)(1u | (2u << 4));
+    BUSTER_TEST(arguments, machine_opcode_has_constraints(&fixed_probe));
+    BUSTER_TEST(arguments, machine_opcode_fixed_register(&fixed_probe, 0) == UINT32_MAX);
+
     // Vector scratch membership is orthogonal to the load class. A frame
     // read in an implicit V register must participate in both chains.
     MachineOpcodeInfo const* vector_load_info = machine_opcode_info(MACHINE_A64_VLOAD_FRAME);
