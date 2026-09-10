@@ -6,12 +6,21 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 python3 "$repo_root/tests/android_apk_assets_test.py"
 
 fake_tool="$repo_root/tests/mobile_ci_fake_tool.sh"
-test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-mobile-ci.XXXXXX")
+if [[ -n ${BUSTER_MOBILE_TEST_EVIDENCE_DIR:-} ]]; then
+    mkdir -p "$BUSTER_MOBILE_TEST_EVIDENCE_DIR"
+    test_root=$(mktemp -d "$BUSTER_MOBILE_TEST_EVIDENCE_DIR/cases.XXXXXX")
+else
+    test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-mobile-ci.XXXXXX")
+fi
 
 cleanup() {
     local status=$?
     trap - EXIT INT TERM
-    rm -rf "$test_root"
+    if [[ -z ${BUSTER_MOBILE_TEST_EVIDENCE_DIR:-} ]]; then
+        rm -rf "$test_root"
+    else
+        echo "Mobile lifecycle evidence: $test_root"
+    fi
     exit "$status"
 }
 trap cleanup EXIT
@@ -316,6 +325,95 @@ test_ios_true_timeout_after_early_launcher_exit() (
     assert_count 1 'simctl shutdown FAKE-UDID' "$log"
 )
 
+test_ios_lifecycle_evidence() (
+    set -euo pipefail
+    local case_name=$1
+    local state="$test_root/ios-evidence-$case_name"
+    local phase=codesign label=Debug status=7 native=7 outcome=command-failure
+    local prior_status=1 launch_status started=$SECONDS
+    local evidence
+    mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app"
+    : >"$state/xcrun.log"
+    export PATH="$fake_bin:$PATH"
+    export FAKE_IOS_STATE_DIR="$state" FAKE_IOS_LOG="$state/xcrun.log"
+    export BUSTER_IOS_SIMULATOR_UDID=FAKE-UDID
+    export BUSTER_IOS_CONSOLE_LOG="$state/console.log"
+    export BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS=1 BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS=1
+    export BUSTER_IOS_BOOT_TIMEOUT_SECONDS=3 BUSTER_IOS_INSTALL_TIMEOUT_SECONDS=3
+    export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=3 BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS=1
+    export FAKE_IOS_CODESIGN_FAIL_LABEL=Debug FAKE_IOS_CODESIGN_STATUS=7
+    case "$case_name" in
+        codesign-exit) ;;
+        codesign-native-124) status=124; native=124; export FAKE_IOS_CODESIGN_STATUS=124 ;;
+        codesign-timeout)
+            status=124; native=unavailable; outcome=timeout
+            export FAKE_IOS_CODESIGN_SLEEP_SECONDS=60 ;;
+        codesign-large-output) export FAKE_IOS_LARGE_OUTPUT=1 ;;
+        shutdown-exit|shutdown-timeout|app-and-shutdown|native-macos)
+            phase=shutdown; label=batch; status=9; native=9; prior_status=0
+            export FAKE_IOS_CODESIGN_STATUS=0 FAKE_IOS_SHUTDOWN_STATUS=9
+            if [[ $case_name == shutdown-timeout ]]; then
+                status=124; native=unavailable; outcome=timeout
+                export FAKE_IOS_SHUTDOWN_SLEEP_SECONDS=60
+            elif [[ $case_name == app-and-shutdown ]]; then
+                prior_status=1
+                export FAKE_IOS_FAIL_LABEL=Debug
+            elif [[ $case_name == native-macos ]]; then
+                prior_status=1
+                export FAKE_IOS_REAL_CODESIGN=1 FAKE_IOS_REAL_SHUTDOWN=1 FAKE_IOS_REAL_CONTEXT=1
+                export BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS=60 BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS=30
+                export BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS=10
+            fi
+            ;;
+    esac
+    if /bin/bash "$repo_root/ios/launch_simulator.sh" --batch \
+        Debug "$state/Debug/ide.app" Release "$state/Release/ide.app" >"$state/run.log" 2>&1; then
+        launch_status=0
+    else
+        launch_status=$?
+    fi
+    [[ $launch_status -eq 1 ]]
+    if [[ $case_name != native-macos && $((SECONDS - started)) -ge 30 ]]; then
+        echo "assertion failed: lifecycle command escaped its short test deadline" >&2
+        exit 1
+    fi
+    evidence="$state/console.Debug.log.codesign"
+    if [[ $phase == shutdown ]]; then evidence="$state/console.log.shutdown"; fi
+    assert_file_contains "phase=$phase label=$label outcome=$outcome" "$evidence.status.log"
+    if [[ $case_name != native-macos ]]; then
+        assert_file_contains "status=$status native_status=$native capture_status=0" "$evidence.status.log"
+        assert_file_contains 'deadline_seconds=1 output_limit_bytes=65536' "$evidence.status.log"
+        assert_file_contains "fake $phase stdout:" "$evidence.log"
+        assert_file_contains "fake $phase stderr:" "$evidence.log"
+    else
+        assert_file_contains 'phase=codesign label=Debug outcome=command-failure' "$state/console.Debug.log.codesign.status.log"
+        assert_file_contains 'Xcode ' "$state/console.log.lifecycle-context.log"
+        assert_file_contains 'iOS ' "$state/console.log.lifecycle-context.log"
+        [[ -s $state/console.Debug.log.codesign.log && -s $evidence.log ]]
+        if grep -qF 'native_status=unavailable' "$evidence.status.log"; then exit 1; fi
+    fi
+    assert_file_contains 'command:' "$evidence.status.log"
+    assert_file_contains 'elapsed_seconds=' "$evidence.status.log"
+    [[ $(wc -c <"$evidence.log") -le 65536 ]]
+    if [[ $case_name == codesign-large-output ]]; then
+        [[ $(wc -c <"$evidence.log") -eq 65536 ]]
+        assert_file_contains 'retained_bytes=65536 truncated=1' "$evidence.status.log"
+    else
+        assert_file_contains 'truncated=0' "$evidence.status.log"
+    fi
+    assert_file_contains 'GITHUB_SHA=' "$state/console.log.lifecycle-context.log"
+    assert_file_contains "$result_marker_success" "$state/console.Release.log"
+    assert_count 1 'simctl boot FAKE-UDID' "$state/xcrun.log"
+    assert_count 1 'simctl shutdown FAKE-UDID' "$state/xcrun.log"
+    assert_file_contains "prior_status=$prior_status" "$state/console.log.shutdown.status.log"
+    assert_file_contains 'result_status=1' "$state/console.log.shutdown.status.log"
+    if [[ $case_name == app-and-shutdown ]]; then
+        assert_file_contains 'BUSTER_IOS_RESULT: FAILURE' "$state/console.Debug.log"
+    fi
+    cat "$evidence.status.log"
+    echo "iOS lifecycle evidence passed: $case_name"
+)
+
 result_marker_success='BUSTER_IOS_RESULT: SUCCESS'
 test_mobile_workflow_uses_batch_invocations
 test_android_success_and_snapshots
@@ -323,6 +421,15 @@ test_android_timeout_and_cleanup_fallback
 test_ios_batch_and_cleanup
 test_ios_failure_and_cleanup_failure
 test_ios_true_timeout_after_early_launcher_exit
+for lifecycle_case in codesign-exit codesign-native-124 codesign-timeout codesign-large-output \
+    shutdown-exit shutdown-timeout app-and-shutdown; do
+    test_ios_lifecycle_evidence "$lifecycle_case"
+done
+if [[ $(uname -s) == Darwin ]]; then
+    # Real macOS tools reject an empty app and an invalid device ID. These
+    # bounded rejections exercise native evidence without touching any device.
+    test_ios_lifecycle_evidence native-macos
+fi
 
 # Attached launchers must not survive a result marker, timeout, or interruption.
 /bin/bash "$repo_root/tests/ios_launch_monitor_test.sh"
