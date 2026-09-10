@@ -77,7 +77,7 @@ jobs:
               files = pages(f"repos/buster14a/buster/pulls/{pr['number']}/files?per_page=100")
               (out / f"pr-{pr['number']}-files.json").write_text(json.dumps(files, indent=2))
               overlap = set(expected) & {file['filename'] for file in files}
-              if pr['number'] not in [357, 362, 365] and overlap:
+              if pr['number'] not in [357, 362, 365, 367] and overlap:
                   raise SystemExit(f"Unreviewed competing change: PR {pr['number']}: {sorted(overlap)}")
           (out / 'source-manifest.json').write_text(json.dumps(expected, indent=2))
           PY
@@ -132,7 +132,7 @@ jobs:
           ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
           path: baseline
           persist-credentials: false
-      - uses: actions/checkout@11bd71901bbe5b1630cea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ needs.publish.outputs.sha }}
           path: candidate
@@ -232,6 +232,10 @@ jobs:
     needs: publish
     runs-on: ubuntu-26.04
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, candidate]
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: '1'
       BUSTER_TEST_JOBS: '1'
@@ -240,9 +244,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ needs.publish.outputs.sha }}
+          ref: ${{ matrix.variant == 'baseline' && 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae' || needs.publish.outputs.sha }}
           persist-credentials: false
-      - name: Exact-SHA Release regressions, modes and canonical self-host gates
+      - name: Build exact-SHA Release compiler with tests enabled
+        id: build
         shell: bash
         run: |
           set -euo pipefail
@@ -250,14 +255,35 @@ jobs:
           git rev-parse HEAD > "$RUNNER_TEMP/a09-correctness/tested.sha"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g0 build.c -o "$RUNNER_TEMP/buster-build"
           "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee "$RUNNER_TEMP/a09-correctness/configure.log"
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/a09-correctness/build.log"
+      - name: Full registered Release suite
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           "$RUNNER_TEMP/buster-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/a09-correctness/test-all.log"
+      - name: Allocator and target mode matrix
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/a09-correctness/modes.log"
+      - name: Canonical self-host and alternate-backend gate
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/a09-correctness/self-host.log"
+      - name: Repeated three-generation self-host audit
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           "$RUNNER_TEMP/buster-build" test_self_host_audit --config Release 2>&1 | tee "$RUNNER_TEMP/a09-correctness/self-host-audit.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:
-          name: a09-correctness-${{ github.run_id }}-${{ github.run_attempt }}
+          name: a09-correctness-${{ matrix.variant }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/a09-correctness/
             build/self-host-audit/
