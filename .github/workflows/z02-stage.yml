@@ -1,0 +1,193 @@
+name: Z02 isolated source validation
+
+on:
+  push:
+    branches: [astra/z02-ci-stage-ef99ec72]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: z02-ci-stage-ef99ec72
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: ${{ github.repository == 'buster14a/buster' && github.ref == 'refs/heads/astra/z02-ci-stage-ef99ec72' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      BASE: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+      BASE_TREE: 093b374996f3aecca200fe2968539554fc67bf55
+      TARGET: astra/z02-throughput-process-diagnostics
+    steps:
+      - name: Read immutable patch instructions
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 0685dc875fd44a2582a8f032c4b7ae1f9a5a05cf
+          path: instructions
+          persist-credentials: false
+      - name: Check out exact compiler baseline
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: source
+          persist-credentials: false
+      - name: Recheck coordination and record the runner
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/z02"
+          test "$(git rev-parse HEAD)" = "$BASE"
+          python3 - <<'PY'
+          import json, os, urllib.request
+          from pathlib import Path
+          root = 'https://api.github.com/repos/buster14a/buster/'
+          def get(path):
+              request = urllib.request.Request(root + path, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          assert get('branches/main')['commit']['sha'] == os.environ['BASE'], 'main moved: review before proceeding'
+          assert get('git/ref/heads/' + os.environ['TARGET'])['object']['sha'] == os.environ['BASE'], 'destination moved: never overwrite it'
+          touched = {'tools/throughput/platform.h', 'tools/throughput/throughput.c', 'tools/throughput/tests.c', 'tools/throughput/README.md', '.github/workflows/compiler-throughput.yml'}
+          page = 1
+          records = []
+          conflicts = []
+          while True:
+              pulls = get('pulls?state=open&per_page=100&page=' + str(page))
+              for pr in pulls:
+                  files = []
+                  file_page = 1
+                  while True:
+                      batch = get('pulls/' + str(pr['number']) + '/files?per_page=100&page=' + str(file_page))
+                      files.extend(item['filename'] for item in batch)
+                      if len(batch) < 100:
+                          break
+                      file_page += 1
+                  overlap = sorted(touched.intersection(files))
+                  record = {'number': pr['number'], 'title': pr['title'], 'sha': pr['head']['sha'], 'files': files, 'overlap': overlap}
+                  records.append(record)
+                  print('OPEN_PR', json.dumps(record, sort_keys=True))
+                  if overlap:
+                      conflicts.append(record)
+              if len(pulls) < 100:
+                  break
+              page += 1
+          Path(os.environ['RUNNER_TEMP'], 'z02', 'open-pr-coordination.json').write_text(json.dumps(records, indent=2))
+          assert not conflicts, 'overlapping work requires review before source edits'
+          PY
+          { uname -a; clang --version; lscpu; } | tee "$RUNNER_TEMP/z02/host.txt"
+          for file in /sys/devices/system/cpu/smt/active /proc/sys/kernel/perf_event_paranoid; do
+            if test -r "$file"; then printf '\n%s: ' "$file"; cat "$file"; else printf '\n%s: unavailable\n' "$file"; fi
+          done | tee -a "$RUNNER_TEMP/z02/host.txt"
+      - name: Native baseline regression suite
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic -fwrapv -fno-strict-aliasing -funsigned-char tools/throughput/tests.c -lm -o "$RUNNER_TEMP/z02/baseline-tests"
+          "$RUNNER_TEMP/z02/baseline-tests" "$RUNNER_TEMP/z02/baseline" 2>&1 | tee "$RUNNER_TEMP/z02/baseline.log"
+      - name: Apply the bounded source slice
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ../instructions/.github/z02-apply.py
+          git diff --check
+          git diff --binary > "$RUNNER_TEMP/z02/source.patch"
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          expected = {'tools/throughput/platform.h', 'tools/throughput/throughput.c', 'tools/throughput/tests.c', 'tools/throughput/README.md', '.github/workflows/compiler-throughput.yml'}
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert changed == expected, changed
+          hashes = {name: hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in sorted(expected)}
+          Path(os.environ['RUNNER_TEMP'], 'z02', 'tested-source-sha256.json').write_text(json.dumps(hashes, indent=2))
+          print(json.dumps(hashes, indent=2))
+          PY
+      - name: Native candidate tests and all-six-input identity
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic -fwrapv -fno-strict-aliasing -funsigned-char tools/throughput/tests.c -lm -o "$RUNNER_TEMP/z02/candidate-tests"
+          "$RUNNER_TEMP/z02/candidate-tests" "$RUNNER_TEMP/z02/candidate" 2>&1 | tee "$RUNNER_TEMP/z02/candidate.log"
+          count=0
+          for file in "$RUNNER_TEMP/z02/baseline/inputs-a/"*.c; do
+            cmp "$file" "$RUNNER_TEMP/z02/candidate/inputs-a/$(basename "$file")"
+            sha256sum "$file"
+            count=$((count + 1))
+          done | tee "$RUNNER_TEMP/z02/input-identity.log"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'], 'z02')
+          a = {p.name: p.read_bytes() for p in (root/'baseline/inputs-a').glob('*.c')}
+          b = {p.name: p.read_bytes() for p in (root/'candidate/inputs-a').glob('*.c')}
+          assert len(a) == 6 and a == b
+          print('FROZEN_INPUT_IDENTITY all_six_files=identical')
+          PY
+      - name: Candidate native ASan and UBSan
+        working-directory: source
+        shell: bash
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          clang -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic -fwrapv -fno-strict-aliasing -funsigned-char -fsanitize=address,undefined -fno-sanitize-recover=all tools/throughput/tests.c -lm -o "$RUNNER_TEMP/z02/sanitized-tests"
+          "$RUNNER_TEMP/z02/sanitized-tests" "$RUNNER_TEMP/z02/sanitized" 2>&1 | tee "$RUNNER_TEMP/z02/sanitized.log"
+      - name: Prepare immutable Git objects without updating any ref
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          python3 - <<'PY'
+          import base64, hashlib, json, os, urllib.request
+          from pathlib import Path
+          root = 'https://api.github.com/repos/buster14a/buster/'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
+          def get(path):
+              request = urllib.request.Request(root + path, headers=headers)
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          def create(kind, payload):
+              assert kind in ('blobs', 'trees', 'commits')
+              request = urllib.request.Request(root + 'git/' + kind, data=json.dumps(payload).encode(), headers={**headers, 'Content-Type': 'application/json'}, method='POST')
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          assert get('branches/main')['commit']['sha'] == os.environ['BASE'], 'main moved: review before publication'
+          assert get('git/ref/heads/' + os.environ['TARGET'])['object']['sha'] == os.environ['BASE'], 'destination moved: no overwrite'
+          hashes = json.loads(Path(os.environ['RUNNER_TEMP'], 'z02', 'tested-source-sha256.json').read_text())
+          entries = []
+          for name, wanted in sorted(hashes.items()):
+              data = Path(name).read_bytes()
+              assert hashlib.sha256(data).hexdigest() == wanted, 'source changed during validation: ' + name
+              sha = create('blobs', {'content': base64.b64encode(data).decode(), 'encoding': 'base64'})['sha']
+              assert sha == hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              entries.append({'path': name, 'mode': '100644', 'type': 'blob', 'sha': sha})
+          tree = create('trees', {'base_tree': os.environ['BASE_TREE'], 'tree': entries})['sha']
+          commit = create('commits', {'message': 'bench: retain page-fault and context-switch diagnostics (#345)', 'tree': tree, 'parents': [os.environ['BASE']], 'author': {'name': 'github-actions[bot]', 'email': '41898282+github-actions[bot]@users.noreply.github.com'}})['sha']
+          result = {'base_sha': os.environ['BASE'], 'commit_sha': commit, 'tree_sha': tree, 'files': entries, 'validation_run': os.environ['GITHUB_RUN_ID'], 'destination_branch': os.environ['TARGET'], 'refs_updated': False}
+          text = json.dumps(result, indent=2)
+          Path(os.environ['RUNNER_TEMP'], 'z02', 'candidate.json').write_text(text)
+          print(text)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('## Z02 source validation\n\nBaseline and candidate native suites, all-six-input identity, and strict native ASan/UBSan completed.\n\nPrepared commit: `' + commit + '`\n\nNo branch was updated by this job. Publish through the linked GitHub connection only after reviewing the exact diff and rechecking competing work. Ordinary exact-head PR gates and physical Zen 5 acceptance are still separate.\n')
+          PY
+      - name: Retain source and validation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: z02-source-validation-${{ github.run_id }}
+          path: ${{ runner.temp }}/z02
+          retention-days: 7
+          if-no-files-found: error
