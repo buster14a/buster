@@ -1,0 +1,132 @@
+name: A04 focused regression validation
+
+# One-use transport workflow; excluded from the source-only pull request.
+on:
+  push:
+    branches: [astra/20260909-a04-transport]
+    paths: ['.a04/**', '.github/workflows/a04-focused.yml']
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'buster14a/buster'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.publish.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Publish only the inspected source changes
+        id: publish
+        shell: bash
+        env:
+          BASE: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          SOURCE_BRANCH: astra/20260909-a04-metamorphic
+        run: |
+          set -euo pipefail
+          cp .a04/apply.py "$RUNNER_TEMP/a04-apply.py"
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$SOURCE_BRANCH")"
+          git checkout --detach "$BASE"
+          # Confirmed UnitTestResult fields from src/buster/tests/test.h.
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          script = Path(os.environ['RUNNER_TEMP']) / 'a04-apply.py'
+          text = script.read_text()
+          text = text.replace('result.passed += generated.passed;', 'result.succeeded_test_count += generated.succeeded_test_count;')
+          text = text.replace('result.failed += generated.failed;', 'result.test_count += generated.test_count;')
+          text = text.replace("if 'u64 passed;' not in header and 'u32 passed;' not in header:", "if 'u64 succeeded_test_count;' not in header or 'u64 test_count;' not in header:")
+          exec(compile(text, str(script), 'exec'))
+          PY
+          git diff --check
+          python3 - <<'PY'
+          import subprocess
+          expected = {'docs/metamorphic-testing.md', 'src/buster/tests/compiler/metamorphic/metamorphic_test.c'}
+          actual = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert actual == expected, actual
+          PY
+          git add docs/metamorphic-testing.md src/buster/tests/compiler/metamorphic/metamorphic_test.c
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'tests: extend metamorphic coverage to aggregates and pure calls'
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$SOURCE_BRANCH")"
+          git push origin "HEAD:refs/heads/$SOURCE_BRANCH"
+          printf 'source_sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          printf 'Source-only commit: `%s`\n' "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+  validate:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      SOURCE_SHA: ${{ needs.publish.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.publish.outputs.source_sha }}
+          persist-credentials: false
+      - name: Build the exact submitted compiler, one job
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p build "$RUNNER_TEMP/a04"
+          exec > >(tee "$RUNNER_TEMP/a04/build.log") 2>&1
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/a04/source-sha.txt"
+          clang --version
+          gcc --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          ./build/build generate --build-directory build-a04 --cc clang --config Release --linker DEFAULT --ci
+          ./build/build build --build-directory build-a04 --config Release -t ide -- -j1
+      - name: Full native suite
+        shell: bash
+        run: |
+          set -euxo pipefail
+          build-a04/Release/ide test --verbose=1 --ci=1 2>&1 | tee "$RUNNER_TEMP/a04/full-test.log"
+      - name: Both frontend forms and independent compiler profiles
+        if: ${{ !cancelled() && hashFiles('build-a04/Release/ide') != '' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for ssa in 0 1; do
+            BUSTER_METAMORPHIC_SEED=4294967295 BUSTER_METAMORPHIC_CASES=2 BUSTER_METAMORPHIC_TRANSFORMS=2047 BUSTER_METAMORPHIC_TARGET=linux-x64 BUSTER_METAMORPHIC_REQUIRE_EXECUTION=1 BUSTER_METAMORPHIC_FRONTEND_SSA="$ssa" BUSTER_METAMORPHIC_OUTPUT="$RUNNER_TEMP/a04/native-ssa-$ssa" build-a04/Release/ide metamorphic 2>&1 | tee "$RUNNER_TEMP/a04/native-ssa-$ssa.log"
+          done
+      - name: Wider target campaign with explicit execution availability
+        if: ${{ !cancelled() && hashFiles('build-a04/Release/ide') != '' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BUSTER_METAMORPHIC_SEED=42 BUSTER_METAMORPHIC_CASES=1 BUSTER_METAMORPHIC_TRANSFORMS=2047 BUSTER_METAMORPHIC_OUTPUT="$RUNNER_TEMP/a04/targets" build-a04/Release/ide metamorphic 2>&1 | tee "$RUNNER_TEMP/a04/targets.log"
+      - name: Independent diagnostic-only controls
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/a04/diagnostic-controls"
+          exec > >(tee "$RUNNER_TEMP/a04/diagnostic-controls.log") 2>&1
+          cd "$RUNNER_TEMP/a04/diagnostic-controls"
+          for seed in 0 1 42 4294967295; do
+            printf '#define JOIN(a,b) a ## b\nint JOIN(v,%s)(void) { return 0; }\n' "$seed" > "valid-$seed.c"
+            printf '#define JOIN(a,b) a ## b\nint f(void) { return JOIN(+,%s); }\n' "$seed" > "invalid-$seed.c"
+            for compiler in clang gcc; do
+              "$compiler" -std=c11 -fsyntax-only -nostdinc "valid-$seed.c"
+              status=0
+              "$compiler" -std=c11 -fsyntax-only -nostdinc "invalid-$seed.c" || status=$?
+              test "$status" = 1
+            done
+          done
+      - name: Retain commands, counts and failure bundles
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: a04-focused-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/a04
+          if-no-files-found: warn
+          retention-days: 7
