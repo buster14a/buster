@@ -48,7 +48,7 @@ jobs:
           assert body.count(needle) == 1
           body = body.replace(needle, '                a09_binding_visits += 1;\n' + needle)
           text = text[:begin] + body + text[end:]
-          begin = text.index('CParseResult c_analyze_semantics(')
+          begin = text.index('BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(')
           end = text.index('\nCParseResult c_parse(', begin)
           body = text[begin:end]
           position = body.rfind('    return result;')
