@@ -1,0 +1,192 @@
+name: A02 integer spelling exact-source validation
+on:
+  push:
+    branches: [astra/a02-20260909-transport]
+    paths: [.github/workflows/a02-validate.yml]
+permissions:
+  contents: read
+concurrency:
+  group: a02-validation-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      source_sha: ${{ steps.publish.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          persist-credentials: false
+      - name: Verify patch transport and scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a02-publication"
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, urllib.request, zlib
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'a02-publication'
+          url = 'https://api.github.com/repos/buster14a/buster/git/blobs/b3a7a49131c704407b07de7191e377b2a89daf3a'
+          request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+          with urllib.request.urlopen(request, timeout=60) as response:
+              blob = json.load(response)
+          raw = base64.b64decode(blob['content'])
+          (out / 'received.zlib').write_bytes(raw)
+          # Repair text-transport transcription only. The original reviewed
+          # patch digest below is authoritative; nothing is applied otherwise.
+          encoded = base64.b64encode(raw).decode()
+          for old, new in [('CVQ0qIG2', 'CVQ0wIG2'), ('Vvb5a3WwtxlF', 'Vvb5a3txlF'), ('GzWG6psh', 'GzWGpsh')]:
+              encoded = encoded.replace(old, new)
+          encoded = encoded.rstrip('=')
+          encoded += '=' * (-len(encoded) % 4)
+          repaired = base64.b64decode(encoded)
+          (out / 'repaired.zlib').write_bytes(repaired)
+          patch = zlib.decompress(repaired)
+          assert hashlib.sha256(patch).hexdigest() == 'd556c90bfae735f75ff4e92683706889e7237923989f496dea7c2ddd57633984'
+          (out / 'implementation.patch').write_bytes(patch)
+          PY
+          git apply --check "$RUNNER_TEMP/a02-publication/implementation.patch"
+          git apply "$RUNNER_TEMP/a02-publication/implementation.patch"
+          git diff --check
+          git add docs/agents/frontend/foundations.md src/buster/lib/compiler/frontend/c/c.h src/buster/lib/compiler/frontend/c/c_internal.h src/buster/lib/compiler/frontend/c/c_source.c src/buster/lib/compiler/frontend/c/c_parse.c src/buster/lib/compiler/frontend/c/c_gen.c src/buster/tests/compiler/frontend/c/c_test.c src/buster/tests/compiler/frontend/c/c_test.h src/buster/tests/compiler/driver/driver_test.c tests/basic_c_integer_literals.c
+          test "$(git diff --cached --name-only | wc -l)" = 10
+          git diff --cached --stat > "$RUNNER_TEMP/a02-publication/stat.txt"
+          git diff --cached > "$RUNNER_TEMP/a02-publication/submitted.patch"
+      - name: Publish only the separately owned implementation branch
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          main=$(gh api repos/buster14a/buster/git/ref/heads/main --jq .object.sha)
+          head=$(gh api repos/buster14a/buster/git/ref/heads/astra/a02-148-integer-spelling --jq .object.sha)
+          test "$main" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          test "$head" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          gh api --paginate 'repos/buster14a/buster/pulls?state=open&per_page=100' > "$RUNNER_TEMP/a02-publication/open-prs.json"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'c: validate complete integer spellings before evaluation'
+          sha=$(git rev-parse HEAD)
+          printf '%s\n' "$sha" > "$RUNNER_TEMP/a02-publication/source.sha"
+          gh auth setup-git
+          git push origin HEAD:refs/heads/astra/a02-148-integer-spelling
+          printf 'source_sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+          printf 'Implementation source: `%s`; frozen parent: `ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae`. No build result in this publication job.\n' "$sha" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a02-publication-${{ github.run_id }}
+          path: ${{ runner.temp }}/a02-publication
+          if-no-files-found: error
+          retention-days: 7
+  validate:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.publish.outputs.source_sha }}
+          persist-credentials: false
+      - name: Build exact submitted source and run registered Release tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a02-validation"
+          exec > >(tee "$RUNNER_TEMP/a02-validation/release.log") 2>&1
+          git rev-parse HEAD | tee "$RUNNER_TEMP/a02-validation/source.sha"
+          clang --version
+          gcc --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all -- -j1
+      - name: Independent strict and extension controls
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x build/Release/ide
+          exec > >(tee "$RUNNER_TEMP/a02-validation/oracles.log") 2>&1
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'a02-validation'
+          rows = []
+          def command(args, accept):
+              result = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+              row = {'command': args, 'exit': result.returncode, 'output': result.stdout, 'expected_accept': accept}
+              rows.append(row)
+              (out / 'oracle-results.json').write_text(json.dumps(rows, indent=2))
+              print(json.dumps(row), flush=True)
+              assert (result.returncode == 0 if accept else result.returncode == 1), row
+          for dialect in ('c17','gnu17'):
+              for compiler in ('clang','gcc','buster'):
+                  prefix = ['build/Release/ide','cc'] if compiler == 'buster' else [compiler]
+                  executable = out / ('positive-' + dialect + '-' + compiler)
+                  flags = ['-std=' + dialect, '-g0'] + ([] if compiler == 'buster' else ['-Wall','-Wextra','-Werror','-pedantic-errors'])
+                  command(prefix + flags + ['tests/basic_c_integer_literals.c','-o',str(executable)], True)
+                  command([str(executable)], True)
+                  for index, expression in enumerate(('09','1lL','1uu','18446744073709551616ULL','0x10000000000000000ULL')):
+                      contexts = ['int test(void) { return (int)(' + expression + '); }\n',
+                                  'int test(void) { return sizeof((int)' + expression + '); }\n',
+                                  'static unsigned long long value = ' + expression + ';\nint main(void) { return value != 0; }\n',
+                                  '#if 0 && ' + expression + '\n#endif\nint main(void) { return 0; }\n']
+                      for context, source in enumerate(contexts):
+                          path = out / ('negative-' + str(index) + '-' + str(context) + '.c')
+                          path.write_text(source)
+                          command(prefix + flags + ['-c',str(path),'-o',str(out/'negative.o')], False)
+          c23 = out / 'c23.c'
+          c23.write_text("#if 0b10'10 != 10 || 0xFF'FFu != 65535\n#error value\n#endif\nint main(void) { return 0'77 != 63 || 18'446'744'073'709'551'615ULL != 0xffffffffffffffffULL; }\n")
+          for compiler in ('clang','gcc','buster'):
+              prefix = ['build/Release/ide','cc'] if compiler == 'buster' else [compiler]
+              executable = out / ('c23-' + compiler)
+              command(prefix + ['-std=c23','-g0',str(c23),'-o',str(executable)], True)
+              command([str(executable)], True)
+          ms = out / 'ms-suffix.c'
+          ms.write_text('int main(void) { return 42i64 != 42LL || 18446744073709551615ui64 != 0xffffffffffffffffULL; }\n')
+          for compiler in ('clang','buster'):
+              prefix = ['build/Release/ide','cc'] if compiler == 'buster' else [compiler,'-fms-extensions']
+              executable = out / ('ms-' + compiler)
+              command(prefix + ['-std=gnu17','-g0',str(ms),'-o',str(executable)], True)
+              command([str(executable)], True)
+          PY
+      - name: Existing differential matrix and independent sanitized references
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x build/Release/ide
+          "$RUNNER_TEMP/buster-build" test_differential --self-test 2>&1 | tee "$RUNNER_TEMP/a02-validation/differential-self-test.log"
+          "$RUNNER_TEMP/buster-build" test_differential --ide build/Release/ide --cc clang --source tests/basic_c_integer_literals.c --sanitize-oracle --out "$RUNNER_TEMP/a02-validation/differential" 2>&1 | tee "$RUNNER_TEMP/a02-validation/differential.log"
+      - name: Existing target-mode and ordinary self-host gates
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x build/Release/ide
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/a02-validation/modes.log"
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/a02-validation/self-host.log"
+      - name: Strict sanitizer registered tests in a new sequential build tree
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT --sanitize -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/buster-build" build --config Debug -t test_all -- -j1 2>&1 | tee "$RUNNER_TEMP/a02-validation/sanitizer.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: a02-validation-${{ github.run_id }}
+          path: ${{ runner.temp }}/a02-validation
+          if-no-files-found: error
+          retention-days: 7
