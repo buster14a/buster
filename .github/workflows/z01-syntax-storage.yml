@@ -1,0 +1,168 @@
+name: Z01 syntax storage experiment
+
+on:
+  push:
+    branches: [astra/z01-248-transport]
+    paths: [.github/workflows/z01-syntax-storage.yml]
+
+permissions: {}
+
+concurrency:
+  group: z01-syntax-storage-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: payload
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: source
+          persist-credentials: false
+      - name: Verify and apply the reviewed three-file patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode payload/.github/z01/parser.patch.gz.b64 | gzip --decompress > "$RUNNER_TEMP/parser.patch"
+          echo 'd78c73c2b9a4b8c2e3371c19cd85be77260262698d740895ee50a5f39a948b10  '"$RUNNER_TEMP/parser.patch" | sha256sum --check
+          cd source
+          test "$(git rev-parse HEAD)" = ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          git apply --check "$RUNNER_TEMP/parser.patch"
+          git apply "$RUNNER_TEMP/parser.patch"
+          git diff --check
+          test "$(git hash-object src/buster/lib/compiler/frontend/c/c_parse.c)" = 848de5ef421fe286ca6ec8c5a05f28959f04db3f
+          test "$(git hash-object src/buster/lib/compiler/frontend/c/c.h)" = 014ea548e06980c8e5f4594ea62f405903031f46
+          test "$(git hash-object src/buster/tests/compiler/frontend/c/c_test.c)" = e3436dd6702014572988eaaccf04ea71995d22e0
+      - name: Create a new implementation branch without replacing any ref
+        id: publish
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          repo = 'repos/buster14a/buster'
+          base = 'ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae'
+          def api(endpoint, data=None):
+              args = ['gh', 'api', repo + endpoint]
+              if data is not None:
+                  args += ['--method', 'POST', '--input', '-']
+              result = subprocess.run(args, input=None if data is None else json.dumps(data), text=True, capture_output=True, check=True)
+              return json.loads(result.stdout)
+          paths = ['src/buster/lib/compiler/frontend/c/c.h', 'src/buster/lib/compiler/frontend/c/c_parse.c', 'src/buster/tests/compiler/frontend/c/c_test.c']
+          changed = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
+          if sorted(changed) != paths:
+              raise SystemExit('Unexpected changed files')
+          if api('/git/ref/heads/main')['object']['sha'] != base:
+              raise SystemExit('Main advanced; review is required')
+          entries = []
+          for path in paths:
+              blob = api('/git/blobs', {'content': pathlib.Path(path).read_text(), 'encoding': 'utf-8'})
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
+          tree = api('/git/trees', {'base_tree': '093b374996f3aecca200fe2968539554fc67bf55', 'tree': entries})
+          commit = api('/git/commits', {'message': 'c: allocate syntax diagnostics only on first error (#248)', 'tree': tree['sha'], 'parents': [base]})
+          if api('/git/ref/heads/main')['object']['sha'] != base:
+              raise SystemExit('Main advanced during publication; review is required')
+          # POST creates only; an existing ref is an error, never an overwrite.
+          api('/git/refs', {'ref': 'refs/heads/astra/z01-248-lazy-syntax-diagnostics', 'sha': commit['sha']})
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('sha=' + commit['sha'] + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+              output.write('Published reviewed source: ' + commit['sha'] + '\n')
+          PY
+
+  validate:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '1'
+      BUSTER_MATRIX_THREADS: '1'
+      BUSTER_PARSER_FRAME_CENSUS: '1'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: payload
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae
+          path: source
+          persist-credentials: false
+      - name: Baseline Release and self-host gates
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/z01"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/z01/baseline-sha.txt"
+          uname -a | tee "$RUNNER_TEMP/z01/os.txt"
+          lscpu | tee "$RUNNER_TEMP/z01/cpu.txt"
+          clang --version | tee "$RUNNER_TEMP/z01/clang.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee "$RUNNER_TEMP/z01/baseline-configure.txt"
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/z01/baseline-tests.txt"
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/z01/baseline-self-host.txt"
+          cp build/Release/ide "$RUNNER_TEMP/baseline-ide"
+      - name: Show that the storage regression fails before the change
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode ../payload/.github/z01/parser.patch.gz.b64 | gzip --decompress > "$RUNNER_TEMP/parser.patch"
+          echo 'd78c73c2b9a4b8c2e3371c19cd85be77260262698d740895ee50a5f39a948b10  '"$RUNNER_TEMP/parser.patch" | sha256sum --check
+          git apply --include=src/buster/tests/compiler/frontend/c/c_test.c "$RUNNER_TEMP/parser.patch"
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/z01/red-build.txt"
+          set +e
+          build/Release/ide test --ci=1 --verbose=1 > "$RUNNER_TEMP/z01/red-tests.txt" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/z01/red-tests.txt"
+          test "$status" -eq 1
+          grep -F 'syntax.diagnostics == 0' "$RUNNER_TEMP/z01/red-tests.txt"
+      - name: Candidate Release, modes and self-host gates
+        working-directory: source
+        env:
+          CANDIDATE_SHA: ${{ needs.publish.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --exclude=src/buster/tests/compiler/frontend/c/c_test.c "$RUNNER_TEMP/parser.patch"
+          test "$(git hash-object src/buster/lib/compiler/frontend/c/c_parse.c)" = 848de5ef421fe286ca6ec8c5a05f28959f04db3f
+          test "$(git hash-object src/buster/tests/compiler/frontend/c/c_test.c)" = e3436dd6702014572988eaaccf04ea71995d22e0
+          printf '%s\n' "$CANDIDATE_SHA" | tee "$RUNNER_TEMP/z01/candidate-sha.txt"
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/z01/candidate-tests.txt"
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/z01/candidate-modes.txt"
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/z01/candidate-self-host.txt"
+          "$RUNNER_TEMP/buster-build" bench_throughput self-test 2>&1 | tee "$RUNNER_TEMP/z01/throughput-self-test.txt"
+          "$RUNNER_TEMP/buster-build" bench_throughput run --baseline "$RUNNER_TEMP/baseline-ide" --candidate "$PWD/build/Release/ide" --output "$RUNNER_TEMP/z01/throughput" --baseline-id ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae --candidate-id "$CANDIDATE_SHA" --profile smoke --require-identical-output 2>&1 | tee "$RUNNER_TEMP/z01/throughput.txt"
+      - name: Strict sanitizer regression gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --sanitize --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF 2>&1 | tee "$RUNNER_TEMP/z01/sanitizer-configure.txt"
+          "$RUNNER_TEMP/buster-build" build --config Debug -t test_all 2>&1 | tee "$RUNNER_TEMP/z01/sanitizer-tests.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: z01-syntax-storage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/z01/
+          if-no-files-found: error
+          retention-days: 7
