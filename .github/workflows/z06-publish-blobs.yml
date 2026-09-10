@@ -1,0 +1,39 @@
+name: Z06 scoped source object transport
+
+on:
+  push:
+    branches: [astra/z06-20260910-transport]
+    paths:
+      - .github/workflows/z06-publish-blobs.yml
+      - .github/z06_publish_blobs.py
+      - .github/z06-patch/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: z06-publish-blobs-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source-objects:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Apply the pinned patch and upload only unreferenced Git blobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/z06_publish_blobs.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: z06-source-objects-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/z06-source-objects
+          if-no-files-found: error
+          retention-days: 7
