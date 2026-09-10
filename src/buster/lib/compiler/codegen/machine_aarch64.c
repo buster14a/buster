@@ -4168,26 +4168,6 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         selector.target = target;
         selector.direct_call_uses = arena_allocate(arena, u8, function->value_count ? function->value_count : 1);
         memset(selector.direct_call_uses, 0, function->value_count);
-        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
-        {
-            IrInstruction* walk = function->instructions + instruction_index;
-            for (u32 operand_index = 0; operand_index < walk->operand_count; operand_index += 1)
-            {
-                IrValueId operand = walk->operands[operand_index];
-                if (operand.value >= function->value_count || selector.direct_call_uses[operand.value] == 2)
-                {
-                    continue;
-                }
-                bool direct = walk->opcode == IR_OPCODE_CALL && operand_index == 0;
-                if (direct)
-                {
-                    IrInstructionId definition = function->values[operand.value].definition;
-                    IrInstruction* reference = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
-                    direct = reference && reference->opcode == IR_OPCODE_FUNCTION && reference->symbol.value == walk->symbol.value;
-                }
-                selector.direct_call_uses[operand.value] = direct ? 1 : 2;
-            }
-        }
         machine_stream_initialize(&selector.immediates, sizeof(u64));
         machine_stream_initialize(&selector.stack_slots, sizeof(u32));
         machine_stream_initialize(&selector.stack_slot_alignments, sizeof(u32));
@@ -4337,6 +4317,20 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                         value_use_blocks[used] = MACHINE_SELECTION_MULTIPLE_BLOCKS;
                     }
                     value_last_use_ordinals[used] = walk_ordinal;
+                    // Fold the existing direct-call projection into this operand
+                    // walk. Other uses are absorbing, so linked/storage order
+                    // cannot change the result. Do not skip the remaining facts.
+                    if (selector.direct_call_uses[used] != 2)
+                    {
+                        bool direct = instruction->opcode == IR_OPCODE_CALL && operand_index == 0;
+                        if (direct)
+                        {
+                            IrInstructionId definition = function->values[used].definition;
+                            IrInstruction* reference = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+                            direct = reference && reference->opcode == IR_OPCODE_FUNCTION && reference->symbol.value == instruction->symbol.value;
+                        }
+                        selector.direct_call_uses[used] = direct ? 1 : 2;
+                    }
                     if (!promotable_locals[used])
                     {
                         continue;
