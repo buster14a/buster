@@ -3480,6 +3480,117 @@ BUSTER_GLOBAL_LOCAL void c_test_source_metrics_partitions(UnitTestArguments* arg
     outer_result->succeeded_test_count += result.succeeded_test_count;
 }
 
+// Shared macro tasks must preserve context floors even when a child grows
+// the array while its parent still owns a suffix. No internal stack seam is
+// needed: the token sequence and deferred locations are the public contract.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 sizes[] = {0, 1, 2, 15, 16, 17, 62, 63, 64, 65, 126, 127, 128, 129, 513};
+    for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
+    {
+        for (u32 nested = 0; nested < 2; nested += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u64 capacity = BUSTER_KB(16);
+            char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+            u64 length = 0;
+            c_test_append_source(bytes, capacity, &length, S8("#define ID(x) x\n#define DUP(x) x x\n#define NUMBERS "));
+            for (u32 index = 0; index < sizes[size_index]; index += 1)
+            {
+                c_test_append_source(bytes, capacity, &length, string_format(temporary.arena, S8("{u32} "), index));
+            }
+            c_test_append_source(bytes, capacity, &length, nested ? S8("\nID(DUP(NUMBERS)) tail\n") : S8("\nNUMBERS tail\n"));
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){.pointer = bytes, .length = length},
+                                                        (CPreprocessOptions){.source_path = S8("macro-task-batches.c")});
+            u64 expected_count = (u64)sizes[size_index] * (nested + 1);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, preprocess.token_count == expected_count + 2);
+            for (u64 index = 0; index < expected_count; index += 1)
+            {
+                String8 expected = string_format(temporary.arena, S8("{u32}"), (u32)(index % sizes[size_index]));
+                c_test_preprocessed_token(arguments, &result, preprocess, index, C_TOKEN_PREPROCESSING_NUMBER, expected);
+            }
+            c_test_preprocessed_token(arguments, &result, preprocess, expected_count, C_TOKEN_IDENTIFIER, S8("tail"));
+            scratch_end(temporary);
+        }
+    }
+
+    String8 definitions = S8("#define ID(x) x\n#define DUP(x) x x\n#define FN(x) x\n#define PAIR(a,b) a b\n"
+                             "#define ALIAS FN\n#define EMPTY\n#define SELF SELF\n#define A B\n#define B A\n"
+                             "#define CAT(a,b) a ## b\n#define STR(x) #x\n#define V(first,...) first __VA_ARGS__\n"
+                             "#define REC(x) x REC(x)\n");
+    struct
+    {
+        String8 input;
+        String8 expected;
+    } cases[] = {
+        {S8("ID(FN)(7)"), S8("7")},
+        {S8("PAIR(FN,tail)(7)"), S8("FN tail (7)")},
+        {S8("PAIR(ID(FN),tail)(7)"), S8("FN tail (7)")},
+        {S8("DUP(SELF)"), S8("SELF SELF")},
+        {S8("DUP(A)"), S8("A A")},
+        {S8("FN(FN(9))"), S8("9")},
+        {S8("ALIAS(11)"), S8("11")},
+        {S8("ID(ALIAS)(13)"), S8("13")},
+        {S8("CAT(,FN)(17)"), S8("17")},
+        {S8("STR(A /* gap */ B)"), S8("\"A B\"")},
+        {S8("V(3, + FN(4))"), S8("3 + 4")},
+        {S8("V(3,)"), S8("3")},
+        {S8("CAT(,) tail"), S8("tail")},
+        {S8("ID(EMPTY) tail"), S8("tail")},
+        {S8("DUP(FN)(9)"), S8("FN 9")},
+        {S8("ID(REC(1))"), S8("1 REC(1)")},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena, S8("{S8}{S8}\n"), definitions, cases[case_index].input);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+        CLexResult expected = c_lex(temporary.arena, cases[case_index].expected);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, expected.diagnostic_count == 0);
+        BUSTER_TEST(arguments, preprocess.token_count == expected.token_count);
+        for (u64 index = 0; index + 1 < expected.token_count; index += 1)
+        {
+            c_test_preprocessed_token(arguments, &result, preprocess, index, expected.tokens[index].kind,
+                                      c_token_spelling(expected.spelling_base, expected.tokens[index]));
+        }
+        scratch_end(temporary);
+    }
+
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = string_format(temporary.arena, S8("{S8}#line 321 \"task-origin.c\"\nID(DUP(__LINE__)) __FILE__ tail\n"), definitions);
+    CPreprocessResult locations = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("macro-task-batches.c")});
+    BUSTER_TEST(arguments, locations.diagnostic_count == 0);
+    BUSTER_TEST(arguments, locations.token_count == 5);
+    c_test_preprocessed_token(arguments, &result, locations, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("321"));
+    c_test_preprocessed_token(arguments, &result, locations, 1, C_TOKEN_PREPROCESSING_NUMBER, S8("321"));
+    c_test_preprocessed_token(arguments, &result, locations, 2, C_TOKEN_STRING_LITERAL, S8("\"task-origin.c\""));
+    for (u64 index = 0; index + 1 < locations.token_count; index += 1)
+    {
+        BUSTER_TEST(arguments, c_preprocess_token_location(&locations, locations.tokens[index]).line == 321);
+    }
+    scratch_end(temporary);
+
+    String8 invalid[] = {S8("FN(1,2)"), S8("FN(1,2,3)"), S8("FN(1")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        temporary = scratch_begin(&arguments->arena, 1);
+        source = string_format(temporary.arena, S8("{S8}#line 402 \"task-error.c\"\n{S8}\n"), definitions, invalid[index]);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("macro-task-batches.c")});
+        bool diagnosed = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < preprocess.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = preprocess.diagnostics[diagnostic_index];
+            diagnosed |= diagnostic.kind == C_DIAGNOSTIC_INVALID_MACRO_INVOCATION && diagnostic.location.line == 402 && diagnostic.location.column == 1;
+        }
+        BUSTER_TEST(arguments, diagnosed);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -14153,6 +14264,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
     c_test_result_add(&result, c_test_inline_assembly_volatile_ir(arguments));
     c_test_result_add(&result, c_test_pasted_keyword_body_walk(arguments));
+    c_test_result_add(&result, c_test_macro_task_batches(arguments));
     c_test_result_add(&result, c_test_frontend_vla_and_ir(arguments));
     c_test_result_add(&result, c_test_local_static_aggregates(arguments));
 

@@ -37,8 +37,9 @@
 //                                              sidecar consumed by parser
 //                                              shape walks
 //   c_macro_name_hash .. c_symbol_intern       macro and symbol tables
-//   c_macro_invocation_arguments ..            macro expansion: arguments,
-//   c_preprocess_expand                        stringify, paste, rescan
+//   c_macro_expansion_tasks_push ..            shared LIFO task batches,
+//   c_preprocess_expand                        arguments, stringify, paste,
+//                                              rescan and context floors
 //   CPpClassMasks, c_pp_class_masks_build,     the per-64-token class
 //   c_pp_line_end_masked,                      projection of a lexed run's
 //   c_pp_parenthesis_depth                     shape sidecar, and what the
@@ -3419,10 +3420,24 @@ typedef enum CMacroExpansionTaskKind
 typedef struct CMacroExpansionTask CMacroExpansionTask;
 struct CMacroExpansionTask
 {
-    CMacroExpansionTask* previous;
     CMacro* macro;
     CPpToken token;
     CMacroExpansionTaskKind kind;
+};
+
+// Contexts suspend strictly LIFO. Pending parent tasks remain below a child's
+// task_base; indices, unlike pointers into this array, survive growth.
+enum
+{
+    C_MACRO_EXPANSION_LOCAL_TASK_CAPACITY = 64,
+};
+
+typedef struct CMacroExpansionTaskStack CMacroExpansionTaskStack;
+struct CMacroExpansionTaskStack
+{
+    CMacroExpansionTask* data;
+    u64 count;
+    u64 capacity;
 };
 
 typedef struct CMacroArgument CMacroArgument;
@@ -3443,7 +3458,7 @@ struct CMacroExpansionContext
 {
     CMacroExpansionContext* parent;
     CMacroExpansionContinuation* continuation;
-    CMacroExpansionTask* top;
+    u64 task_base;
     CPreprocessTokenNode* first_output;
     CPreprocessTokenNode* last_output;
     u64 output_count;
@@ -3732,16 +3747,36 @@ BUSTER_C_INTERNAL void c_preprocess_output_push(Arena* arena, CPreprocessTokenNo
     *count += 1;
 }
 
-BUSTER_C_INTERNAL void c_macro_expansion_task_push(Arena* arena, CMacroExpansionTask** top, CPpToken token, CMacro* macro, CMacroExpansionTaskKind kind)
+// One capacity check for the whole batch. Reversing the stored tokens keeps
+// the next token at the top; an optional ENABLE marker sits below the batch.
+// No pointer into task storage escapes this helper or survives another push.
+BUSTER_C_INTERNAL void c_macro_expansion_tasks_push(Arena* arena, CMacroExpansionTaskStack* tasks, CPpToken const* tokens, u64 token_count, CMacro* macro)
 {
-    CMacroExpansionTask* task = arena_allocate(arena, CMacroExpansionTask, 1);
-    *task = (CMacroExpansionTask){
-        .previous = *top,
-        .macro = macro,
-        .token = token,
-        .kind = kind,
-    };
-    *top = task;
+    u64 maximum_count = UINT64_MAX / sizeof(CMacroExpansionTask);
+    BUSTER_VALIDATE(tasks->count < maximum_count && token_count <= maximum_count - tasks->count - (macro != 0));
+    u64 required = tasks->count + token_count + (macro != 0);
+    if (required > tasks->capacity)
+    {
+        u64 doubled = tasks->capacity > maximum_count / 2 ? maximum_count : tasks->capacity * 2;
+        u64 capacity = BUSTER_MAX(required, doubled);
+        CMacroExpansionTask* data = arena_allocate(arena, CMacroExpansionTask, capacity);
+        if (tasks->count)
+        {
+            memcpy(data, tasks->data, tasks->count * sizeof(*data));
+        }
+        tasks->data = data;
+        tasks->capacity = capacity;
+    }
+    u64 output = tasks->count;
+    if (macro)
+    {
+        tasks->data[output++] = (CMacroExpansionTask){.macro = macro, .kind = C_MACRO_EXPANSION_ENABLE};
+    }
+    for (u64 index = token_count; index; index -= 1)
+    {
+        tasks->data[output++] = (CMacroExpansionTask){.token = tokens[index - 1], .kind = C_MACRO_EXPANSION_TOKEN};
+    }
+    tasks->count = output;
 }
 
 // Collecting an invocation's arguments is also where an argument recovers the
@@ -3750,110 +3785,123 @@ BUSTER_C_INTERNAL void c_macro_expansion_task_push(Arena* arena, CMacroExpansion
 // nothing earlier has to carry it. Only tokens the expansion machinery
 // synthesized or substituted arrive with an answer of their own, and those
 // are already marked foreign.
-BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, char8 const* spelling_base, CMacroExpansionTask** top, CMacro* macro,
+BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, char8 const* spelling_base, CMacroExpansionTaskStack* tasks, u64 task_base, CMacro* macro,
                                                       CSourceLocation location, CMacroArgument** arguments_out, u32* argument_count_out,
                                                       CPreprocessResult* result)
 {
-    CMacroExpansionTask* open = *top;
-    while (open && open->kind == C_MACRO_EXPANSION_ENABLE)
+    while (tasks->count > task_base && tasks->data[tasks->count - 1].kind == C_MACRO_EXPANSION_ENABLE)
     {
-        *top = open->previous;
-        open->macro->disabled = false;
-        open = *top;
+        tasks->data[--tasks->count].macro->disabled = false;
     }
-    if (!open || open->kind != C_MACRO_EXPANSION_TOKEN || !c_token_is_punctuator(&open->token.token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+    bool invoked = tasks->count > task_base && tasks->data[tasks->count - 1].kind == C_MACRO_EXPANSION_TOKEN &&
+                   c_token_is_punctuator(&tasks->data[tasks->count - 1].token.token, C_PUNCTUATOR_LEFT_PARENTHESIS);
+    if (invoked)
     {
-        return false;
-    }
-    *top = open->previous;
-    u32 capacity = macro->definition.parameter_count + 1;
-    CMacroArgument* arguments = arena_allocate(arena, CMacroArgument, capacity);
-    for (u32 argument_index = 0; argument_index < capacity; argument_index += 1)
-    {
-        arguments[argument_index] = (CMacroArgument){0};
-    }
-    u32 argument_count = macro->definition.parameter_count ? 1 : 0;
-    u32 current = 0;
-    u32 depth = 0;
-    bool closed = false;
-    while (*top)
-    {
-        CMacroExpansionTask* task = *top;
-        *top = task->previous;
-        if (task->kind == C_MACRO_EXPANSION_ENABLE)
+        tasks->count -= 1;
+        u32 capacity = macro->definition.parameter_count + 1;
+        CMacroArgument* arguments = arena_allocate(arena, CMacroArgument, capacity);
+        for (u32 argument_index = 0; argument_index < capacity; argument_index += 1)
         {
-            task->macro->disabled = false;
-            continue;
+            arguments[argument_index] = (CMacroArgument){0};
         }
-        CPpToken token = task->token;
-        if (c_token_is_punctuator(&token.token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        u32 argument_count = macro->definition.parameter_count ? 1 : 0;
+        u32 current = 0;
+        u32 depth = 0;
+        bool closed = false;
+        bool valid = true;
+        while (tasks->count > task_base && valid)
         {
-            depth += 1;
-        }
-        else if (c_token_is_punctuator(&token.token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
-        {
-            if (!depth)
+            CMacroExpansionTask task = tasks->data[--tasks->count];
+            if (task.kind == C_MACRO_EXPANSION_ENABLE)
             {
-                closed = true;
-                break;
+                task.macro->disabled = false;
             }
-            depth -= 1;
-        }
-        else if (c_token_is_punctuator(&token.token, C_PUNCTUATOR_COMMA) && !depth)
-        {
-            bool collect_variadic = macro->definition.variadic && current + 1 >= macro->definition.parameter_count;
-            if (!collect_variadic)
+            else
             {
-                current += 1;
-                if (current >= capacity)
+                CPpToken token = task.token;
+                bool separator = false;
+                if (c_token_is_punctuator(&token.token, C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
-                    c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_MACRO_INVOCATION, S8("too many arguments in macro invocation"));
-                    return true;
+                    depth += 1;
                 }
-                argument_count = BUSTER_MAX(argument_count, current + 1);
-                continue;
+                else if (c_token_is_punctuator(&token.token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                {
+                    if (!depth)
+                    {
+                        closed = true;
+                        break;
+                    }
+                    depth -= 1;
+                }
+                else if (c_token_is_punctuator(&token.token, C_PUNCTUATOR_COMMA) && !depth)
+                {
+                    bool collect_variadic = macro->definition.variadic && current + 1 >= macro->definition.parameter_count;
+                    if (!collect_variadic)
+                    {
+                        current += 1;
+                        if (current >= capacity)
+                        {
+                            c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_MACRO_INVOCATION, S8("too many arguments in macro invocation"));
+                            valid = false;
+                        }
+                        else
+                        {
+                            argument_count = BUSTER_MAX(argument_count, current + 1);
+                        }
+                        separator = true;
+                    }
+                }
+                if (valid && !separator)
+                {
+                    if (!argument_count)
+                    {
+                        argument_count = 1;
+                    }
+                    c_preprocess_output_push(arena, &arguments[current].first, &arguments[current].last, token, &arguments[current].token_count);
+                }
             }
         }
-        if (!argument_count)
+        if (valid && !closed)
         {
-            argument_count = 1;
+            c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_MACRO_INVOCATION,
+                                         string_format(arena, S8("unterminated invocation of macro '{S8}'"), macro->name));
+            valid = false;
         }
-        c_preprocess_output_push(arena, &arguments[current].first, &arguments[current].last, token, &arguments[current].token_count);
-    }
-    if (!closed)
-    {
-        c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_MACRO_INVOCATION,
-                                     string_format(arena, S8("unterminated invocation of macro '{S8}'"), macro->name));
-        return true;
-    }
-    if (macro->definition.variadic && argument_count + 1 == macro->definition.parameter_count)
-    {
-        argument_count += 1;
-    }
-    if (argument_count != macro->definition.parameter_count)
-    {
-        c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_MACRO_INVOCATION, S8("macro argument count does not match its definition"));
-        return true;
-    }
-    for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
-    {
-        CMacroArgument* argument = arguments + argument_index;
-        argument->tokens = arena_allocate(arena, CPpToken, argument->token_count);
-        u64 token_index = 0;
-        for (CPreprocessTokenNode* node = argument->first; node; node = node->next)
+        if (valid)
         {
-            argument->tokens[token_index] = node->token;
-            if (token_index && !node->token.foreign)
+            if (macro->definition.variadic && argument_count + 1 == macro->definition.parameter_count)
             {
-                argument->tokens[token_index].preceded_by_space =
-                    c_token_preceded_by_space(spelling_base, argument->tokens[token_index - 1].token, node->token.token);
+                argument_count += 1;
             }
-            token_index += 1;
+            if (argument_count != macro->definition.parameter_count)
+            {
+                c_preprocess_diagnostic_push(arena, result, location, C_DIAGNOSTIC_INVALID_MACRO_INVOCATION, S8("macro argument count does not match its definition"));
+                valid = false;
+            }
+        }
+        if (valid)
+        {
+            for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+            {
+                CMacroArgument* argument = arguments + argument_index;
+                argument->tokens = arena_allocate(arena, CPpToken, argument->token_count);
+                u64 token_index = 0;
+                for (CPreprocessTokenNode* node = argument->first; node; node = node->next)
+                {
+                    argument->tokens[token_index] = node->token;
+                    if (token_index && !node->token.foreign)
+                    {
+                        argument->tokens[token_index].preceded_by_space =
+                            c_token_preceded_by_space(spelling_base, argument->tokens[token_index - 1].token, node->token.token);
+                    }
+                    token_index += 1;
+                }
+            }
+            *arguments_out = arguments;
+            *argument_count_out = argument_count;
         }
     }
-    *arguments_out = arguments;
-    *argument_count_out = argument_count;
-    return true;
+    return invoked;
 }
 
 BUSTER_C_INTERNAL CPpToken c_macro_stringify(CSpellingSpace* space, CMacroArgument argument, u32 stamp)
@@ -4326,7 +4374,7 @@ BUSTER_C_INTERNAL CPpToken c_macro_pragma_token(CSpellingSpace* space, CMacro* m
 // so a symbol-0 token (pasted or synthesized) interns at the same point
 // either way.
 BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* arena, CMacro* first_macro, CSymbolTable* symbols, char8 const* base,
-                                                                        CMacroExpansionContinuation* continuation)
+                                                                        CMacroExpansionContinuation* continuation, CMacroExpansionTaskStack* tasks)
 {
     CMacroExpansionContext* child = 0;
     while (!child && continuation->argument_index < continuation->argument_count)
@@ -4348,11 +4396,9 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
             *child = (CMacroExpansionContext){
                 .parent = continuation->parent,
                 .continuation = continuation,
+                .task_base = tasks->count,
             };
-            for (u64 token_index = argument->token_count; token_index; token_index -= 1)
-            {
-                c_macro_expansion_task_push(arena, &child->top, argument->tokens[token_index - 1], 0, C_MACRO_EXPANSION_TOKEN);
-            }
+            c_macro_expansion_tasks_push(arena, tasks, argument->tokens, argument->token_count, 0);
         }
         else
         {
@@ -4371,7 +4417,7 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
 // is invalid (an edge `##`, a paste that forms no token), diagnosed there.
 BUSTER_C_INTERNAL bool c_macro_materialize(Arena* arena, CSpellingSpace* space, CMacro* first_macro, CMacro* macro, CMacroArgument* arguments,
                                             u32 argument_count, CPpToken invocation, CPpStampTable const* stamps, CPreprocessResult* result,
-                                            CMacroExpansionContext* target)
+                                            CMacroExpansionContext* target, CMacroExpansionTaskStack* tasks)
 {
     CPpToken* replacement_tokens = 0;
     u32 replacement_count = 0;
@@ -4389,11 +4435,7 @@ BUSTER_C_INTERNAL bool c_macro_materialize(Arena* arena, CSpellingSpace* space, 
         else
         {
             macro->disabled = true;
-            c_macro_expansion_task_push(arena, &target->top, (CPpToken){0}, macro, C_MACRO_EXPANSION_ENABLE);
-            for (u32 replacement_index = replacement_count; replacement_index; replacement_index -= 1)
-            {
-                c_macro_expansion_task_push(arena, &target->top, replacement_tokens[replacement_index - 1], 0, C_MACRO_EXPANSION_TOKEN);
-            }
+            c_macro_expansion_tasks_push(arena, tasks, replacement_tokens, replacement_count, macro);
         }
     }
     return ok;
@@ -4413,16 +4455,15 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
         .last_output = *last_output,
         .output_count = *output_count,
     };
-    for (u32 input_index = input_count; input_index; input_index -= 1)
-    {
-        c_macro_expansion_task_push(arena, &context->top, input[input_index - 1], 0, C_MACRO_EXPANSION_TOKEN);
-    }
+    CMacroExpansionTask local_tasks[C_MACRO_EXPANSION_LOCAL_TASK_CAPACITY];
+    CMacroExpansionTaskStack tasks = {.data = local_tasks, .capacity = BUSTER_ARRAY_LENGTH(local_tasks)};
+    c_macro_expansion_tasks_push(arena, &tasks, input, input_count, 0);
     u32 expansion_count = 0;
     bool ok = true;
     bool done = false;
     while (!done)
     {
-        if (!context->top)
+        if (tasks.count == context->task_base)
         {
             CMacroExpansionContinuation* continuation = context->continuation;
             if (!continuation)
@@ -4443,7 +4484,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
                     argument->expanded_tokens[expanded_index++] = node->token;
                 }
                 continuation->argument_index += 1;
-                CMacroExpansionContext* child = c_macro_continuation_advance(arena, first_macro, symbols, space->base, continuation);
+                CMacroExpansionContext* child = c_macro_continuation_advance(arena, first_macro, symbols, space->base, continuation, &tasks);
                 if (child)
                 {
                     context = child;
@@ -4452,22 +4493,21 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
                 {
                     context = continuation->parent;
                     ok = c_macro_materialize(arena, space, first_macro, continuation->macro, continuation->arguments, continuation->argument_count,
-                                             continuation->invocation, stamps, result, context);
+                                             continuation->invocation, stamps, result, context, &tasks);
                     done = !ok;
                 }
             }
         }
         else
         {
-            CMacroExpansionTask* task = context->top;
-            context->top = task->previous;
-            if (task->kind == C_MACRO_EXPANSION_ENABLE)
+            CMacroExpansionTask task = tasks.data[--tasks.count];
+            if (task.kind == C_MACRO_EXPANSION_ENABLE)
             {
-                task->macro->disabled = false;
+                task.macro->disabled = false;
             }
             else
             {
-                CPpToken token = task->token;
+                CPpToken token = task.token;
                 CMacro* macro = token.token.kind == C_TOKEN_IDENTIFIER && !token.no_expand
                                     ? c_macro_find_token(first_macro, symbols, space->base, &token.token)
                                     : 0;
@@ -4494,7 +4534,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
                     bool invoked = true;
                     if (macro->definition.function_like)
                     {
-                        invoked = c_macro_invocation_arguments(arena, space->base, &context->top, macro, c_pp_stamp_location(stamps, token.stamp), &arguments,
+                        invoked = c_macro_invocation_arguments(arena, space->base, &tasks, context->task_base, macro, c_pp_stamp_location(stamps, token.stamp), &arguments,
                                                                &argument_count, result);
                         if (!invoked)
                         {
@@ -4527,20 +4567,20 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CSpellingSpace* space, 
                                 .invocation = token,
                                 .argument_count = argument_count,
                             };
-                            CMacroExpansionContext* child = c_macro_continuation_advance(arena, first_macro, symbols, space->base, continuation);
+                            CMacroExpansionContext* child = c_macro_continuation_advance(arena, first_macro, symbols, space->base, continuation, &tasks);
                             if (child)
                             {
                                 context = child;
                             }
                             else
                             {
-                                ok = c_macro_materialize(arena, space, first_macro, macro, arguments, argument_count, token, stamps, result, context);
+                                ok = c_macro_materialize(arena, space, first_macro, macro, arguments, argument_count, token, stamps, result, context, &tasks);
                                 done = !ok;
                             }
                         }
                         else
                         {
-                            ok = c_macro_materialize(arena, space, first_macro, macro, arguments, argument_count, token, stamps, result, context);
+                            ok = c_macro_materialize(arena, space, first_macro, macro, arguments, argument_count, token, stamps, result, context, &tasks);
                             done = !ok;
                         }
                     }

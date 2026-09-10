@@ -95,6 +95,12 @@ independent legacy mutable-register and pressure-census contracts.
 - Keep the frontend pipeline explicit: source loading and preprocessing,
   parsing and semantic construction, then canonical-IR lowering. Do not add a
   parallel frontend-specific IR or route code generation around canonical IR.
+- Macro expansion uses one growable LIFO task array per expansion call. Each
+  argument context records a task-index floor; lookahead and argument collection
+  must not pop below it into suspended parent work. Store indices, never pointers
+  across batch pushes that may grow the array. An ENABLE marker remains below
+  its replacement batch, and refused identifiers retain `no_expand` on rescans.
+  Output nodes and source-stamp ownership are independent of task storage.
 - Macro placemarkers survive the entire `##` sequence. The replacement loop
   compacts into its existing materialized buffer and removes placemarkers only
   when emitting the rescan tokens. Only the explicitly marked GNU
