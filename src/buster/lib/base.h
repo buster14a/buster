@@ -619,7 +619,8 @@ typedef enum IntegerFormat
 
 #define BUSTER_SLICE_IS_ZERO_TERMINATED(s) (((s).pointer[(s).length]) == 0)
 
-#if BUSTER_APPLE == 0
+// Kernel headers cannot depend on hosted Unicode conversion declarations.
+#if BUSTER_APPLE == 0 && BUSTER_KERNEL == 0
 #include <uchar.h>
 #else
 typedef char char8_t;

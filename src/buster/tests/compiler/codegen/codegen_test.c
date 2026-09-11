@@ -827,12 +827,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_verify_invariants(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("extern int remote(int); extern int remote_data; int local_data;\n"
+                       "int local(int x) { return x + 1; }\n"
+                       "int (*local_pointer(void))(int) { return local; }\n"
+                       "int (*remote_pointer(void))(int) { return remote; }\n"
+                       "int *local_address(void) { return &local_data; }\n"
+                       "int *remote_address(void) { return &remote_data; }\n"
+                       "int direct(int x) { return remote(x); }\n");
+    OperatingSystem systems[] = {OPERATING_SYSTEM_MACOS, OPERATING_SYSTEM_IOS, OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = {.cpu_arch = CPU_ARCH_AARCH64, .os = systems[system]};
+        bool darwin = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("symbol-addresses.c"), tokens, parsed, target);
+        BUSTER_TEST(arguments, tokens.error_count == 0 && parsed.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
+        for (u32 allocator = 0; lowered.program && allocator < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; allocator += 1)
+        {
+            CodegenModule generated = codegen_generate_canonical_module(temporary.arena, lowered.program, lowered.program->modules, target,
+                (CodegenModuleOptions){.register_allocator = (u8)allocator, .verify_invariants = true});
+            BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.statistics.fallback_function_count == 0);
+            BUSTER_TEST(arguments, generated.statistics.fallback_reason_counts[CODEGEN_FALLBACK_TARGET_EXCLUDED] == 0);
+            u32 pages = 0;
+            u32 lows = 0;
+            u32 absolutes = 0;
+            u32 calls = 0;
+            for (u32 index = 0; generated.error == CODEGEN_ERROR_NONE && index < generated.relocation_count; index += 1)
+            {
+                CodegenModuleRelocation* relocation = generated.relocations + index;
+                bool high = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21;
+                bool low = relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12;
+                pages += high;
+                lows += low;
+                absolutes += relocation->kind == CODEGEN_MODULE_RELOCATION_ABSOLUTE64;
+                calls += relocation->kind == CODEGEN_MODULE_RELOCATION_AARCH64_CALL26;
+                if (high || low)
+                {
+                    bool fits = relocation->offset <= generated.code.length && 4 <= generated.code.length - relocation->offset;
+                    BUSTER_TEST(arguments, fits && relocation->aarch64 && !relocation->absolute && !relocation->is_thread_local);
+                    if (fits)
+                    {
+                        u32 word = 0;
+                        memcpy(&word, generated.code.pointer + relocation->offset, sizeof(word));
+                        // Independent instruction masks require zero relocation
+                        // immediates and one destination/base register in ADD.
+                        BUSTER_TEST(arguments, high ? (word & UINT32_C(0xffffffe0)) == UINT32_C(0x90000000)
+                                                     : (word & UINT32_C(0xfffffc00)) == UINT32_C(0x91000000) &&
+                                                       (word & 31u) == ((word >> 5) & 31u));
+                    }
+                    if (high)
+                    {
+                        CodegenModuleRelocation* next = index + 1 < generated.relocation_count ? relocation + 1 : 0;
+                        BUSTER_TEST(arguments, next && next->kind == CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12 &&
+                            next->symbol.value == relocation->symbol.value && next->offset == relocation->offset + 4);
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, calls == 1);
+            BUSTER_TEST(arguments, darwin ? pages == 4 && lows == 4 && absolutes == 0 : pages == 0 && lows == 0 && absolutes == 4);
+            if (generated.error == CODEGEN_ERROR_NONE)
+            {
+                ObjectFile object = object_from_canonical_codegen_module(temporary.arena, lowered.program, &generated, target);
+                BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE);
+                ObjectArtifact written = object_write(temporary.arena, &object, object_format_for_target(target));
+                BUSTER_TEST(arguments, written.error == OBJECT_ERROR_NONE && written.bytes.length != 0);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_scalars(arguments);
+    UnitTestResult local_aggregates = codegen_test_ebpf_local_aggregates(arguments);
+    result.succeeded_test_count += local_aggregates.succeeded_test_count;
+    result.test_count += local_aggregates.test_count;
     UnitTestResult verification = codegen_test_verify_invariants(arguments);
     result.succeeded_test_count += verification.succeeded_test_count;
     result.test_count += verification.test_count;
+    UnitTestResult symbol_addresses = codegen_test_aarch64_symbol_addresses(arguments);
+    result.succeeded_test_count += symbol_addresses.succeeded_test_count;
+    result.test_count += symbol_addresses.test_count;
     UnitTestResult executable_data = codegen_test_executable_data_copy(arguments);
     result.succeeded_test_count += executable_data.succeeded_test_count;
     result.test_count += executable_data.test_count;
@@ -1190,7 +1272,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, i128_count_codegen.error == CODEGEN_ERROR_NONE);
     }
     String8 canonical_windows_c_source = S8(
-        "typedef void *va_list;\n"
+        "typedef __builtin_va_list va_list;\n"
         "struct Pair { int left; int right; };\n"
         "struct Big { long long first; long long second; long long third; };\n"
         "static int sum_pair(struct Pair value) { return value.left + value.right; }\n"
@@ -1726,7 +1808,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     TargetDataLayout aarch64_windows_layout = target_data_layout(aarch64_windows_target);
     BUSTER_TEST(arguments, aarch64_windows_layout.va_list.size == 8);
     String8 aarch64_windows_variadic_source = S8(
-        "typedef void *va_list;\n"
+        "typedef __builtin_va_list va_list;\n"
         "static long sum_many(int count, ...) {\n"
         "    va_list arguments; va_list copy; long total = 0;\n"
         "    __builtin_va_start(arguments, count); __builtin_va_copy(copy, arguments);\n"

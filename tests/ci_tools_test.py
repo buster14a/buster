@@ -9,12 +9,15 @@ import shutil
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+import ci_pack_evidence
 import ci_summary
 import ci_zig
 import github_ci_time
@@ -162,12 +165,161 @@ class SummaryTests(unittest.TestCase):
             ci_summary.write_report({"BUSTER_CI_STEPS": "{}"})
 
 
+class EvidencePackTests(unittest.TestCase):
+    KEEP = {
+        "modes.log": b"modes\n",
+        "result.json": b'{"success": true}\n',
+        "summary.md": b"## Buster CI\n",
+        ".hidden.log": b"dotfiles are evidence too\n",
+        "program": b"outside differential/\n",
+        "other/subject.o": b"outside differential/\n",
+        "differential/processes.tsv": b"phase\telapsed_us\n",
+        "differential/case/config/link.argv": b"clang\0-O0\0subject.o\0",
+        "differential/case/config/run.stderr": b"",
+        "differential/case/config/program.log": b"not a generated program\n",
+        "differential/subject.o.extra": b"not a generated object\n",
+        "differential/nested case/with spaces/run.stdout": b"\x00\xff binary\n",
+        "differential/" + "d" * 60 + "/" + "f" * 60 + ".stdout": b"beyond the ustar name limit\n",
+    }
+    GENERATED = ("differential/program", "differential/subject.o",
+                 "differential/case/config/program", "differential/nested case/with spaces/subject.o")
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        # Laid out like RUNNER_TEMP so the workflow's own command can run here.
+        self.root = Path(self.temporary.name) / "runner temp"
+        self.source = self.root / "buster-ci"
+        self.output = self.root / "native-ci-upload"
+        for name, data in list(self.KEEP.items()) + [(name, b"generated\n") for name in self.GENERATED]:
+            path = self.source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        (self.source / "differential/empty case").mkdir()
+
+    def members(self):
+        with tarfile.open(self.output / ci_pack_evidence.ARCHIVE, "r:gz") as bundle:
+            members = bundle.getmembers()
+            files = {member.name: bundle.extractfile(member).read() for member in members if member.isfile()}
+        return files, {member.name for member in members if member.isdir()}
+
+    def native_steps(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        native = text.split("\n  native:", 1)[1].split("\n  mobile:", 1)[0]
+        return dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", native))
+
+    def test_archive_round_trips_every_retained_file_and_only_excludes_generated_outputs(self):
+        self.assertEqual(ci_pack_evidence.pack(self.source, self.output), (len(self.KEEP), len(self.GENERATED)))
+        files, directories = self.members()
+        self.assertEqual(files, {"buster-ci/" + name: data for name, data in self.KEEP.items()})
+        self.assertIn("buster-ci/differential/empty case", directories)
+        self.assertEqual(sorted(path.name for path in self.output.iterdir()),
+                         sorted((ci_pack_evidence.ARCHIVE,) + ci_pack_evidence.SUMMARIES))
+        for name in ci_pack_evidence.SUMMARIES:
+            self.assertEqual((self.output / name).read_bytes(), self.KEEP[name])
+        # The original tree stays on disk for any later step.
+        for name in list(self.KEEP) + list(self.GENERATED):
+            self.assertTrue((self.source / name).is_file())
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits")
+    def test_permission_bits_are_retained(self):
+        script = self.source / "differential/case/reproduce.sh"
+        script.write_bytes(b"#!/bin/sh\n")
+        script.chmod(0o755)
+        ci_pack_evidence.pack(self.source, self.output)
+        with tarfile.open(self.output / ci_pack_evidence.ARCHIVE, "r:gz") as bundle:
+            self.assertEqual(bundle.getmember("buster-ci/differential/case/reproduce.sh").mode, 0o755)
+
+    def test_missing_input_overlapping_output_links_and_special_files_are_refused(self):
+        with self.assertRaisesRegex(ValueError, "missing evidence"):
+            ci_pack_evidence.pack(self.root / "absent", self.output)
+        result = subprocess.run([sys.executable, str(ROOT / "tools/ci_pack_evidence.py"),
+                                 "--source", str(self.root / "absent"), "--output", str(self.output)],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing evidence directory", result.stderr)
+        for output in (self.source, self.source / "upload", self.root):
+            with self.subTest(output=output), self.assertRaisesRegex(ValueError, "separate"):
+                ci_pack_evidence.pack(self.source, output)
+        if hasattr(os, "mkfifo"):
+            fifo = self.source / "differential/fifo"
+            os.mkfifo(fifo)
+            with self.assertRaisesRegex(ValueError, "special file"):
+                ci_pack_evidence.pack(self.source, self.output)
+            fifo.unlink()
+        try:
+            os.symlink(self.root / "outside", self.source / "differential/link")
+        except (OSError, NotImplementedError):
+            self.skipTest("symbolic links are unavailable to this user")
+        with self.assertRaisesRegex(ValueError, "symbolic link"):
+            ci_pack_evidence.pack(self.source, self.output)
+        self.assertFalse((self.output / ci_pack_evidence.ARCHIVE).exists())
+
+    def test_failed_write_leaves_no_stale_or_partial_upload(self):
+        self.output.mkdir(parents=True)
+        for name in (ci_pack_evidence.ARCHIVE,) + ci_pack_evidence.SUMMARIES:
+            (self.output / name).write_bytes(b"stale from an earlier pack")
+        with mock.patch.object(ci_pack_evidence.tarfile.TarFile, "addfile", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                ci_pack_evidence.pack(self.source, self.output)
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_verification_rejects_changed_missing_and_extra_members(self):
+        ci_pack_evidence.pack(self.source, self.output)
+        archive = self.output / ci_pack_evidence.ARCHIVE
+        files, directories = self.members()
+        digests = {name: hashlib.sha256(data).digest() for name, data in files.items()}
+        ci_pack_evidence.verify(archive, digests, directories)
+        changed = dict(digests)
+        changed["buster-ci/modes.log"] = hashlib.sha256(b"different bytes").digest()
+        missing = dict(digests)
+        del missing["buster-ci/modes.log"]
+        extra = dict(digests)
+        extra["buster-ci/unpacked.log"] = hashlib.sha256(b"").digest()
+        for expected, folders in ((changed, directories), (missing, directories), (extra, directories),
+                                  (digests, directories - {"buster-ci/differential/empty case"})):
+            with self.subTest(), self.assertRaisesRegex(ValueError, "differ"):
+                ci_pack_evidence.verify(archive, expected, folders)
+
+    def test_workflow_packs_after_the_summary_and_never_loses_evidence(self):
+        steps = self.native_steps()
+        self.assertEqual(list(steps)[-4:], ["Native result and reproduction", "Pack native logs",
+                                            "Retain native logs", "Retain unpacked native logs"])
+        pack, packed, unpacked = (steps[name] for name in (
+            "Pack native logs", "Retain native logs", "Retain unpacked native logs"))
+        self.assertIn("id: pack\n", pack)
+        self.assertIn("if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}", pack)
+        self.assertIn("if: ${{ !cancelled() && steps.pack.outcome == 'success' }}", packed)
+        # Exactly one upload runs: the archive, or the original tree after a failed pack.
+        self.assertIn("if: ${{ !cancelled() && steps.pack.outcome != 'success' }}", unpacked)
+        artifact = "name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}\n"
+        for block in (packed, unpacked):
+            self.assertIn(artifact, block)
+            self.assertIn("retention-days: 7\n", block)
+        self.assertIn("path: ${{ runner.temp }}/native-ci-upload/\n", packed)
+        self.assertIn("compression-level: 0\n", packed)
+        self.assertIn("if-no-files-found: error\n", packed)
+        self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/program\n", unpacked)
+        self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/subject.o\n", unpacked)
+        self.assertEqual(ci_pack_evidence.GENERATED, frozenset(("program", "subject.o")))
+
+    @unittest.skipIf(os.name == "nt", "Native lanes run only on Unix")
+    def test_actual_workflow_command_packs_runner_evidence(self):
+        command = re.search(r"(?m)^        run: (.+)$", self.native_steps()["Pack native logs"]).group(1)
+        environment = dict(os.environ, RUNNER_TEMP=str(self.root))
+        result = subprocess.run(["bash", "--noprofile", "--norc", "-c", command], cwd=ROOT,
+                                env=environment, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        files, _ = self.members()
+        self.assertEqual(set(files), {"buster-ci/" + name for name in self.KEEP})
+
+
 
 class WorkflowPolicyTests(unittest.TestCase):
     def test_all_six_platforms_and_commands_remain(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         names = re.findall(r"^          - name: (.+)$", text, re.M)
-        self.assertEqual(sorted(names), sorted(github_ci_time.PLATFORMS + github_ci_time.MOBILE))
+        self.assertEqual(sorted(names), sorted(github_ci_time.PLATFORMS + github_ci_time.MOBILE + github_ci_time.NATIVE))
         self.assertIn("fail-fast: false", text)
         self.assertIn("test_all_combinations_ci --verbose=1", text)
         self.assertIn("test_mode_matrix --config Release", text)
@@ -201,8 +353,171 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("steps.combinations_", condition)
         mobile = text.split("\n  mobile:", 1)[1].split("\n  complete:", 1)[0]
         self.assertNotIn("needs:", mobile)
-        self.assertIn("needs: [lint, test, mobile]", text)
+        self.assertIn("needs: [lint, test, native, mobile]", text)
         self.assertIn("github.run_id", text.split("concurrency:", 1)[1].split("permissions:", 1)[0])
+
+    def test_native_suites_are_independent_and_keep_all_four_unix_runners(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        desktop = text.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
+        native = text.split("\n  native:", 1)[1].split("\n  mobile:", 1)[0]
+        self.assertNotIn("needs:", native)
+        self.assertNotIn("test_mode_matrix", desktop)
+        self.assertNotIn("test_differential", desktop)
+        self.assertNotIn("test_all_combinations_ci", native)
+        self.assertIn("fail-fast: false", native)
+        self.assertNotIn("actions/download-artifact", native)
+        self.assertIn("BUSTER_CI_REQUIRED: modes differential", native)
+        entries = re.findall(r"(?m)^          - name: (.+)\n            runner: (.+)$", native)
+        self.assertEqual(entries, list(zip(github_ci_time.NATIVE, (
+            "ubuntu-26.04", "ubuntu-26.04-arm", "macos-26-intel", "macos-26"))))
+        for suite in ("modes", "differential"):
+            condition = re.search(r"id: " + suite + r"\n        if: (.+)", native).group(1)
+            self.assertIn("!cancelled()", condition)
+            self.assertIn("steps.checkout.outcome == 'success'", condition)
+            self.assertNotIn("steps.modes", condition)
+            self.assertNotIn("steps.combinations", condition)
+        self.assertEqual(native.count('"$driver" generate --cc clang --config Release --linker DEFAULT'), 2)
+        self.assertIn('if [[ ! -f build/CMakeCache.txt ]]; then', native)
+        self.assertIn('"$driver" test_differential --self-test', native)
+        self.assertIn('"$driver" test_differential --ide build/Release/ide '
+                      '--out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle', native)
+        self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/program", native)
+        self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/subject.o", native)
+
+    def test_platform_and_bootstrap_events_cover_the_same_revisions(self):
+        expected = ("  pull_request:", "  push:", "    branches: [main]",
+                    "    tags: ['**']", "  merge_group:",
+                    "    types: [checks_requested]", "  workflow_dispatch:")
+        for name in ("ci.yml", "self-host-audit.yml"):
+            with self.subTest(workflow=name):
+                text = (ROOT / ".github/workflows" / name).read_text()
+                block = re.search(r"(?ms)^on:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", text)
+                self.assertIsNotNone(block)
+                lines = tuple(line.rstrip() for line in block.group(1).splitlines()
+                              if line.strip() and not line.lstrip().startswith("#"))
+                self.assertEqual(lines, expected)
+                # Default checkout is the PR/merge-group merge revision, not
+                # an independently selected head or a stale branch ref.
+                self.assertNotRegex(text, r"(?m)^\s+(ref|repository):")
+
+    def test_bootstrap_cancellation_is_isolated_by_workflow_and_event(self):
+        suffix = ("${{ github.workflow }}-${{ github.event_name }}-"
+                  "${{ github.event_name == 'pull_request' && github.event.pull_request.number || "
+                  "github.event_name == 'merge_group' && github.ref || github.run_id }}")
+        cancel = "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}"
+        for name, prefix in (("ci.yml", "ci-"), ("self-host-audit.yml", "bootstrap-")):
+            with self.subTest(workflow=name):
+                text = (ROOT / ".github/workflows" / name).read_text()
+                block = re.search(r"(?ms)^concurrency:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", text)
+                self.assertIsNotNone(block)
+                lines = tuple(line.strip() for line in block.group(1).splitlines()
+                              if line.strip() and not line.lstrip().startswith("#"))
+                self.assertEqual(lines, ("group: " + prefix + suffix, "cancel-in-progress: " + cancel))
+
+    def test_bootstrap_keeps_every_native_gate_in_order(self):
+        text = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
+        commands = re.findall(r"(?m)^        run: '\"\$RUNNER_TEMP/buster-build\" (.+)'$", text)
+        self.assertEqual(commands, [
+            "self_host_audit_self_test",
+            "generate --cc clang --ci --linker DEFAULT",
+            "test_self_host --config Release",
+            "test_self_host_audit --config Release",
+            "build --config Release -t test_all",
+        ])
+        gates = text[text.index("      - name: Test the bootstrap checker"):].split(
+            "      - name: Retain stage evidence even on failure", 1)[0]
+        self.assertNotRegex(gates, r"(?m)^\s*continue-on-error:")
+        blocks = re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", gates)
+        self.assertEqual([name for name, _ in blocks], [
+            "Test the bootstrap checker",
+            "Configure production compiler",
+            "Preserve ordinary bootstrap and alternate-backend gates",
+            "Verify each generation and repeat",
+            "Run compiler regressions",
+            "Check the bootstrap probe against independent compiler oracles",
+        ])
+        evidence_gates = {
+            "Run compiler regressions",
+            "Check the bootstrap probe against independent compiler oracles",
+        }
+        for name, block in blocks:
+            with self.subTest(gate=name):
+                conditions = re.findall(r"(?m)^        if: (.+)$", block)
+                # These two independent results survive an audit failure, but
+                # cannot run before ordinary bootstrap or after cancellation.
+                expected = (["${{ !cancelled() && steps.ordinary_bootstrap.outcome == 'success' }}"]
+                            if name in evidence_gates else [])
+                self.assertEqual(conditions, expected)
+        self.assertIn("        id: ordinary_bootstrap\n", dict(blocks)[
+            "Preserve ordinary bootstrap and alternate-backend gates"])
+        oracle = dict(blocks)["Check the bootstrap probe against independent compiler oracles"]
+        self.assertIn('"$RUNNER_TEMP/buster-build" test_differential --self-test', oracle)
+        self.assertIn('"$RUNNER_TEMP/buster-build" test_differential --ide build/Release/ide '
+                      '--cc clang --source tests/self_host_bootstrap_probe.c --sanitize-oracle '
+                      '--out build/self-host-audit/probe-oracle', oracle)
+        self.assertNotIn("needs:", text)
+        self.assertIn("name: Linux x86-64 bootstrap evidence", text)
+        self.assertIn("runs-on: ubuntu-26.04", text)
+        self.assertIn("timeout-minutes: 30", text)
+        self.assertNotIn("secrets.", text)
+        self.assertNotRegex(text, r"(?m)^\s*[^#\n]+: write$")
+        artifact = text.split("      - name: Retain stage evidence even on failure", 1)[1]
+        self.assertIn("name: bootstrap-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}", artifact)
+        self.assertIn("if: ${{ !cancelled() }}", artifact)
+        self.assertNotIn("always()", artifact)
+
+    def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        aggregate = text.split("\n  complete:", 1)[1]
+        self.assertIn("needs: [lint, test, native, mobile]", aggregate)
+        self.assertIn("always()", aggregate)
+        # Execute the workflow's real shell body, not a Python copy of its
+        # predicate. Subshells contain its exit statements; all 625 outcomes
+        # include empty/missing dependency results as well as terminal states.
+        body = aggregate.split("        run: |\n", 1)[1]
+        body = textwrap.dedent(body)
+        with tempfile.TemporaryDirectory() as temporary:
+            gate = Path(temporary) / "aggregate.sh"
+            gate.write_bytes(body.encode("utf-8"))
+            environment = dict(os.environ, BUSTER_CI_GATE=gate.as_posix(),
+                               GITHUB_STEP_SUMMARY=(Path(temporary) / "summary.md").as_posix())
+            script = r"""
+set -eu
+checked=0
+for LINT_RESULT in success failure cancelled skipped ''; do
+  for DESKTOP_RESULT in success failure cancelled skipped ''; do
+    for NATIVE_RESULT in success failure cancelled skipped ''; do
+     for MOBILE_RESULT in success failure cancelled skipped ''; do
+      export LINT_RESULT DESKTOP_RESULT NATIVE_RESULT MOBILE_RESULT
+      actual=0
+      ( . "$BUSTER_CI_GATE" ) >/dev/null 2>&1 || actual=$?
+      if [[ "$LINT_RESULT" == success && "$DESKTOP_RESULT" == success && "$NATIVE_RESULT" == success && "$MOBILE_RESULT" == success ]]; then
+        [[ "$actual" -eq 0 ]] || exit 1
+      else
+        [[ "$actual" -ne 0 ]] || exit 1
+      fi
+      checked=$((checked + 1))
+     done
+    done
+  done
+done
+printf '%s\n' "$checked"
+"""
+            # Windows CreateProcess can choose System32/bash.exe (WSL)
+            # before PATH. Use an absolute shell path; on Windows select
+            # the installed Git Bash, not an unrelated WSL distribution.
+            bash = shutil.which("bash")
+            if os.name == "nt":
+                git = shutil.which("git")
+                self.assertIsNotNone(git, "Git for Windows is a CI prerequisite")
+                bash = next((str(parent / "bin/bash.exe")
+                             for parent in Path(git).resolve().parents
+                             if (parent / "bin/bash.exe").is_file()), None)
+            self.assertIsNotNone(bash, "Bash is a CI prerequisite")
+            result = subprocess.run([bash, "--noprofile", "--norc", "-c", script], env=environment,
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.strip(), "625")
 
     @unittest.skipIf(os.name == "nt", "The failure-propagation probe uses the Unix Clang driver")
     def test_recoverable_ubsan_error_is_fatal_with_ci_environment(self):
@@ -271,6 +586,48 @@ class TimingTests(unittest.TestCase):
             run = self.sharded_sample()
             run["jobs"].pop(index)
             self.assertIsNone(github_ci_time.measure(run)[0])
+
+    def suite_sample(self):
+        run = self.sharded_sample()
+        for job in run["jobs"]:
+            job["steps"] = [step for step in job["steps"] if step["name"] != "Execution-mode matrix"]
+        for name in github_ci_time.NATIVE:
+            job = copy.deepcopy(run["jobs"][0])
+            job["name"] = name
+            job["steps"] = [{"name": step, "conclusion": "success"} for step in (
+                "Execution-mode matrix", "Native configuration differential matrix")]
+            run["jobs"].append(job)
+        return run
+
+    def test_suite_matrix_counts_all_fifteen_jobs(self):
+        sample, reason = github_ci_time.measure(self.suite_sample())
+        self.assertIsNone(reason)
+        self.assertEqual(sample["runner_seconds"], 900)
+        report = github_ci_time.summarize({"runs": [self.sharded_sample(),
+            dict(self.suite_sample(), id=2)]})
+        self.assertEqual(len(report["cohorts"]), 2)
+
+    def test_suite_matrix_rejects_missing_duplicate_failed_and_skipped_coverage(self):
+        for index in range(len(github_ci_time.SUITE_JOBS)):
+            run = self.suite_sample()
+            run["jobs"].pop(index)
+            self.assertIsNone(github_ci_time.measure(run)[0])
+            run = self.suite_sample()
+            run["jobs"].append(copy.deepcopy(run["jobs"][index]))
+            self.assertIsNone(github_ci_time.measure(run)[0])
+            for conclusion in ("failure", "cancelled", "skipped", None):
+                run = self.suite_sample()
+                run["jobs"][index]["conclusion"] = conclusion
+                self.assertIsNone(github_ci_time.measure(run)[0])
+        for index in range(len(github_ci_time.SHARDED_JOBS), len(github_ci_time.SUITE_JOBS)):
+            for step in range(2):
+                for conclusion in ("failure", "cancelled", "skipped", None):
+                    run = self.suite_sample()
+                    run["jobs"][index]["steps"][step]["conclusion"] = conclusion
+                    self.assertIsNone(github_ci_time.measure(run)[0])
+                run = self.suite_sample()
+                run["jobs"][index]["steps"].pop(step)
+                self.assertIsNone(github_ci_time.measure(run)[0])
 
     def test_known_median_and_queue_are_separate(self):
         data = {"runs": [self.sample(1, 40), self.sample(2, 60), self.sample(3, 80)]}

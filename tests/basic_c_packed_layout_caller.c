@@ -99,9 +99,7 @@ int main(void)
     built_cross.tail = 'd';
     if (packed_layout_bit_cross_sum(built_cross) != 2000000LL + 800000 + 54321 + 'd') return 46;
 
-    // A named bit-field merges INTEGER into the eightbyte the float already
-    // claimed and an unnamed one does not, so the first record rides a
-    // general-purpose register and the second rides `xmm0`.
+    // Both directions use the measured host unnamed-field convention.
     struct packed_bit_named_record named = packed_layout_make_bit_named(2.5f, -3);
     if (named.lead != 2.5f || named.value != -3) return 47;
     struct packed_bit_named_record built_named;
@@ -114,6 +112,10 @@ int main(void)
     struct packed_bit_padded_record built_padded;
     built_padded.lead = -8.5f;
     if (packed_layout_bit_padded_lead(built_padded) != -8.5f) return 50;
+    struct packed_bit_padded_record neighbors = packed_layout_bit_padded_neighbors(19, built_padded, 23, 3.25f, 5.5f);
+    if (neighbors.lead != 42.25f) return 91;
+    struct packed_bit_padded_record guarded = packed_layout_bit_padded_register_result();
+    if (guarded.lead != 45.25f) return 92;
 
     packed_layout_fill_aligned_object('m');
     if (packed_layout_aligned_object[0] != 'm' || packed_layout_aligned_object[1] != 'n' ||

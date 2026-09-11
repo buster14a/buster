@@ -33,9 +33,11 @@
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #include <buster/lib/compiler/assembly/x86_64_completion_census.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/compiler/codegen/register_allocator_quality_internal.h>
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/compiler/jit/jit.h>
 #include <buster/lib/compiler/link/link.h>
@@ -829,6 +831,8 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
 {
 #if BUSTER_BENCH_ALLOCATIONS
     ArenaBenchmarkCounters allocations = arena_benchmark_counters();
+    MachineQualityCensus quality = machine_quality_census_snapshot();
+    IrConstructionCounters construction = ir_construction_counters();
 #endif
     String8 text = {0};
     source_metrics_append_line(&text, string_format(arena, S8("version={u32}\n"), (u32)SOURCE_METRICS_FILE_VERSION));
@@ -843,6 +847,17 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
 #if BUSTER_BENCH_ALLOCATIONS
     source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_calls"), allocations.calls);
     source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_bytes"), allocations.requested_bytes);
+    source_metrics_append_field(arena, &text, S8("quality_census"), S8("version"), 1);
+#define BUSTER_QUALITY_WRITE_FIELD(name) source_metrics_append_field(arena, &text, S8("quality_census"), S8(#name), quality.name);
+    BUSTER_QUALITY_CENSUS_FIELDS(BUSTER_QUALITY_WRITE_FIELD)
+#undef BUSTER_QUALITY_WRITE_FIELD
+    source_metrics_append_field(arena, &text, S8("ir_construction"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("ir_construction"), S8("overflowed"), construction.overflowed);
+    for (u32 index = 0; index < IR_CONSTRUCTION_COUNT; index += 1)
+    {
+        source_metrics_append_field(arena, &text, S8("ir_construction"), ir_construction_counter_name((IrConstructionCounter)index),
+                                    construction.values[index]);
+    }
 #endif
     return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
 }
@@ -928,6 +943,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                      p.candidate_locals, p.promoted_locals, p.removed_loads, p.removed_stores,
                      p.inserted_parameters, p.removed_parameters, p.uninitialized_locals, p.barrier_functions,
                      p.instructions_before, p.instructions_after, p.values_before, p.values_after);
+        string_print(S8("IR_LOCAL_PROMOTION_WORK parameter_sweeps={u64} block_visits={u64} parameter_visits={u64} incoming_visits={u64}\n"),
+                     p.parameter_sweeps, p.parameter_block_visits, p.parameter_visits, p.parameter_incoming_visits);
     }
     if (compile.error == COMPILER_DRIVER_ERROR_NONE && invocation.verbose && compile.codegen_statistics.function_count)
     {

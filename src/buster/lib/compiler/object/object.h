@@ -114,6 +114,9 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21,
     OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12,
     OBJECT_RELOCATION_AARCH64_JUMP26,
+    // Ordinary ELF address relocations have distinct REL/RELA addend rules.
+    OBJECT_RELOCATION_AARCH64_ELF_PAGE21,
+    OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12,
     OBJECT_RELOCATION_AARCH64_MACH_PAGE21,
     OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
     // The position-independent code model's own form: R_X86_64_GOTPCREL
@@ -257,6 +260,7 @@ BUSTER_F_DECL ObjectArtifact object_write(Arena* arena, ObjectFile* object, Obje
 BUSTER_F_DECL ObjectFile object_read(Arena* arena, ByteSlice bytes, Target target);
 BUSTER_F_DECL ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, Target target);
 BUSTER_F_DECL ObjectExecutable object_link_executable(ObjectFile* object);
+BUSTER_F_DECL bool object_aarch64_elf_page_relocate(ObjectRelocationKind kind, u32 word, u64 place, u64 target, s64 addend, u32* patched);
 BUSTER_F_DECL void object_release_executable(ObjectExecutable executable);
 
 #if BUSTER_FUZZ_AVAILABLE

@@ -32,7 +32,7 @@ struct SmallPair
     int right;
 };
 
-typedef void* va_list;
+typedef __builtin_va_list va_list;
 
 static struct Mixed make_mixed(double value, int count)
 {
