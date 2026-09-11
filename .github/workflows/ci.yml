@@ -344,8 +344,29 @@ jobs:
           BUSTER_CI_REPRO: See docs/ci-suite-partition.md for the native suite commands and coverage contract.
         run: python3 tools/ci_summary.py
 
+      # The differential runner writes tens of thousands of tiny evidence files;
+      # uploading each as an artifact entry was a measured tail (#409). Pack
+      # them once and verify the archive; verdicts stay readable beside it.
+      - name: Pack native logs
+        id: pack
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        shell: bash
+        run: python3 tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"
+
       - name: Retain native logs
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-ci-upload/
+          # The archive is already gzip-compressed.
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+
+      # A packing failure already fails this lane; still retain the original tree.
+      - name: Retain unpacked native logs
+        if: ${{ !cancelled() && steps.pack.outcome != 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}

@@ -71,8 +71,10 @@ No build tree, compiler binary, SDK state or test verdict is cached or shared.
 A mode failure does not suppress the independent differential step. That step
 retains its self-test and missing-CMake-cache recovery before building `ide`.
 Summaries explicitly require both results. Native evidence moves to its own
-run/attempt-qualified `native-*` artifact; retention and the existing program
-and subject-object exclusions are unchanged. Failed work is never made optional.
+run/attempt-qualified `native-*` artifact with unchanged seven-day retention
+and program/subject-object exclusions, packed as described in
+[native evidence packaging](#native-evidence-packaging). Failed work is never
+made optional.
 
 ## Reproduction on the matching Unix image
 
@@ -121,6 +123,47 @@ It does not increase concurrency inside a runner or claim lower aggregate cost.
 No matched timing cohorts or hosted candidate validation are supplied by this
 document; those results must be inspected on the submitted PR revision.
 
+## Native evidence packaging
+
+Refs [#409](https://github.com/buster14a/buster/issues/409). The differential
+runner writes one small file per child phase. The retained Intel macOS
+evidence from job 103010636405 holds 52,072 files and 9,704,041 payload bytes;
+its per-file artifact ZIP was 14,676,739 bytes and took 130 s to upload after
+every test had finished. On this layout's first hosted run,
+[job 103052446729](https://github.com/buster14a/buster/actions/runs/34531119949/job/103052446729)
+still spent 123 s in `Retain native logs` at the end of the longest lane
+(25-34 s on the other three native lanes).
+
+After the native summary, `Pack native logs` runs `tools/ci_pack_evidence.py`,
+also after failed tests but never after cancellation. The `native-*` artifact
+then holds `native-ci-logs.tar.gz` plus copies of `result.json` and
+`summary.md`, so the verdict is readable without unpacking. It is uploaded
+with `compression-level: 0` because the archive is already compressed.
+
+- **Contents.** Every regular file under `buster-ci/`, byte-exact, including
+  empty files, NUL-delimited `.argv` files and dotfiles (the per-file upload
+  skipped hidden files). Permission bits, whole-second modification times and
+  empty directories are kept; owner names are not. As before, only generated
+  `differential/**/program` and `differential/**/subject.o` are left out.
+- **Refusals.** A missing tree, an output directory inside or around the tree,
+  and any symbolic link or special file fail the step. Files are opened
+  without following links.
+- **Verification.** The tool re-reads the finished archive and requires the
+  exact member set and every file's SHA-256 before renaming it into place.
+  Stale or partial archives are removed first and never published.
+- **Failure.** A packing failure fails the lane, and `Retain unpacked native
+  logs` uploads the original tree with the old exclusions under the same
+  artifact name.
+
+Unpack with `tar -xzf native-ci-logs.tar.gz`; files land under `buster-ci/`.
+
+Local check on that complete retained 52,072-file tree (Linux, Python 3.14):
+the archive is 898,450 bytes, 93.9% below the ZIP; packing plus verification
+took 5.0-5.3 s in warm repeated runs; GNU tar and libarchive `bsdtar` both
+extract a tree identical to the source under `diff -r`. This is not a hosted
+macOS measurement. Accept the change only after comparing `Pack native logs`
+plus `Retain native logs` with the previous upload step in matched runs.
+
 ## Remaining bottlenecks
 
 The differential loop is now the largest independent lane. Profile its existing
@@ -131,8 +174,8 @@ already run once per case, not once per configuration. Repeated compilation of
 the unchanged ABI host translation unit inside candidate links is a separate
 work-elimination candidate, requiring full source/flags identity and controls.
 
-Artifact packaging is another measured tail: evaluate packing the many small
-evidence files into one archive while preserving all existing failure evidence.
-Neither parallelism nor packaging is implemented here. Internal combination
-sharding (#333), analyzer partitioning (#92) and full coverage manifests (#335)
-remain separately tracked; no issue is closed by the suite split alone.
+Case-level parallelism (#408) is not implemented here; per-case caller-object
+reuse is proposed separately in #412. Evidence packaging is described above
+(#409). Internal combination sharding (#333), analyzer partitioning (#92) and
+full coverage manifests (#335) remain separately tracked; no issue is closed
+by the suite split alone.

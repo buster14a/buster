@@ -237,7 +237,8 @@ unknown label, so keep the two in step when a runner changes.
 ## Helper validation and timing
 
 `python3 tests/ci_tools_test.py -v` exercises the archive installer, fail-closed
-summaries and timing collector on each desktop platform (`python` on Windows).
+summaries, native evidence packer and timing collector on each desktop platform
+(`python` on Windows).
 Unix runners also compile a tiny Clang probe to verify that recoverable UBSan
 diagnostics become fatal with `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`.
 The same environment applies to the compiler matrix; no sanitizer is suppressed.
@@ -250,9 +251,13 @@ in these configurations. Android and iOS SDK setup and test commands remain.
 
 Desktop, native and mobile summaries use `tools/ci_summary.py`, explicitly requiring each
 applicable suite. Missing, skipped, cancelled or failed work fails the summary.
-Diagnostic uploads do not start after cancellation. The aggregate `CI complete`
-requires all six desktop combination jobs, four native jobs, three mobile jobs
-and workflow lint.
+Diagnostic uploads do not start after cancellation. Native lanes upload one
+verified `native-ci-logs.tar.gz` beside `result.json` and `summary.md`, packed
+by `tools/ci_pack_evidence.py`; a packing failure fails the lane and uploads the
+unpacked tree instead. See
+[native evidence packaging](ci-suite-partition.md#native-evidence-packaging).
+The aggregate `CI complete` requires all six desktop combination jobs, four
+native jobs, three mobile jobs and workflow lint.
 
 The iOS launcher retains separate signing logs for each Debug/Release bundle
 and one shutdown log under `BUSTER_IOS_CONSOLE_LOG`; the GitHub mobile job
