@@ -238,9 +238,8 @@ def run(command, **keywords):
 def workload_command(arguments, output):
     """The command whose cache behaviour is being surveyed.
 
-    Stage 1 is reproduced from `self_host_compile_add` in `build.c` minus `-v`
-    and `-fsource-metrics`, neither of which changes what is measured.  It is
-    pinned to one core: the compile is single-threaded, and pinning removes the
+    Stage 1 includes the link and source metrics used by the audit workload.
+    It is pinned to one core: the compile is single-threaded, and pinning removes
     migrations that otherwise appear as cold-cache samples in whatever function
     happened to run first after the move.
     """
@@ -257,9 +256,12 @@ def workload_command(arguments, output):
             "-DBUSTER_UNITY_BUILD=1",
             "-DBUSTER_INCLUDE_TESTS=0",
             "-g",
+            "-v",
+            "-fsource-metrics=" + output + ".metrics",
+            UNITY_SOURCE,
+            "-lm",
             "-o",
             output,
-            UNITY_SOURCE,
         ]
     if arguments.cpu is not None:
         command = ["taskset", "-c", str(arguments.cpu)] + command
@@ -313,25 +315,46 @@ def parse_stat(text):
     return counts
 
 
+def run_measurement(command, capture=None):
+    """Reject failed workloads and remove incomplete or stale captures."""
+    if capture is not None and os.path.exists(capture):
+        os.unlink(capture)
+    completed = run(command)
+    if completed.returncode:
+        if capture is not None and os.path.exists(capture):
+            os.unlink(capture)
+        raise SystemExit(
+            f"error: {' '.join(command)} failed (exit {completed.returncode}):\n"
+            + completed.stdout
+        )
+    if capture is not None and (
+        not os.path.exists(capture) or os.path.getsize(capture) == 0
+    ):
+        if os.path.exists(capture):
+            os.unlink(capture)
+        raise SystemExit(f"error: perf produced no capture at {capture}")
+    return completed
+
+
 def measure_budget(arguments, output, groups):
     """Median counts per event over `--repeat` runs of the workload."""
     command = workload_command(arguments, output)
     samples = collections.defaultdict(list)
     for title, events in groups:
         for _ in range(arguments.repeat):
-            completed = run(
-                ["perf", "stat", "-e", "{" + ",".join(events) + "}", "--"] + command
+            completed = run_measurement(
+                ["perf", "stat", "-e", "{" + ",".join(events) + "}:u", "--"] + command
             )
             counts = parse_stat(completed.stdout)
-            if not counts:
-                print(
-                    f"warning: group '{title}' produced no counters; the events "
-                    "may not exist on this CPU (try --portable)",
-                    file=sys.stderr,
+            missing = [event for event in events if event not in counts]
+            if missing:
+                raise SystemExit(
+                    f"error: group '{title}' did not count {', '.join(missing)}; "
+                    "no valid budget (try --portable if these events are "
+                    f"unavailable on this CPU):\n{completed.stdout}"
                 )
-                break
-            for event, value in counts.items():
-                samples[event].append(value)
+            for event in events:
+                samples[event].append(counts[event])
     return {event: int(statistics.median(values)) for event, values in samples.items()}
 
 
@@ -624,28 +647,30 @@ def format_symbol_table(profiles, totals, order_key, limit):
 def record(arguments, output, events):
     """One capture per event; the workload is re-run for each."""
     command = workload_command(arguments, output)
+    # A new batch cannot reuse an old event or an old optional DWARF capture.
+    for event in events:
+        for suffix in ("data", "dwarf.data"):
+            path = os.path.join(arguments.out, f"{event.key}.{suffix}")
+            if os.path.exists(path):
+                os.unlink(path)
     for event in events:
         path = os.path.join(arguments.out, f"{event.key}.data")
-        completed = run(
-            ["perf", "record", "-e", event.event, "-c", str(event.period)]
+        run_measurement(
+            ["perf", "record", "-e", event.event + ":u", "-c", str(event.period)]
             + ["-g", "--call-graph", "fp", "-o", path, "--"]
-            + command
+            + command,
+            capture=path,
         )
-        if not os.path.exists(path):
-            print(
-                f"warning: recording {event.event} failed:\n{completed.stdout}",
-                file=sys.stderr,
-            )
-            continue
         if not arguments.dwarf or event.key == "cycles":
             continue
         dwarf_path = os.path.join(arguments.out, f"{event.key}.dwarf.data")
-        run(
-            ["perf", "record", "-e", event.event]
+        run_measurement(
+            ["perf", "record", "-e", event.event + ":u"]
             + ["-c", str(event.period * DWARF_PERIOD_FACTOR)]
             + ["-g", "--call-graph", f"dwarf,{DWARF_STACK_BYTES}"]
             + ["-o", dwarf_path, "--"]
-            + command
+            + command,
+            capture=dwarf_path,
         )
 
 
@@ -657,11 +682,14 @@ def read_capture(path):
     here.  Inline chains are recovered later, for the few hundred addresses that
     matter, through llvm-symbolizer.
     """
-    completed = run(
+    completed = run_measurement(
         ["perf", "script", "-i", path, "--no-demangle", "--no-inline"]
         + ["-F", "comm,ip,sym,symoff,dso,dsoff"]
     )
-    return parse_script(completed.stdout)
+    samples = parse_script(completed.stdout)
+    if not samples:
+        raise SystemExit(f"error: no samples in {path}; no valid profile")
+    return samples
 
 
 def format_call_sites(samples, binary, binary_name, symbols, foreign, total, limit, note):
@@ -707,8 +735,7 @@ def report(arguments, events, budget):
     if budget:
         out += ["", "Counter budget (medians over the workload)", "", format_budget(budget)]
     if not profiles:
-        out += ["", "No captures found; run with --stage record first."]
-        return "\n".join(out)
+        raise SystemExit("error: no captures found; run with --stage record first")
 
     out += ["", "Samples per capture", ""]
     for event in events:
@@ -810,6 +837,9 @@ def report(arguments, events, budget):
 
 def self_test():
     """Parser checks; the pipeline itself needs a machine with perf on it."""
+    import tempfile
+    from unittest.mock import patch
+
     script = (
         "main_thread \n"
         "\t    564b1fe3897a c_lex_dispatch+0xeca (/abs/build/Release/ide+0x1233ab0)\n"
@@ -853,6 +883,89 @@ def self_test():
     assert counts["instructions"] == 10234173202, counts
     assert counts["L1-dcache-load-misses"] == 124535322, counts
     assert "LLC-loads" not in counts, counts
+
+    arguments = argparse.Namespace(
+        command=None, workload="stage1", binary=BINARY,
+        build_directory=BUILD_DIRECTORY, cpu=None, repeat=1,
+    )
+    command = workload_command(arguments, "out")
+    assert "-lm" in command and "-v" in command, command
+    assert "-fsource-metrics=out.metrics" in command, command
+    group = [("test", ["instructions", "cache-misses"])]
+    stat_text = "  1,000 instructions:u\n  10 cache-misses:u\n"
+    for status, output, valid in (
+        (0, stat_text, True),
+        (1, stat_text + "link failed\n", False),
+        (0, stat_text.replace("10 cache-misses", "<not supported> cache-misses"), False),
+        (0, stat_text.replace("10 cache-misses", "<not counted> cache-misses"), False),
+        (0, "", False),
+    ):
+        completed = subprocess.CompletedProcess(["perf"], status, output)
+        accepted = False
+        with patch.object(subprocess, "run", return_value=completed) as mocked_run:
+            try:
+                measured = measure_budget(arguments, "out", group)
+                accepted = measured == {"instructions": 1000, "cache-misses": 10}
+            except SystemExit:
+                pass
+        assert mocked_run.call_args.args[0][3] == "{instructions,cache-misses}:u"
+        assert accepted == valid, (status, output, accepted)
+
+    with tempfile.TemporaryDirectory(prefix="cache-survey-self-test-") as directory:
+        capture = os.path.join(directory, "stale.data")
+        for status in (0, 1):
+            with open(capture, "wb") as handle:
+                handle.write(b"old capture")
+            completed = subprocess.CompletedProcess(["perf"], status, "no new capture")
+            rejected = False
+            with patch.object(subprocess, "run", return_value=completed):
+                try:
+                    run_measurement(["perf", "record"], capture=capture)
+                except SystemExit:
+                    rejected = True
+            assert rejected and not os.path.exists(capture), status
+
+        arguments.out = directory
+        arguments.dwarf = False
+        stale_paths = []
+        for event in PORTABLE_SAMPLED_EVENTS:
+            for suffix in ("data", "dwarf.data"):
+                path = os.path.join(directory, f"{event.key}.{suffix}")
+                stale_paths.append(path)
+                with open(path, "wb") as handle:
+                    handle.write(b"old capture")
+        completed = subprocess.CompletedProcess(["perf"], 1, "recording failed")
+        with patch.object(subprocess, "run", return_value=completed) as mocked_run:
+            try:
+                record(arguments, "out", PORTABLE_SAMPLED_EVENTS)
+            except SystemExit:
+                pass
+        assert mocked_run.call_args.args[0][3] == "cycles:u"
+        assert not any(os.path.exists(path) for path in stale_paths), stale_paths
+
+        for stage in ("all", "budget", "record", "report"):
+            budget_path = os.path.join(directory, "budget.txt")
+            report_path = os.path.join(directory, "report.txt")
+            for path in (budget_path, report_path):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("old measurement")
+            with patch(__name__ + ".check_environment", side_effect=SystemExit("blocked")):
+                try:
+                    main(["--out", directory, "--stage", stage])
+                except SystemExit:
+                    pass
+            assert not os.path.exists(report_path), stage
+            assert os.path.exists(budget_path) == (stage in ("record", "report")), stage
+
+    for status in (0, 1):
+        completed = subprocess.CompletedProcess(["perf"], status, "")
+        rejected = False
+        with patch.object(subprocess, "run", return_value=completed):
+            try:
+                read_capture("empty.data")
+            except SystemExit:
+                rejected = True
+        assert rejected, status
 
     match = READELF_SYMBOL.match(
         "  1747: 0000000001233ab0  8257 FUNC    LOCAL  DEFAULT   28 c_lex_dispatch"
@@ -923,6 +1036,8 @@ def main(argv):
     parser.add_argument("--ibs", action="store_true", help="print the IBS recipe and exit")
     parser.add_argument("--self-test", action="store_true")
     arguments = parser.parse_args(argv)
+    if arguments.repeat < 1:
+        parser.error("--repeat must be positive")
 
     if arguments.self_test:
         self_test()
@@ -933,6 +1048,15 @@ def main(argv):
     if arguments.cpu is not None and arguments.cpu < 0:
         arguments.cpu = None
 
+    # A failed new measurement must not leave a previous report or budget
+    # looking current. Explicit budget -> record -> report reuse keeps its budget.
+    stale_names = ["report.txt"]
+    if arguments.stage in ("all", "budget"):
+        stale_names.append("budget.txt")
+    for name in stale_names:
+        path = os.path.join(arguments.out, name)
+        if os.path.exists(path):
+            os.unlink(path)
     check_environment(arguments)
     os.makedirs(arguments.out, exist_ok=True)
     output = os.path.join(arguments.out, "workload-output")
@@ -958,7 +1082,10 @@ def main(argv):
         record(arguments, output, events)
 
     if arguments.stage in ("all", "report", "budget"):
-        text = report(arguments, events, budget)
+        if arguments.stage == "budget":
+            text = "Counter budget (medians over the workload)\n\n" + format_budget(budget)
+        else:
+            text = report(arguments, events, budget)
         print(text)
         with open(
             os.path.join(arguments.out, "report.txt"), "w", encoding="utf-8"
