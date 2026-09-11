@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-10T010529Z`](docs/performance-audits/2026-09-10T010529Z.md) — Z11 parameter-edge splitter: stable scratch-only outgoing indexes (#296)
 - [`2026-09-10T191815Z`](docs/performance-audits/2026-09-10T191815Z.md) — Integrate lazy syntax diagnostics with integer validation and retained iOS evidence
 - [`2026-09-10T011438Z`](docs/performance-audits/2026-09-10T011438Z.md) — Z01 compiler census and first-error syntax storage (#128, #248)
 - [`2026-09-10T184045Z`](docs/performance-audits/2026-09-10T184045Z.md) — Local aggregate-copy completion for the wider metamorphic campaign (#366)
