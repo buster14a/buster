@@ -223,11 +223,14 @@ host C compiler.
 
 ## CI integration
 
-GitHub's four Unix desktop lanes run the self-tests and the sanitized native
-reference matrix as an independent step after the execution-mode matrix. The
-step is included in the desktop result summary; its process logs and source
-artifacts are retained with the desktop logs (generated executables and objects
-are excluded). Forgejo's dedicated Linux and macOS lanes also run the native
+GitHub's four independent Unix `native` lanes run the self-tests and the
+sanitized native reference matrix as a separate step after the execution-mode
+matrix. The step is included in the native result summary. Its process logs and
+source artifacts are packed into `native-ci-logs.tar.gz` inside the `native-*`
+artifact, beside `result.json` and `summary.md`; generated executables and
+objects are excluded. See
+[native evidence packaging](ci-suite-partition.md#native-evidence-packaging).
+Forgejo's dedicated Linux and macOS lanes also run the native
 matrix. This wiring does not establish that an unavailable native runner ran;
 report the actual submitted-revision checks separately.
 

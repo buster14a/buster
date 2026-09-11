@@ -144,6 +144,52 @@
   Keep object creation and native Windows execution of
   `tests/basic_c_win64_large_frame.c` covered in every allocator mode; page
   probing must preserve all incoming argument registers and private copies.
+- AArch64 vector bodies use NEON when an exact form exists and otherwise
+  expand into scalar MIR lanes before allocation. Exact-width lane loads
+  preserve signed narrow operands; comparisons produce all-ones true lanes,
+  and floating negation toggles the sign bit. Division, remainder, shifts,
+  comparisons, 64-bit-lane multiplication and vector unary operations share
+  the scalar arithmetic rules. Keep the entire vector fixture strict in
+  MIR_STACK, FAST and QUALITY; scalar expansion must remain visible to MIR
+  validation and register allocation.
+- AArch64 128-bit multiplication combines the low-limb product, its generated
+  UMULH high half, and the two cross products. Negation propagates the low
+  limb's borrow. Variable shifts use masks at the 64-bit boundary and suppress
+  the cross term at count zero. These are scalar MIR rows, with synthesized
+  registers created at their actual defining row; creating several registers
+  ahead of their definitions publishes incorrect verifier metadata.
+  `basic_c_x86_64_i128_binary.c` and `basic_c_i128_shift_edges.c` require strict
+  MIR selection and cover product carries and counts below, at and above 64.
+- AArch64 leading/trailing-zero counts use importer-generated CLZ and RBIT
+  forms for ordinary 32/64-bit scalar rows. A 128-bit count operates on both
+  slot-backed limbs, selecting the primary limb's count or 64 plus the other
+  count with ordinary scalar MIR. Publish a zero high result limb, including
+  the direct oracle's all-zero-pair result of 128. Never truncate the operand
+  to a single limb or leave stale high result bytes. Preserve existing replay
+  opcode numbers by appending new rows. The registered zero-count fixture
+  covers every one-bit position and both frontend forms, with strict MIR
+  object checks on all three desktop AArch64 targets and native-host execution.
+  Float/i128 conversions and wide division/remainder remain separate gaps.
+- ELF/Mach-O AArch64 fixed frames are not limited by the scaled callee-save offset.
+  Above that offset's reach, the prologue and each epilogue derive the compact
+  save-area base from X29 in reserved X16, then use small unsigned offsets.
+  Module unwind construction counts both setup words and retains the actual
+  SP-relative save locations. Capacity planning includes large-offset body
+  transfers and aggregate-copy pieces; frame-size sums are checked before
+  narrowing. Keep strict large-frame and packed-layout tests in all MIR modes.
+- Windows/UEFI AArch64 MIR saves FP/LR, allocator-owned X19-X27, and X28 in
+  a compact, sixteen-aligned prefix before establishing X29. Fixed body
+  slots remain X28-relative; incoming stack arguments are relative to X29
+  plus the complete prefix size. The shared bounded Windows probe leaves
+  SP unchanged until its final allocation. Unwind actions describe every
+  prologue instruction, and every epilogue shares the unwind suffix starting
+  at SET_FP: restore SP from X29, reload X28 and allocator saves in reverse
+  order, then restore FP/LR and release the prefix. This also discards VLA
+  allocations. The native `windows_arm64_mir_unwind.c` test derives synthetic
+  boundary contexts from instruction effects and checks RtlVirtualUnwind's
+  restored registers; object-only checks are not native unwind acceptance.
+  Windows variadic signatures and calls remain explicit signature/opcode
+  misses pending their distinct integer-register and pointer-list ABI.
 - ELF AArch64 variadic definitions capture X0-X7 and Q0-Q7 into a 192-byte
   save area before argument capture. Named parameters consume their ABI's
   independent integer and floating-point register files. The existing private

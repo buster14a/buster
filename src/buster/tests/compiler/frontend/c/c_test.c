@@ -2687,6 +2687,43 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
         }
     }
 
+    // Exact logical EOF at an inaccessible page catches full-width tail
+    // reads. Every length moves the input alignment; edits straddle both
+    // vector boundaries and the last readable byte. Keep the independent
+    // translated-byte oracle as well as all lexer/checkpoint comparisons.
+    u64 page_size = os_get_page_size();
+    char8* pages = (char8*)os_reserve(0, page_size * 2, (ProtectionFlags){0},
+                                     (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
+    BUSTER_TEST(arguments, pages != 0);
+    bool committed = pages && os_commit(pages, page_size, (ProtectionFlags){.read = true, .write = true}, false);
+    BUSTER_TEST(arguments, committed);
+    if (committed)
+    {
+        for (u64 length = 0; length <= 193; length += 1)
+        {
+            char8* bytes = pages + page_size - length;
+            for (u64 index = 0; index < length; index += 1)
+            {
+                bytes[index] = 'a';
+            }
+            String8 source = {bytes, length};
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
+            BUSTER_TEST(arguments, c_test_translate_source_paths_agree(arena, source));
+            for (u64 index = 0; index < length; index += 1)
+            {
+                // CRLF and both splice forms, with their starts on lane 63.
+                u64 lane = index % 64;
+                bytes[index] = lane == 63 ? '\\' : lane == 0 ? '\r' : lane == 1 ? '\n' : 'a';
+            }
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
+            BUSTER_TEST(arguments, c_test_translate_source_paths_agree(arena, source));
+        }
+    }
+    if (pages)
+    {
+        BUSTER_TEST(arguments, os_unreserve(pages, page_size * 2));
+    }
+
     // Single items that cross or fill whole windows, which is the shape that
     // sends the emitter to the scalar whole-token fallback.
     {
@@ -3212,6 +3249,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_decode_differential(Uni
         scratch_end(temporary);
     }
 
+    // Reused, deliberately dirty storage exercises descriptor ownership and
+    // output-on-failure independently of a fresh arena's zero-filled pages.
+    // The shared range gate also bounds single-fragment allocation to its
+    // output buffer. Test both wchar_t widths and both u8 element-kind rules.
+    {
+        struct
+        {
+            String8 source;
+            bool accepted;
+        } cases[] = {
+            {S8("\"\""), true},
+            {S8("u8\"\""), true},
+            {S8("u\"\""), true},
+            {S8("U\"\""), true},
+            {S8("L\"\""), true},
+            {S8("\"A\\0B\\n\""), true},
+            {S8("u8\"\\u00e9\""), true},
+            {S8("u\"\\U0001f600\""), true},
+            {S8("U\"\\U0001f600\""), true},
+            {S8("L\"\\U0001f600\""), true},
+            {S8("(\"paren\")"), true},
+            {S8("\"a\" \"b\""), true},
+            {S8("\"a\" u\"b\""), true},
+            {S8("\"\\x100\""), false},
+            {S8("u\"\\uD800\""), false},
+            {S8("U\"\\U00110000\""), false},
+            {S8("L\"\\x\""), false},
+            {S8("u8\"a\" u\"b\""), false},
+        };
+        Target targets[] = {
+            {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+            {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+            {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        };
+        CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
+        Arena* conflicts[] = {arena};
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        u64 temporary_position = temporary.arena->position;
+        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+        {
+            for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+            {
+                for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+                {
+                    CPreprocessResult preprocess = c_preprocess(temporary.arena, cases[case_index].source, (CPreprocessOptions){
+                        .target = targets[target_index],
+                        .data_layout = target_data_layout(targets[target_index]),
+                        .dialect = dialects[dialect_index],
+                    });
+                    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+                    u64 decode_position = arena->position;
+                    memset(arena_allocate(arena, u8, 4096), 0xa5, 4096);
+                    arena_set_position(arena, decode_position);
+                    bool range_accepted = false;
+                    u32 end = (u32)preprocess.token_count;
+                    while (end && preprocess.tokens[end - 1].kind == C_TOKEN_END_OF_FILE)
+                    {
+                        end -= 1;
+                    }
+                    BUSTER_TEST(arguments, c_test_string_literal_range_paths_agree(arena, preprocess, 0, end, &range_accepted));
+                    BUSTER_TEST(arguments, range_accepted == cases[case_index].accepted);
+                    arena_set_position(arena, decode_position);
+                    arena_set_position(temporary.arena, temporary_position);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+
     arena_set_position(arena, position);
     return result;
 }
@@ -3480,6 +3586,117 @@ BUSTER_GLOBAL_LOCAL void c_test_source_metrics_partitions(UnitTestArguments* arg
     outer_result->succeeded_test_count += result.succeeded_test_count;
 }
 
+// Shared macro tasks must preserve context floors even when a child grows
+// the array while its parent still owns a suffix. No internal stack seam is
+// needed: the token sequence and deferred locations are the public contract.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 sizes[] = {0, 1, 2, 15, 16, 17, 62, 63, 64, 65, 126, 127, 128, 129, 513};
+    for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
+    {
+        for (u32 nested = 0; nested < 2; nested += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u64 capacity = BUSTER_KB(16);
+            char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+            u64 length = 0;
+            c_test_append_source(bytes, capacity, &length, S8("#define ID(x) x\n#define DUP(x) x x\n#define NUMBERS "));
+            for (u32 index = 0; index < sizes[size_index]; index += 1)
+            {
+                c_test_append_source(bytes, capacity, &length, string_format(temporary.arena, S8("{u32} "), index));
+            }
+            c_test_append_source(bytes, capacity, &length, nested ? S8("\nID(DUP(NUMBERS)) tail\n") : S8("\nNUMBERS tail\n"));
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){.pointer = bytes, .length = length},
+                                                        (CPreprocessOptions){.source_path = S8("macro-task-batches.c")});
+            u64 expected_count = (u64)sizes[size_index] * (nested + 1);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, preprocess.token_count == expected_count + 2);
+            for (u64 index = 0; index < expected_count; index += 1)
+            {
+                String8 expected = string_format(temporary.arena, S8("{u32}"), (u32)(index % sizes[size_index]));
+                c_test_preprocessed_token(arguments, &result, preprocess, index, C_TOKEN_PREPROCESSING_NUMBER, expected);
+            }
+            c_test_preprocessed_token(arguments, &result, preprocess, expected_count, C_TOKEN_IDENTIFIER, S8("tail"));
+            scratch_end(temporary);
+        }
+    }
+
+    String8 definitions = S8("#define ID(x) x\n#define DUP(x) x x\n#define FN(x) x\n#define PAIR(a,b) a b\n"
+                             "#define ALIAS FN\n#define EMPTY\n#define SELF SELF\n#define A B\n#define B A\n"
+                             "#define CAT(a,b) a ## b\n#define STR(x) #x\n#define V(first,...) first __VA_ARGS__\n"
+                             "#define REC(x) x REC(x)\n");
+    struct
+    {
+        String8 input;
+        String8 expected;
+    } cases[] = {
+        {S8("ID(FN)(7)"), S8("7")},
+        {S8("PAIR(FN,tail)(7)"), S8("FN tail (7)")},
+        {S8("PAIR(ID(FN),tail)(7)"), S8("FN tail (7)")},
+        {S8("DUP(SELF)"), S8("SELF SELF")},
+        {S8("DUP(A)"), S8("A A")},
+        {S8("FN(FN(9))"), S8("9")},
+        {S8("ALIAS(11)"), S8("11")},
+        {S8("ID(ALIAS)(13)"), S8("13")},
+        {S8("CAT(,FN)(17)"), S8("17")},
+        {S8("STR(A /* gap */ B)"), S8("\"A B\"")},
+        {S8("V(3, + FN(4))"), S8("3 + 4")},
+        {S8("V(3,)"), S8("3")},
+        {S8("CAT(,) tail"), S8("tail")},
+        {S8("ID(EMPTY) tail"), S8("tail")},
+        {S8("DUP(FN)(9)"), S8("FN 9")},
+        {S8("ID(REC(1))"), S8("1 REC(1)")},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena, S8("{S8}{S8}\n"), definitions, cases[case_index].input);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+        CLexResult expected = c_lex(temporary.arena, cases[case_index].expected);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, expected.diagnostic_count == 0);
+        BUSTER_TEST(arguments, preprocess.token_count == expected.token_count);
+        for (u64 index = 0; index + 1 < expected.token_count; index += 1)
+        {
+            c_test_preprocessed_token(arguments, &result, preprocess, index, expected.tokens[index].kind,
+                                      c_token_spelling(expected.spelling_base, expected.tokens[index]));
+        }
+        scratch_end(temporary);
+    }
+
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = string_format(temporary.arena, S8("{S8}#line 321 \"task-origin.c\"\nID(DUP(__LINE__)) __FILE__ tail\n"), definitions);
+    CPreprocessResult locations = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("macro-task-batches.c")});
+    BUSTER_TEST(arguments, locations.diagnostic_count == 0);
+    BUSTER_TEST(arguments, locations.token_count == 5);
+    c_test_preprocessed_token(arguments, &result, locations, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("321"));
+    c_test_preprocessed_token(arguments, &result, locations, 1, C_TOKEN_PREPROCESSING_NUMBER, S8("321"));
+    c_test_preprocessed_token(arguments, &result, locations, 2, C_TOKEN_STRING_LITERAL, S8("\"task-origin.c\""));
+    for (u64 index = 0; index + 1 < locations.token_count; index += 1)
+    {
+        BUSTER_TEST(arguments, c_preprocess_token_location(&locations, locations.tokens[index]).line == 321);
+    }
+    scratch_end(temporary);
+
+    String8 invalid[] = {S8("FN(1,2)"), S8("FN(1,2,3)"), S8("FN(1")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        temporary = scratch_begin(&arguments->arena, 1);
+        source = string_format(temporary.arena, S8("{S8}#line 402 \"task-error.c\"\n{S8}\n"), definitions, invalid[index]);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("macro-task-batches.c")});
+        bool diagnosed = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < preprocess.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = preprocess.diagnostics[diagnostic_index];
+            diagnosed |= diagnostic.kind == C_DIAGNOSTIC_INVALID_MACRO_INVOCATION && diagnostic.location.line == 402 && diagnostic.location.column == 1;
+        }
+        BUSTER_TEST(arguments, diagnosed);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3739,6 +3956,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
 {
     UnitTestResult result = {0};
     BUSTER_UNUSED(arguments);
+
+    Target constant_targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+    };
+    String8 constant_source = S8("_Static_assert(sizeof(__INT8_C(1)) == sizeof(int), \"promoted i8\");\n"
+                                 "_Static_assert(sizeof(__UINT16_C(1)) == sizeof(int), \"promoted u16\");\n"
+                                 "_Static_assert(__UINT32_C(1) - 2 > 0, \"unsigned u32\");\n"
+                                 "_Static_assert(sizeof(__INT64_C(1)) == 8 && __INT64_C(1) - 2 < 0, \"signed i64\");\n"
+                                 "_Static_assert(sizeof(__UINT64_C(1)) == 8 && (__UINT64_C(1) << 63) == 0x8000000000000000ULL, \"unsigned u64\");\n"
+                                 "_Static_assert(sizeof(__INTMAX_C(1)) == 8 && sizeof(__UINTMAX_C(1)) == 8, \"max widths\");\n");
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(constant_targets); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = constant_targets[index];
+        CPreprocessResult tokens = c_preprocess(temporary.arena, constant_source,
+            (CPreprocessOptions){.source_path = S8("integer-constant-macros.c"), .target = target, .data_layout = target_data_layout(target)});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult lowered = c_analyze(temporary.arena, S8("integer-constant-macros.c"), tokens, syntax, target);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        scratch_end(temporary);
+    }
 
     {
         u64 arena_position = arguments->arena->position;
@@ -14458,9 +14699,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_body_frame_storage(UnitTestArgu
         CParserResult syntax = c_parse_ast(temporary.arena, tokens);
         u64 parse_ns = timestamp_ns_between(start, timestamp_take());
         u64 allocated = temporary.arena->position - before;
-        // The two token-indexed arrays are deliberately unchanged. Everything
-        // else published here is one declaration and one assertion per body.
-        u64 published = (tokens.token_count + 1) * (sizeof(CDiagnostic) + sizeof(u32)) +
+        // Clean syntax retains only the token-indexed delimiter stack. The
+        // remaining output is one declaration and one assertion per body.
+        u64 published = (tokens.token_count + 1) * sizeof(u32) +
                         (u64)function_count * (sizeof(CParserDeclaration) + sizeof(CParserStaticAssert));
         if (census)
         {
@@ -14553,6 +14794,99 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_body_frame_storage(UnitTestArgu
     return result;
 }
 
+// GitHub #248: syntax diagnostics are cold arena-owned output. Clean parses
+// must not reserve their token-sized array; malformed input keeps exact rows.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_diagnostic_storage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 clean[] = {S8(""), S8("int value;"), S8("int value(void) { return 7; }")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(clean); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, clean[index], (CPreprocessOptions){0});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.diagnostics == 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_capacity == tokens.token_count + 1);
+        CIRLowerResult analysis = c_analyze(temporary.arena, S8("syntax-storage.c"), tokens, syntax, target_native);
+        BUSTER_TEST(arguments, analysis.diagnostic_count == 0);
+        CParserResult empty = c_parse_ast(temporary.arena, (CPreprocessResult){0});
+        BUSTER_TEST(arguments, empty.diagnostics == 0 && empty.diagnostic_count == 0 && empty.diagnostic_capacity == 0);
+        CParserResult no_arena = c_parse_ast(0, tokens);
+        BUSTER_TEST(arguments, no_arena.diagnostics == 0 && no_arena.diagnostic_count == 0 && no_arena.diagnostic_capacity == 0);
+        scratch_end(temporary);
+    }
+
+    // More than one row must keep the first allocation and retain every
+    // diagnostic, including positions after many subsequent arena requests.
+    u32 counts[] = {1, 16, 17, 64, 257};
+    for (u32 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(counts); count_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        u32 count = counts[count_index];
+        String8 source = {.pointer = arena_allocate(temporary.arena, char8, (u64)count * 2 + 2), .length = (u64)count * 2 + 2};
+        for (u32 index = 0; index < count; index += 1)
+        {
+            source.pointer[index * 2] = ")]}"[index % 3];
+            source.pointer[index * 2 + 1] = '\n';
+        }
+        source.pointer[count * 2] = ';';
+        source.pointer[count * 2 + 1] = '\n';
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("syntax-errors.c")});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_count == count);
+        BUSTER_TEST(arguments, syntax.diagnostics != 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_capacity == tokens.token_count + 1);
+        CIRLowerResult analysis = c_analyze(temporary.arena, S8("syntax-errors.c"), tokens, syntax, target_native);
+        BUSTER_TEST(arguments, analysis.diagnostic_count == syntax.diagnostic_count);
+        BUSTER_TEST(arguments, analysis.diagnostics == syntax.diagnostics);
+        char8* later = arena_allocate(temporary.arena, char8, BUSTER_KB(32));
+        memset(later, 0xA5, BUSTER_KB(32));
+        if (syntax.diagnostics && syntax.diagnostic_count == count)
+        {
+            for (u32 index = 0; index < count; index += 1)
+            {
+                CDiagnostic* diagnostic = syntax.diagnostics + index;
+                CSourceLocation expected = c_preprocess_token_location(&tokens, tokens.tokens[index]);
+                BUSTER_TEST(arguments, diagnostic->kind == C_DIAGNOSTIC_UNMATCHED_DELIMITER);
+                BUSTER_STRING_TEST(arguments, diagnostic->message, S8("unmatched closing delimiter"));
+                BUSTER_TEST(arguments, diagnostic->location.line == index + 1 && diagnostic->location.column == 1);
+                BUSTER_TEST(arguments, diagnostic->location.offset == expected.offset && diagnostic->location.file == expected.file &&
+                                       diagnostic->location.map_offset == expected.map_offset);
+            }
+        }
+        scratch_end(temporary);
+    }
+
+    String8 truncated[] = {S8("int unfinished"), S8("int broken(void) {\n")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(truncated); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, truncated[index], (CPreprocessOptions){0});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.diagnostics != 0 && syntax.diagnostic_count == index + 1);
+        if (syntax.diagnostics && syntax.diagnostic_count == index + 1)
+        {
+            CDiagnostic* last = syntax.diagnostics + index;
+            CSourceLocation eof = c_preprocess_token_location(&tokens, tokens.tokens[tokens.token_count - 1]);
+            BUSTER_TEST(arguments, last->kind == C_DIAGNOSTIC_EXPECTED_DECLARATION);
+            BUSTER_STRING_TEST(arguments, last->message, S8("expected ';' or a function body after declaration"));
+            BUSTER_TEST(arguments, last->location.line == eof.line && last->location.column == eof.column &&
+                                   last->location.offset == eof.offset && last->location.file == eof.file && last->location.map_offset == eof.map_offset);
+            if (index)
+            {
+                BUSTER_TEST(arguments, syntax.diagnostics[0].kind == C_DIAGNOSTIC_UNMATCHED_DELIMITER);
+                BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].message, S8("unterminated function body"));
+                BUSTER_TEST(arguments, syntax.diagnostics[0].location.line == 1 && syntax.diagnostics[0].location.column == 18);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -14709,6 +15043,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     c_test_result_add(&result, c_test_parser_body_frame_storage(arguments));
+    c_test_result_add(&result, c_test_parser_diagnostic_storage(arguments));
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
     c_test_result_add(&result, c_test_lexer_rewind_zeroed(arguments));
     c_test_result_add(&result, c_test_scope_interval_index(arguments));
@@ -14760,6 +15095,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
     c_test_result_add(&result, c_test_inline_assembly_volatile_ir(arguments));
     c_test_result_add(&result, c_test_pasted_keyword_body_walk(arguments));
+    c_test_result_add(&result, c_test_macro_task_batches(arguments));
     c_test_result_add(&result, c_test_frontend_vla_and_ir(arguments));
     c_test_result_add(&result, c_test_local_static_aggregates(arguments));
 

@@ -1187,6 +1187,124 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     }
     relocation.addend = 0;
 
+    // ELF page relocations retain explicit RELA addends; REL ADRP carries
+    // an unscaled signed literal, while ADD carries an unsigned low twelve.
+    u32 elf_page_words[] = {UINT32_C(0xb0000008), UINT32_C(0xf0ffffe8), UINT32_C(0x913ffd08), UINT32_C(0x11000517)};
+    u32 elf_page_canonical[] = {UINT32_C(0x90000008), UINT32_C(0x90000008), UINT32_C(0x91000108), UINT32_C(0x11000117)};
+    s64 elf_page_implicit[] = {1, -1, 4095, 1};
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(elf_page_words); case_index += 1)
+    {
+        ObjectSection page_sections[BUSTER_ARRAY_LENGTH(sections)];
+        memcpy(page_sections, sections, sizeof(page_sections));
+        u32 page_text[] = {elf_page_words[case_index], UINT32_C(0xd65f03c0), 0, 0, 0, 0};
+        page_sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = (u8*)page_text, .length = sizeof(page_text)};
+        page_sections[OBJECT_SECTION_TEXT].virtual_size = sizeof(page_text);
+        ObjectRelocation page_relocation = {.section = OBJECT_SECTION_TEXT, .symbol = 1, .addend = -17,
+            .kind = case_index < 2 ? OBJECT_RELOCATION_AARCH64_ELF_PAGE21 : OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12};
+        ObjectFile page_object = object;
+        page_object.sections = page_sections;
+        page_object.relocations = &page_relocation;
+        for (u32 implicit = 0; implicit < 2; implicit += 1)
+        {
+            ObjectArtifact artifact = object_write(arguments->arena, &page_object, OBJECT_FORMAT_ELF64);
+            u64 relocation_section = 0;
+            u64 target_data = 0;
+            bool offsets_valid = object_test_elf_relocation_offsets(artifact.bytes, &relocation_section, &target_data);
+            BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE && offsets_valid);
+            if (!case_index && !implicit && offsets_valid)
+            {
+                u64 section_table = 0;
+                u32 symbol_section = 0;
+                u64 symbol_data = 0;
+                u64 symbol_size = 0;
+                memcpy(&section_table, artifact.bytes.pointer + 40, sizeof(section_table));
+                memcpy(&symbol_section, artifact.bytes.pointer + relocation_section + 40, sizeof(symbol_section));
+                memcpy(&symbol_data, artifact.bytes.pointer + section_table + (u64)symbol_section * 64 + 24, sizeof(symbol_data));
+                memcpy(&symbol_size, artifact.bytes.pointer + section_table + (u64)symbol_section * 64 + 32, sizeof(symbol_size));
+                for (u32 symbol_type = 0; symbol_type < 2; symbol_type += 1)
+                {
+                    for (u64 offset = 0; offset + 24 <= symbol_size; offset += 24)
+                    {
+                        u8* information = artifact.bytes.pointer + symbol_data + offset + 4;
+                        if ((*information >> 4) != 0)
+                        {
+                            *information = (u8)((*information & 0xf0) | symbol_type);
+                        }
+                    }
+                    ObjectFile typed = object_read(arguments->arena, artifact.bytes, page_object.target);
+                    bool found = false;
+                    for (u32 symbol_index = 0; typed.error == OBJECT_ERROR_NONE && symbol_index < typed.symbol_count; symbol_index += 1)
+                    {
+                        ObjectSymbol* symbol = typed.symbols + symbol_index;
+                        if (string_equal(symbol->name, S8("object_entry")))
+                        {
+                            found = symbol->kind == (symbol_type ? OBJECT_SYMBOL_DATA : OBJECT_SYMBOL_FUNCTION);
+                        }
+                    }
+                    BUSTER_TEST(arguments, found);
+                }
+            }
+            if (implicit && offsets_valid)
+            {
+                object_test_write_u32(artifact.bytes, relocation_section + 4, 9);
+                object_test_write_u64(artifact.bytes, relocation_section + 32, 16);
+                object_test_write_u64(artifact.bytes, relocation_section + 56, 16);
+            }
+            ObjectFile imported = object_read(arguments->arena, artifact.bytes, page_object.target);
+            bool valid = imported.error == OBJECT_ERROR_NONE && imported.relocation_count == 1;
+            BUSTER_TEST(arguments, valid);
+            if (valid)
+            {
+                BUSTER_TEST(arguments, imported.relocations[0].kind == page_relocation.kind);
+                BUSTER_TEST(arguments, imported.relocations[0].addend == (implicit ? elf_page_implicit[case_index] : -17));
+                BUSTER_STRING_TEST(arguments, imported.symbols[imported.relocations[0].symbol].name, S8("object_callee"));
+                u32 canonical = 0;
+                memcpy(&canonical, imported.sections[OBJECT_SECTION_TEXT].data.pointer, sizeof(canonical));
+                BUSTER_TEST(arguments, canonical == elf_page_canonical[case_index]);
+                ObjectArtifact rewritten = object_write(arguments->arena, &imported, OBJECT_FORMAT_ELF64);
+                ObjectFile roundtrip = object_read(arguments->arena, rewritten.bytes, page_object.target);
+                BUSTER_TEST(arguments, rewritten.error == OBJECT_ERROR_NONE && roundtrip.error == OBJECT_ERROR_NONE &&
+                                       roundtrip.relocation_count == 1 && roundtrip.relocations[0].addend == imported.relocations[0].addend);
+            }
+            if (offsets_valid)
+            {
+                u32 invalid_words[] = {UINT32_C(0xd503201f), UINT32_C(0x10000008), UINT32_C(0x91400400), UINT32_C(0xf9400000)};
+                for (u32 bad = 0; bad < BUSTER_ARRAY_LENGTH(invalid_words); bad += 1)
+                {
+                    object_test_write_u32(artifact.bytes, target_data, invalid_words[bad]);
+                    BUSTER_TEST(arguments, object_read(arguments->arena, artifact.bytes, page_object.target).error != OBJECT_ERROR_NONE);
+                }
+                object_test_write_u32(artifact.bytes, target_data, elf_page_words[case_index]);
+                u64 relocation_data = 0;
+                memcpy(&relocation_data, artifact.bytes.pointer + relocation_section + 24, sizeof(relocation_data));
+                object_test_write_u64(artifact.bytes, relocation_data, 1);
+                BUSTER_TEST(arguments, object_read(arguments->arena, artifact.bytes, page_object.target).error != OBJECT_ERROR_NONE);
+                object_test_write_u64(artifact.bytes, relocation_data, sizeof(page_text) - 2);
+                BUSTER_TEST(arguments, object_read(arguments->arena, artifact.bytes, page_object.target).error != OBJECT_ERROR_NONE);
+
+            }
+        }
+    }
+    u32 page_patched = 0;
+    BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_PAGE21, UINT32_C(0x90000008),
+                                                         0x2004, 0x2fff, 1, &page_patched) && page_patched == UINT32_C(0xb0000008));
+    BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_PAGE21, UINT32_C(0x90000008),
+                                                         0x3004, 0x3000, -1, &page_patched) && page_patched == UINT32_C(0xf0ffffe8));
+    BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, UINT32_C(0x91000108),
+                                                         0x2008, 0x2fff, 1, &page_patched) && page_patched == UINT32_C(0x91000108));
+    BUSTER_TEST(arguments, object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, UINT32_C(0x91000108),
+                                                         0x2008, 0x3000, -1, &page_patched) && page_patched == UINT32_C(0x913ffd08));
+    BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_PAGE21, UINT32_C(0x90000008),
+                                                          0, UINT64_C(0x100000000), 0, &page_patched));
+    BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_PAGE21, UINT32_C(0x90000008),
+                                                          UINT64_C(0x100001000), 0, 0, &page_patched));
+    BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_PAGE21, UINT32_C(0x90000008),
+                                                          1, 0, 0, &page_patched));
+    BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, UINT32_C(0x91000108),
+                                                          0, UINT64_MAX, 1, &page_patched));
+    BUSTER_TEST(arguments, !object_aarch64_elf_page_relocate(OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, UINT32_C(0x91000108),
+                                                          0, 0, -1, &page_patched));
+
     u32 aarch64_branch_opcodes[] = {UINT32_C(0x14000000), UINT32_C(0x94000000)};
     ObjectRelocationKind aarch64_branch_kinds[] = {OBJECT_RELOCATION_AARCH64_JUMP26, OBJECT_RELOCATION_AARCH64_CALL26};
     s64 elf_rel_addends[] = {4, -4};
@@ -1883,21 +2001,30 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         .symbol_count = BUSTER_ARRAY_LENGTH(linked_page_symbols),
         .relocation_count = BUSTER_ARRAY_LENGTH(linked_page_relocations),
     };
-    ObjectExecutable linked_page_executable = object_link_executable(&linked_page_object);
-    BUSTER_TEST(arguments, linked_page_executable.error == OBJECT_ERROR_NONE && linked_page_executable.address);
-    if (linked_page_executable.error == OBJECT_ERROR_NONE && linked_page_executable.address)
+    ObjectRelocationKind linked_page_kinds[][2] = {
+        {OBJECT_RELOCATION_AARCH64_MACH_PAGE21, OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12},
+        {OBJECT_RELOCATION_AARCH64_ELF_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12},
+    };
+    for (u32 format_index = 0; format_index < BUSTER_ARRAY_LENGTH(linked_page_kinds); format_index += 1)
     {
-        u8* linked_page_text = (u8*)linked_page_executable.address;
-        u8* linked_page_data_address = linked_page_text + 8;
-        u32 expected_linked_page21 = 0;
-        u32 actual_linked_page21 = 0;
-        u32 actual_linked_pageoff12 = 0;
-        memcpy(&actual_linked_page21, linked_page_text, sizeof(actual_linked_page21));
-        memcpy(&actual_linked_pageoff12, linked_page_text + sizeof(u32), sizeof(actual_linked_pageoff12));
-        bool linked_page21_valid = a64_adrp_encode(9, (u64)(uintptr_t)linked_page_text, (u64)(uintptr_t)linked_page_data_address, &expected_linked_page21);
-        BUSTER_TEST(arguments, linked_page21_valid && actual_linked_page21 == expected_linked_page21);
-        BUSTER_TEST(arguments, actual_linked_pageoff12 == (UINT32_C(0x91000000) | (u32)((u64)(uintptr_t)linked_page_data_address & 0xfff) << 10 | (9u << 5) | 9u));
-        object_release_executable(linked_page_executable);
+        linked_page_relocations[0].kind = linked_page_kinds[format_index][0];
+        linked_page_relocations[1].kind = linked_page_kinds[format_index][1];
+        ObjectExecutable linked_page_executable = object_link_executable(&linked_page_object);
+        BUSTER_TEST(arguments, linked_page_executable.error == OBJECT_ERROR_NONE && linked_page_executable.address);
+        if (linked_page_executable.error == OBJECT_ERROR_NONE && linked_page_executable.address)
+        {
+            u8* linked_page_text = (u8*)linked_page_executable.address;
+            u8* linked_page_data_address = linked_page_text + 8;
+            u32 expected_linked_page21 = 0;
+            u32 actual_linked_page21 = 0;
+            u32 actual_linked_pageoff12 = 0;
+            memcpy(&actual_linked_page21, linked_page_text, sizeof(actual_linked_page21));
+            memcpy(&actual_linked_pageoff12, linked_page_text + sizeof(u32), sizeof(actual_linked_pageoff12));
+            bool linked_page21_valid = a64_adrp_encode(9, (u64)(uintptr_t)linked_page_text, (u64)(uintptr_t)linked_page_data_address, &expected_linked_page21);
+            BUSTER_TEST(arguments, linked_page21_valid && actual_linked_page21 == expected_linked_page21);
+            BUSTER_TEST(arguments, actual_linked_pageoff12 == (UINT32_C(0x91000000) | (u32)((u64)(uintptr_t)linked_page_data_address & 0xfff) << 10 | (9u << 5) | 9u));
+            object_release_executable(linked_page_executable);
+        }
     }
     ObjectRelocation linked_page_tlvp_relocation = linked_page_relocations[0];
     linked_page_tlvp_relocation.kind = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21;
@@ -2360,6 +2487,61 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, windows_arm64_roundtrip.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
         BUSTER_TEST(arguments, windows_arm64_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+    }
+
+    // MIR saves precede X29 establishment. Its epilog shares the suffix
+    // starting at SET_FP, including sparse allocator saves in reverse order.
+    u8 windows_arm64_machine_code[80] = {0};
+    u32 windows_arm64_machine_epilog = 56;
+    CodegenUnwindAction windows_arm64_machine_actions[] = {
+        {.code_offset = 4, .value = 48, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+        {.code_offset = 4, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 29},
+        {.code_offset = 4, .value = 8, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 30},
+        {.code_offset = 8, .value = 16, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 19},
+        {.code_offset = 12, .value = 24, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 27},
+        {.code_offset = 16, .value = 32, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 28},
+        {.code_offset = 20, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 29},
+        {.code_offset = 24, .value = 64, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+        {.code_offset = 28, .kind = CODEGEN_UNWIND_ACTION_NOP},
+        {.code_offset = 32, .kind = CODEGEN_UNWIND_ACTION_NOP},
+    };
+    CodegenFunctionDescriptor windows_arm64_machine_function = {
+        .unwind_actions = windows_arm64_machine_actions,
+        .epilog_offsets = &windows_arm64_machine_epilog,
+        .code_size = sizeof(windows_arm64_machine_code),
+        .prolog_size = 32,
+        .unwind_action_count = BUSTER_ARRAY_LENGTH(windows_arm64_machine_actions),
+        .epilog_count = 1,
+    };
+    CodegenModule windows_arm64_machine_module = windows_arm64_module;
+    windows_arm64_machine_module.code = (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_arm64_machine_code);
+    windows_arm64_machine_module.functions = &windows_arm64_machine_function;
+    ObjectFile windows_arm64_machine_object =
+        object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_arm64_machine_module, windows_arm64_target);
+    BUSTER_TEST(arguments, windows_arm64_machine_object.error == OBJECT_ERROR_NONE);
+    u8 expected_windows_arm64_machine_xdata[] = {
+        0x14, 0x00, 0x40, 0x18, 0x0e, 0x00, 0xc0, 0x00,
+        0xe3, 0xe3, 0x04, 0xe1, 0xd2, 0x44, 0xd2, 0x03, 0xd0, 0x02, 0x85, 0xe4,
+    };
+    ByteSlice windows_arm64_machine_xdata = windows_arm64_machine_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+    BUSTER_TEST(arguments, windows_arm64_machine_xdata.length == sizeof(expected_windows_arm64_machine_xdata) &&
+                               memcmp(windows_arm64_machine_xdata.pointer, expected_windows_arm64_machine_xdata,
+                                      sizeof(expected_windows_arm64_machine_xdata)) == 0);
+    for (u32 malformed = 0; malformed < 5; malformed += 1)
+    {
+        CodegenUnwindAction invalid_actions[BUSTER_ARRAY_LENGTH(windows_arm64_machine_actions)];
+        memcpy(invalid_actions, windows_arm64_machine_actions, sizeof(invalid_actions));
+        CodegenFunctionDescriptor invalid_function = windows_arm64_machine_function;
+        invalid_function.unwind_actions = invalid_actions;
+        if (malformed == 0) { invalid_actions[5].value += 8; }
+        if (malformed == 1) { invalid_actions[4].register_index = 19; }
+        if (malformed == 2) { invalid_actions[7].code_offset += 4; }
+        if (malformed == 3) { invalid_actions[6].kind = CODEGEN_UNWIND_ACTION_NOP; }
+        if (malformed == 4) { invalid_function.prolog_size += 4; }
+        CodegenModule invalid_module = windows_arm64_machine_module;
+        invalid_module.functions = &invalid_function;
+        ObjectFile invalid_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &invalid_module, windows_arm64_target);
+        BUSTER_TEST(arguments, invalid_object.error != OBJECT_ERROR_NONE);
     }
 
     CodegenModule mach_cfi_module = separate_module;

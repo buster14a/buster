@@ -851,12 +851,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTes
         {
             CodegenModule generated = codegen_generate_canonical_module(temporary.arena, lowered.program, lowered.program->modules, target,
                 (CodegenModuleOptions){.register_allocator = (u8)allocator, .verify_invariants = true});
-            // The module dispatcher deliberately keeps Windows AArch64 on
-            // the canonical path; preserve that existing target exclusion.
-            u32 expected_fallbacks = target.os == OPERATING_SYSTEM_WINDOWS && allocator != CODEGEN_REGISTER_ALLOCATOR_NONE
-                                         ? 6u : 0;
-            BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.statistics.fallback_function_count == expected_fallbacks);
-            BUSTER_TEST(arguments, generated.statistics.fallback_reason_counts[CODEGEN_FALLBACK_TARGET_EXCLUDED] == expected_fallbacks);
+            BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.statistics.fallback_function_count == 0);
+            BUSTER_TEST(arguments, generated.statistics.fallback_reason_counts[CODEGEN_FALLBACK_TARGET_EXCLUDED] == 0);
             u32 pages = 0;
             u32 lows = 0;
             u32 absolutes = 0;
@@ -910,6 +906,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_aarch64_symbol_addresses(UnitTes
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_scalars(arguments);
+    UnitTestResult local_aggregates = codegen_test_ebpf_local_aggregates(arguments);
+    result.succeeded_test_count += local_aggregates.succeeded_test_count;
+    result.test_count += local_aggregates.test_count;
     UnitTestResult verification = codegen_test_verify_invariants(arguments);
     result.succeeded_test_count += verification.succeeded_test_count;
     result.test_count += verification.test_count;

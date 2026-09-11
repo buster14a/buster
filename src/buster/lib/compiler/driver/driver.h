@@ -112,6 +112,10 @@ struct CompilerDriverInvocation
     GpuTarget gpu_target;
     Target target;
     u32 input_count;
+    // -fcompile-jobs=N: opt-in lanes for consecutive native C link inputs.
+    // Zero/default is one. The caller owns its total process/thread budget;
+    // this does not infer available RAM from the TU's virtual reservation.
+    u32 compile_jobs;
     u32 include_path_count;
     u32 system_include_path_count;
     u32 definition_count;
@@ -194,6 +198,9 @@ struct CompilerDriverResult
     u32 tokenizer_warning_count;
     u32 parser_diagnostic_count;
     u32 analysis_diagnostic_count;
+    // Maximum lanes actually participating in a native C input batch, or
+    // one on serial/unsupported paths. This is not a physical-core count.
+    u32 compilation_workers;
     bool has_object;
     bool has_wasm64;
     bool has_gpu;
@@ -202,12 +209,14 @@ struct CompilerDriverResult
     u8 reserved;
 };
 
-// Fills every table the compile pipeline builds on first use -- the C
-// frontend and codegen -- on the calling thread. Call this before lane_run:
-// those tables are written once and read afterwards through plain loads, so
-// they must be complete before a second lane can reach them, and a gang that
-// finds one unwarmed reports through BUSTER_CHECK_SERIAL_INITIALIZATION
-// rather than racing.
+// Prepare the target-independent frontend, ABI and opcode tables. Serial
+// native emission also prepares its target's metadata on demand.
 BUSTER_F_DECL void compiler_prewarm(void);
+// Before an embedding caller launches a gang that may compile native C,
+// prepare both native families, including all x86 forms/inline assembly.
+// Idle persistent workers are still live threads; preparing a new target
+// after the first gang starts is too late. The opt-in multi-TU driver calls
+// this before creating its first gang; ordinary serial compilation does not.
+BUSTER_F_DECL void compiler_parallel_prewarm(void);
 BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments);
 BUSTER_F_DECL CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation);

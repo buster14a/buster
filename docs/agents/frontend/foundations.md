@@ -14,6 +14,16 @@ promotion. Ordinary pointers, supported integers/floats and fixed vectors are
 eligible. Narrow-normalizing, volatile/atomic, static, thread-local and
 cleanup-managed owners retain memory form.
 
+Signed integer vector comparisons retain their operand's lane type for the
+all-ones/zero mask. `c_ir_vector_mask_type` must not substitute another
+same-width C type such as plain `char`; mask lookup for unsigned or floating
+lanes excludes qualified integer types. `basic_c_vector_lane_edges.c` checks
+narrow signed masks alongside arithmetic in all native backend modes.
+Compatible vector aliases can still have distinct canonical type IDs.
+`c_ir_emit_vector_alias_conversion` preserves their equal lane representation
+through typed views of a private slot, with ordinary validated memory
+operations; do not mutate an existing value's type or weaken cast validation.
+
 Eligibility is per owner, not a function-wide token blacklist. Normal calls,
 address-taking, aggregates beside scalar locals, adjusted array parameters,
 field/index expressions, scalar compound literals, statement expressions,
@@ -48,6 +58,10 @@ incoming values, forwarding through single-predecessor chains. Trivial
 parameters and unused parameter cycles are removed. Disconnected empty label
 blocks have no outgoing edge. Publication includes **every** predecessor edge,
 including parameter-free destinations; selectors must never see a partial CFG.
+Nested GNU statement-expression body walks reuse the function's label block at
+the same source token. Allocating a second block leaves the predeclared label
+unterminated and separates ordinary goto from label-address provenance. The
+strict `basic_c_statement_expression_value.c` corpus checks both goto arms.
 
 Existing current-value queries do not grow the sparse table. A missing-key
 insertion owns capacity growth, and parameter creation reuses the slot its
@@ -95,6 +109,12 @@ independent legacy mutable-register and pressure-census contracts.
 - Keep the frontend pipeline explicit: source loading and preprocessing,
   parsing and semantic construction, then canonical-IR lowering. Do not add a
   parallel frontend-specific IR or route code generation around canonical IR.
+- Macro expansion uses one growable LIFO task array per expansion call. Each
+  argument context records a task-index floor; lookahead and argument collection
+  must not pop below it into suspended parent work. Store indices, never pointers
+  across batch pushes that may grow the array. An ENABLE marker remains below
+  its replacement batch, and refused identifiers retain `no_expand` on rescans.
+  Output nodes and source-stamp ownership are independent of task storage.
 - Macro placemarkers survive the entire `##` sequence. The replacement loop
   compacts into its existing materialized buffer and removes placemarkers only
   when emitting the rescan tokens. Only the explicitly marked GNU

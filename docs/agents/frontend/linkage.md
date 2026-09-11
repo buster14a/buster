@@ -275,3 +275,28 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `_onexit` is deliberately absent — it answers with the handler rather than
   with a status, so it cannot be a tail branch, and a stub that called and
   then chose would need Windows unwind data of its own.
+
+- Ordinary AArch64 ELF ADRP/ADD address pairs use distinct `ELF_PAGE21` and
+  `ELF_ADD_LO12` object kinds (AAELF64 relocations 275/277). The reader keeps
+  RELA's explicit addend and clears the encoded immediate. REL ADRP's initial
+  addend is its **unscaled signed imm21**, unlike the executed displacement
+  or the Mach-O contract; REL ADD uses the unshifted unsigned imm12. Reject
+  misaligned sites, wrong instruction classes and shifted ADD forms.
+  `object_aarch64_elf_page_relocate` shares checked address arithmetic with
+  in-memory and native ELF linking, and the generated A64 ADD plan owns the
+  immediate bits. The dynamic writer omits these sites from x86 layout
+  staging and patches them after layout; imported data uses its dynamic
+  symbol's copy-slot address, including aliases. Untyped exported AArch64
+  ELF text labels can serve as assembly entry points; explicit object types
+  remain data. Mach-O, PE and TLS relocation contracts remain separate.
+
+  Independent Clang/QEMU fixtures for GitHub #355:
+
+  ```sh
+  clang -target aarch64-unknown-linux -c tests/basic_aarch64_elf_page.s -o /tmp/page.o
+  build/Release/ide cc -target aarch64-unknown-linux /tmp/page.o -o /tmp/page
+  qemu-aarch64 /tmp/page
+  clang -target aarch64-unknown-linux -O2 -c tests/basic_c_aarch64_elf_page_caller.c -o /tmp/page-caller.o
+  build/Release/ide cc -target aarch64-unknown-linux -fverify-codegen -fregister-allocator=quality tests/basic_c_aarch64_elf_page_callee.c /tmp/page-caller.o -o /tmp/page-caller
+  qemu-aarch64 /tmp/page-caller
+  ```

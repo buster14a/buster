@@ -14447,26 +14447,31 @@ BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* m
     }
 }
 
-BUSTER_C_INTERNAL void c_parser_diagnostic(CParserResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message)
+BUSTER_C_INTERNAL void c_parser_diagnostic(Arena* arena, CParserResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message)
 {
-    if (!result || result->diagnostic_count >= result->diagnostic_capacity)
+    if (result && result->diagnostic_count < result->diagnostic_capacity)
     {
-        return;
+        // Clean syntax needs no diagnostic storage. Allocate the original
+        // bounded contiguous array once, before publishing its first row.
+        if (!result->diagnostics)
+        {
+            result->diagnostics = arena_allocate(arena, CDiagnostic, result->diagnostic_capacity);
+        }
+        result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
+            .message = message,
+            .location = location,
+            .kind = kind,
+        };
     }
-    result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
-        .message = message,
-        .location = location,
-        .kind = kind,
-    };
 }
 
-BUSTER_C_INTERNAL void c_parser_validate_integer_token(CParserResult* result, CPreprocessResult const* preprocess, CToken token)
+BUSTER_C_INTERNAL void c_parser_validate_integer_token(Arena* arena, CParserResult* result, CPreprocessResult const* preprocess, CToken token)
 {
     String8 spelling = c_token_spelling(preprocess->spelling_base, token);
     u64 value = 0;
     if (!c_number_is_float(spelling) && !c_conditional_number(spelling, &value))
     {
-        c_parser_diagnostic(result, c_preprocess_token_location(preprocess, token), C_DIAGNOSTIC_INVALID_INTEGER_LITERAL,
+        c_parser_diagnostic(arena, result, c_preprocess_token_location(preprocess, token), C_DIAGNOSTIC_INVALID_INTEGER_LITERAL,
                             S8("invalid integer literal or value outside the supported 64-bit range"));
     }
 }
@@ -14862,7 +14867,6 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
         u32 token_count = (u32)preprocess.token_count;
         result.declaration_capacity = token_count + 1;
         result.diagnostic_capacity = token_count + 1;
-        result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
         u32* delimiter_stack = arena_allocate(arena, u32, token_count + 1);
         CParserBodyFrames body_frames = {0};
         u32 index = 0;
@@ -14892,7 +14896,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                 }
                 if (shape == C_TOKEN_PREPROCESSING_NUMBER)
                 {
-                    c_parser_validate_integer_token(&result, &preprocess, token);
+                    c_parser_validate_integer_token(arena, &result, &preprocess, token);
                 }
                 u32 asm_label_end = 0;
                 if (shape == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ASM_KEYWORDS) && index > start &&
@@ -14963,7 +14967,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                             CTokenShape body_shape = c_preprocess_token_shape_at(token_shapes, &preprocess, index);
                             if (body_shape == C_TOKEN_PREPROCESSING_NUMBER)
                             {
-                                c_parser_validate_integer_token(&result, &preprocess, preprocess.tokens[index]);
+                                c_parser_validate_integer_token(arena, &result, &preprocess, preprocess.tokens[index]);
                             }
                             CPunctuator body_punctuator = c_token_shape_punctuator(body_shape);
                             if (body_punctuator == C_PUNCTUATOR_LEFT_BRACE)
@@ -14985,7 +14989,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                         }
                         if (!ended)
                         {
-                            c_parser_diagnostic(&result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unterminated function body"));
+                            c_parser_diagnostic(arena, &result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unterminated function body"));
                         }
                         break;
                     }
@@ -15004,7 +15008,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                                                                                           : C_PUNCTUATOR_LEFT_BRACE;
                     if (!delimiter_count || c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, delimiter_stack[delimiter_count - 1])) != expected)
                     {
-                        c_parser_diagnostic(&result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unmatched closing delimiter"));
+                        c_parser_diagnostic(arena, &result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unmatched closing delimiter"));
                     }
                     else
                     {
@@ -15025,7 +15029,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
             if (!ended)
             {
                 CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[BUSTER_MIN(index, token_count - 1)]);
-                c_parser_diagnostic(&result, location, C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("expected ';' or a function body after declaration"));
+                c_parser_diagnostic(arena, &result, location, C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("expected ';' or a function body after declaration"));
                 break;
             }
             CParserDeclarationKind kind = is_typedef                         ? C_PARSER_DECLARATION_TYPEDEF

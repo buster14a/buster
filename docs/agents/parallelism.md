@@ -64,3 +64,20 @@
   (+3.5%)** for 112 k extra preprocessed tokens — one predicate expansion per
   byte value per table. A real generator writing the bytes into source would
   not cost that; the preprocessor doing it at every compile does.
+
+## Native C link cohorts
+
+The opt-in driver consumer is documented in [driver.md](driver.md#opt-in-native-translation-unit-lanes).
+It reuses `lane_run`, not a new pool or dispatch system. A worker-sized cohort
+has no queued second TU to claim: each participating lane owns one input
+slot, and ordered publication releases that cohort before the next one. An
+atomic take-index would add contention without changing ownership in this
+bounded slice. Extending to more pending inputs must evaluate dynamic claims,
+full-TU/fragment lifetimes, grain size and memory together; no load-balancing
+speedup is established by this implementation.
+
+Do not parallelize functions by copying the TU design blindly: signature plans,
+IR source cursors, module line suppression and inline-assembly symbol changes
+are shared within a TU. Serial table prewarm does not remove these dependencies.
+`compiler_parallel_prewarm()` is the complete native-C prewarm entry for a
+caller launching an external gang; idle persistent workers still count as live.
