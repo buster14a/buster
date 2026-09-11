@@ -53,6 +53,7 @@ typedef struct TpConfig
     unsigned flag_count;
     unsigned mode_mask, pairs, warmups, timeout, seed, scale;
     int cpu, pmu, require_pmu, guard, identical;
+    int assembly;
 } TpConfig;
 
 typedef struct TpWorkload
@@ -68,6 +69,7 @@ typedef struct TpJob
     TpWorkload workload;
     unsigned mode;
     unsigned stage;
+    int assembly;
 } TpJob;
 
 typedef struct TpRow
@@ -226,6 +228,11 @@ static int tp_options(int argc, char** argv, TpConfig* config)
                     ok = tp_number(value, &cpu) && cpu < 65536;
                     if (ok) config->cpu = (int)cpu;
                 }
+            }
+            else if (!strcmp(key, "--artifact"))
+            {
+                config->assembly = !strcmp(value, "assembly");
+                ok = config->assembly || !strcmp(value, "object");
             }
             else if (!strcmp(key, "--mode"))
             {
@@ -465,6 +472,13 @@ typedef struct TpArguments
     unsigned count;
 } TpArguments;
 
+static char const* tp_artifact_extension(TpJob const* job)
+{
+    /* Self-host stages must remain executable even in an assembly-output run.
+     * Path validation can inspect the job without touching compiler options. */
+    return job->stage ? ".exe" : job->assembly ? ".s" : ".o";
+}
+
 static void tp_compile_arguments(TpConfig const* config, TpJob const* job,
                                  char const* compiler, char const* artifact,
                                  char const* metrics, TpArguments* arguments)
@@ -491,7 +505,7 @@ static void tp_compile_arguments(TpConfig const* config, TpJob const* job,
     }
     else
     {
-        args[argc++] = "-c";
+        args[argc++] = job->assembly ? "-S" : "-c";
     }
     for (unsigned i = 0; i < config->flag_count; ++i) args[argc++] = (char*)config->flags[i];
     /* Buster's -O options reset the allocator. The measured mode must be
@@ -514,7 +528,7 @@ static int tp_measure(TpConfig const* config, TpJob const* job, char const* comp
     row->source_functions = job->workload.functions;
     char artifact[TP_PATH_CAP], metrics[TP_PATH_CAP], log[TP_PATH_CAP];
     char leaf[256];
-    snprintf(leaf, sizeof(leaf), "%s-%s-%u%s", job->workload.name, tp_modes[job->mode], variant, job->stage ? ".exe" : ".o");
+    snprintf(leaf, sizeof(leaf), "%s-%s-%u%s", job->workload.name, tp_modes[job->mode], variant, tp_artifact_extension(job));
     int ok = tp_path(artifact, output_root, leaf);
     snprintf(leaf, sizeof(leaf), "%s.metrics", sample_id);
     ok = ok && tp_path(metrics, output_root, leaf);
@@ -680,6 +694,8 @@ static int tp_metadata(TpConfig const* config, char const* root, char const* bas
             if (i) fputc(',', file);
             fprintf(file, "{\"job\":%u,\"name\":", i); tp_json_string(file, w->name);
             fputs(",\"mode\":", file); tp_json_string(file, tp_modes[jobs[i].mode]);
+            fputs(",\"artifact\":", file);
+            tp_json_string(file, jobs[i].stage ? "executable" : jobs[i].assembly ? "assembly" : "object");
             fputs(",\"source\":", file); tp_json_string(file, w->path);
             fputs(",\"sha256\":", file); tp_json_string(file, w->hash);
             fprintf(file, ",\"bytes\":%" PRIu64 ",\"physical_lines\":%" PRIu64 ",\"defined_functions\":%" PRIu64 "}",
@@ -1228,7 +1244,7 @@ static int tp_run(TpConfig config)
         {
             for (unsigned mode = 0; mode < 4; ++mode)
             {
-                if (config.mode_mask & (1u << mode)) jobs[job_count++] = (TpJob){workloads[i], mode, 0};
+                if (config.mode_mask & (1u << mode)) jobs[job_count++] = (TpJob){workloads[i], mode, 0, config.assembly};
             }
         }
     }
@@ -1264,7 +1280,11 @@ static int tp_run(TpConfig config)
     ok = ok && manifest != NULL;
     if (manifest)
     {
-        for (unsigned i = 0; i < job_count; ++i) fprintf(manifest, "%u\t%s/%s\n", i, jobs[i].workload.name, tp_modes[jobs[i].mode]);
+        for (unsigned i = 0; i < job_count; ++i)
+        {
+            fprintf(manifest, "%u\t%s/%s%s\n", i, jobs[i].workload.name, tp_modes[jobs[i].mode],
+                    !jobs[i].stage && jobs[i].assembly ? "/assembly" : "");
+        }
         if (fclose(manifest) != 0) ok = 0;
     }
     FILE* samples = ok && tp_path(path, root, "samples.csv") ? fopen(path, "wb") : NULL;
@@ -1552,6 +1572,7 @@ static void tp_help(void)
           "  throughput self-test\n\n"
           "Options: --pairs N (20+ for guard; two rounds), --warmups N, --mode all|none|mir-stack|fast|quality,\n"
           "--timeout SECONDS, --cpu N|auto, --flag ARG (repeatable), --baseline-id LABEL, --candidate-id LABEL,\n"
+          "--artifact object|assembly (ordinary jobs only; default object; self-host stages stay executable),\n"
           "--pmu (separate replays), --require-pmu, --allocation-baseline IDE --allocation-candidate IDE,\n"
           "--self-host-root FROZEN_TREE --self-host-generated GENERATED_DIR, --require-identical-output,\n"
           "--no-guard (explicit diagnostic/smoke mode; no performance pass claimed).\n\n"
