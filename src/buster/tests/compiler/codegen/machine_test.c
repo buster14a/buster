@@ -3160,6 +3160,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         // This also runs unchanged on the pre-removal table: a legacy-only
         // constraint would disagree with both the helper and its projection.
         MachineOpcodeInfo const* info = machine_opcode_info(opcode);
+        BUSTER_TEST(arguments, opcode_rows[opcode].clobber_mask == info->clobber_mask);
+        BUSTER_TEST(arguments, ((opcode_rows[opcode].flags & MACHINE_OPCODE_ROW_CLOBBERS) != 0) == (info->clobber_mask != 0));
         bool constrained = info->tied_pair || info->early_clobber_mask || info->fixed_register_mask ||
                            (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED);
         BUSTER_TEST(arguments, machine_opcode_has_constraints(info) == constrained);
@@ -3188,6 +3190,27 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 2) == UINT32_MAX);
         BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 3) == UINT32_MAX);
         BUSTER_TEST(arguments, (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED) != 0);
+    }
+
+    // These encoder sequences must retain scratch clobbers after removal
+    // of the unused implicit-physical duplicate. Division and high multiply
+    // write RDX; unsigned float conversions use RCX and two vector scratch
+    // registers beyond their declared operands.
+    u16 const rdx_clobber_opcodes[] = {
+        MACHINE_X64_SDIV32, MACHINE_X64_SDIV64, MACHINE_X64_UDIV32, MACHINE_X64_UDIV64,
+        MACHINE_X64_SREM32, MACHINE_X64_SREM64, MACHINE_X64_UREM32, MACHINE_X64_UREM64, MACHINE_X64_MULH64,
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rdx_clobber_opcodes); index += 1)
+    {
+        BUSTER_TEST(arguments, machine_opcode_info(rdx_clobber_opcodes[index])->clobber_mask == (1ull << MACHINE_X64_RDX));
+    }
+    u16 const conversion_clobber_opcodes[] = {
+        MACHINE_X64_CVT_U64_TO_F32, MACHINE_X64_CVT_U64_TO_F64, MACHINE_X64_CVT_F32_TO_U64, MACHINE_X64_CVT_F64_TO_U64,
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(conversion_clobber_opcodes); index += 1)
+    {
+        u64 expected = (1ull << MACHINE_X64_RCX) | (1ull << MACHINE_X64_ZMM0) | (1ull << MACHINE_X64_ZMM1);
+        BUSTER_TEST(arguments, machine_opcode_info(conversion_clobber_opcodes[index])->clobber_mask == expected);
     }
 
     // A register byte has no meaning without its mask bit. In particular,

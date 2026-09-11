@@ -137,7 +137,6 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = 1u << MACHINE_X64_RDX,                     \
         .schedule_class = MACHINE_SCHEDULE_CLASS_DIV,                                                                                                        \
         .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_X64_RAX, MACHINE_X64_RCX},                                                                    \
-        .implicit_physical_defs = 1ull << MACHINE_X64_RDX,                                                                                                     \
     }
 // The high half of an unsigned product borrows the divide rows' constrained
 // shape exactly -- RAX in and out, RCX the other source, RDX clobbered -- and
@@ -148,7 +147,6 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = 1u << MACHINE_X64_RDX,                     \
         .schedule_class = MACHINE_SCHEDULE_CLASS_MUL,                                                                                                          \
         .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_X64_RAX, MACHINE_X64_RCX},                                                                     \
-        .implicit_physical_defs = 1ull << MACHINE_X64_RDX,                                                                                                      \
     }
 #define MACHINE_INFO_MOVE_CONSTRAINED(name_literal)                                                                                                            \
     {                                                                                                                                                          \
@@ -158,7 +156,7 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 #define MACHINE_INFO_FLOAT_MOVE_CONSTRAINED_CLOBBER(name_literal, clobbers)                                                                                          \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = (clobbers), .implicit_physical_defs = (clobbers),                                  \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = (clobbers),                                  \
         .implicit_resource_defs = MACHINE_RESOURCE_VECTOR_STATE_MASK, \
     }
 #define MACHINE_INFO_THREE_ADDRESS(name_literal)                                                                                                               \
@@ -197,7 +195,7 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 #define MACHINE_INFO_STORE_FRAME(name_literal)                                                                                                                 \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},                                            \
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE, .memory_operand = 1,                                      \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,                                      \
         .schedule_class = MACHINE_SCHEDULE_CLASS_STORE,                                                                                                         \
     }
 #define MACHINE_INFO_FLOAT_MOVE_CLOBBER(name_literal, clobbers)                                                                                                      \
@@ -209,13 +207,13 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 #define MACHINE_INFO_LOAD_POINTER(name_literal)                                                                                                                 \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 2,                                       \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ,                                       \
         .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,                                                                                                       \
     }
 #define MACHINE_INFO_STORE_POINTER(name_literal)                                                                                                               \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                  \
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE, .memory_operand = 1,                                      \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,                                      \
         .schedule_class = MACHINE_SCHEDULE_CLASS_STORE,                                                                                                         \
     }
 
@@ -306,7 +304,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("x64_load_frame"),
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_FRAME},
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 2,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ,
         .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,
     },
     [MACHINE_X64_STORE_FRAME8] = MACHINE_INFO_STORE_FRAME("x64_store_frame8"),
@@ -604,7 +602,6 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_FRAME},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ,
-        .memory_operand = 2,
         .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,
     },
     [MACHINE_X64_VSTORE_FRAME] = {
@@ -613,7 +610,6 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_VECTOR},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY,
         .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
-        .memory_operand = 1,
         .schedule_class = MACHINE_SCHEDULE_CLASS_STORE,
     },
     [MACHINE_X64_VLOAD_PTR] = {
@@ -622,7 +618,6 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ,
-        .memory_operand = 2,
         .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,
     },
     [MACHINE_X64_VSTORE_PTR] = {
@@ -631,7 +626,6 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_VECTOR},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY,
         .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
-        .memory_operand = 1,
         .schedule_class = MACHINE_SCHEDULE_CLASS_STORE,
     },
     [MACHINE_X64_VLOAD_PTR_MASKED] = {
@@ -640,7 +634,6 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ,
-        .memory_operand = 2,
         .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,
     },
     [MACHINE_X64_VSTORE_PTR_MASKED] = {
@@ -649,7 +642,6 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_VECTOR},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY,
         .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
-        .memory_operand = 1,
         .schedule_class = MACHINE_SCHEDULE_CLASS_STORE,
     },
     [MACHINE_X64_VCOMPRESS_STORE_PTR] = {
@@ -658,7 +650,6 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_VECTOR},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY,
         .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
-        .memory_operand = 1,
         .schedule_class = MACHINE_SCHEDULE_CLASS_STORE,
     },
     [MACHINE_X64_VSPLATB] = {
@@ -789,14 +780,14 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("a64_load_frame"),
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_FRAME},
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 2,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ,
         .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,
     },
     [MACHINE_A64_LOAD_FRAME32] = {
         .name = S8_INITIALIZER("a64_load_frame32"),
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_FRAME},
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 2,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ,
         .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,
     },
     [MACHINE_A64_STORE_FRAME8] = MACHINE_INFO_STORE_FRAME("a64_store_frame8"),
@@ -972,7 +963,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("a64_vload_frame"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_FRAME},
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 1,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ,
         .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,
         .implicit_resource_defs = MACHINE_RESOURCE_VECTOR_STATE_MASK,
     },
@@ -980,7 +971,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("a64_vstore_frame"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_FRAME},
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE, .memory_operand = 1,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
         .implicit_resource_uses = MACHINE_RESOURCE_VECTOR_STATE_MASK,
     },
     // Pure V0/V1 compute between its chunk loads and store: no register
@@ -1073,7 +1064,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("a64_vload_frame_sized"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_FRAME},
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 1,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ,
         .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,
         .implicit_resource_defs = MACHINE_RESOURCE_VECTOR_STATE_MASK,
     },
@@ -1081,7 +1072,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("a64_vstore_frame_sized"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_FRAME},
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE, .memory_operand = 1,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
         .implicit_resource_uses = MACHINE_RESOURCE_VECTOR_STATE_MASK,
     },
     [MACHINE_X64_LEA_BLOCK] = {
@@ -1575,11 +1566,6 @@ MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info)
     return info && info->memory_effect < MACHINE_MEMORY_EFFECT_COUNT ? (MachineMemoryEffect)info->memory_effect : MACHINE_MEMORY_EFFECT_NONE;
 }
 
-MachineBundleKind machine_opcode_bundle(MachineOpcodeInfo const* info)
-{
-    return info && info->bundle < MACHINE_BUNDLE_COUNT ? (MachineBundleKind)info->bundle : MACHINE_BUNDLE_NONE;
-}
-
 bool machine_opcode_is_memory(MachineOpcodeInfo const* info)
 {
     return machine_opcode_memory_effect(info) != MACHINE_MEMORY_EFFECT_NONE || (info && (info->attributes & MACHINE_OPCODE_ATTRIBUTE_MEMORY));
@@ -1600,22 +1586,6 @@ u32 machine_opcode_fixed_register(MachineOpcodeInfo const* info, u32 slot)
     return result;
 }
 
-u32 machine_opcode_memory_operand(MachineOpcodeInfo const* info)
-{
-    u32 result;
-    if (!info || !info->memory_operand)
-    {
-        result = UINT32_MAX;
-    }
-    else
-    {
-        u32 slot = (u32)info->memory_operand - 1u;
-        result = slot < info->operand_count ? slot : UINT32_MAX;
-    }
-
-    return result;
-}
-
 bool machine_opcode_operand_is_tied(MachineOpcodeInfo const* info, u32 destination_slot, u32 source_slot)
 {
     bool result;
@@ -1631,11 +1601,6 @@ bool machine_opcode_operand_is_tied(MachineOpcodeInfo const* info, u32 destinati
     }
 
     return result;
-}
-
-bool machine_opcode_operand_is_early_clobber(MachineOpcodeInfo const* info, u32 slot)
-{
-    return info && slot < 8 && (info->early_clobber_mask & (1u << slot)) != 0;
 }
 
 bool machine_opcode_has_constraints(MachineOpcodeInfo const* info)
