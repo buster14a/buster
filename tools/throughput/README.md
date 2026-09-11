@@ -316,6 +316,71 @@ pre-formatting snapshot. Keep each process log separate and do not substitute
 census timings for the normal uninstrumented series.
 
 
+## Result schema 2: process diagnostics (#345)
+
+The generated-input format remains **schema 1**: changing result columns does
+not alter the six workload files, PRNG sequence, flags, modes or default guard
+family. The result bundle is **schema 2**. Its CSV files append `minor_faults`,
+`major_faults`, `voluntary_context_switches` and `involuntary_context_switches`
+after `output_sha256`. These are optional exact unsigned integer counts; `NA`
+means unavailable, whereas `0` is an observed zero. Negative, fractional,
+malformed and overflowing counts are rejected. Raw values retain all 64 bits;
+summary medians use the same floating-point presentation as other metrics.
+
+Linux copies `ru_minflt`, `ru_majflt`, `ru_nvcsw` and `ru_nivcsw` from the
+**existing per-invocation `wait4` result**, after stopping the wall clock. No
+extra process, timer, PMU event, polling loop or allocation observer is enabled
+in a timing trial. These are child usage counts, not the harness's cumulative
+children totals. The operating system may include descendants whose resource
+usage the child waited for; this is not live process-tree aggregation. macOS
+and Windows currently leave these four observations unavailable. In particular,
+a Windows total fault count is not invented as a minor/major split.
+
+Both `samples.csv` and the independent PMU/allocation `telemetry.csv` retain
+the counts. `summary.json` includes their timing medians and separate replay
+medians with availability counts; an incomplete diagnostic series has a null
+median rather than silently selecting its available subset. An unavailable OS
+counter does not invalidate an otherwise complete allocation probe. Missing
+allocation metrics still invalidate an explicitly requested allocation probe.
+The existing output-hash, source-work and bundle-completion checks apply.
+
+**These fields never gate performance.** The two rounds, adjacent pairs,
+15%/2 ms wall margin, 20%/16 MiB RSS margin, exact sign test, Bonferroni family,
+warmups, pair minimum and inconclusive status are unchanged. Synthetic tests
+increase all four diagnostics by twelve orders of magnitude without changing
+a guard decision. They are evidence for investigating scheduling or paging,
+not grounds for deleting inconvenient samples or attributing a speedup.
+
+The new reader rejects a schema-1 result with an explicit version diagnostic;
+it does not reinterpret old column positions. Keep the original harness to
+replay an old bundle, or collect a fresh experiment with schema 2. Do not edit
+an old completion manifest to claim compatibility.
+
+The native regression suite checks exact zero/UINT64_MAX/unavailable replay,
+invalid counters, legacy rejection, optional probe completeness, and unchanged
+corpus hashing. On Linux it compares one allocation-and-sleep child's `wait4`
+counts with an independently obtained `getrusage(RUSAGE_CHILDREN)` delta,
+without another child between snapshots. Other platforms check unavailability.
+The existing Linux harness job additionally runs the suite under ASan/UBSan:
+
+```sh
+clang -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic \
+  -fwrapv -fno-strict-aliasing -funsigned-char \
+  -fsanitize=address,undefined -fno-sanitize-recover=all \
+  tools/throughput/tests.c -lm -o build/throughput-tests-sanitized
+ASAN_OPTIONS=halt_on_error=1:detect_leaks=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  build/throughput-tests-sanitized build/throughput-tool-tests-sanitized
+```
+
+This closes a collection gap, not physical-hardware acceptance. Hosted runner
+labels, generic PMU availability and these OS counters do not establish Zen 5
+identity, physical isolation, instruction throughput or a compiler speedup.
+#46/#128 still require verified physical Zen 5 experiments and separate Zen 4
+nonregression. #346's optional macro/aggregate workloads remain separate; no
+preprocessing/debug-specific case or default corpus expansion is added here.
+
+
 ### QUALITY scratch/work census
 
 The existing `BUSTER_BENCH_ALLOCATIONS=ON` diagnostic compiler also emits
