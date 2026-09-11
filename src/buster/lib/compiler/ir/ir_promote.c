@@ -6,6 +6,8 @@
 // is iterative, including irreducible loops; no C recursion or blocks*locals
 // resident matrix is required. ir_promote_compact owns the single final ID
 // remap, including instruction sources, extras, labels and builder side data.
+// ir_prepare_canonical_module owns the input/output validation boundaries;
+// a producer certificate never certifies rows mutated by this pass.
 
 #define IR_PROMOTE_NONE UINT32_MAX
 
@@ -858,18 +860,20 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
     statistics->values_after += function->value_count;
 }
 
-IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool assume_validated)
+IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified)
 {
     IrValidationResult result = ir_validation_ok();
     if (!program || !program->arena || !module)
     {
         result.error = IR_VALIDATION_INVALID_ID;
+        result.boundary = IR_VALIDATION_BOUNDARY_CANONICAL_INPUT;
     }
     else
     {
-        if (!assume_validated)
+        if (!input_certified)
         {
             result = ir_validate_canonical_module(program, module);
+            result.boundary = IR_VALIDATION_BOUNDARY_CANONICAL_INPUT;
         }
         if (result.error == IR_VALIDATION_NONE && !program->disable_local_promotion && !module->local_promotion_complete)
         {
@@ -884,14 +888,14 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             }
             if (module->local_promotion.promoted_locals)
             {
-                // A certified producer has already established its canonical
-                // contract. Its fast path intentionally skips the general
-                // validator both before and after preparation; the structural
-                // tests and every non-certified producer still validate the
-                // transformed module here.
-                if (!assume_validated)
+                // Mutation ends the input certificate's scope. The optimized
+                // production fast path trusts this pass's own contract, not
+                // the producer's certificate. Debug/test/sanitizer consumers
+                // check the transformed rows before publication instead.
+                if (!input_certified || BUSTER_IR_TRANSFORM_CHECKS)
                 {
                     result = ir_validate_canonical_module(program, module);
+                    result.boundary = IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT;
                 }
             }
             module->local_promotion_complete = result.error == IR_VALIDATION_NONE;

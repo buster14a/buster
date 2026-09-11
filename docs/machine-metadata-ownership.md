@@ -56,10 +56,10 @@ recorded below the inventory; reserved bytes have no semantic authority.
 | `tied_pair` | Authoritative destination/source tie; MIR_STACK and FAST placement, verifier/tests | Two-address SSA rows; changing an opcode requires using its own tie |
 | `early_clobber_mask` | Live constraint input, currently zero in every descriptor; FAST/QUALITY constraint detection | No current nonzero producer; the uncalled per-slot accessor has been removed |
 | `fixed_register_mask`, `fixed_registers[4]` | Authoritative explicit physical operand assignments; verifier and all machine placement modes | A mask bit controls whether the corresponding register byte is meaningful; target-specific scratch fallback remains for other rows |
-| `attributes` | Authoritative call, terminator, flags, constraint and rematerialization facts; verifier, scheduler and placement | `MEMORY` overlaps `memory_effect`; `BUNDLE`/`EXPANDS` do not currently drive bundle/expansion consumers |
+| `attributes` | Authoritative call, terminator, flags, constraint and rematerialization facts; verifier, scheduler and placement | The redundant `MEMORY` bit is removed; `BUNDLE`/`EXPANDS` do not currently drive bundle/expansion consumers |
 | `clobber_mask` | Authoritative extra physical-register clobbers; all placement modes and compact row projection | Encoder-sequence scratch beyond explicit operands; also determines required callee saves |
 | `schedule_class` | Authoritative scheduler barrier/vector membership where specified; published into `schedule_flags` | ALU/SHIFT/MUL/DIV/LOAD/STORE labels are not currently latency or throughput inputs; no scheduling cost model consumes them |
-| `memory_effect` | Authoritative conservative memory-chain membership; `machine_opcode_is_memory`, row publication | Includes six aggregate copies and the x86 incoming read formerly described only by a scheduler switch. It is not a complete hardware-memory-effects model: existing side-effect barriers can omit it |
+| `memory_effect` | Sole static conservative memory-chain classification; `machine_opcode_is_memory`, row publication | Includes six aggregate copies and the x86 incoming read formerly described only by a scheduler switch. It is not a complete hardware-memory-effects model: existing side-effect barriers can omit it |
 | `implicit_resource_uses`, `implicit_resource_defs` | `VECTOR_STATE` is authoritative implicit vector-state chain membership; row publication | Float bridges, scalar conversions and AArch64 implicit V-register rows. Existing FLAGS/NZCV bits still have no resource-mask consumer; flag ordering currently uses `attributes` |
 | `reserved_constraints`, `reserved_hot`, `reserved_form`, `reserved_expansion`, `reserved_metadata`, `reserved_recipe[4]`, `reserved_schedule[9]`, `reserved_physical[2]` | Padding, not semantic state | Zero; preserve the descriptor layout and must not be consumed |
 
@@ -68,6 +68,38 @@ The independent `machine_opcode_emit_recipes` / x86 emit registry supplies
 `MachineOpcode`, and consumed by recipe/encoding registry audits. The
 removed `MachineOpcodeInfo.emit_recipe` member was never a valid lookup
 route. This relationship and all retained descriptor offsets are unchanged.
+
+## Single memory-chain authority
+
+Checked against `b4d56a359dc55343cfa91915e4025a26b3eecce7`. The compiled table
+has 246 opcodes: 38 carry the old `MACHINE_OPCODE_ATTRIBUTE_MEMORY` bit,
+49 have a valid non-NONE `memory_effect`, and none depend on the bit alone.
+The bit's only reader was `machine_opcode_is_memory`, which ORed it with the
+effect classification. Remove the duplicate bit and all its producers; the
+helper now classifies solely through `machine_opcode_memory_effect`. Other
+attribute bit values, effects and descriptor offsets do not change.
+
+The immutable table owns the classification for the process lifetime, and
+`machine_opcode_rows_once` projects it into the existing memory scheduling
+bit at serial publication. No extra pass, cache or invalidation scheme is
+needed. Changed opcode selection must publish the corresponding effect before
+consumers run, as for the other static descriptor facts. There is no new
+allocation and no table-size reduction; measurements are reported separately.
+
+The existing frozen scheduler-membership table independently checks both the
+helper and effect classification for every opcode. The six aggregate-copy
+operations retain READ_WRITE, and both incoming-read operations retain READ.
+The alias-order regression now uses the helper without redundant exceptions
+for those opcodes; its independent slot/range and conservative-copy ordering
+checks remain. Null, zero, out-of-domain effects and a side-effect-only
+synthetic descriptor retain their existing classification behavior.
+
+Memory membership and barriers are different facts. Call, side-effect and
+terminator attributes and barrier/call/atomic schedule classes still impose
+barriers, including operations without a memory effect. VOLATILE, ATOMIC and
+BARRIER effects also remain barriers through the existing publication logic.
+This cleanup does not establish complete hardware effects or new alias proofs;
+unknown memory and uncertified functions keep the current conservative policy.
 
 ## Removed dormant descriptor state
 
@@ -93,8 +125,8 @@ saving, new allocation or pass. Compiler-build and runtime evidence belongs
 to the accompanying performance audit and exact-revision validation results;
 removing declarations alone does not establish a speedup.
 
-This is a bounded cleanup. The diagnostic name, overlapping memory predicates,
-unused attribute/resource bits and metadata outside this inventory still need
+This is a bounded cleanup. The diagnostic name, unused attribute/resource
+bits and metadata outside this inventory still need
 an audit before #45 can close.
 
 ## Removed unused form and expansion identities
@@ -265,11 +297,14 @@ completed slices do not close #45:
 - Audit the remaining diagnostic `name` and unused attribute/resource bits
   in a separate change. The nine dormant fields and three uncalled helpers
   described above are removed with the descriptor layout preserved.
-- Resolve the remaining memory predicates with whole-domain comparisons
-  before removing either source. Do not treat
-  populated FLAGS/NZCV masks as an implemented hazard model.
+- Audit unused FLAGS/NZCV resource bits against the actual flag-ordering
+  attributes; populated masks alone are not an implemented hazard model.
+  The duplicate memory bit is removed by the whole-domain comparison above.
 - Extend the field census beyond the scopes above before claiming that all
   retained machine metadata is active. For example, virtual-register
-  `rematerialization_recipe` and `hint` have no production producer/consumer;
-  `typed_origin` is selector-written provenance retained by raw replay, with
-  no in-process semantic consumer in the audited tree.
+  `rematerialization_recipe` and `hint` have no nonzero production producer
+  in the checked tree, but `bootstrap_trace.c` reads them as diagnostic state.
+  `typed_origin` is selector-written provenance consumed by selector tests,
+  raw replay and bootstrap tracing. Document those diagnostic/serialization
+  contracts and their invalidation before deciding whether to remove fields;
+  they are not allocator rematerialization or register-hint authorities.

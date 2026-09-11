@@ -2685,6 +2685,28 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_select_arithmetic_row(MachineX64Selector* se
     return result;
 }
 
+// Complement both limbs with ordinary SSA arithmetic. A NOT row rewrites its
+// operand; XOR with all ones gives each result a single explicit definition.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_i128_complement(MachineX64Selector* selector, IrInstruction* instruction)
+{
+    IrFunction* function = selector->function;
+    u32 source_slot = instruction->operand_count == 1 && instruction->operands[0].value < function->value_count
+                          ? selector->value_stack_slots[instruction->operands[0].value] : UINT32_MAX;
+    u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+    bool selected = instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT && source_slot != UINT32_MAX && result_slot != UINT32_MAX;
+    if (selected)
+    {
+        u32 low = machine_x64_select_frame_load64(selector, source_slot, 0);
+        u32 high = machine_x64_select_frame_load64(selector, source_slot, 8);
+        u32 mask = machine_x64_select_immediate_register(selector, UINT64_MAX);
+        u32 result_low = machine_x64_select_arithmetic_row(selector, MACHINE_X64_XOR64, low, mask);
+        u32 result_high = machine_x64_select_arithmetic_row(selector, MACHINE_X64_XOR64, high, mask);
+        machine_x64_select_frame_store64(selector, result_slot, 0, result_low);
+        machine_x64_select_frame_store64(selector, result_slot, 8, result_high);
+    }
+    return selected;
+}
+
 // The constrained sibling of machine_x64_select_arithmetic_row, for an opcode
 // whose first slot is used *and* defined: the value is copied into a fresh
 // register first and the operation rewrites it in place, which is the two-row
@@ -5817,6 +5839,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                       instruction->opcode == IR_OPCODE_VA_ARG ||
                       instruction->opcode == IR_OPCODE_CAST || instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
                       instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE || instruction->opcode == IR_OPCODE_BINARY ||
+                      (instruction->opcode == IR_OPCODE_UNARY && instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT) ||
                       // An i128 constant is slot-backed like every other i128
                       // value; nothing else this opcode produces reaches the
                       // aggregate kinds below, so the widened list costs one
@@ -6494,7 +6517,14 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     instruction_selected = machine_x64_select_cast(&selector, instruction, result_register);
                     break;
                 case IR_OPCODE_UNARY:
-                    instruction_selected = machine_x64_select_unary(&selector, instruction, result_register);
+                    if (machine_x64_type_class(&selector, instruction->canonical_type).flags & MACHINE_TYPE_CLASS_INTEGER128)
+                    {
+                        instruction_selected = machine_x64_select_i128_complement(&selector, instruction);
+                    }
+                    else
+                    {
+                        instruction_selected = machine_x64_select_unary(&selector, instruction, result_register);
+                    }
                     break;
                 case IR_OPCODE_BINARY:
                     instruction_selected = machine_x64_select_binary(&selector, instruction, result_register);

@@ -1387,6 +1387,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_windows_arm64_unwind(Uni
     return result;
 }
 
+// Keep runtime complements strict on every desktop x86-64 target.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x86_64_i128_complement(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-windows")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("buster-x64-i128-complement"), S8(".o"));
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), output, S8("tests/basic_c_x86_64_i128_complement.c")};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("i128_complement {S8} {S8} {S8}: {S8}"),
+                    targets[target], modes[mode], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 6 &&
+                    compiled.codegen_statistics.fallback_function_count == 0, description);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+                bool native_target = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS) || (target == 2 && BUSTER_WINDOWS);
+                if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-x64-i128-complement-run"), S8(".exe"));
+                    String8 native_command[] = {modes[mode], frontends[frontend], S8("-fverify-codegen"), S8("-o"), executable,
+                                                S8("tests/basic_c_x86_64_i128_complement.c")};
+                    CompilerDriverInvocation native_invocation = compiler_driver_parse_arguments(temporary.arena,
+                        (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command));
+                    native_invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena, native_invocation);
+                    BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
+                    if (native.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                    }
+                }
+#endif
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 // Keep the complete conversion fixture strict on all desktop AArch64 targets.
 // Foreign object success is not execution evidence; native hosts run it too.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_i128(UnitTestArguments* arguments)
@@ -1433,6 +1484,68 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_i128(Un
                 }
 #endif
                 scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+// Both the new boundary/CFG oracle and the unchanged wide fixture must select.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_i128_divide(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    struct
+    {
+        String8 path;
+        u32 functions;
+    } fixtures[] = {
+        {S8("tests/basic_c_aarch64_i128_divide.c"), 8},
+        {S8("tests/basic_c_aarch64_i128.c"), 38},
+    };
+    for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
+    {
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-a64-i128_divide"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
+                                         S8("-fverify-codegen"), S8("-o"), output, fixtures[fixture].path};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 description = string_format(temporary.arena, S8("i128_divide {S8} {S8} {S8} {S8}: {S8}"),
+                        fixtures[fixture].path, targets[target], modes[mode], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == fixtures[fixture].functions &&
+                        compiled.codegen_statistics.fallback_function_count == 0, description);
+#if BUSTER_CPU_ARCH_AARCH64 && !BUSTER_ANDROID && !BUSTER_IOS
+                    bool native_target = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS) || (target == 2 && BUSTER_WINDOWS);
+                    if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-i128_divide-run"), S8(".exe"));
+                        String8 native_command[] = {modes[mode], frontends[frontend], S8("-fverify-codegen"), S8("-o"), executable,
+                                                    fixtures[fixture].path};
+                        CompilerDriverInvocation native_invocation = compiler_driver_parse_arguments(temporary.arena,
+                            (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command));
+                        native_invocation.reject_machine_fallback = mode != 0;
+                        CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena, native_invocation);
+                        BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
+                        if (native.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                        }
+                    }
+#endif
+                    scratch_end(temporary);
+                }
             }
         }
     }
@@ -2417,9 +2530,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_validation_values(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 path = buster_test_temporary_path(temporary.arena, S8("buster-ir-validation-values"), S8(""));
+            String8 command[] = {string_format(temporary.arena, S8("-fregister-allocator={S8}"), modes[mode]),
+                frontend ? S8("-ffrontend-ssa") : S8("-fno-frontend-ssa"), S8("-fverify-codegen"),
+#if BUSTER_ANDROID || BUSTER_IOS
+                // Mobile app sandboxes validate objects; desktop hosts execute
+                // every allocator/frontend combination below.
+                S8("-c"),
+#endif
+                S8("tests/basic_c_ir_validation_values.c"), S8("-o"), path};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            String8 description = string_format(temporary.arena, S8("canonical values {S8} frontend={u32}: {S8}"),
+                                                modes[mode], frontend, compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+#if !BUSTER_ANDROID && !BUSTER_IOS
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                           (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(temporary.arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+#endif
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
+    UnitTestResult validation_values = compiler_driver_test_validation_values(arguments);
+    result.test_count += validation_values.test_count;
+    result.succeeded_test_count += validation_values.succeeded_test_count;
     UnitTestResult pic_policy = compiler_driver_test_pic_argument_policy(arguments);
     result.test_count += pic_policy.test_count;
     result.succeeded_test_count += pic_policy.succeeded_test_count;
@@ -2436,6 +2594,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     result.test_count += parameter_alignment.test_count;
     result.succeeded_test_count += parameter_alignment.succeeded_test_count;
 #endif
+    UnitTestResult i128_divide = compiler_driver_test_aarch64_i128_divide(arguments);
+    result.test_count += i128_divide.test_count;
+    result.succeeded_test_count += i128_divide.succeeded_test_count;
     UnitTestResult i128_block_parameters = compiler_driver_test_i128_block_parameters(arguments);
     result.test_count += i128_block_parameters.test_count;
     result.succeeded_test_count += i128_block_parameters.succeeded_test_count;
@@ -2448,6 +2609,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     UnitTestResult float_to_i128 = compiler_driver_test_aarch64_float_to_i128(arguments);
     result.test_count += float_to_i128.test_count;
     result.succeeded_test_count += float_to_i128.succeeded_test_count;
+    UnitTestResult complement = compiler_driver_test_x86_64_i128_complement(arguments);
+    result.test_count += complement.test_count;
+    result.succeeded_test_count += complement.succeeded_test_count;
     UnitTestResult fallback = compiler_driver_test_machine_fallback(arguments);
     result.test_count += fallback.test_count;
     result.succeeded_test_count += fallback.succeeded_test_count;

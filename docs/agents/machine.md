@@ -99,6 +99,10 @@
   opcode classifiers. The [metadata ownership inventory](../machine-metadata-ownership.md)
   documents producers, consumers, publication, invalidation, and remaining
   dormant fields; incomplete descriptor fields are not a hazard model.
+- Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
+  through `machine_opcode_is_memory`; the duplicate memory attribute bit is
+  removed. Calls, side effects and terminators still impose independent
+  barriers. A missing memory effect is not permission to reorder a barrier.
 - Memory scheduling uses whole-stack-object alias classes only when the
   selector's existing canonical walk certifies no volatile access in the
   function. Unknown/manual/structural-replay functions default to the original
@@ -175,6 +179,23 @@
   ahead of their definitions publishes incorrect verifier metadata.
   `basic_c_x86_64_i128_binary.c` and `basic_c_i128_shift_edges.c` require strict
   MIR selection and cover product carries and counts below, at and above 64.
+- AArch64 signed/unsigned i128 division and remainder use a bounded restoring
+  loop over ordinary scalar MIR. Five block parameters carry the evolving
+  quotient/dividend, remainder and bit count; parallel edge copies keep the
+  loop in SSA. Signed magnitudes and results use explicit low-limb borrow.
+  The selector counts splits during its existing value-fact walk and allocates
+  canonical-to-machine entry/exit maps only for functions containing a wide
+  divide. Remap branch, switch, label-address and indirect-branch targets to
+  entries, and canonical outgoing edges from exits; preserve original block
+  parameters on the entry. The registered division fixture checks exact results
+  against an independent scalar-limb reference and exercises surrounding CFG
+  edges. It and the unchanged wide-integer fixture require zero fallback on
+  all desktop AArch64 targets and all MIR allocators with both frontend forms.
+- x86-64 i128 bitwise complement reads both frame-backed limbs and emits
+  ordinary three-operand XOR64 rows against one all-ones constant. Each limb
+  result has one definition; do not use mutable NOT rows for this expansion.
+  `basic_c_x86_64_i128_complement.c` checks signed/unsigned loaded values,
+  every bit position and in-place stores in all modes and both frontend forms.
 - AArch64 f32/f64-to-i128 casts use scalar MIR conversions and arithmetic.
   Widen f32 before splitting the absolute magnitude at 2^64, convert both
   unsigned limbs with truncation toward zero, and restore signed results

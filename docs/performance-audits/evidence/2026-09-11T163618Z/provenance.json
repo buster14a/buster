@@ -1,0 +1,10 @@
+{
+  "measurement_local_commit": "0a25667da1b75a7cde37a9edde6afa7581095162",
+  "measurement_published_commit": "971008c79b31eae385f1892d3f51b4459ecca7dd",
+  "measurement_tree": "3033a92f89adb4feb9184d67f26470dd049c56f6",
+  "measurement_main": "5324b7d077d5727a23dd680c0a3efb778a55ff7f",
+  "final_integrated_code_commit": "e7a978da2b16cda2d8c2b693f424c1eeceb04174",
+  "final_integrated_tree": "507766e80ec9cf18cc717b8fe9686d5b297c8fbd",
+  "final_integrated_main": "3d35b5d39ea31de04f9813996d241cf53914b65f",
+  "note": "The measured binaries predate the final main integration. The GitHub commit and local commit have identical source trees; commit metadata differs because publication uses the authenticated GitHub connection."
+}
