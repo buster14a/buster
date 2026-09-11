@@ -2572,9 +2572,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_validation_values(UnitTe
     return result;
 }
 
+#include <buster/tests/compiler/driver/driver_fast_test.c>
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
+    UnitTestResult fast = compiler_driver_test_fast(arguments);
+    result.test_count += fast.test_count;
+    result.succeeded_test_count += fast.succeeded_test_count;
     UnitTestResult validation_values = compiler_driver_test_validation_values(arguments);
     result.test_count += validation_values.test_count;
     result.succeeded_test_count += validation_values.succeeded_test_count;

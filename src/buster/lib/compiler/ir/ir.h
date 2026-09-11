@@ -3,7 +3,8 @@
 // Canonical typed IR API over the record shapes in model.h: program/module/
 // function construction, ABI classification, label-provenance queries,
 // validation (run it before machine selection or Wasm emission), and
-// printing. Everything is arena-owned and integer-ID based.
+// printing and opt-in bounded FAST preparation. Everything is arena-owned
+// and integer-ID based.
 
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/ir/model.h>
@@ -698,6 +699,46 @@ struct IrLocalPromotionStatistics
     u64 parameter_incoming_visits;
 };
 
+// FAST is opt-in until the paired end-to-end acceptance gate passes. Each
+// selected pass runs at most once per module preparation. Budgets are per
+// function, deterministic, and never reject valid source when exhausted.
+typedef enum IrFastPass
+{
+    IR_FAST_FOLD,
+    IR_FAST_ADDRESS,
+    IR_FAST_DCE,
+    IR_FAST_PARAMETERS,
+    IR_FAST_PASS_COUNT,
+} IrFastPass;
+#define IR_FAST_PASS_BIT(pass) (1u << (u32)(pass))
+#define IR_FAST_ALL ((1u << IR_FAST_PASS_COUNT) - 1)
+#define IR_FAST_SCRATCH_BUDGET ((u64)16 * 1024 * 1024)
+#define IR_FAST_RETAINED_BUDGET ((u64)8 * 1024 * 1024)
+#define IR_FAST_PARAMETER_SWEEPS 4u
+#define IR_FAST_WORK_BUDGET ((u64)4 * 1024 * 1024)
+
+typedef struct IrFastPassStatistics IrFastPassStatistics;
+struct IrFastPassStatistics
+{
+    u64 nanoseconds;
+    u64 visits;
+    u64 changes;
+};
+typedef struct IrFastStatistics IrFastStatistics;
+struct IrFastStatistics
+{
+    IrFastPassStatistics passes[IR_FAST_PASS_COUNT];
+    u64 functions;
+    u64 budget_skips;
+    u64 provenance_skips;
+    u64 parameter_budget_hits;
+    u64 scratch_peak_bytes;
+    u64 retained_bytes;
+    u64 compact_nanoseconds;
+    u64 instructions_before;
+    u64 instructions_after;
+};
+
 typedef struct IrModule IrModule;
 struct IrModule
 {
@@ -736,6 +777,8 @@ struct IrModule
     u32 label_address_relocation_count;
     bool local_promotion_complete;
     IrLocalPromotionStatistics local_promotion;
+    bool fast_complete;
+    IrFastStatistics fast;
 };
 
 // ABI decomposition belongs to one compilation/convention, never to an
@@ -780,6 +823,8 @@ struct IrProgram
     // Differential controls, set before publishing any module to a consumer.
     bool disable_local_promotion;
     bool disable_target_local_promotion;
+    u32 fast_passes;
+    bool measure_fast_passes;
     u32 module_count;
     u32 lowered_function_count;
     u32 rejected_function_count;
@@ -811,6 +856,7 @@ typedef enum IrValidationBoundary
     IR_VALIDATION_BOUNDARY_UNSPECIFIED,
     IR_VALIDATION_BOUNDARY_CANONICAL_INPUT,
     IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT,
+    IR_VALIDATION_BOUNDARY_FAST_OUTPUT,
 } IrValidationBoundary;
 
 typedef struct IrValidationResult IrValidationResult;
@@ -934,4 +980,8 @@ BUSTER_F_DECL bool ir_local_promotion_call_barrier(IrProgram* program, IrInstruc
 // local_promotion_complete prevents rerunning the pass, not validation after a
 // later mutation. Consumers must pass false after mutating a prepared module.
 // Unsafe locals remain in memory; no implicit zero/undef initialization.
+// Conservative semantic authority for dead canonical rows; reads, traps,
+// floating exceptions and unknown/exact effects remain observable.
+BUSTER_F_DECL bool ir_instruction_is_pure(IrProgram* program, IrFunction* function, IrInstruction const* row);
+BUSTER_F_DECL String8 ir_fast_pass_name(IrFastPass pass);
 BUSTER_F_DECL IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified);

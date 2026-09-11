@@ -1,0 +1,129 @@
+{
+  "base": "44a90fcbff44988624878aff9db3346a8bc6550b",
+  "code_commit": "985dac665065cb370803553b046dc4af29522616",
+  "code_tree": "a9874f31dcc0b9319f45c30e0f040a922ecefbd2",
+  "platform": "Linux-6.18.35-x86_64-with-glibc2.39",
+  "clang": "Ubuntu clang version 18.1.3 (1ubuntu1)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /workspace/scratch/6f9db092acbf/toolchain/usr/lib/llvm-18/bin\n",
+  "node": "v24.19.0",
+  "commands": [
+    "source /workspace/scratch/22558937a9f9/toolchain-env.sh",
+    "CMAKE_BUILD_PARALLEL_LEVEL=1 ./build.sh generate --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF",
+    "CMAKE_BUILD_PARALLEL_LEVEL=1 ./build.sh build --config Release -t ide",
+    "build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -fcanonical-fast src/buster/apps/ide/ide.c -lm -o build/ide-fast-stage1",
+    "build/ide-fast-stage1 cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -fcanonical-fast src/buster/apps/ide/ide.c -lm -o build/ide-fast-stage2",
+    "cmp build/ide-fast-stage1 build/ide-fast-stage2",
+    "build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v src/buster/apps/ide/ide.c -lm -o build/ide-default-stage1",
+    "build/ide-default-stage1 cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v src/buster/apps/ide/ide.c -lm -o build/ide-default-stage2",
+    "cmp build/ide-default-stage1 build/ide-default-stage2",
+    "build/ide-fast-stage2 bench",
+    "CMAKE_BUILD_PARALLEL_LEVEL=1 ./build.sh build -t ide",
+    "BUSTER_TEST_JOBS=1 build/Debug/ide test --ci=1 --verbose=1"
+  ],
+  "files": {
+    "build/Release/ide": {
+      "sha256": "5ebdba222f623ad0384ee2c608f8c9337d54e5d8a391415b14c2841d96d2017a",
+      "bytes": 39375280
+    },
+    "build/Debug/ide": {
+      "sha256": "87b31eff505cd85f140a85b7dce3020ed8f3d8ebe7368f859e3982ad39971a38",
+      "bytes": 32430392
+    },
+    "build/ide-fast-stage1": {
+      "sha256": "a5a21d6532869feada0db0bbfc59c772152bef2729fcdbcbdabc2bd0d0870948",
+      "bytes": 37852016
+    },
+    "build/ide-fast-stage2": {
+      "sha256": "a5a21d6532869feada0db0bbfc59c772152bef2729fcdbcbdabc2bd0d0870948",
+      "bytes": 37852016
+    },
+    "build/ide-default-stage1": {
+      "sha256": "2c86b16d8a9ed92536179ad9b41e3551c8f985712380758d56e12e46368c1a99",
+      "bytes": 38992768
+    },
+    "build/ide-default-stage2": {
+      "sha256": "2c86b16d8a9ed92536179ad9b41e3551c8f985712380758d56e12e46368c1a99",
+      "bytes": 38992768
+    },
+    "tests/basic_c_canonical_fast.c": {
+      "sha256": "eed5634e90c72165e8684a44958744de923bddcc7074641cc20b04ba04b22f1e",
+      "bytes": 1432
+    },
+    "tests/basic_c_canonical_fast_scalar.c": {
+      "sha256": "4fe492505acceafde90d3019d4308b20f26275598217d4b1a071334b1ce37d7d",
+      "bytes": 282
+    }
+  },
+  "debug_tests": [
+    "TEST_MODULE_TIMING index=0 module=arena_tests duration_ns=6157074 passed=56 failed=0 assertions=56 status=pass",
+    "TEST_MODULE_TIMING index=1 module=hash_tests duration_ns=1704 passed=5 failed=0 assertions=5 status=pass",
+    "TEST_MODULE_TIMING index=2 module=simd_tests duration_ns=26944 passed=141 failed=0 assertions=141 status=pass",
+    "TEST_MODULE_TIMING index=3 module=string_tests duration_ns=55874931 passed=4012 failed=0 assertions=4012 status=pass",
+    "TEST_MODULE_TIMING index=4 module=os_tests duration_ns=321288742 passed=140 failed=0 assertions=140 status=pass",
+    "TEST_MODULE_TIMING index=5 module=file_tests duration_ns=74732401 passed=45 failed=0 assertions=45 status=pass",
+    "TEST_MODULE_TIMING index=6 module=target_tests duration_ns=9138848 passed=6469 failed=0 assertions=6469 status=pass",
+    "TEST_MODULE_TIMING index=7 module=c_frontend_tests duration_ns=5238325106 passed=147835 failed=0 assertions=147835 status=pass",
+    "TEST_MODULE_TIMING index=8 module=metamorphic_tests duration_ns=7259832284 passed=111 failed=0 assertions=111 status=pass",
+    "TEST_MODULE_TIMING index=9 module=aarch64_encoding_tests duration_ns=2991993236 passed=236716 failed=0 assertions=236716 status=pass",
+    "TEST_MODULE_TIMING index=10 module=aarch64_exact_bridge_tests duration_ns=22289 passed=102 failed=0 assertions=102 status=pass",
+    "TEST_MODULE_TIMING index=11 module=aarch64_control_semantics_tests duration_ns=319241 passed=3377 failed=0 assertions=3377 status=pass",
+    "TEST_MODULE_TIMING index=12 module=aarch64_system_registers_tests duration_ns=4012215 passed=108 failed=0 assertions=108 status=pass",
+    "TEST_MODULE_TIMING index=13 module=aarch64_semantics_tests duration_ns=36639925 passed=215 failed=0 assertions=215 status=pass",
+    "TEST_MODULE_TIMING index=14 module=aarch64_system_semantics_tests duration_ns=29063384 passed=694 failed=0 assertions=694 status=pass",
+    "TEST_MODULE_TIMING index=15 module=aarch64_syntax_tests duration_ns=455160820 passed=112 failed=0 assertions=112 status=pass",
+    "TEST_MODULE_TIMING index=16 module=aarch64_semantic_vm_tests duration_ns=259150860 passed=90 failed=0 assertions=90 status=pass",
+    "TEST_MODULE_TIMING index=17 module=aarch64_direct_simd_tests duration_ns=434523763 passed=152 failed=0 assertions=152 status=pass",
+    "TEST_MODULE_TIMING index=18 module=aarch64_complex_simd_tests duration_ns=632873880 passed=32 failed=0 assertions=32 status=pass",
+    "TEST_MODULE_TIMING index=19 module=aarch64_memory_semantics_tests duration_ns=2925190142 passed=18 failed=0 assertions=18 status=pass",
+    "TEST_MODULE_TIMING index=20 module=aarch64_alias_projection_tests duration_ns=833779 passed=28 failed=0 assertions=28 status=pass",
+    "TEST_MODULE_TIMING index=21 module=assembly_tests duration_ns=473343646 passed=6148 failed=0 assertions=6148 status=pass",
+    "TEST_MODULE_TIMING index=22 module=x86_64_forwarding_tests duration_ns=439714 passed=13113 failed=0 assertions=13113 status=pass",
+    "TEST_MODULE_TIMING index=23 module=x86_64_metadata_tests duration_ns=3439050290 passed=1617 failed=0 assertions=1617 status=pass",
+    "TEST_MODULE_TIMING index=24 module=x86_64_tls_tests duration_ns=31998384 passed=294552 failed=0 assertions=294552 status=pass",
+    "TEST_MODULE_TIMING index=25 module=executable_padding_tests duration_ns=15957851 passed=32908 failed=0 assertions=32908 status=pass",
+    "TEST_MODULE_TIMING index=26 module=x86_64_got_tests duration_ns=25013434 passed=133541 failed=0 assertions=133541 status=pass",
+    "TEST_MODULE_TIMING index=27 module=x86_64_completion_census_tests duration_ns=5288643271 passed=34046 failed=0 assertions=34046 status=pass",
+    "TEST_MODULE_TIMING index=28 module=ir_tests duration_ns=87486177 passed=5754 failed=0 assertions=5754 status=pass",
+    "TEST_MODULE_TIMING index=29 module=llvm_bitcode_tests duration_ns=6298206974 passed=331 failed=0 assertions=331 status=pass",
+    "TEST_MODULE_TIMING index=30 module=machine_selection_tests duration_ns=2879625 passed=172 failed=0 assertions=172 status=pass",
+    "TEST_MODULE_TIMING index=31 module=machine_tests duration_ns=3505129424 passed=475488 failed=0 assertions=475488 status=pass",
+    "TEST_MODULE_TIMING index=32 module=codegen_tests duration_ns=179738908 passed=3671 failed=0 assertions=3671 status=pass",
+    "TEST_MODULE_TIMING index=33 module=aarch64_stride_tests duration_ns=9579605 passed=98 failed=0 assertions=98 status=pass",
+    "TEST_MODULE_TIMING index=34 module=debug_model_tests duration_ns=13517917 passed=668 failed=0 assertions=668 status=pass",
+    "TEST_MODULE_TIMING index=35 module=dwarf_tests duration_ns=139140 passed=104 failed=0 assertions=104 status=pass",
+    "TEST_MODULE_TIMING index=36 module=codeview_tests duration_ns=7425027 passed=46596 failed=0 assertions=46596 status=pass",
+    "TEST_MODULE_TIMING index=37 module=pdb_tests duration_ns=1329970946 passed=24848 failed=0 assertions=24848 status=pass",
+    "TEST_MODULE_TIMING index=38 module=object_tests duration_ns=7139454 passed=828 failed=0 assertions=828 status=pass",
+    "TEST_MODULE_TIMING index=39 module=jit_tests duration_ns=442815 passed=149 failed=0 assertions=149 status=pass",
+    "TEST_MODULE_TIMING index=40 module=link_tests duration_ns=166821048 passed=1256 failed=0 assertions=1256 status=pass",
+    "TEST_MODULE_TIMING index=41 module=gpu_pipeline_tests duration_ns=112602 passed=124 failed=0 assertions=124 status=pass",
+    "TEST_MODULE_TIMING index=42 module=compiler_diagnostic_tests duration_ns=5685473 passed=64 failed=0 assertions=64 status=pass",
+    "TEST_MODULE_TIMING index=43 module=compiler_driver_tests duration_ns=13756302617 passed=10420 failed=0 assertions=10420 status=pass",
+    "TEST_MODULE_TIMING index=44 module=compiler_driver_object_path_tests duration_ns=11759987 passed=22 failed=0 assertions=22 status=pass",
+    "TEST_MODULE_TIMING index=45 module=x86_64_tests duration_ns=575417 passed=18 failed=0 assertions=18 status=pass",
+    "[1486994/1486994] Unit tests",
+    "[46/46] Module tests"
+  ],
+  "selfhost_fast": [
+    "IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1255812 changes=90906",
+    "IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1255812 changes=9166",
+    "IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=2535642 changes=130339",
+    "IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=85252 changes=0",
+    "IR_FAST functions=4583 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=1994768 retained_bound=14810348 compact_ns=0 instructions_before=1255812 instructions_after=1116113",
+    "IR_LOCAL_PROMOTION candidates=25297 promoted=8 loads_removed=14 stores_removed=10 parameters_inserted=12 parameters_removed=10 uninitialized=0 barriers=8 instructions_before=1255844 instructions_after=1255812 values_before=1086782 values_after=1086762",
+    "IR_LOCAL_PROMOTION_WORK parameter_sweeps=4 block_visits=28 parameter_visits=14 incoming_visits=28",
+    "CODEGEN cpu=emeraldrapids vector_bits=512 functions=4583 instructions=1116113 values=947063 stack_value_bytes=5046496 stack_frame_bytes=5046496 max_stack_frame_bytes=643320 code_bytes=18381983 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=104 allocator=fast fallback_functions=0",
+    "CODEGEN_ENCODER exact_attempts=1526202 exact_successes=1526202 exact_failures=0",
+    "CODEGEN_MIR mutable_virtual_registers=75934",
+    "CODEGEN_ALLOCATOR reloads=168533 spills=204551 boundary_spills=87775 boundary_reloads=25797 boundary_copies=83 copies=145613 rematerializations=58705 pins=0 splits=0 scheduled=0 schedule_kept=0"
+  ],
+  "selfhost_default": [
+    "IR_LOCAL_PROMOTION candidates=25297 promoted=8 loads_removed=14 stores_removed=10 parameters_inserted=12 parameters_removed=10 uninitialized=0 barriers=8 instructions_before=1255844 instructions_after=1255812 values_before=1086782 values_after=1086762",
+    "IR_LOCAL_PROMOTION_WORK parameter_sweeps=4 block_visits=28 parameter_visits=14 incoming_visits=28",
+    "CODEGEN cpu=emeraldrapids vector_bits=512 functions=4583 instructions=1255812 values=1086762 stack_value_bytes=5243408 stack_frame_bytes=5243408 max_stack_frame_bytes=651512 code_bytes=19378365 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=104 allocator=fast fallback_functions=0",
+    "CODEGEN_ENCODER exact_attempts=1724332 exact_successes=1724332 exact_failures=0",
+    "CODEGEN_MIR mutable_virtual_registers=77423",
+    "CODEGEN_ALLOCATOR reloads=185689 spills=249946 boundary_spills=105979 boundary_reloads=27860 boundary_copies=84 copies=156761 rematerializations=44638 pins=0 splits=0 scheduled=0 schedule_kept=0"
+  ],
+  "stage2_bench": "BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=5 bytes=21042 min_ns=17432406 median_ns=20231205 throughput_mb_s=1\n",
+  "limitation": "Correctness and work census only. Shared host, no performance acceptance or measured peak RSS."
+}

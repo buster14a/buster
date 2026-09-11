@@ -5537,3 +5537,4 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
 }
 
 #include <buster/lib/compiler/ir/ir_promote.c>
+#include <buster/lib/compiler/ir/ir_fast.c>
