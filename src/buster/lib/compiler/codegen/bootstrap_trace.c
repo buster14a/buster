@@ -457,9 +457,10 @@ void bootstrap_trace_machine(BootstrapTrace* trace, IrFunction* function, Machin
                 bootstrap_trace_u64(trace, (u64)row->definition_point);
                 bootstrap_trace_u64(trace, (u64)row->register_class);
                 bootstrap_trace_u64(trace, (u64)row->flags);
-                bootstrap_trace_u64(trace, (u64)row->rematerialization_recipe);
+                // Frozen zero slots preserve the versioned trace framing.
+                bootstrap_trace_u64(trace, 0);
                 bootstrap_trace_u64(trace, (u64)row->typed_origin);
-                bootstrap_trace_u64(trace, (u64)row->hint);
+                bootstrap_trace_u64(trace, 0);
             }
             bootstrap_trace_u64(trace, machine->block_count);
             for (u32 i = 0; i < machine->block_count; i += 1)

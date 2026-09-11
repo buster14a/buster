@@ -2339,7 +2339,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_clear_instruction_cache(UnitTest
     BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 0) == MACHINE_A64_X9);
     BUSTER_TEST(arguments, machine_opcode_fixed_register(info, 1) == MACHINE_A64_X10);
     BUSTER_TEST(arguments, info->clobber_mask == ((1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X11)));
-    BUSTER_TEST(arguments, (info->implicit_resource_defs & MACHINE_RESOURCE_NZCV_MASK) != 0);
+    BUSTER_TEST(arguments, (info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) != 0);
     for (u32 target_index = 0; source.length && target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
     {
         for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
@@ -3437,8 +3437,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // Vector scratch membership is orthogonal to the load class. A frame
     // read in an implicit V register must participate in both chains.
     MachineOpcodeInfo const* vector_load_info = machine_opcode_info(MACHINE_A64_VLOAD_FRAME);
-    BUSTER_TEST(arguments, machine_opcode_schedule_class(vector_load_info) == MACHINE_SCHEDULE_CLASS_LOAD);
-    BUSTER_TEST(arguments, vector_load_info && (vector_load_info->implicit_resource_defs & MACHINE_RESOURCE_VECTOR_STATE_MASK));
+    BUSTER_TEST(arguments, machine_opcode_memory_effect(vector_load_info) == MACHINE_MEMORY_EFFECT_READ);
+    BUSTER_TEST(arguments, vector_load_info && vector_load_info->implicit_vector_state);
 
     MachineOpcodeInfo const* copy_info = machine_opcode_info(MACHINE_OPCODE_SKELETON_COPY);
     BUSTER_TEST(arguments, copy_info && copy_info->operand_count == 2);
@@ -4022,6 +4022,17 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     use_before_definition.instructions[0].operands[1] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1);
     BUSTER_TEST(arguments,
                 machine_verify_function(&use_before_definition).error == MACHINE_VERIFY_VIRTUAL_REGISTER_USE_BEFORE_DEFINITION);
+
+    // Removed hint/recipe slots remain zero in structural replay v2. Reject
+    // stale data instead of silently treating it as an allocation contract.
+    MachineFunction stale_metadata = machine_test_build_function(arguments->arena);
+    stale_metadata.virtual_registers[0].reserved_recipe = 1;
+    BUSTER_TEST(arguments, machine_verify_function(&stale_metadata).error == MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION);
+    stale_metadata.virtual_registers[0].reserved_recipe = 0;
+    stale_metadata.virtual_registers[0].reserved_hint = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX);
+    BUSTER_TEST(arguments, machine_verify_function(&stale_metadata).error == MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION);
+    stale_metadata.virtual_registers[0].reserved_hint = 0;
+    BUSTER_TEST(arguments, machine_verify_function(&stale_metadata).error == MACHINE_VERIFY_NONE);
 
     MachineFunction mismatched_definition_point = machine_test_build_function(arguments->arena);
     mismatched_definition_point.virtual_registers[1].definition_point = machine_point_make(1, MACHINE_POINT_AFTER);

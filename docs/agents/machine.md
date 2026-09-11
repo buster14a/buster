@@ -6,7 +6,7 @@
 
 - `MachineInstruction` is the 24-byte hot row. Keep static scheduling,
   memory-effect, fixed-register, tie, early-clobber, register-clobber, and
-  active implicit-resource facts in `MachineOpcodeInfo`, accessed through the
+  implicit-vector-scratch membership in `MachineOpcodeInfo`, accessed through the
   `machine_opcode_*` helpers.
 - Emission recipes come from the separate immutable recipe projection;
   exact x86 forms come from checked encoding metadata. The unused descriptor
@@ -16,8 +16,8 @@
   not a policy seam. See the [identity joins](../machine-metadata-ownership.md#removed-unused-form-and-expansion-identities)
   before deferring a form choice past scheduling or placement.
 - `MachineOpcodeInfo` retains a 96-byte stride. Operand and allocation
-  constraints occupy its first 32 bytes; diagnostic names follow scheduling
-  and implicit-effect metadata. Keep opcode initializers designated and the
+  constraints occupy its first 32 bytes; explicit barrier and implicit-vector
+  membership are cold. Unused names and speculative resource/cost bits are removed. Keep opcode initializers designated and the
   layout checks intact. Simple FAST rows use the separate 16-byte
   `MachineOpcodeRow` projection instead of loading the full descriptor.
 - Address expressions remain canonical IR / selector-owned; no
@@ -97,8 +97,8 @@
   and implicit vector-state chain membership through the published
   `MachineOpcodeRow.schedule_flags` byte. There are no parallel scheduler
   opcode classifiers. The [metadata ownership inventory](../machine-metadata-ownership.md)
-  documents producers, consumers, publication, invalidation, and remaining
-  dormant fields; incomplete descriptor fields are not a hazard model.
+  documents every shared record's producer, consumer, publication and invalidation.
+  Explicit barrier/vector membership is not a latency or hazard model.
 - Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is
   removed. Calls, side effects and terminators still impose independent
