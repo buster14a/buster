@@ -5,13 +5,15 @@
 ## Machine instruction selection and scheduling
 
 - `MachineInstruction` is the 24-byte hot row. Keep static scheduling,
-  memory, bundle, fixed-register, tie, early-clobber, implicit-physical, and
-  implicit-resource facts in `MachineOpcodeInfo`, accessed through the
+  memory-effect, fixed-register, tie, early-clobber, register-clobber, and
+  active implicit-resource facts in `MachineOpcodeInfo`, accessed through the
   `machine_opcode_*` helpers.
 - Emission recipes come from the separate immutable recipe projection;
   exact x86 forms come from checked encoding metadata. The unused descriptor
   form-set and expansion fields/accessors are removed. Their reserved bytes
-  only preserve layout. See the [identity joins](../machine-metadata-ownership.md#removed-unused-form-and-expansion-identities)
+  only preserve layout. Dormant memory hints, timing, bundle state, duplicate
+  recipe and implicit-physical masks are also removed; reserved bytes are
+  not a policy seam. See the [identity joins](../machine-metadata-ownership.md#removed-unused-form-and-expansion-identities)
   before deferring a form choice past scheduling or placement.
 - `MachineOpcodeInfo` retains a 96-byte stride. Operand and allocation
   constraints occupy its first 32 bytes; diagnostic names follow scheduling

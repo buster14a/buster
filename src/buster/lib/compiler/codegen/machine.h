@@ -773,15 +773,6 @@ typedef enum MachineMemoryEffect
     MACHINE_MEMORY_EFFECT_COUNT,
 } MachineMemoryEffect;
 
-typedef enum MachineBundleKind
-{
-    MACHINE_BUNDLE_NONE,
-    MACHINE_BUNDLE_HEAD,
-    MACHINE_BUNDLE_MEMBER,
-    MACHINE_BUNDLE_TAIL,
-    MACHINE_BUNDLE_COUNT,
-} MachineBundleKind;
-
 typedef enum MachineResource
 {
     MACHINE_RESOURCE_NONE,
@@ -947,11 +938,8 @@ struct MachineOpcodeInfo
     // Layout padding, not a second fixed-register authority. Only the
     // per-slot mask and register bytes below describe fixed assignments.
     u16 reserved_constraints;
-    u16 memory_fold_alternate;
-    // Reserved layout-neutral seam. Recipe lookup is kept in a separate
-    // read-only projection so opcode metadata remains constant and safe to
-    // query concurrently; use machine_opcode_emit_recipe().
-    MachineEmitRecipeId emit_recipe;
+    // Padding only; recipe lookup uses machine_opcode_emit_recipe().
+    u8 reserved_recipe[4];
     u8 operand_count;
     // Per inline slot: two role bits, three class bits, three shape bits.
     u8 operand_info[4];
@@ -973,17 +961,10 @@ struct MachineOpcodeInfo
     u8 reserved_metadata;
     u16 reserved_expansion;
     u8 memory_effect;
-    // Memory operand is slot + 1; zero means this opcode has no memory
-    // operand, allowing slot zero to remain unambiguous in zero defaults.
-    u8 memory_operand;
-    u8 memory_flags;
-    u8 latency;
-    u8 throughput;
-    u8 bundle;
-    u8 reserved_schedule[4];
+    // Removed memory hints, timing and bundle state have no authority.
+    u8 reserved_schedule[9];
 
-    u64 implicit_physical_uses;
-    u64 implicit_physical_defs;
+    u64 reserved_physical[2];
     u64 implicit_resource_uses;
     u64 implicit_resource_defs;
 
@@ -997,7 +978,9 @@ BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, clobber_mask) == 0);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, fixed_registers) + sizeof(((MachineOpcodeInfo*)0)->fixed_registers) <= 32);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, schedule_class) == 32);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, memory_effect) == 36);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, implicit_physical_uses) == 48);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, reserved_physical) == 48);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, implicit_resource_uses) == 64);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, implicit_resource_defs) == 72);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, name) == 80);
 
 #define MACHINE_OPCODE_INFO_HAS_FIXED_REGISTERS 1
@@ -1643,12 +1626,9 @@ BUSTER_F_DECL void machine_x86_64_exact_prewarm(void);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
 BUSTER_F_DECL MachineScheduleClass machine_opcode_schedule_class(MachineOpcodeInfo const* info);
 BUSTER_F_DECL MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info);
-BUSTER_F_DECL MachineBundleKind machine_opcode_bundle(MachineOpcodeInfo const* info);
 BUSTER_F_DECL bool machine_opcode_is_memory(MachineOpcodeInfo const* info);
 BUSTER_F_DECL u32 machine_opcode_fixed_register(MachineOpcodeInfo const* info, u32 slot);
-BUSTER_F_DECL u32 machine_opcode_memory_operand(MachineOpcodeInfo const* info);
 BUSTER_F_DECL bool machine_opcode_operand_is_tied(MachineOpcodeInfo const* info, u32 destination_slot, u32 source_slot);
-BUSTER_F_DECL bool machine_opcode_operand_is_early_clobber(MachineOpcodeInfo const* info, u32 slot);
 BUSTER_F_DECL bool machine_opcode_has_constraints(MachineOpcodeInfo const* info);
 // The published row-facts table, indexed by opcode. Filled by the prewarm
 // below; the accessor fills it on a first serial touch for callers that reach
