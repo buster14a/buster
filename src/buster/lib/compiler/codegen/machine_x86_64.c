@@ -6,6 +6,7 @@
 // else is an explicit unsupported result, never a silent misselection.
 
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
@@ -10820,18 +10821,97 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* e
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_movabs(MachineX64Encoder* encoder, u32 reg, u64 value,
                                                        MachineX64ExactEmitCounters* counters)
 {
+    bool result = false;
     MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_MOV_RI);
-    if (!entry || !entry->descriptor || !entry->plan_valid || entry->variant_count < 3)
+    if (!entry || !entry->descriptor || !entry->plan_valid || entry->variant_count < 3 || reg >= 16 || !encoder->bytes)
     {
-        return machine_x64_exact_reject(encoder, counters);
+        result = machine_x64_exact_reject(encoder, counters);
     }
-    MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, 2);
-    BusterX86MetadataPhysicalOperand operands[2] = {
-        machine_x64_exact_gpr_operand(reg, 64),
-        machine_x64_exact_unsigned_immediate_operand(value, 64),
-    };
-    return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[2], operands, variant.operand_count, false, false, 0, false, counters);
+    else if (entry->gpr_encoding_tables[2])
+    {
+        // Switch constants deliberately retain MOV r64, imm64 even when a
+        // shorter MOV would carry the value. Variant 2 already proves the
+        // complete register population and its trailing eight-byte field.
+        u32 table_index = entry->gpr_encoding_tables[2] - 1u;
+        if (table_index >= machine_x64_gpr_encoding_table_count)
+        {
+            result = machine_x64_exact_reject(encoder, counters);
+        }
+        else
+        {
+            MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + table_index;
+            MachineX64GprEncoding const* encoding = table->encodings + reg;
+            if (table->operand_count != 1 || table->operand_slots[0] != 0 ||
+                table->flags != MACHINE_X64_GPR_ENCODING_TABLE_PATCH_IMMEDIATE ||
+                table->immediate_width != sizeof(value) || encoding->byte_count != 10 ||
+                encoder->count > encoder->capacity || encoding->byte_count > encoder->capacity - encoder->count)
+            {
+                result = machine_x64_exact_reject(encoder, counters);
+            }
+            else
+            {
+                // Copy only the authoritative prefix, then patch the field:
+                // no whole-record overstore and no write before validation.
+                memcpy(encoder->bytes + encoder->count, encoding->bytes, 2);
+                memcpy(encoder->bytes + encoder->count + 2, &value, sizeof(value));
+                encoder->count += encoding->byte_count;
+                if (counters)
+                {
+                    counters->attempts += 1;
+                    counters->successes += 1;
+                }
+                result = true;
+            }
+        }
+    }
+    else
+    {
+        // An unavailable prepared table retains the same checked authority,
+        // not a handwritten encoding or a value-dependent shorter form.
+        MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, 2);
+        BusterX86MetadataPhysicalOperand operands[2] = {
+            machine_x64_exact_gpr_operand(reg, 64),
+            machine_x64_exact_unsigned_immediate_operand(value, 64),
+        };
+        result = machine_x64_emit_exact_form(encoder, entry->metadata_tokens[2], operands, variant.operand_count,
+                                             false, false, 0, false, counters);
+    }
+    return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool machine_x64_test_movabs_prepared(void)
+{
+    MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_MOV_RI);
+    bool result = entry && entry->plan_valid && entry->variant_count >= 3 && entry->gpr_encoding_tables[2] != 0;
+    return result;
+}
+
+MachineEncodeResult machine_x64_test_emit_movabs(u8* bytes, u32 capacity, u32 start, u32 reg, u64 value, bool reference)
+{
+    MachineX64Encoder encoder = {.bytes = bytes, .capacity = capacity, .count = start};
+    MachineX64ExactEmitCounters counters = {0};
+    MachineEncodeResult result = {.bytes = bytes};
+    if (reference)
+    {
+        MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_MOV_RI);
+        BusterX86MetadataPhysicalOperand operands[2] = {
+            machine_x64_exact_gpr_operand(reg, 64),
+            machine_x64_exact_unsigned_immediate_operand(value, 64),
+        };
+        result.valid = machine_x64_emit_exact_form(&encoder, entry->metadata_tokens[2], operands, 2,
+                                                   false, false, 0, false, &counters);
+    }
+    else
+    {
+        result.valid = machine_x64_emit_exact_movabs(&encoder, reg, value, &counters);
+    }
+    result.valid = result.valid && !encoder.overflow;
+    result.byte_count = encoder.count;
+    machine_x64_exact_counters_assign(&result, counters);
+    return result;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     MachineX64Encoder* encoder, u8 table_plus_one, u32 reg, u32 base, s32 displacement,
