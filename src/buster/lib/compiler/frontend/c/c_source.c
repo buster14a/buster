@@ -472,26 +472,32 @@ BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_swar(String8 
 }
 
 #if BUSTER_C_TRANSLATE_AVX512
-BUSTER_C_INLINE BUSTER_ALWAYS_INLINE u64 c_translate_plain_run_end_avx512(String8 source, u64 offset)
+BUSTER_C_INTERNAL u64 c_translate_plain_run_end_avx512(String8 source, u64 offset)
 {
-    if (source.length - offset >= 64)
+    Simd512 carriage_return = simd512_splat('\r');
+    Simd512 line_feed = simd512_splat('\n');
+    Simd512 backslash = simd512_splat('\\');
+    bool stopped = false;
+    while (!stopped && source.length - offset >= 64)
     {
-        __m512i carriage = _mm512_set1_epi8('\r');
-        __m512i newline = _mm512_set1_epi8('\n');
-        __m512i backslash = _mm512_set1_epi8('\\');
-        do
+        Simd512 chunk = simd512_load(source.pointer + offset);
+        Mask64 stop_mask = simd512_equal_byte(chunk, carriage_return) | simd512_equal_byte(chunk, line_feed) |
+                           simd512_equal_byte(chunk, backslash);
+        if (stop_mask)
         {
-            __m512i chunk = _mm512_loadu_si512((const void*)(source.pointer + offset));
-            __mmask64 found = _mm512_cmpeq_epi8_mask(chunk, carriage) | _mm512_cmpeq_epi8_mask(chunk, newline) |
-                               _mm512_cmpeq_epi8_mask(chunk, backslash);
-            if (found)
-            {
-                return offset + (u64)__builtin_ctzll((u64)found);
-            }
+            offset += mask64_first_set(stop_mask);
+            stopped = true;
+        }
+        else
+        {
             offset += 64;
-        } while (source.length - offset >= 64);
+        }
     }
-    return c_translate_plain_run_end_swar(source, offset);
+    if (!stopped)
+    {
+        offset = c_translate_plain_run_end_swar(source, offset);
+    }
+    return offset;
 }
 #endif
 
@@ -568,9 +574,6 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
         // The next output byte starts a new linear run; initially true so the
         // first byte records the first checkpoint.
         bool run_broken = true;
-#if !BUSTER_C_TRANSLATE_AVX512
-        BUSTER_UNUSED(force_scalar);
-#endif
         while (input < source.length)
         {
 #if BUSTER_C_TRANSLATE_AVX512
@@ -587,10 +590,10 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             {
                 while (source.length - input >= 64)
                 {
-                    __m512i chunk = _mm512_loadu_si512((const void*)(source.pointer + input));
-                    u64 carriage = (u64)_mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\r'));
-                    u64 line_feed = (u64)_mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\n'));
-                    u64 backslash = (u64)_mm512_cmpeq_epi8_mask(chunk, _mm512_set1_epi8('\\'));
+                    Simd512 chunk = simd512_load(source.pointer + input);
+                    Mask64 carriage = simd512_equal_byte(chunk, simd512_splat('\r'));
+                    Mask64 line_feed = simd512_equal_byte(chunk, simd512_splat('\n'));
+                    Mask64 backslash = simd512_equal_byte(chunk, simd512_splat('\\'));
                     u64 stops = carriage | (backslash & ((line_feed | carriage) >> 1)) | (backslash & (UINT64_C(1) << 63));
                     u64 limit = stops ? (u64)__builtin_ctzll(stops) : 64;
                     if (!limit)
@@ -598,7 +601,7 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
                         break;
                     }
                     u64 newlines = line_feed & (limit >= 64 ? ~UINT64_C(0) : ((UINT64_C(1) << limit) - 1));
-                    _mm512_storeu_si512((void*)(translated + output), chunk);
+                    simd512_store(translated + output, chunk);
                     if (run_broken)
                     {
                         checkpoints[checkpoint_count] = (IrSourceCheckpoint){
@@ -659,11 +662,29 @@ BUSTER_C_INTERNAL CTranslatedSource c_translate_source(Arena* arena, CSpellingSp
             // so it copies through whole and only those three bytes reach the exact
             // scalar handling below. Native AVX-512 hosts classify 64 bytes at a
             // time; every fallback retains the previous eight-byte SWAR scan.
+            u64 plain_end = input;
+            if (force_scalar)
+            {
+                // The reference must not share the vector plain-run scanner with
+                // the dispatched path: disabling only the fused loop was weaker.
+                while (plain_end < source.length)
+                {
+                    char8 character = source.pointer[plain_end];
+                    if (character == '\r' || character == '\n' || character == '\\')
+                    {
+                        break;
+                    }
+                    plain_end += 1;
+                }
+            }
+            else
+            {
 #if BUSTER_C_TRANSLATE_AVX512
-            u64 plain_end = c_translate_plain_run_end_avx512(source, input);
+                plain_end = c_translate_plain_run_end_avx512(source, input);
 #else
-            u64 plain_end = c_translate_plain_run_end_swar(source, input);
+                plain_end = c_translate_plain_run_end_swar(source, input);
 #endif
+            }
             if (plain_end > input)
             {
                 if (run_broken)
@@ -7387,6 +7408,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                            0, 0, false, false);
         }
     }
+    TargetDataLayout layout = options.data_layout;
     CToken* constant_parameter_replacement = arena_allocate(arena, CToken, 1);
     constant_parameter_replacement[0] = c_space_token(space, S8("value"), C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
     String8* constant_parameters = arena_allocate(arena, String8, 1);
@@ -7396,10 +7418,32 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     };
     for (u32 macro_index = 0; macro_index < BUSTER_ARRAY_LENGTH(constant_macro_names); macro_index += 1)
     {
-        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)constant_macro_names[macro_index]), constant_parameter_replacement, 1,
+        // SDK stdint headers use these functions as their literal constructors.
+        // Keep the promoted small types, unsigned int, and target 64-bit types;
+        // identity replacements make UINT64_C(1) << lane a signed int shift.
+        String8 suffix = S8("");
+        if (macro_index == 5)
+        {
+            suffix = S8("U");
+        }
+        else if (macro_index >= 6)
+        {
+            bool is_unsigned = (macro_index & 1) != 0;
+            suffix = layout.long_integer.size == 8 ? (is_unsigned ? S8("UL") : S8("L")) : (is_unsigned ? S8("ULL") : S8("LL"));
+        }
+        CToken* replacement = constant_parameter_replacement;
+        u32 replacement_count = 1;
+        if (suffix.length)
+        {
+            replacement = arena_allocate(arena, CToken, 3);
+            replacement[0] = constant_parameter_replacement[0];
+            replacement[1] = c_space_token(space, S8("##"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_HASH_HASH);
+            replacement[2] = c_space_token(space, suffix, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE);
+            replacement_count = 3;
+        }
+        c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, string_from_pointer((char8*)constant_macro_names[macro_index]), replacement, replacement_count,
                        constant_parameters, 1, true, false);
     }
-    TargetDataLayout layout = options.data_layout;
     bool windows_target = options.target.os == OPERATING_SYSTEM_WINDOWS;
     bool llp64_target = target_uses_llp64_data_model(options.target);
     bool short_wchar_target = target_uses_16_bit_wchar(options.target);
