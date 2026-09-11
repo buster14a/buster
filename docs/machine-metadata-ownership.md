@@ -14,6 +14,28 @@ metadata follows, implicit physical/resource masks begin at offset 48, and
 the diagnostic name begins at offset 80. The stride remains 96 bytes; layout
 assertions in `machine.h` enforce these boundaries.
 
+## Authority boundaries checked for A12
+
+Checked at `ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae`. This is a source
+ownership map, not a claim that every retained field is consumed or that every
+listed target can execute every operation. Paths below are under
+`src/buster/lib/` unless stated otherwise.
+
+| Family | Existing authority | Derived data or remaining independent policy |
+| --- | --- | --- |
+| Machine opcode identity | `MachineOpcode` in `compiler/codegen/machine.h`; `machine_opcode_infos` defines each operation's operand contract | Compact `MachineOpcodeRow` roles, flags and scheduler membership are published once from descriptors. A machine operation is not an exact ISA form. |
+| Instruction forms | `compiler/assembly/x86_64_metadata.{c,h}` and its generated snapshot own normalized x86 forms, bindings and encoding fields | Exact tokens, shape caches and templates are snapshot-derived. Assembler sizing/legality still has independent decisions; that remaining #267 slice is not completed here. |
+| Operand effects | Active descriptor roles, shapes, ties, fixed-slot bindings and clobbers; instruction operands supply dynamic references | Row facts and allocator placement are derived. Dormant form/physical/resource fields are not a second validated hazard model. `fixed_register_mask` and `fixed_registers` now exclusively describe explicit fixed assignments. |
+| Encoding recipes | `machine_opcode_emit_recipes` and `machine_x86_64_emit_registry.h` identify real dispatch/expansion recipes; exact bytes come from x86 metadata | `machine_opcode_emit_recipe()` is the lookup route, not the dormant descriptor member named `emit_recipe`. TLS, forwarding, GOT relaxation and padding migrations already landed; no replacement registry is introduced. |
+| Target capabilities | `target.{c,h}` owns target identity and CPU features; target-specific selectors and backend gates decide implemented lowering; `MachineTargetDescription` owns the machine register file | Selected machine functions borrow immutable target descriptions. An enum or feature bit is not proof of complete frontend/ABI/object/runtime support; #309 tracks conformance reporting. |
+| Module registration | `CMakeLists.txt` owns split-build module/source membership | Unity includes in `src/buster/apps/ide/ide.c`, test registration in `src/buster/tests/test.c`, and direct prewarm lists are separately maintained, not manifest-generated. #89 remains open; unity and embedded tests still default on at the checked base. |
+| Binary writers | `CodeviewBuffer`/`codeview_emit_bytes`, `PdbBuffer`/`pdb_emit_bytes`, and `ObjectBuffer` own their respective mutable output state | CodeView and PDB still duplicate bounded writes (#314). A shared substrate must preserve each owner's bounds/error/lifetime contract; object-format policy is not an ISA encoding authority. |
+
+Historical Forgejo #598 and #857 map to GitHub #45 and #89 in
+[the migration map](issue-migration-map.md). The GitHub numbers in this
+inventory are not remapped. PR #138's descriptor layout, #256's removal of
+uninstantiated records, and #270's scheduler projection are already integrated.
+
 ## Static opcode descriptors
 
 `machine_opcode_infos` in `machine.c` is the sole producer. Its designated
@@ -32,7 +54,6 @@ does not remove those fields or promise that future consumers may trust them.
 | `operand_count`, `operand_info[4]` | Authoritative inline operand count, role, class and shape; verifier, scheduler, allocators; count and roles are projected into row facts | The target row defines the machine operation, including expansion scratch constraints. Each operand byte uses two role bits, three class bits and three shape bits; the new float-move helpers inherit register shape through the shared operand constants |
 | `tied_pair` | Authoritative destination/source tie; MIR_STACK and FAST placement, verifier/tests | Two-address SSA rows; changing an opcode requires using its own tie |
 | `early_clobber_mask` | Live constraint input, currently zero in every descriptor; FAST/QUALITY constraint detection | No current nonzero producer; the separate `machine_opcode_operand_is_early_clobber` accessor has no caller |
-| `fixed_register_set` | Live but redundant constraint-presence input; `machine_opcode_has_constraints`, QUALITY | SHIFT/DIV/MULH rows also have explicit `fixed_register_mask` and `fixed_registers`; removing this legacy input needs its own compatibility check |
 | `fixed_register_mask`, `fixed_registers[4]` | Authoritative explicit physical operand assignments; verifier and all machine placement modes | A mask bit controls whether the corresponding register byte is meaningful; target-specific scratch fallback remains for other rows |
 | `attributes` | Authoritative call, terminator, flags, constraint and rematerialization facts; verifier, scheduler and placement | `MEMORY` overlaps `memory_effect`; `BUNDLE`/`EXPANDS` do not currently drive bundle/expansion consumers |
 | `clobber_mask` | Authoritative extra physical-register clobbers; all placement modes and compact row projection | Encoder-sequence scratch beyond explicit operands; also determines required callee saves |
@@ -46,7 +67,7 @@ does not remove those fields or promise that future consumers may trust them.
 | `memory_fold_alternate`, `emit_recipe`, `memory_flags`, `latency`, `throughput` | Dormant, zero | No producer beyond zero initialization and no consumer. The in-record `emit_recipe` is not the authoritative recipe projection |
 | `implicit_physical_defs` | Dormant, partly duplicates `clobber_mask` | Populated by constrained conversion/DIV/MULH macros but never read |
 | `implicit_physical_uses` | Dormant, zero | No nonzero producer or consumer |
-| `reserved_hot`, `reserved_metadata`, `reserved_schedule[4]` | Padding, not semantic state | Zero; preserve the descriptor layout and must not be consumed |
+| `reserved_constraints`, `reserved_hot`, `reserved_metadata`, `reserved_schedule[4]` | Padding, not semantic state | Zero; preserve the descriptor layout and must not be consumed |
 
 The independent `machine_opcode_emit_recipes` / x86 emit registry supplies
 `machine_opcode_emit_recipe()`. It is static, read-only, keyed by stable
@@ -54,6 +75,35 @@ The independent `machine_opcode_emit_recipes` / x86 emit registry supplies
 `MachineOpcodeInfo.emit_recipe` member is not a second valid lookup route.
 Changing this relationship or the integrated descriptor layout is outside
 this patch.
+
+## Removed fixed-register duplication
+
+The checked base had three macros (`MACHINE_INFO_SHIFT`, `MACHINE_INFO_DIVIDE`
+and `MACHINE_INFO_MULTIPLY_HIGH`) populating `fixed_register_set` for 15 x86
+opcodes. Every one also specified `fixed_register_mask == 3` and RAX/RCX in
+its slot bytes. The set had only two readers, both Boolean: the shared
+constraint predicate and QUALITY's pin-budget predicate. It never supplied
+an assignment. Remove the field, its three producers and its two reads;
+`reserved_constraints` preserves the existing two-byte layout hole without
+retaining semantic state. Register zero is valid: the slot mask, not the
+register byte's truth value, determines whether an assignment exists.
+
+The two predicates intentionally remain different. The shared helper includes
+tied operands; QUALITY's forced-register/pin-budget predicate does not, since
+a tie alone does not force a fixed scratch assignment. Early-clobber and
+attribute-only constraints remain supported. This is a verified authority
+cleanup, not a claim of a miscompile, a measured speedup or lower RSS. The
+96-byte descriptor, 16-byte projection, 24-byte instruction, prewarm boundary
+and direct calls are unchanged. No new allocation or instruction field is
+introduced.
+
+The existing machine suite checks the helper and its row projection against
+the explicit facts across every opcode, checks the 15-opcode RAX/RCX family,
+and covers null/out-of-range slots, fixed register zero, ignored unmasked
+bytes, ties, early clobbers and attribute-only constraints. The same regression
+can run against the pre-removal source to establish predicate equivalence;
+CI results must be attached to the exact revision rather than inferred from
+this inventory. No independent production table is added for the tests.
 
 ## Published row facts
 
@@ -82,8 +132,10 @@ adds physical-operand barriers dynamically because that fact belongs to an
 instruction rather than an opcode. Existing unknown-opcode rejection runs
 before the projected row is indexed.
 
-The whole-domain regression freezes all 236 opcode memberships: 42 barrier,
-45 memory-chain, and 33 implicit-vector-chain members, including overlaps.
+The original scheduler regression froze all 236 opcode memberships (42
+barrier, 45 memory-chain and 33 implicit-vector-chain members, including
+overlaps). At the A12 checked base its explicitly maintained domain has 241
+opcodes; `schedule_memberships` in `machine_test.c` is the current test contract.
 An AArch64 vector frame load retains `LOAD` classification and belongs to
 both memory and implicit-vector chains. An explicit x86 virtual vector ALU
 row relies on its virtual-register dependencies; it is not added to the
@@ -139,22 +191,21 @@ functions still need structural verification before backend consumption.
 
 ## Outstanding issue #45 work
 
-This patch completes scheduler membership authority and removes its three
-legacy opcode classifiers. It deliberately leaves #45 open:
+Scheduler membership authority and removal of its three legacy classifiers
+landed in #270. The fixed-register set is removed by the A12 slice above.
+PR #256 already removed `MachineAddress`, `MachineSegment`, `MachineUse` and
+`MachineLocationSegment`; their encoded reference tags remain stable. These
+completed slices do not close #45:
 
 - Remove the dormant descriptor fields and uncalled accessors above in a
   separate change coordinated with descriptor-layout and verifier work;
   record the actual static-table and compiler-build impact. No owner or
   future feature is invented to justify keeping them indefinitely.
-- Resolve the redundant constraint-presence and memory predicates with
-  whole-domain comparisons before removing either source. Do not treat
+- Resolve the remaining memory predicates with whole-domain comparisons
+  before removing either source. Do not treat
   populated FLAGS/NZCV/physical masks as an implemented hazard model.
 - Extend the field census beyond the scopes above before claiming that all
   retained machine metadata is active. For example, virtual-register
   `rematerialization_recipe` and `hint` have no production producer/consumer;
   `typed_origin` is selector-written provenance retained by raw replay, with
   no in-process semantic consumer in the audited tree.
-- Coordinate removal of the uninstantiated `MachineAddress`,
-  `MachineSegment`, `MachineUse` and `MachineLocationSegment` declarations
-  with PR #256; this patch does not duplicate it. Keep encoded reference
-  tags stable.

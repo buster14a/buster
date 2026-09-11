@@ -11,6 +11,7 @@
 // the end is the entry point codegen.c calls.
 
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
 
 #include <buster/lib/os.h>
@@ -132,14 +133,14 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,                                                            \
-        .schedule_class = MACHINE_SCHEDULE_CLASS_SHIFT, .fixed_register_set = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX),                              \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_SHIFT,                                                                                                       \
         .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_X64_RAX, MACHINE_X64_RCX},                                                                    \
     }
 #define MACHINE_INFO_DIVIDE(name_literal)                                                                                                                      \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = 1u << MACHINE_X64_RDX,                     \
-        .schedule_class = MACHINE_SCHEDULE_CLASS_DIV, .fixed_register_set = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX),                               \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_DIV,                                                                                                        \
         .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_X64_RAX, MACHINE_X64_RCX},                                                                    \
         .implicit_physical_defs = 1ull << MACHINE_X64_RDX,                                                                                                     \
     }
@@ -150,7 +151,7 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED, .clobber_mask = 1u << MACHINE_X64_RDX,                     \
-        .schedule_class = MACHINE_SCHEDULE_CLASS_MUL, .fixed_register_set = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX),                                 \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_MUL,                                                                                                          \
         .fixed_register_mask = 0x3, .fixed_registers = {MACHINE_X64_RAX, MACHINE_X64_RCX},                                                                     \
         .implicit_physical_defs = 1ull << MACHINE_X64_RDX,                                                                                                      \
     }
@@ -754,6 +755,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_A64_EOR64] = MACHINE_INFO_A64_THREE_ADDRESS("a64_eor64", MACHINE_SCHEDULE_CLASS_ALU),
     [MACHINE_A64_MUL32] = MACHINE_INFO_A64_THREE_ADDRESS("a64_mul32", MACHINE_SCHEDULE_CLASS_MUL),
     [MACHINE_A64_MUL64] = MACHINE_INFO_A64_THREE_ADDRESS("a64_mul64", MACHINE_SCHEDULE_CLASS_MUL),
+    [MACHINE_A64_UMULH64] = MACHINE_INFO_A64_THREE_ADDRESS("a64_umulh64", MACHINE_SCHEDULE_CLASS_MUL),
     [MACHINE_A64_SDIV32] = MACHINE_INFO_A64_THREE_ADDRESS("a64_sdiv32", MACHINE_SCHEDULE_CLASS_DIV),
     [MACHINE_A64_SDIV64] = MACHINE_INFO_A64_THREE_ADDRESS("a64_sdiv64", MACHINE_SCHEDULE_CLASS_DIV),
     [MACHINE_A64_UDIV32] = MACHINE_INFO_A64_THREE_ADDRESS("a64_udiv32", MACHINE_SCHEDULE_CLASS_DIV),
@@ -772,6 +774,10 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     [MACHINE_A64_NEG64] = MACHINE_INFO_MOVE("a64_neg64"),
     [MACHINE_A64_NOT32] = MACHINE_INFO_MOVE("a64_not32"),
     [MACHINE_A64_NOT64] = MACHINE_INFO_MOVE("a64_not64"),
+    [MACHINE_A64_CLZ32] = MACHINE_INFO_MOVE("a64_clz32"),
+    [MACHINE_A64_CLZ64] = MACHINE_INFO_MOVE("a64_clz64"),
+    [MACHINE_A64_RBIT32] = MACHINE_INFO_MOVE("a64_rbit32"),
+    [MACHINE_A64_RBIT64] = MACHINE_INFO_MOVE("a64_rbit64"),
     [MACHINE_A64_CMP32] = MACHINE_INFO_A64_COMPARE("a64_cmp32"),
     [MACHINE_A64_CMP64] = MACHINE_INFO_A64_COMPARE("a64_cmp64"),
     [MACHINE_A64_CMP_ZERO] = {
@@ -1314,6 +1320,11 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_STORE_PTR32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 48,
     [MACHINE_A64_STORE_PTR64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 49,
     [MACHINE_A64_B] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 50,
+    [MACHINE_A64_UMULH64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 51,
+    [MACHINE_A64_CLZ32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 52,
+    [MACHINE_A64_CLZ64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 53,
+    [MACHINE_A64_RBIT32] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 54,
+    [MACHINE_A64_RBIT64] = MACHINE_EMIT_RECIPE_DIRECT_BASE + 55,
     [MACHINE_A64_LEA_OFFSET] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 0,
     [MACHINE_A64_READ_SP] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 1,
     [MACHINE_A64_WRITE_SP] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 2,
@@ -1657,7 +1668,7 @@ bool machine_opcode_operand_is_early_clobber(MachineOpcodeInfo const* info, u32 
 
 bool machine_opcode_has_constraints(MachineOpcodeInfo const* info)
 {
-    return info && (info->tied_pair || info->early_clobber_mask || info->fixed_register_set || info->fixed_register_mask ||
+    return info && (info->tied_pair || info->early_clobber_mask || info->fixed_register_mask ||
                     (info->attributes & MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED));
 }
 
@@ -1919,6 +1930,8 @@ u32 machine_builder_edge(MachineFunctionBuilder* builder, MachineEdge edge)
 // otherwise cross-block SSA uses are invisible to dominance and allocation.
 BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder* builder, IrFunction* function, u32 const* value_registers)
 {
+    IR_CONSTRUCTION_RECORD(CFG_BUILDS, 1);
+    IR_CONSTRUCTION_RECORD(CFG_SCRATCH_SLOTS, function->block_count);
     u32* last_source = arena_allocate(builder->arena, u32, function->block_count);
     memset(last_source, 0xff, sizeof(*last_source) * function->block_count);
     bool valid = true;
@@ -1934,6 +1947,7 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder*
             IrInstruction* terminator = function->instructions + block->last_instruction.value;
             for (u32 index = 0; valid && index < terminator->target_count; index += 1)
             {
+                IR_CONSTRUCTION_RECORD(CFG_TARGET_VISITS, 1);
                 u32 target = terminator->targets[index].value;
                 if (target >= function->block_count)
                 {
@@ -1941,20 +1955,25 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder*
                 }
                 else if (last_source[target] != source)
                 {
+                    IR_CONSTRUCTION_RECORD(CFG_UNIQUE_EDGES, 1);
                     last_source[target] = source;
                     IrBlock* destination = function->blocks + target;
                     valid = destination->parameter_count <= UINT16_MAX;
                     u32 copy_offset = builder->edge_copy_sources.total_count;
                     for (IrBlockParameter* parameter = destination->first_parameter; valid && parameter; parameter = parameter->next)
                     {
+                        IR_CONSTRUCTION_RECORD(CFG_PARAMETER_VISITS, 1);
                         IrIncoming* incoming = parameter->first_incoming;
                         while (incoming && incoming->predecessor.value != source)
                         {
+                            IR_CONSTRUCTION_RECORD(CFG_INCOMING_VISITS, 1);
                             incoming = incoming->next;
                         }
+                        IR_CONSTRUCTION_RECORD(CFG_INCOMING_VISITS, incoming != 0);
                         valid = incoming && incoming->value.value < function->value_count && value_registers[incoming->value.value] != UINT32_MAX;
                         if (valid)
                         {
+                            IR_CONSTRUCTION_RECORD(CFG_COPY_SOURCES, 1);
                             machine_builder_edge_copy_source(builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_registers[incoming->value.value]));
                         }
                     }
@@ -1967,6 +1986,7 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder*
             }
         }
     }
+    IR_CONSTRUCTION_RECORD(CFG_FAILURES, !valid);
     return valid;
 }
 

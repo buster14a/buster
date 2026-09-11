@@ -53,6 +53,16 @@ keep current.
 ## Audits, newest first
 
 - [`2026-09-10T010143Z`](docs/performance-audits/2026-09-10T010143Z.md) — Z15: reuse the prepared fixed-width switch MOVABS plan
+- [`2026-09-10T013314Z`](docs/performance-audits/2026-09-10T013314Z.md) — Z12 sparse owner membership: paired pilot and unity census, no proven speedup
+- [`2026-09-10T010755Z`](docs/performance-audits/2026-09-10T010755Z.md) — isel: reuse AArch64 direct-call facts in the operand walk (#132)
+- [`2026-09-11T130113Z`](docs/performance-audits/2026-09-11T130113Z.md) — Clang Release unity-object attribution for #413: CodeGen Prepare rescans in the direct canonical emitter
+- [`2026-09-10T211248Z`](docs/performance-audits/2026-09-10T211248Z.md) — AArch64 scalar and i128 zero-count MIR coverage (#36, #69)
+- [`2026-09-10T184045Z`](docs/performance-audits/2026-09-10T184045Z.md) — Local aggregate-copy completion for the wider metamorphic campaign (#366)
+- [`2026-09-10T180045Z`](docs/performance-audits/2026-09-10T180045Z.md) — SysV unnamed-bitfield interoperability with unchanged default classification (#66, #391)
+- [`2026-09-10T162615Z`](docs/performance-audits/2026-09-10T162615Z.md) — Native MIR follow-up differential and matched throughput evidence
+- [`2026-09-10T160033Z`](docs/performance-audits/2026-09-10T160033Z.md) — Native backend retirement coverage and verification checkpoint
+- [`2026-09-10T010600Z`](docs/performance-audits/2026-09-10T010600Z.md) — QUALITY scratch census through existing diagnostic replays; no optimization claim
+- [`2026-09-09T174124Z`](docs/performance-audits/2026-09-09T174124Z.md) — Lower Win64 indirect aggregate arguments through MIR (#36)
 - [`2026-09-09T163649Z`](docs/performance-audits/2026-09-09T163649Z.md) — Repair ELF AArch64 variadic register cursors and HFA overflow (#36)
 - [`2026-09-09T151546Z`](docs/performance-audits/2026-09-09T151546Z.md) — Lower Windows x86-64 variadic calls through MIR (#36)
 - [`2026-09-09T141413Z`](docs/performance-audits/2026-09-09T141413Z.md) — Select fixed CPU queries in MIR without self-host fallback (#36)

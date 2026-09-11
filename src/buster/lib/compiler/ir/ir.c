@@ -1,5 +1,6 @@
 // Canonical typed IR construction, ABI classification, and validation
-// (model.h owns the record shapes, ir.h the API). The construction
+// (model.h owns the record shapes, ir.h the API). ir_construction_record
+// owns optional calling-thread construction diagnostics. The construction
 // functions (ir_program_initialize, ir_program_add_*, ir_module_add_*,
 // ir_function_add_*) are thin capacity-checked appends; the substance here
 // is what sits between the frontend and the backends: source-map lookup
@@ -16,10 +17,55 @@
 
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 
 #include <buster/lib/file.h>
 #include <buster/lib/simd.h>
 #include <buster/lib/string.h>
+
+#if BUSTER_BENCH_ALLOCATIONS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL IrConstructionCounters ir_construction_totals;
+
+void ir_construction_record(IrConstructionCounter counter, u64 amount)
+{
+    if ((u32)counter < IR_CONSTRUCTION_COUNT)
+    {
+        u64* value = ir_construction_totals.values + counter;
+        if (amount > UINT64_MAX - *value)
+        {
+            *value = UINT64_MAX;
+            ir_construction_totals.overflowed = true;
+        }
+        else
+        {
+            *value += amount;
+        }
+    }
+    else
+    {
+        ir_construction_totals.overflowed = true;
+    }
+    return;
+}
+
+IrConstructionCounters ir_construction_counters(void)
+{
+    return ir_construction_totals;
+}
+
+String8 ir_construction_counter_name(IrConstructionCounter counter)
+{
+    String8 result = {0};
+    switch (counter)
+    {
+#define IR_CONSTRUCTION_NAME(id, name) case IR_CONSTRUCTION_##id: result = S8(#name); break;
+        IR_CONSTRUCTION_COUNTERS(IR_CONSTRUCTION_NAME)
+#undef IR_CONSTRUCTION_NAME
+        default: break;
+    }
+    return result;
+}
+#endif
 
 IrType* ir_type_from_id(IrTypeTable* table, IrTypeId id)
 {
@@ -2867,20 +2913,19 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_is_complex_x87(IrProgram* program, IrTy
 // and GCC compile; the class is always INTEGER because C admits no bit-field
 // of floating type.
 //
-// An *unnamed* bit-field is padding and contributes no class at all, which the
-// reference compilers agree on and which is observable: clang returns
-// `struct { float f; int : 20; }` in `xmm0` and `struct { float f; int x : 20; }`
-// in `rax`, because only the named field merges INTEGER into the eightbyte the
-// float already claimed.
+// The context selects the versioned unnamed-field policy (#391). Historical
+// Buster/Clang treat it as padding; GCC merges INTEGER for nonzero widths.
+// In `struct { float f; int : 20; }` this changes XMM0 to RAX on return.
+// Zero-width fields contribute no class under either policy.
 //
 // `offset` is the byte offset of the aggregate holding the field, so the bits
 // are `(offset + field->offset) * 8 + field->bit_offset`; the storage-unit
 // slide that packing performs moves those two halves against each other and
 // leaves that sum alone.
-BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classify_bit_field(IrField const* field, u64 offset, IrAbiClass classes[2])
+BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classify_bit_field(IrField const* field, u64 offset, IrAbiClass classes[2], bool unnamed_integer)
 {
     bool result = true;
-    if (field->name.length && field->bit_width)
+    if ((field->name.length || unnamed_integer) && field->bit_width)
     {
         u64 start = (offset + field->offset) * 8 + field->bit_offset;
         u64 first = start / 64;
@@ -2928,7 +2973,7 @@ BUSTER_GLOBAL_LOCAL bool ir_abi_tasks_reserve(TemporalArena* temporary, IrAbiCla
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId root_type, IrAbiClass classes[2])
+BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId root_type, IrAbiClass classes[2], bool unnamed_integer)
 {
     IrType* root = ir_type_from_id(&program->types, root_type);
     bool result;
@@ -2975,7 +3020,7 @@ BUSTER_GLOBAL_LOCAL bool ir_system_v_abi_classes(IrProgram* program, IrTypeId ro
                     IrField* field = type->fields + index;
                     if (field->is_bit_field)
                     {
-                        valid = ir_system_v_abi_classify_bit_field(field, task.offset, classes);
+                        valid = ir_system_v_abi_classify_bit_field(field, task.offset, classes, unnamed_integer);
                         if (!valid)
                         {
                             break;
@@ -3262,7 +3307,7 @@ BUSTER_GLOBAL_LOCAL bool ir_homogeneous_float_abi(IrProgram* program, IrTypeId r
 }
 
 BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConvention convention, bool is_result,
-                                                      bool variadic_argument)
+                                                      bool variadic_argument, bool unnamed_integer)
 {
     IrAbiValue value = {0};
     IrType* type = ir_type_from_id(&program->types, type_id);
@@ -3598,7 +3643,7 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                 return value;
             }
             IrAbiClass classes[2] = {0};
-            if (!ir_system_v_abi_classes(program, type_id, classes))
+            if (!ir_system_v_abi_classes(program, type_id, classes, unnamed_integer))
             {
                 value.part_count = 1;
                 value.indirect = is_result;
@@ -3745,7 +3790,7 @@ IrAbiValue ir_abi_context_value(IrProgram* program, IrAbiContext* context, IrTyp
         if (!(page->resolved & mask) && program->types.types[type_id.value].layout.resolved)
         {
             page->values[slot] = ir_classify_abi_value(program, type_id, context->convention, use == IR_ABI_USE_RESULT,
-                                                      use == IR_ABI_USE_VARIADIC_ARGUMENT);
+                                                      use == IR_ABI_USE_VARIADIC_ARGUMENT, context->sysv_unnamed_bitfields_integer);
             page->resolved |= mask;
             context->classified_values += 1;
         }
@@ -3841,7 +3886,8 @@ IrAbiValue ir_type_abi_value(IrProgram* program, IrTypeId type_id, IrAbiConventi
 IrAbiValue ir_test_abi_reference(IrProgram* program, IrTypeId type, IrAbiConvention convention, IrAbiUse use)
 {
     return ir_classify_abi_value(program, type, convention, use == IR_ABI_USE_RESULT,
-                                 convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && use == IR_ABI_USE_VARIADIC_ARGUMENT);
+                                 convention == IR_ABI_CONVENTION_WINDOWS_AARCH64 && use == IR_ABI_USE_VARIADIC_ARGUMENT,
+                                 program && convention < IR_ABI_CONVENTION_COUNT && program->abi_contexts[convention].sysv_unnamed_bitfields_integer);
 }
 #endif
 
@@ -4066,6 +4112,8 @@ IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block
     {
         if (function->block_count >= function->block_capacity)
         {
+            IR_CONSTRUCTION_RECORD(BLOCK_GROWS, 1);
+            IR_CONSTRUCTION_RECORD(BLOCK_ROWS_COPIED, function->block_count);
             u32 capacity = function->block_capacity ? function->block_capacity * 2 : 8;
             IrBlock* blocks = arena_allocate(arena, IrBlock, capacity);
             if (function->block_count)
@@ -4079,6 +4127,7 @@ IrBlock* ir_function_add_block(Arena* arena, IrFunction* function, IrBlock block
             .value = function->block_count,
         };
         function->blocks[function->block_count++] = block;
+        IR_CONSTRUCTION_RECORD(BLOCK_APPENDS, 1);
         result = &function->blocks[function->block_count - 1];
     }
 
@@ -4096,6 +4145,8 @@ IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue valu
     {
         if (function->value_count >= function->value_capacity)
         {
+            IR_CONSTRUCTION_RECORD(VALUE_GROWS, 1);
+            IR_CONSTRUCTION_RECORD(VALUE_ROWS_COPIED, function->value_count);
             u32 capacity = function->value_capacity ? function->value_capacity * 2 : 16;
             IrValue* values = arena_allocate(arena, IrValue, capacity);
             if (function->value_count)
@@ -4109,6 +4160,7 @@ IrValueId ir_function_add_value(Arena* arena, IrFunction* function, IrValue valu
             .value = function->value_count++,
         };
         function->values[id.value] = value;
+        IR_CONSTRUCTION_RECORD(VALUE_APPENDS, 1);
         result = id;
     }
 
@@ -4149,6 +4201,8 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
     {
         if (function->instruction_count >= function->instruction_capacity)
         {
+            IR_CONSTRUCTION_RECORD(INSTRUCTION_GROWS, 1);
+            IR_CONSTRUCTION_RECORD(INSTRUCTION_ROWS_COPIED, function->instruction_count);
             u32 capacity = function->instruction_capacity ? function->instruction_capacity * 2 : 16;
             IrInstruction* instructions = arena_allocate(arena, IrInstruction, capacity);
             if (function->instruction_count)
@@ -4158,9 +4212,11 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
             {
                 IrSourceRange* canonical_sources = arena_allocate(arena, IrSourceRange, capacity);
                 memset(canonical_sources, 0, sizeof(*canonical_sources) * capacity);
+                IR_CONSTRUCTION_RECORD(SOURCE_ROWS_CLEARED, capacity);
                 if (function->instruction_canonical_sources)
                 {
                     memcpy(canonical_sources, function->instruction_canonical_sources, sizeof(*canonical_sources) * function->instruction_count);
+                    IR_CONSTRUCTION_RECORD(SOURCE_ROWS_COPIED, function->instruction_count);
                 }
                 function->instruction_canonical_sources = canonical_sources;
             }
@@ -4179,6 +4235,8 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
         {
             function->instruction_canonical_sources[id.value] = canonical_source;
         }
+        IR_CONSTRUCTION_RECORD(INSTRUCTION_APPENDS, 1);
+        IR_CONSTRUCTION_RECORD(OPERAND_SLOTS_APPENDED, instruction.operand_count);
         result = id;
     }
 

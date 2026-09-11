@@ -2157,7 +2157,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 12);
     BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == 12);
     u8 expected_windows_xdata[] = {
-        1, 11, 4, 0x95, 11, 1, 18, 0, 4, 3, 1, 0x50,
+        1, 11, 3, 0, 11, 1, 18, 0, 1, 0x50, 0, 0,
     };
     BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_xdata) &&
                                memcmp(windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.pointer, expected_windows_xdata,
@@ -2181,6 +2181,72 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
         BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+    }
+    // #363: an early RBP establishment cannot be shifted to describe a
+    // later allocation. Pin both prologue orders, SAVE offsets, and the
+    // small/large allocation encodings through the public object path.
+    u32 fixed_sizes[] = {32, 48, 144, 256, 8192};
+    for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(fixed_sizes); size_index += 1)
+    {
+        u32 fixed_size = fixed_sizes[size_index];
+        CodegenUnwindAction frame_order_actions[] = {
+            {.code_offset = 1, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 5},
+            {.code_offset = 2, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 12},
+            {.code_offset = 5, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 5},
+            {.code_offset = 12, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, .value = fixed_size},
+            {.code_offset = 16, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 3, .value = fixed_size - 8},
+        };
+        CodegenFunctionDescriptor frame_order_descriptor = windows_unwind_function;
+        frame_order_descriptor.unwind_actions = frame_order_actions;
+        frame_order_descriptor.unwind_action_count = BUSTER_ARRAY_LENGTH(frame_order_actions);
+        frame_order_descriptor.prolog_size = 16;
+        CodegenModule frame_order_module = windows_unwind_module;
+        frame_order_module.functions = &frame_order_descriptor;
+        ObjectFile frame_order_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &frame_order_module, windows_unwind_target);
+        u8 frame_order_expected[16] = {1, 16, (u8)(fixed_size <= 128 ? 5 : 6), 0, 16, 0x34};
+        u16 frame_order_save_offset = (u16)((fixed_size - 8) / 8);
+        memcpy(frame_order_expected + 6, &frame_order_save_offset, sizeof(frame_order_save_offset));
+        frame_order_expected[8] = 12;
+        u32 frame_order_cursor;
+        if (fixed_size <= 128)
+        {
+            frame_order_expected[9] = (u8)(((fixed_size / 8 - 1) << 4) | 2);
+            frame_order_cursor = 10;
+        }
+        else
+        {
+            frame_order_expected[9] = 1;
+            u16 frame_order_allocation = (u16)(fixed_size / 8);
+            memcpy(frame_order_expected + 10, &frame_order_allocation, sizeof(frame_order_allocation));
+            frame_order_cursor = 12;
+        }
+        frame_order_expected[frame_order_cursor] = 2;
+        frame_order_expected[frame_order_cursor + 1] = 0xc0;
+        frame_order_expected[frame_order_cursor + 2] = 1;
+        frame_order_expected[frame_order_cursor + 3] = 0x50;
+        ByteSlice frame_order_actual = frame_order_object.error == OBJECT_ERROR_NONE ? frame_order_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data : (ByteSlice){0};
+        BUSTER_TEST(arguments, frame_order_object.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, frame_order_actual.length == sizeof(frame_order_expected) && memcmp(frame_order_actual.pointer, frame_order_expected, sizeof(frame_order_expected)) == 0);
+    }
+    // Allocating first is the dynamic-stack producer's contract. The offset
+    // belongs to SET_FRAME_POINTER itself (zero and nonzero legal values).
+    for (u32 frame_offset = 0; frame_offset <= 32; frame_offset += 16)
+    {
+        CodegenUnwindAction frame_order_actions[] = {
+            {.code_offset = 1, .kind = CODEGEN_UNWIND_ACTION_PUSH_REGISTER, .register_index = 5},
+            {.code_offset = 8, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, .value = 144},
+            {.code_offset = 12, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 5, .value = frame_offset},
+        };
+        CodegenFunctionDescriptor frame_order_descriptor = windows_unwind_function;
+        frame_order_descriptor.unwind_actions = frame_order_actions;
+        frame_order_descriptor.prolog_size = 12;
+        CodegenModule frame_order_module = windows_unwind_module;
+        frame_order_module.functions = &frame_order_descriptor;
+        ObjectFile frame_order_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &frame_order_module, windows_unwind_target);
+        u8 frame_order_expected[] = {1, 12, 4, (u8)(5 | ((frame_offset / 16) << 4)), 12, 3, 8, 1, 18, 0, 1, 0x50};
+        ByteSlice frame_order_actual = frame_order_object.error == OBJECT_ERROR_NONE ? frame_order_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data : (ByteSlice){0};
+        BUSTER_TEST(arguments, frame_order_object.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, frame_order_actual.length == sizeof(frame_order_expected) && memcmp(frame_order_actual.pointer, frame_order_expected, sizeof(frame_order_expected)) == 0);
     }
     u8 windows_save_code[16] = {0};
     CodegenUnwindAction windows_save_actions[] = {
@@ -2294,6 +2360,61 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     {
         BUSTER_TEST(arguments, windows_arm64_roundtrip.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
         BUSTER_TEST(arguments, windows_arm64_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+    }
+
+    // MIR saves precede X29 establishment. Its epilog shares the suffix
+    // starting at SET_FP, including sparse allocator saves in reverse order.
+    u8 windows_arm64_machine_code[80] = {0};
+    u32 windows_arm64_machine_epilog = 56;
+    CodegenUnwindAction windows_arm64_machine_actions[] = {
+        {.code_offset = 4, .value = 48, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+        {.code_offset = 4, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 29},
+        {.code_offset = 4, .value = 8, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 30},
+        {.code_offset = 8, .value = 16, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 19},
+        {.code_offset = 12, .value = 24, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 27},
+        {.code_offset = 16, .value = 32, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 28},
+        {.code_offset = 20, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 29},
+        {.code_offset = 24, .value = 64, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+        {.code_offset = 28, .kind = CODEGEN_UNWIND_ACTION_NOP},
+        {.code_offset = 32, .kind = CODEGEN_UNWIND_ACTION_NOP},
+    };
+    CodegenFunctionDescriptor windows_arm64_machine_function = {
+        .unwind_actions = windows_arm64_machine_actions,
+        .epilog_offsets = &windows_arm64_machine_epilog,
+        .code_size = sizeof(windows_arm64_machine_code),
+        .prolog_size = 32,
+        .unwind_action_count = BUSTER_ARRAY_LENGTH(windows_arm64_machine_actions),
+        .epilog_count = 1,
+    };
+    CodegenModule windows_arm64_machine_module = windows_arm64_module;
+    windows_arm64_machine_module.code = (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_arm64_machine_code);
+    windows_arm64_machine_module.functions = &windows_arm64_machine_function;
+    ObjectFile windows_arm64_machine_object =
+        object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_arm64_machine_module, windows_arm64_target);
+    BUSTER_TEST(arguments, windows_arm64_machine_object.error == OBJECT_ERROR_NONE);
+    u8 expected_windows_arm64_machine_xdata[] = {
+        0x14, 0x00, 0x40, 0x18, 0x0e, 0x00, 0xc0, 0x00,
+        0xe3, 0xe3, 0x04, 0xe1, 0xd2, 0x44, 0xd2, 0x03, 0xd0, 0x02, 0x85, 0xe4,
+    };
+    ByteSlice windows_arm64_machine_xdata = windows_arm64_machine_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+    BUSTER_TEST(arguments, windows_arm64_machine_xdata.length == sizeof(expected_windows_arm64_machine_xdata) &&
+                               memcmp(windows_arm64_machine_xdata.pointer, expected_windows_arm64_machine_xdata,
+                                      sizeof(expected_windows_arm64_machine_xdata)) == 0);
+    for (u32 malformed = 0; malformed < 5; malformed += 1)
+    {
+        CodegenUnwindAction invalid_actions[BUSTER_ARRAY_LENGTH(windows_arm64_machine_actions)];
+        memcpy(invalid_actions, windows_arm64_machine_actions, sizeof(invalid_actions));
+        CodegenFunctionDescriptor invalid_function = windows_arm64_machine_function;
+        invalid_function.unwind_actions = invalid_actions;
+        if (malformed == 0) { invalid_actions[5].value += 8; }
+        if (malformed == 1) { invalid_actions[4].register_index = 19; }
+        if (malformed == 2) { invalid_actions[7].code_offset += 4; }
+        if (malformed == 3) { invalid_actions[6].kind = CODEGEN_UNWIND_ACTION_NOP; }
+        if (malformed == 4) { invalid_function.prolog_size += 4; }
+        CodegenModule invalid_module = windows_arm64_machine_module;
+        invalid_module.functions = &invalid_function;
+        ObjectFile invalid_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &invalid_module, windows_arm64_target);
+        BUSTER_TEST(arguments, invalid_object.error != OBJECT_ERROR_NONE);
     }
 
     CodegenModule mach_cfi_module = separate_module;

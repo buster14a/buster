@@ -101,6 +101,112 @@ run_with_timeout() {
     "$timeout_bin" --kill-after=10s "${seconds}s" "$@"
 }
 
+# Keep at most 64 KiB, but drain the producer so a full evidence file cannot
+# change the command's status via SIGPIPE. The reader has its own outer bound
+# in case a descendant retains the output descriptor after the command exits.
+capture_lifecycle_output() {
+    local seconds=$1
+    local path=$2
+    run_with_timeout "$seconds" python3 -c '
+import sys
+remaining = 65536
+total = 0
+with open(sys.argv[1], "wb") as output:
+    while True:
+        chunk = sys.stdin.buffer.read1(4096)
+        if not chunk:
+            break
+        output.write(chunk[:remaining])
+        remaining = max(0, remaining - len(chunk))
+        total += len(chunk)
+with open(sys.argv[1] + ".capture-status.log", "w") as status:
+    status.write("BUSTER_IOS_CAPTURE total_bytes=%d retained_bytes=%d truncated=%d\n" %
+                 (total, min(total, 65536), total > 65536))
+' "$path"
+}
+
+lifecycle_context_collected=0
+collect_lifecycle_context() {
+    local context_log="${console_log_base}.lifecycle-context.log"
+    if [[ $lifecycle_context_collected -eq 0 ]]; then
+        lifecycle_context_collected=1
+        {
+            printf 'GITHUB_SHA=%s\nDEVELOPER_DIR=%s\nSIMULATOR_UDID=%s\n' \
+                "${GITHUB_SHA:-unavailable}" "${DEVELOPER_DIR:-default}" "$udid"
+            run_with_timeout "$monitor_command_timeout_seconds" git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse HEAD || true
+            run_with_timeout "$monitor_command_timeout_seconds" xcodebuild -version || true
+            run_with_timeout "$monitor_command_timeout_seconds" xcrun --sdk iphonesimulator --show-sdk-version || true
+            print_simulator_diagnostics
+        } 2>&1 | capture_lifecycle_output "$((5 * monitor_command_timeout_seconds + 10))" "$context_log" || true
+        echo "iOS lifecycle context: $context_log" >&2
+    fi
+}
+
+run_lifecycle_phase() {
+    local phase=$1 label=$2 evidence_base=$3 seconds=$4
+    shift 4
+    local output_log="${evidence_base}.${phase}.log"
+    local status_log="${evidence_base}.${phase}.status.log"
+    local native_log="${evidence_base}.${phase}.native-status.log"
+    local started=$SECONDS
+    local statuses native_status=unavailable outcome result
+    mkdir -p "$(dirname "$evidence_base")"
+    rm -f "$native_log" "${output_log}.capture-status.log"
+    # Record the command's own status before the timeout helper returns. This
+    # distinguishes an ordinary exit 124 from the helper's deadline status.
+    if run_with_timeout "$seconds" "$BASH" -c '
+        status_path=$1
+        shift
+        if "$@"; then status=0; else status=$?; fi
+        printf "%s\n" "$status" >"$status_path"
+        exit "$status"
+    ' bash "$native_log" "$@" 2>&1 | \
+        capture_lifecycle_output "$((seconds + 10 + monitor_command_timeout_seconds))" "$output_log"; then
+        statuses=("${PIPESTATUS[@]}")
+    else
+        statuses=("${PIPESTATUS[@]}")
+    fi
+    if [[ -f $native_log ]]; then
+        read -r native_status <"$native_log" || native_status=unavailable
+    fi
+    result=${statuses[0]}
+    outcome=command-failure
+    if [[ $result -eq 0 ]]; then
+        outcome=success
+    elif [[ $native_status == unavailable ]]; then
+        case "$result" in
+            124) outcome=timeout ;;
+            125) outcome=timeout-helper-failure ;;
+            126|127) outcome=launch-failure ;;
+            137) outcome=timeout-or-signal ;;
+            *) outcome=signal-or-command-failure ;;
+        esac
+    fi
+    if [[ ${statuses[1]} -ne 0 && $result -eq 0 ]]; then
+        outcome=evidence-failure
+        result=1
+    fi
+    if ! {
+        printf 'BUSTER_IOS_PHASE phase=%s label=%s outcome=%s status=%s native_status=%s capture_status=%s elapsed_seconds=%s deadline_seconds=%s output_limit_bytes=65536\n' \
+            "$phase" "$label" "$outcome" "${statuses[0]}" "$native_status" "${statuses[1]}" "$((SECONDS - started))" "$seconds"
+        printf 'command:'
+        printf ' %q' "$@"
+        printf '\noutput_log=%s\n' "$output_log"
+        cat "${output_log}.capture-status.log"
+    } >"$status_log"; then
+        echo "error: could not retain iOS $phase status at $status_log" >&2
+        result=1
+    fi
+    cat "$status_log" >&2 || true
+    if [[ $result -ne 0 ]]; then
+        # Full bounded raw output remains in the artifact, independent of the
+        # console/result-marker logs that are reset for each app launch.
+        tail -c 4096 "$output_log" >&2 || true
+        collect_lifecycle_context
+    fi
+    return "$result"
+}
+
 print_simulator_diagnostics() {
     echo "----- iOS simulator devices -----" >&2
     run_with_timeout "$monitor_command_timeout_seconds" xcrun simctl list devices >&2 || true
@@ -282,6 +388,9 @@ active_launch_pipe_dir=
 
 cleanup() {
     local status=$?
+    local prior_status=$status
+    local shutdown_status
+    local cleanup_summary
     trap - EXIT INT TERM
     if [[ -n ${active_launch_stream_pid:-}${active_launch_reader_pid:-}${active_launch_pipe_dir:-} ]]; then
         stop_launch_stream "$active_launch_stream_pid"
@@ -291,12 +400,18 @@ cleanup() {
     # after both app bundles have had independent install/launch checks.
     if [[ -n ${udid:-} ]]; then
         echo "Shutting down iOS simulator $udid"
-        if ! run_with_timeout "$shutdown_timeout_seconds" xcrun simctl shutdown "$udid" >/dev/null 2>&1; then
+        if run_lifecycle_phase shutdown batch "$console_log_base" "$shutdown_timeout_seconds" xcrun simctl shutdown "$udid"; then
+            shutdown_status=0
+        else
+            shutdown_status=$?
             echo "warning: failed to shut down iOS simulator $udid" >&2
             if [[ $status -eq 0 ]]; then
                 status=1
             fi
         fi
+        cleanup_summary="BUSTER_IOS_CLEANUP prior_status=$prior_status shutdown_status=$shutdown_status result_status=$status"
+        printf '%s\n' "$cleanup_summary" >>"${console_log_base}.shutdown.status.log" || true
+        printf '%s\n' "$cleanup_summary" >&2
     fi
     exit "$status"
 }
@@ -445,10 +560,11 @@ run_one_bundle() {
 
     console_log=$(console_log_for_label "$label")
     mkdir -p "$(dirname "$console_log")"
+    : >"$console_log"
 
     echo "Codesigning iOS ${label} app bundle"
-    if ! run_with_timeout "$codesign_timeout_seconds" \
-        codesign --force --sign - --timestamp=none "$app_bundle" >/dev/null 2>&1; then
+    if ! run_lifecycle_phase codesign "$label" "$console_log" "$codesign_timeout_seconds" \
+        codesign --force --sign - --timestamp=none "$app_bundle"; then
         echo "error: codesign failed for iOS ${label} app bundle" >&2
         return 1
     fi
@@ -463,7 +579,6 @@ run_one_bundle() {
     echo "TIMING_IOS install_seconds label=$label value=$((SECONDS - install_started))"
 
     echo "Launching $bundle_id for iOS ${label} (timeout ${launch_timeout_seconds}s)"
-    : >"$console_log"
     launch_started=$SECONDS
     deadline=$((launch_started + launch_timeout_seconds))
     app_pid=
