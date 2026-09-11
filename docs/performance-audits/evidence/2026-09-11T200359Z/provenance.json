@@ -1,0 +1,24 @@
+{
+  "local_commit": "7b397f689f5b040abdb1f97926360f199a22bee5",
+  "remote_commit": "c837e00599a2503f6dbe94735533c7c6e3d1841f",
+  "tree": "f572a5947e3ff5303126fd414f81469f29348c9c",
+  "compiler": "/workspace/scratch/938e5009f152/issue40/build/Release/ide",
+  "wrappers": {
+    "build/fast-throughput-off": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\" -fno-canonical-fast\nfi\nexec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\"\n",
+    "build/fast-throughput-on": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\" -fcanonical-fast\nfi\nexec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\"\n",
+    "build/fast-throughput-no-fold": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\" -fcanonical-fast -fno-canonical-fast-fold\nfi\nexec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\"\n",
+    "build/fast-throughput-no-address": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\" -fcanonical-fast -fno-canonical-fast-address\nfi\nexec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\"\n",
+    "build/fast-throughput-no-dce": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\" -fcanonical-fast -fno-canonical-fast-dce\nfi\nexec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\"\n",
+    "build/fast-throughput-no-parameters": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\" -fcanonical-fast -fno-canonical-fast-parameters\nfi\nexec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\"\n"
+  },
+  "flags": {
+    "BUSTER_DEBUG_INFO": true,
+    "BUSTER_FRAME_POINTERS": true,
+    "BUSTER_UNITY_BUILD": false,
+    "BUSTER_BENCH_ALLOCATIONS": false
+  },
+  "scope": "Same trusted Clang-built candidate binary for both variants; wrappers append only pass mask flags to cc commands. Wrapper hashes are recorded by harness; actual binary hash must be recorded before and after timing. Hosted quiet window, not physical acceptance.",
+  "compiler_sha256": "6c8dd8dd530dd37c10bd9b399bafdeb9bd64a653868fef92c26651a3efe283cf",
+  "compiler_bytes": 39375296,
+  "compiler_sha256_after": "6c8dd8dd530dd37c10bd9b399bafdeb9bd64a653868fef92c26651a3efe283cf"
+}

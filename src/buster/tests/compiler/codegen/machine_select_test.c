@@ -243,6 +243,7 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_test_stream_equal(Arena* arena, Machi
 
 BUSTER_GLOBAL_LOCAL bool machine_selection_test_order_divergence(Arena* arena, IrProgram* program, IrFunction* function, Target target)
 {
+    ir_function_invalidate_cfg(function);
     bool equivalent = false;
     if (arena && program && function && machine_selection_validate_function(arena, program, function) == MACHINE_SELECTION_VALIDATION_NONE)
     {
@@ -250,9 +251,7 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_test_order_divergence(Arena* arena, I
         if (pair.block)
         {
             MachineSelectResult before = machine_select_canonical_function(arena, program, function, target);
-            IrInstructionId saved_first = pair.block->first_instruction;
-            IrInstructionId saved_previous_next = pair.previous.value == IR_ID_UNDERLYING_INVALID ? IR_INSTRUCTION_ID_INVALID : function->instructions[pair.previous.value].next;
-            IrInstructionId saved_first_next = function->instructions[pair.first.value].next;
+            ir_function_invalidate_cfg(function);
             IrInstructionId saved_second_next = function->instructions[pair.second.value].next;
             if (pair.previous.value == IR_ID_UNDERLYING_INVALID)
             {
@@ -269,13 +268,9 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_test_order_divergence(Arena* arena, I
             equivalent = before.supported == after.supported && before.failed_opcode == after.failed_opcode &&
                          machine_selection_test_stream_equal(arena, &before, &after);
 
-            pair.block->first_instruction = saved_first;
-            if (pair.previous.value != IR_ID_UNDERLYING_INVALID)
-            {
-                function->instructions[pair.previous.value].next = saved_previous_next;
-            }
-            function->instructions[pair.first.value].next = saved_first_next;
-            function->instructions[pair.second.value].next = saved_second_next;
+            // Publication remaps the reordered instruction IDs. The fixture
+            // retains that valid published function; stale builder IDs are no
+            // longer a restoration interface.
         }
     }
     return equivalent;
@@ -320,6 +315,7 @@ BUSTER_GLOBAL_LOCAL void machine_selection_test_share_callees(IrFunction* functi
 
 BUSTER_GLOBAL_LOCAL void machine_selection_test_reverse_storage(Arena* arena, IrFunction* function)
 {
+    ir_function_invalidate_cfg(function);
     u32 count = function->instruction_count;
     IrInstruction* rows = arena_allocate(arena, IrInstruction, count);
     IrSourceRange* sources = function->instruction_canonical_sources ? arena_allocate(arena, IrSourceRange, count) : 0;
@@ -400,7 +396,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_direct_call_facts(Unit
             if (reversed) { machine_selection_test_reverse_storage(arguments->arena, function); }
             BUSTER_TEST(arguments, machine_selection_validate_function(arguments->arena, program, function) == MACHINE_SELECTION_VALIDATION_NONE);
             MachineSelectResult checked = machine_select_canonical_function(arguments->arena, program, function, target);
-            MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, 0);
+            MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, true, 0);
             BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&original, &checked));
             BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&checked, &validated));
             BUSTER_TEST(arguments, checked.supported && machine_verify_function(&checked.function).error == MACHINE_VERIFY_NONE);
@@ -460,12 +456,183 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_direct_call_facts(Unit
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_address_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrField fields[] = {{.offset = 8}, {.offset = 24}, {.offset = UINT64_MAX - 10}};
+    IrType types[] = {
+        {.kind = IR_TYPE_STRUCT, .fields = fields, .field_count = 3, .layout = {.resolved = true, .size = 64, .alignment = 32}},
+        {.kind = IR_TYPE_POINTER, .layout = {.resolved = true, .size = 8, .alignment = 8}},
+        {.kind = IR_TYPE_INTEGER, .is_signed = true, .bit_width = 16, .layout = {.resolved = true, .size = 2, .alignment = 2}},
+    };
+    IrSymbol symbols[] = {{.is_thread_local = true, .is_definition = true}};
+    IrProgram program = {.types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)},
+                         .symbols = {.symbols = symbols, .count = BUSTER_ARRAY_LENGTH(symbols)}};
+    IrValue values[144] = {0};
+    IrInstruction instructions[144] = {0};
+    IrValueId operands[144][2] = {0};
+    u64 immediates[144] = {0};
+    IrFunction function = {.values = values, .value_count = BUSTER_ARRAY_LENGTH(values),
+                           .instructions = instructions, .instruction_count = BUSTER_ARRAY_LENGTH(instructions)};
+    for (u32 index = 0; index < function.value_count; index += 1)
+    {
+        values[index] = (IrValue){.definition = {.value = index}, .canonical_type = {.value = 0}, .category = IR_VALUE_PLACE};
+        instructions[index] = (IrInstruction){.opcode = IR_OPCODE_ARGUMENT, .result = {.value = index},
+                                              .operands = operands[index], .operand_count = 1,
+                                              .immediates = immediates + index, .immediate_count = 1};
+    }
+    instructions[0].opcode = IR_OPCODE_LOCAL;
+    values[0].alignment = 32;
+    instructions[1].opcode = IR_OPCODE_FIELD;
+    immediates[1] = 1;
+    values[1].alignment = 8;
+    instructions[2].opcode = IR_OPCODE_ADDRESS_OF;
+    operands[2][0].value = 1;
+    instructions[3].opcode = IR_OPCODE_DEREFERENCE;
+    operands[3][0].value = 2;
+    instructions[4].opcode = IR_OPCODE_INDEX;
+    instructions[4].operand_count = 2;
+    operands[4][0].value = 3;
+    operands[4][1].value = 5;
+    values[5].canonical_type.value = 2;
+    instructions[6].opcode = IR_OPCODE_FIELD;
+    operands[6][0].value = 4;
+    instructions[7] = instructions[4];
+    instructions[7].result.value = 7;
+    instructions[7].operands = operands[7];
+    operands[7][0].value = 4;
+    operands[7][1].value = 5;
+    instructions[8].opcode = IR_OPCODE_GLOBAL;
+    values[8].is_volatile = true;
+    values[8].is_read_only = true;
+    instructions[9].opcode = IR_OPCODE_ADDRESS_OF;
+    operands[9][0].value = 8;
+    instructions[10].opcode = IR_OPCODE_LABEL_ADDRESS;
+    instructions[11].opcode = IR_OPCODE_CAST;
+    operands[11][0].value = 9;
+    instructions[12].opcode = IR_OPCODE_LOAD;
+    operands[12][0].value = 9;
+    instructions[13].opcode = IR_OPCODE_ATOMIC_LOAD;
+    operands[13][0].value = 9;
+    values[14].definition = IR_INSTRUCTION_ID_INVALID;
+    instructions[15].opcode = IR_OPCODE_FIELD;
+    immediates[15] = 3;
+    instructions[16].opcode = IR_OPCODE_FIELD;
+    immediates[16] = 2;
+    instructions[17].opcode = IR_OPCODE_FIELD;
+    operands[17][0].value = 16;
+    immediates[17] = 1;
+    for (u32 index = 20; index < function.value_count; index += 1)
+    {
+        instructions[index].opcode = IR_OPCODE_ADDRESS_OF;
+        operands[index][0].value = index == 20 ? 0 : index - 1;
+    }
+    MachineSelectionAddressCache cache = {0};
+    u64 arena_start = arguments->arena->position;
+    MachineSelectionAddress address = machine_selection_address(arguments->arena, &program, &function, &cache, IR_VALUE_ID_INVALID);
+    BUSTER_TEST(arguments, !cache.entries && arguments->arena->position == arena_start && address.base_value.value == IR_ID_UNDERLYING_INVALID);
+    address = machine_selection_address(arguments->arena, &program, &function, &cache, (IrValueId){.value = 3});
+    BUSTER_TEST(arguments, address.base_value.value == 0 && address.object_value.value == 0 && address.displacement == 24 &&
+                           address.expression_value.value == 3 && address.index_value.value == IR_ID_UNDERLYING_INVALID);
+    address = machine_selection_address(arguments->arena, &program, &function, &cache, (IrValueId){.value = 1});
+    BUSTER_TEST(arguments, address.field_offset == 24 && address.alignment == 8 && (address.flags & MACHINE_SELECTION_ADDRESS_FIELD));
+    address = machine_selection_address(arguments->arena, &program, &function, &cache, (IrValueId){.value = 6});
+    BUSTER_TEST(arguments, address.base_value.value == 0 && address.object_value.value == 0 && address.displacement == 32 &&
+                           address.index_value.value == 5 && address.scale == 64 && address.index_bit_width == 16 &&
+                           (address.flags & MACHINE_SELECTION_ADDRESS_INDEX_SIGNED) && address.expression_value.value == 6);
+    address = machine_selection_address(arguments->arena, &program, &function, &cache, (IrValueId){.value = 7});
+    BUSTER_TEST(arguments, address.base_value.value == 4 && address.index_value.value == 5 && address.displacement == 0 && address.object_value.value == 0);
+    address = machine_selection_address(arguments->arena, &program, &function, &cache, (IrValueId){.value = 9});
+    u32 symbol_flags = MACHINE_SELECTION_ADDRESS_THREAD_LOCAL | MACHINE_SELECTION_ADDRESS_SYMBOL_DEFINITION |
+                       MACHINE_SELECTION_ADDRESS_VOLATILE | MACHINE_SELECTION_ADDRESS_READ_ONLY;
+    BUSTER_TEST(arguments, address.symbol.value == 0 && address.base_value.value == 8 && address.object_value.value == 8 &&
+                           (address.flags & symbol_flags) == symbol_flags);
+    for (u32 index = 10; index <= 15; index += 1)
+    {
+        address = machine_selection_address(arguments->arena, &program, &function, &cache, (IrValueId){.value = index});
+        BUSTER_TEST(arguments, address.base_value.value == index && address.expression_value.value == index &&
+                               address.object_value.value == IR_ID_UNDERLYING_INVALID && address.symbol.value == IR_ID_UNDERLYING_INVALID);
+    }
+    address = machine_selection_address(arguments->arena, &program, &function, &cache, (IrValueId){.value = 17});
+    BUSTER_TEST(arguments, address.base_value.value == 16 && address.displacement == 24 && address.object_value.value == 0);
+    u64 allocated = arguments->arena->position;
+    // Colliding value ids and chains longer than the cache/path bound must
+    // remain conservative, terminate, and allocate no per-value storage.
+    for (u32 repeat = 0; repeat < 3; repeat += 1)
+    {
+        for (u32 index = 20; index < function.value_count; index += 1)
+        {
+            address = machine_selection_address(arguments->arena, &program, &function, &cache, (IrValueId){.value = index});
+            BUSTER_TEST(arguments, address.base_value.value < index && address.displacement == 0 && address.expression_value.value == index);
+        }
+    }
+    BUSTER_TEST(arguments, arguments->arena->position == allocated && allocated - arena_start <= 4096 + 16);
+    MachineSelectionAddressCache cold = {0};
+    address = machine_selection_address(arguments->arena, &program, &function, &cold, (IrValueId){.value = 143});
+    BUSTER_TEST(arguments, address.base_value.value > 0 && address.base_value.value < 143 &&
+                           address.object_value.value == IR_ID_UNDERLYING_INVALID && address.expression_value.value == 143);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_address_targets(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("struct T { int x; int y; }; struct S { char pad[32]; struct T t; };\n"
+                         "struct S global; extern struct S external; __thread struct S tls;\n"
+                         "int address_local(void) { struct S s; int *p = &s.t.y; *p = 17; return s.t.y; }\n"
+                         "int *address_global(void) { return &global.t.y; }\n"
+                         "int *address_external(void) { return &external.t.y; }\n"
+                         "int *address_tls(void) { return &tls.t.y; }\n"
+                         "int *address_index(struct S *p, short i) { return &p[i].t.y; }\n"
+                         "int address_volatile(volatile struct S *p) { p->t.y = 3; return p->t.y; }\n"
+                         "int address_atomic(int **p) { int *v = __atomic_load_n(p, 0); return __atomic_add_fetch(v, 1, 5); }\n"
+                         "int address_label(int n) { void *p = n ? &&a : &&b; goto *p; a: n += 2; b: return n; }\n");
+    CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 arch_index = 0; arch_index < BUSTER_ARRAY_LENGTH(arches); arch_index += 1)
+    {
+        Target target = {.cpu_arch = arches[arch_index], .os = OPERATING_SYSTEM_LINUX};
+        IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
+        BUSTER_TEST(arguments, program && program->module_count == 1);
+        if (program && program->module_count == 1)
+        {
+            IrModule* module = program->modules;
+            BUSTER_TEST(arguments, module->function_count == 8);
+            for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+            {
+                IrFunction* function = module->functions + function_index;
+                MachineSelectResult selection = machine_select_canonical_function(arguments->arena, program, function, target);
+                BUSTER_TEST(arguments, selection.supported && machine_verify_function(&selection.function).error == MACHINE_VERIFY_NONE);
+                if (selection.supported && string_equal(function->name, S8("address_local")))
+                {
+                    u32 normalized_fields = 0;
+                    for (u32 row = 0; row < selection.function.instruction_count; row += 1)
+                    {
+                        MachineInstruction* instruction = selection.function.instructions + row;
+                        u32 frame_opcode = target.cpu_arch == CPU_ARCH_X86_64 ? MACHINE_X64_LEA_FRAME : MACHINE_A64_LEA_FRAME;
+                        normalized_fields += instruction->opcode == frame_opcode && instruction->payload == 36;
+                    }
+                    // FIELD/FIELD/ADDRESS_OF shares the original frame base;
+                    // this checks the real consumer, not just the fact cache.
+                    BUSTER_TEST(arguments, normalized_fields >= 2);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     UnitTestResult direct_call_result = machine_selection_test_direct_call_facts(arguments);
     result.test_count += direct_call_result.test_count;
     result.succeeded_test_count += direct_call_result.succeeded_test_count;
+    UnitTestResult address_result = machine_selection_test_address_facts(arguments);
+    result.test_count += address_result.test_count;
+    result.succeeded_test_count += address_result.succeeded_test_count;
+    UnitTestResult target_address_result = machine_selection_test_address_targets(arguments);
+    result.test_count += target_address_result.test_count;
+    result.succeeded_test_count += target_address_result.succeeded_test_count;
     String8 source = S8("int selection_add(int a, int b) { int local = 7; return a + local + b; }\n"
                          "int selection_memory(int *p) { *p += 1; return *p; }\n"
                          "int selection_order(void) { return 1 + 2; }\n");
@@ -490,13 +657,14 @@ UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
                 // discarded u32 fact arrays and the old visited-row array.
                 BUSTER_TEST(arguments, arguments->arena->position - before == (u64)function->instruction_count + function->value_count);
                 MachineSelectResult checked = machine_select_canonical_function(arguments->arena, program, function, target);
-                MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, 0);
+                MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, true, 0);
                 BUSTER_TEST(arguments, checked.supported && validated.supported);
                 BUSTER_TEST(arguments, checked.failed_opcode == validated.failed_opcode);
                 BUSTER_TEST(arguments, machine_selection_test_stream_equal(arguments->arena, &checked, &validated));
             }
             BUSTER_TEST(arguments, machine_selection_test_order_divergence(arguments->arena, program, order, target));
 
+            ir_function_invalidate_cfg(add);
             IrInstruction* operand_probe = 0;
             IrInstruction* definition_probe = 0;
             IrInstruction* second_definition = 0;

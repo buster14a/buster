@@ -1,0 +1,42 @@
+{
+  "/tmp/issue37-release-tests.log": {
+    "bytes": 330346,
+    "sha256": "f197db4c7f0d476d3f00c67d7889a21f84b54f5509a0096dc54feda59bef7a8c"
+  },
+  "/tmp/issue37-release-portability-tests.log": {
+    "bytes": 330197,
+    "sha256": "a230b1e80c8edbb6f5f0cd203a87f27d2cc12039c0e71cfa3bf3b6a91e4fd0c8"
+  },
+  "/tmp/issue37-selfhost.log": {
+    "bytes": 16173,
+    "sha256": "ffa91fb75ab10a3dfc2f7b85e86c009b8902246f7acc51e1a7e0c6e26d1adf6b"
+  },
+  "/tmp/issue37-matrix.log": {
+    "bytes": 2581,
+    "sha256": "b377fc91e6318a2e86e76c0b1c05e0b62902c6d8e2e6b8f8ffc108f510106808"
+  },
+  "/tmp/issue37-sanitize.log": {
+    "bytes": 370384,
+    "sha256": "7d070c2d2f906f703107eac0d7cd6b7273dc925e667e03b644525855cfd43f25"
+  },
+  "/tmp/issue37-sanitize-strict-no-leaks.log": {
+    "bytes": 140588,
+    "sha256": "5c820c9bf67982153a485edc587ca6193611d83bb71fd6713c59cf7030b948f0"
+  },
+  "/tmp/issue37-stack-policy-tests.log": {
+    "bytes": 331352,
+    "sha256": "b5d26ef19a898a00da606b516ba5d51084bfaacc765ac7b83711f288dbbfbe7f"
+  },
+  "/tmp/issue37-stack-policy-selfhost.log": {
+    "bytes": 17142,
+    "sha256": "c3f7d46a433d62fe7447313afe7652caf8270a508f4e14b6989908823a604507"
+  },
+  "/tmp/issue37-stack-policy-matrix.log": {
+    "bytes": 2582,
+    "sha256": "f79ebe024e7ebc9e07b7f01400fabdb13547ca6f448d1e519eb6c5c423a9d92d"
+  },
+  "/tmp/issue37-stack-policy-sanitize.log": {
+    "bytes": 140589,
+    "sha256": "5cb1627d23ad0f07ba70ae1830a8598ba0f72f0de74063201a207e7aac169a6f"
+  }
+}

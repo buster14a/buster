@@ -6,7 +6,7 @@
 
 // Target-neutral facts consumed by the handwritten x86-64 and AArch64
 // selectors. machine_type_classes_build projects module types once;
-// machine_selection_value_facts_allocate and MachineSelectionRowLayout serve
+// machine_selection_value_facts_allocate serves
 // the target row walks. machine_selection_validate_function checks only the
 // storage/ownership contract of the unvalidated selector entry point.
 
@@ -38,30 +38,59 @@ struct MachineSelectionValueFacts
     u32* use_blocks;
 };
 
-// Program order for one function's rows, accumulated by the walk a target
-// selector has to make anyway so that every later prepass counts rows down
-// instead of chasing `next` again.  The C lowerer appends a block's rows
-// consecutively, so a block's `block_row_counts[b]` rows are the dense id
-// range starting at its `first_instruction` and the layout needs no per-row
-// storage at all.  Anything that leaves a block's rows out of that shape —
-// the selection reordering test relinks two of them on purpose, and a
-// producer that interleaved two blocks' appends would too — is why `rows`
-// exists: it carries the gathered order for the whole function instead.
-typedef struct MachineSelectionRowLayout MachineSelectionRowLayout;
-struct MachineSelectionRowLayout
+// Demand-filled canonical address analysis. A bounded cache avoids a second
+// function walk and per-value storage for functions which never ask for an
+// address. Entries describe arithmetic, not permission to access or reorder
+// memory. expression_value retains the exact subobject/label metadata identity;
+// object_value names only a proven LOCAL/GLOBAL root, never a pointer argument.
+// Symbol materialization (including TLS, GOT and relocation addends) remains
+// at the original GLOBAL/FUNCTION row. Loads, casts, atomics and pointer/integer
+// arithmetic are opaque: their original canonical result is the address base.
+typedef enum MachineSelectionAddressFlag
 {
-    u32* block_row_counts;
-    u32* rows;
+    MACHINE_SELECTION_ADDRESS_STORAGE = 1u << 0,
+    MACHINE_SELECTION_ADDRESS_THREAD_LOCAL = 1u << 1,
+    MACHINE_SELECTION_ADDRESS_READ_ONLY = 1u << 2,
+    MACHINE_SELECTION_ADDRESS_VOLATILE = 1u << 3,
+    MACHINE_SELECTION_ADDRESS_SYMBOL_DEFINITION = 1u << 4,
+    MACHINE_SELECTION_ADDRESS_FIELD = 1u << 5,
+    MACHINE_SELECTION_ADDRESS_INDEX = 1u << 6,
+    MACHINE_SELECTION_ADDRESS_INDEX_SIGNED = 1u << 7,
+} MachineSelectionAddressFlag;
+
+typedef struct MachineSelectionAddress MachineSelectionAddress;
+struct MachineSelectionAddress
+{
+    u64 displacement;
+    u64 scale;
+    u64 field_offset;
+    IrValueId base_value;
+    IrValueId index_value;
+    IrValueId object_value;
+    IrValueId expression_value;
+    IrSymbolId symbol;
+    u32 alignment;
+    u16 flags;
+    u8 opcode;
+    u8 index_bit_width;
+};
+BUSTER_CT_CHECK(sizeof(MachineSelectionAddress) == 56);
+
+typedef struct MachineSelectionAddressEntry MachineSelectionAddressEntry;
+typedef struct MachineTypeClass MachineTypeClass;
+typedef struct MachineSelectionAddressCache MachineSelectionAddressCache;
+struct MachineSelectionAddressCache
+{
+    MachineSelectionAddressEntry* entries;
+    MachineTypeClass const* type_classes;
+    u32 type_count;
 };
 
-// The id of a block's row number `offset`, where `row_base` is the number of
-// rows the enclosing walk has already passed in earlier blocks.  Callers keep
-// that running total anyway: it is also the row's zero-based ordinal.
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE u32 machine_selection_row_id(MachineSelectionRowLayout const* layout, IrBlock const* block,
-                                                                                  u32 row_base, u32 offset)
-{
-    return layout->rows ? layout->rows[row_base + offset] : block->first_instruction.value + offset;
-}
+// A cache belongs to one immutable validated function and one selection
+// attempt; zero initialize it and discard it before modifying canonical IR.
+// Collisions and chains beyond the fixed bound preserve an opaque base.
+BUSTER_F_DECL MachineSelectionAddress machine_selection_address(Arena* arena, IrProgram* program, IrFunction* function,
+                                                               MachineSelectionAddressCache* cache, IrValueId value);
 
 // A per-type projection of the IrType facts a selector's row path asks,
 // indexed by IrTypeId and built once per codegen module before any function
@@ -92,7 +121,6 @@ typedef enum MachineTypeClassFlag
 
 #define MACHINE_TYPE_CLASS_NO_LOG2 0xffu
 
-typedef struct MachineTypeClass MachineTypeClass;
 struct MachineTypeClass
 {
     u8 flags;

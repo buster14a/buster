@@ -1,0 +1,59 @@
+{
+  "cpu": 8,
+  "pairs": 12,
+  "warmups": 2,
+  "binaries": {
+    "baseline": {
+      "path": "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "size": 23534280,
+      "sha256": "f313dc8d51c6b3ef51e04b2e7a13c6317197f7bed3d26feb248ebd09f1f4109c"
+    },
+    "candidate": {
+      "path": "/workspace/scratch/938e5009f152/issue44-evidence/comparable/ide",
+      "size": 23538432,
+      "sha256": "74b7c9a753294084a20931d1982ea8bc4de70aa8b7583bbb7969855821aef3e2"
+    }
+  },
+  "series": [
+    {
+      "target": "aarch64-unknown-linux-gnu",
+      "paired_wall_ratio_median": 1.0683045695906883,
+      "paired_wall_ratio_min": 0.7689477516724986,
+      "paired_wall_ratio_max": 1.2953225854989765,
+      "baseline": {
+        "wall_ns": 53108292.0,
+        "user_s": 0.0415725,
+        "system_s": 0.009708999999999999,
+        "peak_rss_kib": 25900.0,
+        "object_size": 637288.0
+      },
+      "candidate": {
+        "wall_ns": 56588875.0,
+        "user_s": 0.0493295,
+        "system_s": 0.008167,
+        "peak_rss_kib": 25974.0,
+        "object_size": 639080.0
+      }
+    },
+    {
+      "target": "x86_64-unknown-linux-gnu",
+      "paired_wall_ratio_median": 1.0234527900319264,
+      "paired_wall_ratio_min": 0.9178485965009248,
+      "paired_wall_ratio_max": 2.3375106602609836,
+      "baseline": {
+        "wall_ns": 75962921.0,
+        "user_s": 0.0582405,
+        "system_s": 0.0166,
+        "peak_rss_kib": 42786.0,
+        "object_size": 805248.0
+      },
+      "candidate": {
+        "wall_ns": 84371144.5,
+        "user_s": 0.065927,
+        "system_s": 0.020135,
+        "peak_rss_kib": 42792.0,
+        "object_size": 797824.0
+      }
+    }
+  ]
+}

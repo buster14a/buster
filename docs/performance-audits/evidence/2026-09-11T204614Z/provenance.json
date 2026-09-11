@@ -1,0 +1,146 @@
+{
+  "source_commit": "369877c8bb42094ea7a765b596a4a1fbaaf43ac2",
+  "source_tree": "472eb2e39ba433d86c5429d9d587834d3f813466",
+  "baseline_published_commit": "c837e00599a2503f6dbe94735533c7c6e3d1841f",
+  "binaries": {
+    "fast-before-cost/ide": {
+      "sha256": "6c8dd8dd530dd37c10bd9b399bafdeb9bd64a653868fef92c26651a3efe283cf",
+      "bytes": 39375296
+    },
+    "Release/ide": {
+      "sha256": "1e54c62673883a7a67b5dd9ca93322cb006984ea150692ae415d293302958ada",
+      "bytes": 39375056
+    },
+    "ide-fast-cost-stage1": {
+      "sha256": "682240cf3a2857eb099545c78874df592ccd6493cfc2095da1f93e8d74b3f1f8",
+      "bytes": 37852320
+    },
+    "ide-fast-cost-stage2": {
+      "sha256": "682240cf3a2857eb099545c78874df592ccd6493cfc2095da1f93e8d74b3f1f8",
+      "bytes": 37852320
+    }
+  },
+  "wrappers": {
+    "fast-throughput-before-cost-on": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40/build/fast-before-cost/ide \"$@\" -fcanonical-fast\nfi\nexec /workspace/scratch/938e5009f152/issue40/build/fast-before-cost/ide \"$@\"\n",
+    "fast-throughput-off": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\" -fno-canonical-fast\nfi\nexec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\"\n",
+    "fast-throughput-on": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\" -fcanonical-fast\nfi\nexec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\"\n",
+    "fast-throughput-no-fold": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\" -fcanonical-fast -fno-canonical-fast-fold\nfi\nexec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\"\n",
+    "fast-throughput-no-address": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\" -fcanonical-fast -fno-canonical-fast-address\nfi\nexec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\"\n",
+    "fast-throughput-no-dce": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\" -fcanonical-fast -fno-canonical-fast-dce\nfi\nexec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\"\n",
+    "fast-throughput-no-parameters": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\" -fcanonical-fast -fno-canonical-fast-parameters\nfi\nexec /workspace/scratch/938e5009f152/issue40/build/Release/ide \"$@\"\n"
+  },
+  "timing": "All six runs in coordinated quiet window; no A/A calibration; old/new and on/off all modes; ablations FAST only; guard unchanged and all samples retained. Compiler hashes match pre-run observations.",
+  "debug_tests": {
+    "command": "BUSTER_TEST_JOBS=1 build/Debug/ide test --verbose=1",
+    "log_sha256": "0ca2fec01902a3c78ddd3d9f100428795d808dc1ee7a95cd4928d5437180b1e7",
+    "summary": [
+      "TEST_MODULE_TIMING index=0 module=arena_tests duration_ns=5172475 passed=56 failed=0 assertions=56 status=pass",
+      "TEST_MODULE_TIMING index=1 module=hash_tests duration_ns=1966 passed=5 failed=0 assertions=5 status=pass",
+      "TEST_MODULE_TIMING index=2 module=simd_tests duration_ns=18438 passed=141 failed=0 assertions=141 status=pass",
+      "TEST_MODULE_TIMING index=3 module=string_tests duration_ns=46947950 passed=4012 failed=0 assertions=4012 status=pass",
+      "TEST_MODULE_TIMING index=4 module=os_tests duration_ns=246587600 passed=140 failed=0 assertions=140 status=pass",
+      "TEST_MODULE_TIMING index=5 module=file_tests duration_ns=67686544 passed=45 failed=0 assertions=45 status=pass",
+      "TEST_MODULE_TIMING index=6 module=target_tests duration_ns=5041743 passed=6469 failed=0 assertions=6469 status=pass",
+      "TEST_MODULE_TIMING index=7 module=c_frontend_tests duration_ns=4090311533 passed=147835 failed=0 assertions=147835 status=pass",
+      "TEST_MODULE_TIMING index=8 module=metamorphic_tests duration_ns=5470602424 passed=111 failed=0 assertions=111 status=pass",
+      "TEST_MODULE_TIMING index=9 module=aarch64_encoding_tests duration_ns=2511281829 passed=236716 failed=0 assertions=236716 status=pass",
+      "TEST_MODULE_TIMING index=10 module=aarch64_exact_bridge_tests duration_ns=83391 passed=102 failed=0 assertions=102 status=pass",
+      "TEST_MODULE_TIMING index=11 module=aarch64_control_semantics_tests duration_ns=379244 passed=3377 failed=0 assertions=3377 status=pass",
+      "TEST_MODULE_TIMING index=12 module=aarch64_system_registers_tests duration_ns=2982947 passed=108 failed=0 assertions=108 status=pass",
+      "TEST_MODULE_TIMING index=13 module=aarch64_semantics_tests duration_ns=32031378 passed=215 failed=0 assertions=215 status=pass",
+      "TEST_MODULE_TIMING index=14 module=aarch64_system_semantics_tests duration_ns=28462917 passed=694 failed=0 assertions=694 status=pass",
+      "TEST_MODULE_TIMING index=15 module=aarch64_syntax_tests duration_ns=403761771 passed=112 failed=0 assertions=112 status=pass",
+      "TEST_MODULE_TIMING index=16 module=aarch64_semantic_vm_tests duration_ns=245130467 passed=90 failed=0 assertions=90 status=pass",
+      "TEST_MODULE_TIMING index=17 module=aarch64_direct_simd_tests duration_ns=380053337 passed=152 failed=0 assertions=152 status=pass",
+      "TEST_MODULE_TIMING index=18 module=aarch64_complex_simd_tests duration_ns=487694790 passed=32 failed=0 assertions=32 status=pass",
+      "TEST_MODULE_TIMING index=19 module=aarch64_memory_semantics_tests duration_ns=2571555835 passed=18 failed=0 assertions=18 status=pass",
+      "TEST_MODULE_TIMING index=20 module=aarch64_alias_projection_tests duration_ns=675722 passed=28 failed=0 assertions=28 status=pass",
+      "TEST_MODULE_TIMING index=21 module=assembly_tests duration_ns=462621960 passed=6148 failed=0 assertions=6148 status=pass",
+      "TEST_MODULE_TIMING index=22 module=x86_64_forwarding_tests duration_ns=596582 passed=13113 failed=0 assertions=13113 status=pass",
+      "TEST_MODULE_TIMING index=23 module=x86_64_metadata_tests duration_ns=2075356794 passed=1617 failed=0 assertions=1617 status=pass",
+      "TEST_MODULE_TIMING index=24 module=x86_64_tls_tests duration_ns=15168030 passed=294552 failed=0 assertions=294552 status=pass",
+      "TEST_MODULE_TIMING index=25 module=executable_padding_tests duration_ns=8415533 passed=32908 failed=0 assertions=32908 status=pass",
+      "TEST_MODULE_TIMING index=26 module=x86_64_got_tests duration_ns=12844877 passed=133541 failed=0 assertions=133541 status=pass",
+      "TEST_MODULE_TIMING index=27 module=x86_64_completion_census_tests duration_ns=4307824310 passed=34046 failed=0 assertions=34046 status=pass",
+      "TEST_MODULE_TIMING index=28 module=ir_tests duration_ns=47672268 passed=5754 failed=0 assertions=5754 status=pass",
+      "TEST_MODULE_TIMING index=29 module=llvm_bitcode_tests duration_ns=4241246700 passed=331 failed=0 assertions=331 status=pass",
+      "TEST_MODULE_TIMING index=30 module=machine_selection_tests duration_ns=2333898 passed=172 failed=0 assertions=172 status=pass",
+      "TEST_MODULE_TIMING index=31 module=machine_tests duration_ns=2463675990 passed=475488 failed=0 assertions=475488 status=pass",
+      "TEST_MODULE_TIMING index=32 module=codegen_tests duration_ns=166089547 passed=3671 failed=0 assertions=3671 status=pass",
+      "TEST_MODULE_TIMING index=33 module=aarch64_stride_tests duration_ns=3371835 passed=98 failed=0 assertions=98 status=pass",
+      "TEST_MODULE_TIMING index=34 module=debug_model_tests duration_ns=9212167 passed=668 failed=0 assertions=668 status=pass",
+      "TEST_MODULE_TIMING index=35 module=dwarf_tests duration_ns=108385 passed=104 failed=0 assertions=104 status=pass",
+      "TEST_MODULE_TIMING index=36 module=codeview_tests duration_ns=4222231 passed=46596 failed=0 assertions=46596 status=pass",
+      "TEST_MODULE_TIMING index=37 module=pdb_tests duration_ns=985723032 passed=24848 failed=0 assertions=24848 status=pass",
+      "TEST_MODULE_TIMING index=38 module=object_tests duration_ns=2054018 passed=828 failed=0 assertions=828 status=pass",
+      "TEST_MODULE_TIMING index=39 module=jit_tests duration_ns=253354 passed=149 failed=0 assertions=149 status=pass",
+      "TEST_MODULE_TIMING index=40 module=link_tests duration_ns=105782103 passed=1256 failed=0 assertions=1256 status=pass",
+      "TEST_MODULE_TIMING index=41 module=gpu_pipeline_tests duration_ns=114345 passed=124 failed=0 assertions=124 status=pass",
+      "TEST_MODULE_TIMING index=42 module=compiler_diagnostic_tests duration_ns=4042744 passed=64 failed=0 assertions=64 status=pass",
+      "TEST_MODULE_TIMING index=43 module=compiler_driver_tests duration_ns=12121668885 passed=10420 failed=0 assertions=10420 status=pass",
+      "TEST_MODULE_TIMING index=44 module=compiler_driver_object_path_tests duration_ns=17890829 passed=22 failed=0 assertions=22 status=pass",
+      "TEST_MODULE_TIMING index=45 module=x86_64_tests duration_ns=2242138 passed=18 failed=0 assertions=18 status=pass",
+      "[1486994/1486994] Unit tests",
+      "[46/46] Module tests"
+    ]
+  },
+  "gcc": {
+    "result": 0,
+    "warnings": [
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-Wconversion",
+      "-Wno-missing-field-initializers"
+    ],
+    "description": "Full ir.c translation unit; Debug compile_commands entry with gcc instead of clang and Clang-only warning/diagnostic flags removed."
+  },
+  "selfhost_commands": [
+    "build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -fcanonical-fast src/buster/apps/ide/ide.c -lm -o build/ide-fast-cost-stage1",
+    "build/ide-fast-cost-stage1 cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -fcanonical-fast src/buster/apps/ide/ide.c -lm -o build/ide-fast-cost-stage2",
+    "cmp build/ide-fast-cost-stage1 build/ide-fast-cost-stage2",
+    "build/ide-fast-cost-stage2 bench"
+  ],
+  "archives": {
+    "initial-artifact-logs.tar.gz": {
+      "sha256": "07d242aa2af8882b36d24de34e1db41986eb54e7cdd3d64d49b09ed6d4891500",
+      "bytes": 132922
+    },
+    "no-address.tar.gz": {
+      "sha256": "cad5bf485b93c56a5e5ac63accd37307460830651f6127b2551aca1d8205c575",
+      "bytes": 177277
+    },
+    "no-dce.tar.gz": {
+      "sha256": "babf145efd36e1730ca2f641b145234ccc5bd2153618b81116cb707261b43e52",
+      "bytes": 180443
+    },
+    "no-fold.tar.gz": {
+      "sha256": "a1aecf917dd0abdbe88611a52b250f60e91bbb7e1f86f8476e2cfa8691acbd59",
+      "bytes": 178671
+    },
+    "no-parameters.tar.gz": {
+      "sha256": "9b17cfe410e50f2f4634d6f8ada381b9354b028112ba15cf3e20d639e40f086c",
+      "bytes": 177966
+    },
+    "optimized-on-off.tar.gz": {
+      "sha256": "38225802278c8198ecac4fed5f050d8fe51bbc22125085fdff6d74bed0eee8c3",
+      "bytes": 391319
+    },
+    "query-cost.tar.gz": {
+      "sha256": "749440459dd7b380ef3879425baa84ada328dbfc17e84c05128b2ed2cef6df74",
+      "bytes": 388235
+    },
+    "selfhost-bench.log.gz": {
+      "sha256": "aaa04bfe8a0ce0e2626d0302decdcab414ef7c888cc0ef6b54fe3716caec0fa8",
+      "bytes": 136
+    },
+    "selfhost-stage1.log.gz": {
+      "sha256": "824df8231782017d5009b58205d602a52d66f0f6ad7ed71abee2347caae81386",
+      "bytes": 1821
+    },
+    "selfhost-stage2.log.gz": {
+      "sha256": "4705582626d4d81356766c81d21924c9860a459b8eab7de22fd7c47af4850d64",
+      "bytes": 1826
+    }
+  }
+}

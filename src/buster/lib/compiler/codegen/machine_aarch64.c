@@ -178,6 +178,7 @@ struct MachineA64Selector
     // Per IrValue: the padded raw slot behind an over-aligned local whose
     // virtual register holds a runtime-aligned pointer, or UINT32_MAX.
     u32* value_indirect_slots;
+    MachineSelectionAddressCache address_cache;
     // 1 when every use of the value is a direct-call callee; such FUNCTION
     // values materialize zero instead of a symbol address, exactly like the
     // canonical path, so a single-use reference to an undefined symbol
@@ -641,6 +642,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_local_is_indirect(MachineA64Selector* selec
     return value.value < selector->function->value_count && selector->value_indirect_slots[value.value] != UINT32_MAX;
 }
 
+BUSTER_GLOBAL_LOCAL MachineSelectionAddress machine_a64_address(MachineA64Selector* selector, IrValueId value)
+{
+    return machine_selection_address(selector->arena, selector->program, selector->function, &selector->address_cache, value);
+}
+
 // Places the address of `base` plus a constant byte offset in one row: a
 // direct local folds the offset into its frame displacement, and a pointer
 // folds it into an immediate add. Only a zero offset on a pointer stays a
@@ -652,11 +658,25 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_place_address_offset(MachineA64Selec
     {
         return false;
     }
-    IrValue* value = function->values + base.value;
-    // An incoming block parameter has no defining instruction. Its pointer
-    // value lives in the edge-defined vreg, just like an instruction result.
-    IrInstruction* definition = value->definition.value < function->instruction_count ? function->instructions + value->definition.value : 0;
-    bool local = definition && definition->opcode == IR_OPCODE_LOCAL;
+    MachineSelectionAddress address = machine_a64_address(selector, base);
+    // A zero-offset copy reuses the already materialized SSA address.
+    // Recomputing it from the root would add encoding work at every use.
+    if (byte_offset && address.index_value.value == IR_ID_UNDERLYING_INVALID && address.base_value.value != base.value &&
+        address.displacement <= INT32_MAX && byte_offset <= (u32)INT32_MAX - address.displacement)
+    {
+        MachineSelectionAddress root = machine_a64_address(selector, address.base_value);
+        bool promoted = root.opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[address.base_value.value] != UINT32_MAX &&
+                        !machine_a64_local_is_indirect(selector, address.base_value);
+        if (!promoted)
+        {
+            base = address.base_value;
+            byte_offset += (u32)address.displacement;
+            address = root;
+        }
+    }
+    // The shared fact treats incoming block parameters as opaque pointer
+    // values and retains the LOCAL distinction without chasing a definition.
+    bool local = address.opcode == IR_OPCODE_LOCAL;
     u32 slot = selector->value_stack_slots[base.value];
     if (local && selector->value_virtual_registers[base.value] != UINT32_MAX &&
         !machine_a64_local_is_indirect(selector, base))
@@ -672,10 +692,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_place_address_offset(MachineA64Selec
     // canonical INDEX base rule: its slot address is the base address —
     // the snapshot an rvalue base indexes into. Slices and struct values
     // stay on the loaded-pointer path below.
-    IrType* value_type = ir_type_from_id(&selector->program->types, value->canonical_type);
-    bool storage_value = local ||
-                         (value->category == IR_VALUE_VALUE && value_type &&
-                          (value_type->kind == IR_TYPE_ARRAY || value_type->kind == IR_TYPE_VECTOR));
+    bool storage_value = (address.flags & MACHINE_SELECTION_ADDRESS_STORAGE) != 0;
     if (storage_value && slot != UINT32_MAX)
     {
         u32 row = machine_a64_select_row(selector, (MachineInstruction){
@@ -2640,19 +2657,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_address_of(MachineA64Selector* selec
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_field(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
-    IrProgram* program = selector->program;
-    IrFunction* function = selector->function;
-
+    MachineSelectionAddress address = machine_a64_address(selector, instruction->result);
     bool selected = false;
-    if (result_register != UINT32_MAX && instruction->immediate_count && instruction->immediates)
+    if (result_register != UINT32_MAX && (address.flags & MACHINE_SELECTION_ADDRESS_FIELD) && address.field_offset <= INT32_MAX)
     {
-        IrType* aggregate = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
-        u64 field_index = instruction->immediates[0];
-        if (aggregate && field_index < aggregate->field_count && aggregate->fields[field_index].offset <= INT32_MAX)
-        {
-            selected = machine_a64_select_place_address_offset(selector, instruction->operands[0], result_register,
-                                                               (u32)aggregate->fields[field_index].offset);
-        }
+        selected = machine_a64_select_place_address_offset(selector, instruction->operands[0], result_register, (u32)address.field_offset);
     }
     return selected;
 }
@@ -2729,27 +2738,24 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_global_address(MachineA64Selector* s
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_index(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
-    IrProgram* program = selector->program;
-    IrFunction* function = selector->function;
+    MachineSelectionAddress address = machine_a64_address(selector, instruction->result);
 
     bool selected = false;
     u32 index_register;
     if (result_register != UINT32_MAX && instruction->operand_count >= 2 &&
         machine_a64_operand_register(selector, instruction->operands[1], &index_register))
     {
-        IrType* index_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
-        IrType* element = ir_type_from_id(&program->types, instruction->canonical_type);
-        bool typed = index_type && index_type->kind == IR_TYPE_INTEGER && element && element->layout.resolved && element->layout.size <= INT32_MAX;
+        bool typed = (address.flags & MACHINE_SELECTION_ADDRESS_INDEX) && address.scale <= INT32_MAX;
         // The scaled index is computed in a synthesized temporary; signed
         // narrow indexes sign-extend before scaling.  Resolving the extend
         // before the base address keeps an unsupported index width from
         // emitting rows the rejection would throw away anyway.
         u16 extend_opcode = MACHINE_A64_MOV_RR;
-        if (typed && index_type->is_signed && index_type->bit_width < 64)
+        if (typed && (address.flags & MACHINE_SELECTION_ADDRESS_INDEX_SIGNED) && address.index_bit_width < 64)
         {
-            extend_opcode = (u16)(index_type->bit_width == 8    ? MACHINE_A64_SXTB
-                                  : index_type->bit_width == 16 ? MACHINE_A64_SXTH
-                                  : index_type->bit_width == 32 ? MACHINE_A64_SXTW
+            extend_opcode = (u16)(address.index_bit_width == 8    ? MACHINE_A64_SXTB
+                                  : address.index_bit_width == 16 ? MACHINE_A64_SXTH
+                                  : address.index_bit_width == 32 ? MACHINE_A64_SXTW
                                                                 : 0);
         }
         if (typed && extend_opcode && machine_a64_select_place_address_offset(selector, instruction->operands[0], result_register, 0))
@@ -2760,11 +2766,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_index(MachineA64Selector* selector, 
                                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, index_register)},
                                                  .opcode = extend_opcode,
                                              });
-            if (element->layout.size != 1)
+            if (address.scale != 1)
             {
                 u32 immediate_index = selector->immediates.total_count;
                 u64* immediate_row = (u64*)machine_stream_append(selector->arena, &selector->immediates);
-                *immediate_row = element->layout.size;
+                *immediate_row = address.scale;
                 u32 size_register = machine_a64_synthesize_register(selector);
                 machine_a64_select_row(selector, (MachineInstruction){
                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size_register),
@@ -3434,7 +3440,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_debug_trap(MachineA64Selector* selec
 
 // The aggregate form of a load: an exact-size copy into the result slot,
 // either from a direct local's slot or through an address vreg.
-BUSTER_GLOBAL_LOCAL bool machine_a64_select_aggregate_load(MachineA64Selector* selector, IrInstruction* instruction, IrInstruction* definition, u32 slot,
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_aggregate_load(MachineA64Selector* selector, IrInstruction* instruction, u32 place_opcode, u32 slot,
                                                            u32 result_slot)
 {
     IrProgram* program = selector->program;
@@ -3443,7 +3449,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_aggregate_load(MachineA64Selector* s
     IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
     if (loaded_type && loaded_type->layout.resolved && loaded_type->layout.size <= UINT32_MAX)
     {
-        if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
+        if (place_opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
         {
             machine_a64_select_row(selector, (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, result_slot),
@@ -3453,8 +3459,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_aggregate_load(MachineA64Selector* s
                                              });
             selected = true;
         }
-        else if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-                 definition->opcode == IR_OPCODE_FIELD || machine_a64_local_is_indirect(selector, instruction->operands[0]))
+        else if (place_opcode == IR_OPCODE_DEREFERENCE || place_opcode == IR_OPCODE_GLOBAL || place_opcode == IR_OPCODE_INDEX ||
+                 place_opcode == IR_OPCODE_FIELD || machine_a64_local_is_indirect(selector, instruction->operands[0]))
         {
             u32 address_register;
             selected = machine_a64_operand_register(selector, instruction->operands[0], &address_register);
@@ -3474,14 +3480,14 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_aggregate_load(MachineA64Selector* s
 
 // The scalar form: a promoted local reads as a register, a direct local as a
 // frame load, and anything address-shaped as a sized pointer load.
-BUSTER_GLOBAL_LOCAL bool machine_a64_select_register_load(MachineA64Selector* selector, IrInstruction* instruction, IrInstruction* definition, u32 slot,
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_register_load(MachineA64Selector* selector, IrInstruction* instruction, u32 place_opcode, u32 slot,
                                                            u32 result_register)
 {
     IrProgram* program = selector->program;
 
     bool selected = false;
     u32 place_register = selector->value_virtual_registers[instruction->operands[0].value];
-    if (definition->opcode == IR_OPCODE_LOCAL && place_register != UINT32_MAX && !machine_a64_local_is_indirect(selector, instruction->operands[0]))
+    if (place_opcode == IR_OPCODE_LOCAL && place_register != UINT32_MAX && !machine_a64_local_is_indirect(selector, instruction->operands[0]))
     {
         // Aliased, the load is a name for the local and not code; promoted
         // but not aliasable here, it is a register copy.
@@ -3496,7 +3502,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_register_load(MachineA64Selector* se
         }
         selected = true;
     }
-    else if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
+    else if (place_opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
     {
         u32 row = machine_a64_select_row(selector, (MachineInstruction){
                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
@@ -3506,8 +3512,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_register_load(MachineA64Selector* se
         machine_a64_define(selector, result_register, row);
         selected = true;
     }
-    else if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-             definition->opcode == IR_OPCODE_FIELD || machine_a64_local_is_indirect(selector, instruction->operands[0]))
+    else if (place_opcode == IR_OPCODE_DEREFERENCE || place_opcode == IR_OPCODE_GLOBAL || place_opcode == IR_OPCODE_INDEX ||
+             place_opcode == IR_OPCODE_FIELD || machine_a64_local_is_indirect(selector, instruction->operands[0]))
     {
         u32 address_register;
         if (machine_a64_operand_register(selector, instruction->operands[0], &address_register))
@@ -3541,19 +3547,19 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_load(MachineA64Selector* selector, I
     bool selected = false;
     if (instruction->operands[0].value < function->value_count && instruction->result.value != IR_ID_UNDERLYING_INVALID)
     {
-        IrValue* place = function->values + instruction->operands[0].value;
-        if (place->definition.value < function->instruction_count)
+        MachineSelectionAddress address = machine_a64_address(selector, instruction->operands[0]);
+        if (address.opcode != IR_OPCODE_COUNT)
         {
-            IrInstruction* definition = function->instructions + place->definition.value;
+            u32 place_opcode = address.opcode;
             u32 slot = selector->value_stack_slots[instruction->operands[0].value];
             u32 result_slot = selector->value_stack_slots[instruction->result.value];
             if (result_register != UINT32_MAX)
             {
-                selected = machine_a64_select_register_load(selector, instruction, definition, slot, result_register);
+                selected = machine_a64_select_register_load(selector, instruction, place_opcode, slot, result_register);
             }
             else if (result_slot != UINT32_MAX)
             {
-                selected = machine_a64_select_aggregate_load(selector, instruction, definition, slot, result_slot);
+                selected = machine_a64_select_aggregate_load(selector, instruction, place_opcode, slot, result_slot);
             }
         }
     }
@@ -3562,13 +3568,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_load(MachineA64Selector* selector, I
 
 // The aggregate form of a store: an exact-size copy out of the value slot,
 // into a direct local's slot or through an address vreg.
-BUSTER_GLOBAL_LOCAL bool machine_a64_select_aggregate_store(MachineA64Selector* selector, IrInstruction* instruction, IrInstruction* definition, u64 size,
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_aggregate_store(MachineA64Selector* selector, IrInstruction* instruction, u32 place_opcode, u64 size,
                                                             u32 slot, u32 value_slot)
 {
     bool selected = false;
     if (size && size <= UINT32_MAX)
     {
-        if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
+        if (place_opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
         {
             machine_a64_select_row(selector, (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, slot),
@@ -3578,8 +3584,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_aggregate_store(MachineA64Selector* 
                                              });
             selected = true;
         }
-        else if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-                 definition->opcode == IR_OPCODE_FIELD || machine_a64_local_is_indirect(selector, instruction->operands[0]))
+        else if (place_opcode == IR_OPCODE_DEREFERENCE || place_opcode == IR_OPCODE_GLOBAL || place_opcode == IR_OPCODE_INDEX ||
+                 place_opcode == IR_OPCODE_FIELD || machine_a64_local_is_indirect(selector, instruction->operands[0]))
         {
             u32 address_register;
             selected = machine_a64_operand_register(selector, instruction->operands[0], &address_register);
@@ -3599,7 +3605,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_aggregate_store(MachineA64Selector* 
 
 // The scalar form: a promoted local takes a register copy, a direct local a
 // frame store, and anything address-shaped a sized pointer store.
-BUSTER_GLOBAL_LOCAL bool machine_a64_select_register_store(MachineA64Selector* selector, IrInstruction* instruction, IrInstruction* definition, u64 size,
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_register_store(MachineA64Selector* selector, IrInstruction* instruction, u32 place_opcode, u64 size,
                                                            u32 slot)
 {
     bool selected = false;
@@ -3608,7 +3614,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_register_store(MachineA64Selector* s
     u32 place_register = selector->value_virtual_registers[instruction->operands[0].value];
     if (size_index != UINT32_MAX && machine_a64_operand_register(selector, instruction->operands[1], &value_register))
     {
-        if (definition->opcode == IR_OPCODE_LOCAL && place_register != UINT32_MAX && !machine_a64_local_is_indirect(selector, instruction->operands[0]))
+        if (place_opcode == IR_OPCODE_LOCAL && place_register != UINT32_MAX && !machine_a64_local_is_indirect(selector, instruction->operands[0]))
         {
             // Promoted local: the store is a full-width register copy —
             // the same 64-bit image a direct-slot store writes, since the
@@ -3621,7 +3627,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_register_store(MachineA64Selector* s
             machine_a64_define(selector, place_register, row);
             selected = true;
         }
-        else if (definition->opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
+        else if (place_opcode == IR_OPCODE_LOCAL && slot != UINT32_MAX)
         {
             // Direct-slot stores always write the full eight-byte slot,
             // exactly like the x86-64 machine path: the slot is the value's
@@ -3634,8 +3640,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_register_store(MachineA64Selector* s
                                              });
             selected = true;
         }
-        else if (definition->opcode == IR_OPCODE_DEREFERENCE || definition->opcode == IR_OPCODE_GLOBAL || definition->opcode == IR_OPCODE_INDEX ||
-                 definition->opcode == IR_OPCODE_FIELD || machine_a64_local_is_indirect(selector, instruction->operands[0]))
+        else if (place_opcode == IR_OPCODE_DEREFERENCE || place_opcode == IR_OPCODE_GLOBAL || place_opcode == IR_OPCODE_INDEX ||
+                 place_opcode == IR_OPCODE_FIELD || machine_a64_local_is_indirect(selector, instruction->operands[0]))
         {
             u32 address_register;
             selected = machine_a64_operand_register(selector, instruction->operands[0], &address_register);
@@ -3660,21 +3666,21 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_store(MachineA64Selector* selector, 
     bool selected = false;
     if (instruction->operands[0].value < function->value_count && instruction->operands[1].value < function->value_count)
     {
-        IrValue* place = function->values + instruction->operands[0].value;
-        if (place->definition.value < function->instruction_count)
+        MachineSelectionAddress address = machine_a64_address(selector, instruction->operands[0]);
+        if (address.opcode != IR_OPCODE_COUNT)
         {
-            IrInstruction* definition = function->instructions + place->definition.value;
+            u32 place_opcode = address.opcode;
             IrType* stored_type = ir_type_from_id(&program->types, function->values[instruction->operands[1].value].canonical_type);
             u64 size = stored_type && stored_type->layout.resolved ? stored_type->layout.size : 0;
             u32 slot = selector->value_stack_slots[instruction->operands[0].value];
             u32 value_slot = selector->value_stack_slots[instruction->operands[1].value];
             if (value_slot != UINT32_MAX && selector->value_virtual_registers[instruction->operands[1].value] == UINT32_MAX)
             {
-                selected = machine_a64_select_aggregate_store(selector, instruction, definition, size, slot, value_slot);
+                selected = machine_a64_select_aggregate_store(selector, instruction, place_opcode, size, slot, value_slot);
             }
             else
             {
-                selected = machine_a64_select_register_store(selector, instruction, definition, size, slot);
+                selected = machine_a64_select_register_store(selector, instruction, place_opcode, size, slot);
             }
         }
     }
@@ -4873,8 +4879,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             u32 parameter_count = 0;
-            for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
+            IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
+            for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
             {
+                IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
                 IrType* parameter_type = ir_type_from_id(&program->types, parameter->canonical_type);
                 bool wide = parameter_type && parameter_type->kind == IR_TYPE_INTEGER && parameter_type->bit_width == 128;
                 if (parameter->value.value >= function->value_count ||
@@ -4889,7 +4897,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 }
                 if (wide)
                 {
-                    if (!machine_builder_canonical_pair_parameter(&selector.builder, function, parameter, &selector.value_pairs))
+                    if (!machine_builder_canonical_pair_parameter(&selector.builder, function, published_block, parameter_index, &selector.value_pairs))
                     {
                         return result;
                     }
@@ -4954,13 +4962,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         // row population here as well: aliasing and fusion only inspect these
         // four opcodes, so their later passes can consume compact candidate
         // offsets instead of chasing every linked row again.
-        MachineSelectionRowLayout row_layout = {
-            .block_row_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1),
-        };
         u32* block_candidate_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1);
         u32* candidate_rows = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
         u32 candidate_count = 0;
-        bool dense_rows = true;
         bool nonvolatile_memory = true;
         u32 walk_ordinal = 0;
         u32 expanded_blocks = 0;
@@ -4978,10 +4982,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             {
                 machine_a64_reject(&selector, IR_OPCODE_BINARY);
             }
-            for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+            for (IrInstructionId id = block->first_instruction; id.value <= block->last_instruction.value; id.value += 1)
             {
                 IrInstruction* instruction = function->instructions + id.value;
-                dense_rows &= id.value == block->first_instruction.value + block_row_count;
                 nonvolatile_memory &= !instruction->volatile_access;
                 if (machine_a64_instruction_is_i128_divide(program, instruction))
                 {
@@ -5078,44 +5081,19 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 selector.block_entries[block_index] = entry_block;
                 selector.block_exits[block_index] = expanded_blocks - 1;
             }
-            row_layout.block_row_counts[block_index] = block_row_count;
             block_candidate_counts[block_index] = block_candidate_count;
         }
         // Incoming block-parameter values are edge uses, not instruction
         // operands. Count them before aliasing/fusion so a value carried by
         // canonical promotion cannot be absorbed as an otherwise-dead branch
         // condition.
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        IrPublishedCfg const* cfg = function->published_cfg;
+        for (u32 index = 0; index < cfg->argument_count; index += 1)
         {
-            for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
-            {
-                for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
-                {
-                    if (incoming->value.value < function->value_count)
-                    {
-                        value_use_counts[incoming->value.value] += 1;
-                        value_use_blocks[incoming->value.value] = MACHINE_SELECTION_MULTIPLE_BLOCKS;
-                        value_last_use_ordinals[incoming->value.value] = walk_ordinal;
-                    }
-                }
-            }
-        }
-        if (!dense_rows)
-        {
-            // Relinked blocks do not have a dense id range.  Gather their
-            // program order once so every consumer below preserves that order.
-            row_layout.rows = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
-            u32 gathered_rows = 0;
-            for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-            {
-                IrBlock* block = function->blocks + block_index;
-                for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID;
-                     id = function->instructions[id.value].next)
-                {
-                    row_layout.rows[gathered_rows] = id.value;
-                    gathered_rows += 1;
-                }
-            }
+            u32 value = cfg->arguments[index].value;
+            value_use_counts[value] += 1;
+            value_use_blocks[value] = MACHINE_SELECTION_MULTIPLE_BLOCKS;
+            value_last_use_ordinals[value] = walk_ordinal;
         }
         // Load aliasing over the promoted locals. The measured cost of
         // promotion is the copy every load lowers to: its source is the local,
@@ -5162,7 +5140,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 {
                     u32 row_offset = candidate_rows[candidate_base + remaining - 1];
                     IrInstruction* instruction = function->instructions +
-                                                  machine_selection_row_id(&row_layout, block, walked_ordinals, row_offset);
+                                                  (block->first_instruction.value + row_offset);
                     u32 instruction_ordinal = walked_ordinals + row_offset + 1;
                     if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
                         promotable_locals[instruction->operands[0].value])
@@ -5210,20 +5188,19 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                         load_aliases[candidate] = root;
                     }
                 }
-                walked_ordinals += row_layout.block_row_counts[block_index];
+                walked_ordinals += function->published_cfg->blocks[block_index].instruction_count;
                 candidate_base += block_candidate_count;
             }
         }
         // Classification pass: direct locals become stack slots, every other
         // scalar result becomes a virtual register, in stable value-id order.
-        u32 classified_rows = 0;
         for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
-            u32 block_row_count = row_layout.block_row_counts[block_index];
+            u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
             for (u32 row_offset = 0; row_offset < block_row_count; row_offset += 1)
             {
-                IrInstruction* instruction = function->instructions + machine_selection_row_id(&row_layout, block, classified_rows, row_offset);
+                IrInstruction* instruction = function->instructions + (block->first_instruction.value + row_offset);
                 if (instruction->result.value == IR_ID_UNDERLYING_INVALID || instruction->result.value >= function->value_count)
                 {
                     continue;
@@ -5332,7 +5309,6 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                         &selector, (u32)((value_type->layout.size + 7) & ~(u64)7), value_type->kind == IR_TYPE_VECTOR ? 16u : 8u);
                 }
             }
-            classified_rows += block_row_count;
         }
         // Aliased load results share their local's virtual register: every use
         // site then names the local directly and the load emits nothing. The
@@ -5375,11 +5351,11 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             u32 block_candidate_count = block_candidate_counts[block_index];
             // Stores and BRANCH_IFs are the only rows that mutate fusion
             // state.  Iterate their stable candidate offsets and recover the
-            // original row ID through the dense-or-gathered layout.
+            // published row ID through its canonical block span.
             for (u32 candidate_index = 0; candidate_index < block_candidate_count; candidate_index += 1)
             {
                 u32 row_offset = candidate_rows[fusion_candidate_base + candidate_index];
-                IrInstruction* instruction = function->instructions + machine_selection_row_id(&row_layout, block, fused_rows, row_offset);
+                IrInstruction* instruction = function->instructions + (block->first_instruction.value + row_offset);
                 u32 fusion_ordinal = fused_rows + row_offset + 1;
                 if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
                     promotable_locals[instruction->operands[0].value])
@@ -5560,7 +5536,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     selector.fused_dead[dead_zeros[zero_index]] = 1;
                 }
             }
-            fused_rows += row_layout.block_row_counts[block_index];
+            fused_rows += function->published_cfg->blocks[block_index].instruction_count;
             fusion_candidate_base += block_candidate_count;
         }
         selector.virtual_register_count = selector.builder.virtual_registers.total_count;
@@ -5572,14 +5548,15 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         u32 typed_instruction_count = 0;
         u32 simd_operation_count = 0;
-        u32 selected_rows = 0;
         for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
             machine_builder_block_begin(&selector.builder);
             selector.open_block = (MachineBlock){.parameter_offset = selector.builder.block_parameters.total_count};
-            for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+            IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
+            for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
             {
+                IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
                 u32 value = parameter->value.value;
                 bool wide = selector.value_pairs && selector.value_pairs[value].registers[0] != UINT32_MAX;
                 u32 count = wide ? 2u : 1u;
@@ -5894,10 +5871,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     selector.value_virtual_registers[normalize_values[normalize_index]] = normalize_register;
                 }
             }
-            u32 block_row_count = row_layout.block_row_counts[block_index];
+            u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
             for (u32 row_offset = 0; row_offset < block_row_count && selector.supported; row_offset += 1)
             {
-                IrInstructionId id = {.value = machine_selection_row_id(&row_layout, block, selected_rows, row_offset)};
+                IrInstructionId id = {.value = (block->first_instruction.value + row_offset)};
                 IrInstruction* instruction = function->instructions + id.value;
                 typed_instruction_count += 1;
                 simd_operation_count += instruction->opcode == IR_OPCODE_SIMD;
@@ -5927,7 +5904,6 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     }
                 }
             }
-            selected_rows += block_row_count;
             machine_builder_block_end(&selector.builder, selector.open_block);
         }
         // A dynamic allocation moves the stack pointer below the fixed

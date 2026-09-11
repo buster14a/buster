@@ -5,6 +5,7 @@
 // entry, instruction target, predecessor, or block-parameter incoming edge.
 BUSTER_GLOBAL_LOCAL void codegen_test_rotate_blocks(Arena* arena, IrFunction* function, u32 rotation)
 {
+    ir_function_invalidate_cfg(function);
     u32 count = function->block_count;
     IrBlock* original = arena_allocate(arena, IrBlock, count);
     memcpy(original, function->blocks, sizeof(*original) * count);

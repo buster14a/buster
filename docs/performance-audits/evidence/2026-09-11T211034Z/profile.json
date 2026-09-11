@@ -1,0 +1,68 @@
+{
+  "revision": "369877c8bb42094ea7a765b596a4a1fbaaf43ac2",
+  "configuration": "Release",
+  "generate_argv": [
+    "/workspace/scratch/938e5009f152/issue40/build/build",
+    "generate",
+    "--cc",
+    "clang",
+    "--linker",
+    "DEFAULT",
+    "--",
+    "-DBUSTER_INCLUDE_TESTS=OFF",
+    "-DBUSTER_UNITY_BUILD=OFF"
+  ],
+  "build_argv": [
+    "/workspace/scratch/938e5009f152/issue40/build/build",
+    "build",
+    "--config",
+    "Release",
+    "-t",
+    "ide",
+    "--",
+    "-j1"
+  ],
+  "cwd": "/workspace/scratch/938e5009f152/issue40-production",
+  "compile_command": "/workspace/scratch/6f9db092acbf/toolchain/usr/lib/llvm-18/bin/clang -DBUSTER_BENCH_ALLOCATIONS=0 -DBUSTER_COMPILER_ZIG=0 -DBUSTER_FUZZ_AVAILABLE=0 -DBUSTER_HOST_C_COMPILER=\\\"/workspace/scratch/6f9db092acbf/toolchain/usr/lib/llvm-18/bin/clang\\\" -DBUSTER_HOST_C_COMPILER_ARG1=\\\"\\\" -DBUSTER_HOST_C_COMPILER_ID=\\\"Clang\\\" -DBUSTER_HOST_C_COMPILER_MSVC=0 -DBUSTER_HOST_C_RESOURCE_INCLUDE=\\\"/workspace/scratch/6f9db092acbf/toolchain/usr/lib/llvm-18/lib/clang/18/include\\\" -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_INSTRUMENT=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_SANITIZE=0 -DBUSTER_SINGLE_THREADED=0 -DBUSTER_UNITY_BUILD=0 -DBUSTER_USE_D3D12=0 -DBUSTER_USE_METAL=0 -DBUSTER_USE_SLANG_SHADERS=0 -DBUSTER_USE_VULKAN=0 -DCMAKE_INTDIR=\\\"Release\\\" -I/workspace/scratch/938e5009f152/issue40-production/build/generated -I/workspace/scratch/938e5009f152/issue40-production/src -O3 -DNDEBUG -fcolor-diagnostics -fwrapv -fno-strict-aliasing -funsigned-char -fno-exceptions -Werror -Wall -Wextra -Wundef -Wconversion -Wstrict-overflow=5 -Woverflow -Wshift-overflow -Walloca -Wbool-operation -Wdouble-promotion -Wformat -Wimplicit -Wimplicit-fallthrough -Winfinite-recursion -Winvalid-utf8 -Wmain -Wmisleading-indentation -Wmissing-braces -Woverlength-strings -Wpacked -Wparentheses -Wpointer-arith -Wpragmas -Wshadow -Wtautological-compare -Wtype-limits -Wuninitialized -Wno-missing-field-initializers -Wpedantic -pedantic -Warray-bounds-pointer-arithmetic -Wassign-enum -Wbool-conversion -Wcomma -Wconditional-uninitialized -Wdangling -Wenum-compare-conditional -Wenum-too-large -Wfixed-point-overflow -Wflag-enum -Wfortify-source -Wfour-char-constants -Wimplicit-fallthrough-per-function -Wimplicit-float-conversion -Wimplicit-int-conversion -Wlinker-warnings -Wloop-analysis -Wnon-power-of-two-alignment -Woption-ignored -Wpragma-pack -Wpragma-pack-suspicious-include -Wpedantic-macros -Wread-only-types -Wredundant-parens -Wreserved-identifier -Wreserved-macro-identifier -Wreserved-module-identifier -Wself-assign -Wself-assign-field -Wshadow-all -Wshadow-field -Wshift-sign-overflow -Wsigned-enum-bitfield -Wtautological-constant-in-range-compare -Wunaligned-access -Wvector-conversion -Wthread-safety -ferror-limit=1 -g -fno-omit-frame-pointer -march=native -o CMakeFiles/ide.dir/Release/src/buster/lib/compiler/ir/ir.c.o -c /workspace/scratch/938e5009f152/issue40-production/src/buster/lib/compiler/ir/ir.c",
+  "macro_probe_source": "#include <buster/lib/compiler/ir/ir.h>\n#if BUSTER_IR_TRANSFORM_CHECKS\n#error production_profile_unexpectedly_has_transform_checks\n#endif\n",
+  "macro_probe_exit": 0,
+  "tested_compile_command": "/workspace/scratch/6f9db092acbf/toolchain/usr/lib/llvm-18/bin/clang -DBUSTER_BENCH_ALLOCATIONS=0 -DBUSTER_COMPILER_ZIG=0 -DBUSTER_FUZZ_AVAILABLE=0 -DBUSTER_HOST_C_COMPILER=\\\"/workspace/scratch/6f9db092acbf/toolchain/usr/lib/llvm-18/bin/clang\\\" -DBUSTER_HOST_C_COMPILER_ARG1=\\\"\\\" -DBUSTER_HOST_C_COMPILER_ID=\\\"Clang\\\" -DBUSTER_HOST_C_COMPILER_MSVC=0 -DBUSTER_HOST_C_RESOURCE_INCLUDE=\\\"/workspace/scratch/6f9db092acbf/toolchain/usr/lib/llvm-18/lib/clang/18/include\\\" -DBUSTER_INCLUDE_TESTS=1 -DBUSTER_INSTRUMENT=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_SANITIZE=0 -DBUSTER_SINGLE_THREADED=0 -DBUSTER_UNITY_BUILD=0 -DBUSTER_USE_D3D12=0 -DBUSTER_USE_METAL=0 -DBUSTER_USE_SLANG_SHADERS=0 -DBUSTER_USE_VULKAN=0 -DCMAKE_INTDIR=\\\"Release\\\" -I/workspace/scratch/938e5009f152/issue40/build/generated -I/workspace/scratch/938e5009f152/issue40/src -O3 -DNDEBUG -fcolor-diagnostics -fwrapv -fno-strict-aliasing -funsigned-char -fno-exceptions -Werror -Wall -Wextra -Wundef -Wconversion -Wstrict-overflow=5 -Woverflow -Wshift-overflow -Walloca -Wbool-operation -Wdouble-promotion -Wformat -Wimplicit -Wimplicit-fallthrough -Winfinite-recursion -Winvalid-utf8 -Wmain -Wmisleading-indentation -Wmissing-braces -Woverlength-strings -Wpacked -Wparentheses -Wpointer-arith -Wpragmas -Wshadow -Wtautological-compare -Wtype-limits -Wuninitialized -Wno-missing-field-initializers -Wpedantic -pedantic -Warray-bounds-pointer-arithmetic -Wassign-enum -Wbool-conversion -Wcomma -Wconditional-uninitialized -Wdangling -Wenum-compare-conditional -Wenum-too-large -Wfixed-point-overflow -Wflag-enum -Wfortify-source -Wfour-char-constants -Wimplicit-fallthrough-per-function -Wimplicit-float-conversion -Wimplicit-int-conversion -Wlinker-warnings -Wloop-analysis -Wnon-power-of-two-alignment -Woption-ignored -Wpragma-pack -Wpragma-pack-suspicious-include -Wpedantic-macros -Wread-only-types -Wredundant-parens -Wreserved-identifier -Wreserved-macro-identifier -Wreserved-module-identifier -Wself-assign -Wself-assign-field -Wshadow-all -Wshadow-field -Wshift-sign-overflow -Wsigned-enum-bitfield -Wtautological-constant-in-range-compare -Wunaligned-access -Wvector-conversion -Wthread-safety -ferror-limit=1 -g -fno-omit-frame-pointer -march=native -o CMakeFiles/ide.dir/Release/src/buster/lib/compiler/ir/ir.c.o -c /workspace/scratch/938e5009f152/issue40/src/buster/lib/compiler/ir/ir.c",
+  "matching_flags_except_tests_and_paths": true,
+  "actual_optimization": "-O3",
+  "prior_audit_correction": "2026-09-11T204614Z incorrectly describes -O2; actual ordinary Release commands are -O3, BUSTER_CI=OFF.",
+  "production_binary": {
+    "path": "/workspace/scratch/938e5009f152/issue40-production/build/Release/ide",
+    "sha256": "3c4fa3079c08715dc207a7cf27ab42c428a5e205111ab0179f44f688183802ca",
+    "bytes": 26682640
+  },
+  "wrappers": [
+    {
+      "path": "/workspace/scratch/938e5009f152/issue40/build/fast-production-off",
+      "contents": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40-production/build/Release/ide \"$@\" -fno-canonical-fast\nfi\nexec /workspace/scratch/938e5009f152/issue40-production/build/Release/ide \"$@\"\n",
+      "sha256": "eca4ed6c3de3875d3bc2cb78ea0505694035e27f896f1698839a6fbb6ab05b20"
+    },
+    {
+      "path": "/workspace/scratch/938e5009f152/issue40/build/fast-production-on",
+      "contents": "#!/bin/sh\nif [ \"$1\" = cc ]; then\n    exec /workspace/scratch/938e5009f152/issue40-production/build/Release/ide \"$@\" -fcanonical-fast\nfi\nexec /workspace/scratch/938e5009f152/issue40-production/build/Release/ide \"$@\"\n",
+      "sha256": "f17e0d2d871e2ac9e303f79b30e1a8aa3a93ba90fc1cd365a0a71d37201a0e96"
+    }
+  ],
+  "input_jobs_match_previous_corpus": true,
+  "timed_observations": 1920,
+  "throughput_exit": 0,
+  "confirmed_substantial_regressions": 0,
+  "inconclusive_cases": 21,
+  "guard": {
+    "wall_percent": 15,
+    "wall_ms": 2,
+    "rss_percent": 20,
+    "rss_MiB": 16,
+    "rounds": 2,
+    "pairs_per_round": 20,
+    "warmups": 2,
+    "cpu": 8,
+    "profile": "ci"
+  },
+  "throughput_command": "build/throughput-tools/throughput run --baseline /workspace/scratch/938e5009f152/issue40/build/fast-production-off --candidate /workspace/scratch/938e5009f152/issue40/build/fast-production-on --output build/fast-throughput-production-on-off --profile ci --mode all --pairs 20 --warmups 2 --cpu 8 --baseline-id 369877c8-tests-off-fast-off --candidate-id 369877c8-tests-off-fast-all",
+  "post_run_binary_hashes_unchanged": true
+}

@@ -676,6 +676,20 @@ typedef enum MachineOpcode
     // barrier, but contributes no target bytes.
     MACHINE_X64_COMPILER_BARRIER,
     MACHINE_A64_COMPILER_BARRIER,
+    // Predicate-bank forms preserve the legacy replay identities above.
+    MACHINE_X64_KMOV_FROM_GENERAL, // def mask, use general; payload = bit width
+    MACHINE_X64_KMOV_TO_GENERAL,   // def general, use mask; payload = bit width
+    MACHINE_X64_KMOV,              // def mask, use mask; payload = bit width
+    MACHINE_X64_KAND,
+    MACHINE_X64_KOR,
+    MACHINE_X64_KXOR,
+    MACHINE_X64_VPCMP_K,
+    MACHINE_X64_VPMOVB2K,
+    MACHINE_X64_VLOAD_PTR_K,
+    MACHINE_X64_VSTORE_PTR_K,
+    MACHINE_X64_VCOMPRESS_STORE_PTR_K,
+    MACHINE_X64_VPERMT2B_K,
+    MACHINE_X64_VCOMPRESSB_K,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -984,6 +998,10 @@ BUSTER_CT_CHECK(sizeof(MachineOpcodeRow) == 16);
 // the vector file behind it; every allocator mask is one u64 over this
 // numbering, so the limit may not pass sixty-four.
 #define MACHINE_TARGET_REGISTER_LIMIT 48u
+// Separate predicate bank: these placement IDs never enter the 48-lane tile.
+#define MACHINE_PREDICATE_REGISTER_BASE 48u
+#define MACHINE_PREDICATE_REGISTER_COUNT 8u
+#define MACHINE_PREDICATE_ALLOCATABLE_MASK 0xfeu
 // Upper bound on the callee-saved registers the QUALITY pass may pin;
 // each target lists its own file in preference order and reports how much
 // of it is real through `quality_pin_register_count`.
@@ -1047,7 +1065,7 @@ struct MachineTargetDescription
     // pointer already correct. The frame slots stay at negative offsets from
     // the frame pointer either way; only the saves move above it.
     u8 saves_precede_frame_pointer;
-    u8 reserved[1];
+    u8 predicate_allocatable_mask;
     // The fixed vector scratch per operand slot, the MIR_STACK counterpart
     // of `slot_scratch` for vector-class operand slots.
     u8 vector_slot_scratch[4];
@@ -1157,7 +1175,10 @@ struct MachineFunction
     // PE AArch64 uses a compact frame-chain/save area above the ordinary
     // placement slots. Keep the platform fact through allocation/scheduling.
     bool windows_aarch64_frame;
-    u8 reserved[6];
+    // Fresh selectors certify predicate-free functions so ordinary scalar
+    // placement does not rescan them. A rewrite adding MASK refs clears it.
+    bool predicate_absence_certified;
+    u8 reserved[5];
     // One flag byte per stack slot, or null. Volatile canonical lowering
     // taints every frame object it touches. Object identities do not change
     // during CFG/SSA/scheduling rewrites, so this immutable table is shared.
@@ -1280,6 +1301,9 @@ typedef enum MachineEditKind
     // subject immediate index materializes into location preg at point:
     // the reload of a value whose whole definition is a constant.
     MACHINE_EDIT_REMATERIALIZE,
+    // Predicate edge captures address an explicit frame slot directly.
+    MACHINE_EDIT_FRAME_SPILL,
+    MACHINE_EDIT_FRAME_RELOAD,
     MACHINE_EDIT_KIND_COUNT,
 } MachineEditKind;
 
@@ -1652,10 +1676,13 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena
 // prepare a context for this function alone, which is the unvalidated entry
 // point's cost and never module code generation's.
 BUSTER_F_DECL MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* program, Target target);
+// `predicate_residency` enables source K-chain selection for allocators that
+// retain registers across rows. Stack-only source selection keeps its existing
+// integer bridges; explicit MASK MIR remains valid in every machine allocator.
 BUSTER_F_DECL MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                             bool position_independent, MachineSelectionModule* module);
+                                                                             bool position_independent, bool predicate_residency, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                          bool position_independent, bool assume_validated, MachineSelectionModule* module);
+                                                                          bool position_independent, bool assume_validated, bool predicate_residency, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                             bool assume_validated);
 BUSTER_F_DECL MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function);

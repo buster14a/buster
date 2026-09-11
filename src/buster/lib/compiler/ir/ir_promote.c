@@ -4,8 +4,9 @@
 // use one reusable O(blocks + edges) scratch tile: a may-uninitialized walk,
 // backward live-in pruning, then block-argument SSA construction. Every walk
 // is iterative, including irreducible loops; no C recursion or blocks*locals
-// resident matrix is required. ir_promote_compact owns the single final ID
-// remap, including instruction sources, extras, labels and builder side data.
+// resident matrix is required. ir_promote_compact simplifies its parameters;
+// ir_rewrite_compact owns the shared final ID remap, including instruction
+// sources, extras and builder side data. Label-bearing functions are skipped.
 // ir_prepare_canonical_module owns the input/output validation boundaries;
 // a producer certificate never certifies rows mutated by this pass.
 
@@ -472,58 +473,9 @@ BUSTER_GLOBAL_LOCAL bool ir_promote_global(Arena* arena, IrProgram* program, IrF
     return safe;
 }
 
-BUSTER_GLOBAL_LOCAL void ir_promote_compact(Arena* arena, IrProgram* program, IrFunction* function, u32 old_value_count, u32* load_replacements,
-                                            u8* removed, IrLocalPromotionStatistics* statistics)
+BUSTER_GLOBAL_LOCAL void ir_rewrite_compact(Arena* arena, IrProgram* program, IrFunction* function, u32* replacements, u8* removed)
 {
     u32 count = function->value_count;
-    u32* replacements = arena_allocate(arena, u32, count);
-    for (u32 value = 0; value < count; value += 1)
-    {
-        replacements[value] = value < old_value_count ? load_replacements[value] : value;
-    }
-    bool changed = true;
-    while (changed)
-    {
-        changed = false;
-        statistics->parameter_sweeps += 1;
-        statistics->parameter_block_visits += function->block_count;
-        for (u32 block = 0; block < function->block_count; block += 1)
-        {
-            IrBlock* destination = function->blocks + block;
-            IrBlockParameter** link = &destination->first_parameter;
-            destination->last_parameter = 0;
-            while (*link)
-            {
-                statistics->parameter_visits += 1;
-                IrBlockParameter* parameter = *link;
-                u32 same = IR_PROMOTE_NONE;
-                bool trivial = parameter->value.value >= old_value_count;
-                for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
-                {
-                    statistics->parameter_incoming_visits += 1;
-                    u32 value = ir_promote_root(replacements, incoming->value.value);
-                    if (value != parameter->value.value)
-                    {
-                        trivial = same == IR_PROMOTE_NONE || value == same;
-                        same = value;
-                    }
-                }
-                if (trivial && same != IR_PROMOTE_NONE)
-                {
-                    replacements[parameter->value.value] = same;
-                    *link = parameter->next;
-                    destination->parameter_count -= 1;
-                    statistics->removed_parameters += 1;
-                    changed = true;
-                }
-                else
-                {
-                    destination->last_parameter = parameter;
-                    link = &parameter->next;
-                }
-            }
-        }
-    }
     u32* instruction_map = arena_allocate(arena, u32, function->instruction_count);
     u32* next_map = arena_allocate(arena, u32, function->instruction_count);
     u32* value_map = arena_allocate(arena, u32, count);
@@ -678,8 +630,64 @@ BUSTER_GLOBAL_LOCAL void ir_promote_compact(Arena* arena, IrProgram* program, Ir
     function->value_count = value_count;
 }
 
+BUSTER_GLOBAL_LOCAL void ir_promote_compact(Arena* arena, IrProgram* program, IrFunction* function, u32 old_value_count, u32* load_replacements,
+                                            u8* removed, IrLocalPromotionStatistics* statistics)
+{
+    u32 count = function->value_count;
+    u32* replacements = arena_allocate(arena, u32, count);
+    for (u32 value = 0; value < count; value += 1)
+    {
+        replacements[value] = value < old_value_count ? load_replacements[value] : value;
+    }
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        statistics->parameter_sweeps += 1;
+        statistics->parameter_block_visits += function->block_count;
+        for (u32 block = 0; block < function->block_count; block += 1)
+        {
+            IrBlock* destination = function->blocks + block;
+            IrBlockParameter** link = &destination->first_parameter;
+            destination->last_parameter = 0;
+            while (*link)
+            {
+                statistics->parameter_visits += 1;
+                IrBlockParameter* parameter = *link;
+                u32 same = IR_PROMOTE_NONE;
+                bool trivial = parameter->value.value >= old_value_count;
+                for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
+                {
+                    statistics->parameter_incoming_visits += 1;
+                    u32 value = ir_promote_root(replacements, incoming->value.value);
+                    if (value != parameter->value.value)
+                    {
+                        trivial = same == IR_PROMOTE_NONE || value == same;
+                        same = value;
+                    }
+                }
+                if (trivial && same != IR_PROMOTE_NONE)
+                {
+                    replacements[parameter->value.value] = same;
+                    *link = parameter->next;
+                    destination->parameter_count -= 1;
+                    statistics->removed_parameters += 1;
+                    changed = true;
+                }
+                else
+                {
+                    destination->last_parameter = parameter;
+                    link = &parameter->next;
+                }
+            }
+        }
+    }
+    ir_rewrite_compact(arena, program, function, replacements, removed);
+}
+
 BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* function, IrLocalPromotionStatistics* statistics)
 {
+    ir_function_invalidate_cfg(function);
     statistics->instructions_before += function->instruction_count;
     statistics->values_before += function->value_count;
     u32 local_count = 0;
@@ -858,48 +866,4 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
     }
     statistics->instructions_after += function->instruction_count;
     statistics->values_after += function->value_count;
-}
-
-IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified)
-{
-    IrValidationResult result = ir_validation_ok();
-    if (!program || !program->arena || !module)
-    {
-        result.error = IR_VALIDATION_INVALID_ID;
-        result.boundary = IR_VALIDATION_BOUNDARY_CANONICAL_INPUT;
-    }
-    else
-    {
-        if (!input_certified)
-        {
-            result = ir_validate_canonical_module(program, module);
-            result.boundary = IR_VALIDATION_BOUNDARY_CANONICAL_INPUT;
-        }
-        if (result.error == IR_VALIDATION_NONE && !program->disable_local_promotion && !module->local_promotion_complete)
-        {
-            module->local_promotion = (IrLocalPromotionStatistics){0};
-            for (u32 index = 0; index < module->function_count; index += 1)
-            {
-                IrFunction* function = module->functions + index;
-                if (function->state == IR_FUNCTION_LOWERED)
-                {
-                    ir_promote_function(program, function, &module->local_promotion);
-                }
-            }
-            if (module->local_promotion.promoted_locals)
-            {
-                // Mutation ends the input certificate's scope. The optimized
-                // production fast path trusts this pass's own contract, not
-                // the producer's certificate. Debug/test/sanitizer consumers
-                // check the transformed rows before publication instead.
-                if (!input_certified || BUSTER_IR_TRANSFORM_CHECKS)
-                {
-                    result = ir_validate_canonical_module(program, module);
-                    result.boundary = IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT;
-                }
-            }
-            module->local_promotion_complete = result.error == IR_VALIDATION_NONE;
-        }
-    }
-    return result;
 }
