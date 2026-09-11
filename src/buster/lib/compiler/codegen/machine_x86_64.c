@@ -178,6 +178,7 @@ struct MachineX64Selector
     // as data, and every access dispatches down the same pointer paths a
     // GLOBAL's address takes.
     u32* value_indirect_slots;
+    MachineSelectionAddressCache address_cache;
     // -fPIC, resolved for this target by the caller: it picks the thread-local
     // model, and an interposable symbol is addressed through its GOT slot and
     // called through its procedure linkage entry.
@@ -959,6 +960,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_local_is_indirect(MachineX64Selector* selec
     return value.value < selector->function->value_count && selector->value_indirect_slots[value.value] != UINT32_MAX;
 }
 
+BUSTER_GLOBAL_LOCAL MachineSelectionAddress machine_x64_address(MachineX64Selector* selector, IrValueId value)
+{
+    return machine_selection_address(selector->arena, selector->program, selector->function, &selector->address_cache, value);
+}
+
 // Emits the row computing the address (or pointer value) of `base` into
 // `destination_register` and defines it: a direct local's frame-slot
 // address, or a copy of any vreg-held value — mirroring the canonical
@@ -973,6 +979,22 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_place_address_offset(MachineX64Selec
     if (base.value >= function->value_count)
     {
         return false;
+    }
+    MachineSelectionAddress address = machine_x64_address(selector, base);
+    // A zero-offset copy reuses the already materialized SSA address.
+    // Recomputing it from the root would add encoding work at every use.
+    if (byte_offset && address.index_value.value == IR_ID_UNDERLYING_INVALID && address.base_value.value != base.value &&
+        address.displacement <= INT32_MAX && byte_offset <= (u32)INT32_MAX - address.displacement)
+    {
+        MachineSelectionAddress root = machine_x64_address(selector, address.base_value);
+        bool promoted = root.opcode == IR_OPCODE_LOCAL && selector->value_virtual_registers[address.base_value.value] != UINT32_MAX &&
+                        !machine_x64_local_is_indirect(selector, address.base_value);
+        if (!promoted)
+        {
+            base = address.base_value;
+            byte_offset += (u32)address.displacement;
+            address = root;
+        }
     }
     IrValue* value = function->values + base.value;
     u8 place_kind = selector->place_kinds[base.value];
@@ -996,8 +1018,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_place_address_offset(MachineX64Selec
     // Slices and struct values stay on the loaded-pointer path below,
     // matching the canonical emitter's per-opcode base handling.
     MachineTypeClass value_class = machine_x64_type_class(selector, value->canonical_type);
-    bool storage_value = place_kind == MACHINE_X64_PLACE_LOCAL ||
-                         (value->category == IR_VALUE_VALUE && (value_class.kind == IR_TYPE_ARRAY || value_class.kind == IR_TYPE_VECTOR));
+    bool storage_value = (address.flags & MACHINE_SELECTION_ADDRESS_STORAGE) != 0;
     if (storage_value && slot != UINT32_MAX)
     {
         u32 row = machine_x64_select_row(selector, (MachineInstruction){
@@ -3000,21 +3021,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_address_of(MachineX64Selector* selec
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_field(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
-    IrProgram* program = selector->program;
-    IrFunction* function = selector->function;
-
+    MachineSelectionAddress address = machine_x64_address(selector, instruction->result);
     bool selected = false;
-    if (result_register != UINT32_MAX && instruction->immediate_count && instruction->immediates)
+    if (result_register != UINT32_MAX && (address.flags & MACHINE_SELECTION_ADDRESS_FIELD) && address.field_offset <= INT32_MAX)
     {
-        IrType* aggregate = ir_type_from_id(&program->types, function->values[instruction->operands[0].value].canonical_type);
-        u64 field_index = instruction->immediates[0];
-        if (aggregate && field_index < aggregate->field_count && aggregate->fields[field_index].offset <= INT32_MAX)
-        {
-            // The whole member address is one row: the offset rides in the
-            // frame displacement of a local, or in the lea of a pointer.
-            selected = machine_x64_select_place_address_offset(selector, instruction->operands[0], result_register,
-                                                               (u32)aggregate->fields[field_index].offset);
-        }
+        selected = machine_x64_select_place_address_offset(selector, instruction->operands[0], result_register, (u32)address.field_offset);
     }
     return selected;
 }
@@ -3272,26 +3283,21 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_array(MachineX64Selector* selector, 
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_index(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
-    IrProgram* program = selector->program;
-    IrFunction* function = selector->function;
+    MachineSelectionAddress address = machine_x64_address(selector, instruction->result);
 
     bool selected = false;
     u32 index_register;
     if (result_register != UINT32_MAX && instruction->operand_count >= 2 &&
         machine_x64_operand_register(selector, instruction->operands[1], &index_register))
     {
-        IrTypeId index_type_id = function->values[instruction->operands[1].value].canonical_type;
-        MachineTypeClass index_class = machine_x64_type_class(selector, index_type_id);
-        // The element is fetched for its size, which is any byte count.
-        IrType* element = ir_type_from_id(&program->types, instruction->canonical_type);
-        bool typed = index_class.kind == IR_TYPE_INTEGER && element && element->layout.resolved && element->layout.size <= INT32_MAX;
+        bool typed = (address.flags & MACHINE_SELECTION_ADDRESS_INDEX) && address.scale <= INT32_MAX;
         // The index extend resolves before the base address: an unsupported
         // index width then fails without emitting rows the rejection would
         // throw away anyway.
         u16 extend_opcode = MACHINE_X64_MOV_RR;
-        if (typed && (index_class.flags & MACHINE_TYPE_CLASS_SIGNED))
+        if (typed && (address.flags & MACHINE_SELECTION_ADDRESS_INDEX_SIGNED))
         {
-            u32 index_bits = machine_x64_class_scalar_bit_width(selector, index_type_id, index_class);
+            u32 index_bits = address.index_bit_width;
             if (index_bits < 64)
             {
                 extend_opcode = (u16)(index_bits == 8 ? MACHINE_X64_MOVSX8_RR : index_bits == 16 ? MACHINE_X64_MOVSX16_RR
@@ -3308,10 +3314,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_index(MachineX64Selector* selector, 
                                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, index_register)},
                                                  .opcode = extend_opcode,
                                              });
-            if (element->layout.size != 1)
+            if (address.scale != 1)
             {
                 // The element size folds into the multiply the same way.
-                u32 immediate_index = machine_x64_append_immediate(selector, element->layout.size);
+                u32 immediate_index = machine_x64_append_immediate(selector, address.scale);
                 machine_x64_select_row(selector, (MachineInstruction){
                                                      .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register),
                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled_register),
@@ -5299,6 +5305,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .module = module,
         .type_classes = module->type_classes,
         .type_class_count = module->type_count,
+        .address_cache = {.type_classes = module->type_classes, .type_count = module->type_count},
         .position_independent = position_independent,
         .supported = true,
         .failed_opcode = IR_OPCODE_COUNT,

@@ -54,6 +54,60 @@ struct MachineSelectionRowLayout
     u32* rows;
 };
 
+// Demand-filled canonical address analysis. A bounded cache avoids a second
+// function walk and per-value storage for functions which never ask for an
+// address. Entries describe arithmetic, not permission to access or reorder
+// memory. expression_value retains the exact subobject/label metadata identity;
+// object_value names only a proven LOCAL/GLOBAL root, never a pointer argument.
+// Symbol materialization (including TLS, GOT and relocation addends) remains
+// at the original GLOBAL/FUNCTION row. Loads, casts, atomics and pointer/integer
+// arithmetic are opaque: their original canonical result is the address base.
+typedef enum MachineSelectionAddressFlag
+{
+    MACHINE_SELECTION_ADDRESS_STORAGE = 1u << 0,
+    MACHINE_SELECTION_ADDRESS_THREAD_LOCAL = 1u << 1,
+    MACHINE_SELECTION_ADDRESS_READ_ONLY = 1u << 2,
+    MACHINE_SELECTION_ADDRESS_VOLATILE = 1u << 3,
+    MACHINE_SELECTION_ADDRESS_SYMBOL_DEFINITION = 1u << 4,
+    MACHINE_SELECTION_ADDRESS_FIELD = 1u << 5,
+    MACHINE_SELECTION_ADDRESS_INDEX = 1u << 6,
+    MACHINE_SELECTION_ADDRESS_INDEX_SIGNED = 1u << 7,
+} MachineSelectionAddressFlag;
+
+typedef struct MachineSelectionAddress MachineSelectionAddress;
+struct MachineSelectionAddress
+{
+    u64 displacement;
+    u64 scale;
+    u64 field_offset;
+    IrValueId base_value;
+    IrValueId index_value;
+    IrValueId object_value;
+    IrValueId expression_value;
+    IrSymbolId symbol;
+    u32 alignment;
+    u16 flags;
+    u8 opcode;
+    u8 index_bit_width;
+};
+BUSTER_CT_CHECK(sizeof(MachineSelectionAddress) == 56);
+
+typedef struct MachineSelectionAddressEntry MachineSelectionAddressEntry;
+typedef struct MachineTypeClass MachineTypeClass;
+typedef struct MachineSelectionAddressCache MachineSelectionAddressCache;
+struct MachineSelectionAddressCache
+{
+    MachineSelectionAddressEntry* entries;
+    MachineTypeClass const* type_classes;
+    u32 type_count;
+};
+
+// A cache belongs to one immutable validated function and one selection
+// attempt; zero initialize it and discard it before modifying canonical IR.
+// Collisions and chains beyond the fixed bound preserve an opaque base.
+BUSTER_F_DECL MachineSelectionAddress machine_selection_address(Arena* arena, IrProgram* program, IrFunction* function,
+                                                               MachineSelectionAddressCache* cache, IrValueId value);
+
 // The id of a block's row number `offset`, where `row_base` is the number of
 // rows the enclosing walk has already passed in earlier blocks.  Callers keep
 // that running total anyway: it is also the row's zero-based ordinal.
@@ -92,7 +146,6 @@ typedef enum MachineTypeClassFlag
 
 #define MACHINE_TYPE_CLASS_NO_LOG2 0xffu
 
-typedef struct MachineTypeClass MachineTypeClass;
 struct MachineTypeClass
 {
     u8 flags;

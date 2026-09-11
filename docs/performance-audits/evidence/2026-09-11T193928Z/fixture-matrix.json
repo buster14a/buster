@@ -1,0 +1,212 @@
+[
+  {
+    "compiler": "clang",
+    "mode": "-O0",
+    "compile": 0,
+    "execute": 0,
+    "error": ""
+  },
+  {
+    "compiler": "clang",
+    "mode": "-O2",
+    "compile": 0,
+    "execute": 0,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "x86_64-unknown-linux-gnu",
+    "mode": "none",
+    "compile": 0,
+    "execute": 0,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "x86_64-unknown-linux-gnu",
+    "mode": "mir-stack",
+    "compile": 0,
+    "execute": 0,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "x86_64-unknown-linux-gnu",
+    "mode": "fast",
+    "compile": 0,
+    "execute": 0,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "x86_64-unknown-linux-gnu",
+    "mode": "quality",
+    "compile": 0,
+    "execute": 0,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "aarch64-unknown-linux-gnu",
+    "mode": "none",
+    "compile": 0,
+    "execute": 0,
+    "error": "",
+    "avenue": "qemu-aarch64"
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "aarch64-unknown-linux-gnu",
+    "mode": "mir-stack",
+    "compile": 0,
+    "execute": 0,
+    "error": "",
+    "avenue": "qemu-aarch64"
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "aarch64-unknown-linux-gnu",
+    "mode": "fast",
+    "compile": 0,
+    "execute": 0,
+    "error": "",
+    "avenue": "qemu-aarch64"
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "aarch64-unknown-linux-gnu",
+    "mode": "quality",
+    "compile": 0,
+    "execute": 0,
+    "error": "",
+    "avenue": "qemu-aarch64"
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "none",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "mir-stack",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "fast",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "x86_64-pc-windows-msvc",
+    "mode": "quality",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "none",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "mir-stack",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "fast",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "aarch64-pc-windows-msvc",
+    "mode": "quality",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "x86_64-apple-macos",
+    "mode": "none",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "x86_64-apple-macos",
+    "mode": "mir-stack",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "x86_64-apple-macos",
+    "mode": "fast",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "x86_64-apple-macos",
+    "mode": "quality",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "aarch64-apple-macos",
+    "mode": "none",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "aarch64-apple-macos",
+    "mode": "mir-stack",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "aarch64-apple-macos",
+    "mode": "fast",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  },
+  {
+    "compiler": "candidate Release 2370f88b",
+    "target": "aarch64-apple-macos",
+    "mode": "quality",
+    "compile": 0,
+    "execute": null,
+    "error": ""
+  }
+]

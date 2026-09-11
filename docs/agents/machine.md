@@ -20,9 +20,17 @@
   membership are cold. Unused names and speculative resource/cost bits are removed. Keep opcode initializers designated and the
   layout checks intact. Simple FAST rows use the separate 16-byte
   `MachineOpcodeRow` projection instead of loading the full descriptor.
-- Address expressions remain canonical IR / selector-owned; no
-  `MachineAddress` side table is produced. Keep the reserved
-  `MACHINE_REF_ADDRESS` tag stable for encoded references.
+- Address expressions remain canonical IR / selector-owned. Both native
+  selectors consume `machine_selection_address` from `machine_select.c` for
+  field offsets, index scale/extension and transparent address bases. Its
+  demand cache uses at most 4 KiB per selection attempt, with no function scan
+  or per-value allocation; bounded chains/collisions remain conservative.
+  Discard the cache whenever canonical IR changes. Exact expression ids retain
+  subobject and computed-label identity; only LOCAL/GLOBAL roots name objects.
+  Loads, atomics, casts and pointer/integer arithmetic stay opaque. Original
+  symbol rows own TLS/GOT/relocations, and offset folding never modifies them.
+  These facts authorize no memory reordering or dereference. No `MachineAddress`
+  MIR side table is produced; keep `MACHINE_REF_ADDRESS` stable.
 - `MachineFunction` owns CFG edges, block parameters, and incoming edge
   parallel-copy sources. Edge source `i` maps to destination block parameter
   `i`; keep these copies parallel through allocation so cycles are resolved as
@@ -72,7 +80,7 @@
   Add a selection to the target switch and its direct helpers, with MIR and
   generated-code regressions; do not add a parallel matcher that reports a
   rule without producing the selected MIR. `machine_select.{c,h}` owns only
-  consumed type/value facts, row layout, and the unvalidated entry's shape
+  consumed type/value/address facts, row layout, and the unvalidated entry's shape
   check. The canonical IR verifier remains the pipeline validation authority.
   Unsupported machine selections return `supported = false` and
   `failed_opcode`; `CodegenStatistics.fallback_opcode_counts` and

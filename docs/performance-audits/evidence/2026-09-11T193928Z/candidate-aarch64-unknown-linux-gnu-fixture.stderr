@@ -1,0 +1,4 @@
+ADDRESS_CENSUS arch=1 function=address_nested queries=12 definitions=7 types=7
+ADDRESS_CENSUS arch=1 function=address_negative queries=5 definitions=3 types=3
+ADDRESS_CENSUS arch=1 function=address_integer_wrap queries=0 definitions=0 types=0
+ADDRESS_CENSUS arch=1 function=main queries=149 definitions=67 types=61

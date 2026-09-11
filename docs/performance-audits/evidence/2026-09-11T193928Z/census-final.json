@@ -1,0 +1,178 @@
+[
+  {
+    "variant": "baseline",
+    "target": "x86_64-unknown-linux-gnu",
+    "workload": "fixture",
+    "exit": 0,
+    "functions": 4,
+    "queries": 95,
+    "definitions": 0,
+    "types": 40,
+    "command": [
+      "/workspace/scratch/938e5009f152/issue44-evidence/baseline-probe/ide",
+      "cc",
+      "-target",
+      "x86_64-unknown-linux-gnu",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-c",
+      "tests/basic_c_shared_address_facts.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue44-evidence/baseline-x86_64-unknown-linux-gnu-fixture.o"
+    ]
+  },
+  {
+    "variant": "baseline",
+    "target": "x86_64-unknown-linux-gnu",
+    "workload": "addresses",
+    "exit": 0,
+    "functions": 256,
+    "queries": 32768,
+    "definitions": 0,
+    "types": 16384,
+    "command": [
+      "/workspace/scratch/938e5009f152/issue44-evidence/baseline-probe/ide",
+      "cc",
+      "-target",
+      "x86_64-unknown-linux-gnu",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-c",
+      "/workspace/scratch/938e5009f152/issue44-evidence/addresses.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue44-evidence/baseline-x86_64-unknown-linux-gnu-addresses.o"
+    ]
+  },
+  {
+    "variant": "baseline",
+    "target": "aarch64-unknown-linux-gnu",
+    "workload": "fixture",
+    "exit": 0,
+    "functions": 4,
+    "queries": 165,
+    "definitions": 125,
+    "types": 120,
+    "command": [
+      "/workspace/scratch/938e5009f152/issue44-evidence/baseline-probe/ide",
+      "cc",
+      "-target",
+      "aarch64-unknown-linux-gnu",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-c",
+      "tests/basic_c_shared_address_facts.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue44-evidence/baseline-aarch64-unknown-linux-gnu-fixture.o"
+    ]
+  },
+  {
+    "variant": "baseline",
+    "target": "aarch64-unknown-linux-gnu",
+    "workload": "addresses",
+    "exit": 0,
+    "functions": 256,
+    "queries": 41216,
+    "definitions": 24832,
+    "types": 40960,
+    "command": [
+      "/workspace/scratch/938e5009f152/issue44-evidence/baseline-probe/ide",
+      "cc",
+      "-target",
+      "aarch64-unknown-linux-gnu",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-c",
+      "/workspace/scratch/938e5009f152/issue44-evidence/addresses.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue44-evidence/baseline-aarch64-unknown-linux-gnu-addresses.o"
+    ]
+  },
+  {
+    "variant": "candidate",
+    "target": "x86_64-unknown-linux-gnu",
+    "workload": "fixture",
+    "exit": 0,
+    "functions": 4,
+    "queries": 96,
+    "definitions": 58,
+    "types": 40,
+    "command": [
+      "/workspace/scratch/938e5009f152/issue44-evidence/candidate-probe/ide",
+      "cc",
+      "-target",
+      "x86_64-unknown-linux-gnu",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-c",
+      "tests/basic_c_shared_address_facts.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue44-evidence/candidate-x86_64-unknown-linux-gnu-fixture.o"
+    ]
+  },
+  {
+    "variant": "candidate",
+    "target": "x86_64-unknown-linux-gnu",
+    "workload": "addresses",
+    "exit": 0,
+    "functions": 256,
+    "queries": 36864,
+    "definitions": 20992,
+    "types": 16384,
+    "command": [
+      "/workspace/scratch/938e5009f152/issue44-evidence/candidate-probe/ide",
+      "cc",
+      "-target",
+      "x86_64-unknown-linux-gnu",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-c",
+      "/workspace/scratch/938e5009f152/issue44-evidence/addresses.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue44-evidence/candidate-x86_64-unknown-linux-gnu-addresses.o"
+    ]
+  },
+  {
+    "variant": "candidate",
+    "target": "aarch64-unknown-linux-gnu",
+    "workload": "fixture",
+    "exit": 0,
+    "functions": 4,
+    "queries": 166,
+    "definitions": 77,
+    "types": 71,
+    "command": [
+      "/workspace/scratch/938e5009f152/issue44-evidence/candidate-probe/ide",
+      "cc",
+      "-target",
+      "aarch64-unknown-linux-gnu",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-c",
+      "tests/basic_c_shared_address_facts.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue44-evidence/candidate-aarch64-unknown-linux-gnu-fixture.o"
+    ]
+  },
+  {
+    "variant": "candidate",
+    "target": "aarch64-unknown-linux-gnu",
+    "workload": "addresses",
+    "exit": 0,
+    "functions": 256,
+    "queries": 45312,
+    "definitions": 21248,
+    "types": 25088,
+    "command": [
+      "/workspace/scratch/938e5009f152/issue44-evidence/candidate-probe/ide",
+      "cc",
+      "-target",
+      "aarch64-unknown-linux-gnu",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "-c",
+      "/workspace/scratch/938e5009f152/issue44-evidence/addresses.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue44-evidence/candidate-aarch64-unknown-linux-gnu-addresses.o"
+    ]
+  }
+]
