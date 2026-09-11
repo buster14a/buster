@@ -9,7 +9,7 @@ TracerPid:	0
 Uid:	0	0	0	0
 Gid:	0	0	0	0
 FDSize:	64
-Groups:	 
+Groups:
 NStgid:	97081	28
 NSpid:	97081	28
 NSpgid:	96985	1
