@@ -3516,7 +3516,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 250);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 252);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_A64_UMULH64] = 0, // Pure GPR dataflow; no implicit chain.
         [MACHINE_A64_CLZ32] = 0,
@@ -3527,6 +3527,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_A64_TLS_WINDOWS] = MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_TLS_DARWIN] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_A64_TLS_DARWIN] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_COMPILER_BARRIER] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_COMPILER_BARRIER] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_OPCODE_SKELETON_RETURN] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
