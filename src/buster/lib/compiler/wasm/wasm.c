@@ -3,6 +3,9 @@
 // This file is deliberately self-contained.  The only state shared with the
 // rest of the compiler is the canonical IR model; all temporary vectors and
 // encoded bytes belong to the caller supplied arena.
+// Local aggregate snapshots use private shadow-stack slots. Their SSA locals
+// carry slot addresses; loads copy immediately, so later stores cannot change
+// an earlier value. Function ABIs and block parameters remain scalar-only.
 
 // Linear-memory layout policy: static data starts one 64 KiB region above
 // address zero, and the shadow stack gets its own 64 KiB above the data.
@@ -405,6 +408,12 @@ static bool wasm64_type_is_scalar(IrType* type)
 {
     return type && (type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_FLOAT || type->kind == IR_TYPE_POINTER ||
                     type->kind == IR_TYPE_ENUM);
+}
+
+BUSTER_GLOBAL_LOCAL bool wasm64_type_is_local_aggregate(IrType* type)
+{
+    return type && !type->is_atomic && type->layout.resolved && type->layout.size &&
+           (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION);
 }
 
 static bool wasm64_type_is_pointer(IrType* type)
@@ -1864,6 +1873,10 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
         {
             valtype = WASM64_VALTYPE_I64;
         }
+        else if (wasm64_type_is_local_aggregate(type))
+        {
+            valtype = WASM64_VALTYPE_I64;
+        }
         else if (!wasm64_valtype_for_type(type, value->category == IR_VALUE_PLACE, &valtype))
         {
             wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate Wasm64 SSA value is unsupported"), function, 0, 0,
@@ -1877,14 +1890,20 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
         IrInstruction* instruction = function->instructions + instruction_index;
-        if (instruction->opcode != IR_OPCODE_LOCAL || instruction->result.value == IR_ID_UNDERLYING_INVALID)
+        if (instruction->result.value == IR_ID_UNDERLYING_INVALID)
         {
             continue;
         }
         IrType* type = wasm64_type(context, instruction->canonical_type);
+        bool snapshot = function->values[instruction->result.value].category == IR_VALUE_VALUE && wasm64_type_is_local_aggregate(type);
+        if (instruction->opcode != IR_OPCODE_LOCAL && !snapshot)
+        {
+            continue;
+        }
         u64 size = type && type->layout.resolved ? type->layout.size : 0;
         u64 alignment = type && type->layout.alignment ? type->layout.alignment : 1;
-        if (!size || size > UINT32_MAX || alignment > UINT32_MAX || alignment == 0 || alignment > (UINT64_C(1) << 31))
+        if (!size || size > UINT32_MAX || alignment > UINT32_MAX || alignment == 0 || alignment > (UINT64_C(1) << 31) ||
+            (snapshot && alignment > 16))
         {
             wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_TYPE, wasm64_s8("invalid Wasm64 local frame layout"), function, 0, instruction, IR_SYMBOL_ID_INVALID);
             return false;
@@ -1955,6 +1974,16 @@ static void wasm64_fe_emit_prologue(Wasm64FunctionEmitter* emitter)
     wasm64_fe_u8(emitter, 0x7c); // i64.add
     wasm64_fe_local_tee(emitter, emitter->sp_local);
     wasm64_fe_global_set(emitter, emitter->context->stack_global_index);
+    for (u32 index = 0; index < emitter->function->value_count; index += 1)
+    {
+        if (emitter->value_offsets[index] != UINT32_MAX && emitter->function->values[index].category == IR_VALUE_VALUE)
+        {
+            wasm64_fe_local_get(emitter, emitter->fp_local);
+            wasm64_fe_i64_const(emitter, emitter->value_offsets[index]);
+            wasm64_fe_u8(emitter, 0x7c); // i64.add
+            wasm64_fe_local_set(emitter, emitter->value_locals[index]);
+        }
+    }
     wasm64_fe_i32_const(emitter, (s32)emitter->function->entry.value);
     wasm64_fe_local_set(emitter, emitter->pc_local);
 }
@@ -1997,6 +2026,79 @@ static void wasm64_fe_emit_address_add(Wasm64FunctionEmitter* emitter, u64 offse
     {
         wasm64_fe_i64_const(emitter, (s64)offset);
         wasm64_fe_u8(emitter, 0x7c);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void wasm64_fe_copy_bytes(Wasm64FunctionEmitter* emitter, u64 size)
+{
+    // Memory64 memory.copy consumes i64 destination, source and byte count.
+    wasm64_fe_i64_const(emitter, (s64)size);
+    wasm64_fe_u8(emitter, 0xfc);
+    wasm64_fe_u32(emitter, 10); // memory.copy
+    wasm64_fe_u32(emitter, 0);
+    wasm64_fe_u32(emitter, 0);
+}
+
+BUSTER_GLOBAL_LOCAL void wasm64_fe_emit_aggregate(Wasm64FunctionEmitter* emitter, IrBlock* block, IrInstruction* instruction, IrType* type)
+{
+    bool valid = wasm64_type_is_local_aggregate(type);
+    if (valid)
+    {
+        // Initialize private padding as well as members. This has no external
+        // volatile accesses, and keeps partially populated unions deterministic.
+        wasm64_fe_emit_value(emitter, instruction->result);
+        wasm64_fe_i32_const(emitter, 0);
+        wasm64_fe_i64_const(emitter, (s64)type->layout.size);
+        wasm64_fe_u8(emitter, 0xfc);
+        wasm64_fe_u32(emitter, 11); // memory.fill
+        wasm64_fe_u32(emitter, 0);
+    }
+    for (u32 index = 0; valid && index < instruction->operand_count; index += 1)
+    {
+        IrValueId operand = instruction->operands[index];
+        IrType* operand_type = wasm64_fe_value_ir_type(emitter, operand);
+        u64 offset = 0;
+        valid = operand_type && operand_type->layout.resolved &&
+                emitter->function->values[operand.value].category == IR_VALUE_VALUE &&
+                (wasm64_type_is_scalar(operand_type) || wasm64_type_is_local_aggregate(operand_type));
+        if (valid && instruction->opcode == IR_OPCODE_AGGREGATE)
+        {
+            u64 field_index = instruction->immediates[index];
+            valid = field_index < type->field_count && !type->fields[field_index].is_bit_field;
+            if (valid)
+            {
+                offset = type->fields[field_index].offset;
+            }
+        }
+        else if (valid)
+        {
+            valid = operand_type->layout.size <= UINT64_MAX / (index ? index : 1);
+            if (valid)
+            {
+                offset = (u64)index * operand_type->layout.size;
+            }
+        }
+        valid = valid && offset <= type->layout.size && operand_type->layout.size <= type->layout.size - offset;
+        if (valid)
+        {
+            wasm64_fe_emit_value(emitter, instruction->result);
+            wasm64_fe_emit_address_add(emitter, offset);
+            wasm64_fe_emit_value(emitter, operand);
+            if (wasm64_type_is_local_aggregate(operand_type))
+            {
+                wasm64_fe_copy_bytes(emitter, operand_type->layout.size);
+            }
+            else
+            {
+                wasm64_fe_store(emitter, operand_type);
+            }
+        }
+    }
+    if (!valid)
+    {
+        wasm64_fail(emitter->context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI,
+                    wasm64_s8("unsupported Wasm64 local aggregate construction or member layout"), emitter->function, block, instruction,
+                    IR_SYMBOL_ID_INVALID);
     }
 }
 
@@ -2194,14 +2296,30 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
     break;
     case IR_OPCODE_LOAD:
     {
-        wasm64_fe_emit_value(emitter, instruction->operands[0]);
-        wasm64_fe_load(emitter, type);
-        wasm64_fe_emit_result_set(emitter, instruction, wasm64_type_is_integer(type), type->kind == IR_TYPE_INTEGER && type->is_signed);
+        if (wasm64_type_is_local_aggregate(type))
+        {
+            wasm64_fe_emit_value(emitter, instruction->result);
+            wasm64_fe_emit_value(emitter, instruction->operands[0]);
+            wasm64_fe_copy_bytes(emitter, type->layout.size);
+        }
+        else
+        {
+            wasm64_fe_emit_value(emitter, instruction->operands[0]);
+            wasm64_fe_load(emitter, type);
+            wasm64_fe_emit_result_set(emitter, instruction, wasm64_type_is_integer(type), type->kind == IR_TYPE_INTEGER && type->is_signed);
+        }
     }
     break;
     case IR_OPCODE_STORE:
     {
         IrType* stored_type = wasm64_fe_value_ir_type(emitter, instruction->operands[1]);
+        if (wasm64_type_is_local_aggregate(stored_type))
+        {
+            wasm64_fe_emit_value(emitter, instruction->operands[0]);
+            wasm64_fe_emit_value(emitter, instruction->operands[1]);
+            wasm64_fe_copy_bytes(emitter, stored_type->layout.size);
+            break;
+        }
         if (!stored_type || !wasm64_type_is_scalar(stored_type))
         {
             wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_AGGREGATE_ABI, wasm64_s8("aggregate Wasm64 store is unsupported"), emitter->function, block,
@@ -2513,6 +2631,8 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         break;
     case IR_OPCODE_ARRAY:
     case IR_OPCODE_AGGREGATE:
+        wasm64_fe_emit_aggregate(emitter, block, instruction, type);
+        break;
     case IR_OPCODE_SLICE:
     case IR_OPCODE_VA_START:
     case IR_OPCODE_VA_COPY:

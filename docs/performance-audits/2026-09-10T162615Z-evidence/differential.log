@@ -1,0 +1,17 @@
+DIFFERENTIAL_CASE name=warning configurations=432 failures=0
+DIFFERENTIAL_CASE name=observables configurations=432 failures=0
+DIFFERENTIAL_CASE name=qualified-aggregate configurations=432 failures=0
+DIFFERENTIAL_CASE name=abi configurations=432 failures=0
+DIFFERENTIAL_CASE name=aligned-parameters configurations=432 failures=0
+DIFFERENTIAL_CASE name=unsigned-switch configurations=432 failures=0
+DIFFERENTIAL_CASE name=clear-cache configurations=432 failures=0
+DIFFERENTIAL_CASE name=cpu-queries configurations=432 failures=0
+DIFFERENTIAL_CASE name=native-variadic configurations=432 failures=0
+DIFFERENTIAL_CASE name=native-aggregate configurations=432 failures=0
+DIFFERENTIAL_CASE name=reject-type configurations=432 failures=0
+DIFFERENTIAL_CASE name=reject-syntax configurations=432 failures=0
+DIFFERENTIAL_CASE name=seed-1015568748 configurations=432 failures=0
+DIFFERENTIAL_CASE name=seed-1586005467 configurations=432 failures=0
+DIFFERENTIAL_CASE name=seed-2165703038 configurations=432 failures=0
+DIFFERENTIAL_CASE name=seed-3027450565 configurations=432 failures=0
+DIFFERENTIAL_SUMMARY failures=0 configurations=432

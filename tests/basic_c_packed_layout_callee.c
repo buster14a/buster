@@ -152,6 +152,33 @@ float packed_layout_bit_padded_lead(struct packed_bit_padded_record record)
     return record.lead;
 }
 
+struct packed_bit_padded_record packed_layout_bit_padded_neighbors(int left, struct packed_bit_padded_record record,
+                                                                 int right, float before, float after)
+{
+    record.lead = record.lead + (float)left + (float)right + before + after;
+    return record;
+}
+
+// The unselected return register is zero, so a caller cannot pass by reading
+// a coincidentally live copy of the float from the other register class.
+#if defined(__x86_64__) && defined(__linux__)
+#if PACKED_LAYOUT_SYSV_INTEGER_BITFIELDS
+__asm__(".text\n.globl packed_layout_bit_padded_register_result\n"
+        "packed_layout_bit_padded_register_result:\n"
+        "mov $0x42350000, %eax\npxor %xmm0, %xmm0\nret\n");
+#else
+__asm__(".text\n.globl packed_layout_bit_padded_register_result\n"
+        "packed_layout_bit_padded_register_result:\n"
+        "mov $0x42350000, %ecx\nmovd %ecx, %xmm0\nxor %eax, %eax\nret\n");
+#endif
+#else
+struct packed_bit_padded_record packed_layout_bit_padded_register_result(void)
+{
+    struct packed_bit_padded_record record = {45.25f};
+    return record;
+}
+#endif
+
 unsigned long long packed_layout_below_natural_size(void)
 {
     return sizeof(struct below_natural_record);

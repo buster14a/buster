@@ -251,6 +251,7 @@ typedef enum CDiagnosticKind
     // token length field cannot represent it and only literals carry the
     // oversized escape, so the token is diagnosed and its length clamped.
     C_DIAGNOSTIC_TOKEN_TOO_LONG,
+    C_DIAGNOSTIC_INVALID_INTEGER_LITERAL,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
@@ -1050,6 +1051,8 @@ struct CParserResult
 {
     CParserDeclaration* first_declaration;
     CParserDeclaration* last_declaration;
+    // Null until the first syntax diagnostic; capacity is the logical limit,
+    // not allocated storage. Nonempty rows retain the parse arena's lifetime.
     CDiagnostic* diagnostics;
     u32 declaration_count;
     u32 diagnostic_count;
@@ -1239,6 +1242,7 @@ typedef struct CIRLowerOptions CIRLowerOptions;
 struct CIRLowerOptions
 {
     bool disable_direct_ssa;
+    bool sysv_unnamed_bitfields_integer;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;

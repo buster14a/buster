@@ -21,8 +21,10 @@ diagnostic callers may select `none`, `mir-stack`, `fast`, or `quality` with
 `-fregister-allocator=<mode>`; when several allocator-affecting options are
 present, the last one wins.
 The allocators run on x86-64 under both System V and Win64, and on AArch64
-everywhere but the PE-unwind targets, which still take the canonical path
-whole. Win64 differs from System V in the file it allocates — RSI and RDI are
+including ordinary Windows/UEFI functions with validated compact MIR frame
+and unwind records. Windows AArch64 variadic signatures and calls still fall
+back per function; the target is no longer excluded wholesale. Win64 differs
+from System V in the file it allocates — RSI and RDI are
 callee-saved there, so the allocator has seven callee-saved registers instead
 of five and the vector class keeps only the volatile ZMMs — and in how a call
 is built: the outgoing arguments and the callee's shadow space are written
@@ -32,9 +34,11 @@ can only carry a frame-pointer offset up to 240 bytes. Its prologue pushes the
 callee-saved registers before establishing the frame pointer for the same
 reason. Windows/UEFI variadic definitions and calls use the positional home
 area and float-register duplication described in the [machine guide](machine.md).
+Win64 indirect aggregate arguments use private caller copies with up to
+sixteen-byte alignment, as described in the [machine guide](machine.md).
 Shapes the Win64 subset does not build yet — 128-bit integer signatures,
-vector signatures, indirect (non 1/2/4/8-byte)
-aggregate arguments, and dynamic stack allocation — fall back per function,
+vector signatures, over-aligned aggregate arguments, and dynamic stack
+allocation — fall back per function,
 which `-v`'s `fallback_functions` and `CODEGEN_FALLBACK` lines report.
 `CODEGEN_FALLBACK_REASON` additionally identifies the target, allocator and
 stable reason name for every fallback. Its disjoint counts sum to
@@ -46,6 +50,19 @@ signature; `opcode` retains the first rejected canonical opcode in the legacy
 while `verification` identifies an implementation failure. The allocator,
 stage, opcode and reason counters all survive multi-input compilation.
 
+For two-operand EVEX vector loads/conversions, an ordinary memory qualifier
+names the source tuple, not the destination register width. A broadcast
+qualifier names its scalar element. The metadata selector projects the
+candidate's element width and validates the source qualifier independently;
+for example, masked `vcvtps2pd zmm0, m256` reads eight 32-bit elements while
+masked `vcvtpd2ps ymm0, m512` reads eight 64-bit elements. AT&T's unqualified
+memory spelling uses the same candidate contract. Unsized ordinary loads
+whose destination permits multiple source tuple widths are rejected as
+ambiguous; encoding length and candidate order cannot choose input lanes.
+This bounded projection
+requires a mask/broadcast, ZMM destination, or high vector register and covers
+FULL/HALF EVEX tuples; it does not replace all legacy/VEX source inference.
+
 `-fno-frontend-ssa` selects the original memory-form C lowering;
 `-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last
 flag wins. These controls are independent of `-fno-canonical-local-promotion`
@@ -54,6 +71,30 @@ SSA already built by the frontend. For a fully memory-form differential input,
 disable frontend SSA as well. Verbose compilation reports `IR_FRONTEND_SSA`
 counters beside `IR_LOCAL_PROMOTION`; see the
 [frontend ownership contract](frontend/foundations.md#direct-local-ssa-github-34).
+
+`-fsysv-unnamed-bitfields=integer|padding` selects the classification of
+nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`
+is the unchanged Buster default; `integer` includes those fields in INTEGER
+eightbyte classification for GCC interoperability. Zero-width fields contribute
+no class in either mode, and object layout is unchanged. The last selection
+wins. Invalid values, other native conventions, nonnative targets and LLVM
+bitcode output reject the option. This is one explicit ABI boundary, not a
+general emulation of any GCC or Clang version. Compile interoperating units
+with the policy their external objects use; the linker cannot infer it.
+
+The configured-host packed-layout tests use an independent register probe
+(`tests/host_sysv_unnamed_bitfields.c`) instead of guessing from a version
+string. A later float argument forces a known live XMM0 value under either
+convention. Both link directions then run all four allocators and both frontend
+forms, including later integer/float parameters and an assembly return control
+that zeros the unselected return register. A failed or unknown probe fails the
+test; it never silently assumes a convention or waives a mixed-link check.
+The policy-specific caller also requires `-fverify-codegen` in both link
+directions. The original caller remains intact; its separate underaligned
+volatile aggregate construction defect is tracked in #398.
+`IR_LOCAL_PROMOTION_WORK` reports shared-promotion parameter-cleanup sweeps and
+actual visits, separately from removed rows. The [middle-end pass map](../middle-end-pass-map.md)
+defines their scope, invalidation rules and separate diagnostic replay protocol.
 
 `-fno-machine-fallback` makes native C coverage strict: after code generation
 succeeds, any fallback fails the translation unit before object writing and
@@ -64,13 +105,22 @@ allocator (`mir-stack`, `fast` or `quality`); NONE, direct non-native emission,
 preprocessing and syntax-only checks cannot satisfy the gate. Assembly inputs
 and linked prebuilt objects have no canonical C functions to gate.
 For example, `build/Release/ide cc -fregister-allocator=mir-stack -fno-machine-fallback -target aarch64-unknown-linux -c tests/basic_c_call_abi.c -o build/mir-coverage.o`.
-`compiler_driver_test_machine_fallback` runs a curated arithmetic, control-flow
-and call-ABI corpus through this gate for x86-64 and AArch64 Linux under all
-three machine allocators in `test_all`, including CI. Deliberate PE AArch64
-target exclusion, Win64 indirect aggregate parameters, and Darwin AArch64
-variadic signatures are separate
-negative tests. This corpus is a coverage floor, not a claim of complete MIR
-lowering or permission to retire the canonical oracle.
+`compiler_driver_test_machine_fallback` runs the same ten-fixture arithmetic,
+control-flow, call-ABI, aggregate and frame corpus for x86-64 and AArch64 on
+Linux, macOS and Windows, under all three machine allocators and both explicit
+frontend forms in `test_all`, including CI. Its 360 object-compilation rows
+require 330 non-empty strict successes and 30 explicit refusals: variadic
+fixtures on Windows/Darwin AArch64 and dynamic stack allocation on Windows
+x86-64. Refusals require exact fallback-function, reason and opcode counts, preserve an
+existing output, and still compile through the direct fallback. They are not
+skips; implementing a gap must replace its refusal expectation with strict
+success. Every target/allocator/frontend cohort emits a `MIR_COVERAGE` row
+with actual strict successes, validated expected rejections and failures.
+Object compilation is not target execution. Separate AArch64 vector and
+integer-pair tests, unsupported signature controls, Windows/UEFI large-frame
+tests, and native Windows ARM64 unwind-boundary execution remain registered.
+This corpus is a coverage floor for #36, not a claim of complete MIR lowering
+or permission to retire the canonical oracle.
 
 A `.s` input, or any input under `-x assembler`, is an assembly translation
 unit rather than a C one. `assembly_unit_encode` (`assembly_unit.c`) is the

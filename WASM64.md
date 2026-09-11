@@ -87,6 +87,20 @@ Keep the following policy for such a bridge:
 
 ## Deliberate diagnostics
 
+Local nonempty array, struct and union values can be constructed and copied
+through private shadow-stack storage. Aggregate loads snapshot their bytes
+immediately; changing the original object cannot change an earlier value.
+The emitter uses Memory64 bulk `memory.copy`/`memory.fill`, with 64-bit
+addresses and byte counts. Private snapshot alignment is limited to 16 bytes.
+Aggregate block parameters, bit-field aggregate construction, atomic aggregate
+values and aggregate function ABIs remain explicit unsupported cases. These
+local copies do not add aggregate arguments/results or indirect calls.
+
+`tests/basic_c_local_aggregate_copy.c` covers arrays, nested and packed records,
+unions and independent source/copy mutations. The driver suite emits it with
+both frontend forms and, when Node is available, executes the result using
+`tests/wasm_local_aggregate_execution.js`.
+
 The scalar core rejects constructs it cannot represent correctly, including
 variadic and aggregate function ABIs, indirect calls and function tables,
 function-pointer data relocations, atomics/threads/TLS/SIMD, inline assembly,

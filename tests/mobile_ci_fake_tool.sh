@@ -155,8 +155,17 @@ case "$tool" in
         exit 0
         ;;
     codesign)
-        if [[ ${FAKE_IOS_CODESIGN_STATUS:-0} -ne 0 ]]; then
-            exit "${FAKE_IOS_CODESIGN_STATUS}"
+        if [[ -z ${FAKE_IOS_CODESIGN_FAIL_LABEL:-} || ${!#} == *"/${FAKE_IOS_CODESIGN_FAIL_LABEL}/"* ]]; then
+            if [[ ${FAKE_IOS_REAL_CODESIGN:-0} == 1 ]]; then
+                exec /usr/bin/codesign "$@"
+            fi
+            printf 'fake codesign stdout: bundle rejected\n'
+            printf 'fake codesign stderr: signing diagnostic\n' >&2
+            if [[ ${FAKE_IOS_LARGE_OUTPUT:-0} == 1 ]]; then
+                python3 -c 'import sys; sys.stdout.write("X" * 131072)'
+            fi
+            sleep "${FAKE_IOS_CODESIGN_SLEEP_SECONDS:-0}"
+            exit "${FAKE_IOS_CODESIGN_STATUS:-0}"
         fi
         exit 0
         ;;
@@ -165,6 +174,9 @@ case "$tool" in
         log=${FAKE_IOS_LOG:?FAKE_IOS_LOG is required}
         printf '%s\n' "$*" >>"$log"
         if [[ ${1:-} == --sdk ]]; then
+            if [[ ${FAKE_IOS_REAL_CONTEXT:-0} == 1 ]]; then
+                exec /usr/bin/xcrun "$@"
+            fi
             if [[ ${3:-} == --show-sdk-path ]]; then
                 printf '/fake/iPhoneSimulator.sdk\n'
                 exit 0
@@ -179,6 +191,9 @@ case "$tool" in
         shift || true
         case "$command" in
             list)
+                if [[ ${FAKE_IOS_REAL_CONTEXT:-0} == 1 ]]; then
+                    exec /usr/bin/xcrun simctl list "$@"
+                fi
                 if [[ ${1:-} == devices ]]; then
                     case " $* " in
                         *" -j "*) printf '{"devices":{}}\n' ;;
@@ -243,6 +258,12 @@ case "$tool" in
                 fi
                 ;;
             shutdown)
+                if [[ ${FAKE_IOS_REAL_SHUTDOWN:-0} == 1 ]]; then
+                    exec /usr/bin/xcrun simctl shutdown "$@"
+                fi
+                printf 'fake shutdown stdout: device shutdown rejected\n'
+                printf 'fake shutdown stderr: lifecycle diagnostic\n' >&2
+                sleep "${FAKE_IOS_SHUTDOWN_SLEEP_SECONDS:-0}"
                 if [[ ${FAKE_IOS_SHUTDOWN_STATUS:-0} -ne 0 ]]; then
                     exit "${FAKE_IOS_SHUTDOWN_STATUS}"
                 fi

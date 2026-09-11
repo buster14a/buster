@@ -113,6 +113,10 @@ BUSTER_F_DECL bool a64_mc_decode(u32 word, A64MCInst* instruction);
 // bits and all non-PC-relative operands must already match `opcode`.
 BUSTER_F_DECL bool a64_pc_relative_patch(A64Opcode opcode, u32 word, s64 displacement, u32* patched);
 
+// Unshifted ADD W/X immediate forms, with the register width preserved.
+BUSTER_F_DECL bool a64_add_lo12_read(u32 word, u32* immediate);
+BUSTER_F_DECL bool a64_add_lo12_patch(u32 word, u32 immediate, u32* patched);
+
 // Compute target + addend - place without requiring an intermediate term to
 // fit in s64. Extreme unsigned addresses and signed addends may cancel to a
 // small, valid architectural displacement.
