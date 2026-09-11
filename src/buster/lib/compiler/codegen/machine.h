@@ -921,7 +921,6 @@ BUSTER_CT_CHECK(MACHINE_REGISTER_CLASS_COUNT <= (1u << 3));
 // take the target's fixed per-slot scratch assignment and every allocator
 // must stand clear of them.
 #define MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED (1u << 6)
-#define MACHINE_OPCODE_ATTRIBUTE_MEMORY (1u << 7)
 #define MACHINE_OPCODE_ATTRIBUTE_BUNDLE (1u << 8)
 #define MACHINE_OPCODE_ATTRIBUTE_EXPANDS (1u << 9)
 
@@ -960,6 +959,8 @@ struct MachineOpcodeInfo
     u8 schedule_class;
     u8 reserved_metadata;
     u16 reserved_expansion;
+    // Sole static memory-chain classification; barrier policy also uses
+    // call/side-effect/terminator attributes and the schedule class.
     u8 memory_effect;
     // Removed memory hints, timing and bundle state have no authority.
     u8 reserved_schedule[9];
