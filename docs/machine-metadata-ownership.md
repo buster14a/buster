@@ -112,8 +112,9 @@ DIV/MULH and four unsigned float-conversion rows, duplicating the active
 assignments are removed, together with the uncalled bundle, memory-operand
 and per-slot early-clobber helpers and `MachineBundleKind`.
 
-The live `early_clobber_mask`, fixed-slot assignments, `clobber_mask`, memory
-effects, resource masks and recipe projection remain intact. The machine
+In that historical slice, the live `early_clobber_mask`, fixed-slot assignments,
+`clobber_mask`, memory effects, resource masks and recipe projection remained
+intact; the later cleanup below reduces resource masks to their sole live fact. The machine
 suite checks the clobber projection across the whole opcode domain and the
 specific RDX and RCX/ZMM0/ZMM1 scratch contracts independently of the removed
 duplicates. Existing memory-chain, vector-state, constraint, registry and
@@ -312,8 +313,8 @@ The descriptor remains 96 bytes, the instruction 24, the virtual register
 is no new pass, array or allocation. Padding deliberately separates this
 semantic cleanup from a descriptor-stride experiment. This is not a claim
 that a 96-byte descriptor is optimal or that cleanup improves throughput.
-The accompanying immutable audit records build cost, runtime and memory
-observations and their limits.
+The [final-slice audit](performance-audits/2026-09-11T194152Z.md) records
+compiler-throughput and memory observations and their limits.
 
 ## Record field census and invalidation
 
