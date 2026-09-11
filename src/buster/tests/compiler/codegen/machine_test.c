@@ -3334,6 +3334,22 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 86);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
+    // Equal recipe indices in different categories are distinct identities.
+    // The move family also includes memory reads: a common mnemonic cannot
+    // supply the effects already consumed by scheduling and placement.
+    MachineEmitRecipeId register_move = machine_opcode_emit_recipe(MACHINE_X64_MOV_RR);
+    MachineEmitRecipeId immediate_move = machine_opcode_emit_recipe(MACHINE_X64_MOV_RI);
+    BUSTER_TEST(arguments, machine_emit_recipe_index(register_move) == machine_emit_recipe_index(immediate_move));
+    BUSTER_TEST(arguments, register_move != immediate_move);
+    BUSTER_TEST(arguments, machine_emit_recipe_category(register_move) == MACHINE_EMIT_RECIPE_CATEGORY_DIRECT);
+    BUSTER_TEST(arguments, machine_emit_recipe_category(immediate_move) == MACHINE_EMIT_RECIPE_CATEGORY_FAMILY);
+    BUSTER_TEST(arguments, machine_opcode_memory_effect(machine_opcode_info(MACHINE_X64_MOV_RR)) == MACHINE_MEMORY_EFFECT_NONE);
+    BUSTER_TEST(arguments, machine_opcode_memory_effect(machine_opcode_info(MACHINE_X64_MOV_RI)) == MACHINE_MEMORY_EFFECT_NONE);
+    BUSTER_TEST(arguments, machine_opcode_memory_effect(machine_opcode_info(MACHINE_X64_LOAD_FRAME)) == MACHINE_MEMORY_EFFECT_READ);
+    BUSTER_TEST(arguments, (machine_opcode_row_table()[MACHINE_X64_LOAD_FRAME].schedule_flags & MACHINE_SCHEDULE_UNIT_MEMORY) != 0);
+    BUSTER_TEST(arguments, (machine_opcode_row_table()[MACHINE_X64_MOV_RR].schedule_flags & MACHINE_SCHEDULE_UNIT_MEMORY) == 0);
+    BUSTER_TEST(arguments, machine_x86_64_emit_registry_entry(machine_x86_64_emit_registry_count()) == 0);
+
     u32 x64_counts[MACHINE_EMIT_RECIPE_CATEGORY_COUNT] = {0};
     for (u16 opcode = MACHINE_X64_MOV_RI; opcode <= MACHINE_X64_MULH64; opcode += 1)
     {
