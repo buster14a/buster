@@ -1703,6 +1703,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
         {.path = S8("tests/basic_c_packed_layout.c")},
         {.path = S8("tests/basic_c_large_frame.c")},
         {.path = S8("tests/basic_c_win64_large_frame.c")},
+        {.path = S8("tests/basic_c_compiler_barrier.c")},
         {.path = S8("tests/basic_c_statement_expression_value.c"), .variadic_definitions = 1},
     };
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
