@@ -86,5 +86,5 @@ BUSTER_F_DECL IrConstructionCounters ir_construction_counters(void);
 BUSTER_F_DECL String8 ir_construction_counter_name(IrConstructionCounter counter);
 #define IR_CONSTRUCTION_RECORD(counter, amount) ir_construction_record(IR_CONSTRUCTION_##counter, (u64)(amount))
 #else
-#define IR_CONSTRUCTION_RECORD(counter, amount) ((void)0)
+#define IR_CONSTRUCTION_RECORD(counter, amount)
 #endif
