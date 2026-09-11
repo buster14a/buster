@@ -14,6 +14,16 @@ promotion. Ordinary pointers, supported integers/floats and fixed vectors are
 eligible. Narrow-normalizing, volatile/atomic, static, thread-local and
 cleanup-managed owners retain memory form.
 
+Signed integer vector comparisons retain their operand's lane type for the
+all-ones/zero mask. `c_ir_vector_mask_type` must not substitute another
+same-width C type such as plain `char`; mask lookup for unsigned or floating
+lanes excludes qualified integer types. `basic_c_vector_lane_edges.c` checks
+narrow signed masks alongside arithmetic in all native backend modes.
+Compatible vector aliases can still have distinct canonical type IDs.
+`c_ir_emit_vector_alias_conversion` preserves their equal lane representation
+through typed views of a private slot, with ordinary validated memory
+operations; do not mutate an existing value's type or weaken cast validation.
+
 Eligibility is per owner, not a function-wide token blacklist. Normal calls,
 address-taking, aggregates beside scalar locals, adjusted array parameters,
 field/index expressions, scalar compound literals, statement expressions,
@@ -48,6 +58,10 @@ incoming values, forwarding through single-predecessor chains. Trivial
 parameters and unused parameter cycles are removed. Disconnected empty label
 blocks have no outgoing edge. Publication includes **every** predecessor edge,
 including parameter-free destinations; selectors must never see a partial CFG.
+Nested GNU statement-expression body walks reuse the function's label block at
+the same source token. Allocating a second block leaves the predeclared label
+unterminated and separates ordinary goto from label-address provenance. The
+strict `basic_c_statement_expression_value.c` corpus checks both goto arms.
 
 Existing current-value queries do not grow the sparse table. A missing-key
 insertion owns capacity growth, and parameter creation reuses the slot its
@@ -99,12 +113,27 @@ request validation again. See [the boundary inventory](../../ir-validation-bound
 
 ## C frontend and canonical IR rules
 
+- `c_parse_binding_bind` publishes a previously unbound enclosing-scope name
+  without scanning unrelated undo records. A live undo record implies a valid
+  current binding: bind installs the new entity, and unwind removes its record
+  before restoring the previous one. Bound names retain the oldest-record
+  search and shadow restoration; the authoritative scope/symbol chains and
+  type-parser rollback contract are unchanged. The private test seam observes
+  the existing search cursor and verifies geometric work counts without adding
+  a production counter, allocation, or mutable cache.
+
 - The public frontend API is `compiler/frontend/c/c.h`. In non-unity builds the
   implementation is split across `c_source.c`, `c_parse.c`, and `c_gen.c`;
   `c.c` preserves the unity include order and diagnostic mapping.
 - Keep the frontend pipeline explicit: source loading and preprocessing,
   parsing and semantic construction, then canonical-IR lowering. Do not add a
   parallel frontend-specific IR or route code generation around canonical IR.
+- Macro expansion uses one growable LIFO task array per expansion call. Each
+  argument context records a task-index floor; lookahead and argument collection
+  must not pop below it into suspended parent work. Store indices, never pointers
+  across batch pushes that may grow the array. An ENABLE marker remains below
+  its replacement batch, and refused identifiers retain `no_expand` on rescans.
+  Output nodes and source-stamp ownership are independent of task storage.
 - Macro placemarkers survive the entire `##` sequence. The replacement loop
   compacts into its existing materialized buffer and removes placemarkers only
   when emitting the rescan tokens. Only the explicitly marked GNU
@@ -112,6 +141,28 @@ request validation again. See [the boundary inventory](../../ir-validation-bound
   named parameters and ordinary macros retain it.
   `tests/basic_c_macro_empty_paste.c` covers empty operands, chained pastes,
   surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
+- `c_conditional_number` admits the complete bounded integer spelling, checks
+  overflow before accumulation, and leaves its output unchanged on failure.
+  Ordinary constants and the x87 initializer folder share it; do not restore a
+  second integer parser. U/L/LL (with same-case LL), the MS i8/i16/i32/i64 suffixes (including unsigned forms),
+  binary digits and between-digit separators retain their existing admission
+  policy. Fixed-width Microsoft suffixes retain their signed/unsigned literal type, including the Windows SDK limits. This does not add C23 bit-precise suffixes.
+  The syntax pass validates integer tokens in its existing declaration/body
+  walks, including unused functions and unevaluated operands. Inactive macro
+  definitions and stringized tokens are not C integer tokens and remain valid.
+  Language diagnostics name the offending token with
+  `C_DIAGNOSTIC_INVALID_INTEGER_LITERAL`; preprocessing keeps the conditional
+  directive diagnostic. `c_test_integer_spelling_consistency` and
+  `tests/basic_c_integer_literals.c` cover these contracts (GitHub #148).
+- Preprocessing integer-expression reductions carry signedness and a deferred
+  arithmetic-fault bit in the same byte. Division by zero and signed
+  `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
+  `&&`, `||` and `?:` propagate faults only from evaluated operands; the
+  conditional's common unsigned type still depends on both arms. Syntax
+  validation remains unconditional. `c_test_preprocessor_short_circuit` covers
+  generated `#if`/`#elif`, live-fault and malformed-dead-operand controls;
+  `tests/basic_c_preprocessor_short_circuit.c` runs in the existing native
+  allocator matrix (GitHub #147, #258).
 - A folded conditional expression converts its selected value to the common
   type of both arms before any enclosing operator consumes it. Constant and
   runtime typing share `c_ir_conditional_pointer_type`; arithmetic uses the
@@ -163,6 +214,15 @@ request validation again. See [the boundary inventory](../../ir-validation-bound
   conservative overlap test: holes inside it and arbitrary repeated overwrites
   still take the full compaction path. GNU range copies use their parent
   context's extent; separately materialized range values own a fresh context.
+- `c_parse_validate_constexpr_declaration` validates a leaf root from one local
+  work entry, without acquiring scratch or clearing the translation-unit type
+  universe. Arrays, structs and unions retain the explicit private graph walk.
+  Both paths use the same qualifier and complete-object checks, in the same
+  diagnostic order. Pointees are not subobjects. No result is cached across
+  mutation or rollback. `c_test_constexpr_leaf_storage` checks reused scratch,
+  unrelated type populations, qualifier mutation/restoration and diagnostics;
+  `tests/basic_c_constexpr_leaf.c` runs in C23 under every native allocator.
+  Composite-query universe-sized scratch remains tracked in GitHub #259.
 - **GNU's `__alignof__` takes an expression; `_Alignof` takes only a type
   name.** Both spellings reach the same fold in `c_gen.c`, and it resolved an
   expression operand only for a compound literal until libc-test's
@@ -391,6 +451,13 @@ immutable language types. `ir_type_abi_value` remains the shared call-lowering
 query used by native consumers and the frontend; explicit contexts use
 `ir_abi_context_value`. Wasm, eBPF and LLVM do not acquire a native cache merely
 by existing; only an actual ABI query creates it.
+
+`IrAbiContext.sysv_unnamed_bitfields_integer` selects the narrow SysV unnamed
+bit-field policy. It defaults to false, preserving historical Buster behavior.
+`CIRLowerOptions` sets the requested context before lowering can make an ABI
+query. Independent contexts can classify the same immutable types with different
+policies. Changing a context's policy after a query requires invalidating that
+context, just as changing layout does; neither selection mutates `IrType`.
 
 Cache pages contain 64 types for one use, with a resolution mask; values are
 initialized before their bit is published. Variadic arguments reuse argument

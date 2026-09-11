@@ -5,6 +5,8 @@
 //   CParserDeclaration records — token extents, the name token, the body
 //   range, and typedef/constexpr/variadic flags — by delimiter counting
 //   alone. It builds no tree; every later consumer re-walks token ranges.
+//   The same top-level/body walks validate active integer token spellings,
+//   including unevaluated operands, before any type-only shortcut can hide one.
 //   A function body is split into statements the same way, and the one fact
 //   kept about them is the token range of each _Static_assert statement
 //   (CParserStaticAssert), which c_parse_bind_function_static_asserts
@@ -79,6 +81,7 @@
 //   c_parse_ast, c_analyze_semantics, c_parse     the stage entry points
 
 #include "c_internal.h"
+#include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 
 BUSTER_C_INTERNAL bool c_declaration_keyword(String8 spelling)
 {
@@ -2859,7 +2862,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
         {
             bool is_unsigned = false;
             u32 long_count = 0;
-            for (u64 index = first_spelling.length; index != 0; index -= 1)
+            u32 msvc_width = c_integer_msvc_literal_width(first_spelling, &is_unsigned);
+            for (u64 index = first_spelling.length; !msvc_width && index != 0; index -= 1)
             {
                 u8 byte = first_spelling.pointer[index - 1];
                 if (byte == 'u' || byte == 'U')
@@ -2879,6 +2883,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
                    : long_count == 1 ? (is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG)
                    : is_unsigned     ? C_TYPE_UNSIGNED_INT
                                      : C_TYPE_INT;
+            if (msvc_width)
+            {
+                kind = msvc_width == 8 ? (is_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR)
+                       : msvc_width == 16 ? (is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT)
+                       : msvc_width == 32 ? (is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT)
+                                          : (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG);
+            }
         }
         return end == start + 1 ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
     }
@@ -5141,38 +5152,31 @@ BUSTER_C_INTERNAL void c_parse_aggregate_lookup_insert(CParseResult* result, CTy
     }
 }
 
-// The variable-argument list type, created once per translation unit. A libc
-// spells the same builtin under several typedef names -- musl declares
-// `va_list` in <stdarg.h> and `__isoc_va_list` in the public prototypes, both
-// as `__builtin_va_list` -- and a prototype written with one name has to stay
-// compatible with a definition written with the other, so all of them have to
-// land on one type id rather than on a fresh one each.
+// Builtin identity belongs to the type, so every typedef spelling shares it.
 BUSTER_C_INTERNAL CTypeId c_parse_variable_argument_list_type(CParseResult* result)
 {
+    CTypeId type = C_TYPE_ID_INVALID;
     for (u32 index = 0; index < result->type_count; index += 1)
     {
-        if (result->types[index].kind == C_TYPE_VA_LIST)
+        CType* candidate = result->types + index;
+        if (candidate->kind == C_TYPE_VA_LIST && !candidate->is_const && !candidate->is_volatile &&
+            !candidate->is_restrict && !candidate->is_atomic && !candidate->has_unqualified_type)
         {
-            return (CTypeId){.value = index};
+            type = (CTypeId){.value = index};
+            break;
         }
     }
-    return c_parse_add_type(result, (CType){
-                                        .element_type = C_TYPE_ID_INVALID,
-                                        .return_type = C_TYPE_ID_INVALID,
-                                        .array_bound = C_ARRAY_BOUND_INVALID,
-                                        .kind = C_TYPE_VA_LIST,
-                                        .is_complete = true,
-                                    });
-}
-
-// The typedef names that introduce the variable-argument list type. The set is
-// closed rather than "any typedef of __builtin_va_list" because the underlying
-// spelling is what these names are declared from, and matching on the name is
-// what keeps a library's own alias out of the builtin's identity.
-BUSTER_C_INTERNAL bool c_parse_variable_argument_list_name(String8 name)
-{
-    return string_equal(name, S8("va_list")) || string_equal(name, S8("__gnuc_va_list")) || string_equal(name, S8("__builtin_va_list")) ||
-           string_equal(name, S8("__isoc_va_list"));
+    if (type.value == C_ID_UNDERLYING_INVALID)
+    {
+        type = c_parse_add_type(result, (CType){
+            .element_type = C_TYPE_ID_INVALID,
+            .return_type = C_TYPE_ID_INVALID,
+            .array_bound = C_ARRAY_BOUND_INVALID,
+            .kind = C_TYPE_VA_LIST,
+            .is_complete = true,
+        });
+    }
+    return type;
 }
 
 BUSTER_C_SHARED CTypeId c_parse_add_type(CParseResult* result, CType type)
@@ -5413,6 +5417,10 @@ BUSTER_C_INTERNAL bool c_parse_type_word(String8 spelling)
     {
         return string_equal(spelling, S8("_Thread_local")) || string_equal(spelling, S8("__extension__"));
     }
+    case 17:
+    {
+        return string_equal(spelling, S8("__builtin_va_list"));
+    }
     default:
     {
         return false;
@@ -5535,6 +5543,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
 {
     bool seen_type = false;
     bool seen_void = false;
+    bool seen_va_list = false;
     bool seen_bool = false;
     bool seen_char = false;
     bool seen_short = false;
@@ -5580,7 +5589,12 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
             break;
         }
         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
-        if (string_equal(spelling, S8("void")))
+        if (string_equal(spelling, S8("__builtin_va_list")))
+        {
+            seen_va_list = true;
+            seen_type = true;
+        }
+        else if (string_equal(spelling, S8("void")))
         {
             seen_void = true;
             seen_type = true;
@@ -5671,7 +5685,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
     // `_Imaginary` is recognized only so that a declaration spelled with it
     // is rejected here instead of parsed as an implicit int with a stray
     // identifier; no target this compiler emits for has imaginary types.
-    if (seen_imaginary)
+    if (seen_imaginary || (seen_va_list && seen_complex))
     {
         return C_TYPE_ID_INVALID;
     }
@@ -5689,7 +5703,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
         }
         return c_parse_add_type(result, type);
     }
-    if (seen_void)
+    if (seen_va_list)
+    {
+        bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float ||
+                         seen_double || seen_int128 || seen_complex || seen_imaginary || long_count;
+        type.kind = invalid ? C_TYPE_INVALID : C_TYPE_VA_LIST;
+    }
+    else if (seen_void)
     {
         type.kind = C_TYPE_VOID;
     }
@@ -5730,7 +5750,20 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
         BUSTER_UNUSED(seen_int);
         type.kind = seen_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
     }
-    return c_parse_add_type(result, type);
+    CTypeId parsed = C_TYPE_ID_INVALID;
+    if (type.kind == C_TYPE_VA_LIST)
+    {
+        parsed = c_parse_variable_argument_list_type(result);
+        if (type.is_const || type.is_volatile || type.is_restrict || type.is_atomic)
+        {
+            parsed = c_parse_add_qualified_type(result, parsed, type);
+        }
+    }
+    else if (type.kind != C_TYPE_INVALID)
+    {
+        parsed = c_parse_add_type(result, type);
+    }
+    return parsed;
 }
 
 BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
@@ -6441,6 +6474,7 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
 {
     bool seen_type = false;
     bool seen_void = false;
+    bool seen_va_list = false;
     bool seen_bool = false;
     bool seen_char = false;
     bool seen_short = false;
@@ -6481,7 +6515,12 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
             break;
         }
         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
-        if (string_equal(spelling, S8("void")))
+        if (string_equal(spelling, S8("__builtin_va_list")))
+        {
+            seen_va_list = true;
+            seen_type = true;
+        }
+        else if (string_equal(spelling, S8("void")))
         {
             seen_void = true;
             seen_type = true;
@@ -6553,6 +6592,12 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     if (!seen_type || (seen_signed && seen_unsigned) || seen_imaginary)
     {
         result = C_TYPE_INVALID;
+    }
+    else if (seen_va_list)
+    {
+        bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float ||
+                         seen_double || seen_int128 || seen_complex || seen_imaginary || long_count;
+        result = invalid ? C_TYPE_INVALID : C_TYPE_VA_LIST;
     }
     else if (seen_complex)
     {
@@ -10578,114 +10623,134 @@ BUSTER_C_INTERNAL bool c_parse_integer_constant_range(CTypeParseMachine* machine
 BUSTER_C_SHARED bool c_parse_validate_constexpr_declaration(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                                 CPreprocessResult preprocess, CDeclaration* declaration)
 {
-    if (!declaration->is_constexpr)
-    {
-        return true;
-    }
-    CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]);
-    if (declaration->kind != C_DECLARATION_OBJECT)
-    {
-        c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_CONSTEXPR, S8("constexpr may only declare an object"));
-        return false;
-    }
-    if (!declaration->is_definition)
-    {
-        c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_CONSTEXPR, S8("constexpr object declaration requires an initializer"));
-        return false;
-    }
-    u32 end = declaration->token_start + declaration->token_count;
-    for (u32 index = declaration->token_start; index < end; index += 1)
-    {
-        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
-        if (string_equal(spelling, S8("extern")) || string_equal(spelling, S8("_Thread_local")) || string_equal(spelling, S8("__thread")))
-        {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[index]), C_DIAGNOSTIC_INVALID_CONSTEXPR,
-                               S8("constexpr cannot be combined with this storage-class specifier"));
-            return false;
-        }
-    }
-    if (declaration->type.value >= result->type_count)
-    {
-        c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_CONSTEXPR, S8("constexpr object has an invalid type"));
-        return false;
-    }
-    Arena* conflicts[] = {
-        arena,
-    };
-    TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-    CTypeId* work = arena_allocate(temporary.arena, CTypeId, result->type_count + result->member_count + 1);
-    bool* visited = arena_allocate(temporary.arena, bool, result->type_count + 1);
-    memset(visited, 0, sizeof(*visited) * (result->type_count + 1));
-    u32 work_count = 1;
-    work[0] = declaration->type;
     bool valid = true;
-    String8 message = {0};
-    while (work_count)
+    if (declaration->is_constexpr)
     {
-        CTypeId type_id = work[--work_count];
-        if (type_id.value >= result->type_count || visited[type_id.value])
+        CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]);
+        String8 message = {0};
+        if (declaration->kind != C_DECLARATION_OBJECT)
         {
-            continue;
+            message = S8("constexpr may only declare an object");
         }
-        visited[type_id.value] = true;
-        CType* type = &result->types[type_id.value];
-        if (type->is_atomic)
+        else if (!declaration->is_definition)
         {
-            valid = false;
-            message = S8("constexpr object or subobject cannot have atomic type");
-            break;
+            message = S8("constexpr object declaration requires an initializer");
         }
-        if (type->is_volatile || type->is_restrict)
+        else
         {
-            valid = false;
-            message = S8("constexpr object or subobject cannot be volatile or restrict-qualified");
-            break;
-        }
-        if (type->kind == C_TYPE_FUNCTION || type->kind == C_TYPE_VOID)
-        {
-            valid = false;
-            message = S8("constexpr requires a complete object type");
-            break;
-        }
-        if (type->kind == C_TYPE_ARRAY)
-        {
-            CTypeId element_type = type->element_type;
-            if (type->array_bound >= result->array_bound_count)
+            u32 end = declaration->token_start + declaration->token_count;
+            for (u32 index = declaration->token_start; index < end && !message.length; index += 1)
             {
-                valid = false;
-                message = S8("constexpr object cannot have variably modified type");
-                break;
+                String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
+                if (string_equal(spelling, S8("extern")) || string_equal(spelling, S8("_Thread_local")) || string_equal(spelling, S8("__thread")))
+                {
+                    location = c_preprocess_token_location(&preprocess, preprocess.tokens[index]);
+                    message = S8("constexpr cannot be combined with this storage-class specifier");
+                }
             }
-            CArrayBound bound = result->array_bounds[type->array_bound];
-            u64 count = 0;
-            bool inferred_later = !bound.token_count && !bound.is_star;
-            if (bound.is_star || (!inferred_later && !bound.has_inferred_count &&
-                                  (!c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, declaration->scope, bound.token_start,
-                                                                  bound.token_start + bound.token_count, &count) ||
-                                   !count)))
+            if (!message.length && declaration->type.value >= result->type_count)
             {
-                valid = false;
-                message = S8("constexpr object cannot have variably modified type");
-                break;
-            }
-            work[work_count++] = element_type;
-            continue;
-        }
-        if (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION)
-        {
-            for (u32 member_index = 0; member_index < type->member_count; member_index += 1)
-            {
-                work[work_count++] = result->members[type->member_start + member_index].type;
+                message = S8("constexpr object has an invalid type");
             }
         }
-    }
-    scratch_end(temporary);
-    if (!valid)
-    {
-        c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_CONSTEXPR, message);
+        if (!message.length)
+        {
+            // A leaf has no subobjects to enqueue: validate the local root with
+            // the same checks as a graph entry, without clearing the type universe.
+            // Composite queries retain private rewindable scratch and no cached
+            // answers, so bound evaluation and type mutation keep their ordering.
+            CTypeId root = declaration->type;
+            CTypeId* work = &root;
+            bool* visited = 0;
+            TemporalArena temporary = {0};
+            CTypeKind root_kind = result->types[root.value].kind;
+            if (root_kind == C_TYPE_ARRAY || root_kind == C_TYPE_STRUCT || root_kind == C_TYPE_UNION)
+            {
+                Arena* conflicts[] = {arena};
+                temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                work = arena_allocate(temporary.arena, CTypeId, result->type_count + result->member_count + 1);
+                visited = arena_allocate(temporary.arena, bool, result->type_count + 1);
+                memset(visited, 0, sizeof(*visited) * (result->type_count + 1));
+                work[0] = root;
+            }
+            u32 work_count = 1;
+            while (work_count)
+            {
+                CTypeId type_id = work[--work_count];
+                if (type_id.value >= result->type_count || (visited && visited[type_id.value]))
+                {
+                    continue;
+                }
+                if (visited)
+                {
+                    visited[type_id.value] = true;
+                }
+                CType* type = &result->types[type_id.value];
+                if (type->is_atomic)
+                {
+                    message = S8("constexpr object or subobject cannot have atomic type");
+                    break;
+                }
+                if (type->is_volatile || type->is_restrict)
+                {
+                    message = S8("constexpr object or subobject cannot be volatile or restrict-qualified");
+                    break;
+                }
+                if (type->kind == C_TYPE_FUNCTION || type->kind == C_TYPE_VOID)
+                {
+                    message = S8("constexpr requires a complete object type");
+                    break;
+                }
+                if (type->kind == C_TYPE_ARRAY)
+                {
+                    CTypeId element_type = type->element_type;
+                    if (type->array_bound >= result->array_bound_count)
+                    {
+                        message = S8("constexpr object cannot have variably modified type");
+                        break;
+                    }
+                    CArrayBound bound = result->array_bounds[type->array_bound];
+                    u64 count = 0;
+                    bool inferred_later = !bound.token_count && !bound.is_star;
+                    if (bound.is_star || (!inferred_later && !bound.has_inferred_count &&
+                                          (!c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, declaration->scope, bound.token_start,
+                                                                          bound.token_start + bound.token_count, &count) ||
+                                           !count)))
+                    {
+                        message = S8("constexpr object cannot have variably modified type");
+                        break;
+                    }
+                    work[work_count++] = element_type;
+                    continue;
+                }
+                if (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION)
+                {
+                    for (u32 member_index = 0; member_index < type->member_count; member_index += 1)
+                    {
+                        work[work_count++] = result->members[type->member_start + member_index].type;
+                    }
+                }
+            }
+            if (temporary.arena)
+            {
+                scratch_end(temporary);
+            }
+        }
+        valid = !message.length;
+        if (!valid)
+        {
+            c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_CONSTEXPR, message);
+        }
     }
     return valid;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_validate_constexpr_declaration(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CDeclaration* declaration)
+{
+    return c_parse_validate_constexpr_declaration(0, arena, result, preprocess, declaration);
+}
+#endif
 
 typedef struct CTypePair CTypePair;
 struct CTypePair
@@ -11339,17 +11404,27 @@ BUSTER_C_SHARED u64 c_parse_name_hash(u32 symbol, String8 name)
 // close, so it goes into the oldest record for the symbol -- the value the
 // outermost restore puts back -- or into the slot itself when nothing has
 // shadowed it.  The scan is over the bindings the function body has open,
-// which the reset at each definition keeps to that body's own.
-BUSTER_C_INTERNAL void c_parse_binding_bind(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol)
+// which the reset at each definition keeps to that body's own. Fresh names
+// need no scan. The returned loop cursor exposes examined records to tests;
+// production callers discard it, without maintaining an additional counter.
+BUSTER_C_INTERNAL u32 c_parse_binding_bind(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol)
 {
+    u32 scan_count = 0;
     if (result->binding_by_symbol && symbol && symbol < result->binding_capacity)
     {
         if (scope.value != result->binding_scope.value)
         {
             u32 oldest = UINT32_MAX;
-            for (u32 index = 0; index < result->binding_undo_count && oldest == UINT32_MAX; index += 1)
+            // A live undo record for this symbol always has a valid current
+            // binding: bind installs one, and unwind removes its record before
+            // restoring the previous value. A fresh name therefore cannot
+            // occur in this log, however many unrelated locals it contains.
+            if (result->binding_by_symbol[symbol].value != C_ID_UNDERLYING_INVALID)
             {
-                oldest = result->binding_undo[index].symbol == symbol ? index : UINT32_MAX;
+                for (; scan_count < result->binding_undo_count && oldest == UINT32_MAX; scan_count += 1)
+                {
+                    oldest = result->binding_undo[scan_count].symbol == symbol ? scan_count : UINT32_MAX;
+                }
             }
             if (oldest == UINT32_MAX)
             {
@@ -11373,6 +11448,7 @@ BUSTER_C_INTERNAL void c_parse_binding_bind(CParseResult* result, CScopeId scope
             result->binding_by_symbol[symbol] = entity;
         }
     }
+    return scan_count;
 }
 
 // Restores every binding shadowed since `mark`, newest first.
@@ -11384,6 +11460,18 @@ BUSTER_C_INTERNAL void c_parse_binding_unwind(CParseResult* result, u32 mark)
         result->binding_by_symbol[record.symbol] = record.previous;
     }
 }
+
+#if BUSTER_INCLUDE_TESTS
+u32 c_test_parse_binding_bind(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol)
+{
+    return c_parse_binding_bind(result, scope, entity, symbol);
+}
+
+void c_test_parse_binding_unwind(CParseResult* result, u32 mark)
+{
+    c_parse_binding_unwind(result, mark);
+}
+#endif
 
 BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId scope, CEntityId entity, u32 symbol)
 {
@@ -12974,10 +13062,6 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             }
             type = object_type;
         }
-        if (is_typedef && c_parse_variable_argument_list_name(c_token_spelling(preprocess.spelling_base, name)))
-        {
-            type = c_parse_variable_argument_list_type(result);
-        }
         // A block-scope `typedef int cache_line __attribute__((aligned(64)));`
         // writes the request on the type it declares, not on an object, so it
         // moves onto the type the way the file-scope path in
@@ -14407,17 +14491,33 @@ BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* m
     }
 }
 
-BUSTER_C_INTERNAL void c_parser_diagnostic(CParserResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message)
+BUSTER_C_INTERNAL void c_parser_diagnostic(Arena* arena, CParserResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message)
 {
-    if (!result || result->diagnostic_count >= result->diagnostic_capacity)
+    if (result && result->diagnostic_count < result->diagnostic_capacity)
     {
-        return;
+        // Clean syntax needs no diagnostic storage. Allocate the original
+        // bounded contiguous array once, before publishing its first row.
+        if (!result->diagnostics)
+        {
+            result->diagnostics = arena_allocate(arena, CDiagnostic, result->diagnostic_capacity);
+        }
+        result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
+            .message = message,
+            .location = location,
+            .kind = kind,
+        };
     }
-    result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
-        .message = message,
-        .location = location,
-        .kind = kind,
-    };
+}
+
+BUSTER_C_INTERNAL void c_parser_validate_integer_token(Arena* arena, CParserResult* result, CPreprocessResult const* preprocess, CToken token)
+{
+    String8 spelling = c_token_spelling(preprocess->spelling_base, token);
+    u64 value = 0;
+    if (!c_number_is_float(spelling) && !c_conditional_number(spelling, &value))
+    {
+        c_parser_diagnostic(arena, result, c_preprocess_token_location(preprocess, token), C_DIAGNOSTIC_INVALID_INTEGER_LITERAL,
+                            S8("invalid integer literal or value outside the supported 64-bit range"));
+    }
 }
 
 typedef struct CParserBlockFrame CParserBlockFrame;
@@ -14811,7 +14911,6 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
         u32 token_count = (u32)preprocess.token_count;
         result.declaration_capacity = token_count + 1;
         result.diagnostic_capacity = token_count + 1;
-        result.diagnostics = arena_allocate(arena, CDiagnostic, result.diagnostic_capacity);
         u32* delimiter_stack = arena_allocate(arena, u32, token_count + 1);
         CParserBodyFrames body_frames = {0};
         u32 index = 0;
@@ -14838,6 +14937,10 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                 if (shape == C_TOKEN_END_OF_FILE)
                 {
                     break;
+                }
+                if (shape == C_TOKEN_PREPROCESSING_NUMBER)
+                {
+                    c_parser_validate_integer_token(arena, &result, &preprocess, token);
                 }
                 u32 asm_label_end = 0;
                 if (shape == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ASM_KEYWORDS) && index > start &&
@@ -14905,7 +15008,12 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                         index += 1;
                         while (index < token_count)
                         {
-                            CPunctuator body_punctuator = c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index));
+                            CTokenShape body_shape = c_preprocess_token_shape_at(token_shapes, &preprocess, index);
+                            if (body_shape == C_TOKEN_PREPROCESSING_NUMBER)
+                            {
+                                c_parser_validate_integer_token(arena, &result, &preprocess, preprocess.tokens[index]);
+                            }
+                            CPunctuator body_punctuator = c_token_shape_punctuator(body_shape);
                             if (body_punctuator == C_PUNCTUATOR_LEFT_BRACE)
                             {
                                 brace_depth += 1;
@@ -14925,7 +15033,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                         }
                         if (!ended)
                         {
-                            c_parser_diagnostic(&result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unterminated function body"));
+                            c_parser_diagnostic(arena, &result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unterminated function body"));
                         }
                         break;
                     }
@@ -14944,7 +15052,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
                                                                                           : C_PUNCTUATOR_LEFT_BRACE;
                     if (!delimiter_count || c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, delimiter_stack[delimiter_count - 1])) != expected)
                     {
-                        c_parser_diagnostic(&result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unmatched closing delimiter"));
+                        c_parser_diagnostic(arena, &result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("unmatched closing delimiter"));
                     }
                     else
                     {
@@ -14965,7 +15073,7 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
             if (!ended)
             {
                 CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[BUSTER_MIN(index, token_count - 1)]);
-                c_parser_diagnostic(&result, location, C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("expected ';' or a function body after declaration"));
+                c_parser_diagnostic(arena, &result, location, C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("expected ';' or a function body after declaration"));
                 break;
             }
             CParserDeclarationKind kind = is_typedef                         ? C_PARSER_DECLARATION_TYPEDEF
@@ -15694,10 +15802,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
                                                                    .is_const = true,
                                                                });
             }
-            c_parse_validate_constexpr_declaration(&machine, arena, &result, preprocess, declaration);
-            if (kind == C_DECLARATION_TYPEDEF && c_parse_variable_argument_list_name(declaration->name))
+            // Object bounds may name a preceding constexpr. Validate them
+            // with the ordered initializer walk, after those values exist.
+            if (declaration->kind != C_DECLARATION_OBJECT)
             {
-                declaration->type = c_parse_variable_argument_list_type(&result);
+                c_parse_validate_constexpr_declaration(&machine, arena, &result, preprocess, declaration);
             }
             // A declarator with no parameter list still declares a function
             // when its type is one -- `extern __typeof(f) g;`, musl's
@@ -15998,6 +16107,12 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
         {
             continue;
         }
+        // This walk is in declaration order: an earlier integer constexpr
+        // has its value before a later object's bound is checked. File-scope
+        // objects do not own a function scope, so use the lexical scope here.
+        CDeclaration scoped_declaration = *declaration;
+        scoped_declaration.scope = (CScopeId){.value = 0};
+        c_parse_validate_constexpr_declaration(&machine, arena, &result, preprocess, &scoped_declaration);
         u32 end = declaration->token_start + declaration->token_count;
         u32 initializer_start = end;
         u32 depth = 0;

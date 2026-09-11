@@ -1,0 +1,32 @@
+ExecuteCompiler 191.43s
+  Total Frontend          24.14s   12.6%
+  Total Backend          167.23s   87.4%
+  Total Optimizer         82.83s   43.3%
+  Total CodeGenPasses     84.39s   44.1%
+
+5058 functions, attributed backend union 151.00s
+  1  13.878s  7.25%  codegen_generate_canonical_module_attempt
+  2   3.105s  1.62%  c_lower_to_ir_with_options
+  3   2.977s  1.56%  buster_x86_metadata_emit_parse_pattern
+  4   2.416s  1.26%  machine_select_canonical_function_x86_64
+  5   2.207s  1.15%  c_type_parse_machine_run
+  6   2.200s  1.15%  assembly_tests
+  7   2.075s  1.08%  c_ir_query_execute
+  8   1.604s  0.84%  c_ir_lower_body_advance
+  9   1.532s  0.80%  x86_64_metadata_tests
+ 10   1.502s  0.78%  c_ir_lower_dispatch_run
+ 11   1.411s  0.74%  machine_quality_placement_build
+ 12   1.356s  0.71%  compiler_driver_tests
+  top 10: 22.2% of attributed
+  top 100: 52.3% of attributed
+  top 1000: 83.1% of attributed
+
+codegen_generate_canonical_module_attempt: codegen OptFunction 8.615s; top passes (share of that pass across the TU):
+    3.902s   70.2% of TU  CodeGen Prepare
+    1.451s    5.5% of TU  X86 DAG->DAG Instruction Selection
+    0.840s    8.5% of TU  Greedy Register Allocator
+    0.536s   24.3% of TU  Live Interval Analysis
+    0.313s   14.6% of TU  Register Coalescer
+    0.194s    4.5% of TU  Loop Pass Manager
+    0.149s   41.7% of TU  Machine Copy Propagation Pass
+    0.117s   19.2% of TU  Branch Probability Basic Block Placement

@@ -2812,9 +2812,22 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     // implicit byte-width of an unsuffixed memory operand is an AT&T-only
     // question. Nothing moved down.
     BUSTER_TEST(arguments, source.intel_exact_count == 5629 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 226 && source.intel_unresolved_count == 3956 &&
-                             source.intel_byte_mismatch_count == 768 && source.intel_relocation_mismatch_count == 0 &&
+                             source.intel_alias_equivalent_count == 226 && source.intel_unresolved_count == 3957 &&
+                             source.intel_byte_mismatch_count == 767 && source.intel_relocation_mismatch_count == 0 &&
                              source.intel_policy_rejected_count == 542 && source.intel_different_encoding_count == 17);
+    // #280 changes exactly this census row: VMOVNTDQA zmm0, dword ptr
+    // [rax] is an invalid explicit tuple, not permission to emit another
+    // width. Pin its key and rejection; every formerly exact Intel/AT&T
+    // row retains its class in the complete before/after record comparison.
+    BusterX86CompletionCensusRecord source_tuple_record = records[7468];
+    BUSTER_TEST(arguments, source_tuple_record.form_id == 7468 &&
+                             source_tuple_record.stable_hash == UINT64_C(0xfe3905a4046fe79e) &&
+                             source_tuple_record.intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED &&
+                             source_tuple_record.intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS &&
+                             source_tuple_record.intel_byte_count == 0 &&
+                             source_tuple_record.att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH &&
+                             source_tuple_record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                             source_tuple_record.att_byte_count == 6);
     // Literal VCVTTSS2SIS/VCVTTSS2USIS memory forms previously lost their
     // final S and emitted another instruction through the generic suffix
     // fallback. They now reject the census operands instead of emitting
@@ -2841,8 +2854,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6668 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3261 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6667 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3262 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 542);

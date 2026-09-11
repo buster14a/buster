@@ -1,0 +1,5 @@
+Correctness-only frozen-input A/B: instructions:u unavailable; no performance acceptance claimed.
+Frozen source: a8454d842687419ff5023755fc0dd20243119088; identical arguments and -o across six runs.
+pair=1 cmp=identical bytes=36191896 sha256=46f528d4ff55351847bdbbc20629bd40d9caede3e133373491759c62cb69dabb
+pair=2 cmp=identical bytes=36191896 sha256=46f528d4ff55351847bdbbc20629bd40d9caede3e133373491759c62cb69dabb
+pair=3 cmp=identical bytes=36191896 sha256=46f528d4ff55351847bdbbc20629bd40d9caede3e133373491759c62cb69dabb

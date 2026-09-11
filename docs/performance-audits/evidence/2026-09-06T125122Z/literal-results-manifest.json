@@ -1,0 +1,81 @@
+{
+  "base_commit": "a8454d842687419ff5023755fc0dd20243119088",
+  "status": "UNLANDED: zero stage1 hits; no performance acceptance",
+  "artifacts": [
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/scratch-root/ide-base",
+      "bytes": 36150264,
+      "sha256": "1431e92a4f67d2e1e6a7dc9b8362297ebf89c88c36c00b05926cf2a58122c4de"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/scratch-literals/ide-candidate",
+      "bytes": 36150384,
+      "sha256": "5d738d981ebb8f9d2c4b15a87da79377175778d0f8a35f2b716d6cffc3d093f9"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/scratch-literals/ide-census",
+      "bytes": 36150720,
+      "sha256": "0f6cfd358535287882a1a149201211afd1e77d285a78e00c452091c08353887b"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/scratch-literals/stage1-base",
+      "bytes": 36191896,
+      "sha256": "46f528d4ff55351847bdbbc20629bd40d9caede3e133373491759c62cb69dabb"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/scratch-literals/stage1-output",
+      "bytes": 36191896,
+      "sha256": "46f528d4ff55351847bdbbc20629bd40d9caede3e133373491759c62cb69dabb"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/wt-literals/build/self-host/Release/ide-stage1",
+      "bytes": 36191960,
+      "sha256": "14f7036fc94831939a9e85cb135acda32205682190f56c8729390ff2f3bc4ae5"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/wt-literals/build/self-host/Release/ide-stage2",
+      "bytes": 36191960,
+      "sha256": "14f7036fc94831939a9e85cb135acda32205682190f56c8729390ff2f3bc4ae5"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/scratch-literals/literal-reuse-experimental.patch",
+      "bytes": 6157,
+      "sha256": "7259ea6aab9e93de881321b212762ccb5eac1222504060df6274be5040a00730"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/scratch-literals/ab-result.txt",
+      "bytes": 523,
+      "sha256": "e29617a453be944eebb81fe54a308392008d19921328772abd920afbec25db68"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/scratch-literals/candidate-release-tests.log",
+      "bytes": 154950,
+      "sha256": "803e5e0cdba2a8b2ebaf2516a83befc1a9f6c5ef9d70725b1555d9e0e6b41ff4"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/scratch-literals/candidate-debug-tests-repeat.log",
+      "bytes": 155009,
+      "sha256": "d0bb90fd671e83e18c89223692efe77111b74967c53eb783dd163104861009d9"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/scratch-literals/candidate-self-host.log",
+      "bytes": 12963,
+      "sha256": "58893b498079dd0f59073329e414e6ab825197020ebc513d582fa02fe49ae79e"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/scratch-literals/census-stage1.log",
+      "bytes": 3132,
+      "sha256": "e23d250993a30a9811603b7ee6cf55d443f89994f97472b813877a06c6712d8d"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/scratch-literals/census-fixture.log",
+      "bytes": 228,
+      "sha256": "4fdc899abe2d353618fda746d2b7582d06d4bb9a956ed8279cf9520acf9b1908"
+    },
+    {
+      "path": "/workspace/scratch/0194f2e71ee3/scratch-literals/validation-notes.txt",
+      "bytes": 2703,
+      "sha256": "a649bfb8a4d9d7f5687fe01b2880c8c6cf095f85fda6dc4354213cc324d2e7e8"
+    }
+  ]
+}

@@ -12239,6 +12239,21 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             bool explicit_width = operands[index].memory.width_explicit;
             if (explicit_width && physical[index].memory.source_width > 64)
             {
+                // A two-operand EVEX vector load may read a half tuple (or a
+                // full tuple wider than its destination). Keep the source
+                // qualifier for candidate-specific tuple validation instead of
+                // equating it with the first vector register's width.
+                bool evex_vector_load = operand_count == 2 && index == 1 &&
+                                        physical[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                                        (physical[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM ||
+                                         physical[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM ||
+                                         physical[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM) &&
+                                        (operands[0].has_mask || operands[0].zeroing || operands[1].broadcast ||
+                                         physical[0].reg.width == 512 || physical[0].reg.index >= 16);
+                if (evex_vector_load)
+                {
+                    continue;
+                }
                 // Intel legacy XMM source spells the aggregate memory width
                 // directly.  VEX/EVEX/XOP rows and AT&T suffix projection
                 // publish a scalar element width while carrying the aggregate

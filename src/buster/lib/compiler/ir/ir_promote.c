@@ -485,6 +485,8 @@ BUSTER_GLOBAL_LOCAL void ir_promote_compact(Arena* arena, IrProgram* program, Ir
     while (changed)
     {
         changed = false;
+        statistics->parameter_sweeps += 1;
+        statistics->parameter_block_visits += function->block_count;
         for (u32 block = 0; block < function->block_count; block += 1)
         {
             IrBlock* destination = function->blocks + block;
@@ -492,11 +494,13 @@ BUSTER_GLOBAL_LOCAL void ir_promote_compact(Arena* arena, IrProgram* program, Ir
             destination->last_parameter = 0;
             while (*link)
             {
+                statistics->parameter_visits += 1;
                 IrBlockParameter* parameter = *link;
                 u32 same = IR_PROMOTE_NONE;
                 bool trivial = parameter->value.value >= old_value_count;
                 for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
                 {
+                    statistics->parameter_incoming_visits += 1;
                     u32 value = ir_promote_root(replacements, incoming->value.value);
                     if (value != parameter->value.value)
                     {

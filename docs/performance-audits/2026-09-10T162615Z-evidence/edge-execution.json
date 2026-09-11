@@ -1,0 +1,94 @@
+[
+  {
+    "fixture": "basic_c_x86_64_i128_binary",
+    "mode": "none",
+    "compile": 0,
+    "link": 0,
+    "run": 0
+  },
+  {
+    "fixture": "basic_c_x86_64_i128_binary",
+    "mode": "mir-stack",
+    "compile": 0,
+    "link": 0,
+    "run": 0
+  },
+  {
+    "fixture": "basic_c_x86_64_i128_binary",
+    "mode": "fast",
+    "compile": 0,
+    "link": 0,
+    "run": 0
+  },
+  {
+    "fixture": "basic_c_x86_64_i128_binary",
+    "mode": "quality",
+    "compile": 0,
+    "link": 0,
+    "run": 0
+  },
+  {
+    "fixture": "basic_c_i128_shift_edges",
+    "mode": "none",
+    "compile": 0,
+    "link": 0,
+    "run": 0
+  },
+  {
+    "fixture": "basic_c_i128_shift_edges",
+    "mode": "mir-stack",
+    "compile": 0,
+    "link": 0,
+    "run": 0
+  },
+  {
+    "fixture": "basic_c_i128_shift_edges",
+    "mode": "fast",
+    "compile": 0,
+    "link": 0,
+    "run": 0
+  },
+  {
+    "fixture": "basic_c_i128_shift_edges",
+    "mode": "quality",
+    "compile": 0,
+    "link": 0,
+    "run": 0
+  },
+  {
+    "fixture": "basic_c_vector_lane_edges",
+    "mode": "none",
+    "compile": 0,
+    "link": 0,
+    "run": 0
+  },
+  {
+    "fixture": "basic_c_vector_lane_edges",
+    "mode": "mir-stack",
+    "compile": 0,
+    "link": 0,
+    "run": 0
+  },
+  {
+    "fixture": "basic_c_vector_lane_edges",
+    "mode": "fast",
+    "compile": 0,
+    "link": 0,
+    "run": 0
+  },
+  {
+    "fixture": "basic_c_vector_lane_edges",
+    "mode": "quality",
+    "compile": 0,
+    "link": 0,
+    "run": 0
+  },
+  {
+    "target": "x86_64-windows",
+    "compile": 0
+  },
+  {
+    "target": "aarch64-windows",
+    "compile": 0
+  }
+]

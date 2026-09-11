@@ -4,7 +4,10 @@
  * Linux counters attach before exec, inherit into descendants, and report their
  * scheduling fraction. They exclude kernel/hypervisor work. Other hosts return
  * unavailable, never fabricated zeroes. RSS is the OS per-process high-water
- * mark (not a sum of simultaneously live process-tree RSS).
+ * mark (not a sum of simultaneously live process-tree RSS). Linux also retains
+ * wait4 page-fault and context-switch counts after the wall interval ends.
+ * Their availability bits distinguish an observed zero from an unsupported
+ * platform or failed wait. They are diagnostics, never PMU events or gates.
  */
 #ifndef BUSTER_THROUGHPUT_PLATFORM_H
 #define BUSTER_THROUGHPUT_PLATFORM_H
@@ -22,11 +25,22 @@
 static char const* const tp_counter_names[TP_COUNTERS] = {
     "cycles", "instructions", "branches", "branch_misses", "cache_references", "cache_misses"};
 
+typedef enum TpDiagnostic
+{
+    TP_MINOR_FAULTS,
+    TP_MAJOR_FAULTS,
+    TP_VOLUNTARY_SWITCHES,
+    TP_INVOLUNTARY_SWITCHES,
+    TP_DIAGNOSTICS
+} TpDiagnostic;
+
 typedef struct TpProcess
 {
     double wall_seconds, user_seconds, system_seconds, peak_rss_bytes;
     double counters[TP_COUNTERS], running_fraction[TP_COUNTERS];
     int counter_errors[TP_COUNTERS];
+    uint64_t diagnostics[TP_DIAGNOSTICS];
+    unsigned diagnostics_available;
     int exit_code, signal_number, timed_out, launch_error;
 } TpProcess;
 
@@ -468,6 +482,21 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
             result.signal_number = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
             result.user_seconds = (double)usage.ru_utime.tv_sec + (double)usage.ru_utime.tv_usec * 1e-6;
             result.system_seconds = (double)usage.ru_stime.tv_sec + (double)usage.ru_stime.tv_usec * 1e-6;
+#ifdef __linux__
+            long const diagnostics[TP_DIAGNOSTICS] = {
+                [TP_MINOR_FAULTS] = usage.ru_minflt,
+                [TP_MAJOR_FAULTS] = usage.ru_majflt,
+                [TP_VOLUNTARY_SWITCHES] = usage.ru_nvcsw,
+                [TP_INVOLUNTARY_SWITCHES] = usage.ru_nivcsw};
+            for (unsigned i = 0; i < TP_DIAGNOSTICS; ++i)
+            {
+                if (diagnostics[i] >= 0)
+                {
+                    result.diagnostics[i] = (uint64_t)diagnostics[i];
+                    result.diagnostics_available |= 1u << i;
+                }
+            }
+#endif
 #ifdef __APPLE__
             result.peak_rss_bytes = (double)usage.ru_maxrss;
 #else

@@ -1,0 +1,304 @@
+{
+  "repository": "buster14a/buster",
+  "audit_date": "2026-09-07",
+  "audited_revision": "44a936a8b19901bee0ed9f9062d310eede0066af",
+  "audited_revision_short": "44a936a8",
+  "checkout": "full clone, built and tested locally",
+  "build": "clang 18.1.3, Debug and Release, hosted-CI bootstrap exception (TCC unavailable)",
+  "baseline_tests": "322668/322668 unit, 39/39 module, green before auditing",
+  "self_host": "not run - requires TCC for the trusted bootstrap",
+  "publication_status": "not_published - local bundle only",
+  "issue_count": 26,
+  "issues": [
+    {
+      "key": "c-enum-underlying-type",
+      "title": "c: an enum with no fixed underlying type is always lowered as int",
+      "priority": "P1",
+      "body": "issues/c-enum-underlying-type.md",
+      "marker": "<!-- buster-audit-2026-09-07:c-enum-underlying-type -->",
+      "sha256": "8b441b7c1d8553e9307ac7b23ca12cc80eb47aebfccdd95f41c9629a8d30378b",
+      "sources": {
+        "src/buster/lib/compiler/frontend/c/c_gen.c": "af0bf92839c0d0044caf0ee747623c901404e1d3"
+      }
+    },
+    {
+      "key": "x64-i128-signed-divide",
+      "title": "codegen: signed __int128 divide and remainder negate the divisor by the wrong sign mask",
+      "priority": "P1",
+      "body": "issues/x64-i128-signed-divide.md",
+      "marker": "<!-- buster-audit-2026-09-07:x64-i128-signed-divide -->",
+      "sha256": "360b68b9d7b22eded0027fbb93f7b430f71921d141d2245727cb02bb74a8fc82",
+      "sources": {
+        "src/buster/lib/compiler/codegen/codegen.c": "3b3be0f7abe5a599161c04c0e06c3a79d47aa1dd"
+      }
+    },
+    {
+      "key": "c-float-to-integer-constant-fold",
+      "title": "c: negative floating constants fold to -1 when converted to an integer type",
+      "priority": "P1",
+      "body": "issues/c-float-to-integer-constant-fold.md",
+      "marker": "<!-- buster-audit-2026-09-07:c-float-to-integer-constant-fold -->",
+      "sha256": "bdb5265ba86193401d7a0207b332cb5d3649bce0d5076dad3015bd7158978d07",
+      "sources": {
+        "src/buster/lib/compiler/frontend/c/c_gen.c": "af0bf92839c0d0044caf0ee747623c901404e1d3"
+      }
+    },
+    {
+      "key": "c-bool-aggregate-initializer",
+      "title": "c: _Bool members in aggregate initializers keep only bit 0, and Debug aborts on valid C",
+      "priority": "P1",
+      "body": "issues/c-bool-aggregate-initializer.md",
+      "marker": "<!-- buster-audit-2026-09-07:c-bool-aggregate-initializer -->",
+      "sha256": "fc4c5de0461ba948cfbf1fc549aaea8d7cc7efb5a14570b1051abc5f22356e8f",
+      "sources": {
+        "src/buster/lib/compiler/frontend/c/c_gen.c": "af0bf92839c0d0044caf0ee747623c901404e1d3"
+      }
+    },
+    {
+      "key": "c-unsigned-to-float-constant-fold",
+      "title": "c: unsigned constants at or above 2^63 initializing a float member fold to a negative value",
+      "priority": "P1",
+      "body": "issues/c-unsigned-to-float-constant-fold.md",
+      "marker": "<!-- buster-audit-2026-09-07:c-unsigned-to-float-constant-fold -->",
+      "sha256": "358d43e8bf14a882c03760d30b7f103307c76919ea3ad269b5275c5422ce2f57",
+      "sources": {
+        "src/buster/lib/compiler/frontend/c/c_gen.c": "af0bf92839c0d0044caf0ee747623c901404e1d3"
+      }
+    },
+    {
+      "key": "c-nested-initializer-string",
+      "title": "c: a char array initialized by a string literal inside a nested initializer stores one byte",
+      "priority": "P1",
+      "body": "issues/c-nested-initializer-string.md",
+      "marker": "<!-- buster-audit-2026-09-07:c-nested-initializer-string -->",
+      "sha256": "04f557f6cab339462ca3171aa0e2229d62ab9897533a79827cc45ef221e839e8",
+      "sources": {
+        "src/buster/lib/compiler/frontend/c/c_gen.c": "af0bf92839c0d0044caf0ee747623c901404e1d3"
+      }
+    },
+    {
+      "key": "c-i128-aggregate-initializer",
+      "title": "c: 128-bit members of aggregate static initializers drop their high half",
+      "priority": "P1",
+      "body": "issues/c-i128-aggregate-initializer.md",
+      "marker": "<!-- buster-audit-2026-09-07:c-i128-aggregate-initializer -->",
+      "sha256": "26a722f3c6d18615b61b1cbf5ae55edd3aec26b5afbf8475f4463c7814c5bbe3",
+      "sources": {
+        "src/buster/lib/compiler/frontend/c/c_gen.c": "af0bf92839c0d0044caf0ee747623c901404e1d3"
+      }
+    },
+    {
+      "key": "x86-apx-evex-prefix-fields",
+      "title": "assembly: APX EVEX forms hardcode pp and vvvv, producing colliding and invalid encodings",
+      "priority": "P1",
+      "body": "issues/x86-apx-evex-prefix-fields.md",
+      "marker": "<!-- buster-audit-2026-09-07:x86-apx-evex-prefix-fields -->",
+      "sha256": "9097eadd0b8c0bd5e5f66f3c58f8ead92d9b41415333897504cd4e624a03978d",
+      "sources": {
+        "src/buster/lib/compiler/assembly/x86_64_metadata.c": "d6552e958868d2ec9007c6f3082589249dfb4958"
+      }
+    },
+    {
+      "key": "x86-evex-broadcast-disp8-scale",
+      "title": "assembly: EVEX broadcast operands use the vector-width disp8 scale, addressing the wrong memory",
+      "priority": "P1",
+      "body": "issues/x86-evex-broadcast-disp8-scale.md",
+      "marker": "<!-- buster-audit-2026-09-07:x86-evex-broadcast-disp8-scale -->",
+      "sha256": "b365945beeecb355ce56858d3289812d249a9274d9d00f64460f53db5860d1da",
+      "sources": {
+        "src/buster/lib/compiler/assembly/x86_64_metadata.c": "d6552e958868d2ec9007c6f3082589249dfb4958"
+      }
+    },
+    {
+      "key": "x86-rex2-memory-width-w",
+      "title": "assembly: REX2 forms drop W when the operand width comes only from the memory operand",
+      "priority": "P1",
+      "body": "issues/x86-rex2-memory-width-w.md",
+      "marker": "<!-- buster-audit-2026-09-07:x86-rex2-memory-width-w -->",
+      "sha256": "c6f5f5674a4c34750870aac519fd0c66012e672432d4e76bff0f923b122989d6",
+      "sources": {
+        "src/buster/lib/compiler/assembly/x86_64_metadata.c": "d6552e958868d2ec9007c6f3082589249dfb4958"
+      }
+    },
+    {
+      "key": "x86-att-s-suffix-alias",
+      "title": "assembly: the AT&T 's' suffix is treated as a generic 32-bit size suffix, so bts assembles as bt",
+      "priority": "P1",
+      "body": "issues/x86-att-s-suffix-alias.md",
+      "marker": "<!-- buster-audit-2026-09-07:x86-att-s-suffix-alias -->",
+      "sha256": "c4ffd6e125050f76b4f46912180696682ca1202bc9d1e20fa0f438b3d58ff4ba",
+      "sources": {
+        "src/buster/lib/compiler/assembly/assembly.c": "68bc277353f98e4751671bc0ce1901122a0c6001"
+      }
+    },
+    {
+      "key": "x64-i128-float-cast-unsupported",
+      "title": "codegen: x86-64 rejects __int128 to and from floating casts that AArch64 supports",
+      "priority": "P2",
+      "body": "issues/x64-i128-float-cast-unsupported.md",
+      "marker": "<!-- buster-audit-2026-09-07:x64-i128-float-cast-unsupported -->",
+      "sha256": "95e8dcfe2d7364feb6a245226ef2a69fdd7cb5192bf2135e2382beee56e092b7",
+      "sources": {
+        "src/buster/lib/compiler/codegen/codegen.c": "3b3be0f7abe5a599161c04c0e06c3a79d47aa1dd"
+      }
+    },
+    {
+      "key": "x64-atomic-16-byte-aggregate",
+      "title": "codegen: 16-byte _Atomic structs are rejected while identically laid out __int128 is accepted",
+      "priority": "P2",
+      "body": "issues/x64-atomic-16-byte-aggregate.md",
+      "marker": "<!-- buster-audit-2026-09-07:x64-atomic-16-byte-aggregate -->",
+      "sha256": "50b25ff99878b5bcb8a4f001a8ee0a2972053a4a6185d3543dc9cea47c328fdd",
+      "sources": {
+        "src/buster/lib/compiler/codegen/codegen.c": "3b3be0f7abe5a599161c04c0e06c3a79d47aa1dd"
+      }
+    },
+    {
+      "key": "release-check-macro-is-unreachable",
+      "title": "architecture: BUSTER_CHECK compiles to __builtin_unreachable in Release, so validating checks are not checks",
+      "priority": "P2",
+      "body": "issues/release-check-macro-is-unreachable.md",
+      "marker": "<!-- buster-audit-2026-09-07:release-check-macro-is-unreachable -->",
+      "sha256": "bc58b729c520c1cdf9ab5ff9fc1da04e9e67edf65caa3ceec36533f2affdc63b",
+      "sources": {
+        "src/buster/lib/os.h": "599f667fc06edb4f63f53f7ca9806889b85e9c93"
+      }
+    },
+    {
+      "key": "c-parse-initializer-infinite-loop",
+      "title": "c: eighteen bytes of malformed source hang the compiler forever",
+      "priority": "P1",
+      "body": "issues/c-parse-initializer-infinite-loop.md",
+      "marker": "<!-- buster-audit-2026-09-07:c-parse-initializer-infinite-loop -->",
+      "sha256": "e07ee25f74718939686e499bedd55eb1391d02d9fd8fd8175336c20757c7afa8",
+      "sources": {
+        "src/buster/lib/compiler/frontend/c/c_parse.c": "2eccc2bb47822efcb5a0bcf6f3c271903589d472"
+      }
+    },
+    {
+      "key": "c-parse-identifier-use-overflow",
+      "title": "c: repeated typedef-name statements write past the identifier-use array",
+      "priority": "P1",
+      "body": "issues/c-parse-identifier-use-overflow.md",
+      "marker": "<!-- buster-audit-2026-09-07:c-parse-identifier-use-overflow -->",
+      "sha256": "582280b897a580f6d51b15caca49e2da77846c9d1781a89dd01e278ae966d0b8",
+      "sources": {
+        "src/buster/lib/compiler/frontend/c/c_parse.c": "2eccc2bb47822efcb5a0bcf6f3c271903589d472"
+      }
+    },
+    {
+      "key": "c-import-once-path-unchecked",
+      "title": "c: #import writes into once_paths with no capacity check",
+      "priority": "P1",
+      "body": "issues/c-import-once-path-unchecked.md",
+      "marker": "<!-- buster-audit-2026-09-07:c-import-once-path-unchecked -->",
+      "sha256": "491a1d7f4e107642da9f3268ca7318fb6523594e19c6be3f10407b0a7d14fb07",
+      "sources": {
+        "src/buster/lib/compiler/frontend/c/c_source.c": "3d79e764d78b0ea200e456c8f868d35a7fa93c06"
+      }
+    },
+    {
+      "key": "os-write-error-counted-as-success",
+      "title": "os: a failed write(2) is counted as 18446744073709551615 bytes written",
+      "priority": "P1",
+      "body": "issues/os-write-error-counted-as-success.md",
+      "marker": "<!-- buster-audit-2026-09-07:os-write-error-counted-as-success -->",
+      "sha256": "c2da1a8400f50c8e22414fe4996a451bfbbb69bde16898556359c1e2df8c62c5",
+      "sources": {
+        "src/buster/lib/os.c": "83b07e44d7d5b50c90763741f6f19b203bd70a5d"
+      }
+    },
+    {
+      "key": "arena-commit-failure-and-granularity",
+      "title": "arena: commit failure returns a pointer into uncommitted memory, and non-granular reservations abort",
+      "priority": "P1",
+      "body": "issues/arena-commit-failure-and-granularity.md",
+      "marker": "<!-- buster-audit-2026-09-07:arena-commit-failure-and-granularity -->",
+      "sha256": "f96f951a0564abc4818139924beb78e2543d4c8e76b5cf07e9e148ae48f08dae",
+      "sources": {
+        "src/buster/lib/arena.c": "24e0ff38de66c3409292f031b4728e276b4839cb",
+        "src/buster/lib/arena.h": "6911496be28986c932884034718e65c8d8c23be3"
+      }
+    },
+    {
+      "key": "file-read-unsized-source",
+      "title": "file: a source that does not report a size reads as empty and compiles successfully",
+      "priority": "P1",
+      "body": "issues/file-read-unsized-source.md",
+      "marker": "<!-- buster-audit-2026-09-07:file-read-unsized-source -->",
+      "sha256": "2333bfd63b6776351bfb3c4943ec34fd3d39cf1abd09fab74c2935895b45c37f",
+      "sources": {
+        "src/buster/lib/file.c": "a036e23a7abf55df010a8aefcb892e015b10598b"
+      }
+    },
+    {
+      "key": "os-read-error-indistinguishable-from-eof",
+      "title": "os: a read error is reported as zero bytes, which the caller cannot distinguish from EOF",
+      "priority": "P2",
+      "body": "issues/os-read-error-indistinguishable-from-eof.md",
+      "marker": "<!-- buster-audit-2026-09-07:os-read-error-indistinguishable-from-eof -->",
+      "sha256": "7afc28dc90e77cf9721290a9d83dee64deb95d458681fa4bb9f34e02fe24f829",
+      "sources": {
+        "src/buster/lib/os.c": "83b07e44d7d5b50c90763741f6f19b203bd70a5d"
+      }
+    },
+    {
+      "key": "dwarf-ranges-double-count-base",
+      "title": "dwarf: range lists double-count the text base, so no function is findable by address",
+      "priority": "P1",
+      "body": "issues/dwarf-ranges-double-count-base.md",
+      "marker": "<!-- buster-audit-2026-09-07:dwarf-ranges-double-count-base -->",
+      "sha256": "c1acca0d525c3f306b786844e72b9feb4a2bda94429e79f816aecee11ea80b25",
+      "sources": {
+        "src/buster/lib/compiler/dwarf/dwarf.c": "9c5af5ddcdf9d57ca30dce9565117fba0b42188f"
+      }
+    },
+    {
+      "key": "codeview-fieldlist-length-overflow",
+      "title": "codeview: LF_FIELDLIST length overflows its u16 at about 2500 members",
+      "priority": "P1",
+      "body": "issues/codeview-fieldlist-length-overflow.md",
+      "marker": "<!-- buster-audit-2026-09-07:codeview-fieldlist-length-overflow -->",
+      "sha256": "09762315226a4da90e6d50aa9a8095c3b4749076662cefd5358812495f4864ff",
+      "sources": {
+        "src/buster/lib/compiler/codeview/codeview.c": "140dfcec662722e4fc643ce18379f3614dc629ef"
+      }
+    },
+    {
+      "key": "codeview-gproc32-pend-offsets",
+      "title": "codeview: S_GPROC32 pEnd offsets are computed against the wrong base after the PDB split",
+      "priority": "P1",
+      "body": "issues/codeview-gproc32-pend-offsets.md",
+      "marker": "<!-- buster-audit-2026-09-07:codeview-gproc32-pend-offsets -->",
+      "sha256": "f2717810e4113126df64caf2e34dfe6ee0cf72fae5b766782e891507cbab5818",
+      "sources": {
+        "src/buster/lib/compiler/codeview/codeview.c": "140dfcec662722e4fc643ce18379f3614dc629ef",
+        "src/buster/lib/compiler/pdb/pdb.c": "ea2a1ff6fcbe369c77bac0bd89960cc0370601ea"
+      }
+    },
+    {
+      "key": "codeview-scope-stack-quadratic",
+      "title": "codeview: the scope-walk stack is reallocated per function, giving quadratic arena growth",
+      "priority": "P2",
+      "body": "issues/codeview-scope-stack-quadratic.md",
+      "marker": "<!-- buster-audit-2026-09-07:codeview-scope-stack-quadratic -->",
+      "sha256": "b948255adfd6ae234558ec9e05ebb03eb9b3c2129bf102dbf1d743ad6f1edc9d",
+      "sources": {
+        "src/buster/lib/compiler/codeview/codeview.c": "140dfcec662722e4fc643ce18379f3614dc629ef"
+      }
+    },
+    {
+      "key": "driver-default-object-path",
+      "title": "driver: -c without -o writes the object next to the source instead of the working directory",
+      "priority": "P1",
+      "body": "issues/driver-default-object-path.md",
+      "marker": "<!-- buster-audit-2026-09-07:driver-default-object-path -->",
+      "sha256": "82606d7b92c653f2a900c90c3b6a80ca30edb2f99fbc42672c1789711d813ead",
+      "sources": {
+        "src/buster/lib/compiler/driver/driver.c": "a6f34a319aa53c794aeb85f018969cbc010c6766"
+      }
+    }
+  ],
+  "cited_file_count": 15,
+  "rebased_from": "d0ecad0ddd6ecc676e20fda5694d33176880a90b"
+}

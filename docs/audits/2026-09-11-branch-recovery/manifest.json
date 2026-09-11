@@ -1,0 +1,68 @@
+{
+  "main_sha": "cc25a0d1dba8f1c21447e3712ca5f35678012815",
+  "files": [
+    {
+      "source_commit": "ecb82ab640212d345071569a7c25e099acfcb0e4",
+      "source_path": "docs/performance-audits/2026-09-07T220133Z.md",
+      "destination": "docs/performance-audits/2026-09-07T220133Z.md",
+      "sha256": "bd01f6f71ee1f0cc683239ce585d1213082a91ab3d3b3dcf8c15eefc0a773fa0",
+      "bytes": 15819,
+      "blob": "05c4d30533409126d30bebe1bca774aa8d6e6fa9",
+      "source_branch": "audit/semantic-scaling-20260907"
+    },
+    {
+      "source_commit": "ecb82ab640212d345071569a7c25e099acfcb0e4",
+      "source_path": "tools/semantic_stress.py",
+      "destination": "docs/audits/2026-09-11-branch-recovery/semantic_stress.py.txt",
+      "sha256": "2dd251b686aa9950ba7c862d72e2abbd993fbf7684554a6413102528f381420f",
+      "bytes": 9889,
+      "blob": "1b6edf563450c3e4bbcf8d04c4d356d68b448ce4",
+      "source_branch": "audit/semantic-scaling-20260907"
+    },
+    {
+      "source_commit": "ecb82ab640212d345071569a7c25e099acfcb0e4",
+      "source_path": "tools/semantic-code.patch.gz.b64",
+      "destination": "docs/audits/2026-09-11-branch-recovery/semantic-code.patch.gz.b64.txt",
+      "sha256": "306d98eaddaed96e8824baddf15482d2f9132e0075b4c64a6fe79714f790a2c3",
+      "bytes": 5385,
+      "blob": "a3cbb4316f32acf171002dce88ccbdbb2aeab200",
+      "source_branch": "audit/semantic-scaling-20260907"
+    },
+    {
+      "source_commit": "c2dce587fb9efd06ba60b1459d2d46db8788d38d",
+      "source_path": "docs/performance-audits/2026-09-11T131903Z.md",
+      "destination": "docs/performance-audits/2026-09-11T131903Z.md",
+      "sha256": "30b5b678f26ac2891d8d5daf08df2407a236a0aa64862921547bab20dd63d1bd",
+      "bytes": 6429,
+      "blob": "4359b9e98f46f9cf2a5907f89336f19a27b577f1",
+      "source_branch": "recovery/post-139-measurement-followup-20260911"
+    },
+    {
+      "source_commit": "c2dce587fb9efd06ba60b1459d2d46db8788d38d",
+      "source_path": "docs/performance-audits/evidence/2026-09-11T131903Z/recovered-files.json",
+      "destination": "docs/performance-audits/evidence/2026-09-11T131903Z/recovered-files.json",
+      "sha256": "007cdbdbcb3f22e63d2d6fff69bc41f72164eaceae502d5664f7e29a56871212",
+      "bytes": 10295,
+      "blob": "eb33565bd4ef019f541e0ad8ba7158e7685b7ddb",
+      "source_branch": "recovery/post-139-measurement-followup-20260911"
+    },
+    {
+      "source_commit": "c2dce587fb9efd06ba60b1459d2d46db8788d38d",
+      "source_path": "docs/performance-audits/evidence/2026-09-11T131903Z/validation.json",
+      "destination": "docs/performance-audits/evidence/2026-09-11T131903Z/validation.json",
+      "sha256": "87643e0845bba9e3db9a42dfca8fbdfb8d1762e462ad755ce3cfe2b9edcc450f",
+      "bytes": 3916,
+      "blob": "66e0ec9c92d63c9c30cc3b287113db194567c900",
+      "source_branch": "recovery/post-139-measurement-followup-20260911"
+    },
+    {
+      "source_commit": "c2dce587fb9efd06ba60b1459d2d46db8788d38d",
+      "source_path": "tools/bench_pr139_simd/RECOVERY.md",
+      "destination": "tools/bench_pr139_simd/RECOVERY.md",
+      "sha256": "cf8b8f737b2e20cb77ef7d46a27737a2c97d2f364ccda32f7bc2c6abe22fb7fb",
+      "bytes": 1059,
+      "blob": "88a0448e9988d246fc80605185fa70186a65ddf5",
+      "source_branch": "recovery/post-139-measurement-followup-20260911"
+    }
+  ]
+}

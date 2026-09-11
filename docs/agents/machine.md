@@ -118,12 +118,78 @@
   parameter consumes one slot, and a hidden return pointer consumes the first.
   Pointer-sized `va_list` copies use eight bytes and `va_end` emits no write.
   Scalar and aggregate `va_arg` reads advance one slot, dereferencing indirect
-  aggregates according to the canonical ABI classification. Existing indirect
-  argument/vector signature exclusions still apply to callers.
+  aggregates according to the canonical ABI classification. Reads remain
+  limited to sixteen bytes; vector and 128-bit integer signatures remain excluded.
   Variadic callers duplicate scalar float bits into positional GPRs during the
   integer staging pass, after all XMM bridges, and omit the System V AL count.
   Cross-compiler regressions cover both call directions, register exhaustion,
   copied lists, small/indirect aggregates, and hidden result pointers.
+- Windows/UEFI x86-64 indirect aggregate arguments occupy one pointer slot.
+  Callers copy exact value bytes into storage aligned to sixteen bytes after
+  their shadow and stack-argument area; every call site reuses the maximum outgoing
+  reservation. Fixed and variadic arguments share this ABI placement. Callees
+  capture incoming register pointers before floating bridges, capture stack
+  pointers next, and materialize parameter objects after all incoming captures.
+  Parameter writes affect the private value copy. Complete outgoing sizes are
+  checked before narrowing frame displacements. Alignment requirements above
+  sixteen bytes remain outside this subset. Cross-compiler tests cover odd
+  sizes, larger aggregates, hidden returns, indirect calls, large anonymous
+  arguments, mixed floating parameters and caller-value preservation.
+- Windows/UEFI x86-64 MIR frames larger than one page reuse
+  `codegen_x64_emit_windows_stack_allocate`, the direct emitter's bounded
+  R10/R11 probe loop. RSP stays unchanged until the final allocation, so a
+  large frame requires one allocation unwind action and a bounded prologue.
+  `MachineEncodeResult.frame_allocation_offset` supplies its actual byte offset
+  to unwind construction without widening the result on 64-bit hosts.
+  Keep object creation and native Windows execution of
+  `tests/basic_c_win64_large_frame.c` covered in every allocator mode; page
+  probing must preserve all incoming argument registers and private copies.
+- AArch64 vector bodies use NEON when an exact form exists and otherwise
+  expand into scalar MIR lanes before allocation. Exact-width lane loads
+  preserve signed narrow operands; comparisons produce all-ones true lanes,
+  and floating negation toggles the sign bit. Division, remainder, shifts,
+  comparisons, 64-bit-lane multiplication and vector unary operations share
+  the scalar arithmetic rules. Keep the entire vector fixture strict in
+  MIR_STACK, FAST and QUALITY; scalar expansion must remain visible to MIR
+  validation and register allocation.
+- AArch64 128-bit multiplication combines the low-limb product, its generated
+  UMULH high half, and the two cross products. Negation propagates the low
+  limb's borrow. Variable shifts use masks at the 64-bit boundary and suppress
+  the cross term at count zero. These are scalar MIR rows, with synthesized
+  registers created at their actual defining row; creating several registers
+  ahead of their definitions publishes incorrect verifier metadata.
+  `basic_c_x86_64_i128_binary.c` and `basic_c_i128_shift_edges.c` require strict
+  MIR selection and cover product carries and counts below, at and above 64.
+- AArch64 leading/trailing-zero counts use importer-generated CLZ and RBIT
+  forms for ordinary 32/64-bit scalar rows. A 128-bit count operates on both
+  slot-backed limbs, selecting the primary limb's count or 64 plus the other
+  count with ordinary scalar MIR. Publish a zero high result limb, including
+  the direct oracle's all-zero-pair result of 128. Never truncate the operand
+  to a single limb or leave stale high result bytes. Preserve existing replay
+  opcode numbers by appending new rows. The registered zero-count fixture
+  covers every one-bit position and both frontend forms, with strict MIR
+  object checks on all three desktop AArch64 targets and native-host execution.
+  Float/i128 conversions and wide division/remainder remain separate gaps.
+- ELF/Mach-O AArch64 fixed frames are not limited by the scaled callee-save offset.
+  Above that offset's reach, the prologue and each epilogue derive the compact
+  save-area base from X29 in reserved X16, then use small unsigned offsets.
+  Module unwind construction counts both setup words and retains the actual
+  SP-relative save locations. Capacity planning includes large-offset body
+  transfers and aggregate-copy pieces; frame-size sums are checked before
+  narrowing. Keep strict large-frame and packed-layout tests in all MIR modes.
+- Windows/UEFI AArch64 MIR saves FP/LR, allocator-owned X19-X27, and X28 in
+  a compact, sixteen-aligned prefix before establishing X29. Fixed body
+  slots remain X28-relative; incoming stack arguments are relative to X29
+  plus the complete prefix size. The shared bounded Windows probe leaves
+  SP unchanged until its final allocation. Unwind actions describe every
+  prologue instruction, and every epilogue shares the unwind suffix starting
+  at SET_FP: restore SP from X29, reload X28 and allocator saves in reverse
+  order, then restore FP/LR and release the prefix. This also discards VLA
+  allocations. The native `windows_arm64_mir_unwind.c` test derives synthetic
+  boundary contexts from instruction effects and checks RtlVirtualUnwind's
+  restored registers; object-only checks are not native unwind acceptance.
+  Windows variadic signatures and calls remain explicit signature/opcode
+  misses pending their distinct integer-register and pointer-list ABI.
 - ELF AArch64 variadic definitions capture X0-X7 and Q0-Q7 into a 192-byte
   save area before argument capture. Named parameters consume their ABI's
   independent integer and floating-point register files. The existing private
@@ -154,6 +220,13 @@
   format**. Both x86 emitters use `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
   `CODEGEN_F64_SIGNED64_LIMIT_BITS`; the source width does not change which
   integer bit the final bias restores.
+- AArch64 symbol addresses on macOS/iOS use ADRP/ADD with Mach-O PAGE21 and
+  PAGEOFF12 relocations in every allocator. The selector records the page
+  reference beside the call target, and the encoder publishes both instruction
+  sites. Absolute inline pointer literals in executable text are rejected by
+  Apple's linker. Direct calls retain CALL26; ELF/PE address and TLS forms
+  retain their existing target contracts. The qualified-aggregate differential
+  corpus checks native Apple linking and execution across allocator modes.
 - `-fPIC` is a code model, not an accepted flag. It reaches code generation as
   `CodegenModuleOptions.position_independent`, and generation resolves it for
   the target: x86-64 ELF, where the relocations it changes are the ones `ld`
@@ -192,3 +265,13 @@
   link by name rather than being rewritten. It relaxes the two indirect
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`).
+
+## Incoming argument reads
+
+Both `MACHINE_X64_LOAD_INCOMING` and `MACHINE_A64_LOAD_INCOMING` declare
+`MACHINE_MEMORY_EFFECT_READ`. Their implicit frame-relative address has no
+fixed stack-slot identity, so the scheduler treats them as unknown memory and
+chains them against every pending slot access. No architecture-specific
+scheduler exception is needed. The stack-alias tests explicitly recognize
+incoming reads independently of that metadata; otherwise a missing descriptor
+bit could disappear from both the scheduler and its test oracle.

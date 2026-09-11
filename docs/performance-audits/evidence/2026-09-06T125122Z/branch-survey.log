@@ -1,0 +1,5 @@
+error: perf stat did not count instructions:u, branches:u, branch-misses:u, cycles:u; no valid survey:
+<not supported>,,instructions:u,0,100.00,,
+<not supported>,,branches:u,0,100.00,,
+<not supported>,,branch-misses:u,0,100.00,,
+<not supported>,,cycles:u,0,100.00,,

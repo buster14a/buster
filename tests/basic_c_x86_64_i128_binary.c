@@ -37,11 +37,8 @@ static U64 low_half(U128 value)
     return (U64)value;
 }
 
-// The multiply lives in its own function on purpose. AArch64 still refuses it
-// -- it needs a UMULH row, and that mnemonic has no generated form id yet
-// (#810) -- so keeping it out of `main` leaves every other check in this file
-// machine-selected on both targets, and leaves the fallback count able to say
-// so: zero on x86-64, exactly this one function on AArch64.
+// Keep multiply coverage separately observable: both selectors must select
+// this function, including the high half of the full low-limb product.
 static int multiply_checks(void)
 {
     if (high_half(make(0, 3) * make(0, 5)) != 0 || low_half(make(0, 3) * make(0, 5)) != 15)

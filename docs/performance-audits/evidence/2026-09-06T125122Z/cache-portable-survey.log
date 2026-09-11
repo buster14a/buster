@@ -1,0 +1,4 @@
+warning: load average is 1.75; miss shares from a busy machine are not comparable across runs
+error: perf stat -e {instructions,cycles,L1-dcache-loads,L1-dcache-load-misses}:u -- build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -fsource-metrics=/workspace/scratch/0194f2e71ee3/env-check/surveys/cache-portable-stage1.metrics src/buster/apps/ide/ide.c -lm -o /workspace/scratch/0194f2e71ee3/env-check/surveys/cache-portable-stage1 failed (exit 255):
+Error:
+The instructions event is not supported.

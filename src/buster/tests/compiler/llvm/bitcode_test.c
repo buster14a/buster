@@ -7,24 +7,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
 {
     UnitTestResult result = {0};
     String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
-    String8 fixtures[] = {
-        S8("tests/basic_c_llvm_scalars.c"), S8("tests/basic_c_llvm_layout.c"),
+    typedef struct LlvmBitcodeConsumerFixture
+    {
+        String8 source;
+        String8 caller;
+    } LlvmBitcodeConsumerFixture;
+    LlvmBitcodeConsumerFixture fixtures[] = {
+        {.source = S8("tests/basic_c_llvm_scalars.c")},
+        {.source = S8("tests/basic_c_llvm_layout.c")},
 #if BUSTER_CPU_ARCH_X86_64
-        S8("tests/basic_c_llvm_aggregate_abi_callee.c"), S8("tests/basic_c_llvm_aggregate_abi_caller.c"),
-        S8("tests/basic_c_llvm_vector_abi.c"),
+        {.source = S8("tests/basic_c_llvm_aggregate_abi_callee.c"), .caller = S8("tests/basic_c_llvm_aggregate_abi_caller.c")},
+        {.source = S8("tests/basic_c_llvm_aggregate_abi_caller.c"), .caller = S8("tests/basic_c_llvm_aggregate_abi_callee.c")},
+        {.source = S8("tests/basic_c_llvm_vector_abi.c"), .caller = S8("tests/basic_c_llvm_vector_abi_main.c")},
 #endif
+        {.source = S8("tests/basic_c_llvm_integer_boundary_values.c"), .caller = S8("tests/basic_c_llvm_integer_boundary_check.c")},
     };
     for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
         String8 output = buster_test_temporary_path(arena, S8("buster-llvm-consumer"), S8(".bc"));
-        String8 command[] = {S8("-emit-llvm"), S8("-o"), output, fixtures[fixture]};
+        String8 command[] = {S8("-emit-llvm"), S8("-o"), output, fixtures[fixture].source};
         CompilerDriverResult emitted = compiler_driver_execute_invocation(
             arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
         if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
         {
-            arguments->show(arguments, S8("LLVM fixture {S8}: {S8}\n"), fixtures[fixture], emitted.diagnostic);
+            arguments->show(arguments, S8("LLVM fixture {S8}: {S8}\n"), fixtures[fixture].source, emitted.diagnostic);
         }
         BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
         if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
@@ -40,9 +48,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
             compile[compile_count++] = compiler;
             compile[compile_count++] = S8("-O2");
             compile[compile_count++] = output;
-            if (fixture >= 2)
+            if (fixtures[fixture].caller.length)
             {
-                compile[compile_count++] = fixture == 4 ? S8("tests/basic_c_llvm_vector_abi_main.c") : fixtures[fixture ^ 1u];
+                compile[compile_count++] = fixtures[fixture].caller;
             }
             compile[compile_count++] = S8("-o");
             compile[compile_count++] = executable;
@@ -56,7 +64,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
                 if (compiled.result != PROCESS_RESULT_SUCCESS)
                 {
                     ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
-                    arguments->show(arguments, S8("LLVM consumer rejected {S8}: {S8}\n"), fixtures[fixture],
+                    arguments->show(arguments, S8("LLVM consumer rejected {S8}: {S8}\n"), fixtures[fixture].source,
                                     (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
                 }
                 BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);

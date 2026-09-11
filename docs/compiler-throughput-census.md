@@ -1,0 +1,159 @@
+# Z01: whole-compiler work-elimination and SIMD census
+
+Owner: [#128](https://github.com/buster14a/buster/issues/128). Selected experiment: [#248](https://github.com/buster14a/buster/issues/248). Baseline: **`ef99ec72cf0f17c8818a1d4b4c106fd5908b5eae`**. This is an algorithm/ownership inventory and an explicit measurement ledger, **not a completed current-main hot-path profile or a Zen 5 speedup claim**.
+
+## Evidence and scope
+
+The current `AGENTS.md`, SIMD, parallelism, benchmarking, frontend, build, testing and pipeline contracts were inspected. The newest baseline audit is [2026-09-09T163649Z](performance-audits/2026-09-09T163649Z.md): an Intel-host AArch64 variadic correctness repair, not a Zen 5 census. The implementation remains C-only, with canonical IR as the shared authority, 64-byte canonical rows and 24-byte machine rows. No GPU offload, additional IR, permanent projected function stream or replacement measurement harness is proposed.
+
+Source inspection used a tracked-source archive from [CI run 34362779218](https://github.com/buster14a/buster/actions/runs/34362779218), artifact 10108530540, exporting `bf9afdbe886821aecc9be787075b7cb84c9bdcd1`. Its downloaded zip SHA-256 is `a52aa577f7d225abe5795c2744b225a0ffaee464b613720cf69f56728d77b323`. The GitHub comparison to the baseline contains two commits and 30 changed paths. All selected frontend/header/test and throughput files are unchanged in that comparison. New backend work was reconciled with the current audit and PR history; this is not a claim that every changed backend line or every historical discussion was exhaustively reviewed. No local compiler build or test was run.
+
+Open issues were requested with 100 entries per page through the empty third page; open PRs through the empty second page. Large issue responses were truncated. Targeted all-state searches included diagnostic storage, allocation, frontend scans, selection, scheduling and existing performance experiments. PR #357's shared frontend-test diff was read; its conditional-arithmetic additions are disjoint from this change. The other initially open PR, #362, concerns Win64 lowering/frames. #248 had no earlier comments when selected. This is **partial historical retrieval**, not proof that every issue comment/review was searched. Recheck ownership before each implementation.
+
+Historical Forgejo references are interpreted only through [the migration map](issue-migration-map.md): for example old #586 is GitHub #33, #587 is #34, #601 is #46 and #616 is #61. Current GitHub numbers are never remapped.
+
+### Measurement vocabulary
+
+**H** below means a historically measured symbol, not a current hot-symbol assertion. Other symbols identify production entry points/algorithms inspected in source. **U** means unavailable: for every stage, current-main wall-time share, executed population/histogram, physical bytes moved, branch-miss rate, PMU samples and verified physical Zen 5 measurements are U unless an attached experiment explicitly supplies them. A static upper bound, row size, allocation request or old workload count is not a replacement for those fields.
+
+Opportunity classes: **D** delete work; **L** improve layout/indexing; **B** scalar bitset/batching; **V** SIMD batch; **S** retain serial or sparse logic. Classification of an opportunity does not mean it is profitable. Ordinary predictable branches must be measured rather than replaced by assumption.
+
+## Historical quantitative ledger, kept separate from current acceptance
+
+[2026-09-07T013544Z](performance-audits/2026-09-07T013544Z.md) reports a frozen `7ba25400` tree on a Sapphire Rapids guest. Its main table uses **inclusive Callgrind Ir**, with AVX-512 disabled in the counted binary. Callgrind expands ERMS operations differently from retired hardware instructions. Neither these shares nor the old instruction totals are current wall-time shares.
+
+| Historically measured stage | Inclusive Ir share | Population or subwork recorded in that audit |
+|---|---:|---|
+| H `c_lower_to_ir` | 40.7% | `c_ir_lower_body` 2,264 million Ir; `c_ir_global_initializer` 1,292 million Ir |
+| H `codegen_generate_canonical_module` | 26.2% | Includes the following allocator/selector/encoder/line-mark rows; do not add them again |
+| H `machine_fast_placement_build` | 9.3% | Per selected function |
+| H `machine_select_canonical_function_x86_64` | 6.7% | Per canonical function |
+| H `machine_encode_x86_64` | 5.8% | Per allocated function |
+| H `codegen_record_machine_line_marks` | 2.0% | Debug/source provenance |
+| H `c_analyze_semantics` | 14.6% | `c_parse_infer_file_array_bounds`: 492 million Ir in one call |
+| H `c_preprocess`, including lexing | 13.5% | 29,507,706 lexed bytes; 323 files, 292 unique; 2,854,211 lexed and 3,183,715 preprocessed tokens |
+| H `c_parse_ast` | 2.0% | Syntax scan, not the entire C frontend |
+| Link | 1.1% | Link workload in this frozen compiler compilation |
+| H `dwarf_build` | 1.0% | Debug information enabled in that workload |
+
+The same audit records 286,263 delimiter queries visiting 13,093,107 tokens, only 1,724,513 of them delimiters. That is evidence for classification plus sparse-mask consumption on that workload, not an instruction-throughput prediction for a different CPU. Later direct-SSA and member-lookup changes make extrapolation to current main particularly unsafe.
+
+For a **measured current wall-time** fraction `p` and speedup `s` of precisely that work, the ideal whole-compiler speedup is `1 / (1 - p + p / s)`, before new classification/packing/teardown costs. If added work costs fraction `h` of baseline time, the denominator becomes `1 - p + p / s + h`. With `p` currently U, there is no numeric end-to-end latency bound to advertise. Eliminating all syntax parsing could at most remove its historical 2% of that particular Ir total; lazily allocating one array cannot claim the whole phase, and this is not a 2% wall-time prediction.
+
+## Stage and algorithm map
+
+Source paths in this section are relative to `src/buster/lib/compiler/`. Each row identifies the population and traffic that must be counted, the serial constraints, the existing acceleration and the owning effort. The U rule above applies individually to each row.
+
+| Stage / production symbols | Population, traffic and repeated work to census | Independence, branch and batching constraints | Existing acceleration / candidate class / ownership |
+|---|---|---|---|
+| Input and invocation: `driver/driver.c`, `compiler_driver_execute_invocation`, `compiler_driver_execute_c_single` | Input files, mapped/read bytes, include opens, arguments, output writes; distinguish unique from repeatedly lexed source | File errors, ordered options and artifact publication remain serial; translation units can be independent after readiness barriers | Mapping and prewarming already exist. D/L before V; TU parallelism [#53](https://github.com/buster14a/buster/issues/53), contracts [#90](https://github.com/buster14a/buster/issues/90) |
+| Translation: `frontend/c/c_source.c`, `c_translate_source`, `c_translate_plain_run_end_*` | Plain byte runs, CR/newline/splice/trigraph events, copied bytes, checkpoint stores, logical tails | Batch ordinary bytes; state transitions and logical source positions constrain boundaries | Fused AVX-512 classify/copy plus scalar/SWAR paths already exist; V only after charging setup/tails. Self-host guard work [#297](https://github.com/buster14a/buster/issues/297) |
+| Lexing: `c_lex_compact`, `c_lex_scan_one`, `c_identifier_run_end`, `c_literal_plain_run_end` | 64-byte windows, produced tokens, deferred suffixes, fallback calls and stop-distance histograms, rescanned bytes | Item-aligned windows and quote/comment state; short or immediate-stop fallbacks are not full-source populations | Existing compact SIMD classification and scalar fallback. D mask reuse before another V scan; [#352](https://github.com/buster14a/buster/issues/352), literal decoding [#57](https://github.com/buster14a/buster/issues/57) |
+| Preprocessing: `c_preprocess`, `c_preprocess_expand`, `c_preprocess_process_expanded_line` | Input/output/expanded tokens, range views, nodes, spelling bytes, rescans, include-cache hits, active vs skipped directives | Expansion/rescan order, macro disabling, paste/stringize and provenance prohibit speculative execution or arbitrary token reorder | Range-backed storage and token-class masks already exist. D/L/B/V remaining consumers [#51](https://github.com/buster14a/buster/issues/51), [#60](https://github.com/buster14a/buster/issues/60); short-circuit correctness is PR #357, not this experiment |
+| Interning: `c_symbols_intern_tokens`, `c_symbol_intern` | Identifier lanes, distinct symbols, hashes/probes, copied spelling bytes, hit/miss distributions | Classification/hash preparation can batch; publication must preserve stable symbol identity and collision handling | Shape-sidecar identifier filtering already exists. D/L/B before hash-loop V; reuse [#128](https://github.com/buster14a/buster/issues/128), no new hash-table epic |
+| Syntax: H `c_parse_ast`, `c_parser_diagnostic` | Tokens, declarations, delimiter depth, reused body frames, zero/nonzero diagnostic populations; `(N+1)*sizeof(CDiagnostic)` logical reservation at baseline | Delimiter nesting and ordered diagnostic publication remain serial; clean-path diagnostic storage can disappear entirely | Body frames are already depth-sized/reused (PR #327). Selected D under [#248](https://github.com/buster14a/buster/issues/248), not a vectorized parser |
+| Semantic census and scope/binding: H `c_analyze_semantics`, `c_parse_token_census`, `c_parse_binding_bind` | Shape scans, declarations, scope queries, undo-log comparisons, fresh vs shadowed names, table occupancy | Token classification is independent; scope publication/unwind and declaration order are not | SIMD census and indexed scope lookup already exist. D/L fresh-name undo searches [#302](https://github.com/buster14a/buster/issues/302); preserve #244's scope repair |
+| Semantic aggregate/type queries: `c_parse_aggregate_lookup`, `c_parse_types_compatible` | Tags/scopes, index saturation, fallback type-table visits, repeated type-pair DAG visits, rollback misses | Batch immutable queries only with complete scope/qualifier/rollback keys | L grow/index aggregate tags [#291](https://github.com/buster14a/buster/issues/291); memoized bounded compatibility [#241](https://github.com/buster14a/buster/issues/241). Member-search scratch/cache work #295 has already landed |
+| Constant expressions and initializers: `c_parse_validate_constexpr_declaration`, H `c_parse_infer_file_array_bounds` | Per-declaration clear sizes, touched identifiers, initializer designators, literal element scans, inferred-bound rewalks | Typed evaluation, diagnostics and invalid arithmetic must remain lazy and ordered; classify candidates before evaluating | D/B sparse touched-state [#259](https://github.com/buster14a/buster/issues/259); established literal/delimiter kernels are controls, not missing SIMD |
+| Type/layout/ABI interning: `ir/ir.c`, `ir_type_abi_value` and per-convention ABI contexts | Type IDs, layout changes, cold classifications vs warm cache queries, ABI use/convention keys, scratch retained/cleared | Independent immutable type facts may batch; layout mutation invalidates dependent cache entries; lane prewarm precedes readers | Existing per-convention authority and recovered ABI scratch work. D/L residual warm-query work [#279](https://github.com/buster14a/buster/issues/279); do not duplicate ABI truth |
+| Canonical construction: `frontend/c/c_gen.c`, H `c_lower_to_ir`, `c_ir_lower_body`, `c_ir_global_initializer` | Expressions, values, blocks, canonical rows, operand pools, token-range rewalks, initializer bytes; distinguish bodies from globals | Independent functions after shared publication; expression side effects, short-circuiting and source/debug ownership constrain batching | Direct frontend SSA has landed (#34/PR #317). D repeated queries and discarded rows before V; [#306](https://github.com/buster14a/buster/issues/306), [#56](https://github.com/buster14a/buster/issues/56) |
+| Addressable-place lowering: `c_ir_recover_memory_place_from_value` | Calls, emitted then retracted LOAD/ATOMIC_LOAD rows, repair walks, recovery-family histogram | Preserve volatile/atomic access, bit-fields, labels and single evaluation; batch classification is not permission to evaluate both paths | D explicit place demand for one family [#306](https://github.com/buster14a/buster/issues/306); no new IR and no widening hot rows |
+| Publication, CFG and canonical passes: `ir/ir_promote.c`, `ir_prepare_canonical_module`; `ir/ir.c` validation | Rows/values/blocks/edges, predecessor rebuilds, validation passes, promoted locals, rewrite maps, certificate invalidation | Dense ID scans may batch; graph/worklist dependencies and post-mutation checks remain explicit | D/L/B publication [#38](https://github.com/buster14a/buster/issues/38), bounded passes [#40](https://github.com/buster14a/buster/issues/40), certificate checks [#294](https://github.com/buster14a/buster/issues/294). Do not remove checks to get a speedup |
+| Syntax-only policy: `compiler_driver_execute_c_single`, `c_analyze_with_options` | Canonical rows/bytes allocated for syntax-only requests; lowering-only diagnostics still required | This is a phase-ownership/semantic change, not a representation-only shortcut | D [#292](https://github.com/buster14a/buster/issues/292) after moving all required checks; historical temporary gains are not current acceptance |
+| Selection/legalization: H `machine_select_canonical_function_x86_64`, `machine_a64_select_instruction`, `machine_select.c` facts | Canonical rows, opcode distribution, values/local facts, per-function clearing, ABI sequences and discarded fallback attempts | Classify immutable value/opcode facts in batches; target switches remain authoritative and complex ABI paths stay separate | Declarative matcher removal already landed (PR #269). D/L/B facts [#132](https://github.com/buster14a/buster/issues/132); fallback retirement [#36](https://github.com/buster14a/buster/issues/36) is active correctness work |
+| MIR builder publication: `machine_stream_materialize`, `machine_function_builder_finish` | Empty/single/multichunk streams, copied 24-byte rows and operand data, padding and retained scratch | Flatten each authoritative stream once; alias only when ownership/lifetime permits; do not retain a duplicate full-function stream | D/L builder lifetime work under [#128](https://github.com/buster14a/buster/issues/128); old copy counts are not proof that a current copy can be removed |
+| Parameter edges/remapping: `machine_function_split_parameter_edges`, `machine_function_parameter_edge_target` | Blocks B, edges E, parameter-copy edges, remap requests, full-edge scan iterations; inspect B*E and request*E components | Stable edge/block order, duplicate switch targets, labels, debug remaps and parallel-copy identity must survive indexing | L/B [#296](https://github.com/buster14a/buster/issues/296). Distinct from the allocator CSR already delivered through #122/PR #262 |
+| MIR stack placement and FAST prepass: `machine_stack_placement_build`, `machine_fast_prepass_build` | Vregs, operands, uses, CFG edges, stack homes, liveness touches and placement edits | Per-value classification independent; edge parallel copies, fixed/tied operands and lifetime boundaries are not | Compact 16-byte `MachineOpcodeRow` already exists. D/L/B [#122](https://github.com/buster14a/buster/issues/122), [#131](https://github.com/buster14a/buster/issues/131); no blanket allocator SIMD rewrite |
+| FAST placement and edits: H `machine_fast_placement_build`, `machine_fast_sort_edits` | Owner probes/masks, pressure, spills/reloads, edit counts and key ranges, ordered-stream/duplicate density, merge-copy bytes | Tiny/sparse streams should retain cheap scalar paths; stable equal-point edit order is required | Owner-mask work #130/PR #135 already exists. D/L/B stable sorting experiment [#351](https://github.com/buster14a/buster/issues/351); radix is not accepted on kernel-only evidence |
+| QUALITY placement: `machine_quality_placement_build` | Candidate count/cap hits, region visits, intervals, traffic counters, scratch pages and rejected probes | Bounded deterministic selection, call clobbers and regional legality; source-order bias and overflow are separate policy defects | D/L/B [#125](https://github.com/buster14a/buster/issues/125). #298/#311/#312/#313 change arithmetic or allocation policy: generated-code quality does not establish compiler-throughput benefit |
+| Scheduling: `machine_schedule_function`, `machine_schedule_block_excess`, ready-queue helpers | Rows, units, dependence edges, use/def derivations, ready-set size, per-class pressure, queue probes | Batch ready-candidate classification; memory/volatile/atomic/implicit/mutable-value dependencies remain ordered | Once-per-candidate queue growth work #87 already landed. D reused facts then B/V [#133](https://github.com/buster14a/buster/issues/133); preserve source-order fallback and bounded scratch |
+| Native encoding: H `machine_encode_x86_64`, AArch64 encoder, shared target encoding metadata | Instruction/form counts, metadata loads, exact-cost queries, edit merges, output bytes, relocations and homogeneous-run lengths | Only consecutive compatible runs may batch; byte offsets, relaxation, relocations and edit order are stable outputs | D/L exact-form work [#124](https://github.com/buster14a/buster/issues/124); V homogeneous runs [#59](https://github.com/buster14a/buster/issues/59). Encoding-authority unification #267 has multiple landed slices |
+| Assembly input/output: `compiler_driver_execute_assembly_source`, object assembly relocation helpers | Mnemonics/operands, encoding lookups, symbols, relocations, repeated next-relocation searches, printed bytes | Independent classification helps; labels, relocation offsets and source order constrain compaction | L indexed assembly printing [#116](https://github.com/buster14a/buster/issues/116); reuse shared encoders rather than another bit packer |
+| Object readers/writers: `object_read_*`, `object_write`, `object_write_elf64`, `object_write_coff`, `object_write_mach_o64` | Sections, symbols, relocations, bounds checks, sorted/indexed lookups, copied payload and zeroed padding bytes | Independent validation/classification can batch, but offsets/addends/formats and publication failure semantics remain authoritative | D/L before V; do not disturb current #355/#347/#363 interoperability work. Required serialized bytes are not redundant work |
+| Source/debug model: `debug_model_build`, `debug_variable_add_location`, H `codegen_record_machine_line_marks` | Sources/types/locals, locations, line rows, repeated lookup/sort work, debug-enabled vs -g0 populations | Stable location ranges, duplicate line rows and zero-row lowering matter; build only required debug output | Existing debug location bucket index already removed a proposed CSR need. L sorting/indexing [#103](https://github.com/buster14a/buster/issues/103), [#104](https://github.com/buster14a/buster/issues/104) |
+| Debug serialization: H `dwarf_build`, CodeView and PDB byte writers | Debug sections, records, string/type lookups, emitted/zero-filled bytes, patch operations and retained buffers | Bounded checked writers; format layouts, patch bounds and exact output remain separate from a common substrate | D/L bounded CodeView/PDB experiment [#314](https://github.com/buster14a/buster/issues/314); price complete debug emission, not only append throughput |
+| Archive selection: `compiler_driver_archive_member_needed`, `object_archive_read` | Members, member definitions, selected/unresolved symbols, fixed-point rounds and nested comparison counts | Preserve command-line archive order, weak/strong policy, duplicate definitions and cyclic dependencies | L/B symbol-to-member index plus unresolved worklist [#293](https://github.com/buster14a/buster/issues/293); preserve weak-symbol repairs #226/PR #243 |
+| Linking: `link_objects`, ELF/PE/Mach-O layout and relocation paths | Objects, sections, symbols, aliases, output bytes, copy/zero traffic and relocation patches | Classification/layout can batch; final offsets and ordered binding remain serial dependencies | D/L [#117](https://github.com/buster14a/buster/issues/117) and existing linker efforts; single-object output aliasing still requires a valid ownership contract |
+| Diagnostics/artifact completion: `c_parser_diagnostic`, semantic diagnostic builder, `compiler_driver_publish_c_diagnostics` | Successful invocations vs errors, cold rows/strings, retained provenance, formatting and failed-write paths | Preserve exact order and lifetime; rare diagnostics are not a reason to speculate invalid arithmetic or unsafe accesses | D selected #248 only; driver diagnostic publication/provenance work PR #328 already landed. Semantic diagnostic array remains separate and unchanged |
+| Other canonical consumers: `wasm/wasm.c`, `ebpf/ebpf.c`, `llvm/bitcode.c` | Canonical rows, symbol/signature queries, CFG restructuring, LEB/bitstream bytes and relocation data, by target | Measure separately from native compilation; unsupported capabilities must remain explicit errors | D/L repeated eBPF symbol lookup [#168](https://github.com/buster14a/buster/issues/168). No additional IR or GPU framework; external GPU tool time is a separate orchestration subject |
+| Across functions/TUs and repeated invocations: persistent lanes, `compiler_prewarm` | Lane occupancy, task sizes, per-lane scratch peaks, readiness costs, duplicate immutable queries, serial flatten/merge cost | Prewarm serially, publish ready last, then run persistent lanes; one-lane uses the same worker path; no concurrent mutation of shared IR/type caches | D/L/B parallelism [#53](https://github.com/buster14a/buster/issues/53), [#54](https://github.com/buster14a/buster/issues/54); self-built compiler [#61](https://github.com/buster14a/buster/issues/61) remains a separate subject |
+
+## Negative results and completed work are part of the map
+
+Do not retry these without a material change of premise and a new full-compiler comparison:
+
+* The historical 8-byte delimiter scan lost 13.8 million Callgrind Ir; short ranges made setup more expensive than the predicted row loop. The exact-lane zero-byte test must not be replaced by a borrow-propagating detector.
+* The encoder metadata projection lost 0.97 million instructions on its old workload: approximately 126 touched registry rows were already resident, and the new path added a second lookup.
+* Macro-expander per-push foreign-byte accounting lost 20.8 million instructions; replacing short spelling copies with `memcpy` lost another 3.6 million. The removed scan/copy alone did not price altered inlining.
+* The old FAST edge-index experiment saw zero edges in its corpus. That is not a universal rejection now that block parameters have changed the population, and it is not permission to duplicate the CSR already landed in PR #262.
+* Branchless source-checkpoint lookup lost 3.05 million instructions without changing branch misses. A debug-location CSR was unnecessary after the existing bucket index reduced searches to about 0.7 steps/call.
+* #351's large radix microbenchmark does not erase its small-stream GCC regression. #352's AVX2 fallback scans lost on immediate-stop and short-EOF cases. Functions named AVX2 in that historical lab could still contain AVX-512 under global native flags: inspect emitted instructions, not names.
+
+Sources: [Sep 6 audit](performance-audits/2026-09-06T161430Z.md), [Sep 7 audit](performance-audits/2026-09-07T013544Z.md), [parallelism guide](agents/parallelism.md), #351 and #352. These are old measured losses, not fresh experiments in this change.
+
+## Dependency-ordered implementation map for #128
+
+1. **Evidence/ownership first:** use the landed native throughput harness and allocation observer (#46, PRs #338/#349); preserve baseline/candidate input hashes and output identity. #345 adds missing process diagnostics and #346 adds optional macro/aggregate inputs without a second launcher. Obtain current phase shares, histograms and actual hardware identity before globally ranking wins.
+2. **Bounded clean-path deletion:** selected #248 first-error syntax allocation. It removes a proven unused logical reservation with a narrow correctness surface. It is a useful unclaimed slice in the retrieved ownership set, **not the proven highest-value Zen 5 optimization**. Keep its acceptance draft until measurements and gates complete.
+3. **Remove algorithmic rescans:** #302 fresh-name undo searches, #291 tag saturation, #241 repeated compatibility DAGs, #259 sparse constexpr state, #296 MIR edge remapping and #293 archive extraction. Preserve their existing owners and semantic tests; operation-count scaling precedes SIMD prototypes.
+4. **Attack the historically large lowering population:** census #306's discarded loads/repairs and remaining token-query duplication; build #292's complete semantic-only contract before skipping lowering. Direct SSA and member scratch work already landed and are baseline, not new opportunities.
+5. **Then compact/batch hot backend work:** #132 facts, #125 bounded QUALITY scratch, #133 use/def reuse, #124 encoding cost, #351 stable edits. Compare improved scalar/bitset controls with AVX2/AVX-512 only where real populations repay classification, packing, remapping, tails and teardown. #59 requires real compatible runs.
+6. **Parallelize only published independent work:** #53/#54 after ownership, invalidation, scratch and output determinism are established. #297/#61 self-host SIMD/parity is separate from trusted Clang-built throughput.
+
+## Selected #248 experiment and predeclared acceptance
+
+Baseline `c_parse_ast` allocates `(token_count + 1)` syntax diagnostic rows even on successful input. The candidate threads the existing arena into the private three-call-site `c_parser_diagnostic` helper and materializes that same bounded contiguous array on the first error. It does not add growth, change row/capacity layout, change semantic diagnostics, modify the error cap or add a SIMD primitive. With zero errors, the eliminated request is exactly `(token_count + 1) * sizeof(CDiagnostic)` logical bytes; alignment/commit/RSS/time are separate measurements.
+
+Regression coverage lives in `c_test_parser_diagnostic_storage` and the existing `c_test_parser_body_frame_storage`: clean empty/declaration/function inputs; null/no-token guards; 1/16/17/64/257 ordered errors; truncated declaration/body; retained kinds/messages/locations and semantic handoff alias/lifetime. The existing many-function allocation bound is tightened, not relaxed. CI runs tests-only against the old implementation before candidate validation.
+
+Correctness budget: exact compiler outputs for the representation-only change, unchanged diagnostics, all supported modes (`none`, `mir-stack`, `fast`, `quality`), full Release, strict sanitizers, platform matrix and before/after self-host checks. Memory budget: no additional retained diagnostic rows on error and no diagnostic storage on success; record actual RSS independently. No hot-row widening or additional ISA requirement is allowed. Code-size delta must be recorded, not assumed zero. No speedup is accepted solely from the missing allocation or a microbenchmark.
+
+[CI experiment 34423619331](https://github.com/buster14a/buster/actions/runs/34423619331) publishes verified source independently of its transport branch, then runs baseline/candidate checks with one build/test/matrix worker. The transport is not part of the implementation PR. All results remain pending until the exact run/check reports them; a successful publication job is not a compiler test pass.
+
+The ordinary `Compiler throughput` PR workflow supplies the representative native CI guard; the experiment's smoke comparison is supplementary, not a substitute. Both use the existing C launcher. Use the same immutable generated corpus, compiler flags, dialect/ABI and output path policy; generated-program runtime is not measured as compiler throughput.
+
+For physical acceptance, run the existing paired protocol on a **verified exact Zen 5 model**, then separately on Zen 4. Record OS, compiler, microcode, CPUID/OS vector-state eligibility, affinity, SMT state, flags, input/binary hashes, both rounds' raw paired samples, uncertainty, phase/whole-compiler times, work-normalized counters, memory and disassembly. Cross-check each emitted instruction against AMD's optimization documentation for that processor. Physical Zen 5 access and that instruction-specific verification were not established here; no generic four-instructions-per-cycle claim is made. Hosted VM or unavailable PMU values must stay explicitly unavailable.
+
+Example existing entry points, to run in CI/eligible measurement lanes rather than a local build in this task:
+
+```sh
+./build.sh bench_throughput self-test
+./build.sh bench_throughput run --baseline /base/ide --candidate /candidate/ide \
+  --output build/z01-paired --profile ci --mode all --cpu auto \
+  --baseline-id BASE_SHA --candidate-id CANDIDATE_SHA --require-identical-output
+./build.sh bench_throughput compare --output build/z01-paired
+# Optional PMU and allocation runs use the same launcher, separately:
+./build.sh bench_throughput run --baseline /base/ide --candidate /candidate/ide \
+  --output build/z01-pmu --cpu auto --pmu --require-identical-output
+```
+
+The source-metrics allocation snapshot and exit census have different boundaries. Follow [allocation-census.md](allocation-census.md): requested bytes, padding, zero-requested and zero-written are distinct; none is RSS or physical bandwidth. An instrumented compiler is never the timing/RSS subject.
+
+## Publication-time ownership update
+
+After the initial inventory, PR #372 added `c_parser_validate_integer_token`,
+which calls `c_parser_diagnostic`. Its parser/header/frontend-test patches and
+empty discussion were read before this documentation publication. The two
+changes are compatible but need an explicit integration edit: thread the
+existing `Arena*` through the new validator and both syntax-walk call sites,
+then forward it to `c_parser_diagnostic`. Retain the integer diagnostic identity,
+both regression helpers and both registrations. Both PRs insert a helper after
+`c_test_parser_body_frame_storage`, so a textual conflict is possible even
+though the assertions test different contracts. Do not drop either helper or
+restore eager storage to resolve that conflict. No change to PR #372's branch
+is made here; the combined revision still needs all checks.
+
+PR #370 adds qualified-parameter coverage in the shared frontend test file.
+PR #371 owns the more detailed canonical-pass prerequisite map and cleanup
+work counters; reuse its `docs/middle-end-pass-map.md` when integrated rather
+than creating another middle-end measurement stack. PR #369 extends the
+machine-metadata ownership map. The other newly opened PRs #364-#368 concern
+bootstrap, workflow, metamorphic, PIC-fixture and unwind work. These ownership
+notes are a snapshot, not locks or assertions that future changes are disjoint.
+
+The first docs publication, run 34424310196, stopped on the existing audit
+checker error: `2026-08-24T131821Z` does not open with its ID and a parenthetical.
+The later publication records the baseline checker result and keeps the strict
+checker as a failing post-publication gate. It does not modify the old immutable
+audit or call the repository-wide check green. Documentation can be reviewed
+while that pre-existing failure remains explicit.

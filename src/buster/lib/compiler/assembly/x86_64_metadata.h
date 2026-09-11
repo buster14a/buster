@@ -1025,8 +1025,8 @@ struct BusterX86MetadataCoverageAuditResult
 // Decodes and validates the generated tables on the calling thread.  The
 // per-form caches over them -- normalized row, pattern semantics, operand
 // views, derived facts -- fill on the first use of each form, and every such
-// fill checks BUSTER_CHECK_SERIAL_INITIALIZATION: the compiler is serial end
-// to end, so a compile prepares only the few hundred forms it reaches.  A
+// fill checks BUSTER_CHECK_SERIAL_INITIALIZATION: a serial compile prepares
+// only the few hundred forms it reaches. The opt-in parallel driver or a
 // caller about to run a gang whose lanes may query any form prepares them all
 // with buster_x86_metadata_prewarm_all_forms first; a gang that reaches an
 // unprepared form is reported by that check rather than left to race.  Later
