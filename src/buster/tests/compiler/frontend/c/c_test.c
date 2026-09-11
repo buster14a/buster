@@ -1,6 +1,7 @@
 #include <buster/tests/compiler/frontend/c/c_test.h>
 #include <buster/lib/time.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
+#include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResult* outer_result, CLexResult lex, u64 index, CTokenKind kind, String8 spelling)
@@ -1118,6 +1119,115 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parse_storage_growth(UnitTestArguments
         }
     }
     scratch_end(parse_growth_temporary);
+    return result;
+}
+
+// Exercise the actual binder with increasingly many unrelated live undo
+// records. A timing threshold would be noisy; the returned search cursor is
+// an exact operation count. The ordinary parser/driver tests below separately
+// exercise real source, diagnostics, lowering and executable semantics.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fresh_binding_publication(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 counts[] = {0, 1, 4, 16, 64, 256, 1024, 4096, 16384};
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(counts); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        u32 count = counts[case_index];
+        u32 capacity = count + 3;
+        CParseResult parse = {
+            .arena = temporary.arena,
+            .binding_by_symbol = arena_allocate(temporary.arena, CEntityId, capacity),
+            .binding_undo = arena_allocate(temporary.arena, CParseBindingUndo, capacity),
+            .binding_scope = {.value = 1},
+            .binding_capacity = capacity,
+            .binding_undo_capacity = capacity,
+        };
+        memset(parse.binding_by_symbol, 0xff, sizeof(*parse.binding_by_symbol) * capacity);
+        u64 position = temporary.arena->position;
+        u64 fresh_scans = 0;
+        for (u32 symbol = 1; symbol <= count; symbol += 1)
+        {
+            fresh_scans += c_test_parse_binding_bind(&parse, (CScopeId){.value = 0}, (CEntityId){.value = symbol}, symbol);
+            BUSTER_TEST(arguments, parse.binding_by_symbol[symbol].value == symbol);
+            BUSTER_TEST(arguments, parse.binding_undo_count == symbol - 1);
+            BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, parse.binding_scope, (CEntityId){.value = capacity + symbol}, symbol) == 0);
+        }
+        BUSTER_TEST(arguments, fresh_scans == 0);
+        BUSTER_TEST(arguments, parse.binding_undo_count == count);
+
+        // Put the genuinely shadowed name after every unrelated record.
+        // Publishing it must update the oldest record, not the current slot
+        // or the newer record that restores the intervening block's binding.
+        u32 shadow_symbol = count + 1;
+        CEntityId file_entity = {.value = capacity * 3};
+        CEntityId outer_entity = {.value = capacity * 3 + 1};
+        CEntityId inner_entity = {.value = capacity * 3 + 2};
+        CEntityId replacement = {.value = capacity * 3 + 3};
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, (CScopeId){.value = 0}, file_entity, shadow_symbol) == 0);
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, parse.binding_scope, outer_entity, shadow_symbol) == 0);
+        parse.binding_scope.value = 2;
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, parse.binding_scope, inner_entity, shadow_symbol) == 0);
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, (CScopeId){.value = 0}, replacement, shadow_symbol) == count + 1);
+        BUSTER_TEST(arguments, parse.binding_by_symbol[shadow_symbol].value == inner_entity.value);
+        BUSTER_TEST(arguments, parse.binding_undo[count].previous.value == replacement.value);
+        BUSTER_TEST(arguments, parse.binding_undo[count + 1].previous.value == outer_entity.value);
+        c_test_parse_binding_unwind(&parse, count + 1);
+        parse.binding_scope.value = 1;
+        BUSTER_TEST(arguments, parse.binding_by_symbol[shadow_symbol].value == outer_entity.value);
+        c_test_parse_binding_unwind(&parse, count);
+        BUSTER_TEST(arguments, parse.binding_by_symbol[shadow_symbol].value == replacement.value);
+
+        // A bound file-scope name with no active shadow still takes the
+        // unchanged full search. Fresh publication is the only shortcut.
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, (CScopeId){.value = 0}, file_entity, shadow_symbol) == count);
+        BUSTER_TEST(arguments, parse.binding_by_symbol[shadow_symbol].value == file_entity.value);
+        c_test_parse_binding_unwind(&parse, 0);
+        BUSTER_TEST(arguments, parse.binding_undo_count == 0);
+        for (u32 symbol = 1; symbol <= count; symbol += 1)
+        {
+            BUSTER_TEST(arguments, parse.binding_by_symbol[symbol].value == symbol);
+        }
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, (CScopeId){.value = 0}, replacement, 0) == 0);
+        BUSTER_TEST(arguments, parse.binding_by_symbol[0].value == C_ID_UNDERLYING_INVALID);
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, (CScopeId){.value = 0}, replacement, capacity) == 0);
+        BUSTER_TEST(arguments, temporary.arena->position == position);
+        scratch_end(temporary);
+    }
+
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 source = S8("int f(void) {\nextern int fresh_a(void);\nextern int fresh_b(void);\nreturn 0;\n}\n"
+                        "int g(void) { extern int fresh_a(void); return 0; }\n");
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    CEntityId fresh = c_parse_lookup_entity(&parse, (CScopeId){.value = 0}, S8("fresh_a"));
+    BUSTER_TEST(arguments, fresh.value < parse.entity_count);
+    if (fresh.value < parse.entity_count)
+    {
+        BUSTER_TEST(arguments, parse.entities[fresh.value].kind == C_ENTITY_FUNCTION);
+    }
+    scratch_end(temporary);
+
+    temporary = scratch_begin(0, 0);
+    source = S8("int f(void) {\nextern int fresh_a(void);\nint duplicate;\nextern int duplicate(void);\nreturn 0;\n}\n");
+    preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    parse = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count != 0);
+    bool redefinition = false;
+    for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+    {
+        CDiagnostic diagnostic = parse.diagnostics[diagnostic_index];
+        if (diagnostic.kind == C_DIAGNOSTIC_REDEFINITION)
+        {
+            redefinition = true;
+            BUSTER_TEST(arguments, diagnostic.location.line == 4);
+        }
+    }
+    BUSTER_TEST(arguments, redefinition);
+    scratch_end(temporary);
     return result;
 }
 
@@ -14670,6 +14780,123 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* argument
     return result;
 }
 
+// A leaf query must not acquire storage proportional to unrelated types. Dirty
+// high-water marks observe even allocations rewound before the query returns.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_leaf_storage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+        S8("constexpr int first = 7;\n"
+           "constexpr double fraction = 1.5;\n"
+           "constexpr int *nothing = nullptr;\n"
+           "constexpr unsigned char octet = 23;\n"),
+        (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_C23, .source_path = S8("constexpr-leaf-storage.c")});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.declaration_count == 4);
+    if (!parse.diagnostic_count && parse.declaration_count == 4)
+    {
+        u32 original_count = parse.type_count;
+        u32 unrelated_counts[] = {0, 1, 63, 64, 65, 1024, 65536, 0};
+        CType* types = arena_allocate_zeroed(temporary.arena, CType, original_count + 65536);
+        memcpy(types, parse.types, sizeof(*types) * original_count);
+        parse.types = types;
+        parse.type_capacity = original_count + 65536;
+        bool census = os_get_environment_variable(S8("BUSTER_CONSTEXPR_CENSUS")).length != 0;
+        for (u32 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(unrelated_counts); count_index += 1)
+        {
+            parse.type_count = original_count + unrelated_counts[count_index];
+            for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+            {
+                TemporalArena probe = scratch_begin(&temporary.arena, 1);
+                // Move through the public allocator to the previous high-water
+                // mark, so a reused dirty arena cannot hide another allocation.
+                u64 dirty = arena_dirty_position(probe.arena);
+                if (dirty > probe.arena->position)
+                {
+                    arena_allocate(probe.arena, u8, dirty - probe.arena->position);
+                }
+                u64 before = probe.arena->position;
+                bool valid = c_test_validate_constexpr_declaration(temporary.arena, &parse, tokens,
+                                                                      &parse.declarations[declaration_index]);
+                u64 growth = arena_dirty_position(probe.arena) - before;
+                if (census)
+                {
+                    string_print(S8("CONSTEXPR_LEAF_CENSUS types={u32} declaration={u32} scratch_growth={u64}\n"),
+                                 parse.type_count, declaration_index, growth);
+                }
+                BUSTER_TEST(arguments, valid);
+                BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+                BUSTER_TEST(arguments, probe.arena->position == before);
+                BUSTER_TEST(arguments, growth == 0);
+                scratch_end(probe);
+            }
+        }
+        parse.type_count = original_count;
+
+        // The same type id can change during speculative semantic construction.
+        // A successful query must not hide a later qualifier/type error, and a
+        // failed query must not poison the restored type. Diagnostic precedence
+        // remains atomic, then volatile/restrict, then complete-object kind.
+        CDeclaration declaration = parse.declarations[0];
+        CType saved = parse.types[declaration.type.value];
+        struct
+        {
+            CTypeKind kind;
+            bool atomic;
+            bool volatile_qualified;
+            bool restrict_qualified;
+            String8 message;
+        } invalid[] = {
+            {C_TYPE_VOID, true, true, true, S8("constexpr object or subobject cannot have atomic type")},
+            {C_TYPE_VOID, false, true, true, S8("constexpr object or subobject cannot be volatile or restrict-qualified")},
+            {C_TYPE_INT, false, false, true, S8("constexpr object or subobject cannot be volatile or restrict-qualified")},
+            {C_TYPE_VOID, false, false, false, S8("constexpr requires a complete object type")},
+            {C_TYPE_FUNCTION, false, false, false, S8("constexpr requires a complete object type")},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+        {
+            CType* type = &parse.types[declaration.type.value];
+            type->kind = invalid[index].kind;
+            type->is_atomic = invalid[index].atomic;
+            type->is_volatile = invalid[index].volatile_qualified;
+            type->is_restrict = invalid[index].restrict_qualified;
+            u32 before = parse.diagnostic_count;
+            BUSTER_TEST(arguments, !c_test_validate_constexpr_declaration(temporary.arena, &parse, tokens, &declaration));
+            BUSTER_TEST(arguments, parse.diagnostic_count == before + 1);
+            if (parse.diagnostic_count == before + 1)
+            {
+                CDiagnostic diagnostic = parse.diagnostics[before];
+                BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_INVALID_CONSTEXPR);
+                BUSTER_STRING_TEST(arguments, diagnostic.message, invalid[index].message);
+                BUSTER_TEST(arguments, diagnostic.location.line == 1 && diagnostic.location.column == 1);
+            }
+            *type = saved;
+            BUSTER_TEST(arguments, c_test_validate_constexpr_declaration(temporary.arena, &parse, tokens, &declaration));
+            BUSTER_TEST(arguments, parse.diagnostic_count == before + 1);
+        }
+        // A non-constexpr declaration bypasses type inspection entirely, even
+        // when no type universe exists yet; an invalid constexpr id diagnoses.
+        u32 before = parse.diagnostic_count;
+        declaration.is_constexpr = false;
+        declaration.type = C_TYPE_ID_INVALID;
+        parse.type_count = 0;
+        BUSTER_TEST(arguments, c_test_validate_constexpr_declaration(temporary.arena, &parse, tokens, &declaration));
+        BUSTER_TEST(arguments, parse.diagnostic_count == before);
+        declaration.is_constexpr = true;
+        BUSTER_TEST(arguments, !c_test_validate_constexpr_declaration(temporary.arena, &parse, tokens, &declaration));
+        BUSTER_TEST(arguments, parse.diagnostic_count == before + 1);
+        if (parse.diagnostic_count == before + 1)
+        {
+            BUSTER_STRING_TEST(arguments, parse.diagnostics[before].message, S8("constexpr object has an invalid type"));
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // A syntax pass retains declarations/assertions, not one token-sized body
 // frame array per function. Guard the storage bound, independent of timing.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_body_frame_storage(UnitTestArguments* arguments)
@@ -15044,6 +15271,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
     c_test_result_add(&result, c_test_parser_body_frame_storage(arguments));
     c_test_result_add(&result, c_test_parser_diagnostic_storage(arguments));
+    c_test_result_add(&result, c_test_constexpr_leaf_storage(arguments));
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
     c_test_result_add(&result, c_test_lexer_rewind_zeroed(arguments));
     c_test_result_add(&result, c_test_scope_interval_index(arguments));
@@ -15121,6 +15349,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 
     c_test_result_add(&result, c_test_parse_storage_growth(arguments));
 
+    c_test_result_add(&result, c_test_fresh_binding_publication(arguments));
     c_test_result_add(&result, c_test_type_parse_rollback_growth(arguments));
 
     c_test_result_add(&result, c_test_aggregate_corrections(arguments));

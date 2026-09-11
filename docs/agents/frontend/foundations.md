@@ -103,6 +103,15 @@ independent legacy mutable-register and pressure-census contracts.
 
 ## C frontend and canonical IR rules
 
+- `c_parse_binding_bind` publishes a previously unbound enclosing-scope name
+  without scanning unrelated undo records. A live undo record implies a valid
+  current binding: bind installs the new entity, and unwind removes its record
+  before restoring the previous one. Bound names retain the oldest-record
+  search and shadow restoration; the authoritative scope/symbol chains and
+  type-parser rollback contract are unchanged. The private test seam observes
+  the existing search cursor and verifies geometric work counts without adding
+  a production counter, allocation, or mutable cache.
+
 - The public frontend API is `compiler/frontend/c/c.h`. In non-unity builds the
   implementation is split across `c_source.c`, `c_parse.c`, and `c_gen.c`;
   `c.c` preserves the unity include order and diagnostic mapping.
@@ -195,6 +204,15 @@ independent legacy mutable-register and pressure-census contracts.
   conservative overlap test: holes inside it and arbitrary repeated overwrites
   still take the full compaction path. GNU range copies use their parent
   context's extent; separately materialized range values own a fresh context.
+- `c_parse_validate_constexpr_declaration` validates a leaf root from one local
+  work entry, without acquiring scratch or clearing the translation-unit type
+  universe. Arrays, structs and unions retain the explicit private graph walk.
+  Both paths use the same qualifier and complete-object checks, in the same
+  diagnostic order. Pointees are not subobjects. No result is cached across
+  mutation or rollback. `c_test_constexpr_leaf_storage` checks reused scratch,
+  unrelated type populations, qualifier mutation/restoration and diagnostics;
+  `tests/basic_c_constexpr_leaf.c` runs in C23 under every native allocator.
+  Composite-query universe-sized scratch remains tracked in GitHub #259.
 - **GNU's `__alignof__` takes an expression; `_Alignof` takes only a type
   name.** Both spellings reach the same fold in `c_gen.c`, and it resolved an
   expression operand only for a compound literal until libc-test's

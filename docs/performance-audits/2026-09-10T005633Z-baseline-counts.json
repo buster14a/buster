@@ -1,0 +1,128 @@
+[
+  {
+    "count": 0,
+    "calls": 1,
+    "visits": 0,
+    "source_sha256": "e9b0607d1b8e9e71edc014f7b752e31c78b6ba4c1dc9ae4a511918e8df573ac9",
+    "command": [
+      "build-probe/Release/ide",
+      "cc",
+      "-std=c17",
+      "-g0",
+      "-fsyntax-only",
+      "/home/runner/work/_temp/a09-baseline/fresh-0.c"
+    ]
+  },
+  {
+    "count": 1,
+    "calls": 3,
+    "visits": 0,
+    "source_sha256": "2b9437aee24849c3cf6c178ef512f1c97e3db5bb307322f76bb1bf8d39cd0a17",
+    "command": [
+      "build-probe/Release/ide",
+      "cc",
+      "-std=c17",
+      "-g0",
+      "-fsyntax-only",
+      "/home/runner/work/_temp/a09-baseline/fresh-1.c"
+    ]
+  },
+  {
+    "count": 4,
+    "calls": 9,
+    "visits": 6,
+    "source_sha256": "53bbc35e3e7ce9ef0ad8c76a6d430e4b9655999c2dfdf70ec4774333ee3537ca",
+    "command": [
+      "build-probe/Release/ide",
+      "cc",
+      "-std=c17",
+      "-g0",
+      "-fsyntax-only",
+      "/home/runner/work/_temp/a09-baseline/fresh-4.c"
+    ]
+  },
+  {
+    "count": 16,
+    "calls": 33,
+    "visits": 120,
+    "source_sha256": "f19cf194716b0ab6081c11a85fcfdf1eacb24f682477031f70f0b731e412f074",
+    "command": [
+      "build-probe/Release/ide",
+      "cc",
+      "-std=c17",
+      "-g0",
+      "-fsyntax-only",
+      "/home/runner/work/_temp/a09-baseline/fresh-16.c"
+    ]
+  },
+  {
+    "count": 64,
+    "calls": 129,
+    "visits": 2016,
+    "source_sha256": "288c2156c9b651707b970535803eb00f91b30af3f7a55f45c5a91f277fade1e8",
+    "command": [
+      "build-probe/Release/ide",
+      "cc",
+      "-std=c17",
+      "-g0",
+      "-fsyntax-only",
+      "/home/runner/work/_temp/a09-baseline/fresh-64.c"
+    ]
+  },
+  {
+    "count": 256,
+    "calls": 513,
+    "visits": 32640,
+    "source_sha256": "b4ee1cc4821b897e14819d942edbd3cf9f74dad55fc577481372615b4bfd5dac",
+    "command": [
+      "build-probe/Release/ide",
+      "cc",
+      "-std=c17",
+      "-g0",
+      "-fsyntax-only",
+      "/home/runner/work/_temp/a09-baseline/fresh-256.c"
+    ]
+  },
+  {
+    "count": 1024,
+    "calls": 2049,
+    "visits": 523776,
+    "source_sha256": "bf80cce8405960556b32928346974f88f38d7fb49620d138b96f2c507ed97581",
+    "command": [
+      "build-probe/Release/ide",
+      "cc",
+      "-std=c17",
+      "-g0",
+      "-fsyntax-only",
+      "/home/runner/work/_temp/a09-baseline/fresh-1024.c"
+    ]
+  },
+  {
+    "count": 4096,
+    "calls": 8193,
+    "visits": 8386560,
+    "source_sha256": "e80c43717668a0a9721e55d996f3b759a15bc1fbd4fd309bb7efae97fc72f7df",
+    "command": [
+      "build-probe/Release/ide",
+      "cc",
+      "-std=c17",
+      "-g0",
+      "-fsyntax-only",
+      "/home/runner/work/_temp/a09-baseline/fresh-4096.c"
+    ]
+  },
+  {
+    "count": 16384,
+    "calls": 32769,
+    "visits": 134209536,
+    "source_sha256": "217b9a66ec87f06d6e5b4e10659f349867cb557e8b28d65b8d114fc3c5e1366e",
+    "command": [
+      "build-probe/Release/ide",
+      "cc",
+      "-std=c17",
+      "-g0",
+      "-fsyntax-only",
+      "/home/runner/work/_temp/a09-baseline/fresh-16384.c"
+    ]
+  }
+]
