@@ -102,7 +102,6 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 #define MACHINE_INFO_MOVE(name_literal)                                                                                                                        \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
-        .form_set = MACHINE_OPCODE_FORM_SET_REGISTER, .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
     }
 // Scalar float conversions use the encoder's implicit vector scratch even
 // though both machine operands belong to the general register class.
@@ -110,7 +109,6 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
     { \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, \
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL}, \
-        .form_set = MACHINE_OPCODE_FORM_SET_REGISTER, .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE, \
         .implicit_resource_defs = MACHINE_RESOURCE_VECTOR_STATE_MASK, \
     }
 #define MACHINE_INFO_READ_MODIFY(name_literal)                                                                                                                 \
@@ -124,12 +122,8 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                                            \
         .tied_pair = (u8)(1u | (2u << 4)),                                                                                                                     \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,                                                                                                   \
-        .schedule_class = (schedule), .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                                                                    \
-        .form_set = MACHINE_OPCODE_FORM_SET_REGISTER,                                                                                    \
+        .schedule_class = (schedule),                                                                                                                        \
     }
-#define MACHINE_INFO_FINALIZE(flags, effect, memslot, schedule)                                                                                                \
-    .attributes = (flags), .memory_effect = (effect), .memory_operand = (memslot), .schedule_class = (schedule),                                              \
-    .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE
 #define MACHINE_INFO_SHIFT(name_literal)                                                                                                                       \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},           \
@@ -171,27 +165,24 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 3,                                                                                              \
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                                            \
-        .form_set = MACHINE_OPCODE_FORM_SET_REGISTER, .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
     }
 #define MACHINE_INFO_A64_THREE_ADDRESS(name_literal, schedule)                                                                                                 \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 3,                                                                                              \
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                                            \
-        .form_set = MACHINE_OPCODE_FORM_SET_REGISTER, .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
         .schedule_class = (schedule),                                                                                                                          \
     }
 #define MACHINE_INFO_THREE_ADDRESS_CONSTRAINED(name_literal)                                                                                                   \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 3,                                                                                              \
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                                            \
-        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED | MACHINE_OPCODE_ATTRIBUTE_EXPANDS, .form_set = MACHINE_OPCODE_FORM_SET_PSEUDO,\
-        .expansion_recipe = MACHINE_OPCODE_EXPANSION_PSEUDO, .schedule_class = MACHINE_SCHEDULE_CLASS_DIV,                                                    \
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED | MACHINE_OPCODE_ATTRIBUTE_EXPANDS,                                                               \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_DIV,                                                    \
     }
 #define MACHINE_INFO_A64_COMPARE(name_literal)                                                                                                                 \
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},                  \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE, .implicit_resource_defs = MACHINE_RESOURCE_NZCV_MASK,                                             \
-        .form_set = MACHINE_OPCODE_FORM_SET_REGISTER, .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                               \
     }
 #define MACHINE_INFO_UNARY_READ_MODIFY(name_literal)                                                                                                           \
     {                                                                                                                                                          \
@@ -219,8 +210,7 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
     {                                                                                                                                                          \
         .name = S8_INITIALIZER(name_literal), .operand_count = 2, .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_GENERAL},               \
         .attributes = MACHINE_OPCODE_ATTRIBUTE_MEMORY, .memory_effect = MACHINE_MEMORY_EFFECT_READ, .memory_operand = 2,                                       \
-        .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD, .form_set = MACHINE_OPCODE_FORM_SET_REGISTER,                                     \
-        .expansion_recipe = MACHINE_OPCODE_EXPANSION_SINGLE,                                                                                                   \
+        .schedule_class = MACHINE_SCHEDULE_CLASS_LOAD,                                                                                                       \
     }
 #define MACHINE_INFO_STORE_POINTER(name_literal)                                                                                                               \
     {                                                                                                                                                          \
@@ -1575,29 +1565,9 @@ MachineX64NeutralPatchSite const* machine_x86_64_neutral_patch_site(u32 ordinal)
     return ordinal < MACHINE_X86_64_NEUTRAL_PATCH_SITE_COUNT ? machine_x86_64_neutral_patch_sites + ordinal : 0;
 }
 
-u16 machine_opcode_form_set(MachineOpcodeInfo const* info)
-{
-    u16 result;
-    if (!info)
-    {
-        result = 0;
-    }
-    else
-    {
-        result = info->form_set;
-    }
-
-    return result;
-}
-
 MachineScheduleClass machine_opcode_schedule_class(MachineOpcodeInfo const* info)
 {
     return info && info->schedule_class < MACHINE_SCHEDULE_CLASS_COUNT ? (MachineScheduleClass)info->schedule_class : MACHINE_SCHEDULE_CLASS_NONE;
-}
-
-MachineOpcodeExpansion machine_opcode_expansion(MachineOpcodeInfo const* info)
-{
-    return info && info->expansion_recipe < MACHINE_OPCODE_EXPANSION_COUNT ? (MachineOpcodeExpansion)info->expansion_recipe : MACHINE_OPCODE_EXPANSION_NONE;
 }
 
 MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info)
