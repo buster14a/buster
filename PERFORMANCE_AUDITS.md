@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-10T211248Z`](docs/performance-audits/2026-09-10T211248Z.md) — AArch64 scalar and i128 zero-count MIR coverage (#36, #69)
 - [`2026-09-10T184045Z`](docs/performance-audits/2026-09-10T184045Z.md) — Local aggregate-copy completion for the wider metamorphic campaign (#366)
 - [`2026-09-10T180045Z`](docs/performance-audits/2026-09-10T180045Z.md) — SysV unnamed-bitfield interoperability with unchanged default classification (#66, #391)
 - [`2026-09-10T162615Z`](docs/performance-audits/2026-09-10T162615Z.md) — Native MIR follow-up differential and matched throughput evidence
