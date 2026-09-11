@@ -3,6 +3,7 @@
  * build.c owns compiler construction. No third-party library is required.
  * Map: tp_generate (workloads), tp_measure (commands), tp_run (paired trials),
  * tp_compare (strict raw-sample replay and CI decision), tp_self_test (tests).
+ * qualification.h owns optional dedicated-host admission and cooperative locks.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -16,6 +17,10 @@
 #include <stdarg.h>
 #include <inttypes.h>
 #include <limits.h>
+#ifdef __linux__
+#include <sys/file.h>
+#endif
+#include "qualification.h"
 #ifdef _WIN32
 #pragma comment(lib, "psapi.lib")
 #endif
@@ -44,6 +49,9 @@ typedef struct TpConfig
     char const* candidate;
     char const* baseline_id;
     char const* candidate_id;
+    char const* machine_id;
+    char const* lock_file;
+    TpHost const* host;
     char const* profile;
     char const* self_host_root;
     char const* self_host_generated;
@@ -205,6 +213,8 @@ static int tp_options(int argc, char** argv, TpConfig* config)
             else if (!strcmp(key, "--candidate")) config->candidate = value;
             else if (!strcmp(key, "--baseline-id")) config->baseline_id = value;
             else if (!strcmp(key, "--candidate-id")) config->candidate_id = value;
+            else if (!strcmp(key, "--machine-id")) config->machine_id = value;
+            else if (!strcmp(key, "--lock-file")) config->lock_file = value;
             else if (!strcmp(key, "--profile")) config->profile = value;
             else if (!strcmp(key, "--self-host-root")) config->self_host_root = value;
             else if (!strcmp(key, "--self-host-generated")) config->self_host_generated = value;
@@ -275,6 +285,18 @@ static int tp_options(int argc, char** argv, TpConfig* config)
     {
         tp_error("both allocation compilers, or both self-host root/generated paths, must be supplied together");
         ok = 0;
+    }
+    if (config->machine_id || config->lock_file || !strcmp(config->command, "qualify"))
+    {
+        int dedicated = config->machine_id && config->machine_id[0] &&
+                        strlen(config->machine_id) < TP_HOST_LABEL_CAP && config->lock_file &&
+                        config->lock_file[0] == '/' && config->cpu >= 0 &&
+                        (!strcmp(config->command, "run") || !strcmp(config->command, "qualify"));
+        if (!dedicated)
+        {
+            tp_error("dedicated run/qualify requires --machine-id LABEL (1-127 bytes), --lock-file ABSOLUTE_PATH and --cpu N|auto");
+            ok = 0;
+        }
     }
     if (!ok) tp_error("invalid options; run 'throughput help'");
     return ok;
@@ -644,6 +666,12 @@ static int tp_metadata(TpConfig const* config, char const* root, char const* bas
         fputs("\"allocation_scope\":\"separate explicitly instrumented compiler replay; arena calls and requested bytes\",", file);
         fprintf(file, "\"input_schema\":%d,", TP_INPUT_SCHEMA);
         fputs("\"process_diagnostics_scope\":\"Linux wait4 child usage; faults and context switches, not PMU events; copied after timing; other platforms unavailable; diagnostic only\",", file);
+        if (config->host)
+        {
+            fputs("\"host_qualification\":", file);
+            ok = tp_host_json(file, config->host) && ok;
+            fputc(',', file);
+        }
         fputs("\"compiler_provenance\":[", file);
         char const* compilers[2] = {baseline, candidate};
         char const* ids[2] = {config->baseline_id, config->candidate_id};
@@ -1569,13 +1597,17 @@ static void tp_help(void)
           "  throughput generate --output DIR [--profile smoke|ci|full] [--seed N] [--scale N]\n"
           "  throughput run --baseline IDE --candidate IDE --output NEW_DIR [options]\n"
           "  throughput compare --output RESULT_DIR\n"
-          "  throughput self-test\n\n"
+          "  throughput self-test\n"
+          "  throughput qualify --cpu N|auto --machine-id LABEL --lock-file ABSOLUTE_PATH\n\n"
           "Options: --pairs N (20+ for guard; two rounds), --warmups N, --mode all|none|mir-stack|fast|quality,\n"
           "--timeout SECONDS, --cpu N|auto, --flag ARG (repeatable), --baseline-id LABEL, --candidate-id LABEL,\n"
           "--artifact object|assembly (ordinary jobs only; default object; self-host stages stay executable),\n"
           "--pmu (separate replays), --require-pmu, --allocation-baseline IDE --allocation-candidate IDE,\n"
           "--self-host-root FROZEN_TREE --self-host-generated GENERATED_DIR, --require-identical-output,\n"
-          "--no-guard (explicit diagnostic/smoke mode; no performance pass claimed).\n\n"
+          "--no-guard (explicit diagnostic/smoke mode; no performance pass claimed).\n"
+          "Dedicated Linux run/qualify: --machine-id LABEL --lock-file ABSOLUTE_PATH --cpu N|auto.\n"
+          "qualify prints read-only observations to stdout; does not prove isolation or benchmark noise.\n"
+          "The cooperative lease covers run preparation through replay; prebuild this tool before measurement.\n\n"
           "Exit: 0 no confirmed regression (inspect inconclusive warnings), 1 confirmed regression,\n"
           "2 invalid/incomplete run. Never compare unrelated hosts or reuse an old result directory.\n", stdout);
 }
@@ -1583,8 +1615,19 @@ static void tp_help(void)
 int main(int argc, char** argv)
 {
     TpConfig config;
+    TpHostLock lock = {-1};
+    TpHost host;
     int result = 2;
-    if (tp_options(argc, argv, &config))
+    int admitted = tp_options(argc, argv, &config);
+    if (admitted && config.machine_id)
+    {
+        int error = tp_host_lock_acquire(config.lock_file, &lock);
+        if (!error) error = tp_host_capture(&host, config.cpu, config.machine_id, config.lock_file);
+        admitted = error == 0;
+        if (admitted) config.host = &host;
+        else tp_error("dedicated host admission failed (unsupported platform, busy/invalid lock or unavailable CPU): %s", strerror(error));
+    }
+    if (admitted)
     {
         if (!strcmp(config.command, "help") || !strcmp(config.command, "--help"))
         {
@@ -1607,6 +1650,13 @@ int main(int argc, char** argv)
                         workloads[i].name, workloads[i].bytes, workloads[i].lines, workloads[i].functions, workloads[i].hash);
             }
         }
+        else if (!strcmp(config.command, "qualify"))
+        {
+            int ok = tp_host_json(stdout, config.host);
+            ok = fputc('\n', stdout) != EOF && ok;
+            ok = fflush(stdout) == 0 && ok;
+            result = ok ? 0 : 2;
+        }
         else if (!strcmp(config.command, "run"))
         {
             result = tp_run(config);
@@ -1620,5 +1670,6 @@ int main(int argc, char** argv)
             tp_error("unknown command: %s", config.command);
         }
     }
+    tp_host_lock_release(&lock);
     return result;
 }
