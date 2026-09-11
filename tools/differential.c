@@ -753,12 +753,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                         DCase tests[] = {
                             {S8("warning"), S8("tests/differential/warning.c"), {0}, false},
                             {S8("observables"), S8("tests/differential/observables.c"), {0}, false},
+                            {S8("qualified-aggregate"), S8("tests/differential/qualified_aggregate.c"), S8("tests/differential/qualified_aggregate_host.c"), false, {0}, true},
                             {S8("abi"), S8("tests/differential/abi.c"), S8("tests/differential/abi_host.c"), false, {0}, true},
                             {S8("aligned-parameters"), S8("tests/differential/aligned.c"), S8("tests/differential/aligned_host.c"), false, {0}, true},
                             {S8("unsigned-switch"), S8("tests/differential/switch_unsigned.c"), S8("tests/differential/switch_unsigned_host.c"), false, {0}, true},
                             {S8("clear-cache"), S8("tests/differential/clear_cache.c"), S8("tests/differential/clear_cache_host.c"), false, {0}, true},
                             {S8("cpu-queries"), S8("tests/differential/cpu_queries.c"), S8("tests/differential/cpu_queries_host.c"), false, {0}, true},
                             {S8("native-variadic"), S8("tests/differential/native_variadic.c"), S8("tests/differential/native_variadic_host.c"), false, {0}, true},
+                            {S8("va-list-places"), S8("tests/basic_c_va_list_places.c"), {0}, false, {0}, true},
+                            {S8("native-aggregate"), S8("tests/differential/native_aggregate.c"), S8("tests/differential/native_aggregate_host.c"), false, {0}, true},
                             {S8("reject-type"), S8("tests/differential/reject_type.c"), {0}, true},
                             {S8("reject-syntax"), S8("tests/differential/reject_syntax.c"), {0}, true},
                         };

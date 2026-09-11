@@ -1,0 +1,7 @@
+attributed 5798 blocks, 33200 instructions with debug locations
+    264 blocks   4.6%    1447 insts   4.4%  module setup and global layout
+    268 blocks   4.6%    1699 insts   5.1%  per-function prologue, sizing, canonical_prep
+    199 blocks   3.4%    1637 insts   4.9%  MIR machine attempt (machine_attempt)
+   4659 blocks  80.4%   27164 insts  81.8%  direct canonical emitter (canonical_emit)
+    235 blocks   4.1%     872 insts   2.6%  module tail
+    173 blocks   3.0%     381 insts   1.1%  outside function (line 0)
