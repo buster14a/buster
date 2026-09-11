@@ -7,6 +7,10 @@ process measurement, deterministic inputs, raw data and statistical replay.
 The existing compiler correctness matrix and canonical `test_self_host` gate
 are unchanged. A timing result is not a substitute for either.
 
+Dedicated Linux acceptance hosts: see [qualification and exclusive runs](DEDICATED.md)
+for the opt-in machine observations, shared lease, frozen-source A/A procedure
+and the distinction between software validation and physical-host acceptance.
+
 ## Start here
 
 From the repository root, after building two uninstrumented Release compilers:

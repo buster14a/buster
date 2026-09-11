@@ -88,6 +88,16 @@ static int test_child(int argc, char** argv)
     int result = 0;
     if (argc < 3) result = 2;
     else if (!strcmp(argv[2], "fail")) result = 7;
+    else if (!strcmp(argv[2], "throughput")) result = throughput_cli_main(argc - 2, argv + 2);
+#ifdef __linux__
+    else if (argc == 4 && !strcmp(argv[2], "host-lock-probe"))
+    {
+        TpHostLock lock = {-1};
+        int error = tp_host_lock_acquire(argv[3], &lock);
+        result = error == EAGAIN || error == EWOULDBLOCK ? 0 : 1;
+        tp_host_lock_release(&lock);
+    }
+#endif
     else if (!strcmp(argv[2], "sleep")) test_delay(5000);
     else if (!strcmp(argv[2], "memory"))
     {
@@ -522,6 +532,8 @@ static void test_summary_write_failure(char const* executable, char const* root)
 }
 #endif
 
+#include "qualification_test.h"
+
 int main(int argc, char** argv)
 {
     int result = 2;
@@ -565,6 +577,7 @@ int main(int argc, char** argv)
         test_diagnostic_probes(root);
         test_legacy_schema(executable, root);
         test_compile_options();
+        test_host_qualification(executable, root);
         test_sample_paths(executable, root);
         test_inputs(root);
         test_processes(executable, root);
