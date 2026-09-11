@@ -1,0 +1,79 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index 946961f9..880383de 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -75,6 +75,11 @@
+ 
+ #include "c_internal.h"
+ 
++BUSTER_GLOBAL_LOCAL u64 literal_reuse_census_hits[3];
++BUSTER_GLOBAL_LOCAL u64 literal_reuse_census_bytes[3];
++BUSTER_GLOBAL_LOCAL u64 literal_reuse_census_fragments[3];
++BUSTER_GLOBAL_LOCAL u64 literal_reuse_census_wide[3];
++
+ BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
+ 
+ // Preprocess file indices are registered as IR sources in table order, so a
+@@ -20414,7 +20419,11 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
+                 c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, index, string_end, &decoded) &&
+                 c_ir_string_array_element_compatible(builder, type->element_type, decoded))
+             {
+-                IrValueId string_value = c_ir_emit_string_range_typed(builder, index, string_end, task.type);
++                literal_reuse_census_hits[0] += 1;
++                literal_reuse_census_bytes[0] += decoded.bytes.length;
++                literal_reuse_census_fragments[0] += string_end - index;
++                literal_reuse_census_wide[0] += decoded.element_width != 1;
++                IrValueId string_value = c_ir_emit_string_contents_typed(builder, builder->preprocess.tokens[index], decoded, task.type);
+                 if (string_value.value == IR_ID_UNDERLYING_INVALID ||
+                     !c_ir_emit_store_place(builder, task.place, task.type, string_value,
+                                            c_ir_token_source_range(builder, builder->preprocess.tokens[index])))
+@@ -20859,7 +20868,11 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
+                 c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, string_start, string_end, &decoded) &&
+                 c_ir_string_array_element_compatible(builder, type->element_type, decoded))
+             {
+-                IrValueId value = c_ir_emit_string_range_typed(builder, string_start, string_end, type_id);
++                literal_reuse_census_hits[1] += 1;
++                literal_reuse_census_bytes[1] += decoded.bytes.length;
++                literal_reuse_census_fragments[1] += string_end - string_start;
++                literal_reuse_census_wide[1] += decoded.element_width != 1;
++                IrValueId value = c_ir_emit_string_contents_typed(builder, builder->preprocess.tokens[string_start], decoded, type_id);
+                 c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+                 return;
+             }
+@@ -21124,7 +21137,11 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
+                 c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, index, end, &decoded) &&
+                 c_ir_string_array_element_compatible(builder, field_type_value->element_type, decoded))
+             {
+-                IrValueId string_value = c_ir_emit_string_range_typed(builder, index, end, field_type);
++                literal_reuse_census_hits[2] += 1;
++                literal_reuse_census_bytes[2] += decoded.bytes.length;
++                literal_reuse_census_fragments[2] += end - index;
++                literal_reuse_census_wide[2] += decoded.element_width != 1;
++                IrValueId string_value = c_ir_emit_string_contents_typed(builder, builder->preprocess.tokens[index], decoded, field_type);
+                 if (string_value.value == IR_ID_UNDERLYING_INVALID)
+                 {
+                     goto c_ir_compound_literal_failed;
+@@ -41731,6 +41748,10 @@ BUSTER_C_INTERNAL bool c_ir_type_mapping_pending(CParseResult* parse, IrProgram*
+ 
+ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResult preprocess, CAnalysisResult parse, Target target)
+ {
++    memset(literal_reuse_census_hits, 0, sizeof(literal_reuse_census_hits));
++    memset(literal_reuse_census_bytes, 0, sizeof(literal_reuse_census_bytes));
++    memset(literal_reuse_census_fragments, 0, sizeof(literal_reuse_census_fragments));
++    memset(literal_reuse_census_wide, 0, sizeof(literal_reuse_census_wide));
+     CIRLowerResult result = {0};
+     if (!arena || parse.diagnostic_count)
+     {
+@@ -44463,6 +44484,12 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
+             .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
+         };
+     }
++    for (u32 census_site = 0; census_site < 3; census_site += 1)
++    {
++        string_print(S8("LITERAL_REUSE_CENSUS site={u32} hits={u64} decoded_bytes={u64} fragments={u64} wide_hits={u64}\n"),
++                     census_site, literal_reuse_census_hits[census_site], literal_reuse_census_bytes[census_site],
++                     literal_reuse_census_fragments[census_site], literal_reuse_census_wide[census_site]);
++    }
+     arena_destroy(lowering_arena, 1);
+     scratch_end(temporary);
+     result.canonical_ir_certified = result.program && !result.diagnostic_count &&
