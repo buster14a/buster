@@ -1119,6 +1119,10 @@ struct MachineTargetDescription
 // not selection output).
 typedef struct MachineFunction MachineFunction;
 
+// Optional selector certificates for individual frame objects in a function
+// that also contains volatile accesses. Zero is deliberately UNKNOWN.
+#define MACHINE_STACK_SLOT_MEMORY_NONVOLATILE 1u
+
 // Side data for the SysV x86-64 VA_ARG row.  The selector records the
 // ABI-classified eightbytes once; the encoder then emits the bounded register
 // save-area/overflow-area sequence without consulting IR or calling back into
@@ -1209,6 +1213,12 @@ struct MachineFunction
     // placement slots. Keep the platform fact through allocation/scheduling.
     bool windows_aarch64_frame;
     u8 reserved[6];
+    // One flag byte per stack slot, or null. Volatile canonical lowering
+    // taints every frame object it touches. Object identities do not change
+    // during CFG/SSA/scheduling rewrites, so this immutable table is shared.
+    // A producer introducing a volatile access must invalidate the affected
+    // slot certificate (and the whole-function certificate above).
+    u8* stack_slot_memory_flags;
 };
 
 // AArch64 physical general registers in encoding order; 31 encodes SP or

@@ -2985,6 +2985,11 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
             result.operand = slot;
             MACHINE_VERIFY_REJECT(MACHINE_VERIFY_PAYLOAD);
         }
+        if (function->stack_slot_memory_flags && (function->stack_slot_memory_flags[slot] & ~MACHINE_STACK_SLOT_MEMORY_NONVOLATILE))
+        {
+            result.operand = slot;
+            MACHINE_VERIFY_REJECT(MACHINE_VERIFY_PAYLOAD);
+        }
     }
     if (function->outgoing_bytes && (function->outgoing_slot >= function->stack_slot_count ||
         function->stack_slot_sizes[function->outgoing_slot] != function->outgoing_bytes || (function->outgoing_bytes & 15u)))
@@ -3800,7 +3805,8 @@ bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* 
         return false;
     }
     // Structural replay carries no canonical volatile provenance. Deliberately
-    // drop nonvolatile_memory_certified: memory stays conservatively ordered.
+    // drop both nonvolatile_memory_certified and stack_slot_memory_flags:
+    // memory stays conservatively ordered.
     MachineFunction read = {
         .instructions = arena_allocate(arena, MachineInstruction, header.instruction_count),
         .virtual_registers = arena_allocate(arena, MachineVirtualRegister, header.virtual_register_count),

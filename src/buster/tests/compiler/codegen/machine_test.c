@@ -10,6 +10,7 @@
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
+#include <buster/lib/compiler/codegen/machine_schedule_internal.h>
 #include <buster/lib/compiler/codegen/register_allocator_fast_internal.h>
 #include <buster/lib/compiler/codegen/register_allocator_quality_internal.h>
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -1098,6 +1099,9 @@ typedef enum MachineAliasTestKind
     MACHINE_ALIAS_TEST_INVALID_OFFSET,
     MACHINE_ALIAS_TEST_INCOMING,
     MACHINE_ALIAS_TEST_INCOMING_UNCERTIFIED,
+    MACHINE_ALIAS_TEST_DISJOINT_RANGES,
+    MACHINE_ALIAS_TEST_FOLDED_RANGES,
+    MACHINE_ALIAS_TEST_MIXED_VOLATILE,
     MACHINE_ALIAS_TEST_VECTOR,
     MACHINE_ALIAS_TEST_COUNT,
 } MachineAliasTestKind;
@@ -1109,6 +1113,7 @@ BUSTER_GLOBAL_LOCAL MachineFunction machine_test_alias_function(Arena* arena, bo
 {
     bool vector = variant == MACHINE_ALIAS_TEST_VECTOR;
     bool incoming = variant == MACHINE_ALIAS_TEST_INCOMING || variant == MACHINE_ALIAS_TEST_INCOMING_UNCERTIFIED;
+    bool ranges = variant == MACHINE_ALIAS_TEST_DISJOINT_RANGES || variant == MACHINE_ALIAS_TEST_FOLDED_RANGES;
     MachineFunctionBuilder builder = machine_function_builder_begin(arena);
     u32 pointer = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
         .definition_point = MACHINE_POINT_INVALID, .register_class = MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID});
@@ -1117,8 +1122,9 @@ BUSTER_GLOBAL_LOCAL MachineFunction machine_test_alias_function(Arena* arena, bo
     u32 values[64];
     for (u32 leaf = 0; leaf < BUSTER_ARRAY_LENGTH(values); leaf += 1)
     {
-        u32 slot = variant == MACHINE_ALIAS_TEST_OVERLAPPING ? leaf / 4 : leaf;
-        u32 offset = variant == MACHINE_ALIAS_TEST_OVERLAPPING ? (leaf & 1u) * 4u : variant == MACHINE_ALIAS_TEST_INVALID_OFFSET ? UINT32_MAX : 0;
+        u32 slot = variant == MACHINE_ALIAS_TEST_OVERLAPPING ? leaf / 4 : ranges ? leaf / 8 : leaf;
+        u32 offset = variant == MACHINE_ALIAS_TEST_OVERLAPPING ? (leaf & 1u) * 4u : variant == MACHINE_ALIAS_TEST_INVALID_OFFSET ? UINT32_MAX :
+                     ranges ? (leaf & 7u) * (variant == MACHINE_ALIAS_TEST_FOLDED_RANGES ? 64u : 8u) : 0;
         values[leaf] = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
             .definition_point = machine_point_make(builder.instructions.total_count, MACHINE_POINT_AFTER),
             .register_class = vector ? MACHINE_REGISTER_CLASS_VECTOR : MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID});
@@ -1196,18 +1202,29 @@ BUSTER_GLOBAL_LOCAL MachineFunction machine_test_alias_function(Arena* arena, bo
     machine_builder_block_end(&builder, (MachineBlock){.parameter_count = 1});
     MachineFunction result = machine_function_builder_finish(arena, &builder);
     result.target = aarch64 ? machine_target_aarch64() : machine_target_x86_64();
-    result.nonvolatile_memory_certified = variant != MACHINE_ALIAS_TEST_UNCERTIFIED && variant != MACHINE_ALIAS_TEST_INCOMING_UNCERTIFIED;
+    result.nonvolatile_memory_certified = variant != MACHINE_ALIAS_TEST_UNCERTIFIED && variant != MACHINE_ALIAS_TEST_INCOMING_UNCERTIFIED &&
+                                            variant != MACHINE_ALIAS_TEST_MIXED_VOLATILE;
     result.stack_slot_count = 65;
     result.stack_slot_sizes = arena_allocate(arena, u32, result.stack_slot_count);
     for (u32 slot = 0; slot < result.stack_slot_count; slot += 1)
     {
-        result.stack_slot_sizes[slot] = variant == MACHINE_ALIAS_TEST_SHORT_SLOT ? 4u : vector ? 64u : 16u;
+        result.stack_slot_sizes[slot] = variant == MACHINE_ALIAS_TEST_SHORT_SLOT ? 4u : ranges ? 512u : vector ? 64u : 16u;
     }
     result.line_mark_count = result.instruction_count;
     result.line_marks = arena_allocate(arena, MachineLineMark, result.line_mark_count);
     for (u32 row = 0; row < result.instruction_count; row += 1)
     {
         result.line_marks[row] = (MachineLineMark){.row = row, .instruction = row};
+    }
+    if (variant == MACHINE_ALIAS_TEST_MIXED_VOLATILE)
+    {
+        IrInstruction* canonical_rows = arena_allocate(arena, IrInstruction, result.instruction_count);
+        memset(canonical_rows, 0, result.instruction_count * sizeof(IrInstruction));
+        canonical_rows[30].volatile_access = true;
+        canonical_rows[63].volatile_access = true;
+        canonical_rows[94].volatile_access = true;
+        IrFunction canonical = {.instructions = canonical_rows, .instruction_count = result.instruction_count};
+        machine_selection_certify_stack_memory(arena, &result, &canonical);
     }
     return result;
 }
@@ -1217,6 +1234,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
     UnitTestResult result = {0};
     for (u32 architecture = 0; architecture < 2; architecture += 1)
     {
+        u32 sizes[] = {0, 1, 7, 8, 16, 64, 65, UINT32_MAX};
+        u32 offsets[] = {0, 1, 7, 8, 15, 56, 63, 64, UINT32_MAX - 7u, UINT32_MAX};
+        for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
+        {
+            MachineFunction proof_function = {.stack_slot_count = 1, .stack_slot_sizes = sizes + size_index};
+            for (u32 offset_index = 0; offset_index < BUSTER_ARRAY_LENGTH(offsets); offset_index += 1)
+            {
+                MachineInstruction load = {.opcode = architecture ? MACHINE_A64_LOAD_FRAME : MACHINE_X64_LOAD_FRAME,
+                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0), machine_ref_make(MACHINE_REF_STACK_SLOT, 0)},
+                    .payload = offsets[offset_index]};
+                BUSTER_TEST(arguments, machine_schedule_memory_access(&proof_function, &load).kind == MACHINE_SCHEDULE_MEMORY_UNKNOWN);
+                proof_function.nonvolatile_memory_certified = true;
+                MachineScheduleMemoryAccess access = machine_schedule_memory_access(&proof_function, &load);
+                bool bounded = (u64)load.payload + 8u <= sizes[size_index];
+                BUSTER_TEST(arguments, (access.kind == MACHINE_SCHEDULE_MEMORY_STACK_RANGE) == bounded);
+                BUSTER_TEST(arguments, !bounded || (access.stack_slot == 0 && access.offset == load.payload && access.size == 8));
+                load.operands[1] = machine_ref_make(MACHINE_REF_STACK_SLOT, 1);
+                BUSTER_TEST(arguments, machine_schedule_memory_access(&proof_function, &load).kind == MACHINE_SCHEDULE_MEMORY_UNKNOWN);
+                load.operands[1] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+                BUSTER_TEST(arguments, machine_schedule_memory_access(&proof_function, &load).kind == MACHINE_SCHEDULE_MEMORY_UNKNOWN);
+                proof_function.nonvolatile_memory_certified = false;
+            }
+        }
+        u32 pointer_slot_size = 32;
+        MachineVirtualRegister pointer_values[2] = {
+            {.definition_point = machine_point_make(0, MACHINE_POINT_AFTER), .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+            {.definition_point = machine_point_make(1, MACHINE_POINT_AFTER), .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+        };
+        MachineInstruction pointer_rows[2] = {
+            {.opcode = architecture ? MACHINE_A64_LEA_FRAME : MACHINE_X64_LEA_FRAME, .payload = 8,
+             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0), machine_ref_make(MACHINE_REF_STACK_SLOT, 0)}},
+            {.opcode = architecture ? MACHINE_A64_LOAD_PTR64 : MACHINE_X64_LOAD_PTR64,
+             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0)}},
+        };
+        MachineFunction pointer_function = {.instructions = pointer_rows, .instruction_count = 2,
+            .virtual_registers = pointer_values, .virtual_register_count = 2, .stack_slot_sizes = &pointer_slot_size, .stack_slot_count = 1,
+            .nonvolatile_memory_certified = true};
+        MachineScheduleMemoryAccess pointer_access = machine_schedule_memory_access(&pointer_function, pointer_rows + 1);
+        BUSTER_TEST(arguments, pointer_access.kind == MACHINE_SCHEDULE_MEMORY_STACK_RANGE && pointer_access.stack_slot == 0 &&
+            pointer_access.offset == 8 && pointer_access.size == 8);
+        pointer_values[0].flags = MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE;
+        BUSTER_TEST(arguments, machine_schedule_memory_access(&pointer_function, pointer_rows + 1).kind == MACHINE_SCHEDULE_MEMORY_UNKNOWN);
+        pointer_values[0].flags = 0;
+        pointer_values[0].definition_point = MACHINE_POINT_INVALID;
+        BUSTER_TEST(arguments, machine_schedule_memory_access(&pointer_function, pointer_rows + 1).kind == MACHINE_SCHEDULE_MEMORY_UNKNOWN);
+        pointer_values[0].definition_point = machine_point_make(0, MACHINE_POINT_AFTER);
+        pointer_rows[0].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1);
+        BUSTER_TEST(arguments, machine_schedule_memory_access(&pointer_function, pointer_rows + 1).kind == MACHINE_SCHEDULE_MEMORY_UNKNOWN);
+        pointer_rows[0].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+        IrInstruction volatile_pointer_source = {.volatile_access = true};
+        IrFunction volatile_pointer_function = {.instructions = &volatile_pointer_source, .instruction_count = 1};
+        MachineLineMark volatile_pointer_mark = {.row = 1, .instruction = 0};
+        pointer_function.nonvolatile_memory_certified = false;
+        pointer_function.line_marks = &volatile_pointer_mark;
+        pointer_function.line_mark_count = 1;
+        machine_selection_certify_stack_memory(arguments->arena, &pointer_function, &volatile_pointer_function);
+        BUSTER_TEST(arguments, pointer_function.stack_slot_memory_flags && !pointer_function.stack_slot_memory_flags[0]);
+        BUSTER_TEST(arguments, machine_schedule_memory_access(&pointer_function, pointer_rows + 1).kind == MACHINE_SCHEDULE_MEMORY_UNKNOWN);
         u16 incoming_opcode = architecture ? MACHINE_A64_LOAD_INCOMING : MACHINE_X64_LOAD_INCOMING;
         BUSTER_TEST(arguments, machine_opcode_memory_effect(machine_opcode_info(incoming_opcode)) == MACHINE_MEMORY_EFFECT_READ);
         BUSTER_TEST(arguments, (machine_opcode_row_table()[incoming_opcode].schedule_flags & MACHINE_SCHEDULE_UNIT_MEMORY) != 0);
@@ -1224,9 +1299,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
         {
             MachineFunction function = machine_test_alias_function(arguments->arena, architecture != 0, variant);
             BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+            if (variant == MACHINE_ALIAS_TEST_MIXED_VOLATILE)
+            {
+                BUSTER_TEST(arguments, function.stack_slot_memory_flags != 0);
+                for (u32 slot = 0; slot < function.stack_slot_count; slot += 1)
+                {
+                    BUSTER_TEST(arguments, function.stack_slot_memory_flags[slot] ==
+                        (u32)(slot != 15 && slot != 31 && slot != 47));
+                }
+                function.stack_slot_memory_flags[0] = 2;
+                BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_PAYLOAD);
+                BUSTER_TEST(arguments, machine_schedule_memory_access(&function, function.instructions).kind == MACHINE_SCHEDULE_MEMORY_UNKNOWN);
+                function.stack_slot_memory_flags[0] = MACHINE_STACK_SLOT_MEMORY_NONVOLATILE;
+            }
             MachineScheduleResult scheduled = machine_schedule_function(arguments->arena, &function);
             MachineScheduleResult repeated = machine_schedule_function(arguments->arena, &function);
             BUSTER_TEST(arguments, scheduled.function.nonvolatile_memory_certified == function.nonvolatile_memory_certified);
+            BUSTER_TEST(arguments, scheduled.function.stack_slot_memory_flags == function.stack_slot_memory_flags);
             BUSTER_TEST(arguments, scheduled.moved == repeated.moved &&
                 memcmp(scheduled.function.instructions, repeated.function.instructions, function.instruction_count * sizeof(MachineInstruction)) == 0);
             BUSTER_TEST(arguments, machine_verify_function(&scheduled.function).error == MACHINE_VERIFY_NONE);
@@ -1240,6 +1329,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
             // solely from the metadata whose missing READ effect is tested.
             bool memory_order = true;
             bool independent_memory_moved = false;
+            bool independent_range_moved = false;
             for (u32 first = 0; first < function.instruction_count; first += 1)
             {
                 MachineInstruction* before = function.instructions + first;
@@ -1263,14 +1353,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
                     bool unknown = before_slot == UINT32_MAX || after_slot == UINT32_MAX ||
                                    before->opcode == MACHINE_X64_COPY_FRAME_FROM_FRAME || before->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME ||
                                    after->opcode == MACHINE_X64_COPY_FRAME_FROM_FRAME || after->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME;
+                    // Independent byte-interval oracle: an overlapping byte
+                    // must retain source order even across an eight-byte cell.
+                    u32 access_size = variant == MACHINE_ALIAS_TEST_VECTOR ? 64u : 8u;
+                    bool overlap = (u64)before->payload < (u64)after->payload + access_size &&
+                                   (u64)after->payload < (u64)before->payload + access_size;
+                    bool volatile_slot = variant == MACHINE_ALIAS_TEST_MIXED_VOLATILE &&
+                        (before_slot == 15 || before_slot == 31 || before_slot == 47 || after_slot == 15 || after_slot == 31 || after_slot == 47);
                     bool ordered = before_barrier || after_barrier || (before_memory && after_memory &&
-                                   (unknown || before_slot == after_slot || variant == MACHINE_ALIAS_TEST_UNCERTIFIED || variant == MACHINE_ALIAS_TEST_SHORT_SLOT || variant == MACHINE_ALIAS_TEST_INVALID_OFFSET));
+                                   (unknown || volatile_slot || (before_slot == after_slot && overlap) ||
+                                    (!function.nonvolatile_memory_certified && !function.stack_slot_memory_flags) ||
+                                    variant == MACHINE_ALIAS_TEST_SHORT_SLOT || variant == MACHINE_ALIAS_TEST_INVALID_OFFSET));
                     memory_order &= !ordered || positions[first] < positions[second];
                     independent_memory_moved |= before_memory && after_memory && !ordered && positions[first] > positions[second];
+                    independent_range_moved |= before_memory && after_memory && before_slot == after_slot &&
+                                               !ordered && positions[first] > positions[second];
                 }
             }
             BUSTER_TEST(arguments, memory_order);
-            if (variant == MACHINE_ALIAS_TEST_DISTINCT || variant == MACHINE_ALIAS_TEST_VECTOR)
+            if (variant == MACHINE_ALIAS_TEST_DISJOINT_RANGES)
+            {
+                BUSTER_TEST(arguments, independent_range_moved);
+            }
+            if (variant == MACHINE_ALIAS_TEST_FOLDED_RANGES)
+            {
+                BUSTER_TEST(arguments, !independent_range_moved);
+            }
+            if (variant == MACHINE_ALIAS_TEST_DISTINCT || variant == MACHINE_ALIAS_TEST_VECTOR || variant == MACHINE_ALIAS_TEST_DISJOINT_RANGES ||
+                variant == MACHINE_ALIAS_TEST_MIXED_VOLATILE)
             {
                 BUSTER_TEST(arguments, scheduled.moved && independent_memory_moved);
                 MachineStackPlacement original_placement = machine_fast_placement_build(arguments->arena, &function);
@@ -1282,14 +1392,65 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
                     new_placement.edit_count == repeated_placement.edit_count &&
                     memcmp(new_placement.edits, repeated_placement.edits, new_placement.edit_count * sizeof(MachineEdit)) == 0);
             }
-            if (variant == MACHINE_ALIAS_TEST_DISTINCT)
+            if (variant == MACHINE_ALIAS_TEST_DISTINCT || variant == MACHINE_ALIAS_TEST_MIXED_VOLATILE)
             {
                 ByteSlice replay = machine_replay_serialize(arguments->arena, &function);
-                MachineFunction restored = {.nonvolatile_memory_certified = true};
+                MachineFunction restored = {.nonvolatile_memory_certified = true, .stack_slot_memory_flags = function.stack_slot_memory_flags};
                 BUSTER_TEST(arguments, machine_replay_deserialize(arguments->arena, replay, &restored));
                 BUSTER_TEST(arguments, !restored.nonvolatile_memory_certified);
+                BUSTER_TEST(arguments, !restored.stack_slot_memory_flags);
             }
         }
+        MachineFunction spans = machine_test_alias_function(arguments->arena, architecture != 0, MACHINE_ALIAS_TEST_DISTINCT);
+        spans.nonvolatile_memory_certified = false;
+        IrInstruction provenance_rows[3] = {{.volatile_access = true}, {0}, {.volatile_access = true}};
+        IrFunction provenance = {.instructions = provenance_rows, .instruction_count = BUSTER_ARRAY_LENGTH(provenance_rows)};
+        MachineLineMark source_marks[3] = {{.row = 0, .instruction = 0}, {.row = 2, .instruction = 1},
+                                         {.row = spans.instruction_count, .instruction = 2}};
+        spans.line_marks = source_marks;
+        spans.line_mark_count = BUSTER_ARRAY_LENGTH(source_marks);
+        machine_selection_certify_stack_memory(arguments->arena, &spans, &provenance);
+        BUSTER_TEST(arguments, spans.stack_slot_memory_flags != 0);
+        for (u32 slot = 0; slot < spans.stack_slot_count; slot += 1)
+        {
+            // Both rows lowered from the first volatile canonical operation
+            // touch slot zero; a terminal zero-row mark touches no object.
+            BUSTER_TEST(arguments, spans.stack_slot_memory_flags[slot] == (u32)(slot != 0));
+        }
+        source_marks[1].instruction = provenance.instruction_count;
+        machine_selection_certify_stack_memory(arguments->arena, &spans, &provenance);
+        BUSTER_TEST(arguments, !spans.stack_slot_memory_flags);
+        source_marks[1].instruction = 1;
+        source_marks[1].row = spans.instruction_count + 1;
+        machine_selection_certify_stack_memory(arguments->arena, &spans, &provenance);
+        BUSTER_TEST(arguments, !spans.stack_slot_memory_flags);
+        source_marks[1].row = 0;
+        source_marks[0].row = 1;
+        machine_selection_certify_stack_memory(arguments->arena, &spans, &provenance);
+        BUSTER_TEST(arguments, !spans.stack_slot_memory_flags);
+        // A mutable block parameter already has an incoming definition, but
+        // only one defining instruction. Preserve its old-value store before
+        // the update and its new-value store afterward; textual def counts
+        // alone cannot identify this anti-dependence.
+        MachineFunction mutable = machine_test_alias_function(arguments->arena, architecture != 0, MACHINE_ALIAS_TEST_DISTINCT);
+        MachineRef mutable_reference = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+        mutable.virtual_registers[0].flags = MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE;
+        mutable.instructions[1].operands[1] = mutable_reference;
+        mutable.instructions[65] = (MachineInstruction){.opcode = architecture ? MACHINE_A64_MOV_RR : MACHINE_X64_MOV_RR,
+            .operands = {mutable_reference, mutable.instructions[64].operands[0]}};
+        mutable.instructions[127].operands[1] = mutable_reference;
+        BUSTER_TEST(arguments, machine_verify_function(&mutable).error == MACHINE_VERIFY_NONE);
+        MachineScheduleResult mutable_schedule = machine_schedule_function(arguments->arena, &mutable);
+        BUSTER_TEST(arguments, mutable_schedule.moved && machine_verify_function(&mutable_schedule.function).error == MACHINE_VERIFY_NONE);
+        u32 mutable_positions[3] = {0};
+        for (u32 mark = 0; mark < mutable_schedule.function.line_mark_count; mark += 1)
+        {
+            MachineLineMark line = mutable_schedule.function.line_marks[mark];
+            if (line.instruction == 1) mutable_positions[0] = line.row;
+            if (line.instruction == 65) mutable_positions[1] = line.row;
+            if (line.instruction == 127) mutable_positions[2] = line.row;
+        }
+        BUSTER_TEST(arguments, mutable_positions[0] < mutable_positions[1] && mutable_positions[1] < mutable_positions[2]);
         MachineBlock oversized_block = {.instruction_count = UINT32_MAX};
         MachineFunction oversized = {.instruction_count = UINT32_MAX, .block_count = 1, .blocks = &oversized_block,
                                     .target = architecture ? machine_target_aarch64() : machine_target_x86_64()};
@@ -1314,6 +1475,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
                 MachineStackPlacement previous = machine_fast_placement_build(arguments->arena, &original.function);
                 BUSTER_TEST(arguments, improved.valid && previous.valid);
                 BUSTER_TEST(arguments, improved.spill_count + improved.reload_count < previous.spill_count + previous.reload_count);
+            }
+            String8 range_names[] = {S8("alias_range_pressure"), S8("alias_mixed_pressure")};
+            for (u32 range_case = 0; range_case < BUSTER_ARRAY_LENGTH(range_names); range_case += 1)
+            {
+                IrFunction* range_function = machine_test_ir_function_find(source_program->modules, range_names[range_case]);
+                MachineSelectResult range_selected = machine_select_canonical_function(arguments->arena, source_program, range_function, target);
+                BUSTER_TEST(arguments, range_selected.supported && machine_verify_function(&range_selected.function).error == MACHINE_VERIFY_NONE);
+                if (range_selected.supported)
+                {
+                    BUSTER_TEST(arguments, range_selected.function.nonvolatile_memory_certified == (range_case == 0));
+                    if (range_case)
+                    {
+                        BUSTER_TEST(arguments, range_selected.function.stack_slot_memory_flags != 0);
+                        u32 nonvolatile_slots = 0;
+                        for (u32 slot = 0; slot < range_selected.function.stack_slot_count; slot += 1)
+                        {
+                            nonvolatile_slots += range_selected.function.stack_slot_memory_flags[slot] == MACHINE_STACK_SLOT_MEMORY_NONVOLATILE;
+                        }
+                        BUSTER_TEST(arguments, nonvolatile_slots && nonvolatile_slots < range_selected.function.stack_slot_count);
+                    }
+                    MachineScheduleResult ranged = machine_schedule_function(arguments->arena, &range_selected.function);
+                    MachineFunction conservative = range_selected.function;
+                    conservative.nonvolatile_memory_certified = false;
+                    conservative.stack_slot_memory_flags = 0;
+                    MachineScheduleResult original = machine_schedule_function(arguments->arena, &conservative);
+                    MachineStackPlacement improved = machine_fast_placement_build(arguments->arena, &ranged.function);
+                    MachineStackPlacement previous = machine_fast_placement_build(arguments->arena, &original.function);
+                    arguments->show(arguments, S8("MACHINE_ALIAS_RANGE architecture={u32} mixed={u32} before_spill_reload={u32} after_spill_reload={u32}\n"),
+                        architecture, range_case, previous.spill_count + previous.reload_count, improved.spill_count + improved.reload_count);
+                    BUSTER_TEST(arguments, improved.valid && previous.valid);
+                    BUSTER_TEST(arguments, improved.spill_count + improved.reload_count < previous.spill_count + previous.reload_count);
+                }
+            }
+            IrFunction* volatile_fields = machine_test_ir_function_find(source_program->modules, S8("alias_volatile_fields"));
+            MachineSelectResult fields_selected = machine_select_canonical_function(arguments->arena, source_program, volatile_fields, target);
+            BUSTER_TEST(arguments, fields_selected.supported && !fields_selected.function.nonvolatile_memory_certified);
+            if (fields_selected.supported)
+            {
+                u32 volatile_frame_accesses = 0;
+                MachineFunction* fields = &fields_selected.function;
+                for (u32 mark_index = 0; mark_index < fields->line_mark_count; mark_index += 1)
+                {
+                    MachineLineMark mark = fields->line_marks[mark_index];
+                    if (volatile_fields->instructions[mark.instruction].volatile_access)
+                    {
+                        u32 end = mark_index + 1 < fields->line_mark_count ? fields->line_marks[mark_index + 1].row : fields->instruction_count;
+                        for (u32 row = mark.row; row < end; row += 1)
+                        {
+                            if (machine_schedule_frame_access(fields, fields->instructions + row).kind == MACHINE_SCHEDULE_MEMORY_STACK_RANGE)
+                            {
+                                volatile_frame_accesses += 1;
+                                BUSTER_TEST(arguments, machine_schedule_memory_access(fields, fields->instructions + row).kind == MACHINE_SCHEDULE_MEMORY_UNKNOWN);
+                            }
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, volatile_frame_accesses >= 4);
+                BUSTER_TEST(arguments, machine_verify_function(fields).error == MACHINE_VERIFY_NONE);
             }
         }
         for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
