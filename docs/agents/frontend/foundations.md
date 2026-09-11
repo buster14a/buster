@@ -195,6 +195,15 @@ independent legacy mutable-register and pressure-census contracts.
   conservative overlap test: holes inside it and arbitrary repeated overwrites
   still take the full compaction path. GNU range copies use their parent
   context's extent; separately materialized range values own a fresh context.
+- `c_parse_validate_constexpr_declaration` validates a leaf root from one local
+  work entry, without acquiring scratch or clearing the translation-unit type
+  universe. Arrays, structs and unions retain the explicit private graph walk.
+  Both paths use the same qualifier and complete-object checks, in the same
+  diagnostic order. Pointees are not subobjects. No result is cached across
+  mutation or rollback. `c_test_constexpr_leaf_storage` checks reused scratch,
+  unrelated type populations, qualifier mutation/restoration and diagnostics;
+  `tests/basic_c_constexpr_leaf.c` runs in C23 under every native allocator.
+  Composite-query universe-sized scratch remains tracked in GitHub #259.
 - **GNU's `__alignof__` takes an expression; `_Alignof` takes only a type
   name.** Both spellings reach the same fold in `c_gen.c`, and it resolved an
   expression operand only for a compound literal until libc-test's
