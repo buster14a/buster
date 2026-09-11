@@ -2452,6 +2452,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_i128_complement(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_dynamic_stack(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice input = file_read(arguments->arena, S8("tests/basic_c_win64_dynamic_stack.c"), (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    BUSTER_TEST(arguments, source.length != 0);
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS};
+    for (u32 memory_form = 0; source.length && memory_form < 2; memory_form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("win64-dynamic-stack.c"), source, target,
+                                                                 (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+        BUSTER_TEST(arguments, program && program->module_count == 1);
+        if (program && program->module_count == 1)
+        {
+            IrFunction* function = machine_test_ir_function_find(program->modules, S8("exercise"));
+            BUSTER_TEST(arguments, function != 0);
+            if (function)
+            {
+                MachineSelectResult selected;
+                MachineEncodeResult encoded = machine_test_encode(temporary.arena, program, function, target, &selected);
+                BUSTER_TEST(arguments, selected.supported && encoded.valid);
+                if (selected.supported && encoded.valid)
+                {
+                    BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                    BUSTER_TEST(arguments, selected.function.outgoing_bytes == 0);
+                    BUSTER_TEST(arguments, encoded.frame_pointer_offset != 0);
+                    u32 allocations = 0;
+                    u32 stack_stores = 0;
+                    for (u32 index = 0; index < selected.function.instruction_count; index += 1)
+                    {
+                        MachineInstruction* row = selected.function.instructions + index;
+                        allocations += row->opcode == MACHINE_X64_STACK_ALLOCATE;
+                        stack_stores += row->opcode == MACHINE_X64_STORE_PTR64;
+                    }
+                    BUSTER_TEST(arguments, allocations == 4 && stack_stores == 8);
+                }
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, program->modules, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.statistics.fallback_function_count == 0);
+                    for (u32 index = 0; index < generated.function_count; index += 1)
+                    {
+                        CodegenFunctionDescriptor* descriptor = generated.functions + index;
+                        if (descriptor->symbol.value == function->symbol.value)
+                        {
+                            BUSTER_TEST(arguments, descriptor->unwind_action_count >= 3);
+                            if (descriptor->unwind_action_count >= 3)
+                            {
+                                CodegenUnwindAction* last = descriptor->unwind_actions + descriptor->unwind_action_count - 1;
+                                BUSTER_TEST(arguments, last->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER && last->register_index == MACHINE_X64_RBP &&
+                                    last->value == 0 && last->code_offset == descriptor->prolog_size);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_unsigned_switch(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3072,6 +3136,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     UnitTestResult edge_index_result = machine_test_fast_edge_index(arguments);
     result.test_count += edge_index_result.test_count;
     result.succeeded_test_count += edge_index_result.succeeded_test_count;
+    UnitTestResult dynamic_stack_result = machine_test_x64_dynamic_stack(arguments);
+    result.test_count += dynamic_stack_result.test_count;
+    result.succeeded_test_count += dynamic_stack_result.succeeded_test_count;
     UnitTestResult complement_result = machine_test_x64_i128_complement(arguments);
     result.test_count += complement_result.test_count;
     result.succeeded_test_count += complement_result.succeeded_test_count;

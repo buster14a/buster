@@ -246,6 +246,13 @@
   SP-relative save locations. Capacity planning includes large-offset body
   transfers and aggregate-copy pieces; frame-size sums are checked before
   narrowing. Keep strict large-frame and packed-layout tests in all MIR modes.
+- Win64 x86-64 dynamic frames establish RBP at the bottom of the fixed
+  allocation, after the probe, so PE unwind records retain SET_FPREG. Encoding
+  rebases logical frame offsets once at the existing exact/fast memory paths.
+  Each call reserves shadow space, stack arguments and private aggregate copies
+  below the live VLA and releases that area afterward. A frame-relative LEA
+  restores RSP for every return; `basic_c_win64_dynamic_stack.c` covers nested
+  allocations, page crossings, indirect calls and aggregate argument copies.
 - Windows/UEFI AArch64 MIR saves FP/LR, allocator-owned X19-X27, and X28 in
   a compact, sixteen-aligned prefix before establishing X29. Fixed body
   slots remain X28-relative; incoming stack arguments are relative to X29
