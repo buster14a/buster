@@ -172,6 +172,7 @@ struct MachineA64Selector
     MachineBuilderStream switch_cases;
     // Per IrValue: virtual register index, stack slot index, or UINT32_MAX.
     u32* value_virtual_registers;
+    MachineCanonicalPair* value_pairs;
     u32* value_stack_slots;
     // Per IrValue: the padded raw slot behind an over-aligned local whose
     // virtual register holds a runtime-aligned pointer, or UINT32_MAX.
@@ -4698,20 +4699,38 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
+            u32 parameter_count = 0;
             for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
             {
                 IrType* parameter_type = ir_type_from_id(&program->types, parameter->canonical_type);
+                bool wide = parameter_type && parameter_type->kind == IR_TYPE_INTEGER && parameter_type->bit_width == 128;
                 if (parameter->value.value >= function->value_count ||
-                    (!machine_a64_type_is_scalar_register(parameter_type) && !machine_a64_type_is_float_scalar(parameter_type)))
+                    (!wide && !machine_a64_type_is_scalar_register(parameter_type) && !machine_a64_type_is_float_scalar(parameter_type)))
                 {
                     return result;
                 }
-                selector.value_virtual_registers[parameter->value.value] =
-                    machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
-                                                                             .definition_point = MACHINE_POINT_INVALID,
-                                                                             .register_class = MACHINE_REGISTER_CLASS_GENERAL,
-                                                                             .typed_origin = parameter->value.value,
-                                                                         });
+                parameter_count += wide ? 2u : 1u;
+                if (parameter_count > UINT16_MAX)
+                {
+                    return result;
+                }
+                if (wide)
+                {
+                    if (!machine_builder_canonical_pair_parameter(&selector.builder, function, parameter, &selector.value_pairs))
+                    {
+                        return result;
+                    }
+                    selector.value_stack_slots[parameter->value.value] = machine_a64_append_slot(&selector, 16, 16);
+                }
+                else
+                {
+                    selector.value_virtual_registers[parameter->value.value] =
+                        machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
+                                                                                 .definition_point = MACHINE_POINT_INVALID,
+                                                                                 .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                                 .typed_origin = parameter->value.value,
+                                                                             });
+                }
                 value_facts.definition_blocks[parameter->value.value] = function->blocks[block_index].id.value;
             }
         }
@@ -5352,9 +5371,20 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             u32 parameter_offset = selector.builder.block_parameters.total_count;
             for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
             {
-                machine_builder_block_parameter(&selector.builder,
-                                                (MachineBlockParameter){.virtual_register = selector.value_virtual_registers[parameter->value.value]});
+                u32 value = parameter->value.value;
+                bool wide = selector.value_pairs && selector.value_pairs[value].registers[0] != UINT32_MAX;
+                u32 count = wide ? 2u : 1u;
+                u32 const* registers = wide ? selector.value_pairs[value].registers : selector.value_virtual_registers + value;
+                for (u32 part = 0; part < count; part += 1)
+                {
+                    machine_builder_block_parameter(&selector.builder, (MachineBlockParameter){.virtual_register = registers[part]});
+                    if (wide)
+                    {
+                        machine_a64_select_frame_store64(&selector, selector.value_stack_slots[value], part * 8u, registers[part]);
+                    }
+                }
             }
+            u32 parameter_count = selector.builder.block_parameters.total_count - parameter_offset;
             if (block_index == 0)
             {
                 // The variadic save snapshot reads the still-live incoming
@@ -5669,9 +5699,27 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     machine_a64_reject(&selector, instruction->opcode);
                     break;
                 }
+                u32 value = instruction->result.value;
+                if (selector.value_pairs && value < function->value_count && selector.value_pairs[value].registers[0] != UINT32_MAX)
+                {
+                    u32 slot = selector.value_stack_slots[value];
+                    if (slot == UINT32_MAX)
+                    {
+                        machine_a64_reject(&selector, instruction->opcode);
+                        break;
+                    }
+                    for (u32 part = 0; part < 2; part += 1)
+                    {
+                        u32 reg = selector.value_pairs[value].registers[part];
+                        u32 row = machine_a64_select_row(&selector, (MachineInstruction){
+                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, reg), machine_ref_make(MACHINE_REF_STACK_SLOT, slot)},
+                            .payload = part * 8u, .opcode = MACHINE_A64_LOAD_FRAME});
+                        machine_a64_define(&selector, reg, row);
+                    }
+                }
             }
             selected_rows += block_row_count;
-            machine_builder_block_end(&selector.builder, (MachineBlock){.parameter_offset = parameter_offset, .parameter_count = (u16)block->parameter_count});
+            machine_builder_block_end(&selector.builder, (MachineBlock){.parameter_offset = parameter_offset, .parameter_count = (u16)parameter_count});
         }
         // A dynamic allocation moves the stack pointer below the fixed
         // outgoing argument area, whose base every call with stack parts
@@ -5686,7 +5734,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             result.failed_opcode = selector.failed_opcode;
             return result;
         }
-        if (!machine_builder_canonical_edges(&selector.builder, function, selector.value_virtual_registers))
+        if (!machine_builder_canonical_edges(&selector.builder, function, selector.value_virtual_registers, selector.value_pairs))
         {
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }

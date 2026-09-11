@@ -1966,6 +1966,85 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_disconnected_dominance(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_i128_block_parameters(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice input = file_read(arguments->arena, S8("tests/basic_c_i128_block_parameters.c"), (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    BUSTER_TEST(arguments, source.length != 0);
+    String8 names[] = {S8("wide_choose"), S8("wide_signed"), S8("wide_nested"), S8("wide_swap"),
+                       S8("wide_rotate"), S8("wide_switch"), S8("wide_indirect")};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target = 0; source.length && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("i128-block-parameters.c"), source, targets[target],
+                                                                     (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                {
+                    IrFunction* function = machine_test_ir_function_find(program->modules, names[name]);
+                    BUSTER_TEST(arguments, function != 0);
+                    if (function)
+                    {
+                        u32 parameters = 0;
+                        u32 wide_parameters = 0;
+                        u32 cycle_sources = 0;
+                        for (u32 block = 0; block < function->block_count; block += 1)
+                        {
+                            for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
+                            {
+                                parameters += 1;
+                                IrType* type = ir_type_from_id(&program->types, parameter->canonical_type);
+                                bool wide = type && type->kind == IR_TYPE_INTEGER && type->bit_width == 128;
+                                wide_parameters += wide;
+                                if (wide)
+                                {
+                                    for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+                                    {
+                                        for (IrBlockParameter* other = function->blocks[block].first_parameter; other; other = other->next)
+                                        {
+                                            cycle_sources += other != parameter && incoming->value.value == other->value.value;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Require actual i128 joins, including two- and three-value
+                        // loop cycles, so frontend changes cannot make this vacuous.
+                        BUSTER_TEST_RAW(arguments, memory_form || wide_parameters != 0, names[name]);
+                        if (!memory_form && (name == 3 || name == 4))
+                        {
+                            BUSTER_TEST_RAW(arguments, cycle_sources >= (name == 3 ? 2u : 3u), names[name]);
+                        }
+                        MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, targets[target]);
+                        BUSTER_TEST_RAW(arguments, selected.supported, names[name]);
+                        if (selected.supported)
+                        {
+                            BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                            BUSTER_TEST(arguments, selected.function.block_parameter_count == parameters + wide_parameters);
+                            for (u32 parameter = 0; parameter < selected.function.block_parameter_count; parameter += 1)
+                            {
+                                u32 reg = selected.function.block_parameters[parameter].virtual_register;
+                                BUSTER_TEST(arguments, selected.function.virtual_registers[reg].definition_point == MACHINE_POINT_INVALID);
+                            }
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_pointer_block_parameters(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2690,6 +2769,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     UnitTestResult dominance_result = machine_test_disconnected_dominance(arguments);
     result.test_count += dominance_result.test_count;
     result.succeeded_test_count += dominance_result.succeeded_test_count;
+    UnitTestResult i128_result = machine_test_i128_block_parameters(arguments);
+    result.test_count += i128_result.test_count;
+    result.succeeded_test_count += i128_result.succeeded_test_count;
     UnitTestResult pointer_result = machine_test_pointer_block_parameters(arguments);
     result.test_count += pointer_result.test_count;
     result.succeeded_test_count += pointer_result.succeeded_test_count;
