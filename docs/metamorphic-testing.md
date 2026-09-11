@@ -46,8 +46,8 @@ BUSTER_METAMORPHIC_COMPILER=/absolute/path/to/baseline/ide BUSTER_METAMORPHIC_CA
 The executable needs `BUSTER_INCLUDE_TESTS=1`. Shell environment assignment above
 is POSIX syntax; on Windows set the same environment variables before invoking
 `build/Release/ide.exe metamorphic`. Run from the repository root. Choose a fresh
-output directory: successful working files are reused, and an existing campaign
-folder is not an append-only database.
+output directory: each pair and reducer replay owns a monotonically numbered
+`work-N` directory, and an existing campaign folder is not an append-only database.
 
 ## Generated programs and semantic preconditions
 
@@ -174,10 +174,14 @@ with a ten-second deadline. The comparator checks phase, launch status, timeout,
 process result, raw platform status, stdout and stderr. Equal crashes, equal
 nonzero self-check exits and equal timeouts are failures, never evidence of
 equivalence. Failure-class self-tests cover these cases and stream mismatches.
-Each compilation first clears its expected output paths and must produce a
-nonempty new artifact before consumption or execution. A compiler that exits
-successfully without writing output cannot reuse a preceding Clang reference
-executable or an earlier generated program.
+Each pair and reducer replay writes its sources, intermediate artifacts and
+executables in a distinct `work-N` directory. The work index is claimed
+atomically, so parallel work items within one campaign cannot collide, and a
+later Windows compile never overwrites an executable image whose process has
+only just exited. Each compilation still clears its expected output paths and
+must produce a nonempty new artifact before consumption or execution. A compiler
+that exits successfully without writing output cannot reuse a preceding Clang
+reference executable or an earlier generated program.
 
 For each distinct target/failure signature, up to 16 bundles are retained. The
 same signature in another allocator is still counted and reported, but does not

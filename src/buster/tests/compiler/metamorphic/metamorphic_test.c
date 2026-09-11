@@ -94,6 +94,7 @@ struct MetaContext
 {
     Arena* arena;
     String8 directory;
+    AtomicU64 work_serial;
     String8 compiler;
     String8 clang;
     String8 gcc;
@@ -133,6 +134,7 @@ struct MetaPair
 {
     MetaOutcome base;
     MetaOutcome changed;
+    String8 directory;
     bool passed;
     bool executed;
 };
@@ -418,17 +420,17 @@ BUSTER_GLOBAL_LOCAL MetaOutcome meta_require_output(MetaOutcome outcome, String8
     return outcome;
 }
 
-BUSTER_GLOBAL_LOCAL MetaOutcome meta_execute(MetaContext* context, MetaSpec spec, MetaTarget target, u32 allocator,
-                                               String8 side, u32 mask, bool reference)
+BUSTER_GLOBAL_LOCAL MetaOutcome meta_execute(MetaContext* context, String8 directory, MetaSpec spec, MetaTarget target,
+                                               u32 allocator, String8 side, u32 mask, bool reference)
 {
     Arena* arena = context->arena;
-    String8 source = string_format_z(arena, S8("{S8}/{S8}.c"), context->directory, side);
-    String8 artifact = string_format_z(arena, S8("{S8}/{S8}.artifact"), context->directory, side);
-    String8 executable = string_format_z(arena, S8("{S8}/{S8}.exe"), context->directory, side);
+    String8 source = string_format_z(arena, S8("{S8}/{S8}.c"), directory, side);
+    String8 artifact = string_format_z(arena, S8("{S8}/{S8}.artifact"), directory, side);
+    String8 executable = string_format_z(arena, S8("{S8}/{S8}.exe"), directory, side);
     MetaOutcome result = {.phase = META_PHASE_WRITE, .wait = {.result = PROCESS_RESULT_FAILED}};
     bool single = target.backend == META_EBPF;
     String8 text = meta_source(arena, spec, mask, single);
-    if (context->directory.length && context->compiler.length && meta_clear_output(executable) && meta_clear_output(artifact) &&
+    if (directory.length && context->compiler.length && meta_clear_output(executable) && meta_clear_output(artifact) &&
         file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text)))
     {
         String8 argv[16];
@@ -550,9 +552,17 @@ BUSTER_GLOBAL_LOCAL MetaPair meta_assess(MetaOutcome base, MetaOutcome changed)
 
 BUSTER_GLOBAL_LOCAL MetaPair meta_pair(MetaContext* context, MetaSpec spec, u32 mask, MetaTarget target, u32 allocator, bool reference)
 {
-    MetaOutcome base = meta_execute(context, spec, target, allocator, S8("base"), 0, reference);
-    MetaOutcome changed = meta_execute(context, spec, target, allocator, S8("transformed"), mask, reference);
-    return meta_assess(base, changed);
+    // A completed image can remain locked briefly on Windows. Never compile a
+    // later work item over either executable: the atomic claim also keeps the
+    // naming contract safe if the case loop is split across lanes later.
+    u64 work_index = atomic_u64_increment(&context->work_serial);
+    String8 directory = string_format_z(context->arena, S8("{S8}/work-{u64}"), context->directory, work_index);
+    os_make_directory(directory);
+    MetaOutcome base = meta_execute(context, directory, spec, target, allocator, S8("base"), 0, reference);
+    MetaOutcome changed = meta_execute(context, directory, spec, target, allocator, S8("transformed"), mask, reference);
+    MetaPair result = meta_assess(base, changed);
+    result.directory = directory;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool meta_same_failure_side(MetaOutcome a, MetaOutcome b)
@@ -794,7 +804,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context
                             {
                                 for (u32 extension = 0; extension < BUSTER_ARRAY_LENGTH(extensions); extension += 1)
                                 {
-                                    String8 observed = string_format_z(arena, S8("{S8}/{S8}.{S8}"), original_directory, sides[side], extensions[extension]);
+                                    String8 observed = string_format_z(arena, S8("{S8}/{S8}.{S8}"), pair.directory, sides[side], extensions[extension]);
                                     String8 saved = string_format_z(arena, S8("{S8}/observed-{S8}.{S8}"), failure, sides[side], extensions[extension]);
                                     if (meta_output_present(observed, false) && !file_copy((CopyFileArguments){observed, saved}))
                                         string_print(S8("METAMORPHIC observed artifact could not be saved: {S8}\n"), observed);
@@ -1009,6 +1019,13 @@ UnitTestResult metamorphic_tests(UnitTestArguments* arguments)
     MetaSummary summary = meta_run(&context, 1, 1, BUSTER_META_ALL_TRANSFORMS);
     BUSTER_TEST(arguments, summary.failures == 0);
     BUSTER_TEST(arguments, summary.executed == (BUSTER_META_TRANSFORM_COUNT + 1) * CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT);
+    u64 work_count = atomic_u64_add(&context.work_serial, 0);
+    BUSTER_TEST(arguments, work_count == summary.pairs);
+    String8 first_executable = string_format_z(arguments->arena, S8("{S8}/work-0/base.exe"), directory);
+    String8 last_executable = string_format_z(arguments->arena, S8("{S8}/work-{u64}/base.exe"), directory, work_count - 1);
+    BUSTER_TEST(arguments, !string_equal(first_executable, last_executable));
+    BUSTER_TEST(arguments, meta_output_present(first_executable, true));
+    BUSTER_TEST(arguments, meta_output_present(last_executable, true));
 #else
     arguments->show(arguments, S8("METAMORPHIC execution unavailable on this platform; preprocessing regressions executed\n"));
 #endif
