@@ -77,7 +77,7 @@ void wide_indirect(U128* out, U128 const* in, int n)
 replace:
     value = in[1];
 done:
-    /* The explicit join remains present when computed goto uses memory lowering. */
+    /* Exercise a conditional value after the indirect branch. */
     *out = (n & 2) ? value : in[2];
 }
 

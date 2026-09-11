@@ -2019,7 +2019,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_i128_block_parameters(UnitTestAr
                         }
                         // Require actual i128 joins, including two- and three-value
                         // loop cycles, so frontend changes cannot make this vacuous.
-                        BUSTER_TEST_RAW(arguments, memory_form || wide_parameters != 0, names[name]);
+                        // Computed goto deliberately disables local promotion; its
+                        // memory-form execution is covered by the driver fixture.
+                        BUSTER_TEST_RAW(arguments, memory_form || name == 6 || wide_parameters != 0, names[name]);
                         if (!memory_form && (name == 3 || name == 4))
                         {
                             BUSTER_TEST_RAW(arguments, cycle_sources >= (name == 3 ? 2u : 3u), names[name]);
