@@ -2375,12 +2375,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_validation_values(UnitTe
             String8 path = buster_test_temporary_path(temporary.arena, S8("buster-ir-validation-values"), S8(""));
             String8 command[] = {string_format(temporary.arena, S8("-fregister-allocator={S8}"), modes[mode]),
                 frontend ? S8("-ffrontend-ssa") : S8("-fno-frontend-ssa"), S8("-fverify-codegen"),
+#if BUSTER_ANDROID || BUSTER_IOS
+                // Mobile app sandboxes validate objects; desktop hosts execute
+                // every allocator/frontend combination below.
+                S8("-c"),
+#endif
                 S8("tests/basic_c_ir_validation_values.c"), S8("-o"), path};
             CompilerDriverResult compiled = compiler_driver_execute_invocation(
                 temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
             String8 description = string_format(temporary.arena, S8("canonical values {S8} frontend={u32}: {S8}"),
                                                 modes[mode], frontend, compiled.diagnostic);
-            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+#if !BUSTER_ANDROID && !BUSTER_IOS
             if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
             {
                 String8 run[] = {path};
@@ -2392,6 +2398,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_validation_values(UnitTe
                     BUSTER_TEST(arguments, os_process_wait_sync(temporary.arena, spawn).result == PROCESS_RESULT_SUCCESS);
                 }
             }
+#endif
             scratch_end(temporary);
         }
     }
