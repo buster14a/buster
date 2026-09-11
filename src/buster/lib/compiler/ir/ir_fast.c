@@ -536,17 +536,35 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
         if (result.error == IR_VALIDATION_NONE && program->fast_passes && !module->fast_complete)
         {
             module->fast = (IrFastStatistics){0};
-            for (u32 index = 0; index < module->function_count; index += 1)
+            // A producer certificate is sufficient for the ordinary backend,
+            // but some legacy accepted shapes do not yet satisfy the stricter
+            // canonical validator. Optional rewrites decline those modules as
+            // a unit: this keeps explicit/default FAST safe without turning an
+            // existing accepted source into a diagnostic.
+            bool fast_input_valid = true;
+            if (input_certified)
             {
-                IrFunction* function = module->functions + index;
-                if (function->state == IR_FUNCTION_LOWERED) ir_fast_function(program, function, &module->fast);
+                IrValidationResult fast_input = ir_validate_canonical_module(program, module);
+                fast_input_valid = fast_input.error == IR_VALIDATION_NONE;
             }
-            u64 changes = 0;
-            for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1) changes += module->fast.passes[pass].changes;
-            if (changes && (!input_certified || BUSTER_IR_TRANSFORM_CHECKS))
+            if (!fast_input_valid)
             {
-                result = ir_validate_canonical_module(program, module);
-                result.boundary = IR_VALIDATION_BOUNDARY_FAST_OUTPUT;
+                module->fast.validation_skips = 1;
+            }
+            else
+            {
+                for (u32 index = 0; index < module->function_count; index += 1)
+                {
+                    IrFunction* function = module->functions + index;
+                    if (function->state == IR_FUNCTION_LOWERED) ir_fast_function(program, function, &module->fast);
+                }
+                u64 changes = 0;
+                for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1) changes += module->fast.passes[pass].changes;
+                if (changes && (!input_certified || BUSTER_IR_TRANSFORM_CHECKS))
+                {
+                    result = ir_validate_canonical_module(program, module);
+                    result.boundary = IR_VALIDATION_BOUNDARY_FAST_OUTPUT;
+                }
             }
             module->fast_complete = result.error == IR_VALIDATION_NONE;
         }

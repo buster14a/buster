@@ -49,10 +49,10 @@ static int through_library(int status) { exit(status); }
 
 static int through_list_declarator(int status) { list_noreturn(status); }
 
-// The sibling of that declarator, in the same shape: this one falls off its
-// end, so the block after its call carries the ordinary return-value store the
-// driver test tells the two terminators apart by.
-static int through_list_sibling(int status) { list_returns(status); }
+// The sibling of that declarator, in the same shape, returns normally. Keep an
+// explicit result so DCE cannot discard the post-call witness as dead work on
+// the otherwise undefined non-void fall-off path.
+static int through_list_sibling(int status) { list_returns(status); return 0; }
 
 static int through_list_specifier_first(int status) { list_specifier_first(status); }
 

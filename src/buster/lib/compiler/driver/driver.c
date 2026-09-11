@@ -743,6 +743,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         // optimization is disabled. Match LLVM's -O0 policy by using the
         // low-latency allocator unless the caller explicitly opts out.
         .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST,
+        // The bounded canonical pipeline passed its dedicated-host total-time
+        // and peak-RSS adoption gates. Keep every pass independently
+        // selectable below, including a whole-pipeline opt-out.
+        .fast_passes = IR_FAST_ALL,
     };
     if (!arena)
     {
@@ -4204,6 +4208,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.fast.passes[pass].changes += unit.fast.passes[pass].changes;
         }
         result.fast.functions += unit.fast.functions;
+        result.fast.validation_skips += unit.fast.validation_skips;
         result.fast.budget_skips += unit.fast.budget_skips;
         result.fast.provenance_skips += unit.fast.provenance_skips;
         result.fast.parameter_budget_hits += unit.fast.parameter_budget_hits;

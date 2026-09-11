@@ -4,6 +4,14 @@
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    String8 default_command[] = {S8("source.c")};
+    CompilerDriverInvocation default_invocation = compiler_driver_parse_arguments(arguments->arena,
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(default_command));
+    BUSTER_TEST(arguments, default_invocation.error == COMPILER_DRIVER_ERROR_NONE && default_invocation.fast_passes == IR_FAST_ALL);
+    String8 disabled_command[] = {S8("-fcanonical-fast"), S8("-fno-canonical-fast"), S8("source.c")};
+    CompilerDriverInvocation disabled_invocation = compiler_driver_parse_arguments(arguments->arena,
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(disabled_command));
+    BUSTER_TEST(arguments, disabled_invocation.error == COMPILER_DRIVER_ERROR_NONE && disabled_invocation.fast_passes == 0);
     String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
     for (u32 backend = 0; backend < 7; backend += 1)
     {

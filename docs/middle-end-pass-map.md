@@ -14,8 +14,8 @@ The map below preserves the promotion-census context. The separately selectable
 folding, address normalization, DCE and parameter cleanup now exist in
 [`ir_fast.c`](../src/buster/lib/compiler/ir/ir_fast.c); their order, purity,
 certification, deterministic limits and adoption gate are specified in
-[the FAST pipeline contract](canonical-fast-pipeline.md). They remain opt-in
-pending paired end-to-end acceptance; #371's observability was not itself
+[the FAST pipeline contract](canonical-fast-pipeline.md). They are enabled by
+default after paired end-to-end acceptance; #371's observability was not itself
 implementation of those transformations.
 
 ## Current order, prerequisites and invalidation

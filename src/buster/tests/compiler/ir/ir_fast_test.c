@@ -138,6 +138,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, !ir_instruction_is_pure(program, function, &probe));
     }
     scratch_end(temporary);
+    // Optional transforms must decline a producer-certified legacy shape that
+    // the stricter canonical validator cannot prove. Such source is still
+    // accepted by its existing consumer, so FAST must not create a new error.
+    TemporalArena invalid_temporary = arena_begin_temporal(arguments->arena);
+    CIRLowerResult invalid_lowered = ir_promotion_lower(arguments->arena, S8("int test(int x){return x+0;}"), target_native);
+    BUSTER_TEST(arguments, invalid_lowered.program && !invalid_lowered.diagnostic_count);
+    if (invalid_lowered.program && !invalid_lowered.diagnostic_count)
+    {
+        IrProgram* invalid_program = invalid_lowered.program;
+        IrModule* invalid_module = invalid_program->modules;
+        IrFunction* invalid_function = invalid_module->functions;
+        bool corrupted = false;
+        for (u32 index = 0; index < invalid_function->instruction_count && !corrupted; index += 1)
+        {
+            IrInstruction* row = invalid_function->instructions + index;
+            if (row->opcode == IR_OPCODE_BINARY)
+            {
+                row->binary_operation = IR_BINARY_COUNT;
+                corrupted = true;
+            }
+        }
+        BUSTER_TEST(arguments, corrupted);
+        u32 instruction_count = invalid_function->instruction_count;
+        invalid_program->disable_local_promotion = true;
+        invalid_program->fast_passes = IR_FAST_ALL;
+        IrValidationResult skipped = ir_prepare_canonical_module(invalid_program, invalid_module, true);
+        BUSTER_TEST(arguments, skipped.error == IR_VALIDATION_NONE && invalid_module->fast_complete);
+        BUSTER_TEST(arguments, invalid_module->fast.validation_skips == 1 && invalid_module->fast.functions == 0);
+        BUSTER_TEST(arguments, invalid_function->instruction_count == instruction_count);
+    }
+    scratch_end(invalid_temporary);
     // A safely backed budget-control input: no instruction/block traversal and
     // no value storage. The guard must decline before allocating or touching
     // the advertised value population. This is not a valid-IR certification test.

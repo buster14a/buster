@@ -3,8 +3,10 @@
 The implementation for [#40](https://github.com/buster14a/buster/issues/40)
 lives in `ir_fast.c`, included by the existing `compiler_ir` module immediately
 after `ir_promote.c`. It adds no second IR and widens neither instruction row.
-The transforms are **opt-in** pending paired total-compile-time and peak-RSS
-acceptance. Register allocator FAST remains the ordinary default independently.
+The transforms are enabled by default after passing paired total-compile-time
+and peak-RSS acceptance on the dedicated qualified host. The complete pipeline
+and every pass remain independently selectable. Register allocator FAST remains
+the ordinary default independently.
 
 The [initial paired comparison](performance-audits/2026-09-11T200359Z.md) and
 [query-reduction/ablation follow-up](performance-audits/2026-09-11T204614Z.md)
@@ -12,8 +14,10 @@ retain the observed total-time cost and inconclusive intervals. They do not
 establish performance acceptance; #40 remains open for that criterion.
 The [separate production-profile experiment](performance-audits/2026-09-11T211034Z.md)
 validates tests-OFF outputs against the tested compiler and retains its full
-on/off comparison. Its mixed, inconclusive results also leave acceptance open;
-it includes a correction to the earlier optimization-level label.
+on/off comparison. Its mixed, inconclusive results did not establish acceptance;
+it includes a correction to the earlier optimization-level label. The final
+dedicated-host A/A, on/off, and leave-one-pass-out acceptance is retained in the
+current integration audit.
 
 ## Order and ownership
 
@@ -42,6 +46,10 @@ certificate. Mutating a prepared module requires clearing the relevant
 preparation markers and revoking the caller's input certificate. Repeated
 untrusted preparation still validates. Published CFG/address facts must be
 invalidated before mutation and rebuilt after these transforms (#38/#44).
+Producer-certified modules that do not yet satisfy the stricter canonical
+validator are left unchanged as a unit and increment `validation_skips`.
+Optional transformation must never turn an otherwise accepted legacy source
+shape into a new diagnostic.
 
 ## Purity contract
 
@@ -58,8 +66,8 @@ this contract explicitly classifies and tests them.
 ## Controls and measurement
 
 ```sh
-# Select all passes, then independently disable one (last flag wins).
-build/Release/ide cc source.c -fcanonical-fast -fno-canonical-fast-dce -o output
+# Independently disable one default pass (last flag wins).
+build/Release/ide cc source.c -fno-canonical-fast-dce -o output
 # Select only folding; do not collect timing during throughput observations.
 build/Release/ide cc source.c -fcanonical-fast-fold -o output
 # Diagnostic replay only: clocks and per-pass work counts, plus compaction.
@@ -70,7 +78,8 @@ All four names accept `-fcanonical-fast-NAME` and
 `-fno-canonical-fast-NAME`. `-fno-canonical-fast` clears the whole selection.
 Timing selection does not enable transformations. Per-pass `IR_FAST_PASS` records
 report the enable/timing bits, nanoseconds, row/operand/incoming visits and
-changes. `IR_FAST` records instruction counts, skips, parameter-cap hits,
+changes. `IR_FAST` records instruction counts, validation/budget/provenance
+skips, parameter-cap hits,
 compaction time and memory upper bounds. Multi-input sums additive counters;
 the scratch bound is the maximum, not a sum.
 

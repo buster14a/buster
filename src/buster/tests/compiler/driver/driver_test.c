@@ -8699,9 +8699,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
     // The declarator beside list_noreturn carries no marker of its own, so its
-    // own call falls through.  Scanning the whole declarator list marked it
-    // too, and the ud2 planted after this call is what the fixture then
-    // executed at run time.
+    // own call returns. Scanning the whole declarator list marked it too and
+    // replaced the explicit return after this call with a noreturn terminator.
     u64 sibling_body = string_first_sequence(noreturn_assembly.output, S8("through_list_sibling:\n"));
     BUSTER_TEST(arguments, sibling_body != BUSTER_STRING_NO_MATCH);
     if (sibling_body != BUSTER_STRING_NO_MATCH)

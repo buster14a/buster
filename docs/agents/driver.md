@@ -100,7 +100,7 @@ This bounded projection
 requires a mask/broadcast, ZMM destination, or high vector register and covers
 FULL/HALF EVEX tuples; it does not replace all legacy/VEX source inference.
 
-The opt-in `-fcanonical-fast` shared pipeline and independent
+The default `-fcanonical-fast` shared pipeline and independent
 `-fcanonical-fast-{fold,address,dce,parameters}` controls are described in
 [the FAST pipeline contract](../canonical-fast-pipeline.md). Timing is separate
 (`-ftime-canonical-fast -v`); register allocation selection is unchanged.

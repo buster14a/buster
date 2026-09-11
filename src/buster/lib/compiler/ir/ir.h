@@ -805,6 +805,7 @@ struct IrFastStatistics
 {
     IrFastPassStatistics passes[IR_FAST_PASS_COUNT];
     u64 functions;
+    u64 validation_skips;
     u64 budget_skips;
     u64 provenance_skips;
     u64 parameter_budget_hits;

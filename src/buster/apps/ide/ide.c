@@ -946,9 +946,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                              (u32)invocation.measure_fast_passes, measurement.nanoseconds, measurement.visits, measurement.changes);
             }
             IrFastStatistics measurement = compile.fast;
-            string_print(S8("IR_FAST functions={u64} budget_skips={u64} provenance_skips={u64} parameter_budget_hits={u64} "
+            string_print(S8("IR_FAST functions={u64} validation_skips={u64} budget_skips={u64} provenance_skips={u64} parameter_budget_hits={u64} "
                             "scratch_peak_bound={u64} retained_bound={u64} compact_ns={u64} instructions_before={u64} instructions_after={u64}\n"),
-                         measurement.functions, measurement.budget_skips, measurement.provenance_skips, measurement.parameter_budget_hits,
+                         measurement.functions, measurement.validation_skips, measurement.budget_skips, measurement.provenance_skips, measurement.parameter_budget_hits,
                          measurement.scratch_peak_bytes, measurement.retained_bytes, measurement.compact_nanoseconds,
                          measurement.instructions_before, measurement.instructions_after);
         }
