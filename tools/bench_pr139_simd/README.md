@@ -1,3 +1,11 @@
+> **Recovered historical harness — September 11, 2026.** This is the original
+> PR 160 tool, preserved with its evidence rather than a new performance result.
+> Its complete runtime compatibility with current main has not been validated.
+> The commands below are the original instructions; reproduce the historical
+> source/build tree before relying on its recorded results. See the
+> [recovery record](../../docs/audits/2026-09-11-recovery/README.md) for exact
+> revisions, completed checks, and limitations. It is not wired into CI.
+
 # PR139 SIMD kernel validation
 
 Opt-in Linux x86-64 validation of the three kernels introduced by PR139:
