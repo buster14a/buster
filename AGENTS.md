@@ -107,16 +107,17 @@ unavailable gates; never call an unrun check green. Follow the existing
 
 ## Benchmarking and diagnostics
 
-Before performance work, read the newest entry in
-[PERFORMANCE_AUDITS.md](PERFORMANCE_AUDITS.md), then the relevant methods in
+Before performance work, read the newest audit (`tools/new_audit.py --newest`
+prints its path; [PERFORMANCE_AUDITS.md](PERFORMANCE_AUDITS.md) explains the
+history), then the relevant methods in
 [benchmarking.md](docs/agents/benchmarking.md). Measure using the trusted
 Clang-built compiler; self-built stages validate the fixed point. Compare the
 same inputs, flags, target, and machine. Report compile time and useful work,
 not just a proxy or generated-program runtime.
 
-Record an audit with `tools/new_audit.py`: one new file under
-`docs/performance-audits/` and one newest-first index entry. Never rewrite an
-existing audit. Check index order after a union merge.
+Record an audit with `tools/new_audit.py`: it writes one new file under
+`docs/performance-audits/` and nothing else. Never add a line to the closed
+index in `PERFORMANCE_AUDITS.md`, and never rewrite an existing audit.
 
 ## Forge, issues, and pull requests
 
