@@ -167,6 +167,18 @@
   ahead of their definitions publishes incorrect verifier metadata.
   `basic_c_x86_64_i128_binary.c` and `basic_c_i128_shift_edges.c` require strict
   MIR selection and cover product carries and counts below, at and above 64.
+- AArch64 signed/unsigned i128 division and remainder use a bounded restoring
+  loop over ordinary scalar MIR. Five block parameters carry the evolving
+  quotient/dividend, remainder and bit count; parallel edge copies keep the
+  loop in SSA. Signed magnitudes and results use explicit low-limb borrow.
+  The selector counts splits during its existing value-fact walk and allocates
+  canonical-to-machine entry/exit maps only for functions containing a wide
+  divide. Remap branch, switch, label-address and indirect-branch targets to
+  entries, and canonical outgoing edges from exits; preserve original block
+  parameters on the entry. The registered division fixture checks exact results
+  against an independent scalar-limb reference and exercises surrounding CFG
+  edges. It and the unchanged wide-integer fixture require zero fallback on
+  all desktop AArch64 targets and all MIR allocators with both frontend forms.
 - AArch64 f32/f64-to-i128 casts use scalar MIR conversions and arithmetic.
   Widen f32 before splitting the absolute magnitude at 2^64, convert both
   unsigned limbs with truncation toward zero, and restore signed results

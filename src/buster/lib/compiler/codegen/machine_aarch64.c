@@ -15,7 +15,8 @@
 // aggregate or vector past sixteen bytes — behind a caller-side defensive
 // copy, over-aligned locals as runtime-aligned pointers into padded raw
 // slots, and rvalue array/vector INDEX bases through their storage
-// snapshot. Everything else is an explicit unsupported result, never a
+// snapshot. Wide division expands into scalar MIR blocks before placement.
+// Everything else is an explicit unsupported result, never a
 // silent misselection.
 //
 // Register conventions: values live zero-extended in X registers exactly
@@ -205,6 +206,11 @@ struct MachineA64Selector
     // and whether the value is a chain member that selects into nothing.
     MachineA64BranchFusion* branch_fusions;
     u8* fused_dead;
+    // Only allocated when a wide divide splits a canonical block. Canonical
+    // targets enter its first machine block; outgoing edges leave its last.
+    u32* block_entries;
+    u32* block_exits;
+    MachineBlock open_block;
     u32 virtual_register_count;
     IrOpcode failed_opcode;
     bool supported;
@@ -1969,7 +1975,138 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_to_float(MachineA64Selector* se
 // per-half XOR, and the ordered comparisons as the strict high-half
 // relation blended with the unsigned low-half relation behind high-half
 // equality. Multiply adds the cross products to UMULH of the low halves.
-// Divides and remainders still need their pair lowerings.
+// The restoring loop has five SSA parameters: shifted dividend/quotient,
+// partial remainder, and remaining bit count. All invariant values dominate
+// the loop and all evolving values arrive through parallel edge copies.
+#define MACHINE_A64_I128_DIVIDE_PARAMETER_COUNT 5u
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_instruction_is_i128_divide(IrProgram* program, IrInstruction* instruction)
+{
+    IrBinaryOperation operation = instruction->binary_operation;
+    bool result = false;
+    if (instruction->opcode == IR_OPCODE_BINARY &&
+        (operation == IR_BINARY_SIGNED_DIVIDE || operation == IR_BINARY_UNSIGNED_DIVIDE ||
+         operation == IR_BINARY_SIGNED_REMAINDER || operation == IR_BINARY_UNSIGNED_REMAINDER))
+    {
+        IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+        result = type && type->kind == IR_TYPE_INTEGER && type->bit_width == 128;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void machine_a64_select_i128_apply_sign(MachineA64Selector* selector, u32 sign, u32* low, u32* high)
+{
+    u32 inverted_low = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, *low, sign);
+    u32 inverted_high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, *high, sign);
+    u32 borrow = machine_a64_select_compare_set(selector, inverted_low, sign, MACHINE_A64_CONDITION_BELOW);
+    *low = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, inverted_low, sign);
+    *high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, inverted_high, sign);
+    *high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, *high, borrow);
+}
+
+BUSTER_GLOBAL_LOCAL void machine_a64_select_i128_divide_edge(MachineA64Selector* selector, u32 source, u32 destination, u32 const* values)
+{
+    u32 copy_offset = selector->builder.edge_copy_sources.total_count;
+    for (u32 index = 0; index < MACHINE_A64_I128_DIVIDE_PARAMETER_COUNT; index += 1)
+    {
+        machine_builder_edge_copy_source(&selector->builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[index]));
+    }
+    machine_builder_edge(&selector->builder, (MachineEdge){.source_block = source, .destination_block = destination,
+                                                         .copy_offset = copy_offset, .copy_count = MACHINE_A64_I128_DIVIDE_PARAMETER_COUNT});
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_divide(MachineA64Selector* selector, IrInstruction* instruction, u32 result_slot)
+{
+    u32 left_low;
+    u32 left_high;
+    u32 right_low;
+    u32 right_high;
+    bool selected = false;
+    if (result_slot != UINT32_MAX && machine_a64_select_i128_halves(selector, instruction, &left_low, &left_high, &right_low, &right_high))
+    {
+        bool signed_value = instruction->binary_operation == IR_BINARY_SIGNED_DIVIDE || instruction->binary_operation == IR_BINARY_SIGNED_REMAINDER;
+        bool remainder_result = instruction->binary_operation == IR_BINARY_SIGNED_REMAINDER || instruction->binary_operation == IR_BINARY_UNSIGNED_REMAINDER;
+        u32 zero = machine_a64_select_immediate_register(selector, 0);
+        u32 one = machine_a64_select_immediate_register(selector, 1);
+        u32 top_bit = machine_a64_select_immediate_register(selector, 63);
+        u32 count = machine_a64_select_immediate_register(selector, 128);
+        u32 result_sign = zero;
+        if (signed_value)
+        {
+            u32 left_sign = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ASR64, left_high, top_bit);
+            u32 right_sign = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ASR64, right_high, top_bit);
+            machine_a64_select_i128_apply_sign(selector, left_sign, &left_low, &left_high);
+            machine_a64_select_i128_apply_sign(selector, right_sign, &right_low, &right_high);
+            result_sign = remainder_result ? left_sign : machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, left_sign, right_sign);
+        }
+        u32 entry = selector->builder.open_block;
+        u32 loop = entry + 1;
+        u32 continuation = entry + 2;
+        u32 initial[MACHINE_A64_I128_DIVIDE_PARAMETER_COUNT] = {left_low, left_high, zero, zero, count};
+        machine_a64_select_i128_divide_edge(selector, entry, loop, initial);
+        machine_a64_select_row(selector, (MachineInstruction){.operands = {machine_ref_make(MACHINE_REF_BLOCK, loop)}, .opcode = MACHINE_A64_B});
+        machine_builder_block_end(&selector->builder, selector->open_block);
+        machine_builder_block_begin(&selector->builder);
+        selector->open_block = (MachineBlock){.parameter_offset = selector->builder.block_parameters.total_count,
+                                             .parameter_count = MACHINE_A64_I128_DIVIDE_PARAMETER_COUNT};
+        u32 state[MACHINE_A64_I128_DIVIDE_PARAMETER_COUNT];
+        for (u32 index = 0; index < MACHINE_A64_I128_DIVIDE_PARAMETER_COUNT; index += 1)
+        {
+            state[index] = machine_builder_virtual_register(&selector->builder, (MachineVirtualRegister){.definition_point = MACHINE_POINT_INVALID,
+                                                                                                       .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                                                       .typed_origin = IR_ID_UNDERLYING_INVALID});
+            machine_builder_block_parameter(&selector->builder, (MachineBlockParameter){.virtual_register = state[index]});
+        }
+        // Shift one dividend bit into the partial remainder. Its prefix has
+        // at most 128 bits, so this shift cannot lose a 129th remainder bit.
+        u32 dividend_bit = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSR64, state[1], top_bit);
+        u32 remainder_cross = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSR64, state[2], top_bit);
+        u32 remainder_low = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, state[2], one);
+        remainder_low = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, remainder_low, dividend_bit);
+        u32 remainder_high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, state[3], one);
+        remainder_high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, remainder_high, remainder_cross);
+        u32 high_above = machine_a64_select_compare_set(selector, remainder_high, right_high, MACHINE_A64_CONDITION_ABOVE);
+        u32 high_equal = machine_a64_select_compare_set(selector, remainder_high, right_high, MACHINE_A64_CONDITION_EQUAL);
+        u32 low_enough = machine_a64_select_compare_set(selector, remainder_low, right_low, MACHINE_A64_CONDITION_ABOVE_EQUAL);
+        u32 subtract = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, high_equal, low_enough);
+        subtract = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, high_above, subtract);
+        u32 mask = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, zero, subtract);
+        u32 subtract_low = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, right_low, mask);
+        u32 subtract_high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, right_high, mask);
+        u32 borrow = machine_a64_select_compare_set(selector, remainder_low, subtract_low, MACHINE_A64_CONDITION_BELOW);
+        u32 next[MACHINE_A64_I128_DIVIDE_PARAMETER_COUNT];
+        next[2] = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, remainder_low, subtract_low);
+        next[3] = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, remainder_high, subtract_high);
+        next[3] = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, next[3], borrow);
+        u32 quotient_cross = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSR64, state[0], top_bit);
+        next[0] = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, state[0], one);
+        next[0] = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, next[0], subtract);
+        next[1] = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, state[1], one);
+        next[1] = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, next[1], quotient_cross);
+        next[4] = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, state[4], one);
+        machine_a64_select_row(selector, (MachineInstruction){.operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, next[4])},
+                                                            .opcode = MACHINE_A64_CMP_ZERO});
+        machine_a64_select_row(selector, (MachineInstruction){.operands = {machine_ref_make(MACHINE_REF_BLOCK, loop),
+                                                                         machine_ref_make(MACHINE_REF_BLOCK, continuation)},
+                                                            .opcode = MACHINE_A64_BCC, .payload = MACHINE_A64_CONDITION_NOT_EQUAL});
+        machine_a64_select_i128_divide_edge(selector, loop, loop, next);
+        machine_builder_edge(&selector->builder, (MachineEdge){.source_block = loop, .destination_block = continuation});
+        machine_builder_block_end(&selector->builder, selector->open_block);
+        machine_builder_block_begin(&selector->builder);
+        selector->open_block = (MachineBlock){0};
+        u32 result_low = next[remainder_result ? 2 : 0];
+        u32 result_high = next[remainder_result ? 3 : 1];
+        if (signed_value)
+        {
+            machine_a64_select_i128_apply_sign(selector, result_sign, &result_low, &result_high);
+        }
+        machine_a64_select_frame_store64(selector, result_slot, 0, result_low);
+        machine_a64_select_frame_store64(selector, result_slot, 8, result_high);
+        selected = true;
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_binary(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrFunction* function = selector->function;
@@ -1977,7 +2114,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_binary(MachineA64Selector* sele
     bool selected = false;
     IrBinaryOperation operation = instruction->binary_operation;
     u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
-    if (machine_a64_binary_is_i128_shift(selector, instruction))
+    if (machine_a64_instruction_is_i128_divide(selector->program, instruction))
+    {
+        selected = machine_a64_select_i128_divide(selector, instruction, result_slot);
+    }
+    else if (machine_a64_binary_is_i128_shift(selector, instruction))
     {
         u32 amount;
         selected = machine_a64_constant_shift_amount(selector, instruction->operands[1], &amount)
@@ -4123,10 +4264,15 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_fence(MachineA64Selector* sel
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL u32 machine_a64_block_entry(MachineA64Selector* selector, u32 canonical_block)
+{
+    return selector->block_entries ? selector->block_entries[canonical_block] : canonical_block;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_branch(MachineA64Selector* selector, IrInstruction* instruction)
 {
     machine_a64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[0].value)},
+                                         .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[0].value))},
                                          .opcode = MACHINE_A64_B,
                                      });
     return true;
@@ -4140,7 +4286,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_label_address(MachineA64Selector* se
     {
         u32 row = machine_a64_select_row(selector, (MachineInstruction){
                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
-                                                          .payload = instruction->targets[0].value,
+                                                          .payload = machine_a64_block_entry(selector, instruction->targets[0].value),
                                                           .opcode = MACHINE_A64_LEA_BLOCK,
                                                       });
         machine_a64_define(selector, result_register, row);
@@ -4167,7 +4313,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_indirect_branch(MachineA64Selector* 
                 break;
             }
             MachineSwitchCase* target_row = (MachineSwitchCase*)machine_stream_append(selector->arena, &selector->switch_cases);
-            *target_row = (MachineSwitchCase){.target_block = instruction->targets[target_index].value};
+            *target_row = (MachineSwitchCase){.target_block = machine_a64_block_entry(selector, instruction->targets[target_index].value)};
         }
         if (selected)
         {
@@ -4212,8 +4358,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_fused_branch(MachineA64Selector* sel
         if (selected)
         {
             machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[0].value),
-                                                              machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[1].value)},
+                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[0].value)),
+                                                              machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[1].value))},
                                                  .payload = fusion->condition,
                                                  .opcode = MACHINE_A64_BCC,
                                              });
@@ -4243,8 +4389,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_branch_if(MachineA64Selector* select
                                                  .opcode = MACHINE_A64_CMP_ZERO,
                                              });
             machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[0].value),
-                                                              machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[1].value)},
+                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[0].value)),
+                                                              machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[1].value))},
                                                  .payload = MACHINE_A64_CONDITION_NOT_EQUAL,
                                                  .opcode = MACHINE_A64_BCC,
                                              });
@@ -4289,13 +4435,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_switch(MachineA64Selector* selector,
             MachineSwitchCase* case_row = (MachineSwitchCase*)machine_stream_append(selector->arena, &selector->switch_cases);
             *case_row = (MachineSwitchCase){
                 .value = instruction->immediates[case_index],
-                .target_block = instruction->targets[case_index].value,
+                .target_block = machine_a64_block_entry(selector, instruction->targets[case_index].value),
                 .compare_width = compare_width,
             };
         }
         machine_a64_select_row(selector, (MachineInstruction){
                                              .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, condition_register),
-                                                          machine_ref_make(MACHINE_REF_BLOCK, instruction->targets[instruction->target_count - 1].value)},
+                                                          machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[instruction->target_count - 1].value))},
                                              .payload = first_case,
                                              .opcode = MACHINE_A64_SWITCH,
                                              .flags = (u16)instruction->immediate_count,
@@ -4771,16 +4917,47 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         bool dense_rows = true;
         bool nonvolatile_memory = true;
         u32 walk_ordinal = 0;
+        u32 expanded_blocks = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
             u32 block_row_count = 0;
             u32 block_candidate_count = 0;
+            u32 entry_block = expanded_blocks;
+            if (expanded_blocks < MACHINE_REF_PAYLOAD_LIMIT)
+            {
+                expanded_blocks += 1;
+            }
+            else
+            {
+                machine_a64_reject(&selector, IR_OPCODE_BINARY);
+            }
             for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
             {
                 IrInstruction* instruction = function->instructions + id.value;
                 dense_rows &= id.value == block->first_instruction.value + block_row_count;
                 nonvolatile_memory &= !instruction->volatile_access;
+                if (machine_a64_instruction_is_i128_divide(program, instruction))
+                {
+                    if (!selector.block_entries)
+                    {
+                        selector.block_entries = arena_allocate(arena, u32, function->block_count);
+                        selector.block_exits = arena_allocate(arena, u32, function->block_count);
+                        for (u32 previous = 0; previous < block_index; previous += 1)
+                        {
+                            selector.block_entries[previous] = previous;
+                            selector.block_exits[previous] = previous;
+                        }
+                    }
+                    if (expanded_blocks > MACHINE_REF_PAYLOAD_LIMIT - 2)
+                    {
+                        machine_a64_reject(&selector, IR_OPCODE_BINARY);
+                    }
+                    else
+                    {
+                        expanded_blocks += 2;
+                    }
+                }
                 if ((MACHINE_A64_CANDIDATE_OPCODES >> instruction->opcode) & 1)
                 {
                     candidate_rows[candidate_count] = block_row_count;
@@ -4849,6 +5026,11 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                         promotable_locals[used] = 0;
                     }
                 }
+            }
+            if (selector.block_entries)
+            {
+                selector.block_entries[block_index] = entry_block;
+                selector.block_exits[block_index] = expanded_blocks - 1;
             }
             row_layout.block_row_counts[block_index] = block_row_count;
             block_candidate_counts[block_index] = block_candidate_count;
@@ -5349,7 +5531,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         {
             IrBlock* block = function->blocks + block_index;
             machine_builder_block_begin(&selector.builder);
-            u32 parameter_offset = selector.builder.block_parameters.total_count;
+            selector.open_block = (MachineBlock){.parameter_offset = selector.builder.block_parameters.total_count,
+                                                 .parameter_count = (u16)block->parameter_count};
             for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
             {
                 machine_builder_block_parameter(&selector.builder,
@@ -5671,7 +5854,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 }
             }
             selected_rows += block_row_count;
-            machine_builder_block_end(&selector.builder, (MachineBlock){.parameter_offset = parameter_offset, .parameter_count = (u16)block->parameter_count});
+            machine_builder_block_end(&selector.builder, selector.open_block);
         }
         // A dynamic allocation moves the stack pointer below the fixed
         // outgoing argument area, whose base every call with stack parts
@@ -5686,11 +5869,21 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             result.failed_opcode = selector.failed_opcode;
             return result;
         }
+        u32 canonical_edge_offset = selector.builder.edges.total_count;
         if (!machine_builder_canonical_edges(&selector.builder, function, selector.value_virtual_registers))
         {
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }
         result.function = machine_function_builder_finish(arena, &selector.builder);
+        if (selector.block_entries)
+        {
+            for (u32 edge_index = canonical_edge_offset; edge_index < result.function.edge_count; edge_index += 1)
+            {
+                MachineEdge* edge = result.function.edges + edge_index;
+                edge->source_block = selector.block_exits[edge->source_block];
+                edge->destination_block = selector.block_entries[edge->destination_block];
+            }
+        }
         result.function.target = &machine_aarch64_description;
         result.function.windows_aarch64_frame = target_uses_pe_unwind(target);
         result.function.immediates = arena_allocate(arena, u64, selector.immediates.total_count);
