@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-10T190027Z`](docs/performance-audits/2026-09-10T190027Z.md) — Z02: invalidate rejected throughput summaries and preserve sealed evidence
 - [`2026-09-10T012048Z`](docs/performance-audits/2026-09-10T012048Z.md) — Z17 bounded native C translation-unit cohorts, no speedup claim
 - [`2026-09-10T011012Z`](docs/performance-audits/2026-09-10T011012Z.md) — Z05 literal-call census and single-fragment scratch candidate
 - [`2026-09-10T010529Z`](docs/performance-audits/2026-09-10T010529Z.md) — Z11 parameter-edge splitter: stable scratch-only outgoing indexes (#296)

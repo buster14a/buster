@@ -884,11 +884,36 @@ static double tp_metric(TpRow const* row, unsigned metric)
     return result;
 }
 
+static char const* const tp_summary_names[] = {"summary.json", "summary.md"};
+
+static int tp_remove_summaries(char const* root)
+{
+    int ok = 1;
+    for (unsigned i = 0; i < sizeof(tp_summary_names) / sizeof(tp_summary_names[0]); ++i)
+    {
+        char path[TP_PATH_CAP];
+        int removed = tp_path(path, root, tp_summary_names[i]);
+        if (removed)
+        {
+            removed = remove(path) == 0 || errno == ENOENT;
+        }
+        if (!removed)
+        {
+            tp_error("cannot remove stale or invalid summary %s in %s", tp_summary_names[i], root);
+        }
+        /* Attempt both reports even when one cannot be removed. */
+        ok = removed && ok;
+    }
+    return ok;
+}
+
 static int tp_compare(char const* root)
 {
     char path[TP_PATH_CAP];
     unsigned jobs = 0, pairs = 0, guard = 0, schema = 0, rounds = 0;
-    int ok = tp_path(path, root, "complete.txt");
+    /* A rejected replay must not leave an earlier verdict publishable.
+     * Only derived reports are removed; sealed evidence remains intact. */
+    int ok = tp_remove_summaries(root) && tp_path(path, root, "complete.txt");
     FILE* config = ok ? fopen(path, "rb") : NULL;
     ok = config != NULL;
     if (config)
@@ -921,8 +946,8 @@ static int tp_compare(char const* root)
         if (fgetc(manifest) != EOF) ok = 0;
         fclose(manifest);
     }
-    FILE* json = ok && tp_path(path, root, "summary.json") ? fopen(path, "wb") : NULL;
-    FILE* markdown = ok && tp_path(path, root, "summary.md") ? fopen(path, "wb") : NULL;
+    FILE* json = ok && tp_path(path, root, tp_summary_names[0]) ? fopen(path, "wb") : NULL;
+    FILE* markdown = ok && tp_path(path, root, tp_summary_names[1]) ? fopen(path, "wb") : NULL;
     ok = ok && json && markdown;
     int regressions = 0, inconclusive = 0;
     if (ok)
@@ -1075,6 +1100,9 @@ static int tp_compare(char const* root)
     if (markdown && fclose(markdown) != 0) ok = 0;
     free(rows);
     free(probes);
+    /* Work/output and stream errors can be discovered after reports open.
+     * Close both streams before discarding their incomplete verdicts. */
+    if (!ok) (void)tp_remove_summaries(root);
     int result = !ok ? 2 : regressions ? 1 : 0;
     if (!ok) tp_error("incomplete or incompatible result bundle; no performance verdict");
     else
