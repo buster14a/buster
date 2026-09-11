@@ -134,7 +134,7 @@ MachineSelectionValidationError machine_selection_validate_function(Arena* arena
                         }
                     }
                     tail = id;
-                    id = instruction->next;
+                    id = ir_block_next_instruction(function, block, id);
                 }
             }
             if (error == MACHINE_SELECTION_VALIDATION_NONE && tail.value != block->last_instruction.value)

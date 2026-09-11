@@ -3379,7 +3379,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                 opcode = (u32)failed_function->instructions[validation.instruction.value].opcode;
             }
         }
-        String8 boundary = validation.boundary == IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT ? S8("local-promotion output") : S8("canonical input");
+        String8 boundary = validation.boundary == IR_VALIDATION_BOUNDARY_CFG_PUBLICATION ? S8("canonical CFG publication") :
+                           validation.boundary == IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT ? S8("local-promotion output") : S8("canonical input");
         result.error = COMPILER_DRIVER_ERROR_IR;
         result.diagnostic =
             string_format(arena, S8("canonical C IR validation failed: boundary {S8}, error {u32}, function {u32} ('{S8}'), block {u32}, instruction {u32}, opcode {u32}"),

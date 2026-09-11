@@ -1865,7 +1865,7 @@ struct MachineCanonicalPair
 };
 
 BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_pair_parameter(MachineFunctionBuilder* builder, IrFunction* function,
-                                                                 IrBlockParameter* parameter, MachineCanonicalPair** pairs)
+                                                                 IrCfgBlock const* block, u32 parameter_index, MachineCanonicalPair** pairs)
 {
     if (!*pairs)
     {
@@ -1873,10 +1873,16 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_pair_parameter(MachineFunctio
         memset(*pairs, 0xff, sizeof(**pairs) * function->value_count);
     }
     bool valid = true;
-    IrIncoming* incoming = parameter->first_incoming;
+    IrPublishedCfg const* cfg = function->published_cfg;
+    IrCfgParameter const* parameter = cfg->parameters + block->parameter_offset + parameter_index;
     u32 value = parameter->value.value;
-    for (;;)
+    for (u32 index = 0; index <= block->predecessor_count && valid; index += 1)
     {
+        if (index)
+        {
+            IrCfgEdge const* edge = cfg->edges + cfg->predecessors[block->predecessor_offset + index - 1];
+            value = cfg->arguments[edge->argument_offset + parameter_index].value;
+        }
         if (value >= function->value_count)
         {
             valid = false;
@@ -1890,92 +1896,48 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_pair_parameter(MachineFunctio
                     .typed_origin = IR_ID_UNDERLYING_INVALID});
             }
         }
-        if (!valid || !incoming)
-        {
-            break;
-        }
-        value = incoming->value.value;
-        incoming = incoming->next;
     }
     return valid;
 }
 
-// Canonical predecessor lists are optional when a block has no parameters.
-// Terminator targets are the authoritative CFG, including ordinary branches,
-// repeated switch destinations and computed gotos. Publish every edge once;
-// otherwise cross-block SSA uses are invisible to dominance and allocation.
+// Canonical publication owns terminator topology and edge-argument lookup.
+// Selection translates each already ordered argument once; i128 values expand
+// to their two register limbs without changing the canonical CFG.
 BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder* builder, IrFunction* function, u32 const* value_registers,
                                                         MachineCanonicalPair const* pairs)
 {
-    IR_CONSTRUCTION_RECORD(CFG_BUILDS, 1);
-    IR_CONSTRUCTION_RECORD(CFG_SCRATCH_SLOTS, function->block_count);
-    u32* last_source = arena_allocate(builder->arena, u32, function->block_count);
-    memset(last_source, 0xff, sizeof(*last_source) * function->block_count);
-    bool valid = true;
-    for (u32 source = 0; valid && source < function->block_count; source += 1)
+    IrPublishedCfg const* cfg = function->published_cfg;
+    bool valid = cfg != 0;
+    for (u32 index = 0; valid && index < cfg->edge_count; index += 1)
     {
-        IrBlock* block = function->blocks + source;
-        if (block->last_instruction.value >= function->instruction_count)
+        IrCfgEdge const* edge = cfg->edges + index;
+        IrCfgBlock const* destination = cfg->blocks + edge->destination.value;
+        u32 copy_offset = builder->edge_copy_sources.total_count;
+        for (u32 parameter_index = 0; valid && parameter_index < destination->parameter_count; parameter_index += 1)
         {
-            valid = false;
-        }
-        else
-        {
-            IrInstruction* terminator = function->instructions + block->last_instruction.value;
-            for (u32 index = 0; valid && index < terminator->target_count; index += 1)
+            IrCfgParameter const* parameter = cfg->parameters + destination->parameter_offset + parameter_index;
+            u32 incoming = cfg->arguments[edge->argument_offset + parameter_index].value;
+            bool wide = pairs && pairs[parameter->value.value].registers[0] != UINT32_MAX;
+            u32 count = wide ? 2u : 1u;
+            u32 const* registers = wide ? pairs[incoming].registers : value_registers + incoming;
+            for (u32 part = 0; valid && part < count; part += 1)
             {
-                IR_CONSTRUCTION_RECORD(CFG_TARGET_VISITS, 1);
-                u32 target = terminator->targets[index].value;
-                if (target >= function->block_count)
+                valid = registers[part] != UINT32_MAX;
+                if (valid)
                 {
-                    valid = false;
-                }
-                else if (last_source[target] != source)
-                {
-                    IR_CONSTRUCTION_RECORD(CFG_UNIQUE_EDGES, 1);
-                    last_source[target] = source;
-                    IrBlock* destination = function->blocks + target;
-                    valid = destination->parameter_count <= UINT16_MAX;
-                    u32 copy_offset = builder->edge_copy_sources.total_count;
-                    for (IrBlockParameter* parameter = destination->first_parameter; valid && parameter; parameter = parameter->next)
-                    {
-                        IR_CONSTRUCTION_RECORD(CFG_PARAMETER_VISITS, 1);
-                        IrIncoming* incoming = parameter->first_incoming;
-                        while (incoming && incoming->predecessor.value != source)
-                        {
-                            IR_CONSTRUCTION_RECORD(CFG_INCOMING_VISITS, 1);
-                            incoming = incoming->next;
-                        }
-                        IR_CONSTRUCTION_RECORD(CFG_INCOMING_VISITS, incoming != 0);
-                        valid = incoming && incoming->value.value < function->value_count;
-                        if (valid)
-                        {
-                            bool wide = pairs && pairs[parameter->value.value].registers[0] != UINT32_MAX;
-                            u32 count = wide ? 2u : 1u;
-                            u32 const* registers = wide ? pairs[incoming->value.value].registers : value_registers + incoming->value.value;
-                            for (u32 part = 0; valid && part < count; part += 1)
-                            {
-                                valid = registers[part] != UINT32_MAX;
-                                if (valid)
-                                {
-                                    IR_CONSTRUCTION_RECORD(CFG_COPY_SOURCES, 1);
-                                    machine_builder_edge_copy_source(builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, registers[part]));
-                                }
-                            }
-                        }
-                    }
-                    u32 copy_count = builder->edge_copy_sources.total_count - copy_offset;
-                    valid = valid && copy_count <= UINT16_MAX;
-                    if (valid)
-                    {
-                        machine_builder_edge(builder, (MachineEdge){.source_block = source, .destination_block = target,
-                                                                   .copy_offset = copy_offset, .copy_count = (u16)copy_count});
-                    }
+                    IR_CONSTRUCTION_RECORD(CFG_COPY_SOURCES, 1);
+                    machine_builder_edge_copy_source(builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, registers[part]));
                 }
             }
         }
+        u32 copy_count = builder->edge_copy_sources.total_count - copy_offset;
+        valid = valid && copy_count <= UINT16_MAX;
+        if (valid)
+        {
+            machine_builder_edge(builder, (MachineEdge){.source_block = edge->source.value, .destination_block = edge->destination.value,
+                                                       .copy_offset = copy_offset, .copy_count = (u16)copy_count});
+        }
     }
-    IR_CONSTRUCTION_RECORD(CFG_FAILURES, !valid);
     return valid;
 }
 
@@ -3860,15 +3822,25 @@ BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_intern
                                                                                     bool assume_validated, bool position_independent,
                                                                                     MachineSelectionModule* module)
 {
-    MachineSelectResult result;
-
-    switch (target.cpu_arch)
+    MachineSelectResult result = {.failed_opcode = IR_OPCODE_COUNT};
+    if (arena && program && function)
     {
-        break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, position_independent, assume_validated, module);
-        break; case CPU_ARCH_AARCH64: result = machine_select_canonical_function_aarch64(arena, program, function, target, assume_validated);
-        break; default: BUSTER_TODO();
+        IrValidationResult publication = ir_function_publish_cfg(program->arena, function);
+        if (publication.error == IR_VALIDATION_NONE)
+        {
+            switch (target.cpu_arch)
+            {
+                break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, position_independent, assume_validated, module);
+                break; case CPU_ARCH_AARCH64: result = machine_select_canonical_function_aarch64(arena, program, function, target, assume_validated);
+                break; default: BUSTER_TODO();
+            }
+        }
     }
 
+    if (!result.supported && !assume_validated)
+    {
+        ir_function_invalidate_cfg(function);
+    }
     return result;
 }
 

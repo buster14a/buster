@@ -4846,8 +4846,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             u32 parameter_count = 0;
-            for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
+            IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
+            for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
             {
+                IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
                 IrType* parameter_type = ir_type_from_id(&program->types, parameter->canonical_type);
                 bool wide = parameter_type && parameter_type->kind == IR_TYPE_INTEGER && parameter_type->bit_width == 128;
                 if (parameter->value.value >= function->value_count ||
@@ -4862,7 +4864,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 }
                 if (wide)
                 {
-                    if (!machine_builder_canonical_pair_parameter(&selector.builder, function, parameter, &selector.value_pairs))
+                    if (!machine_builder_canonical_pair_parameter(&selector.builder, function, published_block, parameter_index, &selector.value_pairs))
                     {
                         return result;
                     }
@@ -4927,13 +4929,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         // row population here as well: aliasing and fusion only inspect these
         // four opcodes, so their later passes can consume compact candidate
         // offsets instead of chasing every linked row again.
-        MachineSelectionRowLayout row_layout = {
-            .block_row_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1),
-        };
         u32* block_candidate_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1);
         u32* candidate_rows = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
         u32 candidate_count = 0;
-        bool dense_rows = true;
         bool nonvolatile_memory = true;
         u32 walk_ordinal = 0;
         u32 expanded_blocks = 0;
@@ -4951,10 +4949,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             {
                 machine_a64_reject(&selector, IR_OPCODE_BINARY);
             }
-            for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID; id = function->instructions[id.value].next)
+            for (IrInstructionId id = block->first_instruction; id.value <= block->last_instruction.value; id.value += 1)
             {
                 IrInstruction* instruction = function->instructions + id.value;
-                dense_rows &= id.value == block->first_instruction.value + block_row_count;
                 nonvolatile_memory &= !instruction->volatile_access;
                 if (machine_a64_instruction_is_i128_divide(program, instruction))
                 {
@@ -5051,44 +5048,19 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 selector.block_entries[block_index] = entry_block;
                 selector.block_exits[block_index] = expanded_blocks - 1;
             }
-            row_layout.block_row_counts[block_index] = block_row_count;
             block_candidate_counts[block_index] = block_candidate_count;
         }
         // Incoming block-parameter values are edge uses, not instruction
         // operands. Count them before aliasing/fusion so a value carried by
         // canonical promotion cannot be absorbed as an otherwise-dead branch
         // condition.
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        IrPublishedCfg const* cfg = function->published_cfg;
+        for (u32 index = 0; index < cfg->argument_count; index += 1)
         {
-            for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
-            {
-                for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
-                {
-                    if (incoming->value.value < function->value_count)
-                    {
-                        value_use_counts[incoming->value.value] += 1;
-                        value_use_blocks[incoming->value.value] = MACHINE_SELECTION_MULTIPLE_BLOCKS;
-                        value_last_use_ordinals[incoming->value.value] = walk_ordinal;
-                    }
-                }
-            }
-        }
-        if (!dense_rows)
-        {
-            // Relinked blocks do not have a dense id range.  Gather their
-            // program order once so every consumer below preserves that order.
-            row_layout.rows = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1);
-            u32 gathered_rows = 0;
-            for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-            {
-                IrBlock* block = function->blocks + block_index;
-                for (IrInstructionId id = block->first_instruction; id.value != IR_ID_UNDERLYING_INVALID;
-                     id = function->instructions[id.value].next)
-                {
-                    row_layout.rows[gathered_rows] = id.value;
-                    gathered_rows += 1;
-                }
-            }
+            u32 value = cfg->arguments[index].value;
+            value_use_counts[value] += 1;
+            value_use_blocks[value] = MACHINE_SELECTION_MULTIPLE_BLOCKS;
+            value_last_use_ordinals[value] = walk_ordinal;
         }
         // Load aliasing over the promoted locals. The measured cost of
         // promotion is the copy every load lowers to: its source is the local,
@@ -5135,7 +5107,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 {
                     u32 row_offset = candidate_rows[candidate_base + remaining - 1];
                     IrInstruction* instruction = function->instructions +
-                                                  machine_selection_row_id(&row_layout, block, walked_ordinals, row_offset);
+                                                  (block->first_instruction.value + row_offset);
                     u32 instruction_ordinal = walked_ordinals + row_offset + 1;
                     if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
                         promotable_locals[instruction->operands[0].value])
@@ -5183,20 +5155,19 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                         load_aliases[candidate] = root;
                     }
                 }
-                walked_ordinals += row_layout.block_row_counts[block_index];
+                walked_ordinals += function->published_cfg->blocks[block_index].instruction_count;
                 candidate_base += block_candidate_count;
             }
         }
         // Classification pass: direct locals become stack slots, every other
         // scalar result becomes a virtual register, in stable value-id order.
-        u32 classified_rows = 0;
         for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
-            u32 block_row_count = row_layout.block_row_counts[block_index];
+            u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
             for (u32 row_offset = 0; row_offset < block_row_count; row_offset += 1)
             {
-                IrInstruction* instruction = function->instructions + machine_selection_row_id(&row_layout, block, classified_rows, row_offset);
+                IrInstruction* instruction = function->instructions + (block->first_instruction.value + row_offset);
                 if (instruction->result.value == IR_ID_UNDERLYING_INVALID || instruction->result.value >= function->value_count)
                 {
                     continue;
@@ -5305,7 +5276,6 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                         &selector, (u32)((value_type->layout.size + 7) & ~(u64)7), value_type->kind == IR_TYPE_VECTOR ? 16u : 8u);
                 }
             }
-            classified_rows += block_row_count;
         }
         // Aliased load results share their local's virtual register: every use
         // site then names the local directly and the load emits nothing. The
@@ -5348,11 +5318,11 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             u32 block_candidate_count = block_candidate_counts[block_index];
             // Stores and BRANCH_IFs are the only rows that mutate fusion
             // state.  Iterate their stable candidate offsets and recover the
-            // original row ID through the dense-or-gathered layout.
+            // published row ID through its canonical block span.
             for (u32 candidate_index = 0; candidate_index < block_candidate_count; candidate_index += 1)
             {
                 u32 row_offset = candidate_rows[fusion_candidate_base + candidate_index];
-                IrInstruction* instruction = function->instructions + machine_selection_row_id(&row_layout, block, fused_rows, row_offset);
+                IrInstruction* instruction = function->instructions + (block->first_instruction.value + row_offset);
                 u32 fusion_ordinal = fused_rows + row_offset + 1;
                 if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
                     promotable_locals[instruction->operands[0].value])
@@ -5533,7 +5503,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     selector.fused_dead[dead_zeros[zero_index]] = 1;
                 }
             }
-            fused_rows += row_layout.block_row_counts[block_index];
+            fused_rows += function->published_cfg->blocks[block_index].instruction_count;
             fusion_candidate_base += block_candidate_count;
         }
         selector.virtual_register_count = selector.builder.virtual_registers.total_count;
@@ -5545,14 +5515,15 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         u32 typed_instruction_count = 0;
         u32 simd_operation_count = 0;
-        u32 selected_rows = 0;
         for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
             machine_builder_block_begin(&selector.builder);
             selector.open_block = (MachineBlock){.parameter_offset = selector.builder.block_parameters.total_count};
-            for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+            IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
+            for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
             {
+                IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
                 u32 value = parameter->value.value;
                 bool wide = selector.value_pairs && selector.value_pairs[value].registers[0] != UINT32_MAX;
                 u32 count = wide ? 2u : 1u;
@@ -5867,10 +5838,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     selector.value_virtual_registers[normalize_values[normalize_index]] = normalize_register;
                 }
             }
-            u32 block_row_count = row_layout.block_row_counts[block_index];
+            u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
             for (u32 row_offset = 0; row_offset < block_row_count && selector.supported; row_offset += 1)
             {
-                IrInstructionId id = {.value = machine_selection_row_id(&row_layout, block, selected_rows, row_offset)};
+                IrInstructionId id = {.value = (block->first_instruction.value + row_offset)};
                 IrInstruction* instruction = function->instructions + id.value;
                 typed_instruction_count += 1;
                 simd_operation_count += instruction->opcode == IR_OPCODE_SIMD;
@@ -5900,7 +5871,6 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     }
                 }
             }
-            selected_rows += block_row_count;
             machine_builder_block_end(&selector.builder, selector.open_block);
         }
         // A dynamic allocation moves the stack pointer below the fixed

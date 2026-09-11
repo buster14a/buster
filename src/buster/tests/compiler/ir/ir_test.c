@@ -15,6 +15,7 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_opcode_count(IrFunction* function, IrOpcode opco
 }
 
 #include <buster/tests/compiler/ir/ir_promotion_test.c>
+#include <buster/tests/compiler/ir/ir_cfg_test.c>
 
 BUSTER_GLOBAL_LOCAL u32 ir_test_binary_operation_count(IrFunction* function, IrBinaryOperation operation)
 {
@@ -326,6 +327,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_construction_appends(UnitTestArgument
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_promotion_tests(arguments);
+    UnitTestResult cfg = ir_cfg_publication_tests(arguments);
+    result.test_count += cfg.test_count;
+    result.succeeded_test_count += cfg.succeeded_test_count;
     UnitTestResult construction = ir_test_construction_appends(arguments);
     result.test_count += construction.test_count;
     result.succeeded_test_count += construction.succeeded_test_count;

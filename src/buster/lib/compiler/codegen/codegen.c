@@ -3206,8 +3206,10 @@ BUSTER_GLOBAL_LOCAL void codegen_record_canonical_locations(CodegenModule* resul
                 }
                 if (value.value == IR_ID_UNDERLYING_INVALID)
                 {
-                    for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+                    IrCfgBlock const* published_block = function->published_cfg->blocks + block->id.value;
+                    for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
                     {
+                        IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
                         if (parameter->canonical_local.value == local->id.value)
                         {
                             value = parameter->value;
@@ -8031,26 +8033,24 @@ BUSTER_GLOBAL_LOCAL u32 c_canonical_edge_thunk(CCanonicalEmitter* emitter, IrPro
 {
     CodegenBuffer* buffer = emitter->buffer;
     u32 start = (u32)buffer->count;
-    IrBlock* target = function->blocks + patch.target.value;
+    IrPublishedCfg const* cfg = function->published_cfg;
+    IrCfgEdge const* edge = ir_function_cfg_edge(function, patch.predecessor, patch.target);
+    if (!edge)
+    {
+        buffer->error = CODEGEN_ERROR_INVALID_IR;
+    }
+    IrCfgBlock const* target = cfg ? cfg->blocks + patch.target.value : 0;
     for (u32 pass = 0; pass < 2 && !buffer->error; pass += 1)
     {
         u32 cursor = 0;
-        for (IrBlockParameter* parameter = target->first_parameter; parameter && !buffer->error; parameter = parameter->next)
+        for (u32 index = 0; index < target->parameter_count && !buffer->error; index += 1)
         {
-            IrIncoming* incoming = parameter->first_incoming;
-            while (incoming && incoming->predecessor.value != patch.predecessor.value)
-            {
-                incoming = incoming->next;
-            }
-            if (!incoming)
-            {
-                buffer->error = CODEGEN_ERROR_INVALID_IR;
-            }
-            else
+            IrCfgParameter const* parameter = cfg->parameters + target->parameter_offset + index;
+            IrValueId incoming = cfg->arguments[edge->argument_offset + index];
             {
                 IrType* type = ir_type_from_id(&program->types, parameter->canonical_type);
                 u64 bytes = (BUSTER_MAX(type->layout.size, (u64)8) + 7) & ~(u64)7;
-                u32 value = pass ? parameter->value.value : incoming->value.value;
+                u32 value = pass ? parameter->value.value : incoming.value;
                 for (u32 byte = 0; byte < bytes && !buffer->error; byte += 8)
                 {
                     if (patch.aarch64)
@@ -9467,8 +9467,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         for (u32 block = 0; block < function->block_count; block += 1)
         {
             u64 bytes = 0;
-            for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
+            IrCfgBlock const* published_block = function->published_cfg->blocks + block;
+            for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
             {
+                IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
                 IrType* type = ir_type_from_id(&program->types, parameter->canonical_type);
                 bytes += (BUSTER_MAX(type->layout.size, (u64)8) + 7) & ~(u64)7;
             }
@@ -10407,7 +10409,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 result.failed_opcode = instruction->opcode;
                 if (entry_block && (instruction->opcode == IR_OPCODE_ARGUMENT) != argument_pass)
                 {
-                    instruction_id = instruction->next;
+                    instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                     continue;
                 }
                 if (!entry_block && instruction->opcode == IR_OPCODE_ARGUMENT)
@@ -10419,7 +10421,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 }
                 if (instruction->opcode == IR_OPCODE_LOCAL && function->values[instruction->result.value].alignment <= 16)
                 {
-                    instruction_id = instruction->next;
+                    instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                     continue;
                 }
                 IrSourceRange canonical_source = ir_instruction_canonical_source(function, instruction_id);
@@ -10829,7 +10831,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_ABI;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_type && argument_type->kind == IR_TYPE_FLOAT)
@@ -10875,7 +10877,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 c_x64_store_result(&emitter, result_displacement);
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         u16 windows_float_width = 0;
@@ -10897,7 +10899,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         u32 system_v_integer_parts = 0;
@@ -11006,7 +11008,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         }
                                     }
                                 }
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                         }
@@ -11065,7 +11067,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         return result;
                                     }
                                 }
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             for (u32 part_index = 0; part_index < stack_part_count; part_index += 1)
@@ -11092,7 +11094,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (windows_indirect)
@@ -11119,7 +11121,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         for (u32 part_index = 0; part_index < part_count; part_index += 1)
@@ -11193,7 +11195,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 return result;
                             }
                             c_x64_store_result(&emitter, result_displacement);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
@@ -11446,7 +11448,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD && aggregate)
@@ -11480,7 +11482,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                                 c_x64_store_result(&emitter, result_displacement);
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             // Sixteen bytes is a compare-exchange of the pair: the
@@ -11558,7 +11560,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             memcpy(buffer.bytes + retry_branch_offset + 2, &retry_displacement, sizeof(retry_displacement));
                             c_x64_store_result(&emitter, result_displacement);
                             c_x64_store_high_rdx(&emitter, result_displacement);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (aggregate)
@@ -11947,7 +11949,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (source_contains_f80 || target_contains_f80)
@@ -11966,7 +11968,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         bool source_integer128 = source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128;
@@ -12079,7 +12081,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 c_x64_store_result(&emitter, result_displacement);
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         c_x64_load(&emitter, 0x85, instruction->operands[0]);
@@ -12243,7 +12245,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         else if (target_type->kind == IR_TYPE_FLOAT && source_type->kind == IR_TYPE_INTEGER &&
@@ -12353,7 +12355,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = buffer.error;
                                     return result;
                                 }
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             if (conversion == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT && source_bit_width != 64)
@@ -12420,7 +12422,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         else if (source_type->kind == IR_TYPE_FLOAT && target_type->kind == IR_TYPE_INTEGER &&
@@ -12468,7 +12470,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 return result;
                             }
                             c_x64_store_result(&emitter, result_displacement);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         else if (source_type->kind == IR_TYPE_FLOAT && target_type->kind == IR_TYPE_INTEGER &&
@@ -12564,7 +12566,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             buffer.bytes[below_threshold_branch_offset + 1] = (u8)(s8)below_threshold_delta;
                             buffer.bytes[skip_direct_branch_offset + 1] = (u8)(s8)skip_direct_delta;
                             c_x64_store_result(&emitter, result_displacement);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         else if (conversion == IR_CONVERSION_IDENTITY && source_type->kind == IR_TYPE_FLOAT && target_type->kind == IR_TYPE_FLOAT &&
@@ -12634,7 +12636,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && aggregate)
@@ -12669,7 +12671,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                     return result;
                                 }
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             if (!stored_type || (stored_type->kind != IR_TYPE_INTEGER && !aggregate_kind) || atomic_width != 16 ||
@@ -12728,7 +12730,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             s32 retry_displacement = (s32)retry_delta;
                             memcpy(buffer.bytes + retry_branch_offset + 2, &retry_displacement, sizeof(retry_displacement));
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (aggregate)
@@ -12820,7 +12822,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = buffer.error;
                                     return result;
                                 }
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             if (indirect)
@@ -12844,7 +12846,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = buffer.error;
                                     return result;
                                 }
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             BusterX86MetadataPhysicalOperand store_operands[2] = {
@@ -12986,7 +12988,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             memcpy(buffer.bytes + retry_branch_offset + 2, &retry_delta, sizeof(retry_delta));
                             c_x64_store_result(&emitter, result_displacement);
                             c_x64_store_high_rdx(&emitter, result_displacement);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (!value_type ||
@@ -13131,7 +13133,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             c_x64_store_result(&emitter, result_displacement);
                             c_x64_store_high_rdx(&emitter, result_displacement);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (!value_type || (value_type->kind != IR_TYPE_INTEGER && value_type->kind != IR_TYPE_POINTER) || !value_type->layout.resolved ||
@@ -13214,7 +13216,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         u64 immediate = instruction->immediates[0];
@@ -13495,7 +13497,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         u32 integer_parts = 0;
@@ -13742,7 +13744,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             s32 end_displacement = (s32)end_delta;
                             memcpy(buffer.bytes + end_field_offset, &end_displacement, sizeof(end_displacement));
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (result.abi == CODEGEN_ABI_X86_64_WINDOWS)
@@ -13783,7 +13785,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 (void)codegen_canonical_x64_metadata_emit(&buffer, S8("MOV"), windows_va_part_store_operands,
                                                                           BUSTER_ARRAY_LENGTH(windows_va_part_store_operands));
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         else
@@ -13895,7 +13897,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 buffer.error = CODEGEN_ERROR_CAPACITY;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         for (u32 part = 0; part < (aggregate ? integer_parts : 1); part += 1)
@@ -14600,7 +14602,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     }
                                 }
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (instruction->result.value != IR_ID_UNDERLYING_INVALID)
@@ -14628,7 +14630,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = buffer.error;
                                     return result;
                                 }
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             if (codegen_canonical_x64_result_in_abi_parts(&call_return_abi, result.abi))
@@ -14680,7 +14682,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         integer_index += 1;
                                     }
                                 }
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             u32 return_parts = 0;
@@ -14700,7 +14702,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
                                 }
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             c_x64_store_result(&emitter, result_displacement);
@@ -14938,7 +14940,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error != CODEGEN_ERROR_NONE ? buffer.error : CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (codegen_canonical_x64_type_contains_f80_cached(f80_cache, program, instruction->canonical_type) ||
@@ -14959,7 +14961,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         IrType* canonical_unary_operand_type =
@@ -15009,7 +15011,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             c_x64_store_result(&emitter, result_displacement);
                             c_x64_store_high_rdx(&emitter, result_displacement);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         c_x64_load(&emitter, 0x85, instruction->operands[0]);
@@ -15163,7 +15165,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (operand_type_value && operand_type_value->kind == IR_TYPE_FLOAT)
@@ -15198,7 +15200,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     // The x87 store already wrote the result
                                     // slot; a comparison continues into the
                                     // shared SETcc tail below.
-                                    instruction_id = instruction->next;
+                                    instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                     continue;
                                 }
                             }
@@ -15332,7 +15334,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 c_x64_store_result(&emitter, result_displacement);
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         bool integer128 = operand_type_value && operand_type_value->kind == IR_TYPE_INTEGER && operand_type_value->bit_width == 128;
@@ -15944,7 +15946,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                                 c_x64_store_result(&emitter, result_displacement);
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             else if (operation >= IR_BINARY_SIGNED_LESS && operation <= IR_BINARY_UNSIGNED_GREATER_EQUAL)
@@ -16022,7 +16024,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                                 c_x64_store_result(&emitter, result_displacement);
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             else
@@ -16032,7 +16034,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             c_x64_store_result(&emitter, result_displacement);
                             c_x64_store_high_rdx(&emitter, result_displacement);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         bool wide = codegen_canonical_register_is_64_bit(program, operand_type);
@@ -17134,7 +17136,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 c_x64_restore_rbx(&emitter);
                                 codegen_canonical_x64_emit_return(&buffer, frame_size, result.abi, windows_dynamic_stack);
                                 x87_stack_depth = 0; // the RET terminates this path; the next block starts with an empty stack.
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             if (aggregate_return_abi.part_count && !aggregate_return_abi.indirect)
@@ -17197,7 +17199,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 c_x64_restore_rbx(&emitter);
                                 codegen_canonical_x64_emit_return(&buffer, frame_size, result.abi, windows_dynamic_stack);
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             if (aggregate_return_abi.indirect)
@@ -17265,7 +17267,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 c_x64_restore_rbx(&emitter);
                                 codegen_canonical_x64_emit_return(&buffer, frame_size, result.abi, windows_dynamic_stack);
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             if (return_type && return_type->kind == IR_TYPE_FLOAT)
@@ -17502,7 +17504,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (argument_hfa && !aarch64_windows_variadic)
@@ -17538,7 +17540,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     }
                                 }
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (register_index + abi_part_count > 8)
@@ -17559,7 +17561,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                         return result;
                                     }
                                 }
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             prior_stack_parts = codegen_canonical_a64_align_stack_pair(prior_stack_parts, even_integer_pair);
@@ -17572,7 +17574,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (indirect)
@@ -17587,7 +17589,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     return result;
                                 }
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         // AAPCS64 leaves the bits above a narrow integer
@@ -17625,7 +17627,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             codegen_emit_u32(&buffer, 0xaa1f03e9);
                             c_a64_store(&emitter, 9, result_offset);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
@@ -17807,7 +17809,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 a64_emit_exclusive_retry(&buffer, pair_retry_offset);
                                 c_a64_store(&emitter, 9, result_offset);
                                 c_a64_store_high(&emitter, 14, result_offset);
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             if (!aggregate_kind || (atomic_width != 1 && atomic_width != 2 && atomic_width != 4 && atomic_width != 8))
@@ -17825,7 +17827,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             a64_emit_atomic_pointer(&buffer, 9, 10, (u32)atomic_width, false);
                             c_a64_store(&emitter, 9, result_offset);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (instruction->opcode == IR_OPCODE_ATOMIC_LOAD && instruction->memory_order != IR_MEMORY_ORDER_RELAXED)
@@ -17847,7 +17849,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             a64_emit_atomic_pointer(&buffer, 9, 10, (u32)loaded_type->layout.size, false);
                             c_a64_store(&emitter, 9, result_offset);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (aggregate)
@@ -18052,7 +18054,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (target_integer128)
@@ -18097,7 +18099,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             c_a64_store(&emitter, 9, result_offset);
                             c_a64_store_high(&emitter, 10, result_offset);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (source_integer128 && target_type->kind != IR_TYPE_INTEGER &&
@@ -18146,7 +18148,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (target_type && source_type && target_type->kind == IR_TYPE_FLOAT && source_type->kind == IR_TYPE_INTEGER &&
@@ -18170,7 +18172,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             codegen_emit_u32(&buffer, encoded | (9 << 5));
                             codegen_canonical_a64_frame_float_memory_operation(&buffer, 0, result_offset, (u32)target_type->layout.size, true);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (target_type && source_type && target_type->kind == IR_TYPE_FLOAT && source_type->kind == IR_TYPE_FLOAT &&
@@ -18181,7 +18183,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                                (u32)source_type->layout.size, false);
                             codegen_emit_u32(&buffer, instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND ? 0x1e22c000 : 0x1e624000);
                             codegen_canonical_a64_frame_float_memory_operation(&buffer, 0, result_offset, (u32)target_type->layout.size, true);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (target_type && source_type && target_type->kind == IR_TYPE_INTEGER && source_type->kind == IR_TYPE_FLOAT &&
@@ -18197,7 +18199,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             codegen_emit_u32(&buffer, encoded | 9);
                             c_a64_store(&emitter, 9, result_offset);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         c_a64_store(&emitter, 9, result_offset);
@@ -18256,7 +18258,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 a64_emit_atomic_exclusive_load_pair(&buffer, 9, 14, 10, instruction->memory_order == IR_MEMORY_ORDER_SEQUENTIAL);
                                 a64_emit_atomic_exclusive_store_pair(&buffer, 13, 11, 12, 10, pair_release);
                                 a64_emit_exclusive_retry(&buffer, pair_retry_offset);
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             if (!aggregate_kind || (atomic_width != 1 && atomic_width != 2 && atomic_width != 4 && atomic_width != 8))
@@ -18275,7 +18277,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 codegen_canonical_a64_base_address(&buffer, 10, 28, value_offsets[instruction->operands[0].value]);
                             }
                             a64_emit_atomic_pointer(&buffer, 9, 10, (u32)atomic_width, true);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (instruction->opcode == IR_OPCODE_ATOMIC_STORE && instruction->memory_order != IR_MEMORY_ORDER_RELAXED)
@@ -18297,7 +18299,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 codegen_canonical_a64_base_address(&buffer, 10, 28, value_offsets[instruction->operands[0].value]);
                             }
                             a64_emit_atomic_pointer(&buffer, 9, 10, (u32)stored_type->layout.size, true);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (aggregate)
@@ -18429,7 +18431,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             a64_emit_exclusive_retry(&buffer, pair_retry_offset);
                             c_a64_store(&emitter, 9, result_offset);
                             c_a64_store_high(&emitter, 14, result_offset);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (!value_type ||
@@ -18549,7 +18551,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             codegen_emit_u32(&buffer, UINT32_C(0xd5033f5f));
                             c_a64_store(&emitter, 9, result_offset);
                             c_a64_store_high(&emitter, 14, result_offset);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (!value_type || (value_type->kind != IR_TYPE_INTEGER && value_type->kind != IR_TYPE_POINTER) || !value_type->layout.resolved ||
@@ -18724,7 +18726,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = CODEGEN_ERROR_CAPACITY;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (aarch64_windows_variadic)
@@ -18742,7 +18744,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = CODEGEN_ERROR_CAPACITY;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         a64_emit_constant(&buffer, 9, gp_count * 8);
@@ -18787,7 +18789,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = CODEGEN_ERROR_CAPACITY;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         for (u32 component = 0; component < 4; component += 1)
@@ -18845,7 +18847,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             a64_emit_constant(&buffer, 9, part_count * 8);
                             codegen_emit_u32(&buffer, 0x8b09016b);
                             codegen_emit_u32(&buffer, 0xf900014b);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (aarch64_windows_variadic)
@@ -18880,7 +18882,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             codegen_emit_u32(&buffer, 0xeb0c017f);
                             codegen_emit_u32(&buffer, 0x9a8b01abu);
                             codegen_emit_u32(&buffer, 0xf900014b);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         IrAbiValue va_abi = ir_type_abi_value(program, instruction->canonical_type, codegen_canonical_ir_abi_convention(result.abi), IR_ABI_USE_VARIADIC_ARGUMENT);
@@ -19245,7 +19247,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = CODEGEN_ERROR_CAPACITY;
                                     return result;
                                 }
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             bool return_hfa = call_return_abi.part_count != 0;
@@ -19260,7 +19262,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     codegen_canonical_a64_frame_float_memory_operation(&buffer, part, result_offset + call_return_abi.parts[part].value_offset,
                                                                                        call_return_abi.parts[part].size, true);
                                 }
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             u32 return_parts = 0;
@@ -19440,7 +19442,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         c_a64_load(&emitter, 9, instruction->operands[0]);
@@ -19450,7 +19452,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             codegen_emit_u32(&buffer, 0x7100013f);
                             codegen_emit_u32(&buffer, 0x1a9f17e9);
                             c_a64_store(&emitter, 9, result_offset);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (instruction->unary_operation == IR_UNARY_FLOAT_NEGATE)
@@ -19463,7 +19465,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             codegen_emit_u32(&buffer, type->bit_width == 32 ? 0x52b0000a : 0xd2f0000a);
                             codegen_emit_u32(&buffer, type->bit_width == 32 ? 0x4a0a0129 : 0xca0a0129);
                             c_a64_store(&emitter, 9, result_offset);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (type && type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
@@ -19492,7 +19494,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 codegen_emit_u32(&buffer, 0xaa1f03ea); // mov x10, xzr
                                 c_a64_store(&emitter, 9, result_offset);
                                 c_a64_store_high(&emitter, 10, result_offset);
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             else if (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)
@@ -19507,7 +19509,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 codegen_emit_u32(&buffer, 0xaa1f03ea); // mov x10, xzr
                                 c_a64_store(&emitter, 9, result_offset);
                                 c_a64_store_high(&emitter, 10, result_offset);
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             else
@@ -19517,7 +19519,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             c_a64_store(&emitter, 9, result_offset);
                             c_a64_store_high(&emitter, 10, result_offset);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         u32 operation =
@@ -19549,7 +19551,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (operand_type_value && operand_type_value->kind == IR_TYPE_FLOAT)
@@ -19586,7 +19588,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = CODEGEN_ERROR_CAPACITY;
                                     return result;
                                 }
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             u32 condition = operation == IR_BINARY_FLOAT_EQUAL           ? 0
@@ -19604,7 +19606,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             codegen_emit_u32(&buffer, width == 32 ? 0x1e212000 : 0x1e612000);
                             codegen_emit_u32(&buffer, 0x1a9f07e9 | ((condition ^ 1) << 12));
                             c_a64_store(&emitter, 9, result_offset);
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         if (operand_type_value && operand_type_value->kind == IR_TYPE_INTEGER && operand_type_value->bit_width == 128)
@@ -19775,7 +19777,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 c_a64_store_high(&emitter, 10, result_offset);
                             }
-                            instruction_id = instruction->next;
+                            instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
                         }
                         u32 wide_mask = codegen_canonical_register_is_64_bit(program, operand_type) ? 0x80000000 : 0;
@@ -20267,7 +20269,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 }
                                 codegen_emit_u32(&buffer, 0xa8c17bfd);
                                 codegen_emit_u32(&buffer, 0xd65f03c0);
-                                instruction_id = instruction->next;
+                                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
                             if (aarch64_indirect_return)
@@ -20355,7 +20357,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     result.error = buffer.error;
                     return result;
                 }
-                instruction_id = instruction->next;
+                instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
             }
         }
         for (u32 patch_index = 0; patch_index < emitter.branch_patch_count; patch_index += 1)

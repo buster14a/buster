@@ -229,22 +229,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                 {
                     IrBlock* block = function->blocks + bi;
                     joins += block->parameter_count;
-                    for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+                    IrPublishedCfg const* cfg = function->published_cfg;
+                    BUSTER_TEST(arguments, cfg && !block->first_parameter && !block->last_parameter && !block->first_predecessor && !block->last_predecessor);
+                    IrCfgBlock const* published = cfg->blocks + bi;
+                    for (u32 parameter_index = 0; parameter_index < published->parameter_count; parameter_index += 1)
                     {
+                        IrCfgParameter const* parameter = cfg->parameters + published->parameter_offset + parameter_index;
                         BUSTER_TEST(arguments, parameter->value.value < function->value_count);
                         if (parameter->value.value < function->value_count)
                         {
                             BUSTER_TEST(arguments, function->values[parameter->value.value].definition.value == IR_ID_UNDERLYING_INVALID);
                         }
-                        BUSTER_TEST(arguments, block->predecessor_count > 1 && parameter->incoming_count == block->predecessor_count);
-                        IrPredecessor* pred = block->first_predecessor;
-                        for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+                        BUSTER_TEST(arguments, published->predecessor_count > 1 && published->predecessor_count == block->predecessor_count);
+                        for (u32 predecessor = 0; predecessor < published->predecessor_count; predecessor += 1)
                         {
-                            BUSTER_TEST(arguments, pred && incoming->predecessor.value == pred->block.value);
-                            BUSTER_TEST(arguments, incoming->value.value < function->value_count);
-                            if (pred) pred = pred->next;
+                            IrCfgEdge const* edge = cfg->edges + cfg->predecessors[published->predecessor_offset + predecessor];
+                            BUSTER_TEST(arguments, edge->destination.value == bi && edge->source.value < function->block_count);
+                            BUSTER_TEST(arguments, cfg->arguments[edge->argument_offset + parameter_index].value < function->value_count);
                         }
-                        BUSTER_TEST(arguments, pred == 0);
                     }
                 }
                 BUSTER_TEST(arguments, (joins != 0) == fixture.joins);

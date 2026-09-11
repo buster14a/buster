@@ -680,6 +680,7 @@ BUSTER_GLOBAL_LOCAL void ir_promote_compact(Arena* arena, IrProgram* program, Ir
 
 BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* function, IrLocalPromotionStatistics* statistics)
 {
+    ir_function_invalidate_cfg(function);
     statistics->instructions_before += function->instruction_count;
     statistics->values_before += function->value_count;
     u32 local_count = 0;
@@ -899,6 +900,18 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                 }
             }
             module->local_promotion_complete = result.error == IR_VALIDATION_NONE;
+        }
+        for (u32 index = 0; index < module->function_count && result.error == IR_VALIDATION_NONE; index += 1)
+        {
+            IrFunction* function = module->functions + index;
+            if (function->state == IR_FUNCTION_LOWERED)
+            {
+                IrValidationResult published = ir_function_publish_cfg(program->arena, function);
+                if (published.error != IR_VALIDATION_NONE)
+                {
+                    result = published;
+                }
+            }
         }
     }
     return result;

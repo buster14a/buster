@@ -2597,7 +2597,7 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
                 {
                     break;
                 }
-                instruction_id = instruction->next;
+                instruction_id.value = instruction_id.value == block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
             }
         }
         for (u32 argument = 0; argument < signature->parameter_count; argument += 1)
@@ -2614,8 +2614,10 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
         for (u32 block_index = 0; block_index < block_count; block_index += 1)
         {
             IrBlock* block = record->block_order[block_index];
-            for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+            IrCfgBlock const* published_block = function->published_cfg->blocks + block->id.value;
+            for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
             {
+                IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
                 if (parameter->value.value >= value_count || record->value_ids[parameter->value.value] != LLVM_BC_INVALID_ID)
                 {
                     llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("invalid LLVM phi result value"), function, block, 0,
@@ -2661,7 +2663,7 @@ static bool llvm_bc_plan_function(LlvmBcContext* context, LlvmBcFunction* record
                 {
                     break;
                 }
-                instruction_id = instruction->next;
+                instruction_id.value = instruction_id.value == block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
             }
         }
 
@@ -3664,19 +3666,23 @@ static bool llvm_bc_emit_function_body(LlvmBcContext* context, LlvmBcFunction* r
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         IrBlock* block = record->block_order[block_index];
-        for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+        IrCfgBlock const* published_block = function->published_cfg->blocks + block->id.value;
+        for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
         {
-            u32 maximum = parameter->incoming_count * 2 + 1;
+            IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
+            u32 maximum = published_block->predecessor_count * 2 + 1;
             u64* operands = arena_allocate(context->arena, u64, maximum ? maximum : 1);
             u32 count = 0;
             u32 type = llvm_bc_function_value_type_id(context, record, parameter->value);
             operands[count++] = type;
-            for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+            for (u32 predecessor_index = 0; predecessor_index < published_block->predecessor_count; predecessor_index += 1)
             {
-                u32 value = llvm_bc_function_value_id(context, record, incoming->value);
+                IrPublishedCfg const* cfg = function->published_cfg;
+                IrCfgEdge const* edge = cfg->edges + cfg->predecessors[published_block->predecessor_offset + predecessor_index];
+                u32 value = llvm_bc_function_value_id(context, record, cfg->arguments[edge->argument_offset + parameter_index]);
                 s64 difference = (s64)current_value_id - (s64)value;
                 operands[count++] = llvm_bc_encode_signed_relative(difference);
-                operands[count++] = llvm_bc_function_block_index(context, record, incoming->predecessor);
+                operands[count++] = llvm_bc_function_block_index(context, record, edge->source);
             }
             llvm_bc_record(&context->stream, LLVM_BC_FUNC_PHI, operands, count);
             if (record->value_ids[parameter->value.value] != current_value_id)
@@ -3706,7 +3712,7 @@ static bool llvm_bc_emit_function_body(LlvmBcContext* context, LlvmBcFunction* r
             {
                 break;
             }
-            instruction_id = instruction->next;
+            instruction_id.value = instruction_id.value == block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
         }
     }
     if (current_value_id != record->final_value_id)

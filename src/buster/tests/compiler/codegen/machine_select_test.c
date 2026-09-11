@@ -243,6 +243,7 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_test_stream_equal(Arena* arena, Machi
 
 BUSTER_GLOBAL_LOCAL bool machine_selection_test_order_divergence(Arena* arena, IrProgram* program, IrFunction* function, Target target)
 {
+    ir_function_invalidate_cfg(function);
     bool equivalent = false;
     if (arena && program && function && machine_selection_validate_function(arena, program, function) == MACHINE_SELECTION_VALIDATION_NONE)
     {
@@ -250,9 +251,7 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_test_order_divergence(Arena* arena, I
         if (pair.block)
         {
             MachineSelectResult before = machine_select_canonical_function(arena, program, function, target);
-            IrInstructionId saved_first = pair.block->first_instruction;
-            IrInstructionId saved_previous_next = pair.previous.value == IR_ID_UNDERLYING_INVALID ? IR_INSTRUCTION_ID_INVALID : function->instructions[pair.previous.value].next;
-            IrInstructionId saved_first_next = function->instructions[pair.first.value].next;
+            ir_function_invalidate_cfg(function);
             IrInstructionId saved_second_next = function->instructions[pair.second.value].next;
             if (pair.previous.value == IR_ID_UNDERLYING_INVALID)
             {
@@ -269,13 +268,9 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_test_order_divergence(Arena* arena, I
             equivalent = before.supported == after.supported && before.failed_opcode == after.failed_opcode &&
                          machine_selection_test_stream_equal(arena, &before, &after);
 
-            pair.block->first_instruction = saved_first;
-            if (pair.previous.value != IR_ID_UNDERLYING_INVALID)
-            {
-                function->instructions[pair.previous.value].next = saved_previous_next;
-            }
-            function->instructions[pair.first.value].next = saved_first_next;
-            function->instructions[pair.second.value].next = saved_second_next;
+            // Publication remaps the reordered instruction IDs. The fixture
+            // retains that valid published function; stale builder IDs are no
+            // longer a restoration interface.
         }
     }
     return equivalent;
@@ -320,6 +315,7 @@ BUSTER_GLOBAL_LOCAL void machine_selection_test_share_callees(IrFunction* functi
 
 BUSTER_GLOBAL_LOCAL void machine_selection_test_reverse_storage(Arena* arena, IrFunction* function)
 {
+    ir_function_invalidate_cfg(function);
     u32 count = function->instruction_count;
     IrInstruction* rows = arena_allocate(arena, IrInstruction, count);
     IrSourceRange* sources = function->instruction_canonical_sources ? arena_allocate(arena, IrSourceRange, count) : 0;
@@ -497,6 +493,7 @@ UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
             }
             BUSTER_TEST(arguments, machine_selection_test_order_divergence(arguments->arena, program, order, target));
 
+            ir_function_invalidate_cfg(add);
             IrInstruction* operand_probe = 0;
             IrInstruction* definition_probe = 0;
             IrInstruction* second_definition = 0;

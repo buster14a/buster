@@ -584,6 +584,65 @@ struct IrGlobal
     u8 reserved;
 };
 
+// Immutable topology published after canonical transforms. Blocks/values retain
+// their canonical IDs. Edges are grouped by source and retain first-target
+// order; predecessor edge indices are grouped by destination, sorted by source.
+// Argument i belongs to parameter i of the destination block.
+typedef struct IrCfgBlock IrCfgBlock;
+struct IrCfgBlock
+{
+    u32 first_instruction;
+    u32 instruction_count;
+    u32 successor_offset;
+    u32 successor_count;
+    u32 predecessor_offset;
+    u32 predecessor_count;
+    u32 parameter_offset;
+    u32 parameter_count;
+};
+
+typedef struct IrCfgEdge IrCfgEdge;
+struct IrCfgEdge
+{
+    IrBlockId source;
+    IrBlockId destination;
+    u32 argument_offset;
+};
+
+typedef struct IrCfgParameter IrCfgParameter;
+struct IrCfgParameter
+{
+    IrTypeId canonical_type;
+    IrLocalId canonical_local;
+    IrValueId value;
+};
+
+typedef struct IrPublishedCfg IrPublishedCfg;
+struct IrPublishedCfg
+{
+    Arena* arena;
+    // Null means instruction IDs were already in block order. Otherwise this
+    // is the one map from prepublication IDs to the published dense rows.
+    IrInstructionId const* instruction_remap;
+    IrValueId const* operand_pool;
+    IrBlockId const* target_pool;
+    u64 const* immediate_pool;
+    u64 operand_count;
+    u64 target_count;
+    u64 immediate_count;
+    IrCfgBlock const* blocks;
+    IrCfgEdge const* edges;
+    u32 const* predecessors;
+    IrCfgParameter const* parameters;
+    IrValueId const* arguments;
+    u32 block_count;
+    u32 instruction_count;
+    u32 edge_count;
+    u32 parameter_count;
+    u32 argument_count;
+    u64 allocated_bytes;
+};
+
 typedef struct IrFunction IrFunction;
 typedef struct IrDebugLocal IrDebugLocal;
 struct IrDebugLocal
@@ -606,6 +665,7 @@ struct IrFunction
     IrFunctionId id;
     IrBlockId entry;
     IrBlock* blocks;
+    IrPublishedCfg const* published_cfg;
     IrInstruction* instructions;
     IrValue* values;
     IrValueId* local_places;
@@ -811,6 +871,7 @@ typedef enum IrValidationBoundary
     IR_VALIDATION_BOUNDARY_UNSPECIFIED,
     IR_VALIDATION_BOUNDARY_CANONICAL_INPUT,
     IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT,
+    IR_VALIDATION_BOUNDARY_CFG_PUBLICATION,
 } IrValidationBoundary;
 
 typedef struct IrValidationResult IrValidationResult;
@@ -921,6 +982,25 @@ BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrFunction* function, IrInstru
 // re-deriving block membership or guarding their walks with a counter.
 BUSTER_F_DECL IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners);
 BUSTER_F_DECL IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module);
+// Requires canonical validation (or a producer/pass contract) for instruction
+// semantics. Independently checks exact CFG/list extents before publication;
+// it is not a semantic certificate. Publication provides one instruction ID
+// remap when reordering is needed, preserving value/block/label identities,
+// source provenance and relocations. Explicit mutators must invalidate BEFORE
+// writing rows/CFG/value data and reacquire their mutable builder pointers.
+BUSTER_F_DECL IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function);
+// Verifiers can also inspect mutable builders. Published consumers should use
+// the span directly; this compatibility helper keeps validation on one path.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE IrInstructionId ir_block_next_instruction(IrFunction const* function, IrBlock const* block,
+                                                                                              IrInstructionId instruction)
+{
+    return function->published_cfg ? (IrInstructionId){.value = instruction.value == block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction.value + 1}
+                                   : function->instructions[instruction.value].next;
+}
+
+BUSTER_F_DECL void ir_function_invalidate_cfg(IrFunction* function);
+BUSTER_F_DECL IrCfgEdge const* ir_function_cfg_edge(IrFunction const* function, IrBlockId source, IrBlockId destination);
+
 
 // Shared storage-normalization contract for canonical and frontend promotion.
 BUSTER_F_DECL bool ir_local_type_promotable(IrProgram* program, IrTypeId type);
@@ -932,6 +1012,7 @@ BUSTER_F_DECL bool ir_local_promotion_call_barrier(IrProgram* program, IrInstruc
 // is always revalidated. Debug/test/sanitizer builds also revalidate changed
 // certified IR; optimized production may trust the promotion implementation.
 // local_promotion_complete prevents rerunning the pass, not validation after a
-// later mutation. Consumers must pass false after mutating a prepared module.
+// later mutation. Reopen construction with ir_function_invalidate_cfg BEFORE
+// mutating a prepared function, then pass false to validate the changed input.
 // Unsafe locals remain in memory; no implicit zero/undef initialization.
 BUSTER_F_DECL IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified);
