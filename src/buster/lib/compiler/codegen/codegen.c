@@ -9551,7 +9551,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             TemporalArena machine_scratch = scratch_begin(&arena, 1);
             MachineSelectResult selected = {0};
             selected = machine_select_validated_canonical_function(machine_scratch.arena, program, function, target, position_independent,
-                                                                   machine_module);
+                                                                   options.register_allocator != CODEGEN_REGISTER_ALLOCATOR_MIR_STACK, machine_module);
             if (bootstrap_trace)
             {
                 bootstrap_trace_machine(bootstrap_trace, function, &selected);

@@ -1,0 +1,38 @@
+[
+  {
+    "workload": "compile_1024_functions",
+    "mode": "mir-stack",
+    "baseline_median_ns": 82171733.0,
+    "candidate_median_ns": 238609625.5
+  },
+  {
+    "workload": "compile_1024_functions",
+    "mode": "fast",
+    "baseline_median_ns": 86380980.0,
+    "candidate_median_ns": 82477461.0
+  },
+  {
+    "workload": "compile_1024_functions",
+    "mode": "quality",
+    "baseline_median_ns": 118171153.0,
+    "candidate_median_ns": 64676445.0
+  },
+  {
+    "workload": "kernel_10000000_calls",
+    "mode": "mir-stack",
+    "baseline_median_ns": 95708252.5,
+    "candidate_median_ns": 80738299.5
+  },
+  {
+    "workload": "kernel_10000000_calls",
+    "mode": "fast",
+    "baseline_median_ns": 31527311.0,
+    "candidate_median_ns": 23800346.0
+  },
+  {
+    "workload": "kernel_10000000_calls",
+    "mode": "quality",
+    "baseline_median_ns": 33827702.5,
+    "candidate_median_ns": 23889720.0
+  }
+]

@@ -268,7 +268,9 @@ before a consumer runs.
 | `outgoing_bytes`, `outgoing_slot` | Derived fixed outgoing call-area requirement and selected slot; target selector | Placement pins the slot to the frame bottom; AArch64 store emission respects its base. ABI/call-argument changes invalidate frame placement; zero bytes makes the slot irrelevant |
 | `nonvolatile_memory_certified` | Performance-only selector proof that the existing canonical walk found no volatile memory access | Enables bounded stack-slot alias classes in scheduling. Unknown/manual functions default to false; structural replay deliberately drops the proof. Producers introducing volatile accesses must clear it; row reordering and CFG/SSA rewrites preserve it only while they add no volatile access |
 | `windows_aarch64_frame` | Authoritative target ABI property; AArch64 selector | Stack placement and native encoder/unwind construction; preserve through scheduling and rebuild after a target change |
-| `reserved[6]` | Padding | No semantic producer or consumer; preserve the `MachineFunction` layout |
+| `predicate_absence_certified` | Selector proof from the existing SIMD-operation census or disabled predicate-residency policy that no predicate allocation is needed | Predicate placement admission skips its private inspection. Manual/replayed functions default to false; any producer adding predicate values must clear it before placement |
+| `reserved[5]` | Padding | No semantic producer or consumer; preserve the `MachineFunction` layout |
+| `stack_slot_memory_flags` | Optional derived byte per frame object, built from checked canonical-to-machine source spans only for mixed volatile functions | Scheduler admits only explicit NONVOLATILE objects; verifier rejects unknown bits, replay drops the proof. Slot-preserving row/CFG rewrites may share the table. A new volatile access clears its affected object and the whole-function certificate; changing slot identities requires remapping/rebuilding |
 
 Scheduling shares arrays other than instructions, virtual registers and line
 marks with its input. Its candidate and original must retain the input arena.
@@ -337,7 +339,7 @@ All arrays and indexes below are bounded by their published counts.
 | `MachineBlockParameter.virtual_register` | Selector and edge splitting; verifier/liveness/edge copies | Defined at block entry; changes require all incoming copy slices and value IDs to agree |
 | `MachineLineMark.row`, `instruction` | Selector; scheduler remaps/sorts; debug emission | Borrows canonical source row identity. Reorder invalidates machine row; canonical row remap invalidates instruction ID |
 | `MachineSwitchCase.value`, `target_block`, `compare_width` | Selector and block remapper; switch encoder, verifier and CFG walkers | Function arena. INDIRECT_BRANCH uses only target_block. Width zero preserves the documented 64-bit compatibility form; block changes remap targets |
-| `MachineEdit.point`, `kind`, `flags`, `subject`, `location` | Allocators; ordered encoder edit stream | Placement arena. Kind selects virtual/physical/immediate/temp-offset interpretation. Invalidate after source rows, register file or frame layout change |
+| `MachineEdit.point`, `kind`, `flags`, `subject`, `location` | Allocators; ordered encoder edit stream | Placement arena. Kind selects virtual/physical/immediate/temp-offset/direct-frame interpretation. Invalidate after source rows, register file or frame layout change |
 | `MachinePinSplitEntry.block`, `virtual_register`; `MachinePinSplitStore.row`, `virtual_register` | QUALITY candidate construction; pinned FAST placement | Temporary allocation attempt; source CFG/rows/value IDs and candidate pins must match |
 | Reserved words in these records | Zero initialization and structural copies | Padding or explicitly reserved replay slots; no consumer may treat them as hints |
 
@@ -359,7 +361,7 @@ have the same size.
 | `float_bridge_opcode`, `float_bridge_register` | Placement constraints around implicit vector bridges |
 | `quality_pin_registers`, `quality_pin_register_count` | QUALITY candidate admission in stable target preference order |
 | `saves_precede_frame_pointer` | Placement incoming offsets and encoder prologue/unwind ordering |
-| `reserved` | Padding, no consumer |
+| `predicate_allocatable_mask` | Separate predicate placement admits only k1-k7 on supported x86 targets; zero disables the bank. The mask never expands the shared 48-register GPR/ZMM tile; k0 remains reserved |
 
 ## Derived analysis, placement and result records
 

@@ -400,7 +400,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_direct_call_facts(Unit
             if (reversed) { machine_selection_test_reverse_storage(arguments->arena, function); }
             BUSTER_TEST(arguments, machine_selection_validate_function(arguments->arena, program, function) == MACHINE_SELECTION_VALIDATION_NONE);
             MachineSelectResult checked = machine_select_canonical_function(arguments->arena, program, function, target);
-            MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, 0);
+            MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, true, 0);
             BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&original, &checked));
             BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&checked, &validated));
             BUSTER_TEST(arguments, checked.supported && machine_verify_function(&checked.function).error == MACHINE_VERIFY_NONE);
@@ -490,7 +490,7 @@ UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
                 // discarded u32 fact arrays and the old visited-row array.
                 BUSTER_TEST(arguments, arguments->arena->position - before == (u64)function->instruction_count + function->value_count);
                 MachineSelectResult checked = machine_select_canonical_function(arguments->arena, program, function, target);
-                MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, 0);
+                MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, true, 0);
                 BUSTER_TEST(arguments, checked.supported && validated.supported);
                 BUSTER_TEST(arguments, checked.failed_opcode == validated.failed_opcode);
                 BUSTER_TEST(arguments, machine_selection_test_stream_equal(arguments->arena, &checked, &validated));

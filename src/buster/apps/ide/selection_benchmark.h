@@ -41,7 +41,7 @@ BUSTER_GLOBAL_LOCAL CompilerSelectionSample compiler_selection_sample(Arena* are
             IrFunction* function = ir_module->functions + function_index;
             if (function->state == IR_FUNCTION_LOWERED)
             {
-                MachineSelectResult selected = machine_select_validated_canonical_function(arena, program, function, target_native, false, module);
+                MachineSelectResult selected = machine_select_validated_canonical_function(arena, program, function, target_native, false, true, module);
                 sample.functions += 1;
                 if (selected.supported)
                 {

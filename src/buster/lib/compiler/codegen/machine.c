@@ -7,7 +7,7 @@
 // verifier, baseline MIR_STACK placement, and replay serialization — and then includes the
 // implementation files at the bottom in the backend-implementation-file
 // pattern (selection facts, the x86-64 and AArch64 selectors/encoders,
-// scheduling, and the FAST/QUALITY register allocators), so none of those
+// scheduling, FAST/QUALITY, and the separate predicate-bank allocator), so none of those
 // are standalone translation units. machine_select_canonical_function at
 // the end is the entry point codegen.c calls.
 
@@ -82,6 +82,8 @@ bool machine_emit_recipe_is_valid(MachineEmitRecipeId recipe)
 #define MACHINE_OPERAND_USE_GENERAL ((u8)((MACHINE_OPERAND_SHAPE_REGISTER << MACHINE_OPERAND_SHAPE_SHIFT) | MACHINE_OPERAND_ROLE_USE | (MACHINE_REGISTER_CLASS_GENERAL << MACHINE_OPERAND_CLASS_SHIFT)))
 #define MACHINE_OPERAND_DEFINE_GENERAL ((u8)((MACHINE_OPERAND_SHAPE_REGISTER << MACHINE_OPERAND_SHAPE_SHIFT) | MACHINE_OPERAND_ROLE_DEFINE | (MACHINE_REGISTER_CLASS_GENERAL << MACHINE_OPERAND_CLASS_SHIFT)))
 #define MACHINE_OPERAND_USE_DEFINE_GENERAL ((u8)((MACHINE_OPERAND_SHAPE_REGISTER << MACHINE_OPERAND_SHAPE_SHIFT) | MACHINE_OPERAND_ROLE_USE_DEFINE | (MACHINE_REGISTER_CLASS_GENERAL << MACHINE_OPERAND_CLASS_SHIFT)))
+#define MACHINE_OPERAND_USE_MASK ((u8)((MACHINE_OPERAND_SHAPE_REGISTER << MACHINE_OPERAND_SHAPE_SHIFT) | MACHINE_OPERAND_ROLE_USE | (MACHINE_REGISTER_CLASS_MASK << MACHINE_OPERAND_CLASS_SHIFT)))
+#define MACHINE_OPERAND_DEFINE_MASK ((u8)((MACHINE_OPERAND_SHAPE_REGISTER << MACHINE_OPERAND_SHAPE_SHIFT) | MACHINE_OPERAND_ROLE_DEFINE | (MACHINE_REGISTER_CLASS_MASK << MACHINE_OPERAND_CLASS_SHIFT)))
 #define MACHINE_OPERAND_USE_VECTOR ((u8)((MACHINE_OPERAND_SHAPE_REGISTER << MACHINE_OPERAND_SHAPE_SHIFT) | MACHINE_OPERAND_ROLE_USE | (MACHINE_REGISTER_CLASS_VECTOR << MACHINE_OPERAND_CLASS_SHIFT)))
 #define MACHINE_OPERAND_DEFINE_VECTOR ((u8)((MACHINE_OPERAND_SHAPE_REGISTER << MACHINE_OPERAND_SHAPE_SHIFT) | MACHINE_OPERAND_ROLE_DEFINE | (MACHINE_REGISTER_CLASS_VECTOR << MACHINE_OPERAND_CLASS_SHIFT)))
 #define MACHINE_OPERAND_USE_DEFINE_VECTOR ((u8)((MACHINE_OPERAND_SHAPE_REGISTER << MACHINE_OPERAND_SHAPE_SHIFT) | MACHINE_OPERAND_ROLE_USE_DEFINE | (MACHINE_REGISTER_CLASS_VECTOR << MACHINE_OPERAND_CLASS_SHIFT)))
@@ -354,7 +356,6 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
     },
     [MACHINE_X64_TLS_WINDOWS] = {
-        .name = S8_INITIALIZER("x64_tls_windows"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
@@ -363,12 +364,10 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .fixed_register_mask = 1, .fixed_registers = {MACHINE_X64_RAX},
     },
     [MACHINE_X64_TLS_DARWIN] = {
-        .name = S8_INITIALIZER("x64_tls_darwin"),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
     },
     [MACHINE_A64_TLS_WINDOWS] = {
-        .name = S8_INITIALIZER("a64_tls_windows"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
@@ -377,7 +376,6 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .fixed_register_mask = 1, .fixed_registers = {MACHINE_A64_X9},
     },
     [MACHINE_A64_TLS_DARWIN] = {
-        .name = S8_INITIALIZER("a64_tls_darwin"),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
     },
@@ -558,7 +556,62 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_VECTOR},
         .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
-        },
+    },
+    [MACHINE_X64_KMOV_FROM_GENERAL] = {
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_MASK, MACHINE_OPERAND_USE_GENERAL},
+    },
+    [MACHINE_X64_KMOV_TO_GENERAL] = {
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_USE_MASK},
+    },
+    [MACHINE_X64_KMOV] = {
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_MASK, MACHINE_OPERAND_USE_MASK},
+    },
+    [MACHINE_X64_KAND] = {
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_MASK, MACHINE_OPERAND_USE_MASK, MACHINE_OPERAND_USE_MASK},
+    },
+    [MACHINE_X64_KOR] = {
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_MASK, MACHINE_OPERAND_USE_MASK, MACHINE_OPERAND_USE_MASK},
+    },
+    [MACHINE_X64_KXOR] = {
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_MASK, MACHINE_OPERAND_USE_MASK, MACHINE_OPERAND_USE_MASK},
+    },
+    [MACHINE_X64_VPCMP_K] = {
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_MASK, MACHINE_OPERAND_USE_VECTOR, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VPMOVB2K] = {
+        .operand_count = 2,
+        .operand_info = {MACHINE_OPERAND_DEFINE_MASK, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VLOAD_PTR_K] = {
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_MASK},
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ,
+    },
+    [MACHINE_X64_VSTORE_PTR_K] = {
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_MASK, MACHINE_OPERAND_USE_VECTOR},
+        .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
+    },
+    [MACHINE_X64_VCOMPRESS_STORE_PTR_K] = {
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_MASK, MACHINE_OPERAND_USE_VECTOR},
+        .memory_effect = MACHINE_MEMORY_EFFECT_WRITE,
+    },
+    [MACHINE_X64_VPERMT2B_K] = {
+        .operand_count = 4,
+        .operand_info = {MACHINE_OPERAND_USE_DEFINE_VECTOR, MACHINE_OPERAND_USE_MASK, MACHINE_OPERAND_USE_VECTOR, MACHINE_OPERAND_USE_VECTOR},
+    },
+    [MACHINE_X64_VCOMPRESSB_K] = {
+        .operand_count = 3,
+        .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_MASK, MACHINE_OPERAND_USE_VECTOR},
+    },
     [MACHINE_X64_VLOAD_PTR_MASKED] = {
         .operand_count = 3,
         .operand_info = {MACHINE_OPERAND_DEFINE_VECTOR, MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_USE_GENERAL},
@@ -1223,6 +1276,19 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_X64_TLS_DARWIN] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 58,
     [MACHINE_A64_TLS_WINDOWS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 59,
     [MACHINE_A64_TLS_DARWIN] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 60,
+    [MACHINE_X64_KMOV_FROM_GENERAL] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 50,
+    [MACHINE_X64_KMOV_TO_GENERAL] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 51,
+    [MACHINE_X64_KMOV] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 52,
+    [MACHINE_X64_KAND] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 53,
+    [MACHINE_X64_KOR] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 54,
+    [MACHINE_X64_KXOR] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 55,
+    [MACHINE_X64_VPCMP_K] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 56,
+    [MACHINE_X64_VPMOVB2K] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 57,
+    [MACHINE_X64_VLOAD_PTR_K] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 58,
+    [MACHINE_X64_VSTORE_PTR_K] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 59,
+    [MACHINE_X64_VCOMPRESS_STORE_PTR_K] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 60,
+    [MACHINE_X64_VPERMT2B_K] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 61,
+    [MACHINE_X64_VCOMPRESSB_K] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 62,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)
@@ -2381,6 +2447,10 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_reference(MachineFunction* function, Mac
             break;
         case MACHINE_REF_PHYSICAL_REGISTER:
             valid = payload < MACHINE_TARGET_REGISTER_LIMIT && (!function->target || payload < function->target->register_count);
+            if (function->target && payload >= MACHINE_PREDICATE_REGISTER_BASE && payload < MACHINE_PREDICATE_REGISTER_BASE + MACHINE_PREDICATE_REGISTER_COUNT)
+            {
+                valid = (function->target->predicate_allocatable_mask & (1u << (payload - MACHINE_PREDICATE_REGISTER_BASE))) != 0;
+            }
             break;
         case MACHINE_REF_ADDRESS:
         case MACHINE_REF_EXTRA:
@@ -2403,7 +2473,8 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_register_class(MachineFunction* function
     else if (machine_ref_kind(ref) == MACHINE_REF_PHYSICAL_REGISTER && function->target)
     {
         bool vector = (function->target->vector_register_mask & (UINT64_C(1) << machine_ref_payload(ref))) != 0;
-        valid = expected_class == (vector ? MACHINE_REGISTER_CLASS_VECTOR : MACHINE_REGISTER_CLASS_GENERAL);
+        bool predicate = machine_ref_payload(ref) >= MACHINE_PREDICATE_REGISTER_BASE;
+        valid = expected_class == (predicate ? MACHINE_REGISTER_CLASS_MASK : vector ? MACHINE_REGISTER_CLASS_VECTOR : MACHINE_REGISTER_CLASS_GENERAL);
     }
     return valid;
 }
@@ -2430,6 +2501,22 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
     bool valid = true;
     switch (instruction->opcode)
     {
+        case MACHINE_X64_KMOV_FROM_GENERAL:
+        case MACHINE_X64_KMOV_TO_GENERAL:
+        case MACHINE_X64_KMOV:
+            valid = instruction->payload == 8 || instruction->payload == 16 || instruction->payload == 32 || instruction->payload == 64;
+            break;
+        case MACHINE_X64_KAND:
+        case MACHINE_X64_KOR:
+        case MACHINE_X64_KXOR:
+            valid = instruction->payload == 64;
+            break;
+        case MACHINE_X64_VPCMP_K:
+            valid = instruction->payload < 5;
+            break;
+        case MACHINE_X64_VCOMPRESSB_K:
+            valid = instruction->payload < 2;
+            break;
         case MACHINE_A64_VA_SAVE:
         {
             u32 slot = machine_ref_payload(instruction->operands[0]);
@@ -2942,6 +3029,11 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
             result.operand = register_index;
             MACHINE_VERIFY_REJECT(MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION);
         }
+        if (virtual_register->register_class == MACHINE_REGISTER_CLASS_MASK && function->target &&
+            function->target->predicate_allocatable_mask != MACHINE_PREDICATE_ALLOCATABLE_MASK)
+        {
+            MACHINE_VERIFY_REJECT(MACHINE_VERIFY_CONSTRAINT);
+        }
         result.mutable_virtual_register_count += (virtual_register->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) != 0;
     }
 
@@ -3256,7 +3348,7 @@ BUSTER_GLOBAL_LOCAL u64 machine_function_edge_copy_temporary_size(MachineFunctio
 // register. This is the selector/encoder verification mode, not an
 // allocator, and it is target-independent: everything target-specific comes
 // through the function's MachineTargetDescription.
-MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function)
+BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_stack_placement_build_core(Arena* arena, MachineFunction* function)
 {
     MachineStackPlacement placement = {
         .virtual_register_offsets = arena_allocate(arena, u32, function->virtual_register_count),
@@ -3721,16 +3813,17 @@ bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* 
 #include <buster/lib/compiler/codegen/machine_schedule.c>
 #include <buster/lib/compiler/codegen/register_allocator_fast.c>
 #include <buster/lib/compiler/codegen/register_allocator_quality.c>
+#include <buster/lib/compiler/codegen/register_allocator_predicate.c>
 
 BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_internal(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                                    bool assume_validated, bool position_independent,
+                                                                                    bool assume_validated, bool position_independent, bool predicate_residency,
                                                                                     MachineSelectionModule* module)
 {
     MachineSelectResult result;
 
     switch (target.cpu_arch)
     {
-        break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, position_independent, assume_validated, module);
+        break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, position_independent, assume_validated, predicate_residency, module);
         break; case CPU_ARCH_AARCH64: result = machine_select_canonical_function_aarch64(arena, program, function, target, assume_validated);
         break; default: BUSTER_TODO();
     }
@@ -3740,13 +3833,13 @@ BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_intern
 
 MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
 {
-    return machine_select_canonical_function_internal(arena, program, function, target, false, false, 0);
+    return machine_select_canonical_function_internal(arena, program, function, target, false, false, true, 0);
 }
 
 MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                bool position_independent, MachineSelectionModule* module)
+                                                                bool position_independent, bool predicate_residency, MachineSelectionModule* module)
 {
-    return machine_select_canonical_function_internal(arena, program, function, target, true, position_independent, module);
+    return machine_select_canonical_function_internal(arena, program, function, target, true, position_independent, predicate_residency, module);
 }
 
 MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* program, Target target)
