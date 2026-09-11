@@ -1246,9 +1246,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
                 MachineOpcodeInfo const* before_info = machine_opcode_info(before->opcode);
                 bool before_barrier = (before_info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS |
                                                                   MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) != 0;
-                bool before_memory = machine_opcode_is_memory(before_info) || before->opcode == MACHINE_X64_COPY_FRAME_FROM_FRAME ||
-                                     before->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME || before->opcode == MACHINE_X64_LOAD_INCOMING ||
-                                     before->opcode == MACHINE_A64_LOAD_INCOMING;
+                bool before_memory = machine_opcode_is_memory(before_info);
                 u32 before_slot = UINT32_MAX;
                 if (machine_ref_kind(before->operands[0]) == MACHINE_REF_STACK_SLOT) before_slot = machine_ref_payload(before->operands[0]);
                 if (machine_ref_kind(before->operands[1]) == MACHINE_REF_STACK_SLOT) before_slot = machine_ref_payload(before->operands[1]);
@@ -1258,9 +1256,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
                     MachineOpcodeInfo const* after_info = machine_opcode_info(after->opcode);
                     bool after_barrier = (after_info->attributes & (MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS |
                                                                     MACHINE_OPCODE_ATTRIBUTE_TERMINATOR)) != 0;
-                    bool after_memory = machine_opcode_is_memory(after_info) || after->opcode == MACHINE_X64_COPY_FRAME_FROM_FRAME ||
-                                        after->opcode == MACHINE_A64_COPY_FRAME_FROM_FRAME || after->opcode == MACHINE_X64_LOAD_INCOMING ||
-                                        after->opcode == MACHINE_A64_LOAD_INCOMING;
+                    bool after_memory = machine_opcode_is_memory(after_info);
                     u32 after_slot = UINT32_MAX;
                     if (machine_ref_kind(after->operands[0]) == MACHINE_REF_STACK_SLOT) after_slot = machine_ref_payload(after->operands[0]);
                     if (machine_ref_kind(after->operands[1]) == MACHINE_REF_STACK_SLOT) after_slot = machine_ref_payload(after->operands[1]);
@@ -3160,6 +3156,11 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         // This also runs unchanged on the pre-removal table: a legacy-only
         // constraint would disagree with both the helper and its projection.
         MachineOpcodeInfo const* info = machine_opcode_info(opcode);
+        // The frozen scheduler memberships independently cover every memory
+        // opcode, including effect-only rows that never had the removed bit.
+        bool expected_memory = (schedule_memberships[opcode] & MACHINE_SCHEDULE_UNIT_MEMORY) != 0;
+        BUSTER_TEST(arguments, machine_opcode_is_memory(info) == expected_memory);
+        BUSTER_TEST(arguments, (machine_opcode_memory_effect(info) != MACHINE_MEMORY_EFFECT_NONE) == expected_memory);
         BUSTER_TEST(arguments, opcode_rows[opcode].clobber_mask == info->clobber_mask);
         BUSTER_TEST(arguments, ((opcode_rows[opcode].flags & MACHINE_OPCODE_ROW_CLOBBERS) != 0) == (info->clobber_mask != 0));
         bool constrained = info->tied_pair || info->early_clobber_mask || info->fixed_register_mask ||
@@ -3172,6 +3173,35 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, machine_opcode_fixed_register(info, slot) == expected);
         }
     }
+
+    // Aggregate transfers and incoming reads must be described by their
+    // effects; the alias-order regression no longer supplies opcode exceptions.
+    u16 const copy_memory_opcodes[] = {
+        MACHINE_X64_COPY_FRAME_FROM_FRAME, MACHINE_X64_COPY_FRAME_FROM_PTR, MACHINE_X64_COPY_PTR_FROM_FRAME,
+        MACHINE_A64_COPY_FRAME_FROM_FRAME, MACHINE_A64_COPY_FRAME_FROM_PTR, MACHINE_A64_COPY_PTR_FROM_FRAME,
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(copy_memory_opcodes); index += 1)
+    {
+        BUSTER_TEST(arguments, machine_opcode_memory_effect(machine_opcode_info(copy_memory_opcodes[index])) == MACHINE_MEMORY_EFFECT_READ_WRITE);
+    }
+    BUSTER_TEST(arguments, machine_opcode_memory_effect(machine_opcode_info(MACHINE_X64_LOAD_INCOMING)) == MACHINE_MEMORY_EFFECT_READ);
+    BUSTER_TEST(arguments, machine_opcode_memory_effect(machine_opcode_info(MACHINE_A64_LOAD_INCOMING)) == MACHINE_MEMORY_EFFECT_READ);
+
+    MachineOpcodeInfo memory_probe = {0};
+    BUSTER_TEST(arguments, !machine_opcode_is_memory(0));
+    BUSTER_TEST(arguments, !machine_opcode_is_memory(&memory_probe));
+    // A side-effect barrier alone need not participate in the memory chain.
+    memory_probe.attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS;
+    BUSTER_TEST(arguments, !machine_opcode_is_memory(&memory_probe));
+    for (u8 effect = MACHINE_MEMORY_EFFECT_READ; effect < MACHINE_MEMORY_EFFECT_COUNT; effect += 1)
+    {
+        memory_probe.memory_effect = effect;
+        BUSTER_TEST(arguments, machine_opcode_is_memory(&memory_probe));
+    }
+    memory_probe.memory_effect = MACHINE_MEMORY_EFFECT_COUNT;
+    BUSTER_TEST(arguments, !machine_opcode_is_memory(&memory_probe));
+    memory_probe.memory_effect = UINT8_MAX;
+    BUSTER_TEST(arguments, !machine_opcode_is_memory(&memory_probe));
 
     // The complete SHIFT/DIVIDE/MULTIPLY_HIGH family that formerly repeated
     // an RAX/RCX register set in addition to its two explicit slot bindings.

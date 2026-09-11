@@ -91,6 +91,10 @@
   opcode classifiers. The [metadata ownership inventory](../machine-metadata-ownership.md)
   documents producers, consumers, publication, invalidation, and remaining
   dormant fields; incomplete descriptor fields are not a hazard model.
+- Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
+  through `machine_opcode_is_memory`; the duplicate memory attribute bit is
+  removed. Calls, side effects and terminators still impose independent
+  barriers. A missing memory effect is not permission to reorder a barrier.
 - Memory scheduling uses whole-stack-object alias classes only when the
   selector's existing canonical walk certifies no volatile access in the
   function. Unknown/manual/structural-replay functions default to the original
