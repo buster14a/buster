@@ -2687,6 +2687,43 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
         }
     }
 
+    // Exact logical EOF at an inaccessible page catches full-width tail
+    // reads. Every length moves the input alignment; edits straddle both
+    // vector boundaries and the last readable byte. Keep the independent
+    // translated-byte oracle as well as all lexer/checkpoint comparisons.
+    u64 page_size = os_get_page_size();
+    char8* pages = (char8*)os_reserve(0, page_size * 2, (ProtectionFlags){0},
+                                     (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
+    BUSTER_TEST(arguments, pages != 0);
+    bool committed = pages && os_commit(pages, page_size, (ProtectionFlags){.read = true, .write = true}, false);
+    BUSTER_TEST(arguments, committed);
+    if (committed)
+    {
+        for (u64 length = 0; length <= 193; length += 1)
+        {
+            char8* bytes = pages + page_size - length;
+            for (u64 index = 0; index < length; index += 1)
+            {
+                bytes[index] = 'a';
+            }
+            String8 source = {bytes, length};
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
+            BUSTER_TEST(arguments, c_test_translate_source_paths_agree(arena, source));
+            for (u64 index = 0; index < length; index += 1)
+            {
+                // CRLF and both splice forms, with their starts on lane 63.
+                u64 lane = index % 64;
+                bytes[index] = lane == 63 ? '\\' : lane == 0 ? '\r' : lane == 1 ? '\n' : 'a';
+            }
+            BUSTER_TEST(arguments, c_test_lex_paths_agree(arena, source));
+            BUSTER_TEST(arguments, c_test_translate_source_paths_agree(arena, source));
+        }
+    }
+    if (pages)
+    {
+        BUSTER_TEST(arguments, os_unreserve(pages, page_size * 2));
+    }
+
     // Single items that cross or fill whole windows, which is the shape that
     // sends the emitter to the scalar whole-token fallback.
     {
@@ -3739,6 +3776,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
 {
     UnitTestResult result = {0};
     BUSTER_UNUSED(arguments);
+
+    Target constant_targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+    };
+    String8 constant_source = S8("_Static_assert(sizeof(__INT8_C(1)) == sizeof(int), \"promoted i8\");\n"
+                                 "_Static_assert(sizeof(__UINT16_C(1)) == sizeof(int), \"promoted u16\");\n"
+                                 "_Static_assert(__UINT32_C(1) - 2 > 0, \"unsigned u32\");\n"
+                                 "_Static_assert(sizeof(__INT64_C(1)) == 8 && __INT64_C(1) - 2 < 0, \"signed i64\");\n"
+                                 "_Static_assert(sizeof(__UINT64_C(1)) == 8 && (__UINT64_C(1) << 63) == 0x8000000000000000ULL, \"unsigned u64\");\n"
+                                 "_Static_assert(sizeof(__INTMAX_C(1)) == 8 && sizeof(__UINTMAX_C(1)) == 8, \"max widths\");\n");
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(constant_targets); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = constant_targets[index];
+        CPreprocessResult tokens = c_preprocess(temporary.arena, constant_source,
+            (CPreprocessOptions){.source_path = S8("integer-constant-macros.c"), .target = target, .data_layout = target_data_layout(target)});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult lowered = c_analyze(temporary.arena, S8("integer-constant-macros.c"), tokens, syntax, target);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        scratch_end(temporary);
+    }
 
     {
         u64 arena_position = arguments->arena->position;

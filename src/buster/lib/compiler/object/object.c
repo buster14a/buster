@@ -8930,8 +8930,62 @@ BUSTER_GLOBAL_LOCAL bool object_windows_arm64_initial_frame_valid(CodegenFunctio
            actions[3].register_index == 29 && actions[3].value == 0 && actions[3].code_offset == 8;
 }
 
-BUSTER_GLOBAL_LOCAL bool object_windows_arm64_codes_build(CodegenFunctionDescriptor const* function, ObjectWindowsArm64CodeBuffer* codes,
-                                                          u32* epilog_code_index)
+// A compact machine frame saves FP/LR and the nonvolatile register file
+// before establishing X29. Its epilogue is the unwind suffix beginning at
+// SET_FP: restoring SP from X29 discards fixed and dynamic local allocations.
+// Require one described instruction per offset so partial unwinds cannot
+// silently accept missing probe or setup words.
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_machine_frame(CodegenFunctionDescriptor const* function, u32* frame_pointer_index)
+{
+    bool valid = function->unwind_action_count >= 6;
+    CodegenUnwindAction const* actions = function->unwind_actions;
+    u32 frame = UINT32_MAX;
+    if (valid)
+    {
+        valid = actions[0].kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK && actions[0].code_offset == 4 &&
+                actions[0].value >= 32 && actions[0].value <= 512 && actions[0].value % 16 == 0 &&
+                actions[1].kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER && actions[1].register_index == 29 &&
+                actions[1].value == 0 && actions[1].code_offset == 4 &&
+                actions[2].kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER && actions[2].register_index == 30 &&
+                actions[2].value == 8 && actions[2].code_offset == 4;
+        u32 save_offset = 16;
+        u32 previous_register = 18;
+        for (u32 index = 3; valid && index < function->unwind_action_count; index += 1)
+        {
+            CodegenUnwindAction const* action = actions + index;
+            valid = action->code_offset == (index - 1u) * 4u;
+            if (frame == UINT32_MAX)
+            {
+                if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
+                {
+                    valid &= action->register_index > previous_register && action->register_index <= 28 &&
+                             action->value == save_offset && save_offset + 8u <= actions[0].value;
+                    previous_register = action->register_index;
+                    save_offset += 8;
+                }
+                else
+                {
+                    valid &= action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER && action->register_index == 29 &&
+                             action->value == 0 && previous_register == 28;
+                    frame = index;
+                }
+            }
+            else
+            {
+                valid &= action->kind == CODEGEN_UNWIND_ACTION_NOP || action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK;
+            }
+        }
+        valid &= frame != UINT32_MAX && actions[function->unwind_action_count - 1u].code_offset == function->prolog_size;
+    }
+    if (valid)
+    {
+        *frame_pointer_index = frame;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_canonical_codes_build(CodegenFunctionDescriptor const* function, ObjectWindowsArm64CodeBuffer* codes,
+                                                                    u32* epilog_code_index)
 {
     if (!object_windows_arm64_initial_frame_valid(function))
     {
@@ -9001,6 +9055,33 @@ BUSTER_GLOBAL_LOCAL bool object_windows_arm64_codes_build(CodegenFunctionDescrip
     object_windows_arm64_code_byte(codes, 0x81);
     object_windows_arm64_code_byte(codes, 0xe4);
     return codes->valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_codes_build(CodegenFunctionDescriptor const* function, ObjectWindowsArm64CodeBuffer* codes,
+                                                          u32* epilog_code_index)
+{
+    u32 machine_frame_pointer = UINT32_MAX;
+    bool valid;
+    if (object_windows_arm64_machine_frame(function, &machine_frame_pointer))
+    {
+        valid = true;
+        for (u32 index = function->unwind_action_count; valid && index > 3; index -= 1)
+        {
+            if (index - 1u == machine_frame_pointer)
+            {
+                *epilog_code_index = codes->count;
+            }
+            valid = object_windows_arm64_action_encode(codes, function->unwind_actions + index - 1u);
+        }
+        object_windows_arm64_code_byte(codes, (u8)(0x80u | (function->unwind_actions[0].value / 8u - 1u)));
+        object_windows_arm64_code_byte(codes, 0xe4);
+        valid &= codes->valid;
+    }
+    else
+    {
+        valid = object_windows_arm64_canonical_codes_build(function, codes, epilog_code_index);
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_arm64_unwind_build(Arena* arena, CodegenFunctionDescriptor* functions,

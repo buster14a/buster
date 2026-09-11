@@ -22,6 +22,8 @@ PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS x86-64", "macOS AArch64",
              "Windows x86-64", "Windows AArch64")
 MOBILE = ("Android x86-64", "iOS x86-64", "iOS AArch64")
 SHARDED_JOBS = PLATFORMS + MOBILE + ("Workflow lint", "CI complete")
+NATIVE = tuple(name + " native" for name in PLATFORMS if not name.startswith("Windows"))
+SUITE_JOBS = SHARDED_JOBS + NATIVE
 RUN_FIELDS = ("id", "head_sha", "head_branch", "event", "path", "status", "conclusion",
               "run_attempt", "created_at", "run_started_at", "html_url")
 JOB_FIELDS = ("id", "name", "run_attempt", "status", "conclusion", "started_at", "completed_at", "labels")
@@ -41,7 +43,8 @@ def measure(run):
     result = None
     jobs = run.get("jobs", [])
     names = sorted(job.get("name", "") for job in jobs)
-    sharded = names == sorted(SHARDED_JOBS)
+    suites = names == sorted(SUITE_JOBS)
+    sharded = names == sorted(SHARDED_JOBS) or suites
     if run.get("status") != "completed":
         reason = "not-completed"
     elif run.get("conclusion") != "success":
@@ -63,13 +66,15 @@ def measure(run):
             if name in PLATFORMS:
                 required.add("Combination matrix (Windows)" if name.startswith("Windows")
                              else "Combination matrix (Linux, macOS)")
-                if not name.startswith("Windows"):
+                if not suites and not name.startswith("Windows"):
                     required.add("Execution-mode matrix")
                 if not sharded:
                     if name.startswith("macOS"):
                         required.add("Test (iOS simulator)")
                     if name == "Linux x86-64":
                         required.add("Test (Android)")
+            elif name in NATIVE:
+                required.update(("Execution-mode matrix", "Native configuration differential matrix"))
             elif name.startswith("iOS"):
                 required.add("Test (iOS simulator)")
             elif name.startswith("Android"):

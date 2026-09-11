@@ -4,6 +4,7 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
+#include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
 #include <buster/lib/compiler/codegen/register_allocator_fast_internal.h>
 #include <buster/lib/compiler/codegen/register_allocator_quality_internal.h>
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -34,6 +35,79 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrIncoming) == 16);
 // passed by value on every module generation, so it stays a handful of bytes
 // and this check is what says so.
 BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 6);
+
+// Independent goldens correspond to x86_64_movabs_encoding_oracle.s. The
+// bounded producer comparison also checks every byte outside the instruction.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_movabs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, machine_x64_test_movabs_prepared());
+    u64 values[] = {0, 1, 127, 128, 255, 256, UINT64_C(0x7fffffff), UINT64_C(0x80000000),
+                    UINT64_C(0xffffffff), UINT64_C(0x100000000), UINT64_C(0xffffffff80000000),
+                    UINT64_C(0x7fffffffffffffff), UINT64_C(0x8000000000000000), UINT64_MAX,
+                    UINT64_C(0x0123456789abcdef)};
+    u8 prefixes[16][2] = {
+        {0x48, 0xb8}, {0x48, 0xb9}, {0x48, 0xba}, {0x48, 0xbb},
+        {0x48, 0xbc}, {0x48, 0xbd}, {0x48, 0xbe}, {0x48, 0xbf},
+        {0x49, 0xb8}, {0x49, 0xb9}, {0x49, 0xba}, {0x49, 0xbb},
+        {0x49, 0xbc}, {0x49, 0xbd}, {0x49, 0xbe}, {0x49, 0xbf},
+    };
+    for (u32 reg = 0; reg < 16; reg += 1)
+    {
+        for (u32 value_index = 0; value_index < BUSTER_ARRAY_LENGTH(values); value_index += 1)
+        {
+            u64 value = values[value_index];
+            for (u32 start = 0; start <= 17; start += 1)
+            {
+                for (u32 available = 0; available <= 17; available += 1)
+                {
+                    u8 bytes[64];
+                    u8 reference[64];
+                    u8 expected[64];
+                    memset(bytes, 0xa5, sizeof(bytes));
+                    memset(reference, 0xa5, sizeof(reference));
+                    memset(expected, 0xa5, sizeof(expected));
+                    bool valid = available >= 10;
+                    if (valid)
+                    {
+                        expected[start] = prefixes[reg][0];
+                        expected[start + 1] = prefixes[reg][1];
+                        for (u32 byte = 0; byte < 8; byte += 1)
+                        {
+                            expected[start + 2 + byte] = (u8)(value >> (8u * byte));
+                        }
+                    }
+                    MachineEncodeResult emitted = machine_x64_test_emit_movabs(bytes, start + available, start, reg, value, false);
+                    MachineEncodeResult oracle = machine_x64_test_emit_movabs(reference, start + available, start, reg, value, true);
+                    BUSTER_TEST(arguments, emitted.valid == valid && oracle.valid == valid);
+                    BUSTER_TEST(arguments, emitted.byte_count == start + (valid ? 10u : 0u) && emitted.byte_count == oracle.byte_count);
+                    BUSTER_TEST(arguments, emitted.exact_attempts == 1 && emitted.exact_successes == (u32)valid &&
+                                           emitted.exact_failures == (u32)!valid);
+                    BUSTER_TEST(arguments, emitted.exact_attempts == oracle.exact_attempts &&
+                                           emitted.exact_successes == oracle.exact_successes && emitted.exact_failures == oracle.exact_failures);
+                    BUSTER_TEST(arguments, memcmp(bytes, reference, sizeof(bytes)) == 0 && memcmp(bytes, expected, sizeof(bytes)) == 0);
+                }
+            }
+        }
+    }
+    u32 invalid_registers[] = {16, 31, 32, UINT16_MAX, 65536, UINT32_MAX};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_registers) + 3; index += 1)
+    {
+        u8 bytes[32];
+        u8 expected[32];
+        memset(bytes, 0xa5, sizeof(bytes));
+        memset(expected, 0xa5, sizeof(expected));
+        u32 reg = index < BUSTER_ARRAY_LENGTH(invalid_registers) ? invalid_registers[index] : 0;
+        bool null_output = index == BUSTER_ARRAY_LENGTH(invalid_registers);
+        u32 start = index == BUSTER_ARRAY_LENGTH(invalid_registers) + 1 ? 33u :
+                    index == BUSTER_ARRAY_LENGTH(invalid_registers) + 2 ? UINT32_MAX : 0u;
+        MachineEncodeResult emitted = machine_x64_test_emit_movabs(null_output ? 0 : bytes, sizeof(bytes), start, reg, 0, false);
+        BUSTER_TEST(arguments, !emitted.valid && emitted.byte_count == start);
+        BUSTER_TEST(arguments, emitted.exact_attempts == 1 && emitted.exact_successes == 0 && emitted.exact_failures == 1);
+        BUSTER_TEST(arguments, memcmp(bytes, expected, sizeof(bytes)) == 0);
+    }
+    return result;
+}
 
 // Compiles one C source through the C frontend into a canonical IrProgram
 // for machine-selection tests. Diagnostics fail the caller's assertions.
@@ -2504,6 +2578,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // owners, and all four SIMD tiles must agree with lane membership. The
     // empty mask deliberately permits a null row, as an empty contract does.
     BUSTER_TEST(arguments, machine_fast_owner_match_mask_test(0, 0, 0) == 0);
+    BUSTER_TEST(arguments, !machine_fast_owner_contains_test(0, 0, 0));
+    BUSTER_TEST(arguments, !machine_fast_owner_contains_test(0, 0, UINT32_MAX));
     u64 owner_page_size = os_get_page_size();
     u8* owner_pages = (u8*)os_reserve(0, owner_page_size * 2u, (ProtectionFlags){0}, (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
     BUSTER_TEST(arguments, owner_pages != 0);
@@ -2533,6 +2609,26 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     }
                 }
                 BUSTER_TEST(arguments, machine_fast_owner_match_mask_test(owners, masks[mask_index], value) == expected);
+                BUSTER_TEST(arguments, machine_fast_owner_contains_test(owners, masks[mask_index], value) == (expected != 0));
+            }
+        }
+        // Unique high-bit owners cover late sparse hits and absent values,
+        // independently of the duplicate-owner populations above.
+        for (u32 lane = 0; lane < count; lane += 1)
+        {
+            owners[lane] = UINT32_C(0x80000000) + lane;
+        }
+        u32 queries[] = {owners[0], owners[count - 1u], UINT32_MAX};
+        for (u32 mask_index = 0; mask_index < BUSTER_ARRAY_LENGTH(masks); mask_index += 1)
+        {
+            for (u32 query_index = 0; query_index < BUSTER_ARRAY_LENGTH(queries); query_index += 1)
+            {
+                bool expected = false;
+                for (u32 lane = 0; lane < count; lane += 1)
+                {
+                    expected |= owners[lane] == queries[query_index] && ((masks[mask_index] >> lane) & 1u);
+                }
+                BUSTER_TEST(arguments, machine_fast_owner_contains_test(owners, masks[mask_index], queries[query_index]) == expected);
             }
         }
     }
@@ -2572,8 +2668,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 241);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 246);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
+        [MACHINE_A64_UMULH64] = 0, // Pure GPR dataflow; no implicit chain.
+        [MACHINE_A64_CLZ32] = 0,
+        [MACHINE_A64_CLZ64] = 0,
+        [MACHINE_A64_RBIT32] = 0,
+        [MACHINE_A64_RBIT64] = 0,
         [MACHINE_OPCODE_SKELETON_RETURN] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
@@ -2872,7 +2973,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, recipe_indices_in_range);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 98);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 103);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 86);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
@@ -3101,6 +3202,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1466 (rows: {u32})"), exact_map.fixed_template_rows));
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
+    UnitTestResult movabs_result = machine_test_prepared_movabs(arguments);
+    result.test_count += movabs_result.test_count;
+    result.succeeded_test_count += movabs_result.succeeded_test_count;
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
     BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 173);
@@ -3183,7 +3287,12 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     {
         a64_counts[machine_emit_recipe_category(machine_opcode_emit_recipe(opcode))] += 1;
     }
-    BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 51);
+    // Appended zero-count rows retain all older serialized opcode numbers.
+    for (u16 opcode = MACHINE_A64_CLZ32; opcode <= MACHINE_A64_RBIT64; opcode += 1)
+    {
+        a64_counts[machine_emit_recipe_category(machine_opcode_emit_recipe(opcode))] += 1;
+    }
+    BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 56);
     BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 3);
     BUSTER_TEST(arguments, a64_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 19);
 
@@ -6555,6 +6664,15 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         {MACHINE_A64_NEG64, 3, 5, 0, 0, {UINT32_C(0xcb0503e3)}, 1, "NEG64"},
         {MACHINE_A64_NOT32, 3, 5, 0, 0, {UINT32_C(0x2a2503e3)}, 1, "NOT32"},
         {MACHINE_A64_NOT64, 3, 5, 0, 0, {UINT32_C(0xaa2503e3)}, 1, "NOT64"},
+        // Independent Clang integrated-assembler words, including register 31.
+        {MACHINE_A64_CLZ32, 3, 5, 0, 0, {UINT32_C(0x5ac010a3)}, 1, "CLZ32"},
+        {MACHINE_A64_CLZ64, 3, 5, 0, 0, {UINT32_C(0xdac010a3)}, 1, "CLZ64"},
+        {MACHINE_A64_RBIT32, 3, 5, 0, 0, {UINT32_C(0x5ac000a3)}, 1, "RBIT32"},
+        {MACHINE_A64_RBIT64, 3, 5, 0, 0, {UINT32_C(0xdac000a3)}, 1, "RBIT64"},
+        {MACHINE_A64_CLZ32, 17, 31, 0, 0, {UINT32_C(0x5ac013f1)}, 1, "CLZ32 ZR"},
+        {MACHINE_A64_CLZ64, 17, 31, 0, 0, {UINT32_C(0xdac013f1)}, 1, "CLZ64 ZR"},
+        {MACHINE_A64_RBIT32, 17, 31, 0, 0, {UINT32_C(0x5ac003f1)}, 1, "RBIT32 ZR"},
+        {MACHINE_A64_RBIT64, 17, 31, 0, 0, {UINT32_C(0xdac003f1)}, 1, "RBIT64 ZR"},
         {MACHINE_A64_CMP32, 5, 7, 0, 0, {UINT32_C(0x6b0700bf)}, 1, "CMP32"},
         {MACHINE_A64_CMP64, 5, 7, 0, 0, {UINT32_C(0xeb0700bf)}, 1, "CMP64"},
         {MACHINE_A64_CMP_ZERO, 5, 0, 0, 0, {UINT32_C(0xf10000bf)}, 1, "CMP_ZERO"},
@@ -6969,15 +7087,14 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 machine_select_canonical_function(arguments->arena, machine_a64_program, a64_nine_function, machine_a64_target);
             BUSTER_TEST(arguments, a64_nine_selected.supported);
         }
-        // Module wiring: MIR_STACK on the AArch64 target routes the subset
-        // through the machine path and counts the rest.
+        // Every function in this module now uses the AArch64 machine path.
         CodegenModule a64_mir_module = codegen_generate_canonical_module(arguments->arena, machine_a64_program, machine_a64_module, machine_a64_target,
                                                                          (CodegenModuleOptions){
                                                                              .register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
                                                                          });
         BUSTER_TEST(arguments, a64_mir_module.error == CODEGEN_ERROR_NONE);
         BUSTER_TEST(arguments, a64_none_module.statistics.fallback_function_count == 0);
-        BUSTER_TEST(arguments, a64_mir_module.statistics.fallback_function_count > 0);
+        BUSTER_TEST(arguments, a64_mir_module.statistics.fallback_function_count == 0);
         IrFunction* a64_mir_add = machine_test_ir_function_find(machine_a64_module, S8("add"));
         if (a64_mir_add)
         {
