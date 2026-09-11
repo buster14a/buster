@@ -1,0 +1,60 @@
+{
+  "source_revision": "82dbfaa18b4ee754357a07141cac4a91f108495e",
+  "base_revision": "dae74aa6099f93069af82274f89df7b8471eab2d",
+  "tls_repair_original_commit": "215cac3b3e76a2c5697ebad739d038a5bba55a86",
+  "build_command": "CMAKE_BUILD_PARALLEL_LEVEL=1 BUSTER_TEST_JOBS=1 ./build.sh build --config Release -t test_all",
+  "build_exit_code": 0,
+  "assertions": 1491013,
+  "modules": 47,
+  "compile_commands": [
+    {
+      "directory": "/workspace/scratch/938e5009f152/issue44/build",
+      "command": "/workspace/scratch/6f9db092acbf/toolchain/usr/lib/llvm-18/bin/clang -DBUSTER_BENCH_ALLOCATIONS=0 -DBUSTER_COMPILER_ZIG=0 -DBUSTER_FUZZ_AVAILABLE=0 -DBUSTER_HOST_C_COMPILER=\\\"/workspace/scratch/6f9db092acbf/toolchain/usr/lib/llvm-18/bin/clang\\\" -DBUSTER_HOST_C_COMPILER_ARG1=\\\"\\\" -DBUSTER_HOST_C_COMPILER_ID=\\\"Clang\\\" -DBUSTER_HOST_C_COMPILER_MSVC=0 -DBUSTER_HOST_C_RESOURCE_INCLUDE=\\\"/workspace/scratch/6f9db092acbf/toolchain/usr/lib/llvm-18/lib/clang/18/include\\\" -DBUSTER_INCLUDE_TESTS=1 -DBUSTER_INSTRUMENT=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_SANITIZE=0 -DBUSTER_SINGLE_THREADED=0 -DBUSTER_UNITY_BUILD=0 -DBUSTER_USE_D3D12=0 -DBUSTER_USE_METAL=0 -DBUSTER_USE_SLANG_SHADERS=0 -DBUSTER_USE_VULKAN=0 -DCMAKE_INTDIR=\\\"Release\\\" -I/workspace/scratch/938e5009f152/issue44/build/generated -I/workspace/scratch/938e5009f152/issue44/src -O3 -DNDEBUG -fcolor-diagnostics -fwrapv -fno-strict-aliasing -funsigned-char -fno-exceptions -Werror -Wall -Wextra -Wundef -Wconversion -Wstrict-overflow=5 -Woverflow -Wshift-overflow -Walloca -Wbool-operation -Wdouble-promotion -Wformat -Wimplicit -Wimplicit-fallthrough -Winfinite-recursion -Winvalid-utf8 -Wmain -Wmisleading-indentation -Wmissing-braces -Woverlength-strings -Wpacked -Wparentheses -Wpointer-arith -Wpragmas -Wshadow -Wtautological-compare -Wtype-limits -Wuninitialized -Wno-missing-field-initializers -Wpedantic -pedantic -Warray-bounds-pointer-arithmetic -Wassign-enum -Wbool-conversion -Wcomma -Wconditional-uninitialized -Wdangling -Wenum-compare-conditional -Wenum-too-large -Wfixed-point-overflow -Wflag-enum -Wfortify-source -Wfour-char-constants -Wimplicit-fallthrough-per-function -Wimplicit-float-conversion -Wimplicit-int-conversion -Wlinker-warnings -Wloop-analysis -Wnon-power-of-two-alignment -Woption-ignored -Wpragma-pack -Wpragma-pack-suspicious-include -Wpedantic-macros -Wread-only-types -Wredundant-parens -Wreserved-identifier -Wreserved-macro-identifier -Wreserved-module-identifier -Wself-assign -Wself-assign-field -Wshadow-all -Wshadow-field -Wshift-sign-overflow -Wsigned-enum-bitfield -Wtautological-constant-in-range-compare -Wunaligned-access -Wvector-conversion -Wthread-safety -ferror-limit=1 -g -fno-omit-frame-pointer -march=native -o CMakeFiles/ide.dir/Release/src/buster/tests/compiler/driver/driver_test.c.o -c /workspace/scratch/938e5009f152/issue44/src/buster/tests/compiler/driver/driver_test.c",
+      "file": "/workspace/scratch/938e5009f152/issue44/src/buster/tests/compiler/driver/driver_test.c",
+      "output": "CMakeFiles/ide.dir/Release/src/buster/tests/compiler/driver/driver_test.c.o"
+    },
+    {
+      "directory": "/workspace/scratch/938e5009f152/issue44/build",
+      "command": "/workspace/scratch/6f9db092acbf/toolchain/usr/lib/llvm-18/bin/clang -DBUSTER_BENCH_ALLOCATIONS=0 -DBUSTER_COMPILER_ZIG=0 -DBUSTER_FUZZ_AVAILABLE=0 -DBUSTER_HOST_C_COMPILER=\\\"/workspace/scratch/6f9db092acbf/toolchain/usr/lib/llvm-18/bin/clang\\\" -DBUSTER_HOST_C_COMPILER_ARG1=\\\"\\\" -DBUSTER_HOST_C_COMPILER_ID=\\\"Clang\\\" -DBUSTER_HOST_C_COMPILER_MSVC=0 -DBUSTER_HOST_C_RESOURCE_INCLUDE=\\\"/workspace/scratch/6f9db092acbf/toolchain/usr/lib/llvm-18/lib/clang/18/include\\\" -DBUSTER_INCLUDE_TESTS=1 -DBUSTER_INSTRUMENT=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_SANITIZE=0 -DBUSTER_SINGLE_THREADED=0 -DBUSTER_UNITY_BUILD=0 -DBUSTER_USE_D3D12=0 -DBUSTER_USE_METAL=0 -DBUSTER_USE_SLANG_SHADERS=0 -DBUSTER_USE_VULKAN=0 -DCMAKE_INTDIR=\\\"Release\\\" -I/workspace/scratch/938e5009f152/issue44/build/generated -I/workspace/scratch/938e5009f152/issue44/src -O3 -DNDEBUG -fcolor-diagnostics -fwrapv -fno-strict-aliasing -funsigned-char -fno-exceptions -Werror -Wall -Wextra -Wundef -Wconversion -Wstrict-overflow=5 -Woverflow -Wshift-overflow -Walloca -Wbool-operation -Wdouble-promotion -Wformat -Wimplicit -Wimplicit-fallthrough -Winfinite-recursion -Winvalid-utf8 -Wmain -Wmisleading-indentation -Wmissing-braces -Woverlength-strings -Wpacked -Wparentheses -Wpointer-arith -Wpragmas -Wshadow -Wtautological-compare -Wtype-limits -Wuninitialized -Wno-missing-field-initializers -Wpedantic -pedantic -Warray-bounds-pointer-arithmetic -Wassign-enum -Wbool-conversion -Wcomma -Wconditional-uninitialized -Wdangling -Wenum-compare-conditional -Wenum-too-large -Wfixed-point-overflow -Wflag-enum -Wfortify-source -Wfour-char-constants -Wimplicit-fallthrough-per-function -Wimplicit-float-conversion -Wimplicit-int-conversion -Wlinker-warnings -Wloop-analysis -Wnon-power-of-two-alignment -Woption-ignored -Wpragma-pack -Wpragma-pack-suspicious-include -Wpedantic-macros -Wread-only-types -Wredundant-parens -Wreserved-identifier -Wreserved-macro-identifier -Wreserved-module-identifier -Wself-assign -Wself-assign-field -Wshadow-all -Wshadow-field -Wshift-sign-overflow -Wsigned-enum-bitfield -Wtautological-constant-in-range-compare -Wunaligned-access -Wvector-conversion -Wthread-safety -ferror-limit=1 -g -fno-omit-frame-pointer -march=native -o CMakeFiles/ide.dir/Release/src/buster/lib/compiler/codegen/machine.c.o -c /workspace/scratch/938e5009f152/issue44/src/buster/lib/compiler/codegen/machine.c",
+      "file": "/workspace/scratch/938e5009f152/issue44/src/buster/lib/compiler/codegen/machine.c",
+      "output": "CMakeFiles/ide.dir/Release/src/buster/lib/compiler/codegen/machine.c.o"
+    }
+  ],
+  "binary": {
+    "path": "build/Release/ide",
+    "bytes": 39429104,
+    "sha256": "b0074c30bd68931c3a19bd1f02c68dfdd712b5c295a27cd790cbbde172d9c6ff"
+  },
+  "failure_logs": {
+    "windows_first_attempt": {
+      "head": "94095cb773a3dc97eaa9f06a1a32c25624be581e",
+      "run": 34642885808,
+      "job": 103406778266,
+      "retry": "cancelled following rebase; no cause established"
+    },
+    "initial_rebased_selfhost": {
+      "head": "172067706d8509a365659df5629b44defe73f6dd",
+      "run": 34649062006,
+      "job": 103426702510,
+      "cause": "four inherited TLS descriptors initialize removed MachineOpcodeInfo.name"
+    }
+  },
+  "retained_files": {
+    "windows-first-attempt.log.gz": {
+      "bytes": 44993,
+      "sha256": "e62235c42cbf58f96683d3c296cb0c7506236d5704b635dab0643b8ba302b4e0"
+    },
+    "rebase-build-failure.log.gz": {
+      "bytes": 7721,
+      "sha256": "ca5332bbb7ec091878dee39b4019452368e1878633907af9be5ce7fa6de3542f"
+    },
+    "release-suite.log.gz": {
+      "bytes": 25292,
+      "sha256": "b6d4af375c440e58bc5e898a2e740dc934e96e39a1f3bb8adc44323887939ac9"
+    },
+    "release-suite-summary.log": {
+      "bytes": 5834,
+      "sha256": "042deac697d87e65b4fc77faaa610d9ea400f44e02c43f91560fbcff9f5a574b"
+    }
+  }
+}
