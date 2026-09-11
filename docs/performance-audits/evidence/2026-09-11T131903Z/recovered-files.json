@@ -1,0 +1,286 @@
+{
+  "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+  "integration_base": "680dcdd6b28d6c4ea3ec8e25f8fe3441ff2c76ea",
+  "files": [
+    {
+      "path": "docs/performance-audits/2026-09-06T125122Z.md",
+      "git_blob": "287b7f233c3f8729273d5158044426cfef132e4b",
+      "bytes": 21242
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/README.md",
+      "git_blob": "3315e5035a34b9fee77554219b0de45525701a1f",
+      "bytes": 3475
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/branch-survey.log",
+      "git_blob": "207f8e5b9fe80623c2e9930c97d94235cd3033e8",
+      "bytes": 266
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/buster_x86_metadata_decode_base64_chunk_avx512.asm",
+      "git_blob": "72ce23c8626bfc6b46897c0faad4f548c1ac8b95",
+      "bytes": 4099
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/c_ir_decode_quoted.asm",
+      "git_blob": "e1a9ca0c8b05d630ee45c087c973525872902fc2",
+      "bytes": 6530
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/c_symbols_intern_tokens.asm",
+      "git_blob": "97858d9f5967675d62fa26f0cf321563b6a2a4f2",
+      "bytes": 13936
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/cache-amd-survey.log",
+      "git_blob": "07ffca2104dba732a94d8f0b7b6593e3a5a981e8",
+      "bytes": 889
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/cache-portable-survey.log",
+      "git_blob": "50c03d95045b9dcf620a20aacd214035b651df83",
+      "bytes": 547
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/hide-after.c",
+      "git_blob": "95c3aa764757562b636a8b4d571fbb491f172cc5",
+      "bytes": 100
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/hide-after.readelf.txt",
+      "git_blob": "8b6b1933517e044505842d8ecb69b3729345e2b8",
+      "bytes": 5212
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/hide-before.c",
+      "git_blob": "0e549d11302945451a1bd477ab77af57a07ab868",
+      "bytes": 100
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/hide-before.readelf.txt",
+      "git_blob": "4c24626b664ca7f32581847e05b525eb90a1e5ae",
+      "bytes": 5296
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/initial-measurement-attempts.json",
+      "git_blob": "2c36c0646a8f0640c0efb0e222f190c8863b1034",
+      "bytes": 2823
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/instructions.log",
+      "git_blob": "fd79b245a6021063dcd270923d9de357a9225d50",
+      "bytes": 3286
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/kernel-check.log",
+      "git_blob": "1fccc9d789a1c05290c4ee907f93a94591af855c",
+      "bytes": 38
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/kernel-manifest.json",
+      "git_blob": "90f779aa3b8b05ba4f6fbcc762b2d51a0863d87f",
+      "bytes": 40122
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/kernel-notes.md",
+      "git_blob": "c3c373b37f702df8be5ab0b414d2bf4c294c8704",
+      "bytes": 4119
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/kernel-provenance.json",
+      "git_blob": "afc2ec8472561259150657f6081b54a8200b3cd5",
+      "bytes": 2631
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/kernel-results.json",
+      "git_blob": "bee1431ee7c5aca4a45fdd976577f333d003a603",
+      "bytes": 7076
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/kernel-timing.log",
+      "git_blob": "ff41e0fa302e6aacb2605cd667f37ccc87f5f19b",
+      "bytes": 3072
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/layout-probe.c",
+      "git_blob": "67452d12987f3501a71209dbb2c8cec5f2f30ab2",
+      "bytes": 1184
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-ab-result.txt",
+      "git_blob": "f6eeec2b89a7291ae28bddf986fa34f2ce17e8d1",
+      "bytes": 523
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-census-fixture.log",
+      "git_blob": "0c2dbe28e7362cc07875df0d637cf2554b2093fa",
+      "bytes": 228
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-census-instrumentation.patch",
+      "git_blob": "8de5eb8b611c357694c7d3c40e35e3472c2ecb49",
+      "bytes": 5329
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-census-stage1.log",
+      "git_blob": "e6f2e086c67d5d358b74e0ffd30d94447485b2af",
+      "bytes": 3132
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-results-manifest.json",
+      "git_blob": "69608c3f19ab536a7d2dcd6e80287bc066e3d006",
+      "bytes": 3236
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-reuse-experimental.patch",
+      "git_blob": "4c19a3240b35ca718e6fb38695fbdfd762af8a66",
+      "bytes": 6157
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-validation-notes.txt",
+      "git_blob": "404b80fe1af9cda7455d0b3feaf8cb8e3f7fa4a2",
+      "bytes": 2703
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/base64-128.log",
+      "git_blob": "028459f94181830ccde89c01f99e889bb70d5fec",
+      "bytes": 2338
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/base64-16.log",
+      "git_blob": "62beeb2b3dbe586583dfa3a46c7e473e638c553b",
+      "bytes": 2312
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/base64-32.log",
+      "git_blob": "2f71ba70b97783c5e6da5962eab647636f5e708a",
+      "bytes": 2325
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/base64-4.log",
+      "git_blob": "c96540ca239bd746ecb527ed945f102f8e28150e",
+      "bytes": 2310
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/base64-64.log",
+      "git_blob": "d4e445b7f535b942b6896c7ff48701567ae99017",
+      "bytes": 2334
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/base64-8.log",
+      "git_blob": "7dfa3f5a03ede3ec6a64e97bb63db328b7965a0c",
+      "bytes": 2311
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/identifier-0.log",
+      "git_blob": "850af51e279330189debe16894f675672b55c502",
+      "bytes": 2317
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/identifier-1.log",
+      "git_blob": "5edca62895463c9ab1c85560529c1684e2e3a303",
+      "bytes": 2416
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/identifier-100.log",
+      "git_blob": "d580de76c844b6ac22676795f5fec5114028b568",
+      "bytes": 2436
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/identifier-20.log",
+      "git_blob": "57806ea9eae519dec506a6e65fb136dd10d830b0",
+      "bytes": 2422
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-dense-128.log",
+      "git_blob": "75944011b685be2307b01db6e051add94b61aa7d",
+      "bytes": 2453
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-plain-0.log",
+      "git_blob": "e4b8706007419f49d49bd9904ce654d82d4b0e79",
+      "bytes": 2310
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-plain-128.log",
+      "git_blob": "ca71b10a5a14a9be1a281a57fbef4be627831184",
+      "bytes": 2450
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-plain-16.log",
+      "git_blob": "7ffecffd0173e7aaef80f2932e25948cd955127c",
+      "bytes": 2410
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-plain-32.log",
+      "git_blob": "15b7ff82454a047bd26de9e1c5f836760dc75b0e",
+      "bytes": 2430
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-plain-4.log",
+      "git_blob": "8c865cdcbe5220e73ed629de5ad11c186063f2b2",
+      "bytes": 2408
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-plain-64.log",
+      "git_blob": "aa4b33eed79e137c938acaf966bdf81fe3639cb9",
+      "bytes": 2433
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/software-profile.log",
+      "git_blob": "8a7f3e9476d6d4f66a51f3fdbd390fb952c6a11f",
+      "bytes": 203
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/stage1-profile.log",
+      "git_blob": "8a7f3e9476d6d4f66a51f3fdbd390fb952c6a11f",
+      "bytes": 203
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/validation-excerpts.txt",
+      "git_blob": "63a3b20035e1c9c9515a6c71ceb6adb6af2cb36a",
+      "bytes": 20207
+    },
+    {
+      "path": "tools/bench_pr139_simd/README.md",
+      "git_blob": "fc83d193c186c7576b3250525ccb34bb7cab4d1d",
+      "bytes": 4187
+    },
+    {
+      "path": "tools/bench_pr139_simd/benchmark.c",
+      "git_blob": "b84618354915c8d36ca218fc0d6300dcfebfe917",
+      "bytes": 16509
+    },
+    {
+      "path": "tools/bench_pr139_simd/dump_corpus.c",
+      "git_blob": "3146238cc78a4180f356d5873545cd7a84056506",
+      "bytes": 3384
+    },
+    {
+      "path": "tools/bench_pr139_simd/prepare.py",
+      "git_blob": "7e179c6f69e2752db32b892a19f829cb33ae84c0",
+      "bytes": 7334
+    },
+    {
+      "path": "tools/bench_pr139_simd/regimes.py",
+      "git_blob": "18d89d05f06f2cdbe1f65509b7d1fb0fcc8e0c0d",
+      "bytes": 1058
+    },
+    {
+      "path": "tools/bench_pr139_simd/run.py",
+      "git_blob": "bc458e72e36f2d88fce8bcf471a6fae0f182bd79",
+      "bytes": 6138
+    },
+    {
+      "path": "tools/branch_miss_survey.py",
+      "git_blob": "af67bd088d326d92ec280b9433119345662959f6",
+      "bytes": 23206
+    },
+    {
+      "path": "tools/cache_miss_survey.py",
+      "git_blob": "fc73f4bb2084128585b3fdaeea8f60ba539d6508",
+      "bytes": 43742
+    }
+  ]
+}
