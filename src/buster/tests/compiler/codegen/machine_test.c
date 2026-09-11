@@ -1589,9 +1589,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
         {
             MachineSelectResult selected = machine_select_canonical_function(arguments->arena, asm_program,
                 machine_test_ir_function_find(asm_program->modules, S8("f")), target);
-            // This unrestricted template still needs canonical lowering;
-            // the fixed CPU-query rows do not describe its clobbers.
-            BUSTER_TEST(arguments, !selected.supported);
+            // The exact memory-only compiler barrier is selectable, but it
+            // deliberately invalidates nonvolatile-memory certification.
+            BUSTER_TEST(arguments, selected.supported && !selected.function.nonvolatile_memory_certified);
+            if (selected.supported)
+            {
+                BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+            }
         }
     }
     return result;
