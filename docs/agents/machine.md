@@ -265,3 +265,13 @@
   link by name rather than being rewritten. It relaxes the two indirect
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`).
+
+## Incoming argument reads
+
+Both `MACHINE_X64_LOAD_INCOMING` and `MACHINE_A64_LOAD_INCOMING` declare
+`MACHINE_MEMORY_EFFECT_READ`. Their implicit frame-relative address has no
+fixed stack-slot identity, so the scheduler treats them as unknown memory and
+chains them against every pending slot access. No architecture-specific
+scheduler exception is needed. The stack-alias tests explicitly recognize
+incoming reads independently of that metadata; otherwise a missing descriptor
+bit could disappear from both the scheduler and its test oracle.

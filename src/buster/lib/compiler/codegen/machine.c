@@ -951,6 +951,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("a64_load_incoming"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ,
     },
     [MACHINE_A64_VA_SAVE] = {
         .name = S8_INITIALIZER("a64_va_save"),
