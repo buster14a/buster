@@ -5475,9 +5475,8 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         // A parenthesized assignment can recover a read's place without ever
         // consuming its provisional value. Prune such parameters (including
         // unused cyclic groups), starting only at actual instruction operands.
-        // The pending-parameter map is now dead. Reuse its identically sized
-        // pointer rows instead of allocating another value-count-sized table.
-        IrBlockParameter** parameter_by_value = (IrBlockParameter**)pending_by_value;
+        IrBlockParameter** parameter_by_value = arena_allocate(builder->scratch_arena, IrBlockParameter*, count);
+        IR_CONSTRUCTION_RECORD(SSA_VALUE_POINTER_SLOTS_ALLOCATED, count);
         IR_CONSTRUCTION_RECORD(SSA_VALUE_POINTER_SLOTS_CLEARED, count);
         memset(parameter_by_value, 0, sizeof(*parameter_by_value) * count);
         memset(value_map, 0xff, sizeof(*value_map) * count);
