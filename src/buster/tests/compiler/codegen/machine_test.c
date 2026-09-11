@@ -2834,7 +2834,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_compiler_barrier(UnitTestArgumen
     ByteSlice input = file_read(arguments->arena, S8("tests/basic_c_compiler_barrier.c"), (FileReadOptions){0});
     String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
     BUSTER_TEST(arguments, input.length != 0);
-    CpuArchitecture architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
     for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
     {
         Target target = {.cpu_arch = architectures[architecture], .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
