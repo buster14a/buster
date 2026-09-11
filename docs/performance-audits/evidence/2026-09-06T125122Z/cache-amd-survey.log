@@ -1,0 +1,11 @@
+warning: load average is 1.65; miss shares from a busy machine are not comparable across runs
+error: perf stat -e {instructions,cycles,L1-dcache-loads,L1-dcache-load-misses,l2_cache_req_stat.dc_access_in_l2}:u -- build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -fsource-metrics=/workspace/scratch/0194f2e71ee3/env-check/surveys/cache-amd-stage1.metrics src/buster/apps/ide/ide.c -lm -o /workspace/scratch/0194f2e71ee3/env-check/surveys/cache-amd-stage1 failed (exit 129):
+event syntax error: '..oad-misses,l2_cache_req_stat.dc_access_in_l2}:u'
+                                  \___ Bad event name
+
+Unable to find event on a PMU of 'l2_cache_req_stat.dc_access_in_l2'
+Run 'perf list' for a list of valid events
+
+ Usage: perf stat [<options>] [<command>]
+
+    -e, --event <event>   event selector. use 'perf list' to list available events

@@ -1,0 +1,45 @@
+LITERAL_REUSE_CENSUS site=0 hits=0 decoded_bytes=0 fragments=0 wide_hits=0
+LITERAL_REUSE_CENSUS site=1 hits=0 decoded_bytes=0 fragments=0 wide_hits=0
+LITERAL_REUSE_CENSUS site=2 hits=0 decoded_bytes=0 fragments=0 wide_hits=0
+TARGET cpu=znver4 features=adx,aes,avx,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,clflushopt,clwb,cx16,f16c,fma,fsgsbase,gfni,invpcid,lzcnt,movbe,pclmul,popcnt,rdrand,rdseed,sha,shstk,smap,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,vaes,vpclmulqdq,xsave,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                292                      323
+bytes on disk                 29.376.093               29.404.807
+physical lines                   358.076                  359.070
+
+bytes scanned                 29.374.273               29.402.983
+  code                        23.527.022   80.1 %      23.543.549   80.1 %
+  comment                      1.554.927    5.3 %       1.564.949    5.3 %
+  whitespace                   4.292.324   14.6 %       4.294.485   14.6 %
+  literals, within code       13.169.519   44.8 %      13.169.688   44.8 %
+
+lines scanned                    357.166                  358.158
+  code, the sLOC                 321.780   90.1 %         322.527   90.1 %
+  comment                         26.341    7.4 %          26.547    7.4 %
+  blank                           10.678    3.0 %          10.732    3.0 %
+  both, counted twice              1.633    0.5 %           1.648    0.5 %
+
+comments                          21.986                   22.047
+tokens                         2.845.281                2.848.139
+spliced-away lines                   910    0.3 %             912    0.3 %
+
+preprocessed output                      of lexed
+  tokens to the parser         3.174.291  111.5 %
+  their spelling bytes        23.956.084  101.8 %
+  bytes retained              32.092.577  109.1 %
+  macro expansions               117.298
+  #define directives               3.181
+
+files lexed more than once
+         lexes re-read bytes  path
+            15        10.528  stddef.h
+             3         8.568  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+            13         5.304  /usr/include/x86_64-linux-gnu/bits/wordsize.h
+             2         2.231  /usr/include/x86_64-linux-gnu/bits/stat.h
+             2         1.109  /usr/include/x86_64-linux-gnu/bits/timesize.h
+             2           970  /usr/include/x86_64-linux-gnu/bits/long-double.h
+                      28.710  re-read in total
+CODEGEN cpu=znver4 vector_bits=512 functions=4382 instructions=1401051 values=1161532 stack_value_bytes=4685824 stack_frame_bytes=4685872 max_stack_frame_bytes=587432 code_bytes=16976436 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=64 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=1669498 exact_successes=1669498 exact_failures=0

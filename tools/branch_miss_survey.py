@@ -64,8 +64,10 @@ DEFAULT_COMMAND = [
     "-DBUSTER_UNITY_BUILD=1",
     "-DBUSTER_INCLUDE_TESTS=0",
     "-g",
+    "-v",
     "-fsource-metrics=build/ide-self.metrics",
     "src/buster/apps/ide/ide.c",
+    "-lm",
     "-o",
     "build/ide-self",
 ]
@@ -269,12 +271,28 @@ def short_location(location):
     return "%s:%s" % (os.path.basename(fields[0]), fields[1] if len(fields) > 1 else "?")
 
 
-def run_perf_stat(command):
-    """Return `{event: count}` for one run, or `{}` if perf could not count."""
+def run_perf(command):
+    """A failed workload or perf command never produces a measurement."""
+    environment = dict(os.environ)
+    environment["LC_ALL"] = "C"
     process = subprocess.run(
-        ["perf", "stat", "-x,", "-e", ",".join(STAT_EVENTS), "--"] + command,
+        command,
         capture_output=True,
         text=True,
+        env=environment,
+    )
+    if process.returncode:
+        raise SystemExit(
+            "error: %s failed (exit %d):\n%s%s"
+            % (" ".join(command), process.returncode, process.stdout, process.stderr)
+        )
+    return process
+
+
+def run_perf_stat(command):
+    """Return complete `{event: count}` data from a successful workload."""
+    process = run_perf(
+        ["perf", "stat", "-x,", "-e", ",".join(STAT_EVENTS), "--"] + command
     )
     counts = {}
     for line in process.stderr.splitlines():
@@ -282,11 +300,17 @@ def run_perf_stat(command):
         if len(fields) < 3 or not fields[0].isdigit():
             continue
         counts[fields[2]] = int(fields[0])
+    missing = [event for event in STAT_EVENTS if event not in counts]
+    if missing:
+        raise SystemExit(
+            "error: perf stat did not count %s; no valid survey:\n%s"
+            % (", ".join(missing), process.stderr)
+        )
     return counts
 
 
 def record_branch_stacks(command, binary, period, output):
-    subprocess.run(
+    run_perf(
         [
             "perf",
             "record",
@@ -302,20 +326,12 @@ def record_branch_stacks(command, binary, period, output):
             "--",
         ]
         + command,
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
     )
-    stacks = subprocess.run(
+    stacks = run_perf(
         ["perf", "script", "-i", output, "-F", "pid,brstack"],
-        capture_output=True,
-        text=True,
-        check=True,
     ).stdout
-    mmaps = subprocess.run(
+    mmaps = run_perf(
         ["perf", "script", "-i", output, "--show-mmap-events", "-F", "comm,pid,event"],
-        capture_output=True,
-        text=True,
     ).stdout
     segments = load_segments(binary)
     mappings = []
@@ -327,7 +343,7 @@ def record_branch_stacks(command, binary, period, output):
 
 def cross_check(command, binary, output):
     """Function shares from a plain `branch-misses:u` profile of the same run."""
-    subprocess.run(
+    run_perf(
         [
             "perf",
             "record",
@@ -341,11 +357,8 @@ def cross_check(command, binary, output):
             "--",
         ]
         + command,
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
     )
-    text = subprocess.run(
+    text = run_perf(
         [
             "perf",
             "report",
@@ -361,8 +374,6 @@ def cross_check(command, binary, output):
             "sym",
             "--stdio",
         ],
-        capture_output=True,
-        text=True,
     ).stdout
     shares = collections.Counter()
     for line in text.splitlines():
@@ -434,6 +445,8 @@ def report(counts, symbols, binary, totals, top, sampled, shares):
 def survey(arguments):
     binary = arguments.binary
     command = arguments.command or list(DEFAULT_COMMAND)
+    if not arguments.command:
+        command[0] = binary
     if not os.path.exists(binary):
         sys.stderr.write(
             "error: %s does not exist; build it with "
@@ -515,6 +528,8 @@ def survey(arguments):
 
 def self_test():
     """Cover the address math and the parsing; no perf required."""
+    from unittest.mock import patch
+
     failures = []
 
     def check(name, actual, expected):
@@ -576,6 +591,26 @@ def self_test():
     check("symbol lookup below the first", containing_function(symbols, starts, 0x100), "[unknown]")
     check("short location", short_location("/a/b/c_parse.c:7607:9"), "c_parse.c:7607")
 
+    stat_text = "".join("100,,%s,1,100.00\n" % event for event in STAT_EVENTS)
+    for status, output, valid in (
+        (0, stat_text, True),
+        (1, stat_text + "link failed\n", False),
+        (0, stat_text.replace("100,,branch-misses:u", "<not supported>,,branch-misses:u"), False),
+        (0, stat_text.replace("100,,cycles:u", "<not counted>,,cycles:u"), False),
+        (0, "", False),
+    ):
+        completed = subprocess.CompletedProcess(["perf"], status, "", output)
+        accepted = False
+        with patch.object(subprocess, "run", return_value=completed):
+            try:
+                measured = run_perf_stat(["workload"])
+                accepted = measured == {event: 100 for event in STAT_EVENTS}
+            except SystemExit:
+                pass
+        check("only complete successful stat results accepted", accepted, valid)
+    check("stage 1 links libm", "-lm" in DEFAULT_COMMAND, True)
+    check("stage 1 enables verbose metrics", "-v" in DEFAULT_COMMAND, True)
+
     for failure in failures:
         sys.stderr.write("FAIL %s\n" % failure)
     print("%d checks failed" % len(failures) if failures else "self-test passed")
@@ -599,6 +634,8 @@ def main():
     parser.add_argument("--self-test", action="store_true", help="run the unit checks")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="-- command to profile")
     arguments = parser.parse_args()
+    if arguments.repeat < 1:
+        parser.error("--repeat must be positive")
     if arguments.self_test:
         return self_test()
     if arguments.command and arguments.command[0] == "--":

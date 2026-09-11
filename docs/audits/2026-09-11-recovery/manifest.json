@@ -1,0 +1,638 @@
+{
+  "repository": "buster14a/buster",
+  "integration_base": "680dcdd6b28d6c4ea3ec8e25f8fe3441ff2c76ea",
+  "classification": "historical audit and opt-in measurement tooling recovery; no compiler changes",
+  "sources": [
+    {
+      "ref": "claude/avx512-zen5-compiler-perf-8efb1e",
+      "sha": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "pr": 160
+    },
+    {
+      "ref": "audit/2026-09-07-public-record",
+      "sha": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "pr": 206
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/performance-audits/2026-09-06T125122Z.md",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "287b7f233c3f8729273d5158044426cfef132e4b",
+      "sha256": "672f620094660740c0f1d5963d1534707fe641cd6fae6af94f224257bc09a301",
+      "bytes": 21242
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/README.md",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "3315e5035a34b9fee77554219b0de45525701a1f",
+      "sha256": "5fa2bee02c1cf3c5ca556bfbddce01ae354d2dbe8c7a21ef5a681a98b4485596",
+      "bytes": 3475
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/branch-survey.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "207f8e5b9fe80623c2e9930c97d94235cd3033e8",
+      "sha256": "7593109e945be376b6c15cc884117c1455023c7717f11cd6e0a6c301e46c0517",
+      "bytes": 266
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/buster_x86_metadata_decode_base64_chunk_avx512.asm",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "72ce23c8626bfc6b46897c0faad4f548c1ac8b95",
+      "sha256": "ab1f357b8b174bee408ca8521e916dd26341a106d9c4408c49d4266c44fd5686",
+      "bytes": 4099
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/c_ir_decode_quoted.asm",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "e1a9ca0c8b05d630ee45c087c973525872902fc2",
+      "sha256": "0c7798a67aa18a7363a9dba3128a219dee77856ec78a53e3faabe337b11b3d84",
+      "bytes": 6530
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/c_symbols_intern_tokens.asm",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "97858d9f5967675d62fa26f0cf321563b6a2a4f2",
+      "sha256": "ed534f5c7d2a27bfa1a2c502e9982ef73db41c11367ca05981747889a8bbfbf4",
+      "bytes": 13936
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/cache-amd-survey.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "07ffca2104dba732a94d8f0b7b6593e3a5a981e8",
+      "sha256": "d42031d4f10c4942889fe63e68a0cc6581441e74028c5185a1f452c376eb8b58",
+      "bytes": 889
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/cache-portable-survey.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "50c03d95045b9dcf620a20aacd214035b651df83",
+      "sha256": "f1623bd0042eb084dc0f9870367b6f63b56a3e163b9b24cd64248f883d11e92c",
+      "bytes": 547
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/hide-after.c",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "95c3aa764757562b636a8b4d571fbb491f172cc5",
+      "sha256": "dba0763533b4327faffc81b4737bb904b49f4b1d2025a29d8bbe9233c533afe2",
+      "bytes": 100
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/hide-after.readelf.txt",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "8b6b1933517e044505842d8ecb69b3729345e2b8",
+      "sha256": "a5792190fffe605b6c3131a9d36780e37b4d9314074e96ef8043efac46ddc87a",
+      "bytes": 5212
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/hide-before.c",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "0e549d11302945451a1bd477ab77af57a07ab868",
+      "sha256": "82b561bee773043b29088958a9cd8bf8bab2883a16631a87aba29895d809dfe7",
+      "bytes": 100
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/hide-before.readelf.txt",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "4c24626b664ca7f32581847e05b525eb90a1e5ae",
+      "sha256": "a5fe61e8f3c854d2a1da8f8d39589a5891bdd1e3301dc0b9cf5726327e077ccb",
+      "bytes": 5296
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/initial-measurement-attempts.json",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "2c36c0646a8f0640c0efb0e222f190c8863b1034",
+      "sha256": "c9979ea12c5e802d5582eb45cd249286403d4430465c78cf1fdba95116d5472d",
+      "bytes": 2823
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/instructions.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "fd79b245a6021063dcd270923d9de357a9225d50",
+      "sha256": "66ddbeed33b71683a13065a89a9907fcc0cd6515c7ecc32ffb9b2519287d504d",
+      "bytes": 3286
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/kernel-check.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "1fccc9d789a1c05290c4ee907f93a94591af855c",
+      "sha256": "53b567e790f7e0a67b92381cc84dd389826973f433642de8a0680991adabf61c",
+      "bytes": 38
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/kernel-manifest.json",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "90f779aa3b8b05ba4f6fbcc762b2d51a0863d87f",
+      "sha256": "c325b351fbd2d6a2ef4389bb37be0b7fee68e0f8c07fa10817f5cf0c3ab13b65",
+      "bytes": 40122
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/kernel-notes.md",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "c3c373b37f702df8be5ab0b414d2bf4c294c8704",
+      "sha256": "a9ce800fd42bc8b548630e0431f1f11f7706bbf6d453ac2b8a38c3cc465081ea",
+      "bytes": 4119
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/kernel-provenance.json",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "afc2ec8472561259150657f6081b54a8200b3cd5",
+      "sha256": "605882e49dc6d7d9b90601495c095e900010400f78f8f843bf000c1d19f9d085",
+      "bytes": 2631
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/kernel-results.json",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "bee1431ee7c5aca4a45fdd976577f333d003a603",
+      "sha256": "71b9b24feb849f63f2afacdb91694e0ab1661a2e13673f2d5ad0fc1116c76016",
+      "bytes": 7076
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/kernel-timing.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "ff41e0fa302e6aacb2605cd667f37ccc87f5f19b",
+      "sha256": "32a0dc332a14a0783445560f9bb4c43d0966bb0630e145ab8e0fc22eda9632d0",
+      "bytes": 3072
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/layout-probe.c",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "67452d12987f3501a71209dbb2c8cec5f2f30ab2",
+      "sha256": "1d64648dd41de83c61a0299051e15691f47f78c96bd369cbe1f0250f4fa9462d",
+      "bytes": 1184
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-ab-result.txt",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "f6eeec2b89a7291ae28bddf986fa34f2ce17e8d1",
+      "sha256": "e29617a453be944eebb81fe54a308392008d19921328772abd920afbec25db68",
+      "bytes": 523
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-census-fixture.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "0c2dbe28e7362cc07875df0d637cf2554b2093fa",
+      "sha256": "4fdc899abe2d353618fda746d2b7582d06d4bb9a956ed8279cf9520acf9b1908",
+      "bytes": 228
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-census-instrumentation.patch",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "8de5eb8b611c357694c7d3c40e35e3472c2ecb49",
+      "sha256": "c59547093c0ea3cb73ea94490e30487ec92caaf929b26787c9b797885f53418e",
+      "bytes": 5329
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-census-stage1.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "e6f2e086c67d5d358b74e0ffd30d94447485b2af",
+      "sha256": "e23d250993a30a9811603b7ee6cf55d443f89994f97472b813877a06c6712d8d",
+      "bytes": 3132
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-results-manifest.json",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "69608c3f19ab536a7d2dcd6e80287bc066e3d006",
+      "sha256": "3bb7d7bbb23337e1bc380d78dd7320d8c7a76746a6be1f34cbb84db035242943",
+      "bytes": 3236
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-reuse-experimental.patch",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "4c19a3240b35ca718e6fb38695fbdfd762af8a66",
+      "sha256": "7259ea6aab9e93de881321b212762ccb5eac1222504060df6274be5040a00730",
+      "bytes": 6157
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/literal-validation-notes.txt",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "404b80fe1af9cda7455d0b3feaf8cb8e3f7fa4a2",
+      "sha256": "a649bfb8a4d9d7f5687fe01b2880c8c6cf095f85fda6dc4354213cc324d2e7e8",
+      "bytes": 2703
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/base64-128.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "028459f94181830ccde89c01f99e889bb70d5fec",
+      "sha256": "c5956f7d8a357003c58517f6f63974e63b3acb1ea7ffab6f11d416dcd66bfb7c",
+      "bytes": 2338
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/base64-16.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "62beeb2b3dbe586583dfa3a46c7e473e638c553b",
+      "sha256": "25f797d23012e6d9529d50992d0b89b4169ef385753dcc5783b6f0d0fae13632",
+      "bytes": 2312
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/base64-32.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "2f71ba70b97783c5e6da5962eab647636f5e708a",
+      "sha256": "60e8f03f3f2b1d590a3448bf4ae9df1501f2285efddb5a70ab467d4ce703033f",
+      "bytes": 2325
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/base64-4.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "c96540ca239bd746ecb527ed945f102f8e28150e",
+      "sha256": "784879eab1ac929af1233b312f6d0173e74d66b3f598a0108386b1dde08a6eb4",
+      "bytes": 2310
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/base64-64.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "d4e445b7f535b942b6896c7ff48701567ae99017",
+      "sha256": "6117e407ffc9650982fee60d23828746ace7abc3a1a04c70bed68d8e7616b914",
+      "bytes": 2334
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/base64-8.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "7dfa3f5a03ede3ec6a64e97bb63db328b7965a0c",
+      "sha256": "677a6276ca7936523167bbfe1fc441249a00f9b9d469d5469e8b94a5e08dcb6d",
+      "bytes": 2311
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/identifier-0.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "850af51e279330189debe16894f675672b55c502",
+      "sha256": "dc05ce9d459fb8077a8e00381d40bb2f5ea36f9b6d973055f9b2d1b9ffdfcddb",
+      "bytes": 2317
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/identifier-1.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "5edca62895463c9ab1c85560529c1684e2e3a303",
+      "sha256": "6041fa60e02b0ceb59a4a885c03e0760a08a2c8446aecffecc04eceaa31ad18b",
+      "bytes": 2416
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/identifier-100.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "d580de76c844b6ac22676795f5fec5114028b568",
+      "sha256": "f9f350d00cb5dac4285fc146b962f4d57083925a3e5f4d73953ca114e4cca038",
+      "bytes": 2436
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/identifier-20.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "57806ea9eae519dec506a6e65fb136dd10d830b0",
+      "sha256": "b5e96e07107e2ba13f77e25d0e9bae84757d457eb50af6d5b6f78b893644d556",
+      "bytes": 2422
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-dense-128.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "75944011b685be2307b01db6e051add94b61aa7d",
+      "sha256": "131b79a1f59976c059d9d60b5851d12b70cea08ad8147ab30fbdbb2f96af441f",
+      "bytes": 2453
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-plain-0.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "e4b8706007419f49d49bd9904ce654d82d4b0e79",
+      "sha256": "3f9f997cb8f8deb9286c56406fc319fcb8090e407ad65df023d914d29e87bf20",
+      "bytes": 2310
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-plain-128.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "ca71b10a5a14a9be1a281a57fbef4be627831184",
+      "sha256": "06310ea3488badf2d9b4edf32ad4573373f237e69fef2ccef9eb0d1b48395e27",
+      "bytes": 2450
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-plain-16.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "7ffecffd0173e7aaef80f2932e25948cd955127c",
+      "sha256": "8053521167858ce8df33a76aea3bffeb96108e4bbf9afa60c632a05178d5f09e",
+      "bytes": 2410
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-plain-32.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "15b7ff82454a047bd26de9e1c5f836760dc75b0e",
+      "sha256": "b9d5efc91fa1d1b7b34222afb1753881a8a9ce6328676daf7ff4ec898b4ca11a",
+      "bytes": 2430
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-plain-4.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "8c865cdcbe5220e73ed629de5ad11c186063f2b2",
+      "sha256": "e2257cda90daa1b2f998b36d23a53db786c16c08d3c78b05af7c87a35403cd84",
+      "bytes": 2408
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/regimes/quoted-plain-64.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "aa4b33eed79e137c938acaf966bdf81fe3639cb9",
+      "sha256": "07a90a3fccc84bf8dadd353e7480720ec16fc568b1105554af77ec150030f64f",
+      "bytes": 2433
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/software-profile.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "8a7f3e9476d6d4f66a51f3fdbd390fb952c6a11f",
+      "sha256": "adddd0889fe71f2e81512da7b1c1cf97422dfeb25755c8c132d194bc884e01af",
+      "bytes": 203
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/stage1-profile.log",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "8a7f3e9476d6d4f66a51f3fdbd390fb952c6a11f",
+      "sha256": "adddd0889fe71f2e81512da7b1c1cf97422dfeb25755c8c132d194bc884e01af",
+      "bytes": 203
+    },
+    {
+      "path": "docs/performance-audits/evidence/2026-09-06T125122Z/validation-excerpts.txt",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "63a3b20035e1c9c9515a6c71ceb6adb6af2cb36a",
+      "sha256": "d93b7e4a74f9f861a227407aa34230e275f5edec5753868d40c94883a3bb3d0f",
+      "bytes": 20207
+    },
+    {
+      "path": "tools/bench_pr139_simd/README.md",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "fc83d193c186c7576b3250525ccb34bb7cab4d1d",
+      "sha256": "acd88f68292aea93f36300473b8fb8e3f02cb1fd3d923fd2791c70e05320c07e",
+      "bytes": 4187,
+      "recovery_transform": "prepended-warning; original bytes are an unchanged suffix",
+      "warning_bytes": 538,
+      "recovered_sha256": "54c0b19fad60387bf2bd177b8129a7ecfe7c7ecafb19f4288a3ce3cf12101b21"
+    },
+    {
+      "path": "tools/bench_pr139_simd/benchmark.c",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "b84618354915c8d36ca218fc0d6300dcfebfe917",
+      "sha256": "2dc4aec42910f6532d828fc001933f98b1620cc67df05c2a503c1fc11a81d4ef",
+      "bytes": 16509
+    },
+    {
+      "path": "tools/bench_pr139_simd/dump_corpus.c",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "3146238cc78a4180f356d5873545cd7a84056506",
+      "sha256": "c28f7a0d4b10024f595c1cdbda1440788ec504af4dd2974e30f65a53a4d09482",
+      "bytes": 3384
+    },
+    {
+      "path": "tools/bench_pr139_simd/prepare.py",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "7e179c6f69e2752db32b892a19f829cb33ae84c0",
+      "sha256": "b0ffa6080906fe61552a3d5a6e2d6b13a07174460ac2dbb04f92d21bf83660b4",
+      "bytes": 7334
+    },
+    {
+      "path": "tools/bench_pr139_simd/regimes.py",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "18d89d05f06f2cdbe1f65509b7d1fb0fcc8e0c0d",
+      "sha256": "fd7152c74b32b598a531553a1f1b9d231c3df6f3500383ee2f5eb4a491c693d0",
+      "bytes": 1058
+    },
+    {
+      "path": "tools/bench_pr139_simd/run.py",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "bc458e72e36f2d88fce8bcf471a6fae0f182bd79",
+      "sha256": "eb099ec448c261b9f0e7e30a5c6a6c9de0d892e2320f05a417bc60f58126f528",
+      "bytes": 6138
+    },
+    {
+      "path": "tools/branch_miss_survey.py",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "af67bd088d326d92ec280b9433119345662959f6",
+      "sha256": "fd2afebd4cb294cb240ed4fe7cb970f0924e0c1f802a599702ea1ac71df574f2",
+      "bytes": 23206
+    },
+    {
+      "path": "tools/cache_miss_survey.py",
+      "source_commit": "8c3b9944ff0ecee0c25d89b312ca005729f51abb",
+      "source_blob": "fc73f4bb2084128585b3fdaeea8f60ba539d6508",
+      "sha256": "c6f280698aa85dd6911bf512397943ebcead2119660d8a863c79c3a4da6bf321",
+      "bytes": 43742
+    },
+    {
+      "path": "docs/audits/2026-09-07/AUDIT_REPORT.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "186e7967d46667a90d83c9eb52ca51d464d8a183",
+      "sha256": "0231e8d55b6d749f6e4063000a38c051ee91519e6bc1dc79c58df922373ade5b",
+      "bytes": 27500
+    },
+    {
+      "path": "docs/audits/2026-09-07/PUBLICATION.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "3c5144454beb2580ca5d5b8f054568d4a61e5c84",
+      "sha256": "f328fc1b9cc8af79a72d62922ff5b05531f436d34f36790e9b92451e072c861c",
+      "bytes": 6304
+    },
+    {
+      "path": "docs/audits/2026-09-07/README.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "3087746322ad2cdb7dd2b6e4cab63882ec2b1ae4",
+      "sha256": "1a2173d1e2bb4228dea67eb8dbf80245218f54f3466a454be4f9966b1b58f9f6",
+      "bytes": 11049
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/arena-commit-failure-and-granularity.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "8332e511f82345b9350700b05ba4bd5fe4589337",
+      "sha256": "f96f951a0564abc4818139924beb78e2543d4c8e76b5cf07e9e148ae48f08dae",
+      "bytes": 4527
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/c-bool-aggregate-initializer.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "3186119feb9b19b6a144846bae157820e1decba8",
+      "sha256": "fc4c5de0461ba948cfbf1fc549aaea8d7cc7efb5a14570b1051abc5f22356e8f",
+      "bytes": 3608
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/c-enum-underlying-type.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "cc2817efa6937885b238293fe3bb8a18f787bf85",
+      "sha256": "8b441b7c1d8553e9307ac7b23ca12cc80eb47aebfccdd95f41c9629a8d30378b",
+      "bytes": 3783
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/c-float-to-integer-constant-fold.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "ec70484144e6ec6d725a50e1e479adf580fc8caf",
+      "sha256": "bdb5265ba86193401d7a0207b332cb5d3649bce0d5076dad3015bd7158978d07",
+      "bytes": 3520
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/c-i128-aggregate-initializer.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "e7fd601f8a55aa5f9445335bebceae88e2b2807f",
+      "sha256": "26a722f3c6d18615b61b1cbf5ae55edd3aec26b5afbf8475f4463c7814c5bbe3",
+      "bytes": 2995
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/c-import-once-path-unchecked.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "fff695f9dcc381912ee1b2d560400fbf0a3dd80f",
+      "sha256": "491a1d7f4e107642da9f3268ca7318fb6523594e19c6be3f10407b0a7d14fb07",
+      "bytes": 3268
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/c-nested-initializer-string.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "570a5f754f513aed9b75220178c448a0abb6bcc7",
+      "sha256": "04f557f6cab339462ca3171aa0e2229d62ab9897533a79827cc45ef221e839e8",
+      "bytes": 3337
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/c-parse-identifier-use-overflow.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "d58c69a8eefa224b499f907c341ffd7201ac8ae3",
+      "sha256": "582280b897a580f6d51b15caca49e2da77846c9d1781a89dd01e278ae966d0b8",
+      "bytes": 3903
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/c-parse-initializer-infinite-loop.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "396b90ad0a199ebeeb61b8897702846f310bd735",
+      "sha256": "e07ee25f74718939686e499bedd55eb1391d02d9fd8fd8175336c20757c7afa8",
+      "bytes": 3633
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/c-unsigned-to-float-constant-fold.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "79da0218e0d7d7f66bd59033a478bb852e3e741f",
+      "sha256": "358d43e8bf14a882c03760d30b7f103307c76919ea3ad269b5275c5422ce2f57",
+      "bytes": 2618
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/codeview-fieldlist-length-overflow.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "750b9b292f3068279e375c4ff10dc7a6a4eab19d",
+      "sha256": "09762315226a4da90e6d50aa9a8095c3b4749076662cefd5358812495f4864ff",
+      "bytes": 3018
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/codeview-gproc32-pend-offsets.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "1ac66f3ff78c1146dcf3855ff6cacab000f03a90",
+      "sha256": "f2717810e4113126df64caf2e34dfe6ee0cf72fae5b766782e891507cbab5818",
+      "bytes": 3109
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/codeview-scope-stack-quadratic.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "52bb05dd60a85e27cd18c52e39f3ed5a24aa8e16",
+      "sha256": "b948255adfd6ae234558ec9e05ebb03eb9b3c2129bf102dbf1d743ad6f1edc9d",
+      "bytes": 3249
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/driver-default-object-path.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "fd560b406090fe72b88dda2b329241523f119d5f",
+      "sha256": "82606d7b92c653f2a900c90c3b6a80ca30edb2f99fbc42672c1789711d813ead",
+      "bytes": 2919
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/dwarf-ranges-double-count-base.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "ef612e3c0891c77f02afe11531a1d8dafde1ed41",
+      "sha256": "c1acca0d525c3f306b786844e72b9feb4a2bda94429e79f816aecee11ea80b25",
+      "bytes": 3387
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/file-read-unsized-source.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "7aa2d4775f975349ffd4889e6bd9f7fe34cd3a1a",
+      "sha256": "2333bfd63b6776351bfb3c4943ec34fd3d39cf1abd09fab74c2935895b45c37f",
+      "bytes": 2664
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/os-read-error-indistinguishable-from-eof.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "24fff5a8e5fe3815584f5ef83f64fa021d38e30e",
+      "sha256": "7afc28dc90e77cf9721290a9d83dee64deb95d458681fa4bb9f34e02fe24f829",
+      "bytes": 2580
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/os-write-error-counted-as-success.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "143ec350bf71f73c47f78fe6e119aaef77cd565b",
+      "sha256": "c2da1a8400f50c8e22414fe4996a451bfbbb69bde16898556359c1e2df8c62c5",
+      "bytes": 3602
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/release-check-macro-is-unreachable.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "ad97845d3df402f4eec3ea53f7cc5033ad3cec94",
+      "sha256": "bc58b729c520c1cdf9ab5ff9fc1da04e9e67edf65caa3ceec36533f2affdc63b",
+      "bytes": 4930
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/x64-atomic-16-byte-aggregate.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "4917a63028c05595a3c3d360432faa0ecc079148",
+      "sha256": "50b25ff99878b5bcb8a4f001a8ee0a2972053a4a6185d3543dc9cea47c328fdd",
+      "bytes": 2600
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/x64-i128-float-cast-unsupported.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "c11407c157addbc8f7ee4a47230678120b2cba9b",
+      "sha256": "95e8dcfe2d7364feb6a245226ef2a69fdd7cb5192bf2135e2382beee56e092b7",
+      "bytes": 2769
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/x64-i128-signed-divide.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "67a5d4e7423a9e38c5293b3edf59aae1e8838ea5",
+      "sha256": "360b68b9d7b22eded0027fbb93f7b430f71921d141d2245727cb02bb74a8fc82",
+      "bytes": 3620
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/x86-apx-evex-prefix-fields.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "bb16d64e4b9321b526dcf63e8aecab10396cbe0e",
+      "sha256": "9097eadd0b8c0bd5e5f66f3c58f8ead92d9b41415333897504cd4e624a03978d",
+      "bytes": 4016
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/x86-att-s-suffix-alias.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "37230cc1dbd4ab3d1f43042c5589ab6452557866",
+      "sha256": "c4ffd6e125050f76b4f46912180696682ca1202bc9d1e20fa0f438b3d58ff4ba",
+      "bytes": 3323
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/x86-evex-broadcast-disp8-scale.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "2de757d9cd55323ca40482d58756637f1e43a01a",
+      "sha256": "b365945beeecb355ce56858d3289812d249a9274d9d00f64460f53db5860d1da",
+      "bytes": 3307
+    },
+    {
+      "path": "docs/audits/2026-09-07/issues/x86-rex2-memory-width-w.md",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "7d14cd4d4674d133a3156ea4b2e9ca4d5c965bb9",
+      "sha256": "c6f5f5674a4c34750870aac519fd0c66012e672432d4e76bff0f923b122989d6",
+      "bytes": 3059
+    },
+    {
+      "path": "docs/audits/2026-09-07/manifest.json",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "47568089b436387301b84091540750c1635bfb70",
+      "sha256": "1e8167b8c3daa64df9ae139fc677f35059cf5ddabbc302a7c866d80a2528307d",
+      "bytes": 14597
+    },
+    {
+      "path": "docs/audits/2026-09-07/publication-results.json",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "63f563d85fea7166203b9b6f5537988a155251f0",
+      "sha256": "903888dae1937934f9b3040153fb3a1c1c4990abd64b1fcb62879ce2a0d9cd40",
+      "bytes": 4857
+    },
+    {
+      "path": "docs/audits/2026-09-07/publish.py",
+      "source_commit": "a226b93e8b3fb9fa14310c9c101e43bc09812de9",
+      "source_blob": "434f732737e6cb2c90d8aaa8dba0cff950d731cf",
+      "sha256": "c917720a70fc8444988768e68de84190df08a6148a6d8fac65848697a4d208e6",
+      "bytes": 19308
+    }
+  ]
+}
