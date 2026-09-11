@@ -2363,9 +2363,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_validation_values(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 path = buster_test_temporary_path(temporary.arena, S8("buster-ir-validation-values"), S8(""));
+            String8 command[] = {string_format(temporary.arena, S8("-fregister-allocator={S8}"), modes[mode]),
+                frontend ? S8("-ffrontend-ssa") : S8("-fno-frontend-ssa"), S8("-fverify-codegen"),
+#if BUSTER_ANDROID || BUSTER_IOS
+                // Mobile app sandboxes validate objects; desktop hosts execute
+                // every allocator/frontend combination below.
+                S8("-c"),
+#endif
+                S8("tests/basic_c_ir_validation_values.c"), S8("-o"), path};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            String8 description = string_format(temporary.arena, S8("canonical values {S8} frontend={u32}: {S8}"),
+                                                modes[mode], frontend, compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+#if !BUSTER_ANDROID && !BUSTER_IOS
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                           (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(temporary.arena, spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+#endif
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
+    UnitTestResult validation_values = compiler_driver_test_validation_values(arguments);
+    result.test_count += validation_values.test_count;
+    result.succeeded_test_count += validation_values.succeeded_test_count;
     UnitTestResult pic_policy = compiler_driver_test_pic_argument_policy(arguments);
     result.test_count += pic_policy.test_count;
     result.succeeded_test_count += pic_policy.succeeded_test_count;

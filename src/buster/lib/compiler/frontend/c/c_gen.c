@@ -65,6 +65,8 @@
 //   c_ir_count_quoted                             and character decoding
 //   c_ir_complex_compose, c_ir_complex_split    immutable complex construction
 //                                                 and scalar projection
+//   c_ir_emit_initializer_capture                exact constructor types and
+//                                                 qualified subobject stores
 //   c_ir_build_function_name_index                call-target resolution
 //   CIrLowerFrameKind .. c_ir_lower_dispatch      the lowering machines
 //   c_ir_lower_expression_core_step               the expression evaluator
@@ -14067,7 +14069,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
             {
                 return IR_VALUE_ID_INVALID;
             }
-            IrValueId finite = c_ir_emit_binary_value(builder, below_positive, above_negative, builder->bool_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+            IrValueId finite = c_ir_emit_binary_value(builder, below_positive, above_negative, builder->bool_type, IR_BINARY_BOOLEAN_AND, source);
             return finite.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_emit_cast(builder, finite, builder->s32_type, source);
         }
         bool single = string_equal(link_name, S8("isnanf")) || string_equal(link_name, S8("isinff"));
@@ -14104,7 +14106,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
         }
         if (isinf_builtin)
         {
-            IrValueId result = c_ir_emit_binary_value(builder, positive, negative, builder->bool_type, IR_BINARY_INTEGER_BITWISE_OR, source);
+            IrValueId result = c_ir_emit_binary_value(builder, positive, negative, builder->bool_type, IR_BINARY_BOOLEAN_OR, source);
             return result.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_emit_cast(builder, result, builder->s32_type, source);
         }
         IrValueId positive_s32 = c_ir_emit_cast(builder, positive, builder->s32_type, source);
@@ -14947,7 +14949,7 @@ BUSTER_C_INTERNAL bool c_ir_apply_complex_operation(CIntegerIrBuilder* builder, 
         IrValueId imaginary_compare = c_ir_emit_binary_value(builder, left_imaginary, right_imaginary, builder->bool_type,
                                                              equal ? IR_BINARY_FLOAT_EQUAL : IR_BINARY_FLOAT_NOT_EQUAL, source);
         IrValueId combined = c_ir_emit_binary_value(builder, real_compare, imaginary_compare, builder->bool_type,
-                                                    equal ? IR_BINARY_INTEGER_BITWISE_AND : IR_BINARY_INTEGER_BITWISE_OR, source);
+                                                    equal ? IR_BINARY_BOOLEAN_AND : IR_BINARY_BOOLEAN_OR, source);
         result = combined.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_emit_cast(builder, combined, builder->s32_type, source);
         break;
     }
@@ -21805,6 +21807,66 @@ BUSTER_C_INTERNAL bool c_ir_postfix_update_at(CIntegerIrBuilder* builder, u32 in
                                c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_MINUS_MINUS));
 }
 
+// Aggregate operands are captured values, while volatile qualifiers belong to
+// their destination places. If a conversion retained the unqualified value,
+// initialize explicit storage through the ordinary qualified STORE contract.
+// Keep exact constructor typing and evaluate each initializer only once.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_initializer_capture(CIntegerIrBuilder* builder, IrTypeId type_id, IrValueId* operands,
+                                                        u64* fields, u32 count, IrSourceRange source)
+{
+    IrType* type = ir_type_from_id(&builder->program->types, type_id);
+    bool array = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR;
+    bool storage = false;
+    for (u32 index = 0; index < count && !storage; index += 1)
+    {
+        IrTypeId field_type = array ? type->element_type : type->fields[fields[index]].type;
+        IrTypeId operand_type = builder->function->values[operands[index].value].canonical_type;
+        storage = operand_type.value != field_type.value &&
+                  ir_types_differ_only_in_volatile(&builder->program->types, operand_type, field_type);
+    }
+    IrValueId result = IR_VALUE_ID_INVALID;
+    if (storage)
+    {
+        IrValueId place = c_ir_emit_temporary(builder, type_id, source);
+        bool valid = place.value != IR_ID_UNDERLYING_INVALID;
+        for (u32 index = 0; index < count && valid; index += 1)
+        {
+            IrValueId field;
+            if (array)
+            {
+                IrValueId offset = c_ir_emit_integer_value_typed(builder, index, false, (CToken){0}, builder->size_type);
+                field = offset.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_index_place(builder, place, offset, source) : IR_VALUE_ID_INVALID;
+            }
+            else
+            {
+                field = c_ir_emit_field_index_place(builder, place, (u32)fields[index], source);
+            }
+            IrTypeId field_type = array ? type->element_type : type->fields[fields[index]].type;
+            valid = field.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, field, field_type, operands[index], source);
+        }
+        if (valid)
+        {
+            result = c_ir_emit_load_place(builder, place, type_id, source);
+        }
+    }
+    else
+    {
+        result = c_ir_add_result(builder, type_id);
+        if (result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrInstruction instruction = c_ir_instruction_initialize(array ? IR_OPCODE_ARRAY : IR_OPCODE_AGGREGATE, type_id);
+            instruction.operands = operands;
+            instruction.operand_count = count;
+            instruction.immediates = fields;
+            instruction.immediate_count = array ? 0 : (u16)count;
+            instruction.result = result;
+            IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+            builder->function->values[result.value].definition = id;
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrTypeId root_type, CToken token)
 {
     typedef enum CIrZeroTaskKind
@@ -21854,16 +21916,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrT
                 builder->failure_message = string_format(builder->arena, S8("aggregate has too many fields to lower ({u32})"), task.operand_count);
                 return IR_VALUE_ID_INVALID;
             }
-            IrValueId aggregate = c_ir_add_result(builder, task.type);
             IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
-            IrInstruction instruction = c_ir_instruction_initialize((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? IR_OPCODE_ARRAY : IR_OPCODE_AGGREGATE, task.type);
-            instruction.operands = task.operands;
-            instruction.operand_count = task.operand_count;
-            instruction.immediates = task.fields;
-            instruction.immediate_count = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? 0 : (u16)task.operand_count;
-            instruction.result = aggregate;
-            IrInstructionId instruction_id = c_ir_append_instruction(builder, instruction, instruction_source);
-            builder->function->values[aggregate.value].definition = instruction_id;
+            IrValueId aggregate = c_ir_emit_initializer_capture(builder, task.type, task.operands, task.fields, task.operand_count, instruction_source);
+            if (aggregate.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return IR_VALUE_ID_INVALID;
+            }
             *task.output = aggregate;
             continue;
         }
@@ -22908,21 +22966,9 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
     {
         goto c_ir_compound_literal_failed;
     }
-    IrValueId result = c_ir_add_result(builder, type_id);
     IrSourceRange instruction_source = c_ir_token_source_range(builder, builder->preprocess.tokens[open]);
-    IrInstruction instruction =
-        c_ir_instruction_initialize((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? IR_OPCODE_ARRAY : IR_OPCODE_AGGREGATE, type_id);
-    instruction.operands = operands;
-    instruction.operand_count = operand_count;
-    if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR)
-    {
-        instruction.immediates = fields;
-        instruction.immediate_count = (u16)operand_count;
-    }
-    instruction.result = result;
-    IrInstructionId instruction_id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[result.value].definition = instruction_id;
-    c_ir_lower_frame_finish(builder, true, result);
+    IrValueId result = c_ir_emit_initializer_capture(builder, type_id, operands, fields, operand_count, instruction_source);
+    c_ir_lower_frame_finish(builder, result.value != IR_ID_UNDERLYING_INVALID, result);
     return;
 c_ir_compound_literal_failed:
     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -26195,7 +26241,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValue
         }
         IrValueId real_nonzero = c_ir_emit_binary_value(builder, real, zero, builder->bool_type, IR_BINARY_FLOAT_NOT_EQUAL, source);
         IrValueId imaginary_nonzero = c_ir_emit_binary_value(builder, imaginary, zero, builder->bool_type, IR_BINARY_FLOAT_NOT_EQUAL, source);
-        return c_ir_emit_binary_value(builder, real_nonzero, imaginary_nonzero, builder->bool_type, IR_BINARY_INTEGER_BITWISE_OR, source);
+        return c_ir_emit_binary_value(builder, real_nonzero, imaginary_nonzero, builder->bool_type, IR_BINARY_BOOLEAN_OR, source);
     }
     if (type->is_nullptr)
     {

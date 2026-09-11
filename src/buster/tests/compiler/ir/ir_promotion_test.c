@@ -14,9 +14,143 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult ir_promotion_lower(Arena* arena, String8 sour
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* arguments)
+// A stale input certificate is deliberately supplied after a safely backed
+// fault is injected outside the promoted function. These are hook controls,
+// not claims that the frontend or promotion produces any of these faults.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_validation_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    String8 source = S8("int storage=1;void* address=&storage;"
+                        "int test(int c){int x=3;if(c)x=7;return x;}"
+                        "double other(void){return 2.0;}");
+    for (u32 variant = 0; variant < 5; variant += 1)
+    {
+        for (u32 certified = 0; certified < 2; certified += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            CIRLowerResult lowered = ir_promotion_lower(arguments->arena, source, target_native);
+            BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+            if (lowered.program && !lowered.diagnostic_count)
+            {
+                IrProgram* program = lowered.program;
+                IrModule* module = program->modules;
+                IrFunction* function = 0;
+                IrFunction* other = 0;
+                IrGlobal* storage = 0;
+                IrGlobal* address = 0;
+                for (u32 index = 0; index < module->function_count; index += 1)
+                {
+                    IrFunction* candidate = module->functions + index;
+                    if (string_equal(candidate->name, S8("test"))) function = candidate;
+                    if (string_equal(candidate->name, S8("other"))) other = candidate;
+                }
+                for (u32 index = 0; index < module->global_count; index += 1)
+                {
+                    IrGlobal* global = module->globals + index;
+                    IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
+                    if (symbol && string_equal(symbol->name, S8("storage"))) storage = global;
+                    if (symbol && string_equal(symbol->name, S8("address"))) address = global;
+                }
+                bool fixture_valid = function && other && storage && address && other->entry.value < other->block_count;
+                BUSTER_TEST(arguments, fixture_valid);
+                if (fixture_valid)
+                {
+                    IrValidationResult original = ir_validate_canonical_module(program, module);
+                    BUSTER_TEST(arguments, original.error == IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, original.boundary == IR_VALIDATION_BOUNDARY_UNSPECIFIED);
+                    u32 old_instructions = function->instruction_count;
+                    IrValidationError expected = IR_VALIDATION_OPERATION;
+                    IrBlock* other_entry = other->blocks + other->entry.value;
+                    if (variant == 0)
+                    {
+                        storage->alignment = 3;
+                        expected = IR_VALIDATION_ALIGNMENT;
+                    }
+                    else if (variant == 1)
+                    {
+                        address->relocation_count = 1;
+                        address->relocations = 0;
+                    }
+                    else if (variant == 2)
+                    {
+                        // The byte range and target symbol are valid, but a data
+                        // symbol cannot own a function's label-address relocation.
+                        address->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
+                        address->bytes.length = program->data_layout.pointer.size;
+                        address->bytes.pointer = arena_allocate(arguments->arena, u8, address->bytes.length);
+                        memset(address->bytes.pointer, 0, address->bytes.length);
+                        address->relocation_count = 1;
+                        address->relocations = arena_allocate(arguments->arena, IrGlobalRelocation, 1);
+                        address->relocations[0] = (IrGlobalRelocation){.symbol = storage->symbol,
+                            .label_block = {.value = 0}, .is_label_address = true};
+                    }
+                    else if (variant == 3)
+                    {
+                        other_entry->terminated = false;
+                        expected = IR_VALIDATION_UNTERMINATED_BLOCK;
+                    }
+                    else
+                    {
+                        IrType* signature = ir_type_from_id(&program->types, other->canonical_type);
+                        IrType* integer_signature = ir_type_from_id(&program->types, function->canonical_type);
+                        BUSTER_TEST(arguments, signature && integer_signature);
+                        if (signature && integer_signature)
+                        {
+                            signature->return_type = integer_signature->return_type;
+                        }
+                        expected = IR_VALIDATION_RETURN_TYPE;
+                    }
+                    IrValidationResult validation = ir_prepare_canonical_module(program, module, certified != 0);
+                    BUSTER_TEST(arguments, validation.error == expected);
+                    BUSTER_TEST(arguments, validation.boundary == (certified ? IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT
+                                                                            : IR_VALIDATION_BOUNDARY_CANONICAL_INPUT));
+                    BUSTER_TEST(arguments, !module->local_promotion_complete);
+                    BUSTER_TEST(arguments, certified ? module->local_promotion.promoted_locals > 0
+                                                    : module->local_promotion.promoted_locals == 0);
+                    BUSTER_TEST(arguments, certified ? function->instruction_count < old_instructions
+                                                    : function->instruction_count == old_instructions);
+                    BUSTER_TEST(arguments, validation.function.value == (variant >= 3 ? other->id.value : IR_ID_UNDERLYING_INVALID));
+                    BUSTER_TEST(arguments, validation.block.value == (variant >= 3 ? other_entry->id.value : IR_ID_UNDERLYING_INVALID));
+                    BUSTER_TEST(arguments, validation.instruction.value == (variant >= 3 ? other_entry->last_instruction.value : IR_ID_UNDERLYING_INVALID));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    // A preparation marker is not a certificate after a subsequent mutation.
+    // The caller must revoke its input proof; preparation must then validate
+    // even when the pass itself has already completed.
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    CIRLowerResult lowered = ir_promotion_lower(arguments->arena, S8("int test(void){int x=3;return x;}"), target_native);
+    BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+    if (lowered.program && !lowered.diagnostic_count)
+    {
+        IrProgram* program = lowered.program;
+        IrModule* module = program->modules;
+        IrValidationResult prepared = ir_prepare_canonical_module(program, module, true);
+        BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && module->local_promotion_complete);
+        BUSTER_TEST(arguments, prepared.boundary == IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT);
+        bool function_valid = module->function_count && module->functions[0].entry.value < module->functions[0].block_count;
+        BUSTER_TEST(arguments, function_valid);
+        if (function_valid)
+        {
+            IrFunction* function = module->functions;
+            IrBlock* block = function->blocks + function->entry.value;
+            block->terminated = false;
+            IrValidationResult mutated = ir_prepare_canonical_module(program, module, false);
+            BUSTER_TEST(arguments, mutated.error == IR_VALIDATION_UNTERMINATED_BLOCK);
+            BUSTER_TEST(arguments, mutated.boundary == IR_VALIDATION_BOUNDARY_CANONICAL_INPUT);
+            BUSTER_TEST(arguments, mutated.function.value == function->id.value && mutated.block.value == block->id.value);
+            BUSTER_TEST(arguments, mutated.instruction.value == block->last_instruction.value);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = ir_promotion_validation_tests(arguments);
     struct Fixture
     {
         String8 source;
@@ -49,10 +183,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
         {S8("int test(int c){void* p=c?&&a:&&b;goto *p;a:return 3;b:return 4;}"), false, false, false, true, false},
         {S8("__attribute__((noreturn))void stop(int);void test(int n){int x=n;stop(x);}"), true, false, false, false, false},
     };
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixtures); index += 1)
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixtures) * 2; index += 1)
     {
         TemporalArena temporary = arena_begin_temporal(arguments->arena);
-        struct Fixture fixture = fixtures[index];
+        struct Fixture fixture = fixtures[index / 2];
+        bool input_certified = (index & 1u) != 0;
         CIRLowerResult lowered = ir_promotion_lower(arguments->arena, fixture.source, target_native);
         BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
         if (lowered.program && !lowered.diagnostic_count)
@@ -72,7 +207,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                 u32 old_locals = ir_test_opcode_count(function, IR_OPCODE_LOCAL);
                 BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
                 program->disable_local_promotion = true;
-                BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
+                IrValidationResult disabled = ir_prepare_canonical_module(program, module, input_certified);
+                BUSTER_TEST(arguments, disabled.error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, disabled.boundary == (input_certified ? IR_VALIDATION_BOUNDARY_UNSPECIFIED : IR_VALIDATION_BOUNDARY_CANONICAL_INPUT));
                 BUSTER_TEST(arguments, function->instruction_count == old_instructions && function->value_count == old_values);
                 BUSTER_TEST(arguments, !module->local_promotion_complete && module->local_promotion.promoted_locals == 0);
                 BUSTER_TEST(arguments, module->local_promotion.parameter_sweeps == 0);
@@ -80,8 +217,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                 BUSTER_TEST(arguments, module->local_promotion.parameter_visits == 0);
                 BUSTER_TEST(arguments, module->local_promotion.parameter_incoming_visits == 0);
                 program->disable_local_promotion = false;
-                IrValidationResult valid = ir_prepare_canonical_module(program, module, false);
+                IrValidationResult valid = ir_prepare_canonical_module(program, module, input_certified);
                 BUSTER_TEST(arguments, valid.error == IR_VALIDATION_NONE);
+                IrValidationBoundary expected_boundary = module->local_promotion.promoted_locals ? IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT
+                                                        : input_certified ? IR_VALIDATION_BOUNDARY_UNSPECIFIED : IR_VALIDATION_BOUNDARY_CANONICAL_INPUT;
+                BUSTER_TEST(arguments, valid.boundary == expected_boundary);
                 BUSTER_TEST(arguments, module->local_promotion_complete);
                 u32 locals = ir_test_opcode_count(function, IR_OPCODE_LOCAL);
                 u64 joins = 0;
@@ -173,7 +313,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                     BUSTER_TEST(arguments, stats.parameter_visits == 0);
                     BUSTER_TEST(arguments, stats.parameter_incoming_visits == 0);
                 }
-                BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
+                IrValidationResult repeated = ir_prepare_canonical_module(program, module, input_certified);
+                BUSTER_TEST(arguments, repeated.error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, repeated.boundary == (input_certified ? IR_VALIDATION_BOUNDARY_UNSPECIFIED : IR_VALIDATION_BOUNDARY_CANONICAL_INPUT));
                 BUSTER_TEST(arguments, memory_compare(&stats, &module->local_promotion, sizeof(stats)));
                 BUSTER_TEST(arguments, (function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN) != 0);
             }

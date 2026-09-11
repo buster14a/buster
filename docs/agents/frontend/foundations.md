@@ -101,6 +101,16 @@ late escape, scalar temporaries, bitfields and dynamic-stack fallback. Native
 machine tests exercise vector block parameters as well as preserving the
 independent legacy mutable-register and pressure-census contracts.
 
+`ir_prepare_canonical_module` consumes an input-only producer certificate.
+Changed output is checked with the existing canonical verifier in debug,
+test and sanitizer builds; optimized production retains the pass-contract
+fast path. `BUSTER_VERIFY_IR_TRANSFORMS=1` also enables this check in an
+optimized production build. `IrValidationResult.boundary` distinguishes
+canonical input from local-promotion output, including successful hook calls;
+it is not a durable certificate. `local_promotion_complete` is only a pass
+completion marker. A later mutator must invalidate its own certificate and
+request validation again. See [the boundary inventory](../../ir-validation-boundaries.md).
+
 ## C frontend and canonical IR rules
 
 - `c_parse_binding_bind` publishes a previously unbound enclosing-scope name
@@ -430,6 +440,22 @@ Qualifiers, volatile memory, and non-constructor values retain their existing
 explicit load/store path. No whole-function cleanup pass is required. Raw IR
 tests cover both direct frontend SSA and its memory-form reference, so scalar
 parameter promotion cannot conceal complex construction temporaries.
+
+`c_ir_emit_initializer_capture` keeps the exact constructor operand contract.
+When a volatile-qualified field and its converted value have distinct types,
+it captures the already-evaluated operands through explicit subobject stores
+and loads the completed aggregate. This also handles omitted zero initializers;
+it does not retag an existing value or change the field's layout/qualification.
+The ordinary exact-type constructor stays immutable. The strict
+`basic_c_ir_validation_values.c` corpus covers lowered/raised alignment,
+volatile loads/stores, nested records, unions, arrays and single evaluation.
+
+Complex comparisons/truth conversion and floating classification combine
+Boolean comparisons with `IR_BINARY_BOOLEAN_AND`/`IR_BINARY_BOOLEAN_OR`.
+Their canonical verifier case requires matching Boolean value operands and a
+Boolean value result. Integer bitwise opcodes still require integer operands.
+Both native canonical emitters implement these Boolean operations as well as
+the existing machine selectors, including canonical fallback for x87 functions.
 
 ## ABI decomposition ownership
 

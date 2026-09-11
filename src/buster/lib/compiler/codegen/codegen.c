@@ -16145,6 +16145,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             break;
                         case IR_BINARY_INTEGER_BITWISE_AND:
+                        case IR_BINARY_BOOLEAN_AND:
                             if (!codegen_canonical_x64_metadata_emit(&buffer, S8("AND"), scalar_operands,
                                                                       BUSTER_ARRAY_LENGTH(scalar_operands)))
                             {
@@ -16153,6 +16154,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             break;
                         case IR_BINARY_INTEGER_BITWISE_OR:
+                        case IR_BINARY_BOOLEAN_OR:
                             if (!codegen_canonical_x64_metadata_emit(&buffer, S8("OR"), scalar_operands,
                                                                       BUSTER_ARRAY_LENGTH(scalar_operands)))
                             {
@@ -19815,9 +19817,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             operation = 0x1aca2529;
                             break;
                         case IR_BINARY_INTEGER_BITWISE_AND:
+                        case IR_BINARY_BOOLEAN_AND:
                             operation = 0x0a0a0129;
                             break;
                         case IR_BINARY_INTEGER_BITWISE_OR:
+                        case IR_BINARY_BOOLEAN_OR:
                             operation = 0x2a0a0129;
                             break;
                         case IR_BINARY_INTEGER_BITWISE_XOR:
