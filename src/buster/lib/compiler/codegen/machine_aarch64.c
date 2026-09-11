@@ -1077,6 +1077,9 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast_i128(MachineA64Selector* select
     return selected;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_to_float(MachineA64Selector* selector, IrInstruction* instruction,
+                                                          IrType* source_type, IrType* target_type, u32 result_register);
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast(MachineA64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     IrProgram* program = selector->program;
@@ -1090,7 +1093,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast(MachineA64Selector* selector, I
     IrType* early_target_type = ir_type_from_id(&program->types, instruction->canonical_type);
     bool source_is_integer128 = early_source_type && early_source_type->kind == IR_TYPE_INTEGER && early_source_type->bit_width == 128;
     bool target_is_integer128 = early_target_type && early_target_type->kind == IR_TYPE_INTEGER && early_target_type->bit_width == 128;
-    if (source_is_integer128 || target_is_integer128)
+    if (source_is_integer128 && early_target_type && early_target_type->kind == IR_TYPE_FLOAT)
+    {
+        selected = machine_a64_select_i128_to_float(selector, instruction, early_source_type, early_target_type, result_register);
+    }
+    else if (source_is_integer128 || target_is_integer128)
     {
         selected = machine_a64_select_cast_i128(selector, instruction, early_source_type, early_target_type, result_register);
     }
@@ -1775,6 +1782,106 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_variable_shift(MachineA64Select
         }
         machine_a64_select_frame_store64(selector, result_slot, 0, left ? surviving : filled);
         machine_a64_select_frame_store64(selector, result_slot, 8, left ? filled : surviving);
+    }
+    return selected;
+}
+
+// Normalize the unsigned magnitude as a pair, then round its top 24/53 bits
+// once using round/sticky/parity. Converting limbs independently would lose
+// the low limb's sticky bit and double-round halfway inputs. A zero high limb
+// selects the ordinary u64 conversion; no runtime branch or mutable vreg is
+// introduced. All shifts use the existing AArch64 modulo-64 scalar rows.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_i128_to_float(MachineA64Selector* selector, IrInstruction* instruction,
+                                                          IrType* source_type, IrType* target_type, u32 result_register)
+{
+    IrFunction* function = selector->function;
+    u32 source_slot = instruction->operands[0].value < function->value_count ? selector->value_stack_slots[instruction->operands[0].value] : UINT32_MAX;
+    bool signed_value = instruction->conversion_operation == IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT;
+    bool selected = source_type && source_type->kind == IR_TYPE_INTEGER && source_type->bit_width == 128 && source_slot != UINT32_MAX &&
+                    target_type && target_type->kind == IR_TYPE_FLOAT && (target_type->bit_width == 32 || target_type->bit_width == 64) &&
+                    result_register != UINT32_MAX && (signed_value || instruction->conversion_operation == IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT);
+    if (selected)
+    {
+        bool wide = target_type->bit_width == 64;
+        u32 precision = wide ? 53u : 24u;
+        u32 low = machine_a64_select_frame_load64(selector, source_slot, 0);
+        u32 high = machine_a64_select_frame_load64(selector, source_slot, 8);
+        u32 zero = machine_a64_select_immediate_register(selector, 0);
+        u32 one = machine_a64_select_immediate_register(selector, 1);
+        u32 width = machine_a64_select_immediate_register(selector, 64);
+        u32 sign = zero;
+        if (signed_value)
+        {
+            u32 sign_position = machine_a64_select_immediate_register(selector, 63);
+            sign = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ASR64, high, sign_position);
+            u32 inverted_low = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, low, sign);
+            u32 inverted_high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, high, sign);
+            u32 borrow = machine_a64_select_compare_set(selector, inverted_low, sign, MACHINE_A64_CONDITION_BELOW);
+            low = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, inverted_low, sign);
+            high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, inverted_high, sign);
+            high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, high, borrow);
+        }
+        u32 leading = machine_a64_select_zero_count(selector, high, UINT32_MAX, true, true);
+        u32 inverse = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, width, leading);
+        u32 cross = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSR64, low, inverse);
+        u32 shifted = machine_a64_select_compare_set(selector, leading, zero, MACHINE_A64_CONDITION_NOT_EQUAL);
+        u32 shifted_mask = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, zero, shifted);
+        // CLZ(high)==0 would otherwise wrap the cross shift of 64 to zero.
+        cross = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, cross, shifted_mask);
+        u32 normalized_high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, high, leading);
+        normalized_high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, normalized_high, cross);
+        u32 normalized_low = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, low, leading);
+        u32 significand_shift = machine_a64_select_immediate_register(selector, 64 - precision);
+        u32 significand = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSR64, normalized_high, significand_shift);
+        u32 round_shift = machine_a64_select_immediate_register(selector, 63 - precision);
+        u32 round = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSR64, normalized_high, round_shift);
+        round = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, round, one);
+        u32 sticky_shift = machine_a64_select_immediate_register(selector, precision + 1);
+        u32 sticky_bits = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, normalized_high, sticky_shift);
+        sticky_bits = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, sticky_bits, normalized_low);
+        u32 sticky = machine_a64_select_compare_set(selector, sticky_bits, zero, MACHINE_A64_CONDITION_NOT_EQUAL);
+        u32 parity = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, significand, one);
+        u32 increment = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ORR64, sticky, parity);
+        increment = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, increment, round);
+        u32 rounded = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ADD64, significand, increment);
+        u32 has_high = machine_a64_select_compare_set(selector, high, zero, MACHINE_A64_CONDITION_NOT_EQUAL);
+        u32 high_mask = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, zero, has_high);
+        u32 difference = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, rounded, low);
+        difference = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, difference, high_mask);
+        u32 conversion_input = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, low, difference);
+        u32 discard_bias = machine_a64_select_immediate_register(selector, 128 - precision);
+        u32 discarded = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, discard_bias, leading);
+        discarded = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, discarded, high_mask);
+        // The rounded significand is exactly representable, even if the
+        // rounding increment carries to 2^precision. Scale in the destination
+        // format, avoiding a second rounding through f64 for f32 results.
+        u32 converted = machine_a64_synthesize_register(selector);
+        machine_a64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, converted), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, conversion_input)},
+            .opcode = (u16)(wide ? MACHINE_A64_CVT_U64_TO_F64 : MACHINE_A64_CVT_U64_TO_F32),
+        });
+        u32 exponent_shift = machine_a64_select_immediate_register(selector, precision - 1);
+        u32 scale_exponent = machine_a64_select_arithmetic_row(selector, MACHINE_A64_LSL64, discarded, exponent_shift);
+        u32 unit_bits = machine_a64_select_immediate_register(selector, wide ? UINT64_C(0x3ff0000000000000) : UINT64_C(0x3f800000));
+        u32 scale = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ADD64, unit_bits, scale_exponent);
+        u32 scaled = signed_value ? machine_a64_synthesize_register(selector) : result_register;
+        u32 row = machine_a64_select_row(selector, (MachineInstruction){
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, converted),
+                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scale)},
+            .opcode = MACHINE_A64_FARITH,
+            .payload = (wide ? 0x100u : 0u) | 2u,
+        });
+        if (signed_value)
+        {
+            u32 sign_bit = machine_a64_select_immediate_register(selector, wide ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000));
+            u32 float_sign = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, sign, sign_bit);
+            row = machine_a64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, scaled),
+                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, float_sign)},
+                .opcode = MACHINE_A64_EOR64,
+            });
+        }
+        machine_a64_define(selector, result_register, row);
     }
     return selected;
 }
