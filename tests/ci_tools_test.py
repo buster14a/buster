@@ -9,6 +9,7 @@ import shutil
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import unittest
@@ -16,6 +17,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+import ci_pack_evidence
 import ci_summary
 import ci_zig
 import github_ci_time
@@ -161,6 +163,155 @@ class SummaryTests(unittest.TestCase):
     def test_required_list_must_be_explicit(self):
         with self.assertRaises(ValueError):
             ci_summary.write_report({"BUSTER_CI_STEPS": "{}"})
+
+
+class EvidencePackTests(unittest.TestCase):
+    KEEP = {
+        "modes.log": b"modes\n",
+        "result.json": b'{"success": true}\n',
+        "summary.md": b"## Buster CI\n",
+        ".hidden.log": b"dotfiles are evidence too\n",
+        "program": b"outside differential/\n",
+        "other/subject.o": b"outside differential/\n",
+        "differential/processes.tsv": b"phase\telapsed_us\n",
+        "differential/case/config/link.argv": b"clang\0-O0\0subject.o\0",
+        "differential/case/config/run.stderr": b"",
+        "differential/case/config/program.log": b"not a generated program\n",
+        "differential/subject.o.extra": b"not a generated object\n",
+        "differential/nested case/with spaces/run.stdout": b"\x00\xff binary\n",
+        "differential/" + "d" * 60 + "/" + "f" * 60 + ".stdout": b"beyond the ustar name limit\n",
+    }
+    GENERATED = ("differential/program", "differential/subject.o",
+                 "differential/case/config/program", "differential/nested case/with spaces/subject.o")
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        # Laid out like RUNNER_TEMP so the workflow's own command can run here.
+        self.root = Path(self.temporary.name) / "runner temp"
+        self.source = self.root / "buster-ci"
+        self.output = self.root / "native-ci-upload"
+        for name, data in list(self.KEEP.items()) + [(name, b"generated\n") for name in self.GENERATED]:
+            path = self.source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        (self.source / "differential/empty case").mkdir()
+
+    def members(self):
+        with tarfile.open(self.output / ci_pack_evidence.ARCHIVE, "r:gz") as bundle:
+            members = bundle.getmembers()
+            files = {member.name: bundle.extractfile(member).read() for member in members if member.isfile()}
+        return files, {member.name for member in members if member.isdir()}
+
+    def native_steps(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        native = text.split("\n  native:", 1)[1].split("\n  mobile:", 1)[0]
+        return dict(re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", native))
+
+    def test_archive_round_trips_every_retained_file_and_only_excludes_generated_outputs(self):
+        self.assertEqual(ci_pack_evidence.pack(self.source, self.output), (len(self.KEEP), len(self.GENERATED)))
+        files, directories = self.members()
+        self.assertEqual(files, {"buster-ci/" + name: data for name, data in self.KEEP.items()})
+        self.assertIn("buster-ci/differential/empty case", directories)
+        self.assertEqual(sorted(path.name for path in self.output.iterdir()),
+                         sorted((ci_pack_evidence.ARCHIVE,) + ci_pack_evidence.SUMMARIES))
+        for name in ci_pack_evidence.SUMMARIES:
+            self.assertEqual((self.output / name).read_bytes(), self.KEEP[name])
+        # The original tree stays on disk for any later step.
+        for name in list(self.KEEP) + list(self.GENERATED):
+            self.assertTrue((self.source / name).is_file())
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits")
+    def test_permission_bits_are_retained(self):
+        script = self.source / "differential/case/reproduce.sh"
+        script.write_bytes(b"#!/bin/sh\n")
+        script.chmod(0o755)
+        ci_pack_evidence.pack(self.source, self.output)
+        with tarfile.open(self.output / ci_pack_evidence.ARCHIVE, "r:gz") as bundle:
+            self.assertEqual(bundle.getmember("buster-ci/differential/case/reproduce.sh").mode, 0o755)
+
+    def test_missing_input_overlapping_output_links_and_special_files_are_refused(self):
+        with self.assertRaisesRegex(ValueError, "missing evidence"):
+            ci_pack_evidence.pack(self.root / "absent", self.output)
+        result = subprocess.run([sys.executable, str(ROOT / "tools/ci_pack_evidence.py"),
+                                 "--source", str(self.root / "absent"), "--output", str(self.output)],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing evidence directory", result.stderr)
+        for output in (self.source, self.source / "upload", self.root):
+            with self.subTest(output=output), self.assertRaisesRegex(ValueError, "separate"):
+                ci_pack_evidence.pack(self.source, output)
+        if hasattr(os, "mkfifo"):
+            fifo = self.source / "differential/fifo"
+            os.mkfifo(fifo)
+            with self.assertRaisesRegex(ValueError, "special file"):
+                ci_pack_evidence.pack(self.source, self.output)
+            fifo.unlink()
+        try:
+            os.symlink(self.root / "outside", self.source / "differential/link")
+        except (OSError, NotImplementedError):
+            self.skipTest("symbolic links are unavailable to this user")
+        with self.assertRaisesRegex(ValueError, "symbolic link"):
+            ci_pack_evidence.pack(self.source, self.output)
+        self.assertFalse((self.output / ci_pack_evidence.ARCHIVE).exists())
+
+    def test_failed_write_leaves_no_stale_or_partial_upload(self):
+        self.output.mkdir(parents=True)
+        for name in (ci_pack_evidence.ARCHIVE,) + ci_pack_evidence.SUMMARIES:
+            (self.output / name).write_bytes(b"stale from an earlier pack")
+        with mock.patch.object(ci_pack_evidence.tarfile.TarFile, "addfile", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                ci_pack_evidence.pack(self.source, self.output)
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_verification_rejects_changed_missing_and_extra_members(self):
+        ci_pack_evidence.pack(self.source, self.output)
+        archive = self.output / ci_pack_evidence.ARCHIVE
+        files, directories = self.members()
+        digests = {name: hashlib.sha256(data).digest() for name, data in files.items()}
+        ci_pack_evidence.verify(archive, digests, directories)
+        changed = dict(digests)
+        changed["buster-ci/modes.log"] = hashlib.sha256(b"different bytes").digest()
+        missing = dict(digests)
+        del missing["buster-ci/modes.log"]
+        extra = dict(digests)
+        extra["buster-ci/unpacked.log"] = hashlib.sha256(b"").digest()
+        for expected, folders in ((changed, directories), (missing, directories), (extra, directories),
+                                  (digests, directories - {"buster-ci/differential/empty case"})):
+            with self.subTest(), self.assertRaisesRegex(ValueError, "differ"):
+                ci_pack_evidence.verify(archive, expected, folders)
+
+    def test_workflow_packs_after_the_summary_and_never_loses_evidence(self):
+        steps = self.native_steps()
+        self.assertEqual(list(steps)[-4:], ["Native result and reproduction", "Pack native logs",
+                                            "Retain native logs", "Retain unpacked native logs"])
+        pack, packed, unpacked = (steps[name] for name in (
+            "Pack native logs", "Retain native logs", "Retain unpacked native logs"))
+        self.assertIn("id: pack\n", pack)
+        self.assertIn("if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}", pack)
+        self.assertIn("if: ${{ !cancelled() && steps.pack.outcome == 'success' }}", packed)
+        # Exactly one upload runs: the archive, or the original tree after a failed pack.
+        self.assertIn("if: ${{ !cancelled() && steps.pack.outcome != 'success' }}", unpacked)
+        artifact = "name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}\n"
+        for block in (packed, unpacked):
+            self.assertIn(artifact, block)
+            self.assertIn("retention-days: 7\n", block)
+        self.assertIn("path: ${{ runner.temp }}/native-ci-upload/\n", packed)
+        self.assertIn("compression-level: 0\n", packed)
+        self.assertIn("if-no-files-found: error\n", packed)
+        self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/program\n", unpacked)
+        self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/subject.o\n", unpacked)
+        self.assertEqual(ci_pack_evidence.GENERATED, frozenset(("program", "subject.o")))
+
+    @unittest.skipIf(os.name == "nt", "Native lanes run only on Unix")
+    def test_actual_workflow_command_packs_runner_evidence(self):
+        command = re.search(r"(?m)^        run: (.+)$", self.native_steps()["Pack native logs"]).group(1)
+        environment = dict(os.environ, RUNNER_TEMP=str(self.root))
+        result = subprocess.run(["bash", "--noprofile", "--norc", "-c", command], cwd=ROOT,
+                                env=environment, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        files, _ = self.members()
+        self.assertEqual(set(files), {"buster-ci/" + name for name in self.KEEP})
 
 
 
