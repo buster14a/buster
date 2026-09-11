@@ -354,7 +354,6 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
     },
     [MACHINE_X64_TLS_WINDOWS] = {
-        .name = S8_INITIALIZER("x64_tls_windows"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
@@ -363,12 +362,10 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .fixed_register_mask = 1, .fixed_registers = {MACHINE_X64_RAX},
     },
     [MACHINE_X64_TLS_DARWIN] = {
-        .name = S8_INITIALIZER("x64_tls_darwin"),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
     },
     [MACHINE_A64_TLS_WINDOWS] = {
-        .name = S8_INITIALIZER("a64_tls_windows"),
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
@@ -377,7 +374,6 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .fixed_register_mask = 1, .fixed_registers = {MACHINE_A64_X9},
     },
     [MACHINE_A64_TLS_DARWIN] = {
-        .name = S8_INITIALIZER("a64_tls_darwin"),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
     },
