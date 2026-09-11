@@ -1,0 +1,157 @@
+{
+  "integration_base": "680dcdd6b28d6c4ea3ec8e25f8fe3441ff2c76ea",
+  "compiler": "clang version 17.0.0 (https://github.com/swiftlang/llvm-project.git 10999b6d034fe318f3d56c83bddb6572593a8bb0)",
+  "survey_self_tests": {
+    "branch": "passed",
+    "cache": "passed"
+  },
+  "raw_lexer_corpus": {
+    "source_commit": "680dcdd6b28d6c4ea3ec8e25f8fe3441ff2c76ea",
+    "clang": "clang version 17.0.0 (https://github.com/swiftlang/llvm-project.git 10999b6d034fe318f3d56c83bddb6572593a8bb0)",
+    "lexer": "Clang raw lexer",
+    "files": [
+      {
+        "file": "src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h",
+        "bytes": 6052285,
+        "tokens": 41363,
+        "identifiers": 14917,
+        "literals": 1380,
+        "sha256": "442f2b1e99122b5e41c693116bfb4efdad93332e8de1c1b52c8caccf03c34419"
+      },
+      {
+        "file": "src/buster/lib/compiler/frontend/c/c_gen.c",
+        "bytes": 2261715,
+        "tokens": 277800,
+        "identifiers": 118917,
+        "literals": 823,
+        "sha256": "34ce511bfbab885438ddf6647c99151b9014c4b791c06564b9acad4c7632eb57"
+      },
+      {
+        "file": "src/buster/lib/compiler/frontend/c/c_source.c",
+        "bytes": 402209,
+        "tokens": 49391,
+        "identifiers": 19155,
+        "literals": 1056,
+        "sha256": "bb6ed1855aef70428b3b345518e48df5a17d194c054179850307c2552cc66cfd"
+      },
+      {
+        "file": "src/buster/lib/compiler/frontend/c/c_parse.c",
+        "bytes": 774331,
+        "tokens": 90355,
+        "identifiers": 38255,
+        "literals": 336,
+        "sha256": "a5b4986034882cbe1c41bcea21033656b542772d5a2dfec40f2c7192e914eba3"
+      },
+      {
+        "file": "src/buster/lib/compiler/codegen/machine_x86_64.c",
+        "bytes": 740960,
+        "tokens": 82604,
+        "identifiers": 30132,
+        "literals": 313,
+        "sha256": "dc6f52a3eeabef91cc5557678f4649444c238741bab16e8126de84249eb34cf1"
+      }
+    ],
+    "blob_chunks": 957,
+    "blob_encoded_bytes": 3892388,
+    "literals": 3908,
+    "literal_spelling_bytes": 5767387,
+    "runs": 5,
+    "tokens": 541513,
+    "max_literal_length": 5063
+  },
+  "kernel_check": {
+    "gates": 665856,
+    "failures": 0
+  },
+  "synthetic_checks": [
+    {
+      "corpus": "base64-128.bin",
+      "gates": 724550,
+      "failures": 0
+    },
+    {
+      "corpus": "base64-16.bin",
+      "gates": 724550,
+      "failures": 0
+    },
+    {
+      "corpus": "base64-32.bin",
+      "gates": 724550,
+      "failures": 0
+    },
+    {
+      "corpus": "base64-4.bin",
+      "gates": 724550,
+      "failures": 0
+    },
+    {
+      "corpus": "base64-64.bin",
+      "gates": 724550,
+      "failures": 0
+    },
+    {
+      "corpus": "base64-8.bin",
+      "gates": 724550,
+      "failures": 0
+    },
+    {
+      "corpus": "identifier-0.bin",
+      "gates": 560806,
+      "failures": 0
+    },
+    {
+      "corpus": "identifier-1.bin",
+      "gates": 560806,
+      "failures": 0
+    },
+    {
+      "corpus": "identifier-100.bin",
+      "gates": 560806,
+      "failures": 0
+    },
+    {
+      "corpus": "identifier-20.bin",
+      "gates": 560806,
+      "failures": 0
+    },
+    {
+      "corpus": "quoted-dense-128.bin",
+      "gates": 740934,
+      "failures": 0
+    },
+    {
+      "corpus": "quoted-plain-0.bin",
+      "gates": 740934,
+      "failures": 0
+    },
+    {
+      "corpus": "quoted-plain-128.bin",
+      "gates": 740934,
+      "failures": 0
+    },
+    {
+      "corpus": "quoted-plain-16.bin",
+      "gates": 740934,
+      "failures": 0
+    },
+    {
+      "corpus": "quoted-plain-32.bin",
+      "gates": 740934,
+      "failures": 0
+    },
+    {
+      "corpus": "quoted-plain-4.bin",
+      "gates": 740934,
+      "failures": 0
+    },
+    {
+      "corpus": "quoted-plain-64.bin",
+      "gates": 740934,
+      "failures": 0
+    }
+  ],
+  "timing_run": false,
+  "buster_lexer_pipeline_run": false,
+  "compiler_self_host_run": false,
+  "full_compiler_tests_run": false
+}
