@@ -58,6 +58,7 @@ keep current.
 - [`2026-09-10T012048Z`](docs/performance-audits/2026-09-10T012048Z.md) — Z17 bounded native C translation-unit cohorts, no speedup claim
 - [`2026-09-10T011012Z`](docs/performance-audits/2026-09-10T011012Z.md) — Z05 literal-call census and single-fragment scratch candidate
 - [`2026-09-10T010529Z`](docs/performance-audits/2026-09-10T010529Z.md) — Z11 parameter-edge splitter: stable scratch-only outgoing indexes (#296)
+- [`2026-09-10T005633Z`](docs/performance-audits/2026-09-10T005633Z.md) — Reproduce quadratic fresh-name publication on frozen main (#302)
 - [`2026-09-10T010336Z`](docs/performance-audits/2026-09-10T010336Z.md) — Z07 semantic-query census and constexpr leaf storage candidate (#259)
 - [`2026-09-10T191815Z`](docs/performance-audits/2026-09-10T191815Z.md) — Integrate lazy syntax diagnostics with integer validation and retained iOS evidence
 - [`2026-09-10T011438Z`](docs/performance-audits/2026-09-10T011438Z.md) — Z01 compiler census and first-error syntax storage (#128, #248)

@@ -1122,6 +1122,115 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parse_storage_growth(UnitTestArguments
     return result;
 }
 
+// Exercise the actual binder with increasingly many unrelated live undo
+// records. A timing threshold would be noisy; the returned search cursor is
+// an exact operation count. The ordinary parser/driver tests below separately
+// exercise real source, diagnostics, lowering and executable semantics.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fresh_binding_publication(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 counts[] = {0, 1, 4, 16, 64, 256, 1024, 4096, 16384};
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(counts); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        u32 count = counts[case_index];
+        u32 capacity = count + 3;
+        CParseResult parse = {
+            .arena = temporary.arena,
+            .binding_by_symbol = arena_allocate(temporary.arena, CEntityId, capacity),
+            .binding_undo = arena_allocate(temporary.arena, CParseBindingUndo, capacity),
+            .binding_scope = {.value = 1},
+            .binding_capacity = capacity,
+            .binding_undo_capacity = capacity,
+        };
+        memset(parse.binding_by_symbol, 0xff, sizeof(*parse.binding_by_symbol) * capacity);
+        u64 position = temporary.arena->position;
+        u64 fresh_scans = 0;
+        for (u32 symbol = 1; symbol <= count; symbol += 1)
+        {
+            fresh_scans += c_test_parse_binding_bind(&parse, (CScopeId){.value = 0}, (CEntityId){.value = symbol}, symbol);
+            BUSTER_TEST(arguments, parse.binding_by_symbol[symbol].value == symbol);
+            BUSTER_TEST(arguments, parse.binding_undo_count == symbol - 1);
+            BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, parse.binding_scope, (CEntityId){.value = capacity + symbol}, symbol) == 0);
+        }
+        BUSTER_TEST(arguments, fresh_scans == 0);
+        BUSTER_TEST(arguments, parse.binding_undo_count == count);
+
+        // Put the genuinely shadowed name after every unrelated record.
+        // Publishing it must update the oldest record, not the current slot
+        // or the newer record that restores the intervening block's binding.
+        u32 shadow_symbol = count + 1;
+        CEntityId file_entity = {.value = capacity * 3};
+        CEntityId outer_entity = {.value = capacity * 3 + 1};
+        CEntityId inner_entity = {.value = capacity * 3 + 2};
+        CEntityId replacement = {.value = capacity * 3 + 3};
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, (CScopeId){.value = 0}, file_entity, shadow_symbol) == 0);
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, parse.binding_scope, outer_entity, shadow_symbol) == 0);
+        parse.binding_scope.value = 2;
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, parse.binding_scope, inner_entity, shadow_symbol) == 0);
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, (CScopeId){.value = 0}, replacement, shadow_symbol) == count + 1);
+        BUSTER_TEST(arguments, parse.binding_by_symbol[shadow_symbol].value == inner_entity.value);
+        BUSTER_TEST(arguments, parse.binding_undo[count].previous.value == replacement.value);
+        BUSTER_TEST(arguments, parse.binding_undo[count + 1].previous.value == outer_entity.value);
+        c_test_parse_binding_unwind(&parse, count + 1);
+        parse.binding_scope.value = 1;
+        BUSTER_TEST(arguments, parse.binding_by_symbol[shadow_symbol].value == outer_entity.value);
+        c_test_parse_binding_unwind(&parse, count);
+        BUSTER_TEST(arguments, parse.binding_by_symbol[shadow_symbol].value == replacement.value);
+
+        // A bound file-scope name with no active shadow still takes the
+        // unchanged full search. Fresh publication is the only shortcut.
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, (CScopeId){.value = 0}, file_entity, shadow_symbol) == count);
+        BUSTER_TEST(arguments, parse.binding_by_symbol[shadow_symbol].value == file_entity.value);
+        c_test_parse_binding_unwind(&parse, 0);
+        BUSTER_TEST(arguments, parse.binding_undo_count == 0);
+        for (u32 symbol = 1; symbol <= count; symbol += 1)
+        {
+            BUSTER_TEST(arguments, parse.binding_by_symbol[symbol].value == symbol);
+        }
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, (CScopeId){.value = 0}, replacement, 0) == 0);
+        BUSTER_TEST(arguments, parse.binding_by_symbol[0].value == C_ID_UNDERLYING_INVALID);
+        BUSTER_TEST(arguments, c_test_parse_binding_bind(&parse, (CScopeId){.value = 0}, replacement, capacity) == 0);
+        BUSTER_TEST(arguments, temporary.arena->position == position);
+        scratch_end(temporary);
+    }
+
+    TemporalArena temporary = scratch_begin(0, 0);
+    String8 source = S8("int f(void) {\nextern int fresh_a(void);\nextern int fresh_b(void);\nreturn 0;\n}\n"
+                        "int g(void) { extern int fresh_a(void); return 0; }\n");
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CParseResult parse = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    CEntityId fresh = c_parse_lookup_entity(&parse, (CScopeId){.value = 0}, S8("fresh_a"));
+    BUSTER_TEST(arguments, fresh.value < parse.entity_count);
+    if (fresh.value < parse.entity_count)
+    {
+        BUSTER_TEST(arguments, parse.entities[fresh.value].kind == C_ENTITY_FUNCTION);
+    }
+    scratch_end(temporary);
+
+    temporary = scratch_begin(0, 0);
+    source = S8("int f(void) {\nextern int fresh_a(void);\nint duplicate;\nextern int duplicate(void);\nreturn 0;\n}\n");
+    preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    parse = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count != 0);
+    bool redefinition = false;
+    for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+    {
+        CDiagnostic diagnostic = parse.diagnostics[diagnostic_index];
+        if (diagnostic.kind == C_DIAGNOSTIC_REDEFINITION)
+        {
+            redefinition = true;
+            BUSTER_TEST(arguments, diagnostic.location.line == 4);
+        }
+    }
+    BUSTER_TEST(arguments, redefinition);
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_parse_rollback_growth(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -15240,6 +15349,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 
     c_test_result_add(&result, c_test_parse_storage_growth(arguments));
 
+    c_test_result_add(&result, c_test_fresh_binding_publication(arguments));
     c_test_result_add(&result, c_test_type_parse_rollback_growth(arguments));
 
     c_test_result_add(&result, c_test_aggregate_corrections(arguments));
