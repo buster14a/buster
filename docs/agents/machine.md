@@ -170,15 +170,6 @@
   covers every one-bit position and both frontend forms, with strict MIR
   object checks on all three desktop AArch64 targets and native-host execution.
   Further i128 coverage is tracked in [#69](https://github.com/buster14a/buster/issues/69).
-- AArch64 i128-to-f32/f64 casts normalize the magnitude as two scalar MIR
-  limbs and retain round/sticky/parity bits before one nearest-even rounding
-  at the destination precision. A zero high limb selects the ordinary u64
-  conversion; a nonzero high limb scales the rounded significand by an exact
-  power of two. Suppress the modulo-64 cross shift when CLZ(high) is zero.
-  Signed results restore the floating sign only after forming the magnitude.
-  The registered fixture constructs expected IEEE images in integer code,
-  checks even/odd ties and significand carries across the limb boundary, and
-  requires all desktop AArch64 targets and allocator/frontend combinations.
 - ELF/Mach-O AArch64 fixed frames are not limited by the scaled callee-save offset.
   Above that offset's reach, the prologue and each epilogue derive the compact
   save-area base from X29 in reserved X16, then use small unsigned offsets.
@@ -274,6 +265,18 @@
   link by name rather than being rewritten. It relaxes the two indirect
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`).
+
+## Wide integer conversion rounding
+
+- AArch64 i128-to-f32/f64 casts normalize the magnitude as two scalar MIR
+  limbs and retain round/sticky/parity bits before one nearest-even rounding
+  at the destination precision. A zero high limb selects the ordinary u64
+  conversion; a nonzero high limb scales the rounded significand by an exact
+  power of two. Suppress the modulo-64 cross shift when CLZ(high) is zero.
+  Signed results restore the floating sign only after forming the magnitude.
+  The registered fixture constructs expected IEEE images in integer code,
+  checks even/odd ties and significand carries across the limb boundary, and
+  requires all desktop AArch64 targets and allocator/frontend combinations.
 
 ## Incoming argument reads
 
