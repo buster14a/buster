@@ -49,17 +49,20 @@ gh variable set GH_ACTIONS_CI_ENABLED --body true --repo OWNER/REPOSITORY
 
 ## What runs
 
-The `test` matrix retains the six desktop runners and names above. The `mobile`
-matrix runs three independent suite-level shards, so desktop build/test work is
-not repeated to obtain earlier mobile results. `lint` validates every GitHub
-workflow. **Require the aggregate `CI complete` check**, which fails unless
-lint, all desktop lanes and all mobile lanes succeed; the six desktop names
-alone no longer include mobile results.
+The `test` matrix retains the six desktop runners and names above for the full
+combination matrix. Four independent `native` lanes run the Unix execution-mode
+and configuration-differential suites together, reusing their fresh Release
+compiler. The `mobile` matrix retains its three independent suite-level shards.
+`lint` validates every GitHub workflow. **Require the aggregate `CI complete`
+check**, which fails unless lint and every desktop, native and mobile lane
+succeed. The six desktop names alone do not include native or mobile results.
+See [suite partitioning](ci-suite-partition.md) for ownership and measurement.
 
 | Work | Runners | Command |
 |---|---|---|
 | Combination matrix | all six desktop lanes | `test_all_combinations_ci` |
-| Execution-mode matrix | the four Unix desktop lanes | `test_mode_matrix --config Release` |
+| Execution-mode matrix | the four independent Unix native lanes | `test_mode_matrix --config Release` |
+| Native differential matrix | the same four native lanes | `test_differential --ide build/Release/ide --out <fresh-directory> --sanitize-oracle` |
 | Android shard | `ubuntu-26.04` | `android/start_emulator_ci.sh start`, then `android/test_ci.sh --all` |
 | iOS shards | `macos-26-intel`, `macos-26` | `ios/test_ci.sh --all` |
 
@@ -70,10 +73,10 @@ are standalone and retain Debug and Release. The existing Intel iOS gate is
 compile/link/bundle-only; Apple Silicon retains simulator execution.
 
 The main workflow covers pull requests (including forks), main pushes, tags,
-merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix. `fail-fast` is off in both
-matrices. Unix execution-mode tests still run after a combination failure,
-without allowing that earlier failure to pass. Mobile shards have no desktop
-prerequisite and their results cannot be hidden by a failed desktop build.
+merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix. `fail-fast` is off
+in all three matrices. Native and mobile lanes have no desktop prerequisite;
+combination failure cannot hide their results or turn green. Within each native
+lane, the differential step still runs after mode failure unless cancelled.
 
 PR revisions and merge groups coalesce per PR/ref. Main/tag pushes and manual
 runs have unique run-ID groups so neither active nor pending results are
@@ -113,7 +116,7 @@ SHAs must not be substituted for one another in validation reports. Re-running
 a job retains the original event SHA; a newer PR head requires its own run.
 Branch protection should require **both `CI complete` and
 `Linux x86-64 bootstrap evidence`** when the stronger audit is mandatory.
-`CI complete` aggregates only its own lint, desktop and mobile jobs; it is not
+`CI complete` aggregates only its own lint, desktop, native and mobile jobs; it is not
 a proxy for the separate bootstrap result. No same-name skipped check is
 introduced to stand in for a missing run, and this documentation does not
 change repository rules.
@@ -134,7 +137,7 @@ PRs; this change does not broaden recovery or the source-free broker.
 
 `python3 tests/ci_tools_test.py -v` checks the shared event/concurrency contract,
 retained bootstrap command order, and the actual `CI complete` shell predicate
-under all 125 combinations of success, failure, cancellation, skip and missing
+under all 625 combinations of success, failure, cancellation, skip and missing
 results. These checks validate the checked-in policy; they are not evidence
 that a live fork, merge queue, manual dispatch or cancellation race was run.
 
@@ -234,7 +237,8 @@ unknown label, so keep the two in step when a runner changes.
 ## Helper validation and timing
 
 `python3 tests/ci_tools_test.py -v` exercises the archive installer, fail-closed
-summaries and timing collector on each desktop platform (`python` on Windows).
+summaries, native evidence packer and timing collector on each desktop platform
+(`python` on Windows).
 Unix runners also compile a tiny Clang probe to verify that recoverable UBSan
 diagnostics become fatal with `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`.
 The same environment applies to the compiler matrix; no sanitizer is suppressed.
@@ -245,10 +249,15 @@ only main pushes save verified archives, before compiler tests run. SDK setup
 for unused Vulkan rendering/shader support is removed; those options are off
 in these configurations. Android and iOS SDK setup and test commands remain.
 
-Desktop and mobile summaries use `tools/ci_summary.py`, explicitly requiring each
+Desktop, native and mobile summaries use `tools/ci_summary.py`, explicitly requiring each
 applicable suite. Missing, skipped, cancelled or failed work fails the summary.
-Diagnostic uploads do not start after cancellation. The aggregate `CI complete`
-continues to require all six desktop jobs, three mobile jobs and workflow lint.
+Diagnostic uploads do not start after cancellation. Native lanes upload one
+verified `native-ci-logs.tar.gz` beside `result.json` and `summary.md`, packed
+by `tools/ci_pack_evidence.py`; a packing failure fails the lane and uploads the
+unpacked tree instead. See
+[native evidence packaging](ci-suite-partition.md#native-evidence-packaging).
+The aggregate `CI complete` requires all six desktop combination jobs, four
+native jobs, three mobile jobs and workflow lint.
 
 The iOS launcher retains separate signing logs for each Debug/Release bundle
 and one shutdown log under `BUSTER_IOS_CONSOLE_LOG`; the GitHub mobile job
@@ -276,8 +285,10 @@ attached launch-monitor ownership suite continues to use macOS `/bin/bash`.
 Collect timing using `python3 tools/github_ci_time.py collect --branch main --limit 30 --output /tmp/before.json`
 and summarize using `python3 tools/github_ci_time.py summarize /tmp/before.json`.
 For a candidate, replace `--branch main` with `--head-sha COMMIT`. The collector
-accepts both historical six-job workflows and the current eleven-job workflow;
-all applicable suites must succeed on a complete first attempt. Workflow hashes
+accepts historical six- and eleven-job workflows and the current fifteen-job
+suite-partitioned workflow; all applicable suites must succeed on a complete
+first attempt. The four native jobs must report both mode and differential
+success, and their execution intervals and runner seconds are included. Workflow hashes
 and runner labels define separate cohorts. Reports include queue delay, elapsed
 time, execution span and summed runner seconds, including mobile/lint/aggregate
 jobs. Never attribute differences to this PR without matching source/cache state
