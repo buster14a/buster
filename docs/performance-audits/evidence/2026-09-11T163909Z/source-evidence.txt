@@ -1,0 +1,11 @@
+Baseline main: f52360b20f73eb9258516687947dabddfa4f76f6
+Retained opcode records: 246
+Both retained-metadata SHA-256: 47f13404300db35221a4031c369299e03e909d6cc85fe0045178b98e0b59ac2d
+Descriptor/instruction/row strides: 96/24/16 bytes (unchanged)
+Descriptor table storage: 246 * 96 = 23616 bytes (unchanged)
+
+5	3	docs/agents/machine.md
+42	20	docs/machine-metadata-ownership.md
+11	46	src/buster/lib/compiler/codegen/machine.c
+9	29	src/buster/lib/compiler/codegen/machine.h
+23	0	src/buster/tests/compiler/codegen/machine_test.c
