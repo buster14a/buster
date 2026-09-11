@@ -11088,8 +11088,15 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
     {
         u32 width = decoded.element_width;
         u32 fragment_count = end - start;
-        ByteSlice* fragments = arena_allocate(arena, ByteSlice, fragment_count);
-        u64* fragment_elements = arena_allocate(arena, u64, fragment_count);
+        // A single fragment needs only the result's existing descriptor.
+        // Keep scratch arrays for concatenation, not for this common case.
+        ByteSlice* fragments = &decoded.bytes;
+        u64* fragment_elements = &decoded.element_count;
+        if (fragment_count > 1)
+        {
+            fragments = arena_allocate(arena, ByteSlice, fragment_count);
+            fragment_elements = arena_allocate(arena, u64, fragment_count);
+        }
         u64 byte_length = 0;
         u64 element_count = 0;
         for (u32 fragment_index = 0; result && fragment_index < fragment_count; fragment_index += 1)
@@ -37778,9 +37785,18 @@ bool c_test_decode_quoted_paths_agree(Arena* arena, String8 spelling, u8 delimit
 // count, width, kind and encoding, with `bytes` left empty.
 bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, bool* accepted_out)
 {
-    CIrDecodedString decoded = {0};
-    CIrDecodedString counted = {0};
+    CIrDecodedString sentinel = {
+        .bytes = {.pointer = (u8*)arena, .length = 17},
+        .element_count = 19,
+        .element_width = 23,
+        .element_kind = C_TYPE_UNSIGNED_INT,
+        .encoding = C_IR_STRING_ENCODING_UTF32,
+    };
+    CIrDecodedString decoded = sentinel;
+    CIrDecodedString counted = sentinel;
+    u64 position = arena->position;
     bool decoded_accepts = c_ir_decode_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, &decoded);
+    u64 allocated = arena->position - position;
     bool counted_accepts = c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, start, end, &counted);
     bool result = decoded_accepts == counted_accepts;
     if (result && decoded_accepts)
@@ -37788,6 +37804,25 @@ bool c_test_string_literal_range_paths_agree(Arena* arena, CPreprocessResult pre
         result = counted.bytes.pointer == 0 && counted.bytes.length == 0 && counted.element_count == decoded.element_count &&
                  counted.element_width == decoded.element_width && counted.element_kind == decoded.element_kind && counted.encoding == decoded.encoding &&
                  decoded.bytes.length == decoded.element_count * decoded.element_width;
+        c_ir_string_literal_range_trim(preprocess, &start, &end);
+        if (end - start == 1)
+        {
+            String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]);
+            u64 capacity = spelling.length * (decoded.element_width == 1 ? 1 : 4);
+            // One output buffer, with no arena bookkeeping. Permit a future
+            // smaller buffer, but never a returned pointer into stack scratch.
+            result = result && allocated <= capacity && decoded.bytes.length <= allocated &&
+                     decoded.bytes.pointer == (u8*)arena + position;
+        }
+    }
+    else if (result)
+    {
+        result = decoded.bytes.pointer == sentinel.bytes.pointer && decoded.bytes.length == sentinel.bytes.length &&
+                 decoded.element_count == sentinel.element_count && decoded.element_width == sentinel.element_width &&
+                 decoded.element_kind == sentinel.element_kind && decoded.encoding == sentinel.encoding &&
+                 counted.bytes.pointer == sentinel.bytes.pointer && counted.bytes.length == sentinel.bytes.length &&
+                 counted.element_count == sentinel.element_count && counted.element_width == sentinel.element_width &&
+                 counted.element_kind == sentinel.element_kind && counted.encoding == sentinel.encoding;
     }
     *accepted_out = decoded_accepts;
     return result;
