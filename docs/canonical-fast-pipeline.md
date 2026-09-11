@@ -10,6 +10,10 @@ The [initial paired comparison](performance-audits/2026-09-11T200359Z.md) and
 [query-reduction/ablation follow-up](performance-audits/2026-09-11T204614Z.md)
 retain the observed total-time cost and inconclusive intervals. They do not
 establish performance acceptance; #40 remains open for that criterion.
+The [separate production-profile experiment](performance-audits/2026-09-11T211034Z.md)
+validates tests-OFF outputs against the tested compiler and retains its full
+on/off comparison. Its mixed, inconclusive results also leave acceptance open;
+it includes a correction to the earlier optimization-level label.
 
 ## Order and ownership
 
