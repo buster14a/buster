@@ -946,18 +946,24 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast_float_to_integer(MachineA64Sele
     return selected;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_float_to_i128(MachineA64Selector* selector, IrInstruction* instruction,
+                                                          IrType* source_type, IrType* target_type);
+
 // i128 values use the same two-eightbyte frame representation as aggregate
 // values, mirroring machine_x64_select_cast_i128: scalar integer extensions
 // and truncations use the existing frame rows, a 128-bit reinterpret is a
-// byte-preserving frame copy, and other i128 casts continue through the
-// explicit unsupported fallback.
+// byte-preserving frame copy. Scalar float inputs use the magnitude split below.
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast_i128(MachineA64Selector* selector, IrInstruction* instruction, IrType* source_type,
                                                       IrType* cast_target_type, u32 result_register)
 {
     IrFunction* function = selector->function;
 
     bool selected = false;
-    if (source_type && cast_target_type && source_type->kind == IR_TYPE_INTEGER && cast_target_type->kind == IR_TYPE_INTEGER)
+    if (source_type && source_type->kind == IR_TYPE_FLOAT)
+    {
+        selected = machine_a64_select_float_to_i128(selector, instruction, source_type, cast_target_type);
+    }
+    else if (source_type && cast_target_type && source_type->kind == IR_TYPE_INTEGER && cast_target_type->kind == IR_TYPE_INTEGER)
     {
         bool source_integer128 = source_type->bit_width == 128;
         bool target_integer128 = cast_target_type->bit_width == 128;
@@ -1660,6 +1666,77 @@ BUSTER_GLOBAL_LOCAL u32 machine_a64_select_compare_set(MachineA64Selector* selec
                                          .opcode = MACHINE_A64_CSET,
                                      });
     return result;
+}
+
+// Scalar conversion rows carry IEEE bit images in the ordinary GPR model.
+BUSTER_GLOBAL_LOCAL u32 machine_a64_select_float_to_pair_step(MachineA64Selector* selector, u16 opcode, u32 source, u32 other, u32 payload)
+{
+    u32 result = machine_a64_synthesize_register(selector);
+    MachineInstruction row = {
+        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result), machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source)},
+        .opcode = opcode,
+        .payload = payload,
+    };
+    if (other != UINT32_MAX)
+    {
+        row.operands[2] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, other);
+    }
+    machine_a64_select_row(selector, row);
+    return result;
+}
+
+// Match the direct oracle's 2^64 magnitude split using ordinary scalar MIR.
+// Widen f32 exactly before splitting. For representable finite inputs the high
+// limb converts back to f64 exactly, so subtraction retains the complete low
+// limb; FCVTZU supplies truncation toward zero. Restore signed values with an
+// integer borrow, including -2^127 and negative values that truncate to zero.
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_float_to_i128(MachineA64Selector* selector, IrInstruction* instruction,
+                                                          IrType* source_type, IrType* target_type)
+{
+    IrFunction* function = selector->function;
+    u32 result_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+    bool signed_value = instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER;
+    u32 source = UINT32_MAX;
+    bool selected = source_type && source_type->kind == IR_TYPE_FLOAT && (source_type->bit_width == 32 || source_type->bit_width == 64) &&
+                    target_type && target_type->kind == IR_TYPE_INTEGER && target_type->bit_width == 128 && result_slot != UINT32_MAX &&
+                    (signed_value || instruction->conversion_operation == IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER) &&
+                    machine_a64_operand_register(selector, instruction->operands[0], &source);
+    if (selected)
+    {
+        if (source_type->bit_width == 32)
+        {
+            source = machine_a64_select_float_to_pair_step(selector, MACHINE_A64_CVT_F32_TO_F64, source, UINT32_MAX, 0);
+        }
+        u32 sign = UINT32_MAX;
+        if (signed_value)
+        {
+            u32 sign_position = machine_a64_select_immediate_register(selector, 63);
+            sign = machine_a64_select_arithmetic_row(selector, MACHINE_A64_ASR64, source, sign_position);
+            u32 magnitude_mask = machine_a64_select_immediate_register(selector, UINT64_C(0x7fffffffffffffff));
+            source = machine_a64_select_arithmetic_row(selector, MACHINE_A64_AND64, source, magnitude_mask);
+        }
+        // FARITH payload bit 8 selects f64; its low byte selects mul/sub.
+        u32 inverse_limb_scale = machine_a64_select_immediate_register(selector, UINT64_C(0x3bf0000000000000)); // 2^-64
+        u32 scaled = machine_a64_select_float_to_pair_step(selector, MACHINE_A64_FARITH, source, inverse_limb_scale, 0x102);
+        u32 high = machine_a64_select_float_to_pair_step(selector, MACHINE_A64_CVT_F64_TO_U64, scaled, UINT32_MAX, 0);
+        u32 high_float = machine_a64_select_float_to_pair_step(selector, MACHINE_A64_CVT_U64_TO_F64, high, UINT32_MAX, 0);
+        u32 limb_scale = machine_a64_select_immediate_register(selector, UINT64_C(0x43f0000000000000)); // 2^64
+        u32 high_contribution = machine_a64_select_float_to_pair_step(selector, MACHINE_A64_FARITH, high_float, limb_scale, 0x102);
+        u32 residual = machine_a64_select_float_to_pair_step(selector, MACHINE_A64_FARITH, source, high_contribution, 0x101);
+        u32 low = machine_a64_select_float_to_pair_step(selector, MACHINE_A64_CVT_F64_TO_U64, residual, UINT32_MAX, 0);
+        if (signed_value)
+        {
+            u32 inverted_low = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, low, sign);
+            u32 inverted_high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_EOR64, high, sign);
+            u32 borrow = machine_a64_select_compare_set(selector, inverted_low, sign, MACHINE_A64_CONDITION_BELOW);
+            low = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, inverted_low, sign);
+            high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, inverted_high, sign);
+            high = machine_a64_select_arithmetic_row(selector, MACHINE_A64_SUB64, high, borrow);
+        }
+        machine_a64_select_frame_store64(selector, result_slot, 0, low);
+        machine_a64_select_frame_store64(selector, result_slot, 8, high);
+    }
+    return selected;
 }
 
 // Unary pair arithmetic stays in ordinary scalar rows. The low half's
