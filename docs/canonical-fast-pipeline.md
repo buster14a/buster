@@ -6,6 +6,11 @@ after `ir_promote.c`. It adds no second IR and widens neither instruction row.
 The transforms are **opt-in** pending paired total-compile-time and peak-RSS
 acceptance. Register allocator FAST remains the ordinary default independently.
 
+The [initial paired comparison](performance-audits/2026-09-11T200359Z.md) and
+[query-reduction/ablation follow-up](performance-audits/2026-09-11T204614Z.md)
+retain the observed total-time cost and inconclusive intervals. They do not
+establish performance acceptance; #40 remains open for that criterion.
+
 ## Order and ownership
 
 `ir_prepare_canonical_module` receives the frontend's completed CFG. It checks

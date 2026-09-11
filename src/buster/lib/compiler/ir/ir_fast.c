@@ -18,7 +18,6 @@ bool ir_instruction_is_pure(IrProgram* program, IrFunction* function, IrInstruct
     bool result = false;
     if (row && row->result.value < function->value_count && !row->volatile_access)
     {
-        IrType* type = ir_type_from_id(&program->types, row->canonical_type);
         switch (row->opcode)
         {
         case IR_OPCODE_CONSTANT_INTEGER:
@@ -87,7 +86,11 @@ bool ir_instruction_is_pure(IrProgram* program, IrFunction* function, IrInstruct
             break;
         default: break;
         }
-        result = result && type && !type->is_atomic && !type->is_volatile;
+        if (result)
+        {
+            IrType* type = ir_type_from_id(&program->types, row->canonical_type);
+            result = type && !type->is_atomic && !type->is_volatile;
+        }
     }
     return result;
 }
@@ -113,15 +116,18 @@ BUSTER_GLOBAL_LOCAL u64 ir_fast_mask(u32 width)
 BUSTER_GLOBAL_LOCAL bool ir_fast_constant(IrProgram* program, IrFunction* function, u32 value, u64* bits)
 {
     IrValue* slot = function->values + value;
-    u32 width = ir_fast_width(program, slot->canonical_type);
     bool result = false;
-    if (width && slot->definition.value < function->instruction_count)
+    if (slot->definition.value < function->instruction_count)
     {
         IrInstruction* row = function->instructions + slot->definition.value;
         if (row->opcode == IR_OPCODE_CONSTANT_INTEGER && row->immediate_count == 1)
         {
-            *bits = (row->immediate_is_negative ? (u64)0 - row->immediates[0] : row->immediates[0]) & ir_fast_mask(width);
-            result = true;
+            u32 width = ir_fast_width(program, slot->canonical_type);
+            if (width)
+            {
+                *bits = (row->immediate_is_negative ? (u64)0 - row->immediates[0] : row->immediates[0]) & ir_fast_mask(width);
+                result = true;
+            }
         }
     }
     return result;
@@ -183,15 +189,20 @@ BUSTER_GLOBAL_LOCAL void ir_fast_fold(IrProgram* program, IrFunction* function, 
         IrInstruction* row = function->instructions + index;
         statistics->visits += 1;
         if (removed[index] || row->result.value >= function->value_count) continue;
+        bool address = pass == IR_FAST_ADDRESS;
+        // Most rows cannot participate in either rewrite. In particular the
+        // address pass has no reason to query scalar widths or constants.
+        if (address ? (row->opcode != IR_OPCODE_ADDRESS_OF && row->opcode != IR_OPCODE_DEREFERENCE) :
+            (row->opcode != IR_OPCODE_CAST && row->opcode != IR_OPCODE_UNARY && row->opcode != IR_OPCODE_BINARY)) continue;
         u32 replacement = IR_PROMOTE_NONE;
         u32 first = row->operand_count ? ir_promote_root(replacements, row->operands[0].value) : IR_PROMOTE_NONE;
-        u32 second = row->operand_count > 1 ? ir_promote_root(replacements, row->operands[1].value) : IR_PROMOTE_NONE;
-        u32 width = ir_fast_width(program, row->canonical_type);
+        u32 second = !address && row->operand_count > 1 ? ir_promote_root(replacements, row->operands[1].value) : IR_PROMOTE_NONE;
+        u32 width = address ? 0 : ir_fast_width(program, row->canonical_type);
         u64 left = 0, right = 0, bits = 0;
         bool constant = false;
-        bool left_constant = first != IR_PROMOTE_NONE && ir_fast_constant(program, function, first, &left);
+        bool left_constant = !address && first != IR_PROMOTE_NONE && ir_fast_constant(program, function, first, &left);
         bool right_constant = second != IR_PROMOTE_NONE && ir_fast_constant(program, function, second, &right);
-        if (pass == IR_FAST_ADDRESS)
+        if (address)
         {
             if ((row->opcode == IR_OPCODE_ADDRESS_OF || row->opcode == IR_OPCODE_DEREFERENCE) && first != IR_PROMOTE_NONE)
             {
@@ -315,7 +326,8 @@ BUSTER_GLOBAL_LOCAL void ir_fast_dce(IrProgram* program, IrFunction* function, u
     for (u32 index = 0; index < function->instruction_count; index += 1)
     {
         IrInstruction* row = function->instructions + index;
-        if (!removed[index] && ir_instruction_is_pure(program, function, row) && !uses[row->result.value]) queue[tail++] = index;
+        if (!removed[index] && row->result.value < function->value_count && !uses[row->result.value] &&
+            ir_instruction_is_pure(program, function, row)) queue[tail++] = index;
     }
     while (head < tail)
     {
