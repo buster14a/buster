@@ -28,6 +28,22 @@
     X(INITIAL_VALUE_SLOTS, initial_value_slots) \
     X(SSA_FINISH_CALLS, ssa_finish_calls) \
     X(SSA_FINISH_FAILURES, ssa_finish_failures) \
+    X(SSA_SLOT_LOOKUPS, ssa_slot_lookups) \
+    X(SSA_SLOT_PROBES, ssa_slot_probes) \
+    X(SSA_SLOT_GROWS, ssa_slot_grows) \
+    X(SSA_SLOT_ROWS_CLEARED, ssa_slot_rows_cleared) \
+    X(SSA_SLOT_ROWS_REHASHED, ssa_slot_rows_rehashed) \
+    X(SSA_PREDECESSOR_TARGET_VISITS, ssa_predecessor_target_visits) \
+    X(SSA_PREDECESSOR_EDGES, ssa_predecessor_edges) \
+    X(SSA_PENDING_PARAMETER_VISITS, ssa_pending_parameter_visits) \
+    X(SSA_PENDING_INCOMING_VISITS, ssa_pending_incoming_visits) \
+    X(SSA_INITIALIZATION_VALUE_VISITS, ssa_initialization_value_visits) \
+    X(SSA_PARAMETER_SWEEPS, ssa_parameter_sweeps) \
+    X(SSA_PARAMETER_VISITS, ssa_parameter_visits) \
+    X(SSA_PARAMETER_INCOMING_VISITS, ssa_parameter_incoming_visits) \
+    X(SSA_VALUE_POINTER_SLOTS_ALLOCATED, ssa_value_pointer_slots_allocated) \
+    X(SSA_VALUE_POINTER_SLOTS_CLEARED, ssa_value_pointer_slots_cleared) \
+    X(SSA_OPERANDS_REMAPPED, ssa_operands_remapped) \
     X(BEFORE_SSA_BLOCK_ROWS, before_ssa_block_rows) \
     X(BEFORE_SSA_INSTRUCTION_ROWS, before_ssa_instruction_rows) \
     X(BEFORE_SSA_VALUE_ROWS, before_ssa_value_rows) \

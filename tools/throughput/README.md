@@ -217,7 +217,7 @@ normal timing compilers must remain uninstrumented. Raw metric files are
 retained in the native harness artifacts even though its allocation summary
 contains only arena calls/bytes. There is no second measurement runner.
 
-`version=1` identifies the construction vocabulary. `overflowed=1` invalidates
+`version=2` identifies the construction vocabulary. `overflowed=1` invalidates
 the census: counters saturate rather than wrapping. Counts are cumulative
 **calling-thread** totals since process start, including failed attempts
 that reached each hook. They are not all-lane aggregates. The compiler is
@@ -236,6 +236,14 @@ nothing. No extra arena storage or whole-function row stream is retained.
   `after_ssa_*_rows`, `final_*_slots` describe frontend finish entry/exit,
   including failed finish calls. Earlier failures have no exit snapshot.
   This is not general canonical finalization or later promotion.
+- `ssa_slot_*` counts sparse current-value lookups, buckets inspected, table
+  growths, cleared capacity rows and live rows rehashed. The remaining `ssa_*`
+  work fields count the two predecessor target walks and unique edges, pending
+  parameter/incoming propagation, initialization graph values, fixed-point
+  parameter sweeps/rows/incomings, value-indexed pointer scratch allocated and
+  cleared, and final operand remaps. These are populations, not byte or time
+  estimates; multiply slots by their documented element type only in a
+  platform-specific analysis.
 - `place_load_retractions`, `place_atomic_load_retractions`,
   `ssa_read_retractions`, `place_repair_steps` count recovered memory
   loads, SSA read aliases, and previous-instruction traversal steps.

@@ -851,7 +851,7 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
 #define BUSTER_QUALITY_WRITE_FIELD(name) source_metrics_append_field(arena, &text, S8("quality_census"), S8(#name), quality.name);
     BUSTER_QUALITY_CENSUS_FIELDS(BUSTER_QUALITY_WRITE_FIELD)
 #undef BUSTER_QUALITY_WRITE_FIELD
-    source_metrics_append_field(arena, &text, S8("ir_construction"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("ir_construction"), S8("version"), 2);
     source_metrics_append_field(arena, &text, S8("ir_construction"), S8("overflowed"), construction.overflowed);
     for (u32 index = 0; index < IR_CONSTRUCTION_COUNT; index += 1)
     {

@@ -76,11 +76,16 @@ initialization; restored loads still become independent definitions first.
 
 Temporary places and read aliases preserve C lvalue/qualifier checks without
 emitting `LOCAL`, `LOAD` or `STORE` rows for promoted owners. Finalization
-resolves aliases and compacts values/operand slices. Debug-local names, types,
-IDs, scopes and source ranges are preserved; frontend entity IDs do not escape.
-The existing conservative opcode summary also tracks `LOCAL`, so shared
-promotion skips its discovery scan for certified functions with no memory
-locals. Unknown summaries still scan and the shared algorithm stays independent.
+resolves aliases and compacts values/operand slices. Its pending-parameter map
+and retained-parameter reachability map have sequential lifetimes and share one
+value-indexed union allocation; clear it before changing the active member.
+`ir_construction.version=2` allocation probes count the sparse-table probes and
+growth work, predecessor and parameter walks, value-pointer scratch, and operand
+remaps without retaining another row stream. Debug-local names, types, IDs,
+scopes and source ranges are preserved; frontend entity IDs do not escape. The
+existing conservative opcode summary also tracks `LOCAL`, so shared promotion
+skips its discovery scan for certified functions with no memory locals. Unknown
+summaries still scan and the shared algorithm stays independent.
 
 `c_lower_to_ir_with_options` and `c_analyze_with_options` expose the memory-form
 reference through `CIRLowerOptions.disable_direct_ssa`. `ide cc
