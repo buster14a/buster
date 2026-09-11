@@ -3704,6 +3704,20 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_scalar_store(MachineX64Selector* sel
     return selected;
 }
 
+// A GNU compiler barrier has no architectural instruction. Its machine row
+// exists solely so scheduling cannot move memory operations across it.
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_compiler_barrier(MachineX64Selector* selector, IrInstruction* instruction)
+{
+    IrInstructionExtra extra = ir_instruction_extra(selector->function, ir_instruction_self_id(selector->function, instruction));
+    bool selected = !extra.literal.length && !instruction->operand_count && !instruction->target_count && extra.clobber_count == 1 &&
+                    string_equal(extra.clobbers[0], S8("memory"));
+    if (selected)
+    {
+        machine_x64_select_row(selector, (MachineInstruction){.opcode = MACHINE_X64_COMPILER_BARRIER});
+    }
+    return selected;
+}
+
 // These fixed literal forms have more architectural results than the hot
 // row has inline operand slots. One constrained row snapshots all results
 // into a private frame object; ordinary stores then publish the C outputs.
@@ -6614,7 +6628,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     instruction_selected = true;
                     break;
                 case IR_OPCODE_INLINE_ASSEMBLY:
-                    instruction_selected = machine_x64_select_cpu_query(&selector, instruction);
+                    instruction_selected = machine_x64_select_compiler_barrier(&selector, instruction) ||
+                                           machine_x64_select_cpu_query(&selector, instruction);
                     break;
                 case IR_OPCODE_ATOMIC_FENCE:
                     instruction_selected = machine_x64_select_atomic_fence(&selector, instruction);
@@ -12211,6 +12226,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                                                         machine_x64_fixed_template_family_row(MACHINE_X64_FIXED_TEMPLATE_JMP_REGISTER, target_register),
                                                         S8("JMP"), target_register, 64);
                     }
+                    break; case MACHINE_X64_COMPILER_BARRIER:
                     break; case MACHINE_X64_CPUID:
                     case MACHINE_X64_XGETBV:
                     {
