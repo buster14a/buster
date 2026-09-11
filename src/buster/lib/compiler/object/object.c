@@ -31,7 +31,7 @@
 //   object_read_mach_o64, object_read              and their dispatcher
 //   object_bytes_are_object, object_archive_read   archives and detection
 //   object_symbol_name_slot                        symbol-name interning
-//   object_windows_x64_unwind_build                Windows unwind info from
+//   object_windows_x64_unwind_layout/build         Windows unwind info from
 //                                                  codegen unwind actions
 //   object_relocation_kind_from_codegen            codegen -> format
 //                                                  relocation mapping
@@ -279,6 +279,30 @@ BUSTER_GLOBAL_LOCAL bool object_absolute32s_value(u64 address, s64 addend, s32* 
     if (valid)
     {
         *result = (s32)value;
+    }
+    return valid;
+}
+
+// AAELF64 275/277 use Page(S+A)-Page(P) and the low twelve bits of S+A.
+// Share the checked address arithmetic and instruction authority between
+// the in-memory linker and both native ELF executable writers.
+bool object_aarch64_elf_page_relocate(ObjectRelocationKind kind, u32 word, u64 place, u64 target, s64 addend, u32* patched)
+{
+    u64 address = 0;
+    bool valid = patched && !(place & 3) && object_address_addend(target, addend, &address);
+    if (valid && kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21)
+    {
+        s64 displacement = 0;
+        valid = a64_pc_relative_displacement(address & ~UINT64_C(0xfff), place & ~UINT64_C(0xfff), 0, &displacement) &&
+                a64_pc_relative_patch(A64_OPCODE_ADRP, word, displacement, patched);
+    }
+    else if (valid && kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+    {
+        valid = a64_add_lo12_patch(word, (u32)(address & A64_IMM12_MAX), patched);
+    }
+    else
+    {
+        valid = false;
     }
     return valid;
 }
@@ -897,6 +921,11 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_aarch64_immediate_relocation(Objec
 {
     u32 word = 0;
     memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
+    u32 immediate = 0;
+    if (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12 && !a64_add_lo12_read(word, &immediate))
+    {
+        return false;
+    }
     if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
     {
         u32 shift = 0;
@@ -1046,13 +1075,16 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_string(buffer, S8("\n"));
             return true;
         }
+        case OBJECT_RELOCATION_AARCH64_ELF_PAGE21:
         case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21:
         case OBJECT_RELOCATION_AARCH64_MACH_PAGE21:
         case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP:
         {
             u32 word = 0;
             memcpy(&word, section_data.pointer + relocation->offset, sizeof(word));
-            if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && !object_mach_page21_instruction_valid(word))
+            u32 canonical = 0;
+            if ((relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 && !a64_pc_relative_patch(A64_OPCODE_ADRP, word, 0, &canonical)) ||
+                (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && !object_mach_page21_instruction_valid(word)))
             {
                 return false;
             }
@@ -1074,6 +1106,7 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_string(buffer, S8("\n"));
             return true;
         }
+        case OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12:
         case OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
         case OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12:
         case OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12:
@@ -4400,12 +4433,17 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 // cross-object resolution; the weak bit says it loses to a
                 // strong definition instead of colliding with it.
                 u8 binding = (u8)(information >> 4);
+                // AArch64 assembly need not annotate exported code labels
+                // with .type. Preserve explicit STT_OBJECT, but admit an
+                // untyped exported text label as a callable entry point.
+                bool untyped_code = target.cpu_arch == CPU_ARCH_AARCH64 && symbol_type == 0 && binding != 0 &&
+                                    section_index && section_kinds[section_index] == OBJECT_SECTION_TEXT;
                 *destination = (ObjectSymbol){
                     .name = string_duplicate_arena(arena, name, false),
                     .value = symbol_value,
                     .size = size,
                     .section = section_index ? section_kinds[section_index] : OBJECT_SECTION_UNDEFINED,
-                    .kind = symbol_type == 2 ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
+                    .kind = symbol_type == 2 || untyped_code ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
                     .global = binding != 0,
                     .weak = binding == 2,
                     // st_other's low two bits are st_visibility; STV_HIDDEN
@@ -4573,6 +4611,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             kind = relocation_type == 257                             ? OBJECT_RELOCATION_ABSOLUTE64
                                    : relocation_type == 258                           ? OBJECT_RELOCATION_ABSOLUTE32
                                    : relocation_type == 261                           ? OBJECT_RELOCATION_AARCH64_PREL32
+                                   : relocation_type == 275                           ? OBJECT_RELOCATION_AARCH64_ELF_PAGE21
+                                   : relocation_type == 277                           ? OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12
                                    : relocation_type == 282                           ? OBJECT_RELOCATION_AARCH64_JUMP26
                                    : relocation_type == 283                           ? OBJECT_RELOCATION_AARCH64_CALL26
                                    : relocation_type == 549                           ? OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12
@@ -4620,7 +4660,38 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     }
                     if (read_ok)
                     {
-                        if (kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26)
+                        if (kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+                        {
+                            u64 instruction_offset = section_bases[target_section] + source_offset;
+                            u32 instruction = 0;
+                            u32 canonical = 0;
+                            u32 immediate = 0;
+                            A64MCInst decoded = {0};
+                            bool page = kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21;
+                            read_ok = !(instruction_offset & 3) && target_section_data->alignment >= 4 &&
+                                      object_read_u32(target_section_data->data, instruction_offset, &instruction);
+                            if (read_ok)
+                            {
+                                read_ok = page ? a64_mc_decode(instruction, &decoded) && decoded.opcode == A64_OPCODE_ADRP &&
+                                                 a64_pc_relative_patch(A64_OPCODE_ADRP, instruction, 0, &canonical)
+                                               : a64_add_lo12_read(instruction, &immediate) && a64_add_lo12_patch(instruction, 0, &canonical);
+                            }
+                            if (read_ok)
+                            {
+                                // REL ADRP stores an unscaled signed imm21 addend,
+                                // unlike its executed displacement and Mach-O's rule.
+                                if (section_type == 9)
+                                {
+                                    addend = page ? decoded.operands[1].value / 4096 : (s64)immediate;
+                                }
+                                memcpy(target_section_data->data.pointer + instruction_offset, &canonical, sizeof(canonical));
+                            }
+                            else
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                            }
+                        }
+                        else if (kind == OBJECT_RELOCATION_AARCH64_CALL26 || kind == OBJECT_RELOCATION_AARCH64_JUMP26)
                         {
                             u64 instruction_offset = section_bases[target_section] + source_offset;
                             u32 instruction = 0;
@@ -8574,154 +8645,133 @@ struct ObjectWindowsUnwindResult
     u8 reserved[2];
 };
 
+// A frame register describes RSP at its establishment instruction, not at
+// the end of the prologue. Both current x64 producers establish it before
+// allocation only for fixed-RSP bodies. Those frames use PUSH/ALLOC/SAVE
+// alone, as large fixed frames already did; SAVE offsets remain relative to
+// the final RSP. Dynamic-stack functions establish RBP after fixed allocation
+// and must retain SET_FPREG, including its actual displacement.
+typedef struct ObjectWindowsX64UnwindLayout ObjectWindowsX64UnwindLayout;
+struct ObjectWindowsX64UnwindLayout
+{
+    u32 frame_action;
+    u32 frame_offset;
+    u32 slot_count;
+    bool encode_frame;
+    bool valid;
+};
+
+BUSTER_GLOBAL_LOCAL ObjectWindowsX64UnwindLayout object_windows_x64_unwind_layout(CodegenFunctionDescriptor* function)
+{
+    ObjectWindowsX64UnwindLayout result = {
+        .frame_action = UINT32_MAX,
+        .valid = function->prolog_size <= UINT8_MAX && (!function->unwind_action_count || function->unwind_actions),
+    };
+    bool allocation_after_frame = false;
+    u64 displaced_frame_offset = 0;
+    for (u32 action_index = 0; result.valid && action_index < function->unwind_action_count; action_index += 1)
+    {
+        CodegenUnwindAction* action = function->unwind_actions + action_index;
+        result.valid = action->code_offset <= UINT8_MAX && action->register_index <= 15;
+        if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
+        {
+            result.slot_count += 1;
+        }
+        else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
+        {
+            result.valid &= result.frame_action == UINT32_MAX;
+            result.frame_action = action_index;
+            result.frame_offset = action->value;
+            displaced_frame_offset = action->value;
+        }
+        else if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
+        {
+            result.valid &= action->value % 8 == 0;
+            result.slot_count += action->value <= 128 ? 1 : action->value <= 524280 ? 2 : 3;
+            if (result.frame_action != UINT32_MAX)
+            {
+                allocation_after_frame = true;
+                // Retain the existing overflow rejection without treating
+                // later allocation as part of the SET_FPREG displacement.
+                displaced_frame_offset += action->value;
+                result.valid &= displaced_frame_offset <= UINT32_MAX;
+            }
+        }
+        else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
+        {
+            result.valid &= action->value % 8 == 0;
+            result.slot_count += action->value <= 524280 ? 2 : 3;
+        }
+        else
+        {
+            result.valid = false;
+        }
+        result.valid &= result.slot_count <= UINT8_MAX;
+    }
+    result.encode_frame = result.frame_action != UINT32_MAX && !allocation_after_frame &&
+                          result.frame_offset <= 240 && result.frame_offset % 16 == 0;
+    result.slot_count += result.encode_frame;
+    result.valid &= result.slot_count <= UINT8_MAX;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Arena* arena, CodegenFunctionDescriptor* functions, u32 function_count)
 {
     ObjectWindowsUnwindResult result = {
         .function_count = function_count,
     };
-    if (arena && (!function_count || functions) && function_count <= UINT32_MAX / 12)
+    bool valid = arena && (!function_count || functions) && function_count <= UINT32_MAX / 12;
+    if (valid)
     {
         result.xdata_offsets = arena_allocate(arena, u32, function_count);
         u64 xdata_size = 0;
-        for (u32 function_index = 0; function_index < function_count; function_index += 1)
+        for (u32 function_index = 0; valid && function_index < function_count; function_index += 1)
+        {
+            ObjectWindowsX64UnwindLayout layout = object_windows_x64_unwind_layout(functions + function_index);
+            u64 record_size = align_forward(4 + (u64)layout.slot_count * 2, 4);
+            valid = layout.valid && xdata_size <= UINT32_MAX && record_size <= UINT32_MAX - xdata_size;
+            if (valid)
+            {
+                result.xdata_offsets[function_index] = (u32)xdata_size;
+                xdata_size += record_size;
+            }
+        }
+        if (valid)
+        {
+            result.pdata = (ByteSlice){
+                .pointer = arena_allocate(arena, u8, (u64)function_count * 12),
+                .length = (u64)function_count * 12,
+            };
+            result.xdata = (ByteSlice){
+                .pointer = arena_allocate(arena, u8, xdata_size),
+                .length = xdata_size,
+            };
+            if (result.pdata.length)
+            {
+                memset(result.pdata.pointer, 0, result.pdata.length);
+            }
+            if (result.xdata.length)
+            {
+                memset(result.xdata.pointer, 0, result.xdata.length);
+            }
+        }
+        for (u32 function_index = 0; valid && function_index < function_count; function_index += 1)
         {
             CodegenFunctionDescriptor* function = functions + function_index;
-            if (function->prolog_size > UINT8_MAX)
-            {
-                return result;
-            }
-            u32 frame_action = UINT32_MAX;
-            u32 frame_offset = 0;
-            u32 unwind_slot_count = 0;
-            for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
-            {
-                CodegenUnwindAction* action = function->unwind_actions + action_index;
-                if (action->code_offset > UINT8_MAX || action->register_index > 15)
-                {
-                    return result;
-                }
-                if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
-                {
-                    unwind_slot_count += 1;
-                }
-                else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
-                {
-                    if (frame_action != UINT32_MAX)
-                    {
-                        return result;
-                    }
-                    frame_action = action_index;
-                    frame_offset = action->value;
-                }
-                else if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
-                {
-                    if (action->value % 8)
-                    {
-                        return result;
-                    }
-                    unwind_slot_count += action->value <= 128 ? 1 : action->value <= 524280 ? 2 : 3;
-                    if (frame_action != UINT32_MAX)
-                    {
-                        if (action->value > UINT32_MAX - frame_offset)
-                        {
-                            return result;
-                        }
-                        frame_offset += action->value;
-                    }
-                }
-                else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
-                {
-                    if (action->value % 8)
-                    {
-                        return result;
-                    }
-                    unwind_slot_count += action->value <= 524280 ? 2 : 3;
-                }
-                else
-                {
-                    return result;
-                }
-                if (unwind_slot_count > UINT8_MAX)
-                {
-                    return result;
-                }
-            }
-            bool encode_frame = frame_action != UINT32_MAX && frame_offset <= 240 && frame_offset % 16 == 0;
-            unwind_slot_count += encode_frame;
-            if (unwind_slot_count > UINT8_MAX)
-            {
-                return result;
-            }
-            result.xdata_offsets[function_index] = (u32)xdata_size;
-            u64 record_size = align_forward(4 + (u64)unwind_slot_count * 2, 4);
-            if (xdata_size > UINT32_MAX || record_size > UINT32_MAX - xdata_size)
-            {
-                return result;
-            }
-            xdata_size += record_size;
-        }
-        result.pdata = (ByteSlice){
-            .pointer = arena_allocate(arena, u8, (u64)function_count * 12),
-            .length = (u64)function_count * 12,
-        };
-        result.xdata = (ByteSlice){
-            .pointer = arena_allocate(arena, u8, xdata_size),
-            .length = xdata_size,
-        };
-        if (result.pdata.length)
-        {
-            memset(result.pdata.pointer, 0, result.pdata.length);
-        }
-        if (result.xdata.length)
-        {
-            memset(result.xdata.pointer, 0, result.xdata.length);
-        }
-        for (u32 function_index = 0; function_index < function_count; function_index += 1)
-        {
-            CodegenFunctionDescriptor* function = functions + function_index;
-            u32 frame_action = UINT32_MAX;
-            u32 frame_offset = 0;
-            u32 unwind_slot_count = 0;
-            for (u32 action_index = 0; action_index < function->unwind_action_count; action_index += 1)
-            {
-                CodegenUnwindAction* action = function->unwind_actions + action_index;
-                if (action->kind == CODEGEN_UNWIND_ACTION_PUSH_REGISTER)
-                {
-                    unwind_slot_count += 1;
-                }
-                else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
-                {
-                    frame_action = action_index;
-                    frame_offset = action->value;
-                }
-                else if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
-                {
-                    unwind_slot_count += action->value <= 128 ? 1 : action->value <= 524280 ? 2 : 3;
-                    if (frame_action != UINT32_MAX)
-                    {
-                        frame_offset += action->value;
-                    }
-                }
-                else if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
-                {
-                    unwind_slot_count += action->value <= 524280 ? 2 : 3;
-                }
-            }
-            bool encode_frame = frame_action != UINT32_MAX && frame_offset <= 240 && frame_offset % 16 == 0;
-            unwind_slot_count += encode_frame;
+            ObjectWindowsX64UnwindLayout layout = object_windows_x64_unwind_layout(function);
             u8* record = result.xdata.pointer + result.xdata_offsets[function_index];
             record[0] = 1;
             record[1] = (u8)function->prolog_size;
-            record[2] = (u8)unwind_slot_count;
-            if (encode_frame)
+            record[2] = (u8)layout.slot_count;
+            if (layout.encode_frame)
             {
-                record[3] = (u8)(functions[function_index].unwind_actions[frame_action].register_index | ((frame_offset / 16) << 4));
+                record[3] = (u8)(functions[function_index].unwind_actions[layout.frame_action].register_index | ((layout.frame_offset / 16) << 4));
             }
             u32 cursor = 4;
             for (u32 action_index = function->unwind_action_count; action_index > 0; action_index -= 1)
             {
                 CodegenUnwindAction* action = function->unwind_actions + action_index - 1;
-                if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER && !encode_frame)
+                if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER && !layout.encode_frame)
                 {
                     continue;
                 }
@@ -8747,10 +8797,6 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Ar
                     }
                     else
                     {
-                        if (action->value > UINT32_MAX)
-                        {
-                            return result;
-                        }
                         record[cursor + 1] = (u8)((action->register_index << 4) | 5);
                         u32 far_offset = (u32)action->value;
                         memcpy(record + cursor + 2, &far_offset, sizeof(far_offset));
@@ -8776,14 +8822,10 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Ar
                     cursor += 6;
                 }
             }
-            if (cursor != 4 + unwind_slot_count * 2)
-            {
-                return (ObjectWindowsUnwindResult){0};
-            }
+            valid = cursor == 4 + layout.slot_count * 2;
         }
-        result.valid = true;
     }
-
+    result.valid = valid;
     return result;
 }
 
@@ -8888,8 +8930,62 @@ BUSTER_GLOBAL_LOCAL bool object_windows_arm64_initial_frame_valid(CodegenFunctio
            actions[3].register_index == 29 && actions[3].value == 0 && actions[3].code_offset == 8;
 }
 
-BUSTER_GLOBAL_LOCAL bool object_windows_arm64_codes_build(CodegenFunctionDescriptor const* function, ObjectWindowsArm64CodeBuffer* codes,
-                                                          u32* epilog_code_index)
+// A compact machine frame saves FP/LR and the nonvolatile register file
+// before establishing X29. Its epilogue is the unwind suffix beginning at
+// SET_FP: restoring SP from X29 discards fixed and dynamic local allocations.
+// Require one described instruction per offset so partial unwinds cannot
+// silently accept missing probe or setup words.
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_machine_frame(CodegenFunctionDescriptor const* function, u32* frame_pointer_index)
+{
+    bool valid = function->unwind_action_count >= 6;
+    CodegenUnwindAction const* actions = function->unwind_actions;
+    u32 frame = UINT32_MAX;
+    if (valid)
+    {
+        valid = actions[0].kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK && actions[0].code_offset == 4 &&
+                actions[0].value >= 32 && actions[0].value <= 512 && actions[0].value % 16 == 0 &&
+                actions[1].kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER && actions[1].register_index == 29 &&
+                actions[1].value == 0 && actions[1].code_offset == 4 &&
+                actions[2].kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER && actions[2].register_index == 30 &&
+                actions[2].value == 8 && actions[2].code_offset == 4;
+        u32 save_offset = 16;
+        u32 previous_register = 18;
+        for (u32 index = 3; valid && index < function->unwind_action_count; index += 1)
+        {
+            CodegenUnwindAction const* action = actions + index;
+            valid = action->code_offset == (index - 1u) * 4u;
+            if (frame == UINT32_MAX)
+            {
+                if (action->kind == CODEGEN_UNWIND_ACTION_SAVE_REGISTER)
+                {
+                    valid &= action->register_index > previous_register && action->register_index <= 28 &&
+                             action->value == save_offset && save_offset + 8u <= actions[0].value;
+                    previous_register = action->register_index;
+                    save_offset += 8;
+                }
+                else
+                {
+                    valid &= action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER && action->register_index == 29 &&
+                             action->value == 0 && previous_register == 28;
+                    frame = index;
+                }
+            }
+            else
+            {
+                valid &= action->kind == CODEGEN_UNWIND_ACTION_NOP || action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK;
+            }
+        }
+        valid &= frame != UINT32_MAX && actions[function->unwind_action_count - 1u].code_offset == function->prolog_size;
+    }
+    if (valid)
+    {
+        *frame_pointer_index = frame;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_canonical_codes_build(CodegenFunctionDescriptor const* function, ObjectWindowsArm64CodeBuffer* codes,
+                                                                    u32* epilog_code_index)
 {
     if (!object_windows_arm64_initial_frame_valid(function))
     {
@@ -8959,6 +9055,33 @@ BUSTER_GLOBAL_LOCAL bool object_windows_arm64_codes_build(CodegenFunctionDescrip
     object_windows_arm64_code_byte(codes, 0x81);
     object_windows_arm64_code_byte(codes, 0xe4);
     return codes->valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_codes_build(CodegenFunctionDescriptor const* function, ObjectWindowsArm64CodeBuffer* codes,
+                                                          u32* epilog_code_index)
+{
+    u32 machine_frame_pointer = UINT32_MAX;
+    bool valid;
+    if (object_windows_arm64_machine_frame(function, &machine_frame_pointer))
+    {
+        valid = true;
+        for (u32 index = function->unwind_action_count; valid && index > 3; index -= 1)
+        {
+            if (index - 1u == machine_frame_pointer)
+            {
+                *epilog_code_index = codes->count;
+            }
+            valid = object_windows_arm64_action_encode(codes, function->unwind_actions + index - 1u);
+        }
+        object_windows_arm64_code_byte(codes, (u8)(0x80u | (function->unwind_actions[0].value / 8u - 1u)));
+        object_windows_arm64_code_byte(codes, 0xe4);
+        valid &= codes->valid;
+    }
+    else
+    {
+        valid = object_windows_arm64_canonical_codes_build(function, codes, epilog_code_index);
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_arm64_unwind_build(Arena* arena, CodegenFunctionDescriptor* functions,
@@ -9813,6 +9936,8 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
     return kind == OBJECT_RELOCATION_AARCH64_JUMP26                 ? 282
            : kind == OBJECT_RELOCATION_AARCH64_CALL26               ? 283
            : kind == OBJECT_RELOCATION_AARCH64_PREL32               ? 261
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21            ? 275
+           : kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12          ? 277
            : kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ? 549
            : kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 ? 551
            : kind == OBJECT_RELOCATION_ABSOLUTE64                   ? 257
@@ -10814,6 +10939,19 @@ ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat forma
             result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
             return result;
         }
+        if (source->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || source->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+        {
+            u32 word = 0;
+            u32 canonical = 0;
+            memcpy(&word, object->sections[source->section].data.pointer + source->offset, sizeof(word));
+            if (format != OBJECT_FORMAT_ELF64 || object->target.cpu_arch != CPU_ARCH_AARCH64 ||
+                object->sections[source->section].alignment < 4 ||
+                !object_aarch64_elf_page_relocate(source->kind, word, source->offset, source->offset, 0, &canonical))
+            {
+                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                return result;
+            }
+        }
         if (source->kind == OBJECT_RELOCATION_AARCH64_CALL26 || source->kind == OBJECT_RELOCATION_AARCH64_JUMP26)
         {
             u32 instruction = 0;
@@ -11062,6 +11200,19 @@ ObjectExecutable object_link_executable(ObjectFile* object)
                 break;
             }
             memcpy(patch, &value, sizeof(value));
+        }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+        {
+            u32 word = 0;
+            u32 patched = 0;
+            memcpy(&word, patch, sizeof(word));
+            if (!object_aarch64_elf_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
+                                                relocation->addend, &patched))
+            {
+                result.error = OBJECT_ERROR_CAPACITY;
+                break;
+            }
+            memcpy(patch, &patched, sizeof(patched));
         }
         else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
         {

@@ -1,12 +1,21 @@
 name: Self-host fixed point
 
-# As with the platform matrix, pushes are sufficient for same-repository PRs.
-# Iteration, process execution and comparisons belong to the native build driver.
-on: [push]
+# Match the platform matrix: PRs (including forks) validate the merge revision,
+# without a second expensive feature-push run. Build policy stays in build.c.
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['**']
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
 
+# Supersede only the same PR/merge-group. Unique main/tag/manual groups also
+# prevent a newer pending run from displacing an earlier pending measurement.
 concurrency:
-  group: bootstrap-${{ github.ref }}
-  cancel-in-progress: true
+  group: bootstrap-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'merge_group' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 permissions:
   contents: read
@@ -32,16 +41,25 @@ jobs:
       - name: Configure production compiler
         run: '"$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT'
       - name: Preserve ordinary bootstrap and alternate-backend gates
+        id: ordinary_bootstrap
         run: '"$RUNNER_TEMP/buster-build" test_self_host --config Release'
       - name: Verify each generation and repeat
         run: '"$RUNNER_TEMP/buster-build" test_self_host_audit --config Release'
       - name: Run compiler regressions
+        if: ${{ !cancelled() && steps.ordinary_bootstrap.outcome == 'success' }}
         run: '"$RUNNER_TEMP/buster-build" build --config Release -t test_all'
+      - name: Check the bootstrap probe against independent compiler oracles
+        # A failed audit must not suppress its independent semantic evidence.
+        # These steps remain required failures; no continue-on-error is used.
+        if: ${{ !cancelled() && steps.ordinary_bootstrap.outcome == 'success' }}
+        run: |
+          "$RUNNER_TEMP/buster-build" test_differential --self-test
+          "$RUNNER_TEMP/buster-build" test_differential --ide build/Release/ide --cc clang --source tests/self_host_bootstrap_probe.c --sanitize-oracle --out build/self-host-audit/probe-oracle
       - name: Retain stage evidence even on failure
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: ${{ always() }}
+        if: ${{ !cancelled() }}
         with:
-          name: bootstrap-evidence-${{ github.sha }}
+          name: bootstrap-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: build/self-host-audit/
           retention-days: 7
           if-no-files-found: error

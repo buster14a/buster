@@ -20,12 +20,17 @@
 #pragma comment(lib, "psapi.lib")
 #endif
 
-#define TP_SCHEMA 1
+#define TP_SCHEMA 2
+/* Result columns must not change the generated workload's byte identity. */
+#define TP_INPUT_SCHEMA 1
+#define TP_RAW_FIELDS (22 + TP_DIAGNOSTICS)
+#define TP_STANDARD_METRICS 15
+#define TP_METRICS (TP_STANDARD_METRICS + TP_DIAGNOSTICS)
 #define TP_CASES 6
 #define TP_MAX_JOBS 32
 #define TP_ROUNDS 2
 #define TP_MAX_FLAGS 32
-#define TP_RAW_HEADER "round,pair,order,variant,job,wall_seconds,user_seconds,system_seconds,peak_rss_bytes,cycles,instructions,branches,branch_misses,cache_references,cache_misses,arena_calls,arena_bytes,output_bytes,source_bytes,source_lines,source_functions,output_sha256\n"
+#define TP_RAW_HEADER "round,pair,order,variant,job,wall_seconds,user_seconds,system_seconds,peak_rss_bytes,cycles,instructions,branches,branch_misses,cache_references,cache_misses,arena_calls,arena_bytes,output_bytes,source_bytes,source_lines,source_functions,output_sha256,minor_faults,major_faults,voluntary_context_switches,involuntary_context_switches\n"
 
 static char const* const tp_case_names[TP_CASES] = {
     "tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow", "backend_pressure"};
@@ -48,6 +53,7 @@ typedef struct TpConfig
     unsigned flag_count;
     unsigned mode_mask, pairs, warmups, timeout, seed, scale;
     int cpu, pmu, require_pmu, guard, identical;
+    int assembly;
 } TpConfig;
 
 typedef struct TpWorkload
@@ -63,6 +69,7 @@ typedef struct TpJob
     TpWorkload workload;
     unsigned mode;
     unsigned stage;
+    int assembly;
 } TpJob;
 
 typedef struct TpRow
@@ -222,6 +229,11 @@ static int tp_options(int argc, char** argv, TpConfig* config)
                     if (ok) config->cpu = (int)cpu;
                 }
             }
+            else if (!strcmp(key, "--artifact"))
+            {
+                config->assembly = !strcmp(value, "assembly");
+                ok = config->assembly || !strcmp(value, "object");
+            }
             else if (!strcmp(key, "--mode"))
             {
                 config->mode_mask = 0;
@@ -292,7 +304,7 @@ static int tp_generate(TpConfig const* config, char const* root, TpWorkload work
             uint32_t random = config->seed ^ (kind * UINT32_C(2654435761));
             if (!random) random = 1;
             fprintf(file, "/* buster-throughput schema=%d seed=%u profile=%s scale=%u case=%s */\n",
-                    TP_SCHEMA, config->seed, config->profile, config->scale, workload->name);
+                    TP_INPUT_SCHEMA, config->seed, config->profile, config->scale, workload->name);
             if (kind == 0)
             {
                 fputs("unsigned tiny(unsigned x)\n{\n    return x + 1u;\n}\n", file);
@@ -440,8 +452,14 @@ static int tp_sample_csv(FILE* file, unsigned round, unsigned pair, unsigned ord
     else fputs(",NA", file);
     if (isfinite(row->arena_bytes)) fprintf(file, ",%.17g", row->arena_bytes);
     else fputs(",NA", file);
-    fprintf(file, ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%s\n",
+    fprintf(file, ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%s",
             row->output_bytes, row->source_bytes, row->source_lines, row->source_functions, row->output_hash);
+    for (unsigned i = 0; i < TP_DIAGNOSTICS; ++i)
+    {
+        if (process->diagnostics_available & (1u << i)) fprintf(file, ",%" PRIu64, process->diagnostics[i]);
+        else fputs(",NA", file);
+    }
+    fputc('\n', file);
     return !ferror(file) && fflush(file) == 0;
 }
 
@@ -453,6 +471,13 @@ typedef struct TpArguments
     char include_generated[TP_PATH_CAP + 3];
     unsigned count;
 } TpArguments;
+
+static char const* tp_artifact_extension(TpJob const* job)
+{
+    /* Self-host stages must remain executable even in an assembly-output run.
+     * Path validation can inspect the job without touching compiler options. */
+    return job->stage ? ".exe" : job->assembly ? ".s" : ".o";
+}
 
 static void tp_compile_arguments(TpConfig const* config, TpJob const* job,
                                  char const* compiler, char const* artifact,
@@ -480,7 +505,7 @@ static void tp_compile_arguments(TpConfig const* config, TpJob const* job,
     }
     else
     {
-        args[argc++] = "-c";
+        args[argc++] = job->assembly ? "-S" : "-c";
     }
     for (unsigned i = 0; i < config->flag_count; ++i) args[argc++] = (char*)config->flags[i];
     /* Buster's -O options reset the allocator. The measured mode must be
@@ -503,7 +528,7 @@ static int tp_measure(TpConfig const* config, TpJob const* job, char const* comp
     row->source_functions = job->workload.functions;
     char artifact[TP_PATH_CAP], metrics[TP_PATH_CAP], log[TP_PATH_CAP];
     char leaf[256];
-    snprintf(leaf, sizeof(leaf), "%s-%s-%u%s", job->workload.name, tp_modes[job->mode], variant, job->stage ? ".exe" : ".o");
+    snprintf(leaf, sizeof(leaf), "%s-%s-%u%s", job->workload.name, tp_modes[job->mode], variant, tp_artifact_extension(job));
     int ok = tp_path(artifact, output_root, leaf);
     snprintf(leaf, sizeof(leaf), "%s.metrics", sample_id);
     ok = ok && tp_path(metrics, output_root, leaf);
@@ -617,6 +642,8 @@ static int tp_metadata(TpConfig const* config, char const* root, char const* bas
         fputs("\"cpu_scope\":\"OS child user plus system CPU time\",\"rss_scope\":\"OS per-child peak; not concurrent tree sum\",", file);
         fputs("\"pmu_scope\":\"separate diagnostic replay; user-space inherited hardware events; >=90% running required\",", file);
         fputs("\"allocation_scope\":\"separate explicitly instrumented compiler replay; arena calls and requested bytes\",", file);
+        fprintf(file, "\"input_schema\":%d,", TP_INPUT_SCHEMA);
+        fputs("\"process_diagnostics_scope\":\"Linux wait4 child usage; faults and context switches, not PMU events; copied after timing; other platforms unavailable; diagnostic only\",", file);
         fputs("\"compiler_provenance\":[", file);
         char const* compilers[2] = {baseline, candidate};
         char const* ids[2] = {config->baseline_id, config->candidate_id};
@@ -667,6 +694,8 @@ static int tp_metadata(TpConfig const* config, char const* root, char const* bas
             if (i) fputc(',', file);
             fprintf(file, "{\"job\":%u,\"name\":", i); tp_json_string(file, w->name);
             fputs(",\"mode\":", file); tp_json_string(file, tp_modes[jobs[i].mode]);
+            fputs(",\"artifact\":", file);
+            tp_json_string(file, jobs[i].stage ? "executable" : jobs[i].assembly ? "assembly" : "object");
             fputs(",\"source\":", file); tp_json_string(file, w->path);
             fputs(",\"sha256\":", file); tp_json_string(file, w->hash);
             fprintf(file, ",\"bytes\":%" PRIu64 ",\"physical_lines\":%" PRIu64 ",\"defined_functions\":%" PRIu64 "}",
@@ -803,7 +832,7 @@ static int tp_load_samples(char const* root, char const* name, unsigned jobs, un
             size_t length = strlen(line);
             if (!length || line[length - 1] != '\n') { ok = 0; break; }
             line[length - 1] = 0;
-            char* fields[22];
+            char* fields[TP_RAW_FIELDS];
             unsigned count = 1;
             fields[0] = line;
             for (char* p = line; *p && ok; ++p)
@@ -811,11 +840,11 @@ static int tp_load_samples(char const* root, char const* name, unsigned jobs, un
                 if (*p == ',')
                 {
                     *p = 0;
-                    if (count == 22) { ok = 0; break; }
+                    if (count == TP_RAW_FIELDS) { ok = 0; break; }
                     fields[count++] = p + 1;
                 }
             }
-            if (!ok || count != 22) { ok = 0; break; }
+            if (!ok || count != TP_RAW_FIELDS) { ok = 0; break; }
             unsigned round, pair, order, variant, job;
             ok = tp_number(fields[0], &round) && tp_number(fields[1], &pair) && tp_number(fields[2], &order) &&
                  tp_number(fields[3], &variant) && tp_number(fields[4], &job) &&
@@ -835,6 +864,16 @@ static int tp_load_samples(char const* root, char const* name, unsigned jobs, un
                  tp_parse_u64(fields[19], &row->source_lines) && tp_parse_u64(fields[20], &row->source_functions) &&
                  row->process.wall_seconds > 0.0 && row->process.peak_rss_bytes > 0.0 && row->output_bytes > 0 &&
                  row->source_bytes > 0 && row->source_lines > 0 && strlen(fields[21]) == 64;
+            row->process.diagnostics_available = 0;
+            for (unsigned i = 0; i < TP_DIAGNOSTICS && ok; ++i)
+            {
+                row->process.diagnostics[i] = 0;
+                if (strcmp(fields[22 + i], "NA"))
+                {
+                    ok = tp_parse_u64(fields[22 + i], &row->process.diagnostics[i]);
+                    if (ok) row->process.diagnostics_available |= 1u << i;
+                }
+            }
             for (unsigned i = 0; i < 64 && ok; ++i)
             {
                 char c = fields[21][i];
@@ -881,14 +920,45 @@ static double tp_metric(TpRow const* row, unsigned metric)
     else if (metric == 12) result = (double)row->source_lines / row->process.wall_seconds;
     else if (metric == 13 && row->source_functions) result = (double)row->source_functions / row->process.wall_seconds;
     else if (metric == 14) result = (double)row->source_bytes / row->process.wall_seconds;
+    else if (metric >= TP_STANDARD_METRICS && metric < TP_METRICS)
+    {
+        unsigned diagnostic = metric - TP_STANDARD_METRICS;
+        if (row->process.diagnostics_available & (1u << diagnostic))
+            result = (double)row->process.diagnostics[diagnostic];
+    }
     return result;
+}
+
+static char const* const tp_summary_names[] = {"summary.json", "summary.md"};
+
+static int tp_remove_summaries(char const* root)
+{
+    int ok = 1;
+    for (unsigned i = 0; i < sizeof(tp_summary_names) / sizeof(tp_summary_names[0]); ++i)
+    {
+        char path[TP_PATH_CAP];
+        int removed = tp_path(path, root, tp_summary_names[i]);
+        if (removed)
+        {
+            removed = remove(path) == 0 || errno == ENOENT;
+        }
+        if (!removed)
+        {
+            tp_error("cannot remove stale or invalid summary %s in %s", tp_summary_names[i], root);
+        }
+        /* Attempt both reports even when one cannot be removed. */
+        ok = removed && ok;
+    }
+    return ok;
 }
 
 static int tp_compare(char const* root)
 {
     char path[TP_PATH_CAP];
     unsigned jobs = 0, pairs = 0, guard = 0, schema = 0, rounds = 0;
-    int ok = tp_path(path, root, "complete.txt");
+    /* A rejected replay must not leave an earlier verdict publishable.
+     * Only derived reports are removed; sealed evidence remains intact. */
+    int ok = tp_remove_summaries(root) && tp_path(path, root, "complete.txt");
     FILE* config = ok ? fopen(path, "rb") : NULL;
     ok = config != NULL;
     if (config)
@@ -897,6 +967,8 @@ static int tp_compare(char const* root)
         ok = fgets(line, sizeof(line), config) && sscanf(line, "schema=%u jobs=%u pairs=%u rounds=%u guard=%u %c",
                 &schema, &jobs, &pairs, &rounds, &guard, &extra) == 5 && schema == TP_SCHEMA && rounds == TP_ROUNDS &&
                 jobs > 0 && jobs <= TP_MAX_JOBS && pairs > 0 && pairs <= TP_MAX_PAIRS && guard <= 1 && (!guard || pairs >= 20);
+        if (schema && schema != TP_SCHEMA)
+            tp_error("unsupported result schema %u (expected %d); retain the old harness to replay that bundle", schema, TP_SCHEMA);
         fclose(config);
     }
     if (ok) ok = tp_completion(root, jobs, pairs, (int)guard, 0);
@@ -921,8 +993,8 @@ static int tp_compare(char const* root)
         if (fgetc(manifest) != EOF) ok = 0;
         fclose(manifest);
     }
-    FILE* json = ok && tp_path(path, root, "summary.json") ? fopen(path, "wb") : NULL;
-    FILE* markdown = ok && tp_path(path, root, "summary.md") ? fopen(path, "wb") : NULL;
+    FILE* json = ok && tp_path(path, root, tp_summary_names[0]) ? fopen(path, "wb") : NULL;
+    FILE* markdown = ok && tp_path(path, root, tp_summary_names[1]) ? fopen(path, "wb") : NULL;
     ok = ok && json && markdown;
     int regressions = 0, inconclusive = 0;
     if (ok)
@@ -932,8 +1004,9 @@ static int tp_compare(char const* root)
                 TP_SCHEMA, guard ? "true" : "false", alpha);
         fputs("# Compiler throughput comparison\n\nSame-host paired A/B; two fixed rounds; all samples retained. Wall-time gate: **15% and 2 ms**. Peak-RSS gate: **20% and 16 MiB**. Each gate must pass its one-sided exact sign test in **both** rounds (nominal family-wise alpha 1%, Bonferroni across cases and gated metrics; independent pairs assumed).\n\n", markdown);
         fputs("| Workload / mode | Base wall (ms) | Candidate wall (ms) | Paired change | Base / candidate peak MiB | Candidate lines/s | Decision |\n|---|---:|---:|---:|---:|---:|---|\n", markdown);
-        static char const* const metric_names[15] = {"wall_seconds", "cpu_seconds", "peak_rss_bytes", "cycles", "instructions", "branches",
-            "branch_misses", "cache_references", "cache_misses", "arena_calls", "arena_bytes", "output_bytes", "lines_per_second", "functions_per_second", "bytes_per_second"};
+        static char const* const metric_names[TP_METRICS] = {"wall_seconds", "cpu_seconds", "peak_rss_bytes", "cycles", "instructions", "branches",
+            "branch_misses", "cache_references", "cache_misses", "arena_calls", "arena_bytes", "output_bytes", "lines_per_second", "functions_per_second", "bytes_per_second",
+            "minor_faults", "major_faults", "voluntary_context_switches", "involuntary_context_switches"};
         for (unsigned job = 0; job < jobs && ok; ++job)
         {
             /* The same variant must do the same work and emit the same bytes
@@ -962,8 +1035,8 @@ static int tp_compare(char const* root)
             if (job) fputc(',', json);
             fputs("{\"name\":", json); tp_json_string(json, names[job]);
             fputs(",\"medians\":{", json);
-            double medians[2][15];
-            for (unsigned metric = 0; metric < 15; ++metric)
+            double medians[2][TP_METRICS];
+            for (unsigned metric = 0; metric < TP_METRICS; ++metric)
             {
                 if (metric) fputc(',', json);
                 tp_json_string(json, metric_names[metric]); fputs(":[", json);
@@ -1039,9 +1112,11 @@ static int tp_compare(char const* root)
                 fputs("{\"job\":", json); tp_json_string(json, names[job]);
                 fprintf(json, ",\"kind\":\"%s\",\"repeats\":3,\"diagnostic_only\":true,\"metrics\":{", kind ? "allocations" : "pmu");
                 unsigned begin = kind ? 9 : 3, end = kind ? 11 : 9;
-                for (unsigned metric = begin; metric < end; ++metric)
+                unsigned ordinary = end - begin;
+                for (unsigned item = 0; item < ordinary + TP_DIAGNOSTICS; ++item)
                 {
-                    if (metric != begin) fputc(',', json);
+                    unsigned metric = item < ordinary ? begin + item : TP_STANDARD_METRICS + item - ordinary;
+                    if (item) fputc(',', json);
                     tp_json_string(json, metric_names[metric]); fputs(":[", json);
                     for (unsigned variant = 0; variant < 2; ++variant)
                     {
@@ -1056,9 +1131,9 @@ static int tp_compare(char const* root)
                             double value = tp_metric(row, metric);
                             if (isfinite(value)) values[count++] = value;
                         }
-                        if (kind && count != 3) ok = 0;
+                        if (kind && metric < TP_STANDARD_METRICS && count != 3) ok = 0;
                         fprintf(json, "{\"available_samples\":%u,\"median\":", count);
-                        if (count) { tp_sort(values, count); tp_json_number(json, tp_median_sorted(values, count)); }
+                        if (count && (metric < TP_STANDARD_METRICS || count == 3)) { tp_sort(values, count); tp_json_number(json, tp_median_sorted(values, count)); }
                         else fputs("null", json);
                         fputc('}', json);
                     }
@@ -1068,13 +1143,16 @@ static int tp_compare(char const* root)
             }
         }
         fprintf(json, "],\"confirmed_regressions\":%d,\"inconclusive_cases\":%d,\"valid\":%s}\n", regressions, inconclusive, ok ? "true" : "false");
-        fprintf(markdown, "\nConfirmed regressions: **%d**. Inconclusive cases: **%d**. An inconclusive result is a warning, not evidence of equivalence; it is not silently rerun until green.\n\nHardware-counter and instrumented-allocation replays are separate from these uninstrumented timing trials. See `telemetry.csv`, `commands.jsonl`, and `capabilities.jsonl`. Missing observations are `NA`/`null`, not zero. Generated workloads count source definitions; self-host stages report actual lexed lines and leave function throughput unavailable.\n", regressions, inconclusive);
+        fprintf(markdown, "\nConfirmed regressions: **%d**. Inconclusive cases: **%d**. An inconclusive result is a warning, not evidence of equivalence; it is not silently rerun until green.\n\nOS fault and context-switch medians in `summary.json` are diagnostic only and never affect either guard. Hardware-counter and instrumented-allocation replays are separate from these uninstrumented timing trials. See `telemetry.csv`, `commands.jsonl`, and `capabilities.jsonl`. Missing observations are `NA`/`null`, not zero. Generated workloads count source definitions; self-host stages report actual lexed lines and leave function throughput unavailable.\n", regressions, inconclusive);
         ok = ok && !ferror(json) && !ferror(markdown);
     }
     if (json && fclose(json) != 0) ok = 0;
     if (markdown && fclose(markdown) != 0) ok = 0;
     free(rows);
     free(probes);
+    /* Work/output and stream errors can be discovered after reports open.
+     * Close both streams before discarding their incomplete verdicts. */
+    if (!ok) (void)tp_remove_summaries(root);
     int result = !ok ? 2 : regressions ? 1 : 0;
     if (!ok) tp_error("incomplete or incompatible result bundle; no performance verdict");
     else
@@ -1166,7 +1244,7 @@ static int tp_run(TpConfig config)
         {
             for (unsigned mode = 0; mode < 4; ++mode)
             {
-                if (config.mode_mask & (1u << mode)) jobs[job_count++] = (TpJob){workloads[i], mode, 0};
+                if (config.mode_mask & (1u << mode)) jobs[job_count++] = (TpJob){workloads[i], mode, 0, config.assembly};
             }
         }
     }
@@ -1202,7 +1280,11 @@ static int tp_run(TpConfig config)
     ok = ok && manifest != NULL;
     if (manifest)
     {
-        for (unsigned i = 0; i < job_count; ++i) fprintf(manifest, "%u\t%s/%s\n", i, jobs[i].workload.name, tp_modes[jobs[i].mode]);
+        for (unsigned i = 0; i < job_count; ++i)
+        {
+            fprintf(manifest, "%u\t%s/%s%s\n", i, jobs[i].workload.name, tp_modes[jobs[i].mode],
+                    !jobs[i].stage && jobs[i].assembly ? "/assembly" : "");
+        }
         if (fclose(manifest) != 0) ok = 0;
     }
     FILE* samples = ok && tp_path(path, root, "samples.csv") ? fopen(path, "wb") : NULL;
@@ -1483,13 +1565,14 @@ static int tp_self_test(void)
 
 static void tp_help(void)
 {
-    fputs("Compiler throughput (native C; schema 1)\n\n"
+    fputs("Compiler throughput (native C; result schema 2, input schema 1)\n\n"
           "  throughput generate --output DIR [--profile smoke|ci|full] [--seed N] [--scale N]\n"
           "  throughput run --baseline IDE --candidate IDE --output NEW_DIR [options]\n"
           "  throughput compare --output RESULT_DIR\n"
           "  throughput self-test\n\n"
           "Options: --pairs N (20+ for guard; two rounds), --warmups N, --mode all|none|mir-stack|fast|quality,\n"
           "--timeout SECONDS, --cpu N|auto, --flag ARG (repeatable), --baseline-id LABEL, --candidate-id LABEL,\n"
+          "--artifact object|assembly (ordinary jobs only; default object; self-host stages stay executable),\n"
           "--pmu (separate replays), --require-pmu, --allocation-baseline IDE --allocation-candidate IDE,\n"
           "--self-host-root FROZEN_TREE --self-host-generated GENERATED_DIR, --require-identical-output,\n"
           "--no-guard (explicit diagnostic/smoke mode; no performance pass claimed).\n\n"

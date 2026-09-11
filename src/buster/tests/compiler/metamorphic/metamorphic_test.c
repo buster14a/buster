@@ -1,5 +1,5 @@
 // Source-equivalence testing, not random text mutation. meta_source renders a
-// bounded, unsigned-integer grammar and its independently evaluated oracle.
+// bounded unsigned-integer grammar, aggregate/call relations and host oracle.
 // meta_pair isolates compiler/guest crashes with deadlines; meta_reduce only
 // edits grammar parameters and retains the failure signature. meta_run owns
 // the capability matrix, deduplication and persistent failure bundles.
@@ -15,7 +15,7 @@
 #include <buster/lib/time.h>
 #include <buster/tests/compiler/codegen/ebpf_test_vm.h>
 
-#define BUSTER_META_TRANSFORM_COUNT 9u
+#define BUSTER_META_TRANSFORM_COUNT 11u
 #define BUSTER_META_ALL_TRANSFORMS ((1u << BUSTER_META_TRANSFORM_COUNT) - 1u)
 #define BUSTER_META_MAX_TERMS 3u
 #define BUSTER_META_MAX_CASES 256u
@@ -31,6 +31,9 @@
 #define BUSTER_META_COMMUTE 64u
 #define BUSTER_META_LAYOUT 128u
 #define BUSTER_META_EMPTY_PASTE 256u
+#define BUSTER_META_AGGREGATES 512u
+#define BUSTER_META_OUTLINE 1024u
+#define BUSTER_META_REFERENCE_COUNT 4u
 
 typedef struct MetaSpec MetaSpec;
 struct MetaSpec
@@ -93,6 +96,9 @@ struct MetaContext
     String8 directory;
     String8 compiler;
     String8 clang;
+    String8 gcc;
+    String8 reference_compiler;
+    bool reference_optimized;
     String8 node;
     String8 qemu;
     String8 wine;
@@ -225,12 +231,27 @@ BUSTER_GLOBAL_LOCAL String8 meta_layout(Arena* arena, String8 source)
     return (String8){data, length};
 }
 
+BUSTER_GLOBAL_LOCAL u32 meta_target_transform_mask(MetaTarget target, u32 mask)
+{
+    // The bounded eBPF test interpreter has no local-call execution contract.
+    // Retain every other requested relation; report this exclusion in meta_run.
+    return target.backend == META_EBPF ? mask & ~BUSTER_META_OUTLINE : mask;
+}
+
 BUSTER_GLOBAL_LOCAL String8 meta_source(Arena* arena, MetaSpec spec, u32 mask, bool single_function)
 {
     MetaText text = {0};
     if (mask & BUSTER_META_EMPTY_PASTE)
     {
         meta_append(&text, S8("#define META_NAME(prefix,name) prefix ## name\n"));
+    }
+    // Match the u64 evaluator by value range, not by an assumed sizeof/ABI.
+    meta_append(&text, S8("typedef char meta_u64_width[(~0ULL == 18446744073709551615ULL) ? 1 : -1];\n"));
+    String8 product = meta_name(arena, S8("product"), mask);
+    if (mask & BUSTER_META_OUTLINE)
+    {
+        meta_append(&text, string_format(arena,
+            S8("unsigned long long {S8}(unsigned long long left, unsigned long long right) {{\nreturn left * right;\n}}\n"), product));
     }
     meta_append(&text, S8("unsigned long long metamorphic(unsigned long long x, unsigned long long y) {\n"));
     String8 a = meta_name(arena, S8("a"), mask);
@@ -240,6 +261,18 @@ BUSTER_GLOBAL_LOCAL String8 meta_source(Arena* arena, MetaSpec spec, u32 mask, b
     String8 declaration_b = string_format(arena, S8("unsigned long long {S8} = y;\n"), b);
     meta_append(&text, mask & BUSTER_META_DECLARATIONS ? declaration_b : declaration_a);
     meta_append(&text, mask & BUSTER_META_DECLARATIONS ? declaration_a : declaration_b);
+    if (mask & BUSTER_META_AGGREGATES)
+    {
+        // Explicit nested initialization defines both elements. Observe members,
+        // never padding, and keep all reads within the two-element array.
+        String8 aggregate = meta_name(arena, S8("aggregate"), mask);
+        String8 copy = meta_name(arena, S8("aggregate_copy"), mask);
+        meta_append(&text, S8("struct MetaValues { unsigned long long lane[2]; };\n"));
+        meta_append(&text, string_format(arena, S8("struct MetaValues {S8} = {{{{ {S8}, {S8} }}}};\n"), aggregate, a, b));
+        meta_append(&text, string_format(arena, S8("struct MetaValues {S8} = {S8};\n"), copy, aggregate));
+        a = string_format(arena, S8("{S8}.lane[0]"), copy);
+        b = string_format(arena, S8("{S8}.lane[1]"), copy);
+    }
     a = meta_operand(arena, a, mask);
     b = meta_operand(arena, b, mask);
     meta_append(&text, string_format(arena, S8("unsigned long long {S8} = {S8} + {S8};\n"), value, a, b));
@@ -256,7 +289,11 @@ BUSTER_GLOBAL_LOCAL String8 meta_source(Arena* arena, MetaSpec spec, u32 mask, b
             right = string_format(arena, S8("t{u32}b"), term);
         }
         if (mask & BUSTER_META_COMMUTE) { String8 swap = left; left = right; right = swap; }
-        meta_append(&text, string_format(arena, S8("{S8} = {S8} + ({S8} * {S8});\n"), value, value, left, right));
+        // Call operands are pure unsigned expressions: their unspecified
+        // evaluation order cannot change the result or any observable state.
+        String8 term_value = mask & BUSTER_META_OUTLINE ? string_format(arena, S8("{S8}({S8}, {S8})"), product, left, right)
+                                                       : string_format(arena, S8("({S8} * {S8})"), left, right);
+        meta_append(&text, string_format(arena, S8("{S8} = {S8} + {S8};\n"), value, value, term_value));
     }
     if (spec.rounds)
     {
@@ -396,13 +433,13 @@ BUSTER_GLOBAL_LOCAL MetaOutcome meta_execute(MetaContext* context, MetaSpec spec
     {
         String8 argv[16];
         u32 count = 0;
-        argv[count++] = reference ? context->clang : context->compiler;
+        argv[count++] = reference ? context->reference_compiler : context->compiler;
         if (!reference)
         {
             argv[count++] = S8("cc");
         }
         argv[count++] = S8("-std=c11");
-        argv[count++] = S8("-O0");
+        argv[count++] = reference && context->reference_optimized ? S8("-O2") : S8("-O0");
         argv[count++] = S8("-nostdinc");
         argv[count++] = S8("-fwrapv");
         argv[count++] = S8("-fno-strict-aliasing");
@@ -642,8 +679,19 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context
     TimeDataType started = timestamp_take();
     u64 budget_ns = context->full || BUSTER_SANITIZE ? UINT64_C(300000000000) : UINT64_C(60000000000);
     bool budget_expired = false;
-    if (context->clang.length)
+    for (u32 reference = 0; !budget_expired && reference < BUSTER_META_REFERENCE_COUNT; reference += 1)
     {
+        context->reference_compiler = reference < BUSTER_META_REFERENCE_COUNT / 2 ? context->clang : context->gcc;
+        context->reference_optimized = (reference & 1u) != 0;
+        String8 optimization = context->reference_optimized ? S8("-O2") : S8("-O0");
+        if (!context->reference_compiler.length)
+        {
+            if (context->full)
+                string_print(S8("METAMORPHIC_REFERENCE_UNAVAILABLE compiler={S8} optimization={S8}\n"),
+                             reference < BUSTER_META_REFERENCE_COUNT / 2 ? S8("clang") : S8("gcc"), optimization);
+            continue;
+        }
+        u32 reference_start = result.reference_pairs;
         for (u32 seed_index = 0; !budget_expired && seed_index < cases; seed_index += 1)
         {
             for (u32 transform = 0; !budget_expired && transform <= BUSTER_META_TRANSFORM_COUNT; transform += 1)
@@ -666,7 +714,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context
                 if (!pair.passed)
                 {
                     result.failures += 1;
-                    string_print(S8("METAMORPHIC_REFERENCE_FAILURE seed={u32} mask={u32} compiler={S8}\n"), first_seed + seed_index, mask, context->clang);
+                    string_print(S8("METAMORPHIC_REFERENCE_FAILURE seed={u32} mask={u32} compiler={S8} optimization={S8}\n"),
+                                 first_seed + seed_index, mask, context->reference_compiler, optimization);
                     meta_save_outcome(arena, context->directory, S8("reference-base"), pair.base);
                     meta_save_outcome(arena, context->directory, S8("reference-transformed"), pair.changed);
                     // Do not promote invalid source/engine setup as a compiler
@@ -676,7 +725,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context
                 arena_set_position(arena, temporary.position);
             }
         }
-        string_print(S8("METAMORPHIC_REFERENCE pairs={u32} failed={u32} compiler={S8}\n"), result.reference_pairs, result.failures, context->clang);
+        string_print(S8("METAMORPHIC_REFERENCE pairs={u32} failed={u32} compiler={S8} optimization={S8}\n"),
+                     result.reference_pairs - reference_start, result.failures, context->reference_compiler, optimization);
     }
     for (u32 target_index = 0; !budget_expired && target_index < BUSTER_ARRAY_LENGTH(meta_targets); target_index += 1)
     {
@@ -689,6 +739,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context
         {
             continue;
         }
+        u32 target_mask = meta_target_transform_mask(target, transform_mask);
+        if (target_mask != transform_mask)
+            string_print(S8("METAMORPHIC_TRANSFORMS_UNAVAILABLE target={S8} mask={u32} reason=local-calls-not-interpreted\n"),
+                         target.name, transform_mask & ~target_mask);
         for (u32 mode = 0; !budget_expired && mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
         {
             u32 row_pairs = 0, row_failures = 0, row_executed = 0, row_unexecuted = 0;
@@ -697,7 +751,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context
                 MetaSpec spec = meta_spec(first_seed + seed_index);
                 for (u32 transform = 0; !budget_expired && transform <= BUSTER_META_TRANSFORM_COUNT; transform += 1)
                 {
-                    u32 mask = transform == BUSTER_META_TRANSFORM_COUNT ? transform_mask : (1u << transform) & transform_mask;
+                    u32 mask = transform == BUSTER_META_TRANSFORM_COUNT ? target_mask : (1u << transform) & target_mask;
                     if (!mask || (transform == BUSTER_META_TRANSFORM_COUNT && !(mask & (mask - 1))))
                     {
                         continue;
@@ -801,6 +855,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaContext meta_context(Arena* arena, St
     {
         result.target_filter = os_get_environment_variable(S8("BUSTER_METAMORPHIC_TARGET"));
         result.clang = executable_resolve_in_path(arena, S8("clang"));
+        result.gcc = executable_resolve_in_path(arena, S8("gcc"));
         result.node = executable_resolve_in_path(arena, S8("node"));
         result.qemu = executable_resolve_in_path(arena, S8("qemu-aarch64"));
         result.wine = executable_resolve_in_path(arena, S8("wine"));
@@ -869,9 +924,53 @@ BUSTER_GLOBAL_LOCAL UnitTestResult meta_preprocessor_tests(UnitTestArguments* ar
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult meta_generator_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 seeds[] = {0, 1, 42, UINT32_MAX};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(seeds); index += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        MetaSpec spec = meta_spec(seeds[index]);
+        String8 base = meta_source(arguments->arena, spec, 0, false);
+        BUSTER_TEST(arguments, !string_equal(base, meta_source(arguments->arena, spec, BUSTER_META_AGGREGATES, false)));
+        BUSTER_TEST(arguments, !string_equal(base, meta_source(arguments->arena, spec, BUSTER_META_OUTLINE, false)));
+        for (u32 transform = 0; transform <= BUSTER_META_TRANSFORM_COUNT; transform += 1)
+        {
+            u32 mask = transform == BUSTER_META_TRANSFORM_COUNT ? BUSTER_META_ALL_TRANSFORMS : 1u << transform;
+            String8 first = meta_source(arguments->arena, spec, mask, false);
+            String8 second = meta_source(arguments->arena, meta_spec(seeds[index]), mask, false);
+            BUSTER_TEST(arguments, string_equal(first, second));
+        }
+        // Invalid token pastes are diagnostic-only inputs, never executables.
+        // A valid adjacent-token control prevents universal rejection passing.
+        String8 valid = string_format(arguments->arena,
+            S8("#define JOIN(a,b) a ## b\nint JOIN(v,{u32})(void) {{ return 0; }}\n"), seeds[index]);
+        String8 invalid = string_format(arguments->arena,
+            S8("#define JOIN(a,b) a ## b\nint f(void) {{ return JOIN(+,{u32}); }}\n"), seeds[index]);
+        for (u32 layout = 0; layout < 2; layout += 1)
+        {
+            CPreprocessResult accepted = c_preprocess(arguments->arena, layout ? meta_layout(arguments->arena, valid) : valid, (CPreprocessOptions){0});
+            CPreprocessResult rejected = c_preprocess(arguments->arena, layout ? meta_layout(arguments->arena, invalid) : invalid, (CPreprocessOptions){0});
+            BUSTER_TEST(arguments, accepted.error_count == 0);
+            BUSTER_TEST(arguments, rejected.error_count != 0);
+        }
+        arena_set_position(arguments->arena, temporary.position);
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(meta_targets); index += 1)
+    {
+        u32 expected = meta_targets[index].backend == META_EBPF ? BUSTER_META_ALL_TRANSFORMS & ~BUSTER_META_OUTLINE : BUSTER_META_ALL_TRANSFORMS;
+        BUSTER_TEST(arguments, meta_target_transform_mask(meta_targets[index], BUSTER_META_ALL_TRANSFORMS) == expected);
+    }
+    return result;
+}
+
 UnitTestResult metamorphic_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = meta_preprocessor_tests(arguments);
+    UnitTestResult generated = meta_generator_tests(arguments);
+    result.succeeded_test_count += generated.succeeded_test_count;
+    result.test_count += generated.test_count;
     MetaOutcome ok = {.phase = META_PHASE_EXECUTE, .launched = true, .wait = {.result = PROCESS_RESULT_SUCCESS}};
     MetaOutcome bad = ok;
     bad.wait.result = PROCESS_RESULT_FAILED;

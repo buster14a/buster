@@ -1,5 +1,6 @@
 #include <buster/tests/compiler/ir/ir_test.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/time.h>
 #if BUSTER_INCLUDE_TESTS
 
@@ -262,9 +263,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_call_validation(UnitTestArg
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_construction_appends(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrFunction function = {0};
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters before = ir_construction_counters();
+#endif
+    BUSTER_TEST(arguments, ir_function_add_block(0, &function, (IrBlock){0}) == 0);
+    BUSTER_TEST(arguments, ir_function_add_value(arguments->arena, 0, (IrValue){0}).value == IR_ID_UNDERLYING_INVALID);
+    BUSTER_TEST(arguments, ir_function_add_instruction(0, &function, (IrInstruction){0}, (IrSourceRange){0}).value == IR_ID_UNDERLYING_INVALID);
+    // Initial zero capacity, exact powers of two, and repeated growth
+    // retain row identity and the parallel canonical source array.
+    for (u32 index = 0; index < 65; index += 1)
+    {
+        IrBlock* block = ir_function_add_block(arguments->arena, &function, (IrBlock){.sealed = true});
+        IrValueId value = ir_function_add_value(arguments->arena, &function, (IrValue){.definition = {.value = index}});
+        IrInstructionId instruction = ir_function_add_instruction(arguments->arena, &function,
+            (IrInstruction){.opcode = IR_OPCODE_CONSTANT_INTEGER, .result = value, .next = IR_INSTRUCTION_ID_INVALID},
+            (IrSourceRange){.source = {.value = 7}, .offset = index * 3, .length = 2});
+        BUSTER_TEST(arguments, block && block->id.value == index);
+        BUSTER_TEST(arguments, value.value == index && instruction.value == index);
+        BUSTER_TEST(arguments, function.block_count == index + 1 && function.instruction_count == index + 1 && function.value_count == index + 1);
+    }
+    BUSTER_TEST(arguments, function.block_capacity == 128 && function.instruction_capacity == 128 && function.value_capacity == 128);
+    for (u32 index = 0; index < 65; index += 1)
+    {
+        BUSTER_TEST(arguments, function.blocks[index].id.value == index && function.blocks[index].sealed);
+        BUSTER_TEST(arguments, function.values[index].definition.value == index);
+        BUSTER_TEST(arguments, function.instructions[index].opcode == IR_OPCODE_CONSTANT_INTEGER && function.instructions[index].result.value == index);
+        BUSTER_TEST(arguments, function.instructions[index].next.value == IR_ID_UNDERLYING_INVALID);
+        IrSourceRange source = function.instruction_canonical_sources[index];
+        BUSTER_TEST(arguments, source.source.value == 7 && source.offset == index * 3 && source.length == 2);
+    }
+#if BUSTER_BENCH_ALLOCATIONS
+    IrConstructionCounters after = ir_construction_counters();
+    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+#define IR_CONSTRUCTION_EXPECT(counter, expected) \
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_##counter] - before.values[IR_CONSTRUCTION_##counter] == (expected))
+    IR_CONSTRUCTION_EXPECT(BLOCK_APPENDS, 65);
+    IR_CONSTRUCTION_EXPECT(VALUE_APPENDS, 65);
+    IR_CONSTRUCTION_EXPECT(INSTRUCTION_APPENDS, 65);
+    IR_CONSTRUCTION_EXPECT(OPERAND_SLOTS_APPENDED, 0);
+    IR_CONSTRUCTION_EXPECT(BLOCK_GROWS, 5);
+    IR_CONSTRUCTION_EXPECT(VALUE_GROWS, 4);
+    IR_CONSTRUCTION_EXPECT(INSTRUCTION_GROWS, 4);
+    IR_CONSTRUCTION_EXPECT(BLOCK_ROWS_COPIED, 120);
+    IR_CONSTRUCTION_EXPECT(VALUE_ROWS_COPIED, 112);
+    IR_CONSTRUCTION_EXPECT(INSTRUCTION_ROWS_COPIED, 112);
+    IR_CONSTRUCTION_EXPECT(SOURCE_ROWS_COPIED, 112);
+    IR_CONSTRUCTION_EXPECT(SOURCE_ROWS_CLEARED, 240);
+#undef IR_CONSTRUCTION_EXPECT
+    for (u32 index = 0; index < IR_CONSTRUCTION_COUNT; index += 1)
+    {
+        BUSTER_TEST(arguments, ir_construction_counter_name((IrConstructionCounter)index).length != 0);
+    }
+    BUSTER_TEST(arguments, ir_construction_counter_name(IR_CONSTRUCTION_COUNT).length == 0);
+#endif
+    return result;
+}
+
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_promotion_tests(arguments);
+    UnitTestResult construction = ir_test_construction_appends(arguments);
+    result.test_count += construction.test_count;
+    result.succeeded_test_count += construction.succeeded_test_count;
 
     UnitTestResult call_validation = ir_test_canonical_call_validation(arguments);
     result.succeeded_test_count += call_validation.succeeded_test_count;
@@ -396,6 +460,60 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
             }
             BUSTER_TEST(arguments, arena_destroy(fixture_arena, 1));
         }
+    }
+
+    // Independent ABI contexts share immutable types but not unnamed-field
+    // policy or cached classifications. Cover both eightbytes and ABI uses.
+    {
+        IrProgram bitfields = ir_program_initialize(arguments->arena, 0, 8, 0, 0);
+        IrTypeId scalar = ir_program_add_type(&bitfields, (IrType){.kind = IR_TYPE_FLOAT, .bit_width = 32,
+            .layout = {.size = 4, .alignment = 4, .resolved = true}});
+        IrTypeId integer_type = ir_program_add_type(&bitfields, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 32,
+            .layout = {.size = 4, .alignment = 4, .resolved = true}});
+        IrField fields[3][2] = {0};
+        IrTypeId records[3];
+        for (u32 shape = 0; shape < 3; shape += 1)
+        {
+            fields[shape][0] = (IrField){.name = S8("lead"), .type = scalar};
+            fields[shape][1] = (IrField){.name = shape == 2 ? S8("named") : (String8){0}, .type = integer_type,
+                .offset = 4, .is_bit_field = true, .bit_width = shape == 1 ? 0 : 20};
+            records[shape] = ir_program_add_type(&bitfields, (IrType){.kind = IR_TYPE_STRUCT, .fields = fields[shape], .field_count = 2,
+                .layout = {.size = 8, .alignment = 4, .resolved = true}});
+        }
+        IrTypeId array = ir_program_add_type(&bitfields, (IrType){.kind = IR_TYPE_ARRAY, .element_type = records[0], .element_count = 2,
+            .layout = {.size = 16, .alignment = 4, .resolved = true}});
+        IrField nested_field = {.name = S8("nested"), .type = records[0]};
+        IrTypeId nested = ir_program_add_type(&bitfields, (IrType){.kind = IR_TYPE_STRUCT, .fields = &nested_field, .field_count = 1,
+            .layout = {.size = 8, .alignment = 4, .resolved = true}});
+        IrType original_types[8];
+        memcpy(original_types, bitfields.types.types, bitfields.types.count * sizeof(*original_types));
+        IrAbiContext padding = ir_abi_context_initialize(arguments->arena, &bitfields.types, IR_ABI_CONVENTION_SYSTEMV_X86_64);
+        IrAbiContext integer = ir_abi_context_initialize(arguments->arena, &bitfields.types, IR_ABI_CONVENTION_SYSTEMV_X86_64);
+        integer.sysv_unnamed_bitfields_integer = true;
+        for (u32 use = 0; use < IR_ABI_USE_COUNT; use += 1)
+        {
+            for (u32 shape = 0; shape < 3; shape += 1)
+            {
+                IrAbiValue old_value = ir_abi_context_value(&bitfields, &padding, records[shape], (IrAbiUse)use);
+                IrAbiValue new_value = ir_abi_context_value(&bitfields, &integer, records[shape], (IrAbiUse)use);
+                BUSTER_TEST(arguments, old_value.part_count == 1 && old_value.parts[0].abi_class ==
+                                      (shape == 2 ? IR_ABI_CLASS_INTEGER : IR_ABI_CLASS_FLOAT));
+                BUSTER_TEST(arguments, new_value.part_count == 1 && new_value.parts[0].abi_class ==
+                                      (shape == 1 ? IR_ABI_CLASS_FLOAT : IR_ABI_CLASS_INTEGER));
+            }
+            IrAbiValue old_array = ir_abi_context_value(&bitfields, &padding, array, (IrAbiUse)use);
+            IrAbiValue new_array = ir_abi_context_value(&bitfields, &integer, array, (IrAbiUse)use);
+            BUSTER_TEST(arguments, old_array.part_count == 2 && old_array.parts[0].abi_class == IR_ABI_CLASS_FLOAT &&
+                                  old_array.parts[1].abi_class == IR_ABI_CLASS_FLOAT);
+            BUSTER_TEST(arguments, new_array.part_count == 2 && new_array.parts[0].abi_class == IR_ABI_CLASS_INTEGER &&
+                                  new_array.parts[1].abi_class == IR_ABI_CLASS_INTEGER);
+            BUSTER_TEST(arguments, ir_abi_context_value(&bitfields, &padding, nested, (IrAbiUse)use).parts[0].abi_class == IR_ABI_CLASS_FLOAT);
+            BUSTER_TEST(arguments, ir_abi_context_value(&bitfields, &integer, nested, (IrAbiUse)use).parts[0].abi_class == IR_ABI_CLASS_INTEGER);
+        }
+        integer.sysv_unnamed_bitfields_integer = false;
+        ir_abi_context_invalidate(&integer);
+        BUSTER_TEST(arguments, ir_abi_context_value(&bitfields, &integer, records[0], IR_ABI_USE_RESULT).parts[0].abi_class == IR_ABI_CLASS_FLOAT);
+        BUSTER_TEST(arguments, memcmp(original_types, bitfields.types.types, bitfields.types.count * sizeof(*original_types)) == 0);
     }
 
     IrProgram abi_program = ir_program_initialize(arguments->arena, 0, 32, 0, 0);

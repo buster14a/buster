@@ -152,9 +152,10 @@ unity trees use one job. Clang tests then run concurrently in the same bounded
 pool, with each tree's quota passed through `BUSTER_TEST_JOBS`; future multithreaded test work
 must honor that limit. Application builds are multithreaded by default;
 `./build.sh generate -DBUSTER_SINGLE_THREADED=ON` is the explicit serial
-fallback. A single compile is serial throughout: the compiler library starts no
-lanes of its own, so build-level concurrency is the only thing that has to be
-budgeted. Trees are declared longest-first — sanitized Debug,
+fallback. Compiler invocations default to one worker. The opt-in
+`ide cc -fcompile-jobs=N` native C link path also owns a bounded TU gang;
+callers enabling it must budget compiler workers together with build-level
+concurrency. It does not infer available RAM from virtual arena reservations. Trees are declared longest-first — sanitized Debug,
 sanitized Release, the unity Release tree that also runs `clang_analyze`, trees
 covering two configurations, then the rest — because Ninja admits ready edges
 from a shared pool in declaration order and a fresh CI checkout has no
@@ -249,3 +250,27 @@ drives the simulator), `bench_all` (desktop only — runs `ide bench`),
 shader compilation are retained as opt-in infrastructure and default off. The
 Vulkan SDK (`VULKAN_SDK` env) is required only when Vulkan or Slang shader
 compilation is explicitly enabled.
+
+## Incremental Android test assets
+
+The Android `apk` graph in `cmake/AndroidApk.cmake` treats the active files under
+`tests/` as package inputs, not compiler sources. After configuring the normal
+Android tree, `cmake --build build/android-ci-x86_64 --config Debug --target apk`
+repackages fixture edits, additions, renames and deletions without requiring a
+C source rebuild or another destructive `generate`. Release uses the same
+contract. An unchanged build does not repackage. A content-stable inventory
+handles removals and newly added files whose timestamps predate the APK;
+`CONFIGURE_DEPENDS` refreshes that inventory with the supported Ninja generators.
+The preserved `.bbb` corpus is excluded before Android asset packaging.
+
+`python3 tests/android_apk_assets_test.py` exercises that same production graph
+through real CMake and Ninja Multi-Config, in Debug and Release, with isolated
+fixtures and controlled packaging-tool stand-ins. It checks package contents,
+fixture-only invalidation, stale-file removal, no-op behavior, and the retained
+native-library/manifest/sign-script dependencies. It requires the existing
+CMake, Ninja, Python and Bash prerequisites, not an Android SDK or a compiler.
+The existing `tests/mobile_ci_scripts_test.sh` suite and mobile lifecycle CI run
+it on Linux and macOS. This is build-graph evidence, not Android compilation,
+signing or device execution; those remain the regular Android mobile CI gates.
+Do not run two configurations' packaging concurrently in one build directory:
+the existing APK and staging paths are shared.

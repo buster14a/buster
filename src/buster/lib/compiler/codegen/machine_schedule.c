@@ -1,5 +1,104 @@
-#include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/codegen/machine_schedule_internal.h>
 #include <buster/lib/simd.h>
+
+MachineLineMark* machine_schedule_remap_line_marks(Arena* arena, Arena* scratch_arena,
+                                                   MachineLineMark const* marks, u32 mark_count,
+                                                   u32 const* new_rows, u32 row_count)
+{
+    MachineLineMark* result = arena_allocate(arena, MachineLineMark, mark_count ? mark_count : 1);
+    bool ordered = true;
+    for (u32 mark_index = 0; mark_index < mark_count; mark_index += 1)
+    {
+        result[mark_index] = marks[mark_index];
+        if (result[mark_index].row < row_count)
+        {
+            result[mark_index].row = new_rows[result[mark_index].row];
+        }
+        if (mark_index && result[mark_index - 1].row > result[mark_index].row)
+        {
+            ordered = false;
+        }
+    }
+    if (!ordered)
+    {
+        // Scheduling can arbitrarily permute a large block. Bound insertion
+        // work to short runs instead of assuming globally almost-sorted marks.
+        // Equal rows always retain their source order, including terminal marks.
+        u64 const run_length = 16;
+        for (u64 first = 0; first < mark_count; first += run_length)
+        {
+            u64 end = BUSTER_MIN(first + run_length, (u64)mark_count);
+            for (u64 mark_index = first + 1; mark_index < end; mark_index += 1)
+            {
+                MachineLineMark mark = result[mark_index];
+                u64 shift = mark_index;
+                while (shift > first && result[shift - 1].row > mark.row)
+                {
+                    result[shift] = result[shift - 1];
+                    shift -= 1;
+                }
+                result[shift] = mark;
+            }
+        }
+        if (mark_count > run_length)
+        {
+            // One temporary 8M-byte array, only for larger disordered inputs.
+            // Snapshot after allocating the result so the arenas may alias.
+            u64 scratch_position = scratch_arena->position;
+            MachineLineMark* temporary = arena_allocate(scratch_arena, MachineLineMark, mark_count);
+            MachineLineMark* source = result;
+            MachineLineMark* destination = temporary;
+            // Wide endpoints keep doubling and partial-tail arithmetic valid
+            // throughout the u32 mark-count domain without recursion.
+            for (u64 width = run_length; width < mark_count; width *= 2)
+            {
+                for (u64 first = 0; first < mark_count; first += 2 * width)
+                {
+                    u64 middle = BUSTER_MIN(first + width, (u64)mark_count);
+                    u64 end = BUSTER_MIN(first + 2 * width, (u64)mark_count);
+                    u64 left = first;
+                    u64 right = middle;
+                    u64 output = first;
+                    while (left < middle && right < end)
+                    {
+                        if (source[left].row <= source[right].row)
+                        {
+                            destination[output] = source[left];
+                            left += 1;
+                        }
+                        else
+                        {
+                            destination[output] = source[right];
+                            right += 1;
+                        }
+                        output += 1;
+                    }
+                    while (left < middle)
+                    {
+                        destination[output] = source[left];
+                        left += 1;
+                        output += 1;
+                    }
+                    while (right < end)
+                    {
+                        destination[output] = source[right];
+                        right += 1;
+                        output += 1;
+                    }
+                }
+                MachineLineMark* swap = source;
+                source = destination;
+                destination = swap;
+            }
+            if (source != result)
+            {
+                memcpy(result, source, (u64)mark_count * sizeof(MachineLineMark));
+            }
+            arena_set_position(scratch_arena, scratch_position);
+        }
+    }
+    return result;
+}
 
 // Stage 9: pressure-aware scheduling over the machine IR. The selector emits
 // rows in typed-IR walk order, so independent computations stretch their
@@ -882,29 +981,8 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                                     machine_point_make(new_rows[machine_point_instruction(definition)], machine_point_phase(definition));
                             }
                         }
-                        MachineLineMark* scheduled_marks = arena_allocate(arena, MachineLineMark, function->line_mark_count ? function->line_mark_count : 1);
-                        for (u32 mark_index = 0; mark_index < function->line_mark_count; mark_index += 1)
-                        {
-                            scheduled_marks[mark_index] = function->line_marks[mark_index];
-                            if (scheduled_marks[mark_index].row < row_count)
-                            {
-                                scheduled_marks[mark_index].row = new_rows[scheduled_marks[mark_index].row];
-                            }
-                        }
-                        // The line consumer walks marks in ascending row order; scheduling
-                        // shuffles them within each block, so restore the order. Insertion sort:
-                        // the sequence is block-locally shuffled but globally almost sorted.
-                        for (u32 mark_index = 1; mark_index < function->line_mark_count; mark_index += 1)
-                        {
-                            MachineLineMark mark = scheduled_marks[mark_index];
-                            u32 shift = mark_index;
-                            while (shift && scheduled_marks[shift - 1].row > mark.row)
-                            {
-                                scheduled_marks[shift] = scheduled_marks[shift - 1];
-                                shift -= 1;
-                            }
-                            scheduled_marks[shift] = mark;
-                        }
+                        MachineLineMark* scheduled_marks = machine_schedule_remap_line_marks(arena, scratch.arena, function->line_marks,
+                                                                                            function->line_mark_count, new_rows, row_count);
                         result.function.instructions = scheduled_instructions;
                         result.function.virtual_registers = scheduled_registers;
                         result.function.line_marks = scheduled_marks;
