@@ -52,6 +52,7 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-10T013314Z`](docs/performance-audits/2026-09-10T013314Z.md) — Z12 sparse owner membership: paired pilot and unity census, no proven speedup
 - [`2026-09-10T010755Z`](docs/performance-audits/2026-09-10T010755Z.md) — isel: reuse AArch64 direct-call facts in the operand walk (#132)
 - [`2026-09-11T130113Z`](docs/performance-audits/2026-09-11T130113Z.md) — Clang Release unity-object attribution for #413: CodeGen Prepare rescans in the direct canonical emitter
 - [`2026-09-10T211248Z`](docs/performance-audits/2026-09-10T211248Z.md) — AArch64 scalar and i128 zero-count MIR coverage (#36, #69)
