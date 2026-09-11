@@ -744,21 +744,6 @@ struct MachineX64EmitRegistryEntry
     u8 reserved;
 };
 
-// Encoding forms are deliberately target-neutral.  An opcode may expose more
-// than one legal form (for example a register and a folded-memory form), so
-// MachineOpcodeInfo stores a bit set rather than a single enum value.
-typedef enum MachineOpcodeForm
-{
-    MACHINE_OPCODE_FORM_NONE,
-    MACHINE_OPCODE_FORM_REGISTER,
-    MACHINE_OPCODE_FORM_REGISTER_IMMEDIATE,
-    MACHINE_OPCODE_FORM_MEMORY,
-    MACHINE_OPCODE_FORM_BRANCH,
-    MACHINE_OPCODE_FORM_CALL,
-    MACHINE_OPCODE_FORM_PSEUDO,
-    MACHINE_OPCODE_FORM_COUNT,
-} MachineOpcodeForm;
-
 typedef enum MachineScheduleClass
 {
     MACHINE_SCHEDULE_CLASS_NONE,
@@ -775,15 +760,6 @@ typedef enum MachineScheduleClass
     MACHINE_SCHEDULE_CLASS_BARRIER,
     MACHINE_SCHEDULE_CLASS_COUNT,
 } MachineScheduleClass;
-
-typedef enum MachineOpcodeExpansion
-{
-    MACHINE_OPCODE_EXPANSION_NONE,
-    MACHINE_OPCODE_EXPANSION_SINGLE,
-    MACHINE_OPCODE_EXPANSION_SEQUENCE,
-    MACHINE_OPCODE_EXPANSION_PSEUDO,
-    MACHINE_OPCODE_EXPANSION_COUNT,
-} MachineOpcodeExpansion;
 
 typedef enum MachineMemoryEffect
 {
@@ -832,22 +808,7 @@ typedef MachineResource MachineImplicitResource;
 #define MACHINE_IMPLICIT_RESOURCE_CONTROL MACHINE_RESOURCE_CONTROL
 #define MACHINE_IMPLICIT_RESOURCE_COUNT MACHINE_RESOURCE_COUNT
 
-// The bit each form and each resource occupies in `MachineOpcodeInfo`'s
-// `form_set` and implicit-resource masks.  Both are spelled as enumerators
-// rather than a shift over the position enum because every use is a constant
-// initializer in the opcode table, where a named bit reads better than the
-// shift that produced it.
-typedef enum MachineOpcodeFormSet
-{
-    MACHINE_OPCODE_FORM_SET_NONE = 1u << MACHINE_OPCODE_FORM_NONE,
-    MACHINE_OPCODE_FORM_SET_REGISTER = 1u << MACHINE_OPCODE_FORM_REGISTER,
-    MACHINE_OPCODE_FORM_SET_REGISTER_IMMEDIATE = 1u << MACHINE_OPCODE_FORM_REGISTER_IMMEDIATE,
-    MACHINE_OPCODE_FORM_SET_MEMORY = 1u << MACHINE_OPCODE_FORM_MEMORY,
-    MACHINE_OPCODE_FORM_SET_BRANCH = 1u << MACHINE_OPCODE_FORM_BRANCH,
-    MACHINE_OPCODE_FORM_SET_CALL = 1u << MACHINE_OPCODE_FORM_CALL,
-    MACHINE_OPCODE_FORM_SET_PSEUDO = 1u << MACHINE_OPCODE_FORM_PSEUDO,
-} MachineOpcodeFormSet;
-
+// Named bits for implicit-resource masks.
 typedef enum MachineResourceMask
 {
     MACHINE_RESOURCE_NONE_MASK = 1u << MACHINE_RESOURCE_NONE,
@@ -1004,13 +965,13 @@ struct MachineOpcodeInfo
     u8 fixed_registers[4];
     u8 reserved_hot;
 
-    // Expanded target metadata. Some fields are deliberately incomplete or
-    // dormant; docs/machine-metadata-ownership.md names their actual
-    // consumers. Scheduler membership is published into MachineOpcodeRow.
-    u16 form_set;
+    // Scheduler membership is published into MachineOpcodeRow. Reserved
+    // form/expansion bytes preserve offsets; they are not identity mappings.
+    // See docs/machine-metadata-ownership.md for the actual authorities.
+    u16 reserved_form;
     u8 schedule_class;
     u8 reserved_metadata;
-    u16 expansion_recipe;
+    u16 reserved_expansion;
     u8 memory_effect;
     // Memory operand is slot + 1; zero means this opcode has no memory
     // operand, allowing slot zero to remain unambiguous in zero defaults.
@@ -1034,6 +995,8 @@ struct MachineOpcodeInfo
 BUSTER_CT_CHECK(sizeof(MachineOpcodeInfo) == 96);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, clobber_mask) == 0);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, fixed_registers) + sizeof(((MachineOpcodeInfo*)0)->fixed_registers) <= 32);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, schedule_class) == 32);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, memory_effect) == 36);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, implicit_physical_uses) == 48);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, name) == 80);
 
@@ -1678,9 +1641,7 @@ BUSTER_F_DECL u32 machine_x86_64_neutral_patch_site_count(void);
 BUSTER_F_DECL MachineX64NeutralPatchSite const* machine_x86_64_neutral_patch_site(u32 ordinal);
 BUSTER_F_DECL void machine_x86_64_exact_prewarm(void);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
-BUSTER_F_DECL u16 machine_opcode_form_set(MachineOpcodeInfo const* info);
 BUSTER_F_DECL MachineScheduleClass machine_opcode_schedule_class(MachineOpcodeInfo const* info);
-BUSTER_F_DECL MachineOpcodeExpansion machine_opcode_expansion(MachineOpcodeInfo const* info);
 BUSTER_F_DECL MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info);
 BUSTER_F_DECL MachineBundleKind machine_opcode_bundle(MachineOpcodeInfo const* info);
 BUSTER_F_DECL bool machine_opcode_is_memory(MachineOpcodeInfo const* info);

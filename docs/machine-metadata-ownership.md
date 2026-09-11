@@ -60,14 +60,12 @@ does not remove those fields or promise that future consumers may trust them.
 | `schedule_class` | Authoritative scheduler barrier/vector membership where specified; published into `schedule_flags` | ALU/SHIFT/MUL/DIV/LOAD/STORE labels are not currently latency or throughput inputs; no scheduling cost model consumes them |
 | `memory_effect` | Authoritative conservative memory-chain membership; `machine_opcode_is_memory`, row publication | Includes six aggregate copies and the x86 incoming read formerly described only by a scheduler switch. It is not a complete hardware-memory-effects model: existing side-effect barriers can omit it |
 | `implicit_resource_uses`, `implicit_resource_defs` | `VECTOR_STATE` is authoritative implicit vector-state chain membership; row publication | Float bridges, scalar conversions and AArch64 implicit V-register rows. Existing FLAGS/NZCV bits still have no resource-mask consumer; flag ordering currently uses `attributes` |
-| `form_set` | Dormant populated field | `machine_opcode_form_set` has no caller; no selector or encoder consults this field |
-| `expansion_recipe` | Dormant populated field | `machine_opcode_expansion` has no caller; actual emission recipe identity comes from the independent registry described below |
 | `memory_operand` | Dormant populated field | Slot-plus-one accessor has no caller; must not be treated as a validated alias or folding description |
 | `bundle` | Dormant, zero | Accessor has no caller; scheduler flag-pair units are built from attributes, not this byte |
 | `memory_fold_alternate`, `emit_recipe`, `memory_flags`, `latency`, `throughput` | Dormant, zero | No producer beyond zero initialization and no consumer. The in-record `emit_recipe` is not the authoritative recipe projection |
 | `implicit_physical_defs` | Dormant, partly duplicates `clobber_mask` | Populated by constrained conversion/DIV/MULH macros but never read |
 | `implicit_physical_uses` | Dormant, zero | No nonzero producer or consumer |
-| `reserved_constraints`, `reserved_hot`, `reserved_metadata`, `reserved_schedule[4]` | Padding, not semantic state | Zero; preserve the descriptor layout and must not be consumed |
+| `reserved_constraints`, `reserved_hot`, `reserved_form`, `reserved_expansion`, `reserved_metadata`, `reserved_schedule[4]` | Padding, not semantic state | Zero; preserve the descriptor layout and must not be consumed |
 
 The independent `machine_opcode_emit_recipes` / x86 emit registry supplies
 `machine_opcode_emit_recipe()`. It is static, read-only, keyed by stable
@@ -75,6 +73,50 @@ The independent `machine_opcode_emit_recipes` / x86 emit registry supplies
 `MachineOpcodeInfo.emit_recipe` member is not a second valid lookup route.
 Changing this relationship or the integrated descriptor layout is outside
 this patch.
+
+## Removed unused form and expansion identities
+
+Rechecked against `5324b7d077d5727a23dd680c0a3efb778a55ff7f`: the descriptor
+`form_set` and `expansion_recipe` had initializer producers and accessor
+implementations, but no accessor callers or direct consumers anywhere in
+`src/`. They did not select a legal encoding, describe an actual expansion,
+or supply scheduler membership. Remove both fields, their producers, their
+accessors, the three now-unused form/expansion enums, and the unused
+`MACHINE_INFO_FINALIZE` macro. `reserved_form` and `reserved_expansion` are
+zero-initialized padding preserving every retained descriptor offset, not
+planned semantic fields. The descriptor/instruction/projection strides remain
+96/24/16 bytes. Compile-time checks also freeze the active `schedule_class`
+and `memory_effect` offsets at 32 and 36.
+
+The existing identities have these supported joins:
+
+| Domain | Producer and consumer | Supported join and validity |
+| --- | --- | --- |
+| Selected operation (`MachineOpcode`) | Target selector switches publish rows; verifier, scheduler, placement and encoder consume them | Index immutable opcode descriptors, published row facts and the recipe projection. Validate the opcode before indexing. |
+| Emission recipe (`MachineEmitRecipeId`) | `machine_opcode_emit_recipes`, with the x86 registry supplying its x86 subset; registry audits consume the projection | Retain both category and index. DIRECT index 0 (`MOV_RR`) and FAMILY index 0 (`MOV_RI`) are different recipe IDs. An out-of-domain opcode returns INVALID. |
+| x86 producer ordinal | `machine_x86_64_emit_registry.h`; registry audits check the matching encoder cohort | `machine_x86_64_emit_registry_entry` indexes the contiguous registered x86 span only. Its ordinal is not a machine opcode or exact form ID; an out-of-range ordinal returns null. |
+| Exact x86 form | The normalized x86 metadata snapshot and checked binding/encoding helpers | The current emitter resolves a supported operand shape through those helpers. A recipe category or common mnemonic does not identify an exact form. Missing forms fail explicitly through the existing checked emission result. |
+| Multi-instruction expansion | Existing target emitter policy, identified in the recipe registry | The selected machine operation must already include its sequence's operand constraints, clobbers, barriers and implicit vector-state effects. The removed SINGLE/PSEUDO labels never validated these facts. |
+
+Descriptors and recipe data are immutable for the process lifetime. Selection
+publishes the operation and dynamic operands before scheduling and placement.
+Changing that operation selects a new descriptor and requires rechecking the
+facts those consumers used. Exact-form decisions deferred to emission may
+vary bytes or immediate/displacement width only while preserving the selected
+operation's effects, ties, fixed-register assignments, clobbers and sequence
+contract. Introducing a memory form, implicit scratch register, flag effect,
+or expansion after those facts were consumed requires a new earlier selection
+contract; matching mnemonics do not authorize it.
+
+The bounded x86 move-family tests distinguish register and immediate recipe
+identities, frame-read effects and scheduler membership, and missing registry
+mappings. Existing exhaustive registry tests check category/index/status joins;
+existing emitter tests check actual bytes and unsupported/capacity failures.
+These checks reuse current authorities and add no production projection,
+allocation or per-instruction pass. Layout preservation means zero table-byte
+saving; build/runtime measurements must be reported separately, without
+inferring a speedup from removing unused declarations. Other dormant fields
+in the inventory remain a separate cleanup; this slice does not close #45.
 
 ## Removed fixed-register duplication
 

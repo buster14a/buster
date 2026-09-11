@@ -4,10 +4,15 @@
 
 ## Machine instruction selection and scheduling
 
-- `MachineInstruction` is the 24-byte hot row. Keep static form, scheduling,
+- `MachineInstruction` is the 24-byte hot row. Keep static scheduling,
   memory, bundle, fixed-register, tie, early-clobber, implicit-physical, and
   implicit-resource facts in `MachineOpcodeInfo`, accessed through the
   `machine_opcode_*` helpers.
+- Emission recipes come from the separate immutable recipe projection;
+  exact x86 forms come from checked encoding metadata. The unused descriptor
+  form-set and expansion fields/accessors are removed. Their reserved bytes
+  only preserve layout. See the [identity joins](../machine-metadata-ownership.md#removed-unused-form-and-expansion-identities)
+  before deferring a form choice past scheduling or placement.
 - `MachineOpcodeInfo` retains a 96-byte stride. Operand and allocation
   constraints occupy its first 32 bytes; diagnostic names follow scheduling
   and implicit-effect metadata. Keep opcode initializers designated and the
@@ -160,6 +165,14 @@
   ahead of their definitions publishes incorrect verifier metadata.
   `basic_c_x86_64_i128_binary.c` and `basic_c_i128_shift_edges.c` require strict
   MIR selection and cover product carries and counts below, at and above 64.
+- AArch64 f32/f64-to-i128 casts use scalar MIR conversions and arithmetic.
+  Widen f32 before splitting the absolute magnitude at 2^64, convert both
+  unsigned limbs with truncation toward zero, and restore signed results
+  with an explicit low-limb borrow. Both destination limbs are overwritten.
+  The registered finite-input fixture decodes IEEE images with integer
+  operations and requires strict compilation across all desktop AArch64
+  targets, all MIR allocators, and both frontend forms; native hosts execute
+  the same cases, retaining NONE as the direct reference.
 - AArch64 leading/trailing-zero counts use importer-generated CLZ and RBIT
   forms for ordinary 32/64-bit scalar rows. A 128-bit count operates on both
   slot-backed limbs, selecting the primary limb's count or 64 plus the other
@@ -169,7 +182,7 @@
   opcode numbers by appending new rows. The registered zero-count fixture
   covers every one-bit position and both frontend forms, with strict MIR
   object checks on all three desktop AArch64 targets and native-host execution.
-  Float/i128 conversions and wide division/remainder remain separate gaps.
+  Further i128 coverage is tracked in [#69](https://github.com/buster14a/buster/issues/69).
 - ELF/Mach-O AArch64 fixed frames are not limited by the scaled callee-save offset.
   Above that offset's reach, the prologue and each epilogue derive the compact
   save-area base from X29 in reserved X16, then use small unsigned offsets.
@@ -265,6 +278,18 @@
   link by name rather than being rewritten. It relaxes the two indirect
   thread-local models back to local-exec for the same reason
   (`link_elf_relax_thread_local`).
+
+## Wide integer conversion rounding
+
+- AArch64 i128-to-f32/f64 casts normalize the magnitude as two scalar MIR
+  limbs and retain round/sticky/parity bits before one nearest-even rounding
+  at the destination precision. A zero high limb selects the ordinary u64
+  conversion; a nonzero high limb scales the rounded significand by an exact
+  power of two. Suppress the modulo-64 cross shift when CLZ(high) is zero.
+  Signed results restore the floating sign only after forming the magnitude.
+  The registered fixture constructs expected IEEE images in integer code,
+  checks even/odd ties and significand carries across the limb boundary, and
+  requires all desktop AArch64 targets and allocator/frontend combinations.
 
 ## Incoming argument reads
 
