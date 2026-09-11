@@ -2651,7 +2651,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
                     IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_SIMD:
-        wasm64_fail(context, WASM64_ERROR_SIMD, wasm64_s8("SIMD operations are unsupported by Wasm64"), emitter->function, block, instruction,
+        wasm64_fail(context, WASM64_ERROR_SIMD, wasm64_s8("exact SIMD intrinsics are unsupported by Wasm64; select an explicit source fallback"), emitter->function, block, instruction,
                     IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_INLINE_ASSEMBLY:

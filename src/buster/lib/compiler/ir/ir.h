@@ -315,6 +315,16 @@ typedef enum IrBinaryOperation
     IR_BINARY_COUNT,
 } IrBinaryOperation;
 
+// Dedicated vector arithmetic is lane-wise and legalizable. Exact intrinsics
+// retain their target, width, masked-memory and lane-selection semantics.
+// See docs/ir-vector-semantics.md for the complete opcode and predicate contract.
+typedef enum IrVectorSemantics
+{
+    IR_VECTOR_SEMANTICS_NONE,
+    IR_VECTOR_SEMANTICS_GENERIC,
+    IR_VECTOR_SEMANTICS_EXACT_X86_512,
+} IrVectorSemantics;
+
 // The target-fixed 512-bit byte vocabulary.  These are not portable vector
 // operations and deliberately do not grow into one: each entry names a single
 // AVX-512 instruction that the canonical backend emits directly, and code that
@@ -345,18 +355,24 @@ typedef enum IrSimdOperation
     IR_SIMD_COUNT,
 } IrSimdOperation;
 
-// The fixed operand/immediate arity of one SIMD operation. Every consumer —
-// the frontend that builds the instruction, the validator, and the backend
-// read the arity from here so a new operation
-// cannot be half-taught to the pipeline.
+// Fixed arity, semantic class, and C-integer/internal-predicate boundaries.
+// Frontend result typing, validation and backend selection share this row;
+// adding an operation requires the complete contract, not only its arity.
 typedef struct IrSimdShape IrSimdShape;
 struct IrSimdShape
 {
     u8 operand_count;
     u8 immediate_count;
     bool has_result;
+    u8 semantic_class; // IrVectorSemantics
+    // C operands/results remain integer masks. These fields identify the
+    // explicit integer <-> internal predicate<N> boundaries for lowering.
+    u8 predicate_operand_mask;
+    u8 predicate_lane_count;
+    bool predicate_result;
     u8 reserved[1];
 };
+BUSTER_CT_CHECK(sizeof(IrSimdShape) == 8);
 
 typedef struct IrValue IrValue;
 typedef struct IrLabelProvenancePath IrLabelProvenancePath;
@@ -909,7 +925,9 @@ BUSTER_F_DECL void ir_label_provenance_load(Arena* arena, IrFunction* function, 
 BUSTER_F_DECL bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrValueId value);
 BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFunction* function, IrValueId value);
 BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* function, IrBlockParameter* parameter);
+BUSTER_F_DECL IrVectorSemantics ir_vector_operation_semantics(IrOpcode opcode, u32 operation);
 BUSTER_F_DECL IrSimdShape ir_simd_operation_shape(IrSimdOperation operation);
+BUSTER_F_DECL bool ir_simd_operation_supported(Target target, IrSimdOperation operation);
 BUSTER_F_DECL String8 ir_simd_operation_name(IrSimdOperation operation);
 BUSTER_F_DECL u32 ir_inline_assembly_label_operand_base(IrInstruction* instruction);
 BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrFunction* function, IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out);

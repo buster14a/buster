@@ -9,6 +9,8 @@
 // ABI classification the frontend and codegen both consume
 // (ir_abi_unqualified_type, ir_system_v_abi_classes,
 // ir_homogeneous_float_abi, ir_classify_abi_value, ir_abi_context_value),
+// vector semantic classes and exact target/predicate contracts
+// (ir_vector_operation_semantics, ir_simd_operation_shape/supported),
 // the shared local-promotion pass (ir_prepare_canonical_module, in
 // ir_promote.c), and the module validator
 // (ir_validate_canonical_module) that every producer runs before machine
@@ -567,45 +569,69 @@ BUSTER_GLOBAL_LOCAL u32 ir_canonical_inline_assembly_type_class(IrType* type)
     return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
 }
 
+IrVectorSemantics ir_vector_operation_semantics(IrOpcode opcode, u32 operation)
+{
+    IrVectorSemantics result = IR_VECTOR_SEMANTICS_NONE;
+    if ((opcode == IR_OPCODE_UNARY && operation >= IR_UNARY_VECTOR_INTEGER_NEGATE && operation <= IR_UNARY_VECTOR_INTEGER_BITWISE_NOT) ||
+        (opcode == IR_OPCODE_BINARY && operation >= IR_BINARY_VECTOR_INTEGER_ADD && operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL))
+    {
+        result = IR_VECTOR_SEMANTICS_GENERIC;
+    }
+    else if (opcode == IR_OPCODE_SIMD && operation < IR_SIMD_COUNT)
+    {
+        result = IR_VECTOR_SEMANTICS_EXACT_X86_512;
+    }
+    return result;
+}
+
 IrSimdShape ir_simd_operation_shape(IrSimdOperation operation)
 {
-    switch (operation)
+    static IrSimdShape const shapes[IR_SIMD_COUNT] = {
+        [IR_SIMD_LOAD] = {.operand_count = 1, .has_result = true},
+        [IR_SIMD_LOAD_MASKED] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 2, .predicate_lane_count = 64},
+        [IR_SIMD_STORE] = {.operand_count = 2},
+        [IR_SIMD_STORE_MASKED] = {.operand_count = 3, .predicate_operand_mask = 2, .predicate_lane_count = 64},
+        [IR_SIMD_SPLAT_BYTE] = {.operand_count = 1, .has_result = true},
+        [IR_SIMD_COMPARE_EQUAL_BYTE] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_COMPARE_LESS_BYTE] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_SIGN_MASK_BYTE] = {.operand_count = 1, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_TEST_MASK_BYTE] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_PERMUTE2_BYTE] = {.operand_count = 4, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
+        [IR_SIMD_COMPRESS_BYTE] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
+        [IR_SIMD_COMPRESS_STORE_BYTE] = {.operand_count = 3, .predicate_operand_mask = 2, .predicate_lane_count = 64},
+        [IR_SIMD_WIDEN_BYTE_TO_WORD] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
+        [IR_SIMD_SHIFT_LEFT_WORD] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
+        [IR_SIMD_TERNARY_WORD] = {.operand_count = 3, .immediate_count = 1, .has_result = true},
+        [IR_SIMD_COMPARE_EQUAL_WORD] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
+        [IR_SIMD_SPLAT_WORD] = {.operand_count = 1, .has_result = true},
+        [IR_SIMD_COMPARE_LESS_WORD] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
+        [IR_SIMD_COMPRESS_WORD] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 16},
+    };
+    IrSimdShape result = {0};
+    if ((u32)operation < IR_SIMD_COUNT)
     {
-    case IR_SIMD_LOAD:
-        return (IrSimdShape){.operand_count = 1, .has_result = true};
-    case IR_SIMD_LOAD_MASKED:
-        return (IrSimdShape){.operand_count = 2, .has_result = true};
-    case IR_SIMD_STORE:
-        return (IrSimdShape){.operand_count = 2};
-    case IR_SIMD_STORE_MASKED:
-        return (IrSimdShape){.operand_count = 3};
-    case IR_SIMD_SPLAT_BYTE:
-    case IR_SIMD_SPLAT_WORD:
-        return (IrSimdShape){.operand_count = 1, .has_result = true};
-    case IR_SIMD_COMPARE_EQUAL_BYTE:
-    case IR_SIMD_COMPARE_LESS_BYTE:
-    case IR_SIMD_TEST_MASK_BYTE:
-    case IR_SIMD_COMPARE_EQUAL_WORD:
-    case IR_SIMD_COMPARE_LESS_WORD:
-        return (IrSimdShape){.operand_count = 2, .has_result = true};
-    case IR_SIMD_SIGN_MASK_BYTE:
-        return (IrSimdShape){.operand_count = 1, .has_result = true};
-    case IR_SIMD_PERMUTE2_BYTE:
-        return (IrSimdShape){.operand_count = 4, .has_result = true};
-    case IR_SIMD_COMPRESS_BYTE:
-    case IR_SIMD_COMPRESS_WORD:
-        return (IrSimdShape){.operand_count = 2, .has_result = true};
-    case IR_SIMD_COMPRESS_STORE_BYTE:
-        return (IrSimdShape){.operand_count = 3};
-    case IR_SIMD_WIDEN_BYTE_TO_WORD:
-    case IR_SIMD_SHIFT_LEFT_WORD:
-        return (IrSimdShape){.operand_count = 1, .immediate_count = 1, .has_result = true};
-    case IR_SIMD_TERNARY_WORD:
-        return (IrSimdShape){.operand_count = 3, .immediate_count = 1, .has_result = true};
-    case IR_SIMD_COUNT:
-        break;
+        result = shapes[operation];
+        result.semantic_class = (u8)ir_vector_operation_semantics(IR_OPCODE_SIMD, (u32)operation);
     }
-    return (IrSimdShape){0};
+    return result;
+}
+
+bool ir_simd_operation_supported(Target target, IrSimdOperation operation)
+{
+    // F/BW are also needed for the vocabulary's 64-byte frame transfers.
+    // Additional features constrain the exact byte permute/compress forms.
+    bool result = ir_vector_operation_semantics(IR_OPCODE_SIMD, (u32)operation) == IR_VECTOR_SEMANTICS_EXACT_X86_512 &&
+                  target.cpu_arch == CPU_ARCH_X86_64 && target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F) &&
+                  target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW);
+    if (result && operation == IR_SIMD_PERMUTE2_BYTE)
+    {
+        result = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI);
+    }
+    else if (result && (operation == IR_SIMD_COMPRESS_BYTE || operation == IR_SIMD_COMPRESS_STORE_BYTE))
+    {
+        result = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI2);
+    }
+    return result;
 }
 
 String8 ir_simd_operation_name(IrSimdOperation operation)
@@ -751,75 +777,85 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_simd_valid(IrProgram* program, IrFunction*
 {
     IrSimdOperation operation = (IrSimdOperation)instruction->simd_operation;
     IrSimdShape shape = ir_simd_operation_shape(operation);
-    if (operation < IR_SIMD_COUNT && instruction->operand_count == shape.operand_count && instruction->target_count == 0 &&
-        instruction->immediate_count == shape.immediate_count && shape.has_result == (instruction->result.value != IR_ID_UNDERLYING_INVALID))
+    // Four is the widest shape (vpermt2b's mask plus three vectors).
+    IrTypeId operands[4] = {0};
+    IrTypeId result_type = instruction->canonical_type;
+    IrType* result = ir_type_from_id(&program->types, result_type);
+    bool valid = shape.semantic_class == IR_VECTOR_SEMANTICS_EXACT_X86_512 && instruction->operand_count == shape.operand_count &&
+                 instruction->operand_count <= BUSTER_ARRAY_LENGTH(operands) && instruction->target_count == 0 &&
+                 instruction->immediate_count == shape.immediate_count &&
+                 shape.has_result == (instruction->result.value != IR_ID_UNDERLYING_INVALID) && result &&
+                 (!shape.has_result || (instruction->result.value < function->value_count &&
+                    function->values[instruction->result.value].canonical_type.value == result_type.value)) &&
+                 (!shape.predicate_result || ir_simd_type_is_mask(program, result_type));
+    for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
     {
-        // Four is the widest shape in the table (vpermt2b's mask plus three
-        // vectors); a fifth would have to widen this and every switch arm below.
-        IrTypeId operands[4] = {0};
-        if (instruction->operand_count > BUSTER_ARRAY_LENGTH(operands))
+        IrValueId operand = instruction->operands[operand_index];
+        valid = operand.value < function->value_count && function->values[operand.value].category == IR_VALUE_VALUE;
+        if (valid)
         {
-            return false;
-        }
-        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
-        {
-            IrValueId operand = instruction->operands[operand_index];
-            if (operand.value >= function->value_count || function->values[operand.value].category != IR_VALUE_VALUE)
-            {
-                return false;
-            }
             operands[operand_index] = function->values[operand.value].canonical_type;
+            valid = !(shape.predicate_operand_mask & (1u << operand_index)) || ir_simd_type_is_mask(program, operands[operand_index]);
         }
-        IrTypeId result_type = instruction->canonical_type;
-        IrType* result = ir_type_from_id(&program->types, result_type);
-        if (!result || (shape.has_result && function->values[instruction->result.value].canonical_type.value != result_type.value))
-        {
-            return false;
-        }
+    }
+    if (valid)
+    {
         u64 immediate = instruction->immediate_count ? instruction->immediates[0] : 0;
         switch (operation)
         {
         case IR_SIMD_LOAD:
-            return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+            valid = ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+            break;
         case IR_SIMD_LOAD_MASKED:
-            return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_mask(program, operands[1]) && ir_simd_type_is_vector(program, result_type);
+            valid = ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+            break;
         case IR_SIMD_STORE:
-            return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && result->kind == IR_TYPE_VOID;
+            valid = ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && result->kind == IR_TYPE_VOID;
+            break;
         case IR_SIMD_STORE_MASKED:
         case IR_SIMD_COMPRESS_STORE_BYTE:
-            return ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_mask(program, operands[1]) &&
+            valid = ir_simd_type_is_address(program, operands[0]) &&
                    ir_simd_type_is_vector(program, operands[2]) && result->kind == IR_TYPE_VOID;
+            break;
         case IR_SIMD_SPLAT_BYTE:
-            return ir_simd_type_is_byte(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+            valid = ir_simd_type_is_byte(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+            break;
         case IR_SIMD_SPLAT_WORD:
-            return ir_simd_type_is_word(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+            valid = ir_simd_type_is_word(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+            break;
         case IR_SIMD_COMPARE_EQUAL_BYTE:
         case IR_SIMD_COMPARE_LESS_BYTE:
         case IR_SIMD_TEST_MASK_BYTE:
         case IR_SIMD_COMPARE_EQUAL_WORD:
         case IR_SIMD_COMPARE_LESS_WORD:
-            return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_mask(program, result_type);
+            valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]);
+            break;
         case IR_SIMD_SIGN_MASK_BYTE:
-            return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_mask(program, result_type);
+            valid = ir_simd_type_is_vector(program, operands[0]);
+            break;
         case IR_SIMD_PERMUTE2_BYTE:
-            return ir_simd_type_is_mask(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) &&
+            valid = ir_simd_type_is_vector(program, operands[1]) &&
                    ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, operands[3]) && ir_simd_type_is_vector(program, result_type);
+            break;
         case IR_SIMD_COMPRESS_BYTE:
         case IR_SIMD_COMPRESS_WORD:
-            return ir_simd_type_is_mask(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_vector(program, result_type);
+            valid = ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_vector(program, result_type);
+            break;
         case IR_SIMD_WIDEN_BYTE_TO_WORD:
-            return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 4;
+            valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 4;
+            break;
         case IR_SIMD_SHIFT_LEFT_WORD:
-            return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 32;
+            valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 32;
+            break;
         case IR_SIMD_TERNARY_WORD:
-            return ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) &&
+            valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) &&
                    ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, result_type) && immediate < 256;
+            break;
         case IR_SIMD_COUNT:
             break;
         }
     }
-
-    return false;
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_canonical_inline_assembly_valid(IrProgram* program, IrFunction* function, IrInstruction* instruction)
@@ -5035,8 +5071,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
             instruction->binary_operation == IR_BINARY_INTEGER_EQUAL || instruction->binary_operation == IR_BINARY_INTEGER_NOT_EQUAL ||
             instruction->binary_operation == IR_BINARY_FLOAT_EQUAL || instruction->binary_operation == IR_BINARY_FLOAT_NOT_EQUAL ||
             (instruction->binary_operation >= IR_BINARY_SIGNED_LESS && instruction->binary_operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
-        bool vector_operation =
-            instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_ADD && instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
+        bool vector_operation = ir_vector_operation_semantics(IR_OPCODE_BINARY, instruction->binary_operation) == IR_VECTOR_SEMANTICS_GENERIC;
         bool vector_comparison = instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_EQUAL &&
                                  instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
         bool matching_operands = left && right && left->canonical_type.value == right->canonical_type.value;

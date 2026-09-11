@@ -1913,7 +1913,7 @@ static void ebpf_fe_emit_instruction(EbpfFunctionEmitter* emitter, IrBlock* bloc
                   block, instruction, IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_SIMD:
-        ebpf_fail(context, EBPF_ERROR_SIMD, ebpf_s8("SIMD operations are unsupported by eBPF"), emitter->function, block, instruction,
+        ebpf_fail(context, EBPF_ERROR_SIMD, ebpf_s8("exact SIMD intrinsics are unsupported by eBPF; select an explicit source fallback"), emitter->function, block, instruction,
                   IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_INLINE_ASSEMBLY:

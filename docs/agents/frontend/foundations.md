@@ -113,6 +113,12 @@ request validation again. See [the boundary inventory](../../ir-validation-bound
 
 ## C frontend and canonical IR rules
 
+- [Vector semantics](../../ir-vector-semantics.md) classifies every dedicated
+  vector opcode. Generic lane operations can legalize without changing their
+  semantics; exact SIMD uses a shared feature gate and explicit refusal.
+  `IrSimdShape` owns integer/internal-predicate boundaries, consumed by C
+  result typing and canonical validation. C masks remain integer values.
+
 - `c_parse_binding_bind` publishes a previously unbound enclosing-scope name
   without scanning unrelated undo records. A live undo record implies a valid
   current binding: bind installs the new entity, and unwind removes its record
