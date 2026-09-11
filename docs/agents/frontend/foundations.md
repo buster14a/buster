@@ -78,7 +78,8 @@ Temporary places and read aliases preserve C lvalue/qualifier checks without
 emitting `LOCAL`, `LOAD` or `STORE` rows for promoted owners. Finalization
 resolves aliases and compacts values/operand slices. Its pending-parameter map
 and retained-parameter reachability map have sequential lifetimes and share one
-value-indexed union allocation; clear it before changing the active member.
+value-indexed generic-pointer allocation; clear it before changing the stored
+pointer type.
 `ir_construction.version=2` allocation probes count the sparse-table probes and
 growth work, predecessor and parameter walks, value-pointer scratch, and operand
 remaps without retaining another row stream. Debug-local names, types, IDs,
