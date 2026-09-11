@@ -14519,9 +14519,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_body_frame_storage(UnitTestArgu
         CParserResult syntax = c_parse_ast(temporary.arena, tokens);
         u64 parse_ns = timestamp_ns_between(start, timestamp_take());
         u64 allocated = temporary.arena->position - before;
-        // The two token-indexed arrays are deliberately unchanged. Everything
-        // else published here is one declaration and one assertion per body.
-        u64 published = (tokens.token_count + 1) * (sizeof(CDiagnostic) + sizeof(u32)) +
+        // Clean syntax retains only the token-indexed delimiter stack. The
+        // remaining output is one declaration and one assertion per body.
+        u64 published = (tokens.token_count + 1) * sizeof(u32) +
                         (u64)function_count * (sizeof(CParserDeclaration) + sizeof(CParserStaticAssert));
         if (census)
         {
@@ -14614,6 +14614,99 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_body_frame_storage(UnitTestArgu
     return result;
 }
 
+// GitHub #248: syntax diagnostics are cold arena-owned output. Clean parses
+// must not reserve their token-sized array; malformed input keeps exact rows.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parser_diagnostic_storage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 clean[] = {S8(""), S8("int value;"), S8("int value(void) { return 7; }")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(clean); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, clean[index], (CPreprocessOptions){0});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.diagnostics == 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_capacity == tokens.token_count + 1);
+        CIRLowerResult analysis = c_analyze(temporary.arena, S8("syntax-storage.c"), tokens, syntax, target_native);
+        BUSTER_TEST(arguments, analysis.diagnostic_count == 0);
+        CParserResult empty = c_parse_ast(temporary.arena, (CPreprocessResult){0});
+        BUSTER_TEST(arguments, empty.diagnostics == 0 && empty.diagnostic_count == 0 && empty.diagnostic_capacity == 0);
+        CParserResult no_arena = c_parse_ast(0, tokens);
+        BUSTER_TEST(arguments, no_arena.diagnostics == 0 && no_arena.diagnostic_count == 0 && no_arena.diagnostic_capacity == 0);
+        scratch_end(temporary);
+    }
+
+    // More than one row must keep the first allocation and retain every
+    // diagnostic, including positions after many subsequent arena requests.
+    u32 counts[] = {1, 16, 17, 64, 257};
+    for (u32 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(counts); count_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        u32 count = counts[count_index];
+        String8 source = {.pointer = arena_allocate(temporary.arena, char8, (u64)count * 2 + 2), .length = (u64)count * 2 + 2};
+        for (u32 index = 0; index < count; index += 1)
+        {
+            source.pointer[index * 2] = ")]}"[index % 3];
+            source.pointer[index * 2 + 1] = '\n';
+        }
+        source.pointer[count * 2] = ';';
+        source.pointer[count * 2 + 1] = '\n';
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("syntax-errors.c")});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_count == count);
+        BUSTER_TEST(arguments, syntax.diagnostics != 0);
+        BUSTER_TEST(arguments, syntax.diagnostic_capacity == tokens.token_count + 1);
+        CIRLowerResult analysis = c_analyze(temporary.arena, S8("syntax-errors.c"), tokens, syntax, target_native);
+        BUSTER_TEST(arguments, analysis.diagnostic_count == syntax.diagnostic_count);
+        BUSTER_TEST(arguments, analysis.diagnostics == syntax.diagnostics);
+        char8* later = arena_allocate(temporary.arena, char8, BUSTER_KB(32));
+        memset(later, 0xA5, BUSTER_KB(32));
+        if (syntax.diagnostics && syntax.diagnostic_count == count)
+        {
+            for (u32 index = 0; index < count; index += 1)
+            {
+                CDiagnostic* diagnostic = syntax.diagnostics + index;
+                CSourceLocation expected = c_preprocess_token_location(&tokens, tokens.tokens[index]);
+                BUSTER_TEST(arguments, diagnostic->kind == C_DIAGNOSTIC_UNMATCHED_DELIMITER);
+                BUSTER_STRING_TEST(arguments, diagnostic->message, S8("unmatched closing delimiter"));
+                BUSTER_TEST(arguments, diagnostic->location.line == index + 1 && diagnostic->location.column == 1);
+                BUSTER_TEST(arguments, diagnostic->location.offset == expected.offset && diagnostic->location.file == expected.file &&
+                                       diagnostic->location.map_offset == expected.map_offset);
+            }
+        }
+        scratch_end(temporary);
+    }
+
+    String8 truncated[] = {S8("int unfinished"), S8("int broken(void) {\n")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(truncated); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, truncated[index], (CPreprocessOptions){0});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, syntax.diagnostics != 0 && syntax.diagnostic_count == index + 1);
+        if (syntax.diagnostics && syntax.diagnostic_count == index + 1)
+        {
+            CDiagnostic* last = syntax.diagnostics + index;
+            CSourceLocation eof = c_preprocess_token_location(&tokens, tokens.tokens[tokens.token_count - 1]);
+            BUSTER_TEST(arguments, last->kind == C_DIAGNOSTIC_EXPECTED_DECLARATION);
+            BUSTER_STRING_TEST(arguments, last->message, S8("expected ';' or a function body after declaration"));
+            BUSTER_TEST(arguments, last->location.line == eof.line && last->location.column == eof.column &&
+                                   last->location.offset == eof.offset && last->location.file == eof.file && last->location.map_offset == eof.map_offset);
+            if (index)
+            {
+                BUSTER_TEST(arguments, syntax.diagnostics[0].kind == C_DIAGNOSTIC_UNMATCHED_DELIMITER);
+                BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].message, S8("unterminated function body"));
+                BUSTER_TEST(arguments, syntax.diagnostics[0].location.line == 1 && syntax.diagnostics[0].location.column == 18);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_spelling_consistency(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -14770,6 +14863,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     c_test_result_add(&result, c_test_parser_body_frame_storage(arguments));
+    c_test_result_add(&result, c_test_parser_diagnostic_storage(arguments));
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
     c_test_result_add(&result, c_test_lexer_rewind_zeroed(arguments));
     c_test_result_add(&result, c_test_scope_interval_index(arguments));

@@ -5022,6 +5022,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             }
             link_write_u32(bytes, output_offset, patched);
         }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+        {
+            u32 patched = 0;
+            if (section->alignment < 4 ||
+                !object_aarch64_elf_page_relocate(relocation->kind, link_read_u32(section->data.pointer, relocation->offset),
+                                                place_address, symbol_address, relocation->addend, &patched))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, patched);
+        }
         else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
         {
             s64 value = 0;
@@ -5178,26 +5190,46 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         return result;
     }
     ObjectRelocation* converted_relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count);
+    u32 converted_count = 0;
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
-        converted_relocations[index] = object->relocations[index];
-        if (converted_relocations[index].kind == OBJECT_RELOCATION_AARCH64_CALL26 ||
-            converted_relocations[index].kind == OBJECT_RELOCATION_AARCH64_JUMP26)
+        ObjectRelocation relocation = object->relocations[index];
+        if (relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
         {
-            converted_relocations[index].kind = OBJECT_RELOCATION_X86_64_PC32;
+            // The layout staging writer cannot patch an A64 page field. Do
+            // not impose an unrelated x86 rel32/absolute32 range on it; the
+            // overlay below applies the original relocation after layout.
+            if (relocation.section >= OBJECT_SECTION_COUNT || relocation.symbol >= object->symbol_count)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            ObjectSection* section = object->sections + relocation.section;
+            if (section->alignment < 4 || (relocation.offset & 3) || relocation.offset > section->data.length ||
+                4 > section->data.length - relocation.offset)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
         }
-        else if (converted_relocations[index].kind == OBJECT_RELOCATION_AARCH64_PREL32)
+        else
         {
-            converted_relocations[index].kind = OBJECT_RELOCATION_X86_64_PC32;
-        }
-        else if (converted_relocations[index].kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ||
-                 converted_relocations[index].kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12)
-        {
-            converted_relocations[index].kind = OBJECT_RELOCATION_X86_64_TPOFF32;
+            if (relocation.kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation.kind == OBJECT_RELOCATION_AARCH64_JUMP26 ||
+                relocation.kind == OBJECT_RELOCATION_AARCH64_PREL32)
+            {
+                relocation.kind = OBJECT_RELOCATION_X86_64_PC32;
+            }
+            else if (relocation.kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ||
+                     relocation.kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12)
+            {
+                relocation.kind = OBJECT_RELOCATION_X86_64_TPOFF32;
+            }
+            converted_relocations[converted_count++] = relocation;
         }
     }
     ObjectFile converted = *object;
     converted.relocations = converted_relocations;
+    converted.relocation_count = converted_count;
     NativeExecutableLinkOptions staging_options = options;
     staging_options.output_path = (String8){0};
     // The staging link is handed the object with its initializer arrays still
@@ -5244,6 +5276,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     u64 dynamic_program_header = ELF_HEADER_SIZE + 4 * ELF_PROGRAM_HEADER_SIZE;
     u64 dynamic_offset = link_read_u64(bytes, dynamic_program_header + 8);
     u64 relocation_offset = 0;
+    u64 dynamic_symbol_offset = 0;
     u64 copy_relocation_offset = 0;
     u64 copy_relocation_size = 0;
     // Walked to its DT_NULL terminator, over the extent PT_DYNAMIC states,
@@ -5271,6 +5304,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         {
             u64 address = link_read_u64(bytes, entry + 8);
             relocation_offset = address - image_base;
+        }
+        else if (tag == 6)
+        {
+            u64 address = link_read_u64(bytes, entry + 8);
+            dynamic_symbol_offset = address - image_base;
         }
         else if (tag == 7)
         {
@@ -5385,10 +5423,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         ObjectRelocation* relocation = &object->relocations[index];
         if (relocation->kind != OBJECT_RELOCATION_AARCH64_CALL26 && relocation->kind != OBJECT_RELOCATION_AARCH64_JUMP26 &&
             relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 &&
-            relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12)
+            relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 &&
+            relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_PAGE21 && relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
         {
             continue;
         }
+        bool page_relocation = relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 ||
+                               relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12;
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
         if (relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12)
@@ -5425,9 +5466,21 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             // decided that, exactly as in the x86-64 writer.
             symbol_address = 0;
         }
+        else if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_DATA && page_relocation)
+        {
+            // The staging writer already assigned copy slots, including
+            // aliases. Their dynamic symbols carry the authoritative address.
+            u64 value_offset = dynamic_symbol_offset + ((u64)import_indices[relocation->symbol] + 1) * ELF_SYMBOL_SIZE + 8;
+            if (!dynamic_symbol_offset || value_offset > result.executable.length || 8 > result.executable.length - value_offset)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            symbol_address = link_read_u64(bytes, value_offset);
+        }
         else if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
-            if (relocation->addend)
+            if (relocation->addend && !page_relocation)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;
@@ -5464,8 +5517,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         s64 displacement = 0;
         u32 instruction = link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset);
         u32 patched = 0;
-        if ((place_address & 3) || !link_address_difference(symbol_address, place_address, relocation->addend, &displacement) ||
-            !link_aarch64_branch_relocate(relocation->kind, instruction, displacement, &patched))
+        bool relocated = page_relocation
+                             ? object_aarch64_elf_page_relocate(relocation->kind, instruction, place_address, symbol_address, relocation->addend, &patched)
+                             : !(place_address & 3) && link_address_difference(symbol_address, place_address, relocation->addend, &displacement) &&
+                               link_aarch64_branch_relocate(relocation->kind, instruction, displacement, &patched);
+        if (!relocated)
         {
             result.error = LINK_ERROR_RELOCATION;
             return result;

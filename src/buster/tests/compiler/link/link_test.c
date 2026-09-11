@@ -3830,6 +3830,62 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_text_header && link_read_u32(aarch64_executable.executable.pointer, aarch64_text_header + 4) == 1);
     BUSTER_TEST(arguments, aarch64_bss_header && link_read_u32(aarch64_executable.executable.pointer, aarch64_bss_header + 4) == 8);
     BUSTER_TEST(arguments, aarch64_debug_info_header && link_read_u64(aarch64_executable.executable.pointer, aarch64_debug_info_header + 32) == 0);
+    // The address oracle derives the result from ELF section addresses,
+    // independently of the relocation input. Text targets precede the pair;
+    // read-only targets follow it, covering both signs of the page delta.
+    s64 page_addends[] = {-1, 0, 1, 4095, 4096};
+    for (u32 data_section = 0; data_section < 2; data_section += 1)
+    {
+        for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(page_addends); addend_index += 1)
+        {
+            u32 page_text[1028] = {0};
+            page_text[1024] = UINT32_C(0x90000008);
+            page_text[1025] = UINT32_C(0x91000108);
+            page_text[1026] = UINT32_C(0x52800000);
+            page_text[1027] = UINT32_C(0xd65f03c0);
+            u8 page_data[8192] = {0};
+            ObjectSymbol page_symbols[] = {
+                {.name = S8("main"), .value = 4096, .size = 16, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+                {.name = S8("page_data"), .value = 1, .size = 1, .section = data_section, .kind = OBJECT_SYMBOL_DATA},
+            };
+            ObjectRelocation page_relocations[] = {
+                {.offset = 4096, .section = OBJECT_SECTION_TEXT, .symbol = 1, .addend = page_addends[addend_index], .kind = OBJECT_RELOCATION_AARCH64_ELF_PAGE21},
+                {.offset = 4100, .section = OBJECT_SECTION_TEXT, .symbol = 1, .addend = page_addends[addend_index], .kind = OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12},
+            };
+            ObjectFile page_object = link_test_object_make(arguments->arena, aarch64_target,
+                (ByteSlice){.pointer = (u8*)page_text, .length = sizeof(page_text)}, page_symbols, 2, page_relocations, 2);
+            page_object.sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(page_data);
+            NativeExecutableLinkResult page_linked = link_native_executable(arguments->arena, &page_object,
+                                                                       (NativeExecutableLinkOptions){.entry_symbol = S8("main")});
+            u64 text_header = 0;
+            u64 data_header = 0;
+            bool valid = page_linked.error == LINK_ERROR_NONE &&
+                         link_test_elf_section_find(page_linked.executable, S8(".text"), 0, &text_header) &&
+                         link_test_elf_section_find(page_linked.executable, data_section ? S8(".rodata") : S8(".text"), 0, &data_header);
+            BUSTER_TEST(arguments, valid);
+            if (valid)
+            {
+                u64 text_address = link_read_u64(page_linked.executable.pointer, text_header + 16);
+                u64 text_offset = link_read_u64(page_linked.executable.pointer, text_header + 24);
+                u64 expected = link_read_u64(page_linked.executable.pointer, data_header + 16) + 1 + (u64)page_addends[addend_index];
+                A64MCInst page = {0};
+                u32 low = 0;
+                BUSTER_TEST(arguments, a64_mc_decode(link_read_u32(page_linked.executable.pointer, text_offset + 4096), &page) && page.opcode == A64_OPCODE_ADRP);
+                BUSTER_TEST(arguments, a64_add_lo12_read(link_read_u32(page_linked.executable.pointer, text_offset + 4100), &low));
+                u64 actual = ((text_address + 4096) & ~UINT64_C(0xfff)) + (u64)page.operands[1].value + low;
+                BUSTER_TEST(arguments, actual == expected);
+            }
+            u32 saved_word = page_text[1025];
+            page_text[1025] = UINT32_C(0x91400108);
+            BUSTER_TEST(arguments, link_native_executable(arguments->arena, &page_object,
+                (NativeExecutableLinkOptions){.entry_symbol = S8("main")}).error == LINK_ERROR_RELOCATION);
+            page_text[1025] = saved_word;
+            page_relocations[0].offset += 1;
+            BUSTER_TEST(arguments, link_native_executable(arguments->arena, &page_object,
+                (NativeExecutableLinkOptions){.entry_symbol = S8("main")}).error == LINK_ERROR_RELOCATION);
+        }
+    }
+
     u32 aarch64_jump_instructions[] = {
         0x14000000, 0xd4200000, 0x52800000, 0xd65f03c0,
     };
@@ -4238,6 +4294,42 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments,
                 link_test_elf_dynamic_symbol(aarch64_copy_executable.executable, S8("tzname"), &aarch64_copy_tzname, &aarch64_copy_tzname_size, 0));
     BUSTER_TEST(arguments, aarch64_copy_tzname && aarch64_copy_tzname != aarch64_copy_environ && aarch64_copy_tzname_size == 16);
+    // ADRP/ADD references to imported data must use the staging writer's
+    // copy slot (including aliases), never the function PLT thunk.
+    for (u32 import_symbol = 1; import_symbol < BUSTER_ARRAY_LENGTH(aarch64_copy_symbols); import_symbol += 1)
+    {
+        u32 page_words[] = {UINT32_C(0x52800000), UINT32_C(0xd65f03c0), UINT32_C(0x90000017), UINT32_C(0x910002f7)};
+        ObjectRelocation page_relocations[] = {
+            {.offset = 8, .section = OBJECT_SECTION_TEXT, .symbol = import_symbol, .addend = 1, .kind = OBJECT_RELOCATION_AARCH64_ELF_PAGE21},
+            {.offset = 12, .section = OBJECT_SECTION_TEXT, .symbol = import_symbol, .addend = 1, .kind = OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12},
+        };
+        ObjectFile page_object = link_test_object_make(arguments->arena, aarch64_target,
+            (ByteSlice){.pointer = (u8*)page_words, .length = sizeof(page_words)}, aarch64_copy_symbols,
+            BUSTER_ARRAY_LENGTH(aarch64_copy_symbols), page_relocations, 2);
+        NativeExecutableLinkResult page_linked = link_native_executable(arguments->arena, &page_object,
+            (NativeExecutableLinkOptions){.entry_symbol = S8("main"), .runtime_data_symbols = copy_alias_exports,
+                                          .runtime_data_symbol_count = BUSTER_ARRAY_LENGTH(copy_alias_exports)});
+        u64 text_header = 0;
+        u64 copy_address = 0;
+        bool valid = page_linked.error == LINK_ERROR_NONE && link_test_elf_section_find(page_linked.executable, S8(".text"), 0, &text_header) &&
+                     link_test_elf_dynamic_symbol(page_linked.executable, aarch64_copy_symbols[import_symbol].name, &copy_address, 0, 0);
+        BUSTER_TEST(arguments, valid);
+        if (valid)
+        {
+            u64 text_offset = link_read_u64(page_linked.executable.pointer, text_header + 24);
+            u64 text_address = link_read_u64(page_linked.executable.pointer, text_header + 16);
+            A64MCInst page = {0};
+            u32 low = 0;
+            BUSTER_TEST(arguments, a64_mc_decode(link_read_u32(page_linked.executable.pointer, text_offset + 8), &page) && page.opcode == A64_OPCODE_ADRP);
+            BUSTER_TEST(arguments, a64_add_lo12_read(link_read_u32(page_linked.executable.pointer, text_offset + 12), &low));
+            BUSTER_TEST(arguments, ((text_address + 8) & ~UINT64_C(0xfff)) + (u64)page.operands[1].value + low == copy_address + 1);
+        }
+        page_words[2] = UINT32_C(0xd503201f);
+        BUSTER_TEST(arguments, link_native_executable(arguments->arena, &page_object,
+            (NativeExecutableLinkOptions){.entry_symbol = S8("main"), .runtime_data_symbols = copy_alias_exports,
+                .runtime_data_symbol_count = BUSTER_ARRAY_LENGTH(copy_alias_exports)}).error == LINK_ERROR_RELOCATION);
+    }
+
     // The same object without an export table: the driver could not read the
     // library, so each import keeps a pointer-sized slot of its own -- three
     // slots, three copy relocations, still the AArch64 type.

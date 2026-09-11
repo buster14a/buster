@@ -52,6 +52,12 @@ keep current.
 
 ## Audits, newest first
 
+- [`2026-09-10T191815Z`](docs/performance-audits/2026-09-10T191815Z.md) — Integrate lazy syntax diagnostics with integer validation and retained iOS evidence
+- [`2026-09-10T011438Z`](docs/performance-audits/2026-09-10T011438Z.md) — Z01 compiler census and first-error syntax storage (#128, #248)
+- [`2026-09-10T184045Z`](docs/performance-audits/2026-09-10T184045Z.md) — Local aggregate-copy completion for the wider metamorphic campaign (#366)
+- [`2026-09-10T180045Z`](docs/performance-audits/2026-09-10T180045Z.md) — SysV unnamed-bitfield interoperability with unchanged default classification (#66, #391)
+- [`2026-09-10T164337Z`](docs/performance-audits/2026-09-10T164337Z.md) — Import ordinary AArch64 ELF page addresses (#355)
+- [`2026-09-09T174124Z`](docs/performance-audits/2026-09-09T174124Z.md) — Lower Win64 indirect aggregate arguments through MIR (#36)
 - [`2026-09-10T010143Z`](docs/performance-audits/2026-09-10T010143Z.md) — Z15: reuse the prepared fixed-width switch MOVABS plan
 - [`2026-09-10T013314Z`](docs/performance-audits/2026-09-10T013314Z.md) — Z12 sparse owner membership: paired pilot and unity census, no proven speedup
 - [`2026-09-10T010755Z`](docs/performance-audits/2026-09-10T010755Z.md) — isel: reuse AArch64 direct-call facts in the operand walk (#132)
