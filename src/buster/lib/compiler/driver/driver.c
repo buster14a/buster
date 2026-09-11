@@ -1204,6 +1204,19 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.verify_codegen = true;
             continue;
         }
+        if (string_starts_with_sequence(argument, S8("-fsysv-unnamed-bitfields=")))
+        {
+            value = compiler_driver_option_value(argument, S8("-fsysv-unnamed-bitfields="));
+            if (!string_equal(value, S8("integer")) && !string_equal(value, S8("padding")))
+            {
+                invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                invocation.diagnostic = S8("-fsysv-unnamed-bitfields requires integer or padding");
+                break;
+            }
+            invocation.sysv_unnamed_bitfields_integer = string_equal(value, S8("integer"));
+            invocation.sysv_bitfield_abi_explicit = true;
+            continue;
+        }
         value = compiler_driver_option_value(argument, S8("-fbootstrap-trace="));
         if (value.length)
         {
@@ -1470,6 +1483,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     {
         invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         invocation.diagnostic = S8("-fverify-codegen requires native x86-64 or AArch64 code generation");
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.sysv_bitfield_abi_explicit &&
+        (invocation.has_gpu_target || invocation.emit_llvm_bitcode || invocation.target.cpu_arch != CPU_ARCH_X86_64 ||
+         ir_abi_convention_for_target(invocation.target) != IR_ABI_CONVENTION_SYSTEMV_X86_64))
+    {
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("-fsysv-unnamed-bitfields requires native System V x86-64 code generation");
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.reject_machine_fallback &&
         (invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
@@ -3308,7 +3328,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
         CIRLowerResult semantic = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
-                                                       (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa});
+                                                       (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
+                                                                         .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer});
         result.analysis_diagnostic_count = semantic.diagnostic_count;
         if (semantic.diagnostic_count || !semantic.program)
         {
@@ -3326,7 +3347,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         goto end;
     }
     CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
-                                                  (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa});
+                                                  (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
+                                                                    .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     if (!lowered.program || lowered.diagnostic_count)
@@ -4138,6 +4160,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.local_promotion.instructions_after += unit.local_promotion.instructions_after;
         result.local_promotion.values_before += unit.local_promotion.values_before;
         result.local_promotion.values_after += unit.local_promotion.values_after;
+        result.local_promotion.parameter_sweeps += unit.local_promotion.parameter_sweeps;
+        result.local_promotion.parameter_block_visits += unit.local_promotion.parameter_block_visits;
+        result.local_promotion.parameter_visits += unit.local_promotion.parameter_visits;
+        result.local_promotion.parameter_incoming_visits += unit.local_promotion.parameter_incoming_visits;
         codegen_statistics_add(&result.codegen_statistics, &unit.codegen_statistics);
         if (unit.error != COMPILER_DRIVER_ERROR_NONE)
         {

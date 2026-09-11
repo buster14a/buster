@@ -33,17 +33,23 @@
 // fallback does use ordinary functions, because there the call is already the
 // cheapest thing about it.
 
-// The feature set the vocabulary needs: F and BW for the 512-bit byte lanes
-// and their mask compares, VBMI for vpermt2b, VBMI2 for vpcompressb. `ide cc`
-// predefines these from its own target, so this one condition decides the same
-// way for every compiler that builds this tree.
-#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_COMPILER_MSVC && defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VBMI__) && defined(__AVX512VBMI2__)
+// Translation only needs F/BW loads, stores, byte splats and equality masks.
+// Preserve that existing host tier without enabling VBMI/VBMI2 consumers on
+// it. The full-vocabulary flag stays unchanged; `ide cc` defines the feature
+// macros from its selected target, not from the machine running the compiler.
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_COMPILER_MSVC && defined(__AVX512F__) && defined(__AVX512BW__)
+#define BUSTER_SIMD_512_BASE 1
+#else
+#define BUSTER_SIMD_512_BASE 0
+#endif
+
+#if BUSTER_SIMD_512_BASE && defined(__AVX512VBMI__) && defined(__AVX512VBMI2__)
 #define BUSTER_SIMD_512 1
 #else
 #define BUSTER_SIMD_512 0
 #endif
 
-#if BUSTER_SIMD_512 && !defined(__BUSTER__)
+#if BUSTER_SIMD_512_BASE && !defined(__BUSTER__)
 #include <immintrin.h>
 #endif
 
@@ -56,7 +62,7 @@
 // a single kmovq at exactly those boundaries.
 typedef u64 Mask64;
 
-#if BUSTER_SIMD_512
+#if BUSTER_SIMD_512_BASE
 typedef u8 Simd512 __attribute__((vector_size(64)));
 #else
 // Deliberately not over-aligned: the fallback only ever reads and writes
@@ -252,14 +258,27 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 
 #endif
 
-#if BUSTER_SIMD_512 && defined(__BUSTER__)
-
+#if BUSTER_SIMD_512_BASE && defined(__BUSTER__)
 #define simd512_load(address) __builtin_buster_simd_load(address)
-#define simd512_load_masked(address, mask) __builtin_buster_simd_load_masked((address), (mask))
 #define simd512_store(address, value) __builtin_buster_simd_store((address), (value))
-#define simd512_store_masked(address, mask, value) __builtin_buster_simd_store_masked((address), (mask), (value))
 #define simd512_splat(byte) __builtin_buster_simd_splat_byte(byte)
 #define simd512_equal_byte(left, right) __builtin_buster_simd_equal_byte((left), (right))
+#elif BUSTER_SIMD_512_BASE
+#define simd512_load(address) ((Simd512)_mm512_loadu_si512(address))
+#define simd512_store(address, value) _mm512_storeu_si512((address), (__m512i)(value))
+#define simd512_splat(byte) ((Simd512)_mm512_set1_epi8((char)(byte)))
+#define simd512_equal_byte(left, right) ((Mask64)_mm512_cmpeq_epi8_mask((__m512i)(left), (__m512i)(right)))
+#else
+#define simd512_load(address) simd512_load_fallback(address)
+#define simd512_store(address, value) simd512_store_fallback((address), (value))
+#define simd512_splat(byte) simd512_splat_fallback(byte)
+#define simd512_equal_byte(left, right) simd512_equal_byte_fallback((left), (right))
+#endif
+
+#if BUSTER_SIMD_512 && defined(__BUSTER__)
+
+#define simd512_load_masked(address, mask) __builtin_buster_simd_load_masked((address), (mask))
+#define simd512_store_masked(address, mask, value) __builtin_buster_simd_store_masked((address), (mask), (value))
 #define simd512_less_byte(left, right) __builtin_buster_simd_less_byte((left), (right))
 #define simd512_sign_byte(value) __builtin_buster_simd_sign_byte(value)
 #define simd512_test_byte(left, right) __builtin_buster_simd_test_byte((left), (right))
@@ -276,12 +295,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 
 #elif BUSTER_SIMD_512
 
-#define simd512_load(address) ((Simd512)_mm512_loadu_si512(address))
 #define simd512_load_masked(address, mask) ((Simd512)_mm512_maskz_loadu_epi8((__mmask64)(mask), (address)))
-#define simd512_store(address, value) _mm512_storeu_si512((address), (__m512i)(value))
 #define simd512_store_masked(address, mask, value) _mm512_mask_storeu_epi8((address), (__mmask64)(mask), (__m512i)(value))
-#define simd512_splat(byte) ((Simd512)_mm512_set1_epi8((char)(byte)))
-#define simd512_equal_byte(left, right) ((Mask64)_mm512_cmpeq_epi8_mask((__m512i)(left), (__m512i)(right)))
 #define simd512_less_byte(left, right) ((Mask64)_mm512_cmplt_epu8_mask((__m512i)(left), (__m512i)(right)))
 #define simd512_sign_byte(value) ((Mask64)_mm512_movepi8_mask((__m512i)(value)))
 #define simd512_test_byte(left, right) ((Mask64)_mm512_test_epi8_mask((__m512i)(left), (__m512i)(right)))
@@ -300,12 +315,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 
 #else
 
-#define simd512_load(address) simd512_load_fallback(address)
 #define simd512_load_masked(address, mask) simd512_load_masked_fallback((address), (mask))
-#define simd512_store(address, value) simd512_store_fallback((address), (value))
 #define simd512_store_masked(address, mask, value) simd512_store_masked_fallback((address), (mask), (value))
-#define simd512_splat(byte) simd512_splat_fallback(byte)
-#define simd512_equal_byte(left, right) simd512_equal_byte_fallback((left), (right))
 #define simd512_less_byte(left, right) simd512_less_byte_fallback((left), (right))
 #define simd512_sign_byte(value) simd512_sign_byte_fallback(value)
 #define simd512_test_byte(left, right) simd512_test_byte_fallback((left), (right))
@@ -320,12 +331,17 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_less_word(left, right) simd512_less_word_fallback((left), (right))
 #define simd512_compress_word(mask, value) simd512_compress_word_fallback((mask), (value))
 
+// Only private lvalues are passed here. Character access preserves the
+// representation of both the scalar struct and the F/BW-only vector; no
+// unsupported instruction is required by the remaining fallback operations.
+#define BUSTER_SIMD_FALLBACK_BYTES(value) ((u8*)&(value))
+
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_splat_fallback(u8 value)
 {
     Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        result.bytes[lane] = value;
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane] = value;
     }
     return result;
 }
@@ -336,7 +352,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_load_fallback(void const*
     u8 const* source = (u8 const*)address;
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        result.bytes[lane] = source[lane];
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane] = source[lane];
     }
     return result;
 }
@@ -347,7 +363,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_load_masked_fallback(void
     u8 const* source = (u8 const*)address;
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        result.bytes[lane] = (mask >> lane) & 1 ? source[lane] : 0;
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane] = (mask >> lane) & 1 ? source[lane] : 0;
     }
     return result;
 }
@@ -357,7 +373,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL void simd512_store_fallback(void* address
     u8* destination = (u8*)address;
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        destination[lane] = value.bytes[lane];
+        destination[lane] = BUSTER_SIMD_FALLBACK_BYTES(value)[lane];
     }
 }
 
@@ -368,7 +384,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL void simd512_store_masked_fallback(void* 
     {
         if ((mask >> lane) & 1)
         {
-            destination[lane] = value.bytes[lane];
+            destination[lane] = BUSTER_SIMD_FALLBACK_BYTES(value)[lane];
         }
     }
 }
@@ -378,7 +394,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_equal_byte_fallback(Simd51
     Mask64 result = 0;
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        result |= left.bytes[lane] == right.bytes[lane] ? (Mask64)1 << lane : 0;
+        result |= BUSTER_SIMD_FALLBACK_BYTES(left)[lane] == BUSTER_SIMD_FALLBACK_BYTES(right)[lane] ? (Mask64)1 << lane : 0;
     }
     return result;
 }
@@ -388,7 +404,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_less_byte_fallback(Simd512
     Mask64 result = 0;
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        result |= left.bytes[lane] < right.bytes[lane] ? (Mask64)1 << lane : 0;
+        result |= BUSTER_SIMD_FALLBACK_BYTES(left)[lane] < BUSTER_SIMD_FALLBACK_BYTES(right)[lane] ? (Mask64)1 << lane : 0;
     }
     return result;
 }
@@ -398,7 +414,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_sign_byte_fallback(Simd512
     Mask64 result = 0;
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        result |= value.bytes[lane] & 0x80 ? (Mask64)1 << lane : 0;
+        result |= BUSTER_SIMD_FALLBACK_BYTES(value)[lane] & 0x80 ? (Mask64)1 << lane : 0;
     }
     return result;
 }
@@ -408,7 +424,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_test_byte_fallback(Simd512
     Mask64 result = 0;
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        result |= (left.bytes[lane] & right.bytes[lane]) ? (Mask64)1 << lane : 0;
+        result |= (BUSTER_SIMD_FALLBACK_BYTES(left)[lane] & BUSTER_SIMD_FALLBACK_BYTES(right)[lane]) ? (Mask64)1 << lane : 0;
     }
     return result;
 }
@@ -418,8 +434,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_permute2_byte_fallback(Ma
     Simd512 result = simd512_splat_fallback(0);
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        u32 index = indices.bytes[lane] & 127;
-        result.bytes[lane] = (mask >> lane) & 1 ? (index < 64 ? low.bytes[index] : high.bytes[index - 64]) : 0;
+        u32 index = BUSTER_SIMD_FALLBACK_BYTES(indices)[lane] & 127;
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane] = (mask >> lane) & 1 ? (index < 64 ? BUSTER_SIMD_FALLBACK_BYTES(low)[index] : BUSTER_SIMD_FALLBACK_BYTES(high)[index - 64]) : 0;
     }
     return result;
 }
@@ -432,7 +448,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_compress_byte_fallback(Ma
     {
         if ((mask >> lane) & 1)
         {
-            result.bytes[next] = value.bytes[lane];
+            BUSTER_SIMD_FALLBACK_BYTES(result)[next] = BUSTER_SIMD_FALLBACK_BYTES(value)[lane];
             next += 1;
         }
     }
@@ -446,7 +462,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL void simd512_compress_store_byte_fallback
     {
         if ((mask >> lane) & 1)
         {
-            *destination = value.bytes[lane];
+            *destination = BUSTER_SIMD_FALLBACK_BYTES(value)[lane];
             destination += 1;
         }
     }
@@ -457,7 +473,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_widen_byte_fallback(Simd5
     Simd512 result = simd512_splat_fallback(0);
     for (u32 lane = 0; lane < 16; lane += 1)
     {
-        result.bytes[lane * 4] = value.bytes[quarter * 16 + lane];
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane * 4] = BUSTER_SIMD_FALLBACK_BYTES(value)[quarter * 16 + lane];
     }
     return result;
 }
@@ -467,13 +483,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_shift_left_word_fallback(
     Simd512 result = simd512_splat_fallback(0);
     for (u32 word = 0; word < 16; word += 1)
     {
-        u32 lanes = (u32)value.bytes[word * 4] | ((u32)value.bytes[word * 4 + 1] << 8) | ((u32)value.bytes[word * 4 + 2] << 16) |
-                    ((u32)value.bytes[word * 4 + 3] << 24);
+        u32 lanes = (u32)BUSTER_SIMD_FALLBACK_BYTES(value)[word * 4] | ((u32)BUSTER_SIMD_FALLBACK_BYTES(value)[word * 4 + 1] << 8) | ((u32)BUSTER_SIMD_FALLBACK_BYTES(value)[word * 4 + 2] << 16) |
+                    ((u32)BUSTER_SIMD_FALLBACK_BYTES(value)[word * 4 + 3] << 24);
         lanes = count >= 32 ? 0 : lanes << count;
-        result.bytes[word * 4] = (u8)lanes;
-        result.bytes[word * 4 + 1] = (u8)(lanes >> 8);
-        result.bytes[word * 4 + 2] = (u8)(lanes >> 16);
-        result.bytes[word * 4 + 3] = (u8)(lanes >> 24);
+        BUSTER_SIMD_FALLBACK_BYTES(result)[word * 4] = (u8)lanes;
+        BUSTER_SIMD_FALLBACK_BYTES(result)[word * 4 + 1] = (u8)(lanes >> 8);
+        BUSTER_SIMD_FALLBACK_BYTES(result)[word * 4 + 2] = (u8)(lanes >> 16);
+        BUSTER_SIMD_FALLBACK_BYTES(result)[word * 4 + 3] = (u8)(lanes >> 24);
     }
     return result;
 }
@@ -483,7 +499,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_and_fallback(Simd512 left
     Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        result.bytes[lane] = left.bytes[lane] & right.bytes[lane];
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane] = BUSTER_SIMD_FALLBACK_BYTES(left)[lane] & BUSTER_SIMD_FALLBACK_BYTES(right)[lane];
     }
     return result;
 }
@@ -493,7 +509,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_or_fallback(Simd512 left,
     Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        result.bytes[lane] = left.bytes[lane] | right.bytes[lane];
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane] = BUSTER_SIMD_FALLBACK_BYTES(left)[lane] | BUSTER_SIMD_FALLBACK_BYTES(right)[lane];
     }
     return result;
 }
@@ -503,7 +519,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_xor_fallback(Simd512 left
     Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        result.bytes[lane] = left.bytes[lane] ^ right.bytes[lane];
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane] = BUSTER_SIMD_FALLBACK_BYTES(left)[lane] ^ BUSTER_SIMD_FALLBACK_BYTES(right)[lane];
     }
     return result;
 }
@@ -513,7 +529,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_add_byte_fallback(Simd512
     Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        result.bytes[lane] = (u8)(left.bytes[lane] + right.bytes[lane]);
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane] = (u8)(BUSTER_SIMD_FALLBACK_BYTES(left)[lane] + BUSTER_SIMD_FALLBACK_BYTES(right)[lane]);
     }
     return result;
 }
@@ -523,7 +539,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_subtract_byte_fallback(Si
     Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
     {
-        result.bytes[lane] = (u8)(left.bytes[lane] - right.bytes[lane]);
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane] = (u8)(BUSTER_SIMD_FALLBACK_BYTES(left)[lane] - BUSTER_SIMD_FALLBACK_BYTES(right)[lane]);
     }
     return result;
 }
@@ -536,10 +552,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_ternary_word_fallback(Sim
         u8 produced = 0;
         for (u32 bit = 0; bit < 8; bit += 1)
         {
-            u32 selector = (u32)(((a.bytes[lane] >> bit) & 1) << 2) | (u32)(((b.bytes[lane] >> bit) & 1) << 1) | (u32)((c.bytes[lane] >> bit) & 1);
+            u32 selector = (u32)(((BUSTER_SIMD_FALLBACK_BYTES(a)[lane] >> bit) & 1) << 2) | (u32)(((BUSTER_SIMD_FALLBACK_BYTES(b)[lane] >> bit) & 1) << 1) | (u32)((BUSTER_SIMD_FALLBACK_BYTES(c)[lane] >> bit) & 1);
             produced |= (u8)(((table >> selector) & 1) << bit);
         }
-        result.bytes[lane] = produced;
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane] = produced;
     }
     return result;
 }
@@ -549,8 +565,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_equal_word_fallback(Simd51
     Mask64 result = 0;
     for (u32 word = 0; word < 16; word += 1)
     {
-        bool equal = left.bytes[word * 4] == right.bytes[word * 4] && left.bytes[word * 4 + 1] == right.bytes[word * 4 + 1] &&
-                     left.bytes[word * 4 + 2] == right.bytes[word * 4 + 2] && left.bytes[word * 4 + 3] == right.bytes[word * 4 + 3];
+        bool equal = BUSTER_SIMD_FALLBACK_BYTES(left)[word * 4] == BUSTER_SIMD_FALLBACK_BYTES(right)[word * 4] && BUSTER_SIMD_FALLBACK_BYTES(left)[word * 4 + 1] == BUSTER_SIMD_FALLBACK_BYTES(right)[word * 4 + 1] &&
+                     BUSTER_SIMD_FALLBACK_BYTES(left)[word * 4 + 2] == BUSTER_SIMD_FALLBACK_BYTES(right)[word * 4 + 2] && BUSTER_SIMD_FALLBACK_BYTES(left)[word * 4 + 3] == BUSTER_SIMD_FALLBACK_BYTES(right)[word * 4 + 3];
         result |= equal ? (Mask64)1 << word : 0;
     }
     return result;
@@ -560,8 +576,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd512_word_lane_fallback(Simd512 va
 {
     // Little-endian lane assembly, matching what the hardware forms read: the
     // fallback stores the same bytes a vector load would have.
-    return (u32)value.bytes[lane * 4] | ((u32)value.bytes[lane * 4 + 1] << 8) | ((u32)value.bytes[lane * 4 + 2] << 16) |
-           ((u32)value.bytes[lane * 4 + 3] << 24);
+    return (u32)BUSTER_SIMD_FALLBACK_BYTES(value)[lane * 4] | ((u32)BUSTER_SIMD_FALLBACK_BYTES(value)[lane * 4 + 1] << 8) | ((u32)BUSTER_SIMD_FALLBACK_BYTES(value)[lane * 4 + 2] << 16) |
+           ((u32)BUSTER_SIMD_FALLBACK_BYTES(value)[lane * 4 + 3] << 24);
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_splat_word_fallback(u32 value)
@@ -572,10 +588,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_splat_word_fallback(u32 v
     Simd512 result = {0};
     for (u32 lane = 0; lane < 16; lane += 1)
     {
-        result.bytes[lane * 4] = (u8)value;
-        result.bytes[lane * 4 + 1] = (u8)(value >> 8);
-        result.bytes[lane * 4 + 2] = (u8)(value >> 16);
-        result.bytes[lane * 4 + 3] = (u8)(value >> 24);
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane * 4] = (u8)value;
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane * 4 + 1] = (u8)(value >> 8);
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane * 4 + 2] = (u8)(value >> 16);
+        BUSTER_SIMD_FALLBACK_BYTES(result)[lane * 4 + 3] = (u8)(value >> 24);
     }
     return result;
 }
@@ -598,16 +614,17 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_compress_word_fallback(Ma
     {
         if ((mask >> lane) & 1)
         {
-            result.bytes[next * 4] = value.bytes[lane * 4];
-            result.bytes[next * 4 + 1] = value.bytes[lane * 4 + 1];
-            result.bytes[next * 4 + 2] = value.bytes[lane * 4 + 2];
-            result.bytes[next * 4 + 3] = value.bytes[lane * 4 + 3];
+            BUSTER_SIMD_FALLBACK_BYTES(result)[next * 4] = BUSTER_SIMD_FALLBACK_BYTES(value)[lane * 4];
+            BUSTER_SIMD_FALLBACK_BYTES(result)[next * 4 + 1] = BUSTER_SIMD_FALLBACK_BYTES(value)[lane * 4 + 1];
+            BUSTER_SIMD_FALLBACK_BYTES(result)[next * 4 + 2] = BUSTER_SIMD_FALLBACK_BYTES(value)[lane * 4 + 2];
+            BUSTER_SIMD_FALLBACK_BYTES(result)[next * 4 + 3] = BUSTER_SIMD_FALLBACK_BYTES(value)[lane * 4 + 3];
             next += 1;
         }
     }
     return result;
 }
 
+#undef BUSTER_SIMD_FALLBACK_BYTES
 #endif
 
 #define simd512_zero() simd512_splat(0)

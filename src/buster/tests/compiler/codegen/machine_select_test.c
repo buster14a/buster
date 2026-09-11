@@ -289,9 +289,183 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_test_rejected(Arena* arena, IrProgram
     return error == expected && !selected.supported;
 }
 
+// Coalesce repeated FUNCTION values only in the straight-line fixtures below.
+// The first reference dominates every rewritten use; unused definitions remain
+// present so the selector's zero-use policy is covered too.
+BUSTER_GLOBAL_LOCAL void machine_selection_test_share_callees(IrFunction* function)
+{
+    for (u32 row = 0; row < function->instruction_count; row += 1)
+    {
+        IrInstruction* instruction = function->instructions + row;
+        for (u32 operand = 0; operand < instruction->operand_count; operand += 1)
+        {
+            IrValueId value = instruction->operands[operand];
+            IrInstructionId definition = function->values[value.value].definition;
+            if (definition.value < function->instruction_count && function->instructions[definition.value].opcode == IR_OPCODE_FUNCTION)
+            {
+                for (u32 earlier = 0; earlier < definition.value; earlier += 1)
+                {
+                    IrInstruction* reference = function->instructions + earlier;
+                    if (reference->opcode == IR_OPCODE_FUNCTION &&
+                        reference->symbol.value == function->instructions[definition.value].symbol.value)
+                    {
+                        instruction->operands[operand] = reference->result;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void machine_selection_test_reverse_storage(Arena* arena, IrFunction* function)
+{
+    u32 count = function->instruction_count;
+    IrInstruction* rows = arena_allocate(arena, IrInstruction, count);
+    IrSourceRange* sources = function->instruction_canonical_sources ? arena_allocate(arena, IrSourceRange, count) : 0;
+    for (u32 row = 0; row < count; row += 1)
+    {
+        rows[count - row - 1] = function->instructions[row];
+        IrInstructionId* next = &rows[count - row - 1].next;
+        if (next->value != IR_ID_UNDERLYING_INVALID) { next->value = count - next->value - 1; }
+        if (sources) { sources[count - row - 1] = function->instruction_canonical_sources[row]; }
+    }
+    for (u32 block = 0; block < function->block_count; block += 1)
+    {
+        IrBlock* entry = function->blocks + block;
+        if (entry->first_instruction.value != IR_ID_UNDERLYING_INVALID) { entry->first_instruction.value = count - entry->first_instruction.value - 1; }
+        if (entry->last_instruction.value != IR_ID_UNDERLYING_INVALID) { entry->last_instruction.value = count - entry->last_instruction.value - 1; }
+    }
+    for (u32 value = 0; value < function->value_count; value += 1)
+    {
+        IrInstructionId* definition = &function->values[value].definition;
+        if (definition->value != IR_ID_UNDERLYING_INVALID) { definition->value = count - definition->value - 1; }
+    }
+    for (u32 extra = 0; extra < function->extra_count; extra += 1)
+    {
+        function->extra_instructions[extra].value = count - function->extra_instructions[extra].value - 1;
+    }
+    function->instructions = rows;
+    function->instruction_canonical_sources = sources;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_selection_test_ordered_rows_equal(MachineSelectResult* before, MachineSelectResult* after)
+{
+    MachineFunction* left = &before->function;
+    MachineFunction* right = &after->function;
+    bool equal = before->supported && after->supported && before->failed_opcode == after->failed_opcode &&
+                 left->instruction_count == right->instruction_count && left->virtual_register_count == right->virtual_register_count &&
+                 left->immediate_count == right->immediate_count && left->call_target_count == right->call_target_count &&
+                 left->stack_slot_count == right->stack_slot_count && left->block_count == right->block_count;
+    for (u32 row = 0; equal && row < left->instruction_count; row += 1)
+    {
+        equal = machine_selection_test_instruction_equal(left, right, left->instructions + row, right->instructions + row);
+    }
+    for (u32 index = 0; equal && index < left->immediate_count; index += 1) { equal = left->immediates[index] == right->immediates[index]; }
+    for (u32 index = 0; equal && index < left->call_target_count; index += 1) { equal = left->call_targets[index].value == right->call_targets[index].value; }
+    for (u32 index = 0; equal && index < left->stack_slot_count; index += 1)
+    {
+        equal = left->stack_slot_sizes[index] == right->stack_slot_sizes[index] && left->stack_slot_alignments[index] == right->stack_slot_alignments[index];
+    }
+    return equal;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_direct_call_facts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("extern int fact_target(int); extern int fact_sink(int (*)(int)); extern int fact_zero(void);\n"
+                       "int fact_direct(int x) { return fact_target(x) + fact_target(x + 1); }\n"
+                       "int fact_escape_after(int x) { int a = fact_target(x); return a + fact_sink(fact_target); }\n"
+                       "int fact_escape_before(int x) { int a = fact_sink(fact_target); return a + fact_target(x); }\n"
+                       "int fact_indirect(int (*f)(int), int x) { return f(x); }\n"
+                       "int fact_no_calls(void) { return 3; }\n"
+                       "int fact_nullary(void) { return fact_zero(); }\n");
+    String8 names[] = {S8("fact_direct"), S8("fact_escape_after"), S8("fact_escape_before"), S8("fact_indirect"), S8("fact_no_calls"), S8("fact_nullary")};
+    Target target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX};
+    IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
+    BUSTER_TEST(arguments, program != 0);
+    u32 direct_values = 0;
+    u32 escaped_values = 0;
+    u32 unused_values = 0;
+    u32 repeated_values = 0;
+    for (u32 fixture = 0; program && fixture < BUSTER_ARRAY_LENGTH(names); fixture += 1)
+    {
+        IrFunction* function = machine_selection_test_find(program, names[fixture]);
+        BUSTER_TEST(arguments, function && function->block_count == 1);
+        if (!function || function->block_count != 1) { continue; }
+        machine_selection_test_share_callees(function);
+        MachineSelectResult original = machine_select_canonical_function(arguments->arena, program, function, target);
+        for (u32 reversed = 0; reversed < 2; reversed += 1)
+        {
+            if (reversed) { machine_selection_test_reverse_storage(arguments->arena, function); }
+            BUSTER_TEST(arguments, machine_selection_validate_function(arguments->arena, program, function) == MACHINE_SELECTION_VALIDATION_NONE);
+            MachineSelectResult checked = machine_select_canonical_function(arguments->arena, program, function, target);
+            MachineSelectResult validated = machine_select_validated_canonical_function(arguments->arena, program, function, target, false, 0);
+            BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&original, &checked));
+            BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&checked, &validated));
+            BUSTER_TEST(arguments, checked.supported && machine_verify_function(&checked.function).error == MACHINE_VERIFY_NONE);
+            if (!checked.supported) { continue; }
+            for (u32 row = 0; row < function->instruction_count; row += 1)
+            {
+                IrInstruction* reference = function->instructions + row;
+                if (reference->opcode != IR_OPCODE_FUNCTION) { continue; }
+                // Independent scalar oracle: classify one value from all of
+                // its uses, not by replaying the production three-state update.
+                u32 uses = 0;
+                u32 matching_calls = 0;
+                for (u32 use_row = 0; use_row < function->instruction_count; use_row += 1)
+                {
+                    IrInstruction* use = function->instructions + use_row;
+                    for (u32 operand = 0; operand < use->operand_count; operand += 1)
+                    {
+                        if (use->operands[operand].value == reference->result.value)
+                        {
+                            uses += 1;
+                            matching_calls += use->opcode == IR_OPCODE_CALL && operand == 0 && use->symbol.value == reference->symbol.value;
+                        }
+                    }
+                }
+                bool direct = uses != 0 && uses == matching_calls;
+                direct_values += direct;
+                escaped_values += uses != 0 && !direct;
+                unused_values += uses == 0;
+                repeated_values += matching_calls > 1;
+                u32 definitions = 0;
+                for (u32 selected_row = 0; selected_row < checked.function.instruction_count; selected_row += 1)
+                {
+                    MachineInstruction* selected = checked.function.instructions + selected_row;
+                    if (machine_selection_test_instruction_origin(&checked.function, selected) == reference->result.value)
+                    {
+                        definitions += 1;
+                        BUSTER_TEST(arguments, selected->opcode == (direct ? MACHINE_A64_MOV_RI : MACHINE_A64_LEA_SYMBOL));
+                        if (direct)
+                        {
+                            MachineRef immediate = selected->operands[1];
+                            BUSTER_TEST(arguments, machine_ref_kind(immediate) == MACHINE_REF_IMMEDIATE &&
+                                machine_ref_payload(immediate) < checked.function.immediate_count &&
+                                checked.function.immediates[machine_ref_payload(immediate)] == 0);
+                        }
+                        else
+                        {
+                            BUSTER_TEST(arguments, selected->payload < checked.function.call_target_count &&
+                                checked.function.call_targets[selected->payload].value == reference->symbol.value);
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, definitions == 1);
+            }
+        }
+    }
+    BUSTER_TEST(arguments, direct_values && escaped_values && unused_values && repeated_values);
+    return result;
+}
+
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult direct_call_result = machine_selection_test_direct_call_facts(arguments);
+    result.test_count += direct_call_result.test_count;
+    result.succeeded_test_count += direct_call_result.succeeded_test_count;
     String8 source = S8("int selection_add(int a, int b) { int local = 7; return a + local + b; }\n"
                          "int selection_memory(int *p) { *p += 1; return *p; }\n"
                          "int selection_order(void) { return 1 + 2; }\n");

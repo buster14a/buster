@@ -1,0 +1,25 @@
+Optimized IR of the Release unity object (Clang 22.1.8, CI flags): 2740 defined functions, 213050 basic blocks
+  >= 10000 blocks: 0 functions
+  >=  5000 blocks: 5 functions
+  >=  2000 blocks: 14 functions
+  >=  1000 blocks: 28 functions
+  9160  assembly_tests
+  8552  compiler_driver_tests
+  6421  x86_64_metadata_tests
+  5815  codegen_generate_canonical_module_attempt
+  5193  machine_tests
+  4276  c_frontend_tests
+  3570  target_tests
+  3224  x86_64_completion_census_tests
+  3081  object_tests
+  2779  aarch64_encoding_tests
+  2712  link_tests
+  2483  c_lower_to_ir_with_options
+  2201  machine_select_canonical_function_x86_64
+  2109  c_ir_query_execute
+  1850  codegen_tests
+  1650  c_ir_lower_dispatch_run
+  1613  c_test_frontend_semantic_basics
+  1557  c_type_parse_machine_run
+  1545  c_test_frontend_global_types
+  1462  ir_tests

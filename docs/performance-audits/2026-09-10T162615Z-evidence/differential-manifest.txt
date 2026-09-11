@@ -1,0 +1,11 @@
+version=1
+ide=/workspace/scratch/d77c3882cf3a/full36-stage3-final-ide
+cc=/workspace/scratch/d77c3882cf3a/tooling/ubuntu-clang/usr/lib/llvm-18/bin/clang
+configurations=432
+seed=1
+generated=4
+verify=1
+sanitize_oracle=0
+hash_algorithm=buster_hash_64
+ide_hash=1087827668488339160 ide_bytes=40635304
+cc_hash=8200759042653518910 cc_bytes=140536
