@@ -5119,7 +5119,7 @@ BUSTER_C_INTERNAL void c_ir_ssa_classify_initialization(CIntegerIrBuilder* build
             }
             else
             {
-                CIrSsaParameter* pending = value_pointers[value];
+                CIrSsaParameter* pending = (CIrSsaParameter*)value_pointers[value];
                 if (pending && !memory[pending->local] && !ssa->locals[pending->local].initialized_entry)
                 {
                     IrBlockParameter* parameter = pending->parameter;
@@ -5396,7 +5396,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         memset(value_pointers, 0, sizeof(*value_pointers) * count);
         for (CIrSsaParameter* pending = ssa->first_parameter; pending; pending = pending->next)
         {
-            value_pointers[pending->parameter->value.value] = pending;
+            value_pointers[pending->parameter->value.value] = (void*)pending;
         }
         c_ir_ssa_classify_initialization(builder, memory, replacements, value_pointers);
         valid = c_ir_ssa_restore_memory(builder, memory);
@@ -5436,7 +5436,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                 {
                     IR_CONSTRUCTION_RECORD(SSA_PARAMETER_VISITS, 1);
                     IrBlockParameter* parameter = *link;
-                    CIrSsaParameter* pending = value_pointers[parameter->value.value];
+                    CIrSsaParameter* pending = (CIrSsaParameter*)value_pointers[parameter->value.value];
                     if ((pending && memory[pending->local]) || replacements[parameter->value.value] != parameter->value.value)
                     {
                         *link = parameter->next;
@@ -5487,7 +5487,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         {
             for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
             {
-                value_pointers[parameter->value.value] = parameter;
+                value_pointers[parameter->value.value] = (void*)parameter;
             }
         }
         for (u32 index = 0; index < function->instruction_count; index += 1)
@@ -5510,7 +5510,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         }
         for (u32 index = 0; index < work_count; index += 1)
         {
-            IrBlockParameter* parameter = value_pointers[work[index]];
+            IrBlockParameter* parameter = (IrBlockParameter*)value_pointers[work[index]];
             for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
             {
                 u32 value = c_ir_ssa_root(replacements, incoming->value.value);
