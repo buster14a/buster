@@ -243,7 +243,73 @@ BUSTER_GLOBAL_LOCAL u32 d_matrix(DConfig* configs, u32 capacity)
     return count;
 }
 
-BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig config, bool host, bool optimize, String8 directory)
+// The fixed observer is immutable within a case. Compile it once for Buster
+// rows, but never share it with the independent O0/O2 or reduction controls.
+// Source-only flags belong to compilation; sanitizer runtime flags also belong
+// to the final link. The returned argv fits the existing 40-entry command.
+BUSTER_GLOBAL_LOCAL u64 d_caller_arguments(DSettings* settings, DCase test, bool compile, String8* argv)
+{
+    Arena* arena = settings->arena;
+    u64 count = 0;
+    argv[count++] = settings->cc;
+    if (compile)
+    {
+        argv[count++] = S8("-O0");
+        argv[count++] = S8("-fwrapv");
+        argv[count++] = S8("-fno-strict-aliasing");
+        argv[count++] = S8("-funsigned-char");
+    }
+    if (settings->sanitize_oracle)
+    {
+        argv[count++] = S8("-fsanitize=address,undefined");
+        argv[count++] = S8("-fno-sanitize-recover=all");
+    }
+    if (compile && test.include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), test.include); }
+    if (compile && settings->include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), settings->include); }
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL bool d_caller_ready(DObservation compile, bool artifact_exists, bool io_failed)
+{
+    return d_success(compile) && artifact_exists && !io_failed;
+}
+
+BUSTER_GLOBAL_LOCAL String8 d_prepare_caller(DSettings* settings, DCase test, String8 directory)
+{
+    Arena* arena = settings->arena;
+    String8 caller_directory = path_join(arena, directory, S8("caller"));
+    make_directory_recursive(arena, caller_directory);
+    String8 object = path_join(arena, caller_directory, S8("caller.o"));
+    os_file_delete(object);
+    bool ready = false;
+    if (!path_exists(arena, object) && !settings->io_failed)
+    {
+        String8 argv[40];
+        u64 count = d_caller_arguments(settings, test, true, argv);
+        argv[count++] = test.host;
+        argv[count++] = S8("-c");
+        argv[count++] = S8("-o");
+        argv[count++] = object;
+        DObservation compile = d_observe(settings, (SliceString8){.pointer = argv, .length = count},
+            path_join(arena, caller_directory, S8("compile")));
+        ready = d_caller_ready(compile, path_exists(arena, object), settings->io_failed);
+        if (ready)
+        {
+            u64 hash = 0, size = 0;
+            ready = build_artifact_fanout_hash_file(arena, object, &hash, &size) && size > 0;
+            if (ready)
+            {
+                d_write(settings, path_join(arena, caller_directory, S8("manifest.txt")),
+                    string_format(arena, S8("version=1\nsource={S8}\nhash_algorithm=buster_hash_64\nobject_hash={u64} object_bytes={u64}\nsanitize_oracle={u32}\n"),
+                        test.host, hash, size, (u32)settings->sanitize_oracle));
+                ready = !settings->io_failed;
+            }
+        }
+    }
+    return ready ? object : (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig config, bool host, bool optimize, String8 directory, String8 caller_object)
 {
     Arena* arena = settings->arena;
     make_directory_recursive(arena, directory);
@@ -306,20 +372,8 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
         bool executable_ready = path_exists(arena, executable);
         if (!host && test.host.length && path_exists(arena, object))
         {
-            count = 0;
-            argv[count++] = settings->cc;
-            argv[count++] = S8("-O0");
-            argv[count++] = S8("-fwrapv");
-            argv[count++] = S8("-fno-strict-aliasing");
-            argv[count++] = S8("-funsigned-char");
-            if (settings->sanitize_oracle)
-            {
-                argv[count++] = S8("-fsanitize=address,undefined");
-                argv[count++] = S8("-fno-sanitize-recover=all");
-            }
-            if (test.include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), test.include); }
-            if (settings->include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), settings->include); }
-            argv[count++] = test.host;
+            count = d_caller_arguments(settings, test, !caller_object.length, argv);
+            argv[count++] = caller_object.length ? caller_object : test.host;
             argv[count++] = object;
 #if BUSTER_LINUX
             argv[count++] = S8("-no-pie");
@@ -406,11 +460,11 @@ BUSTER_GLOBAL_LOCAL void d_reduce(DSettings* settings, DCase test, DConfig confi
             if (best.length > to) { memcpy(candidate_bytes + from, best.pointer + to, (size_t)(best.length - to)); }
             d_write(settings, source, candidate);
             String8 trial = path_join(arena, directory, string_format(arena, S8("trial-{u32}"), trials++));
-            DResult o0 = d_execute(settings, reduced, config, true, false, path_join(arena, trial, S8("host-o0")));
-            DResult o2 = d_execute(settings, reduced, config, true, true, path_join(arena, trial, S8("host-o2")));
+            DResult o0 = d_execute(settings, reduced, config, true, false, path_join(arena, trial, S8("host-o0")), (String8){0});
+            DResult o2 = d_execute(settings, reduced, config, true, true, path_join(arena, trial, S8("host-o2")), (String8){0});
             if (d_oracle_valid(o0, o2, reduced))
             {
-                DResult actual = d_execute(settings, reduced, config, false, false, path_join(arena, trial, S8("buster")));
+                DResult actual = d_execute(settings, reduced, config, false, false, path_join(arena, trial, S8("buster")), (String8){0});
                 if (d_classify(actual, o0, false) == signature)
                 {
                     best = string_duplicate_arena(arena, candidate, false);
@@ -425,9 +479,9 @@ BUSTER_GLOBAL_LOCAL void d_reduce(DSettings* settings, DCase test, DConfig confi
     String8 final_source = path_join(arena, directory, S8("minimized.c"));
     d_write(settings, final_source, best);
     reduced.source = final_source;
-    DResult o0 = d_execute(settings, reduced, config, true, false, path_join(arena, directory, S8("final-host-o0")));
-    DResult o2 = d_execute(settings, reduced, config, true, true, path_join(arena, directory, S8("final-host-o2")));
-    DResult actual = d_execute(settings, reduced, config, false, false, path_join(arena, directory, S8("final-buster")));
+    DResult o0 = d_execute(settings, reduced, config, true, false, path_join(arena, directory, S8("final-host-o0")), (String8){0});
+    DResult o2 = d_execute(settings, reduced, config, true, true, path_join(arena, directory, S8("final-host-o2")), (String8){0});
+    DResult actual = d_execute(settings, reduced, config, false, false, path_join(arena, directory, S8("final-buster")), (String8){0});
     bool confirmed = d_oracle_valid(o0, o2, reduced) && d_classify(actual, o0, false) == signature;
     d_write(settings, path_join(arena, directory, S8("reduction.txt")),
         string_format(arena, S8("version=1 original_bytes={u64} reduced_bytes={u64} trials={u32} signature={u32} confirmed={u32}\n"),
@@ -456,18 +510,32 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
         ByteSlice fixed = file_read(arena, test.host, (FileReadOptions){0});
         d_write(settings, path_join(arena, directory, S8("host.c")), (String8){.pointer = (char8*)fixed.pointer, .length = fixed.length});
     }
-    DResult o0 = d_execute(settings, test, configs[0], true, false, path_join(arena, directory, S8("host-o0")));
-    DResult o2 = d_execute(settings, test, configs[0], true, true, path_join(arena, directory, S8("host-o2")));
+    DResult o0 = d_execute(settings, test, configs[0], true, false, path_join(arena, directory, S8("host-o0")), (String8){0});
+    DResult o2 = d_execute(settings, test, configs[0], true, true, path_join(arena, directory, S8("host-o2")), (String8){0});
     bool trusted = d_oracle_valid(o0, o2, test);
     u32 failures = trusted ? 0 : 1;
     DObservation diagnostics = {0};
     bool reduced = false;
     if (!trusted) { string_print(S8("DIFFERENTIAL_FAIL case={S8} independent_oracle=invalid\n"), test.name); }
-    for (u32 index = 0; trusted && index < config_count; index += 1)
+    String8 caller_object = {0};
+    bool ready = trusted;
+    if (trusted && test.host.length && !test.reject)
+    {
+        // Allocate before row scratch checkpoints. The object is case-local,
+        // freshly built, and never enters the independent reference/reducer.
+        caller_object = d_prepare_caller(settings, test, directory);
+        ready = caller_object.length > 0;
+        if (!ready)
+        {
+            failures += 1;
+            string_print(S8("DIFFERENTIAL_FAIL case={S8} caller_compile=invalid\n"), test.name);
+        }
+    }
+    for (u32 index = 0; ready && index < config_count; index += 1)
     {
         u64 scratch = arena->position;
         DConfig config = configs[index];
-        DResult actual = d_execute(settings, test, config, false, false, path_join(arena, directory, config.name));
+        DResult actual = d_execute(settings, test, config, false, false, path_join(arena, directory, config.name), caller_object);
         u32 failure = d_classify(actual, o0, test.reject);
         // Source paths are identical across the matrix; only the explicitly
         // validated CODEGEN_VERIFY line is removed from successful diagnostics.
@@ -489,7 +557,7 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
         // reclaimed after writing their byte-exact files and status records.
         if (index) { arena_set_position(arena, scratch); }
     }
-    string_print(S8("DIFFERENTIAL_CASE name={S8} configurations={u32} failures={u32}\n"), test.name, trusted ? config_count : 0, failures);
+    string_print(S8("DIFFERENTIAL_CASE name={S8} configurations={u32} failures={u32}\n"), test.name, ready ? config_count : 0, failures);
     return failures;
 }
 
@@ -601,6 +669,45 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         }
     }
     DSettings settings = {.arena = arena, .timeout_seconds = 1};
+    DSettings caller_settings = {.arena = arena, .cc = S8("compiler with spaces"), .include = S8("global include")};
+    DCase caller_case = {.host = S8("fixed caller.c"), .include = S8("source include")};
+    for (u32 sanitize = 0; sanitize < 2; sanitize += 1)
+    {
+        caller_settings.sanitize_oracle = sanitize != 0;
+        String8 argv[40];
+        u64 argc = d_caller_arguments(&caller_settings, caller_case, true, argv);
+        String8 expected[] = {S8("compiler with spaces"), S8("-O0"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char")};
+        errors += argc != 7 + sanitize * 2;
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1) { errors += !string_equal(argv[index], expected[index]); }
+        if (sanitize)
+        {
+            errors += !string_equal(argv[5], S8("-fsanitize=address,undefined"));
+            errors += !string_equal(argv[6], S8("-fno-sanitize-recover=all"));
+        }
+        errors += !string_equal(argv[argc - 2], S8("-Isource include"));
+        errors += !string_equal(argv[argc - 1], S8("-Iglobal include"));
+        argc = d_caller_arguments(&caller_settings, caller_case, false, argv);
+        errors += argc != 1 + sanitize * 2 || !string_equal(argv[0], caller_settings.cc);
+        if (sanitize)
+        {
+            errors += !string_equal(argv[1], S8("-fsanitize=address,undefined"));
+            errors += !string_equal(argv[2], S8("-fno-sanitize-recover=all"));
+        }
+    }
+    DObservation caller_compile = {.kind = D_EXIT};
+    errors += !d_caller_ready(caller_compile, true, false);
+    errors += d_caller_ready(caller_compile, false, false);
+    errors += d_caller_ready(caller_compile, true, true);
+    caller_compile.status = 1;
+    errors += d_caller_ready(caller_compile, true, false);
+    caller_compile.status = 0; caller_compile.sanitizer = true;
+    errors += d_caller_ready(caller_compile, true, false);
+    caller_compile.sanitizer = false;
+    for (u32 kind = D_SIGNAL; kind <= D_WAIT; kind += 1)
+    {
+        caller_compile.kind = (DKind)kind;
+        errors += d_caller_ready(caller_compile, true, false);
+    }
     String8 directory = string_format_z(arena, S8("build/differential-self-test-{u64}"), os_now_microseconds());
     if (!d_create_output(arena, directory)) { errors += 1; }
     else
@@ -646,6 +753,16 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         errors += d_verification(&settings, &telemetry, config);
         telemetry.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=2 scheduled=1 allocator=quality\n");
         errors += !d_verification(&settings, &telemetry, config) || telemetry.output.length != 0;
+        // A stale object plus a failed launch must never publish a caller.
+        DSettings missing_caller = settings;
+        missing_caller.cc = path_join(arena, directory, S8("missing-compiler"));
+        String8 stale_directory = path_join(arena, directory, S8("caller"));
+        make_directory_recursive(arena, stale_directory);
+        String8 stale_object = path_join(arena, stale_directory, S8("caller.o"));
+        d_write(&missing_caller, stale_object, S8("not an object"));
+        errors += !path_exists(arena, stale_object);
+        errors += d_prepare_caller(&missing_caller, caller_case, directory).length != 0;
+        errors += path_exists(arena, stale_object) || missing_caller.io_failed;
         errors += d_create_output(arena, directory); // Never reuse existing output.
     }
     errors += settings.io_failed;
