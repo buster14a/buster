@@ -439,31 +439,6 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_class_scalar_bit_width(MachineX64Selector co
     return result;
 }
 
-// Mirrors codegen_canonical_x64_simd_supported: F and BW carry the 512-bit
-// byte lanes and mask compares, VBMI vpermt2b, VBMI2 the compress family.
-BUSTER_GLOBAL_LOCAL bool machine_x64_simd_supported(Target target, IrSimdOperation operation)
-{
-    bool result;
-    if (!target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F) || !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW))
-    {
-        result = false;
-    }
-    else if (operation == IR_SIMD_PERMUTE2_BYTE)
-    {
-        result = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI);
-    }
-    else if (operation == IR_SIMD_COMPRESS_BYTE || operation == IR_SIMD_COMPRESS_STORE_BYTE)
-    {
-        result = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI2);
-    }
-    else
-    {
-        result = true;
-    }
-
-    return result;
-}
-
 BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId type_id, IrAbiUse use, Target target, MachineX64ValueShape* shape)
 {
     IrType* type = ir_type_from_id(&program->types, type_id);
@@ -475,7 +450,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
         // model-dependent register split this subset does not reproduce.
         // Win64 passes every 64-byte vector indirectly, a shape this subset
         // does not build, so those signatures stay canonical outright.
-        if (!machine_x64_simd_supported(target, IR_SIMD_SPLAT_BYTE) || convention == IR_ABI_CONVENTION_WIN64_X86_64)
+        if (!ir_simd_operation_supported(target, IR_SIMD_SPLAT_BYTE) || convention == IR_ABI_CONVENTION_WIN64_X86_64)
         {
             return false;
         }
@@ -3955,7 +3930,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_simd(MachineX64Selector* selector, I
     // stage through k1 inside the encoder.
     IrSimdOperation operation = (IrSimdOperation)instruction->simd_operation;
     IrSimdShape shape = ir_simd_operation_shape(operation);
-    bool selected = machine_x64_simd_supported(selector->target, operation) && instruction->operand_count == shape.operand_count &&
+    bool selected = ir_simd_operation_supported(selector->target, operation) && instruction->operand_count == shape.operand_count &&
                     instruction->immediate_count == shape.immediate_count && (!shape.immediate_count || instruction->immediates) &&
                     (!shape.has_result || result_register != UINT32_MAX);
     u32 operand_registers[4];
@@ -5318,7 +5293,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .function = function,
         .builder = machine_function_builder_begin(arena),
         .target = target,
-        .vector_registers_supported = machine_x64_simd_supported(target, IR_SIMD_SPLAT_BYTE),
+        .vector_registers_supported = ir_simd_operation_supported(target, IR_SIMD_SPLAT_BYTE),
         .module = module,
         .type_classes = module->type_classes,
         .type_class_count = module->type_count,

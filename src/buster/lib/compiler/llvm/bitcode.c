@@ -2415,7 +2415,7 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
                      instruction, instruction->symbol);
         return LLVM_BC_INVALID_ID;
     case IR_OPCODE_SIMD:
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode target SIMD lowering is not implemented"), function, block,
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode exact SIMD lowering is unavailable; select an explicit source fallback"), function, block,
                      instruction, instruction->symbol);
         return LLVM_BC_INVALID_ID;
     case IR_OPCODE_LABEL_ADDRESS:

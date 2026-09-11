@@ -6353,24 +6353,6 @@ enum
     X64_SIMD_MASK = 1,
 };
 
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_supported(Target target, IrSimdOperation operation)
-{
-    if (target.cpu_arch != CPU_ARCH_X86_64 || !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F) ||
-        !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW))
-    {
-        return false;
-    }
-    if (operation == IR_SIMD_PERMUTE2_BYTE)
-    {
-        return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI);
-    }
-    if (operation == IR_SIMD_COMPRESS_BYTE || operation == IR_SIMD_COMPRESS_STORE_BYTE)
-    {
-        return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI2);
-    }
-    return true;
-}
-
 BUSTER_GLOBAL_LOCAL s32 codegen_canonical_x64_rebase_frame_displacement(CodegenBuffer* buffer, s64 displacement, u32 frame_base_offset);
 
 BUSTER_GLOBAL_LOCAL BusterX86MetadataFeatureInput codegen_canonical_x64_simd_features(void)
@@ -6465,7 +6447,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_simd_operation(CodegenBuffer* buf
 {
     IrSimdOperation operation = (IrSimdOperation)instruction->simd_operation;
     IrSimdShape shape = ir_simd_operation_shape(operation);
-    if (codegen_canonical_x64_simd_supported(target, operation) && instruction->operand_count == shape.operand_count &&
+    if (ir_simd_operation_supported(target, operation) && instruction->operand_count == shape.operand_count &&
         instruction->immediate_count == shape.immediate_count)
     {
         s32 slots[4] = {0};
@@ -6761,7 +6743,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_instruction_uses_wide_vector(IrPr
         // A run of these is the whole point of the vocabulary; splitting it
         // with a vzeroupper between every pair would cost more than the
         // transition it avoids.
-        return codegen_canonical_x64_simd_supported(target, (IrSimdOperation)instruction->simd_operation);
+        return ir_simd_operation_supported(target, (IrSimdOperation)instruction->simd_operation);
     }
     if (instruction->opcode != IR_OPCODE_BINARY || instruction->operand_count != 2 || instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_EQUAL)
     {
@@ -20587,6 +20569,10 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
         if (!code_buffer_exhausted)
         {
             result.statistics.verified_ir_module_count = options.verify_invariants ? 1 : 0;
+            if (result.error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION && result.failed_opcode == IR_OPCODE_SIMD)
+            {
+                result.failure_reason = S8("exact SIMD intrinsic requires a supported target and feature set; select an explicit source fallback");
+            }
             return result;
         }
         scratch_end(attempt_scope);
