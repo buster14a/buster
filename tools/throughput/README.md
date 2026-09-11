@@ -152,9 +152,9 @@ multiplexed-out observations are `NA`/`null`, never fabricated zero counts.
 from normal allocation paths. The diagnostic build counts **calling-thread arena
 bump requests and requested bytes**, including repeated allocations after arena
 rewinds, excluding alignment padding. These are not libc `malloc` counts, OS
-reservation/commit counts, peak live allocation, or all-thread totals. A single
-compiler invocation is currently serial; this explicit scope must be revisited
-when the compiler itself becomes parallel. The metrics snapshot precedes report
+reservation/commit counts, peak live allocation, or all-thread totals. With opt-in `-fcompile-jobs=N`, these calling-thread keys exclude worker
+bumps and must not be labeled whole-compiler allocation totals. The separate
+exit census aggregates worker records; its snapshot and teardown scope differ. The metrics snapshot precedes report
 formatting so the report does not count itself. Zero-size requests count as calls.
 
 The two new fields are `allocation.arena_calls` and `allocation.arena_bytes` in
