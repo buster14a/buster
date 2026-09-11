@@ -1683,32 +1683,27 @@ static void wasm64_fe_emit_parallel_copy(Wasm64FunctionEmitter* emitter, IrBlock
     u32 parameter_count = target ? target->parameter_count : 0;
     if (parameter_count)
     {
-        u32 parameter_index = 0;
-        for (IrBlockParameter* parameter = target->first_parameter; parameter; parameter = parameter->next, parameter_index += 1)
+        IrPublishedCfg const* cfg = emitter->function->published_cfg;
+        IrCfgEdge const* edge = ir_function_cfg_edge(emitter->function, predecessor->id, target->id);
+        if (!edge)
         {
-            IrValueId source = IR_VALUE_ID_INVALID;
-            for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
-            {
-                if (incoming->predecessor.value == predecessor->id.value)
-                {
-                    source = incoming->value;
-                    break;
-                }
-            }
-            if (source.value == IR_ID_UNDERLYING_INVALID || parameter->value.value >= emitter->function->value_count)
-            {
-                wasm64_fail(emitter->context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing Wasm64 block-parameter incoming value"), emitter->function,
-                            target, 0, IR_SYMBOL_ID_INVALID);
-                return;
-            }
-            wasm64_fe_emit_value(emitter, source);
-            wasm64_fe_local_set(emitter, emitter->block_temp_bases[target->id.value] + parameter_index);
+            wasm64_fail(emitter->context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing Wasm64 block-parameter incoming value"), emitter->function,
+                        target, 0, IR_SYMBOL_ID_INVALID);
         }
-        parameter_index = 0;
-        for (IrBlockParameter* parameter = target->first_parameter; parameter; parameter = parameter->next, parameter_index += 1)
+        else
         {
-            wasm64_fe_local_get(emitter, emitter->block_temp_bases[target->id.value] + parameter_index);
-            wasm64_fe_local_set(emitter, emitter->value_locals[parameter->value.value]);
+            IrCfgBlock const* block = cfg->blocks + target->id.value;
+            for (u32 index = 0; index < parameter_count; index += 1)
+            {
+                wasm64_fe_emit_value(emitter, cfg->arguments[edge->argument_offset + index]);
+                wasm64_fe_local_set(emitter, emitter->block_temp_bases[target->id.value] + index);
+            }
+            for (u32 index = 0; index < parameter_count; index += 1)
+            {
+                IrCfgParameter const* parameter = cfg->parameters + block->parameter_offset + index;
+                wasm64_fe_local_get(emitter, emitter->block_temp_bases[target->id.value] + index);
+                wasm64_fe_local_set(emitter, emitter->value_locals[parameter->value.value]);
+            }
         }
     }
 }
@@ -1950,8 +1945,10 @@ static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* 
         // Temporary local types are declared in block order, not one reusable
         // untyped tile: different joins can carry different scalar types.
         emitter->block_temp_bases[block_index] = record->signature.param_count + local_type_index;
-        for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
+        IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
+        for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
         {
+            IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
             Wasm64ValType type = 0;
             IrType* parameter_type = wasm64_type(context, parameter->canonical_type);
             if (!wasm64_valtype_for_type(parameter_type, function->values[parameter->value.value].category == IR_VALUE_PLACE, &type))
@@ -2651,7 +2648,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
                     IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_SIMD:
-        wasm64_fail(context, WASM64_ERROR_SIMD, wasm64_s8("SIMD operations are unsupported by Wasm64"), emitter->function, block, instruction,
+        wasm64_fail(context, WASM64_ERROR_SIMD, wasm64_s8("exact SIMD intrinsics are unsupported by Wasm64; select an explicit source fallback"), emitter->function, block, instruction,
                     IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_INLINE_ASSEMBLY:
@@ -2736,7 +2733,7 @@ static bool wasm64_fe_emit_function(Wasm64Context* context, Wasm64FunctionRecord
             }
             IrInstruction* instruction = emitter.function->instructions + instruction_id.value;
             wasm64_fe_emit_instruction(&emitter, block, instruction);
-            instruction_id = instruction->next;
+            instruction_id.value = instruction_id.value == block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
         }
         wasm64_fe_u8(&emitter, 0x0b); // end if
     }

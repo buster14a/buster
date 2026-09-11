@@ -16812,34 +16812,14 @@ BUSTER_C_INTERNAL IrTypeId c_ir_simd_vector_type(CIntegerIrBuilder* builder)
 
 BUSTER_C_INTERNAL IrTypeId c_ir_simd_result_type(CIntegerIrBuilder* builder, IrSimdOperation operation)
 {
-    switch (operation)
+    IrSimdShape shape = ir_simd_operation_shape(operation);
+    IrTypeId result = IR_TYPE_ID_INVALID;
+    if (shape.semantic_class == IR_VECTOR_SEMANTICS_EXACT_X86_512)
     {
-    case IR_SIMD_STORE:
-    case IR_SIMD_STORE_MASKED:
-    case IR_SIMD_COMPRESS_STORE_BYTE:
-        return builder->void_type;
-    case IR_SIMD_COMPARE_EQUAL_BYTE:
-    case IR_SIMD_COMPARE_LESS_BYTE:
-    case IR_SIMD_SIGN_MASK_BYTE:
-    case IR_SIMD_TEST_MASK_BYTE:
-    case IR_SIMD_COMPARE_EQUAL_WORD:
-    case IR_SIMD_COMPARE_LESS_WORD:
-        return builder->scalar_types[C_TYPE_UNSIGNED_LONG_LONG];
-    case IR_SIMD_LOAD:
-    case IR_SIMD_LOAD_MASKED:
-    case IR_SIMD_SPLAT_BYTE:
-    case IR_SIMD_SPLAT_WORD:
-    case IR_SIMD_PERMUTE2_BYTE:
-    case IR_SIMD_COMPRESS_BYTE:
-    case IR_SIMD_COMPRESS_WORD:
-    case IR_SIMD_WIDEN_BYTE_TO_WORD:
-    case IR_SIMD_SHIFT_LEFT_WORD:
-    case IR_SIMD_TERNARY_WORD:
-        return c_ir_simd_vector_type(builder);
-    case IR_SIMD_COUNT:
-        break;
+        result = !shape.has_result ? builder->void_type : shape.predicate_result ? builder->scalar_types[C_TYPE_UNSIGNED_LONG_LONG] :
+                 c_ir_simd_vector_type(builder);
     }
-    return IR_TYPE_ID_INVALID;
+    return result;
 }
 
 // Arguments get exactly the conversions C would already have applied at a call

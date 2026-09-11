@@ -1,0 +1,630 @@
+{
+  "compiler_sha256": "87b31eff505cd85f140a85b7dce3020ed8f3d8ebe7368f859e3982ad39971a38",
+  "node_script": "const fs=require('fs'); const m=new WebAssembly.Module(fs.readFileSync(process.argv[1])); const i=new WebAssembly.Instance(m); for (const x of [0n,1n,0xffffffffn,0xffffffffffffffffn]) {for(const y of [0n,1n]) {if(BigInt.asUintN(64,i.exports.fast_scalar(x,y))!==BigInt.asUintN(64,x+7n))process.exit(1);}}",
+  "results": [
+    {
+      "backend": "wasm",
+      "mask": 0,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 1,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-fold",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 2,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-address",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 3,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-address",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 4,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-dce",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 5,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-dce",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 6,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-address",
+        "-fcanonical-fast-dce",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 7,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-address",
+        "-fcanonical-fast-dce",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 8,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 9,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 10,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-address",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 11,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-address",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 12,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-dce",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 13,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-dce",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 14,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-address",
+        "-fcanonical-fast-dce",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "wasm",
+      "mask": 15,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-target",
+        "wasm64-unknown-freestanding",
+        "-nostdinc",
+        "tests/basic_c_canonical_fast_scalar.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-address",
+        "-fcanonical-fast-dce",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.wasm"
+      ],
+      "compile": 0,
+      "link": null,
+      "run": 0,
+      "diagnostic": ""
+    },
+    {
+      "backend": "llvm",
+      "mask": 0,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 1,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-fold",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 2,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-address",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 3,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-address",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 4,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-dce",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 5,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-dce",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 6,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-address",
+        "-fcanonical-fast-dce",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 7,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-address",
+        "-fcanonical-fast-dce",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 8,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 9,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 10,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-address",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 11,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-address",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 12,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-dce",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 13,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-dce",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 14,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-address",
+        "-fcanonical-fast-dce",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    },
+    {
+      "backend": "llvm",
+      "mask": 15,
+      "command": [
+        "/workspace/scratch/938e5009f152/issue40/build/Debug/ide",
+        "cc",
+        "-emit-llvm",
+        "-c",
+        "tests/basic_c_canonical_fast.c",
+        "-fcanonical-fast-fold",
+        "-fcanonical-fast-address",
+        "-fcanonical-fast-dce",
+        "-fcanonical-fast-parameters",
+        "-o",
+        "/workspace/scratch/938e5009f152/issue40/build/fast-final.bc"
+      ],
+      "compile": 0,
+      "link": 0,
+      "run": 0,
+      "diagnostic": "warning: overriding the module target triple with x86_64-pc-linux-gnu [-Woverride-module]\n1 warning generated.\n"
+    }
+  ]
+}

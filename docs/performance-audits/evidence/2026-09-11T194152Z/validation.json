@@ -1,0 +1,176 @@
+{
+  "baseline-selfhost.log": {
+    "sha256": "b9223475cf42f8aeceaf855c5fc348f1486f81c6082ad9a37de1804ea972d9dc",
+    "bytes": 25646,
+    "totals": [],
+    "tail": [
+      "CODEGEN_ENCODER exact_attempts=0 exact_successes=0 exact_failures=0",
+      "CODEGEN_MIR mutable_virtual_registers=0",
+      "Self-host stage 1 took 6.326237 seconds (6326237000 nanoseconds)",
+      "Self-host stage 2 took 17.712547 seconds (17712547000 nanoseconds)",
+      "Self-host stage 2 benchmark took 0.111583 seconds (111583000 nanoseconds)",
+      "Self-host machine stage took 25.688494 seconds (25688494000 nanoseconds)",
+      "Self-host machine stage benchmark took 0.152979 seconds (152979000 nanoseconds)",
+      "Self-host canonical stage took 26.375537 seconds (26375537000 nanoseconds)"
+    ]
+  },
+  "baseline-tests.log": {
+    "sha256": "42ceb6a5a18efea3d46fc4b78a2f7da0328ebcd45da5113239d91f9033c101c0",
+    "bytes": 329985,
+    "totals": [
+      "[1485952/1485952] Unit tests",
+      "[46/46] Module tests",
+      "[0/0] External tests"
+    ],
+    "tail": [
+      "Launched [1298]: \"/tmp/buster-tests-13-1-15746695100926/buster-c-archive-driver-13\" ",
+      "Process [1298]: Time (user): 0:124 s,us, (system): 0:0 s,us. Max RSS: 566448 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0",
+      "TEST_MODULE_TIMING index=43 module=compiler_driver_tests duration_ns=9057079276 passed=9779 failed=0 assertions=9779 status=pass",
+      "TEST_MODULE_TIMING index=44 module=compiler_driver_object_path_tests duration_ns=4042449 passed=22 failed=0 assertions=22 status=pass",
+      "TEST_MODULE_TIMING index=45 module=x86_64_tests duration_ns=329046 passed=18 failed=0 assertions=18 status=pass",
+      "[1485952/1485952] Unit tests",
+      "[46/46] Module tests",
+      "[0/0] External tests"
+    ]
+  },
+  "baseline-matrix.log": {
+    "sha256": "6f6afd26d77c45f839553256a7fc85baa74c63a6bf27d4e17bb497cade2abffd",
+    "bytes": 2581,
+    "totals": [],
+    "tail": [
+      "MODE_MATRIX leg=x86_64-macos/mir-stack avenue=oracle status=pass fixtures=6 elapsed_us=355226",
+      "MODE_MATRIX leg=x86_64-macos/fast avenue=oracle status=pass fixtures=6 elapsed_us=351391",
+      "MODE_MATRIX leg=x86_64-macos/quality avenue=oracle status=pass fixtures=6 elapsed_us=328076",
+      "MODE_MATRIX leg=aarch64-macos/none avenue=oracle status=pass fixtures=6 elapsed_us=212703",
+      "MODE_MATRIX leg=aarch64-macos/mir-stack avenue=oracle status=pass fixtures=6 elapsed_us=199576",
+      "MODE_MATRIX leg=aarch64-macos/fast avenue=oracle status=pass fixtures=6 elapsed_us=191442",
+      "MODE_MATRIX leg=aarch64-macos/quality avenue=oracle status=pass fixtures=6 elapsed_us=178207",
+      "MODE_MATRIX_RESULT legs=24 executed=8 oracle_checked=16 expected_failures=0 failures=0 elapsed_us=6054478 status=pass"
+    ]
+  },
+  "issue45-debug2.log": {
+    "sha256": "2ec89fd42f3eea0d92450e2b00648fa45f87075173d4000f88df67ddda6fcd0a",
+    "bytes": 331883,
+    "totals": [
+      "[1485955/1485955] Unit tests",
+      "[46/46] Module tests",
+      "[0/0] External tests"
+    ],
+    "tail": [
+      "Launched [1342]: \"/tmp/buster-tests-57-1-15751712503383/buster-c-archive-driver-57\" ",
+      "Process [1342]: Time (user): 0:0 s,us, (system): 0:254 s,us. Max RSS: 568752 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 0, (invol): 0",
+      "TEST_MODULE_TIMING index=43 module=compiler_driver_tests duration_ns=11333929431 passed=9779 failed=0 assertions=9779 status=pass",
+      "TEST_MODULE_TIMING index=44 module=compiler_driver_object_path_tests duration_ns=4828370 passed=22 failed=0 assertions=22 status=pass",
+      "TEST_MODULE_TIMING index=45 module=x86_64_tests duration_ns=380092 passed=18 failed=0 assertions=18 status=pass",
+      "[1485955/1485955] Unit tests",
+      "[46/46] Module tests",
+      "[0/0] External tests"
+    ]
+  },
+  "issue45-selfhost.log": {
+    "sha256": "b7acd122be6529413b8078e7420213f79e6dea71edb04abe6cc59c35bdc1bc0f",
+    "bytes": 25645,
+    "totals": [],
+    "tail": [
+      "CODEGEN_ENCODER exact_attempts=0 exact_successes=0 exact_failures=0",
+      "CODEGEN_MIR mutable_virtual_registers=0",
+      "Self-host stage 1 took 4.072349 seconds (4072349000 nanoseconds)",
+      "Self-host stage 2 took 11.170361 seconds (11170361000 nanoseconds)",
+      "Self-host stage 2 benchmark took 0.091607 seconds (91607000 nanoseconds)",
+      "Self-host machine stage took 22.215354 seconds (22215354000 nanoseconds)",
+      "Self-host machine stage benchmark took 0.240319 seconds (240319000 nanoseconds)",
+      "Self-host canonical stage took 23.038739 seconds (23038739000 nanoseconds)"
+    ]
+  },
+  "issue45-release-tests.log": {
+    "sha256": "c5ab15074f70aa0384e211aaded493c962cfc6124b0557024e217c4803801f3e",
+    "bytes": 330110,
+    "totals": [
+      "[1485955/1485955] Unit tests",
+      "[46/46] Module tests",
+      "[0/0] External tests"
+    ],
+    "tail": [
+      "Launched [1298]: \"/tmp/buster-tests-13-1-16593046482453/buster-c-archive-driver-13\" ",
+      "Process [1298]: Time (user): 0:125 s,us, (system): 0:0 s,us. Max RSS: 566492 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0",
+      "TEST_MODULE_TIMING index=43 module=compiler_driver_tests duration_ns=8263843135 passed=9779 failed=0 assertions=9779 status=pass",
+      "TEST_MODULE_TIMING index=44 module=compiler_driver_object_path_tests duration_ns=4315860 passed=22 failed=0 assertions=22 status=pass",
+      "TEST_MODULE_TIMING index=45 module=x86_64_tests duration_ns=172228 passed=18 failed=0 assertions=18 status=pass",
+      "[1485955/1485955] Unit tests",
+      "[46/46] Module tests",
+      "[0/0] External tests"
+    ]
+  },
+  "issue45-matrix.log": {
+    "sha256": "d55ddac2cc8bdead560449e138dd34f68ec7845bc1f0eb002c52d20bb5ab0f02",
+    "bytes": 2583,
+    "totals": [],
+    "tail": [
+      "MODE_MATRIX leg=x86_64-macos/mir-stack avenue=oracle status=pass fixtures=6 elapsed_us=302960",
+      "MODE_MATRIX leg=x86_64-macos/fast avenue=oracle status=pass fixtures=6 elapsed_us=371099",
+      "MODE_MATRIX leg=x86_64-macos/quality avenue=oracle status=pass fixtures=6 elapsed_us=326866",
+      "MODE_MATRIX leg=aarch64-macos/none avenue=oracle status=pass fixtures=6 elapsed_us=213398",
+      "MODE_MATRIX leg=aarch64-macos/mir-stack avenue=oracle status=pass fixtures=6 elapsed_us=190551",
+      "MODE_MATRIX leg=aarch64-macos/fast avenue=oracle status=pass fixtures=6 elapsed_us=188421",
+      "MODE_MATRIX leg=aarch64-macos/quality avenue=oracle status=pass fixtures=6 elapsed_us=181146",
+      "MODE_MATRIX_RESULT legs=24 executed=8 oracle_checked=16 expected_failures=0 failures=0 elapsed_us=5906264 status=pass"
+    ]
+  },
+  "issue45-sanitize.log": {
+    "sha256": "e7fa3a46d4e1faf362ed1ccddfc603df7aea20b090fd2dc2b760f0ef847c6834",
+    "bytes": 373868,
+    "totals": [
+      "[1477404/1477407] Unit tests",
+      "[44/46] Module tests",
+      "[0/0] External tests"
+    ],
+    "tail": [
+      "[1477404/1477407] Unit tests",
+      "[44/46] Module tests",
+      "[0/0] External tests",
+      "==3297==Can't open /proc/1889/task for reading.",
+      "==1889==LeakSanitizer has encountered a fatal error.",
+      "==1889==HINT: For debugging, try setting environment variable LSAN_OPTIONS=verbosity=1:log_threads=1",
+      "==1889==HINT: LeakSanitizer does not work under ptrace (strace, gdb, etc)",
+      "ninja: build stopped: subcommand failed."
+    ]
+  },
+  "issue45-sanitize-no-leaks.log": {
+    "sha256": "d8203f77b4a945fca7714fbb2f942cd302a1d22910a1aefb40e8014474bc9aed",
+    "bytes": 358251,
+    "totals": [
+      "[1477404/1477407] Unit tests",
+      "[44/46] Module tests",
+      "[0/0] External tests"
+    ],
+    "tail": [
+      "[1477404/1477407] Unit tests",
+      "[44/46] Module tests",
+      "[0/0] External tests",
+      "==1421==Can't open /proc/13/task for reading.",
+      "==13==LeakSanitizer has encountered a fatal error.",
+      "==13==HINT: For debugging, try setting environment variable LSAN_OPTIONS=verbosity=1:log_threads=1",
+      "==13==HINT: LeakSanitizer does not work under ptrace (strace, gdb, etc)",
+      "ninja: build stopped: subcommand failed."
+    ]
+  },
+  "issue45-sanitize-direct-no-leaks.log": {
+    "sha256": "8cde839a5e88c525a4ecb5a3c3f837b1960c4662d22be0b8dca9bca3ace5a2fe",
+    "bytes": 140590,
+    "totals": [
+      "[1477409/1477409] Unit tests",
+      "[46/46] Module tests",
+      "[0/0] External tests"
+    ],
+    "tail": [
+      "Launched [556]: \"/tmp/buster-tests-5-1-17668564553280/buster-c-host-pic-5\" ",
+      "Process [556]: Time (user): 0:1430 s,us, (system): 0:0 s,us. Max RSS: 635036 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0",
+      "TEST_MODULE_TIMING index=43 module=compiler_driver_tests duration_ns=19662892176 passed=6372 failed=0 assertions=6372 status=pass",
+      "TEST_MODULE_TIMING index=44 module=compiler_driver_object_path_tests duration_ns=26888895 passed=22 failed=0 assertions=22 status=pass",
+      "TEST_MODULE_TIMING index=45 module=x86_64_tests duration_ns=3950560 passed=18 failed=0 assertions=18 status=pass",
+      "[1477409/1477409] Unit tests",
+      "[46/46] Module tests",
+      "[0/0] External tests"
+    ]
+  }
+}

@@ -1,7 +1,8 @@
 // Opt-in bootstrap snapshots, not an interchange format. The field walks
 // below are deliberately explicit: object padding, pointer addresses, arena
 // capacity and lazy ABI caches must never become compiler input evidence.
-// bootstrap_trace_ir captures semantic canonical records after validation;
+// bootstrap_trace_ir captures semantic canonical records after validation,
+// reading immutable CFG slices after publication and builder links before it;
 // bootstrap_trace_machine captures actual selected MIR before allocation and
 // runs the verifier even for selector-certified functions. Debug source byte
 // offsets are excluded because resource-header storage differs by generation;
@@ -144,25 +145,53 @@ BUSTER_GLOBAL_LOCAL void bootstrap_trace_ir_function(BootstrapTrace* trace, IrFu
         bootstrap_trace_u64(trace, (u64)block->id.value);
         bootstrap_trace_u64(trace, (u64)block->first_instruction.value);
         bootstrap_trace_u64(trace, (u64)block->last_instruction.value);
-        bootstrap_trace_u64(trace, (u64)block->parameter_count);
-        bootstrap_trace_u64(trace, (u64)block->predecessor_count);
+        bootstrap_trace_u64(trace, function->published_cfg ? (u64)function->published_cfg->blocks[i].parameter_count : (u64)block->parameter_count);
+        bootstrap_trace_u64(trace, function->published_cfg ? (u64)function->published_cfg->blocks[i].predecessor_count : (u64)block->predecessor_count);
         bootstrap_trace_u64(trace, (u64)block->terminated);
         bootstrap_trace_u64(trace, (u64)block->sealed);
-        for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+        if (function->published_cfg)
         {
-            bootstrap_trace_u64(trace, (u64)parameter->canonical_type.value);
-            bootstrap_trace_u64(trace, (u64)parameter->canonical_local.value);
-            bootstrap_trace_u64(trace, (u64)parameter->value.value);
-            bootstrap_trace_u64(trace, (u64)parameter->incoming_count);
-            for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+            IrPublishedCfg const* cfg = function->published_cfg;
+            IrCfgBlock const* dense_block = cfg->blocks + i;
+            for (u32 parameter_index = 0; parameter_index < dense_block->parameter_count; parameter_index += 1)
             {
-                bootstrap_trace_u64(trace, (u64)incoming->predecessor.value);
-                bootstrap_trace_u64(trace, (u64)incoming->value.value);
+                IrCfgParameter const* parameter = cfg->parameters + dense_block->parameter_offset + parameter_index;
+                bootstrap_trace_u64(trace, (u64)parameter->canonical_type.value);
+                bootstrap_trace_u64(trace, (u64)parameter->canonical_local.value);
+                bootstrap_trace_u64(trace, (u64)parameter->value.value);
+                bootstrap_trace_u64(trace, (u64)dense_block->predecessor_count);
+                for (u32 predecessor_index = 0; predecessor_index < dense_block->predecessor_count; predecessor_index += 1)
+                {
+                    u32 edge_index = cfg->predecessors[dense_block->predecessor_offset + predecessor_index];
+                    IrCfgEdge const* edge = cfg->edges + edge_index;
+                    bootstrap_trace_u64(trace, (u64)edge->source.value);
+                    bootstrap_trace_u64(trace, (u64)cfg->arguments[edge->argument_offset + parameter_index].value);
+                }
+            }
+            for (u32 predecessor_index = 0; predecessor_index < dense_block->predecessor_count; predecessor_index += 1)
+            {
+                u32 edge_index = cfg->predecessors[dense_block->predecessor_offset + predecessor_index];
+                bootstrap_trace_u64(trace, (u64)cfg->edges[edge_index].source.value);
             }
         }
-        for (IrPredecessor* predecessor = block->first_predecessor; predecessor; predecessor = predecessor->next)
+        else
         {
-            bootstrap_trace_u64(trace, predecessor->block.value);
+            for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
+            {
+                bootstrap_trace_u64(trace, (u64)parameter->canonical_type.value);
+                bootstrap_trace_u64(trace, (u64)parameter->canonical_local.value);
+                bootstrap_trace_u64(trace, (u64)parameter->value.value);
+                bootstrap_trace_u64(trace, (u64)parameter->incoming_count);
+                for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+                {
+                    bootstrap_trace_u64(trace, (u64)incoming->predecessor.value);
+                    bootstrap_trace_u64(trace, (u64)incoming->value.value);
+                }
+            }
+            for (IrPredecessor* predecessor = block->first_predecessor; predecessor; predecessor = predecessor->next)
+            {
+                bootstrap_trace_u64(trace, predecessor->block.value);
+            }
         }
     }
     bootstrap_trace_u64(trace, function->instruction_count);
@@ -172,7 +201,7 @@ BUSTER_GLOBAL_LOCAL void bootstrap_trace_ir_function(BootstrapTrace* trace, IrFu
         bootstrap_trace_u64(trace, (u64)instruction->canonical_type.value);
         bootstrap_trace_u64(trace, (u64)instruction->symbol.value);
         bootstrap_trace_u64(trace, (u64)instruction->canonical_local.value);
-        bootstrap_trace_u64(trace, (u64)instruction->next.value);
+        bootstrap_trace_u64(trace, function->published_cfg ? (u64)IR_ID_UNDERLYING_INVALID : (u64)instruction->next.value);
         bootstrap_trace_u64(trace, (u64)instruction->result.value);
         bootstrap_trace_u64(trace, (u64)instruction->opcode);
         bootstrap_trace_u64(trace, (u64)instruction->conversion_operation);
@@ -457,9 +486,10 @@ void bootstrap_trace_machine(BootstrapTrace* trace, IrFunction* function, Machin
                 bootstrap_trace_u64(trace, (u64)row->definition_point);
                 bootstrap_trace_u64(trace, (u64)row->register_class);
                 bootstrap_trace_u64(trace, (u64)row->flags);
-                bootstrap_trace_u64(trace, (u64)row->rematerialization_recipe);
+                // Frozen zero slots preserve the versioned trace framing.
+                bootstrap_trace_u64(trace, 0);
                 bootstrap_trace_u64(trace, (u64)row->typed_origin);
-                bootstrap_trace_u64(trace, (u64)row->hint);
+                bootstrap_trace_u64(trace, 0);
             }
             bootstrap_trace_u64(trace, machine->block_count);
             for (u32 i = 0; i < machine->block_count; i += 1)

@@ -1,0 +1,42 @@
+TARGET cpu=emeraldrapids features=adx,aes,avx,avx-vnni,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512fp16,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,cldemote,clflushopt,clwb,cx16,f16c,fma,fsgsbase,gfni,invpcid,lzcnt,movbe,movdir64b,pclmul,popcnt,rdrand,rdseed,rtm,serialize,sha,smap,sse2,sse3,sse4.1,sse4.2,ssse3,tsxldtrk,vaes,vpclmulqdq,waitpkg,xsave,xsaves
+SOURCE build/fast-throughput-on-off/inputs/backend_pressure.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                  1                        1
+bytes on disk                    711.531                  711.531
+physical lines                    19.202                   19.202
+
+bytes scanned                    711.531                  711.531
+  code                           457.673   64.3 %         457.673   64.3 %
+  comment                             87    0.0 %              87    0.0 %
+  whitespace                     253.771   35.7 %         253.771   35.7 %
+  literals, within code                0    0.0 %               0    0.0 %
+
+lines scanned                     19.202                   19.202
+  code, the sLOC                  19.201  100.0 %          19.201  100.0 %
+  comment                              1    0.0 %               1    0.0 %
+  blank                                0    0.0 %               0    0.0 %
+  both, counted twice                  0    0.0 %               0    0.0 %
+
+comments                               1                        1
+tokens                           275.861                  275.861
+spliced-away lines                     0    0.0 %               0    0.0 %
+
+preprocessed output                      of lexed
+  tokens to the parser           275.861  100.0 %
+  their spelling bytes           457.673  100.0 %
+  bytes retained                 712.777  100.2 %
+  macro expansions                     0
+  #define directives                   0
+IR_FRONTEND_SSA functions=64 locals=2176 reads=59456 writes=19072 parameters_created=0 parameters_removed=0 temporaries=0 fallback_locals=0
+IR_FAST_PASS name=fold enabled=1 timed=1 ns=1235060 visits=95424 changes=16384
+IR_FAST_PASS name=address enabled=1 timed=1 ns=150793 visits=95424 changes=0
+IR_FAST_PASS name=dce enabled=1 timed=1 ns=582654 visits=231168 changes=16384
+IR_FAST_PASS name=parameters enabled=1 timed=1 ns=2453 visits=0 changes=0
+IR_FAST functions=64 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=47952 retained_bound=1306368 compact_ns=2028756 instructions_before=95424 instructions_after=79040
+IR_LOCAL_PROMOTION candidates=0 promoted=0 loads_removed=0 stores_removed=0 parameters_inserted=0 parameters_removed=0 uninitialized=0 barriers=0 instructions_before=95424 instructions_after=95424 values_before=95360 values_after=95360
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=0 block_visits=0 parameter_visits=0 incoming_visits=0
+CODEGEN cpu=emeraldrapids vector_bits=512 functions=64 instructions=79040 values=78976 stack_value_bytes=464384 stack_frame_bytes=464384 max_stack_frame_bytes=7256 code_bytes=1400828 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=0 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=100160 exact_successes=100160 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=16384
+CODEGEN_ALLOCATOR reloads=76864 spills=57920 boundary_spills=0 boundary_reloads=0 boundary_copies=0 copies=56704 rematerializations=0 pins=0 splits=0 scheduled=0 schedule_kept=0

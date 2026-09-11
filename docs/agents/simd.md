@@ -147,8 +147,11 @@ speedup merely because a proxy improved.
   canonical backend allocates no registers, so a mask spills to its frame slot
   either way, the vector instructions pick it back up with a single `kmovq`,
   and mask shifts, Boolean combinations, `mask64_count` and `mask64_first_set`
-  stay on the general-purpose ALUs, which retire more of them per cycle on
-  Zen 4/5 than the k unit does.
+  retain integer semantics across general-purpose/predicate register bridges.
+  Canonical shape metadata specifies the internal predicate width and mask
+  operand/result boundaries. The complete generic/exact opcode classification,
+  feature refusal rules, and cross-target representation contract are in
+  [vector semantics](../ir-vector-semantics.md).
 - **SIMD C lexing method: the Validark lineage.** `c_lex_compact` in
   `frontend/c/c_source.c` draws on Niles Salter's (Validark's) Accelerated Zig
   Parser — local checkout `~/dev/Accelerated-Zig-Parser`, upstream

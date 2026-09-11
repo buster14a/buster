@@ -1,0 +1,9 @@
+{
+  "archive_sha256": "2f6876ee8bcc7604779652181dd5dfe056bc7f1346d65995ee45e83e036b020c",
+  "archive_bytes": 116638,
+  "included_files": 646,
+  "excluded": "Last output .o files only; sizes and hashes remain in sealed samples.csv. All six primary evidence files, complete seal, source inputs, command/capability logs, metrics, and host observations are retained. Native compare does not require object outputs.",
+  "production_revision": "2370f88b7bd214c87b38e37170970f2bb9335579",
+  "remote_source_tree": "670bdc2e59c18baa56ea569dc3e22541087333a5",
+  "replay_exit_code": 0
+}

@@ -58,8 +58,8 @@ typedef enum MachinePointPhase
 BUSTER_CT_CHECK(MACHINE_POINT_PHASE_COUNT <= (1u << MACHINE_POINT_PHASE_BITS));
 
 // The hot instruction row. Static per-opcode metadata supplies operand
-// roles, classes, ties, early clobbers, implicit registers, regmasks, memory
-// alternatives, emission recipe, and side effects; the row carries only the
+// roles, classes, ties, early clobbers, clobber masks and side effects.
+// The row carries only the
 // selected opcode, four inline packed operands, an immediate-or-side-table
 // payload, and rare dynamic flags. No source/debug information, no linked
 // pointers, no allocator state.
@@ -107,10 +107,12 @@ struct MachineVirtualRegister
     MachinePoint definition_point;
     u8 register_class;
     u8 flags;
-    u16 rematerialization_recipe;
+    // Reserved zero slots preserve structural replay version 2. Actual
+    // rematerialization lives in MachineFastPrepass, not virtual registers.
+    u16 reserved_recipe;
     // IrValueId.value origin, or IR_ID_UNDERLYING_INVALID when synthesized.
     u32 typed_origin;
-    MachineRef hint;
+    u32 reserved_hint;
 };
 BUSTER_CT_CHECK(sizeof(MachineVirtualRegister) == 16);
 
@@ -666,6 +668,20 @@ typedef enum MachineOpcode
     MACHINE_A64_CLZ64,
     MACHINE_A64_RBIT32, // def, use; reverse bits within the selected width
     MACHINE_A64_RBIT64,
+    // Predicate-bank forms preserve the legacy replay identities above.
+    MACHINE_X64_KMOV_FROM_GENERAL, // def mask, use general; payload = bit width
+    MACHINE_X64_KMOV_TO_GENERAL,   // def general, use mask; payload = bit width
+    MACHINE_X64_KMOV,              // def mask, use mask; payload = bit width
+    MACHINE_X64_KAND,
+    MACHINE_X64_KOR,
+    MACHINE_X64_KXOR,
+    MACHINE_X64_VPCMP_K,
+    MACHINE_X64_VPMOVB2K,
+    MACHINE_X64_VLOAD_PTR_K,
+    MACHINE_X64_VSTORE_PTR_K,
+    MACHINE_X64_VCOMPRESS_STORE_PTR_K,
+    MACHINE_X64_VPERMT2B_K,
+    MACHINE_X64_VCOMPRESSB_K,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -744,23 +760,6 @@ struct MachineX64EmitRegistryEntry
     u8 reserved;
 };
 
-typedef enum MachineScheduleClass
-{
-    MACHINE_SCHEDULE_CLASS_NONE,
-    MACHINE_SCHEDULE_CLASS_ALU,
-    MACHINE_SCHEDULE_CLASS_SHIFT,
-    MACHINE_SCHEDULE_CLASS_MUL,
-    MACHINE_SCHEDULE_CLASS_DIV,
-    MACHINE_SCHEDULE_CLASS_LOAD,
-    MACHINE_SCHEDULE_CLASS_STORE,
-    MACHINE_SCHEDULE_CLASS_BRANCH,
-    MACHINE_SCHEDULE_CLASS_CALL,
-    MACHINE_SCHEDULE_CLASS_VECTOR,
-    MACHINE_SCHEDULE_CLASS_ATOMIC,
-    MACHINE_SCHEDULE_CLASS_BARRIER,
-    MACHINE_SCHEDULE_CLASS_COUNT,
-} MachineScheduleClass;
-
 typedef enum MachineMemoryEffect
 {
     MACHINE_MEMORY_EFFECT_NONE,
@@ -772,44 +771,6 @@ typedef enum MachineMemoryEffect
     MACHINE_MEMORY_EFFECT_BARRIER,
     MACHINE_MEMORY_EFFECT_COUNT,
 } MachineMemoryEffect;
-
-typedef enum MachineResource
-{
-    MACHINE_RESOURCE_NONE,
-    MACHINE_RESOURCE_FLAGS,
-    MACHINE_RESOURCE_NZCV,
-    MACHINE_RESOURCE_STACK_POINTER,
-    MACHINE_RESOURCE_FP_ENVIRONMENT,
-    MACHINE_RESOURCE_VECTOR_STATE,
-    MACHINE_RESOURCE_CONTROL,
-    MACHINE_RESOURCE_COUNT,
-} MachineResource;
-
-// Public spelling used by verifier/scheduler clients.  Keep the shorter
-// MachineResource name as a source-compatible alias for existing target code;
-// both names denote the same compact bit positions in implicit-resource
-// masks.
-typedef MachineResource MachineImplicitResource;
-#define MACHINE_IMPLICIT_RESOURCE_NONE MACHINE_RESOURCE_NONE
-#define MACHINE_IMPLICIT_RESOURCE_FLAGS MACHINE_RESOURCE_FLAGS
-#define MACHINE_IMPLICIT_RESOURCE_NZCV MACHINE_RESOURCE_NZCV
-#define MACHINE_IMPLICIT_RESOURCE_STACK_POINTER MACHINE_RESOURCE_STACK_POINTER
-#define MACHINE_IMPLICIT_RESOURCE_FP_ENVIRONMENT MACHINE_RESOURCE_FP_ENVIRONMENT
-#define MACHINE_IMPLICIT_RESOURCE_VECTOR_STATE MACHINE_RESOURCE_VECTOR_STATE
-#define MACHINE_IMPLICIT_RESOURCE_CONTROL MACHINE_RESOURCE_CONTROL
-#define MACHINE_IMPLICIT_RESOURCE_COUNT MACHINE_RESOURCE_COUNT
-
-// Named bits for implicit-resource masks.
-typedef enum MachineResourceMask
-{
-    MACHINE_RESOURCE_NONE_MASK = 1u << MACHINE_RESOURCE_NONE,
-    MACHINE_RESOURCE_FLAGS_MASK = 1u << MACHINE_RESOURCE_FLAGS,
-    MACHINE_RESOURCE_NZCV_MASK = 1u << MACHINE_RESOURCE_NZCV,
-    MACHINE_RESOURCE_STACK_POINTER_MASK = 1u << MACHINE_RESOURCE_STACK_POINTER,
-    MACHINE_RESOURCE_FP_ENVIRONMENT_MASK = 1u << MACHINE_RESOURCE_FP_ENVIRONMENT,
-    MACHINE_RESOURCE_VECTOR_STATE_MASK = 1u << MACHINE_RESOURCE_VECTOR_STATE,
-    MACHINE_RESOURCE_CONTROL_MASK = 1u << MACHINE_RESOURCE_CONTROL,
-} MachineResourceMask;
 
 // One mark per lowered IR instruction, in selection order: the machine row
 // where its rows begin and the IR row itself. The source position is not
@@ -913,7 +874,6 @@ BUSTER_CT_CHECK(MACHINE_REGISTER_CLASS_COUNT <= (1u << 3));
 #define MACHINE_OPCODE_ATTRIBUTE_TERMINATOR (1u << 0)
 #define MACHINE_OPCODE_ATTRIBUTE_CALL (1u << 1)
 #define MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS (1u << 2)
-#define MACHINE_OPCODE_ATTRIBUTE_REMATERIALIZABLE (1u << 3)
 #define MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE (1u << 4)
 #define MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE (1u << 5)
 // The encoder sequence pins its operand registers (divides, shift counts,
@@ -921,15 +881,13 @@ BUSTER_CT_CHECK(MACHINE_REGISTER_CLASS_COUNT <= (1u << 3));
 // take the target's fixed per-slot scratch assignment and every allocator
 // must stand clear of them.
 #define MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED (1u << 6)
-#define MACHINE_OPCODE_ATTRIBUTE_BUNDLE (1u << 8)
-#define MACHINE_OPCODE_ATTRIBUTE_EXPANDS (1u << 9)
 
 typedef struct MachineOpcodeInfo MachineOpcodeInfo;
 struct MachineOpcodeInfo
 {
     // Operand and allocation constraints occupy the first 32 bytes. Simple
     // FAST rows use MachineOpcodeRow; full-descriptor consumers keep these
-    // facts together ahead of the diagnostic name and scheduling metadata.
+    // facts together ahead of the cold scheduling membership.
     // Extra registers the opcode's encoder sequence scribbles on beyond its
     // declared operands; owners must vacate before the instruction runs.
     u64 clobber_mask;
@@ -956,35 +914,28 @@ struct MachineOpcodeInfo
     // form/expansion bytes preserve offsets; they are not identity mappings.
     // See docs/machine-metadata-ownership.md for the actual authorities.
     u16 reserved_form;
-    u8 schedule_class;
+    u8 schedule_barrier;
     u8 reserved_metadata;
     u16 reserved_expansion;
     // Sole static memory-chain classification; barrier policy also uses
-    // call/side-effect/terminator attributes and the schedule class.
+    // call/side-effect/terminator attributes and explicit barrier membership.
     u8 memory_effect;
     // Removed memory hints, timing and bundle state have no authority.
     u8 reserved_schedule[9];
 
     u64 reserved_physical[2];
-    u64 implicit_resource_uses;
-    u64 implicit_resource_defs;
-
-    // Diagnostic/debug-only identity is cold for allocator and scheduler
-    // classification; placing it last prevents its 16 bytes from occupying
-    // the descriptor prefix read for every row.
-    String8 name;
+    // One ordering chain for implicit vector scratch; no resource hazard
+    // model or distinction between reads and writes is implied.
+    u8 implicit_vector_state;
+    u8 reserved_cold[31];
 };
 BUSTER_CT_CHECK(sizeof(MachineOpcodeInfo) == 96);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, clobber_mask) == 0);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, fixed_registers) + sizeof(((MachineOpcodeInfo*)0)->fixed_registers) <= 32);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, schedule_class) == 32);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, schedule_barrier) == 32);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, memory_effect) == 36);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, reserved_physical) == 48);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, implicit_resource_uses) == 64);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, implicit_resource_defs) == 72);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, name) == 80);
-
-#define MACHINE_OPCODE_INFO_HAS_FIXED_REGISTERS 1
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(MachineOpcodeInfo, implicit_vector_state) == 64);
 
 // The published row-facts projection of the opcode table: everything a
 // per-instruction-row walk asks of an opcode, in sixteen bytes per opcode
@@ -1039,6 +990,10 @@ BUSTER_CT_CHECK(sizeof(MachineOpcodeRow) == 16);
 // the vector file behind it; every allocator mask is one u64 over this
 // numbering, so the limit may not pass sixty-four.
 #define MACHINE_TARGET_REGISTER_LIMIT 48u
+// Separate predicate bank: these placement IDs never enter the 48-lane tile.
+#define MACHINE_PREDICATE_REGISTER_BASE 48u
+#define MACHINE_PREDICATE_REGISTER_COUNT 8u
+#define MACHINE_PREDICATE_ALLOCATABLE_MASK 0xfeu
 // Upper bound on the callee-saved registers the QUALITY pass may pin;
 // each target lists its own file in preference order and reports how much
 // of it is real through `quality_pin_register_count`.
@@ -1102,7 +1057,7 @@ struct MachineTargetDescription
     // pointer already correct. The frame slots stay at negative offsets from
     // the frame pointer either way; only the saves move above it.
     u8 saves_precede_frame_pointer;
-    u8 reserved[1];
+    u8 predicate_allocatable_mask;
     // The fixed vector scratch per operand slot, the MIR_STACK counterpart
     // of `slot_scratch` for vector-class operand slots.
     u8 vector_slot_scratch[4];
@@ -1118,6 +1073,10 @@ struct MachineTargetDescription
 // payloads index `stack_slot_sizes` (slot offsets are frame-layout output,
 // not selection output).
 typedef struct MachineFunction MachineFunction;
+
+// Optional selector certificates for individual frame objects in a function
+// that also contains volatile accesses. Zero is deliberately UNKNOWN.
+#define MACHINE_STACK_SLOT_MEMORY_NONVOLATILE 1u
 
 // Side data for the SysV x86-64 VA_ARG row.  The selector records the
 // ABI-classified eightbytes once; the encoder then emits the bounded register
@@ -1208,7 +1167,16 @@ struct MachineFunction
     // PE AArch64 uses a compact frame-chain/save area above the ordinary
     // placement slots. Keep the platform fact through allocation/scheduling.
     bool windows_aarch64_frame;
-    u8 reserved[6];
+    // Fresh selectors certify predicate-free functions so ordinary scalar
+    // placement does not rescan them. A rewrite adding MASK refs clears it.
+    bool predicate_absence_certified;
+    u8 reserved[5];
+    // One flag byte per stack slot, or null. Volatile canonical lowering
+    // taints every frame object it touches. Object identities do not change
+    // during CFG/SSA/scheduling rewrites, so this immutable table is shared.
+    // A producer introducing a volatile access must invalidate the affected
+    // slot certificate (and the whole-function certificate above).
+    u8* stack_slot_memory_flags;
 };
 
 // AArch64 physical general registers in encoding order; 31 encodes SP or
@@ -1325,6 +1293,9 @@ typedef enum MachineEditKind
     // subject immediate index materializes into location preg at point:
     // the reload of a value whose whole definition is a constant.
     MACHINE_EDIT_REMATERIALIZE,
+    // Predicate edge captures address an explicit frame slot directly.
+    MACHINE_EDIT_FRAME_SPILL,
+    MACHINE_EDIT_FRAME_RELOAD,
     MACHINE_EDIT_KIND_COUNT,
 } MachineEditKind;
 
@@ -1625,7 +1596,6 @@ BUSTER_F_DECL u32 machine_x86_64_neutral_patch_site_count(void);
 BUSTER_F_DECL MachineX64NeutralPatchSite const* machine_x86_64_neutral_patch_site(u32 ordinal);
 BUSTER_F_DECL void machine_x86_64_exact_prewarm(void);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
-BUSTER_F_DECL MachineScheduleClass machine_opcode_schedule_class(MachineOpcodeInfo const* info);
 BUSTER_F_DECL MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info);
 BUSTER_F_DECL bool machine_opcode_is_memory(MachineOpcodeInfo const* info);
 BUSTER_F_DECL u32 machine_opcode_fixed_register(MachineOpcodeInfo const* info, u32 slot);
@@ -1692,10 +1662,13 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena
 // prepare a context for this function alone, which is the unvalidated entry
 // point's cost and never module code generation's.
 BUSTER_F_DECL MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* program, Target target);
+// `predicate_residency` enables source K-chain selection for allocators that
+// retain registers across rows. Stack-only source selection keeps its existing
+// integer bridges; explicit MASK MIR remains valid in every machine allocator.
 BUSTER_F_DECL MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                             bool position_independent, MachineSelectionModule* module);
+                                                                             bool position_independent, bool predicate_residency, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                          bool position_independent, bool assume_validated, MachineSelectionModule* module);
+                                                                          bool position_independent, bool assume_validated, bool predicate_residency, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                             bool assume_validated);
 BUSTER_F_DECL MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function);

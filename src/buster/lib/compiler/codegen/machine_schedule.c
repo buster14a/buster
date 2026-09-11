@@ -141,27 +141,29 @@ MachineLineMark* machine_schedule_remap_line_marks(Arena* arena, Arena* scratch_
 //   register operand (argument staging, return-value moves) are barriers:
 //   ordered against every other unit in both directions, which freezes call
 //   sequences and everything the allocators special-case around them.
-// - machine_schedule_stack_alias proves bounded frame accesses belong to
-//   disjoint slot identities only when selection certifies no volatile access.
-//   Same-slot accesses keep source order. Unknown memory flushes every pending
-//   slot chain and precedes every new one. Calls, atomics and fences retain
+// - machine_schedule_memory_access proves bounded frame accesses belong to
+//   disjoint slot/range identities when selection certifies no volatile access
+//   in the function or in the particular frame object.
+//   Overlapping accesses keep source order. Unknown memory flushes every pending
+//   range chain and precedes every new one. Calls, atomics and fences retain
 //   their barriers; uncertified functions retain the original memory chain.
 // - Rows that pass through the target's float state (XMM / vector registers)
 //   chain the same way: the ABI bridges stage values that live across
 //   neighboring rows, and the float compute rows clobber that state.
-// - A virtual register with more than one defining row (x86-64 promoted
-//   locals, two-address result chains) keeps every touching row in source
+// - An explicitly mutable virtual register (the target promotion exception,
+//   including one textual update to a block parameter) keeps every touch in source
 //   order; a single-definition value needs only its def-before-use edges.
 
-// A whole-object alias class, represented by its existing stable stack-slot
-// id. UINT32_MAX is UNKNOWN. Only these fixed frame forms prove one bounded
-// access; pointer, aggregate, incoming, and future forms remain conservative.
+// These fixed frame forms, plus scalar pointer operations whose immutable SSA
+// definition is a direct frame address, prove one bounded access. Other pointer,
+// aggregate, incoming, and future forms remain conservative.
 // Payloads are unsigned byte offsets into the slot on both native targets.
-BUSTER_GLOBAL_LOCAL u32 machine_schedule_stack_alias(MachineFunction* function, MachineInstruction* instruction)
+MachineScheduleMemoryAccess machine_schedule_frame_access(MachineFunction const* function, MachineInstruction const* instruction)
 {
-    u32 result = UINT32_MAX;
+    MachineScheduleMemoryAccess result = {0};
     u32 width = 0;
     u32 operand = 0;
+    bool pointer = false;
     switch (instruction->opcode)
     {
         case MACHINE_X64_LOAD_FRAME:
@@ -177,20 +179,79 @@ BUSTER_GLOBAL_LOCAL u32 machine_schedule_stack_alias(MachineFunction* function, 
         case MACHINE_A64_STORE_FRAME64: width = 8; break;
         case MACHINE_X64_VLOAD_FRAME: width = 64; operand = 1; break;
         case MACHINE_X64_VSTORE_FRAME: width = 64; break;
+        case MACHINE_X64_LOAD_PTR8:
+        case MACHINE_A64_LOAD_PTR8: width = 1; operand = 1; pointer = true; break;
+        case MACHINE_X64_LOAD_PTR16:
+        case MACHINE_A64_LOAD_PTR16: width = 2; operand = 1; pointer = true; break;
+        case MACHINE_X64_LOAD_PTR32:
+        case MACHINE_A64_LOAD_PTR32: width = 4; operand = 1; pointer = true; break;
+        case MACHINE_X64_LOAD_PTR64:
+        case MACHINE_A64_LOAD_PTR64: width = 8; operand = 1; pointer = true; break;
+        case MACHINE_X64_STORE_PTR8:
+        case MACHINE_A64_STORE_PTR8: width = 1; pointer = true; break;
+        case MACHINE_X64_STORE_PTR16:
+        case MACHINE_A64_STORE_PTR16: width = 2; pointer = true; break;
+        case MACHINE_X64_STORE_PTR32:
+        case MACHINE_A64_STORE_PTR32: width = 4; pointer = true; break;
+        case MACHINE_X64_STORE_PTR64:
+        case MACHINE_A64_STORE_PTR64: width = 8; pointer = true; break;
         default: break;
     }
     MachineRef reference = instruction->operands[operand];
+    u32 offset = instruction->payload;
+    if (pointer)
+    {
+        u32 value = machine_ref_payload(reference);
+        bool bounded_value = machine_ref_kind(reference) == MACHINE_REF_VIRTUAL_REGISTER && value < function->virtual_register_count &&
+                             function->virtual_registers && function->instructions;
+        MachineVirtualRegister const* address = bounded_value ? function->virtual_registers + value : 0;
+        u32 defining_row = address ? machine_point_instruction(address->definition_point) : UINT32_MAX;
+        bool ssa = address && !address->flags && address->definition_point != MACHINE_POINT_INVALID && defining_row < function->instruction_count;
+        MachineInstruction const* definition = ssa ? function->instructions + defining_row : 0;
+        if (definition && definition->operands[0] == reference &&
+            (definition->opcode == MACHINE_X64_LEA_FRAME || definition->opcode == MACHINE_A64_LEA_FRAME))
+        {
+            reference = definition->operands[1];
+            offset = definition->payload;
+        }
+        else
+        {
+            width = 0;
+        }
+    }
     u32 slot = machine_ref_payload(reference);
     if (width && machine_ref_kind(reference) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count && function->stack_slot_sizes)
     {
         u32 size = function->stack_slot_sizes[slot];
-        if (instruction->payload <= size && width <= size - instruction->payload)
+        if (offset <= size && width <= size - offset)
         {
-            result = slot;
+            result = (MachineScheduleMemoryAccess){.kind = MACHINE_SCHEDULE_MEMORY_STACK_RANGE,
+                                                   .stack_slot = slot, .offset = offset, .size = width};
         }
     }
     return result;
 }
+
+MachineScheduleMemoryAccess machine_schedule_memory_access(MachineFunction const* function, MachineInstruction const* instruction)
+{
+    MachineScheduleMemoryAccess result = machine_schedule_frame_access(function, instruction);
+    if (result.kind != MACHINE_SCHEDULE_MEMORY_UNKNOWN && !function->nonvolatile_memory_certified &&
+        (!function->stack_slot_memory_flags || function->stack_slot_memory_flags[result.stack_slot] != MACHINE_STACK_SLOT_MEMORY_NONVOLATILE))
+    {
+        result = (MachineScheduleMemoryAccess){0};
+    }
+    return result;
+}
+
+// Eight-byte cells preserve useful scalar-field freedom while bounding every
+// frame operation to eight dependency keys. Large objects fold cell indices
+// modulo eight: collisions add conservative ordering, never remove an overlap.
+// Small objects allocate only the next power-of-two number of cells they need.
+#define MACHINE_SCHEDULE_ALIAS_CELL_BYTES 8u
+#define MACHINE_SCHEDULE_ALIAS_CELL_LIMIT 8u
+#define MACHINE_SCHEDULE_EDGE_FACTOR (7u + 2u * MACHINE_SCHEDULE_ALIAS_CELL_LIMIT)
+// The checked 23N graph bound keeps unit indices below this tag bit.
+#define MACHINE_SCHEDULE_REGISTER_DEFINED (1u << 31)
 
 BUSTER_GLOBAL_LOCAL MachineRegisterClass machine_schedule_register_class(MachineFunction* function, u32 virtual_register)
 {
@@ -355,6 +416,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
         // allocator and parser.
         class_capacities[MACHINE_REGISTER_CLASS_GENERAL] = mask64_count((Mask64)function->target->allocatable_mask);
         class_capacities[MACHINE_REGISTER_CLASS_VECTOR] = mask64_count((Mask64)function->target->vector_allocatable_mask);
+        class_capacities[MACHINE_REGISTER_CLASS_MASK] = mask64_count((Mask64)function->target->predicate_allocatable_mask);
         u32 allocatable_count = BUSTER_MAX(class_capacities[MACHINE_REGISTER_CLASS_GENERAL], class_capacities[MACHINE_REGISTER_CLASS_VECTOR]);
         u32 maximum_block_rows = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
@@ -366,9 +428,9 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
         // smaller cannot have excess, and a function of only such blocks is
         // done before anything is allocated. This is the gate almost every
         // function leaves through.
-        // The largest u32 scratch count is the 10N+16 ready queue; the new
-        // dependency bound is 9N+8. Unrepresentable blocks keep source order.
-        if (maximum_block_rows > allocatable_count && maximum_block_rows <= (UINT32_MAX - 16u) / 10u)
+        // The largest u32 scratch count is the bounded dependency array.
+        // Unrepresentable blocks keep source order before scratch allocation.
+        if (maximum_block_rows > allocatable_count && maximum_block_rows <= (UINT32_MAX - 16u) / MACHINE_SCHEDULE_EDGE_FACTOR)
         {
             TemporalArena scratch = scratch_begin(&arena, 1);
             u32* touch_epochs = arena_allocate(scratch.arena, u32, register_count ? register_count : 1);
@@ -456,11 +518,11 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                 // array is indexed by block-local unit index; edge capacity is a hard
                 // bound — each row contributes at most four operand edges, and each unit
                 // at most a barrier-in edge, one appearance in a barrier's flush list,
-                // and one vector link. Memory contributes at most two edges per
-                // unit: one previous-slot/unknown link and one later unknown
-                // flush appearance. Pending slot tails are cleared by each flush,
-                // so the complete bound is (4 + 2 + 1 + 2)N + 8, not pairwise.
-                u32 edge_capacity = 9 * maximum_block_rows + 8;
+                // and one vector link. Each memory row touches at most eight
+                // range keys. Each key contributes a predecessor edge and at
+                // most one later unknown-memory flush edge. Every pending tail
+                // is cleared on flush, bounding all memory work linearly.
+                u32 edge_capacity = MACHINE_SCHEDULE_EDGE_FACTOR * maximum_block_rows + 8;
                 u32* unit_first_rows = arena_allocate(scratch.arena, u32, maximum_block_rows);
                 u32* unit_row_counts = arena_allocate(scratch.arena, u32, maximum_block_rows);
                 u8* unit_flags = arena_allocate(scratch.arena, u8, maximum_block_rows);
@@ -471,11 +533,28 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                 u32* predecessor_lists = arena_allocate(scratch.arena, u32, edge_capacity);
                 u32* flush_list = arena_allocate(scratch.arena, u32, maximum_block_rows);
                 u32* newly_ready = arena_allocate(scratch.arena, u32, maximum_block_rows);
-                bool stack_aliases = function->nonvolatile_memory_certified && function->stack_slot_count && function->stack_slot_sizes;
-                u32 alias_count = stack_aliases ? function->stack_slot_count : 0;
+                bool stack_aliases = (function->nonvolatile_memory_certified || function->stack_slot_memory_flags) &&
+                                     function->stack_slot_count && function->stack_slot_sizes &&
+                                     function->stack_slot_count < UINT32_MAX / MACHINE_SCHEDULE_ALIAS_CELL_LIMIT;
+                u32* alias_offsets = arena_allocate(scratch.arena, u32, stack_aliases ? (u64)function->stack_slot_count + 1u : 0);
+                u32 alias_count = 0;
+                if (stack_aliases)
+                {
+                    alias_offsets[0] = 0;
+                    for (u32 slot = 0; slot < function->stack_slot_count; slot += 1)
+                    {
+                        u32 cells = 1;
+                        while (cells < MACHINE_SCHEDULE_ALIAS_CELL_LIMIT && function->stack_slot_sizes[slot] > cells * MACHINE_SCHEDULE_ALIAS_CELL_BYTES)
+                        {
+                            cells *= 2;
+                        }
+                        alias_count += cells;
+                        alias_offsets[slot + 1] = alias_count;
+                    }
+                }
                 u32* alias_epochs = arena_allocate(scratch.arena, u32, alias_count);
                 u32* alias_tails = arena_allocate(scratch.arena, u32, alias_count);
-                u32* pending_aliases = arena_allocate(scratch.arena, u32, stack_aliases ? maximum_block_rows : 0);
+                u32* pending_aliases = arena_allocate(scratch.arena, u32, BUSTER_MIN(alias_count, MACHINE_SCHEDULE_ALIAS_CELL_LIMIT * maximum_block_rows));
                 for (u32 alias = 0; alias < alias_count; alias += 1)
                 {
                     alias_epochs[alias] = 0;
@@ -614,31 +693,46 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                             flush_count += 1;
                             if (flags & MACHINE_SCHEDULE_UNIT_MEMORY)
                             {
-                                u32 alias = stack_aliases && unit_row_counts[unit_index] == 1
-                                                ? machine_schedule_stack_alias(function, function->instructions + block->first_instruction + unit_first_rows[unit_index])
-                                                : UINT32_MAX;
-                                u32 previous = last_memory;
-                                if (alias != UINT32_MAX && alias_epochs[alias] == epoch)
+                                MachineScheduleMemoryAccess access = {0};
+                                if (stack_aliases && unit_row_counts[unit_index] == 1)
                                 {
-                                    previous = alias_tails[alias];
+                                    access = machine_schedule_memory_access(function, function->instructions + block->first_instruction + unit_first_rows[unit_index]);
                                 }
-                                if (previous != UINT32_MAX)
+                                if (access.kind == MACHINE_SCHEDULE_MEMORY_STACK_RANGE)
                                 {
-                                    edge_sources[edge_count] = previous;
-                                    edge_destinations[edge_count] = unit_index;
-                                    edge_count += 1;
-                                }
-                                if (alias != UINT32_MAX)
-                                {
-                                    if (alias_epochs[alias] != epoch)
+                                    u32 base = alias_offsets[access.stack_slot];
+                                    u32 cells = alias_offsets[access.stack_slot + 1] - base;
+                                    u32 first_cell = access.offset / MACHINE_SCHEDULE_ALIAS_CELL_BYTES;
+                                    u32 touched = (access.offset % MACHINE_SCHEDULE_ALIAS_CELL_BYTES + access.size + MACHINE_SCHEDULE_ALIAS_CELL_BYTES - 1u) /
+                                                  MACHINE_SCHEDULE_ALIAS_CELL_BYTES;
+                                    touched = BUSTER_MIN(touched, cells);
+                                    for (u32 cell = 0; cell < touched; cell += 1)
                                     {
-                                        pending_aliases[pending_alias_count++] = alias;
-                                        alias_epochs[alias] = epoch;
+                                        u32 alias = base + ((first_cell + cell) & (cells - 1u));
+                                        bool pending = alias_epochs[alias] == epoch;
+                                        u32 previous = pending ? alias_tails[alias] : last_memory;
+                                        if (previous != UINT32_MAX)
+                                        {
+                                            edge_sources[edge_count] = previous;
+                                            edge_destinations[edge_count] = unit_index;
+                                            edge_count += 1;
+                                        }
+                                        if (!pending)
+                                        {
+                                            pending_aliases[pending_alias_count++] = alias;
+                                            alias_epochs[alias] = epoch;
+                                        }
+                                        alias_tails[alias] = unit_index;
                                     }
-                                    alias_tails[alias] = unit_index;
                                 }
                                 else
                                 {
+                                    if (last_memory != UINT32_MAX)
+                                    {
+                                        edge_sources[edge_count] = last_memory;
+                                        edge_destinations[edge_count] = unit_index;
+                                        edge_count += 1;
+                                    }
                                     // An unknown access may alias every slot. Each
                                     // pending tail reaches it, and it starts the next
                                     // memory epoch. Every tail is flushed at most once.
@@ -680,19 +774,28 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
                                 u32 role = info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
                                 bool defines = role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
                                 bool tracked = register_epochs[virtual_register] == epoch;
-                                u32 tracked_unit = tracked ? register_units[virtual_register] : UINT32_MAX;
-                                if (definition_totals[virtual_register] > 1)
+                                u32 tracked_unit = tracked ? register_units[virtual_register] & ~MACHINE_SCHEDULE_REGISTER_DEFINED : UINT32_MAX;
+                                bool sole_definition = definition_totals[virtual_register] == 1;
+                                bool sole_definition_seen = tracked && (register_units[virtual_register] & MACHINE_SCHEDULE_REGISTER_DEFINED);
+                                if ((function->virtual_registers[virtual_register].flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) &&
+                                    (!sole_definition || !sole_definition_seen))
                                 {
-                                    // Explicit mutable value: every touch stays in
-                                    // source order. The verifier and the gate above
+                                    // Preserve mutable touches across writes. The
+                                    // verifier and the gate above
                                     // reject an unclassified duplicate definition.
+                                    // Count alone is insufficient: one textual
+                                    // definition may update a loop-carried live-in.
                                     if (tracked && tracked_unit != unit_index)
                                     {
                                         edge_sources[edge_count] = tracked_unit;
                                         edge_destinations[edge_count] = unit_index;
                                         edge_count += 1;
                                     }
-                                    register_units[virtual_register] = unit_index;
+                                    // Once a sole textual update has been seen,
+                                    // subsequent reads need only depend on that
+                                    // update. Chaining those reads would punish
+                                    // promoted locals that are already SSA-shaped.
+                                    register_units[virtual_register] = unit_index | (defines && sole_definition ? MACHINE_SCHEDULE_REGISTER_DEFINED : 0u);
                                     register_epochs[virtual_register] = epoch;
                                 }
                                 else

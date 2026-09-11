@@ -25,6 +25,12 @@
 // building. Performance is only ever quoted from the clang-built binaries, so
 // the fallback owes correctness and nothing else.
 //
+// Mask64 is a C integer bitset, never a handle to a predicate register. The
+// canonical IrSimdShape metadata specifies its explicit predicate<64> or
+// predicate<16> boundary. Unsupported exact builtins fail; the scalar choice
+// above occurs in this header before IR construction. The full contract is in
+// docs/ir-vector-semantics.md.
+//
 // **Everything below is a macro, and arguments must be free of side effects.**
 // That is forced rather than chosen: `ide cc` lowers directly and runs no
 // inliner, not even for `always_inline`, so a function wrapper around a single

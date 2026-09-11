@@ -3,7 +3,8 @@
 // Canonical typed IR API over the record shapes in model.h: program/module/
 // function construction, ABI classification, label-provenance queries,
 // validation (run it before machine selection or Wasm emission), and
-// printing. Everything is arena-owned and integer-ID based.
+// printing and opt-in bounded FAST preparation. Everything is arena-owned
+// and integer-ID based.
 
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/ir/model.h>
@@ -315,6 +316,16 @@ typedef enum IrBinaryOperation
     IR_BINARY_COUNT,
 } IrBinaryOperation;
 
+// Dedicated vector arithmetic is lane-wise and legalizable. Exact intrinsics
+// retain their target, width, masked-memory and lane-selection semantics.
+// See docs/ir-vector-semantics.md for the complete opcode and predicate contract.
+typedef enum IrVectorSemantics
+{
+    IR_VECTOR_SEMANTICS_NONE,
+    IR_VECTOR_SEMANTICS_GENERIC,
+    IR_VECTOR_SEMANTICS_EXACT_X86_512,
+} IrVectorSemantics;
+
 // The target-fixed 512-bit byte vocabulary.  These are not portable vector
 // operations and deliberately do not grow into one: each entry names a single
 // AVX-512 instruction that the canonical backend emits directly, and code that
@@ -345,18 +356,24 @@ typedef enum IrSimdOperation
     IR_SIMD_COUNT,
 } IrSimdOperation;
 
-// The fixed operand/immediate arity of one SIMD operation. Every consumer —
-// the frontend that builds the instruction, the validator, and the backend
-// read the arity from here so a new operation
-// cannot be half-taught to the pipeline.
+// Fixed arity, semantic class, and C-integer/internal-predicate boundaries.
+// Frontend result typing, validation and backend selection share this row;
+// adding an operation requires the complete contract, not only its arity.
 typedef struct IrSimdShape IrSimdShape;
 struct IrSimdShape
 {
     u8 operand_count;
     u8 immediate_count;
     bool has_result;
+    u8 semantic_class; // IrVectorSemantics
+    // C operands/results remain integer masks. These fields identify the
+    // explicit integer <-> internal predicate<N> boundaries for lowering.
+    u8 predicate_operand_mask;
+    u8 predicate_lane_count;
+    bool predicate_result;
     u8 reserved[1];
 };
+BUSTER_CT_CHECK(sizeof(IrSimdShape) == 8);
 
 typedef struct IrValue IrValue;
 typedef struct IrLabelProvenancePath IrLabelProvenancePath;
@@ -584,6 +601,65 @@ struct IrGlobal
     u8 reserved;
 };
 
+// Immutable topology published after canonical transforms. Blocks/values retain
+// their canonical IDs. Edges are grouped by source and retain first-target
+// order; predecessor edge indices are grouped by destination, sorted by source.
+// Argument i belongs to parameter i of the destination block.
+typedef struct IrCfgBlock IrCfgBlock;
+struct IrCfgBlock
+{
+    u32 first_instruction;
+    u32 instruction_count;
+    u32 successor_offset;
+    u32 successor_count;
+    u32 predecessor_offset;
+    u32 predecessor_count;
+    u32 parameter_offset;
+    u32 parameter_count;
+};
+
+typedef struct IrCfgEdge IrCfgEdge;
+struct IrCfgEdge
+{
+    IrBlockId source;
+    IrBlockId destination;
+    u32 argument_offset;
+};
+
+typedef struct IrCfgParameter IrCfgParameter;
+struct IrCfgParameter
+{
+    IrTypeId canonical_type;
+    IrLocalId canonical_local;
+    IrValueId value;
+};
+
+typedef struct IrPublishedCfg IrPublishedCfg;
+struct IrPublishedCfg
+{
+    Arena* arena;
+    // Null means instruction IDs were already in block order. Otherwise this
+    // is the one map from prepublication IDs to the published dense rows.
+    IrInstructionId const* instruction_remap;
+    IrValueId const* operand_pool;
+    IrBlockId const* target_pool;
+    u64 const* immediate_pool;
+    u64 operand_count;
+    u64 target_count;
+    u64 immediate_count;
+    IrCfgBlock const* blocks;
+    IrCfgEdge const* edges;
+    u32 const* predecessors;
+    IrCfgParameter const* parameters;
+    IrValueId const* arguments;
+    u32 block_count;
+    u32 instruction_count;
+    u32 edge_count;
+    u32 parameter_count;
+    u32 argument_count;
+    u64 allocated_bytes;
+};
+
 typedef struct IrFunction IrFunction;
 typedef struct IrDebugLocal IrDebugLocal;
 struct IrDebugLocal
@@ -606,6 +682,7 @@ struct IrFunction
     IrFunctionId id;
     IrBlockId entry;
     IrBlock* blocks;
+    IrPublishedCfg const* published_cfg;
     IrInstruction* instructions;
     IrValue* values;
     IrValueId* local_places;
@@ -698,6 +775,46 @@ struct IrLocalPromotionStatistics
     u64 parameter_incoming_visits;
 };
 
+// FAST is opt-in until the paired end-to-end acceptance gate passes. Each
+// selected pass runs at most once per module preparation. Budgets are per
+// function, deterministic, and never reject valid source when exhausted.
+typedef enum IrFastPass
+{
+    IR_FAST_FOLD,
+    IR_FAST_ADDRESS,
+    IR_FAST_DCE,
+    IR_FAST_PARAMETERS,
+    IR_FAST_PASS_COUNT,
+} IrFastPass;
+#define IR_FAST_PASS_BIT(pass) (1u << (u32)(pass))
+#define IR_FAST_ALL ((1u << IR_FAST_PASS_COUNT) - 1)
+#define IR_FAST_SCRATCH_BUDGET ((u64)16 * 1024 * 1024)
+#define IR_FAST_RETAINED_BUDGET ((u64)8 * 1024 * 1024)
+#define IR_FAST_PARAMETER_SWEEPS 4u
+#define IR_FAST_WORK_BUDGET ((u64)4 * 1024 * 1024)
+
+typedef struct IrFastPassStatistics IrFastPassStatistics;
+struct IrFastPassStatistics
+{
+    u64 nanoseconds;
+    u64 visits;
+    u64 changes;
+};
+typedef struct IrFastStatistics IrFastStatistics;
+struct IrFastStatistics
+{
+    IrFastPassStatistics passes[IR_FAST_PASS_COUNT];
+    u64 functions;
+    u64 budget_skips;
+    u64 provenance_skips;
+    u64 parameter_budget_hits;
+    u64 scratch_peak_bytes;
+    u64 retained_bytes;
+    u64 compact_nanoseconds;
+    u64 instructions_before;
+    u64 instructions_after;
+};
+
 typedef struct IrModule IrModule;
 struct IrModule
 {
@@ -736,6 +853,8 @@ struct IrModule
     u32 label_address_relocation_count;
     bool local_promotion_complete;
     IrLocalPromotionStatistics local_promotion;
+    bool fast_complete;
+    IrFastStatistics fast;
 };
 
 // ABI decomposition belongs to one compilation/convention, never to an
@@ -780,6 +899,8 @@ struct IrProgram
     // Differential controls, set before publishing any module to a consumer.
     bool disable_local_promotion;
     bool disable_target_local_promotion;
+    u32 fast_passes;
+    bool measure_fast_passes;
     u32 module_count;
     u32 lowered_function_count;
     u32 rejected_function_count;
@@ -811,6 +932,8 @@ typedef enum IrValidationBoundary
     IR_VALIDATION_BOUNDARY_UNSPECIFIED,
     IR_VALIDATION_BOUNDARY_CANONICAL_INPUT,
     IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT,
+    IR_VALIDATION_BOUNDARY_FAST_OUTPUT,
+    IR_VALIDATION_BOUNDARY_CFG_PUBLICATION,
 } IrValidationBoundary;
 
 typedef struct IrValidationResult IrValidationResult;
@@ -909,7 +1032,9 @@ BUSTER_F_DECL void ir_label_provenance_load(Arena* arena, IrFunction* function, 
 BUSTER_F_DECL bool ir_label_metadata_shape_valid(IrProgram* program, IrFunction* function, IrValueId value);
 BUSTER_F_DECL bool ir_label_metadata_transfer_valid(IrProgram* program, IrFunction* function, IrValueId value);
 BUSTER_F_DECL bool ir_label_block_parameter_provenance_valid(IrFunction* function, IrBlockParameter* parameter);
+BUSTER_F_DECL IrVectorSemantics ir_vector_operation_semantics(IrOpcode opcode, u32 operation);
 BUSTER_F_DECL IrSimdShape ir_simd_operation_shape(IrSimdOperation operation);
+BUSTER_F_DECL bool ir_simd_operation_supported(Target target, IrSimdOperation operation);
 BUSTER_F_DECL String8 ir_simd_operation_name(IrSimdOperation operation);
 BUSTER_F_DECL u32 ir_inline_assembly_label_operand_base(IrInstruction* instruction);
 BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrFunction* function, IrInstruction* instruction, String8 literal, String8 prefix, u32* target_index_out);
@@ -921,6 +1046,25 @@ BUSTER_F_DECL bool ir_inline_assembly_jump_target(IrFunction* function, IrInstru
 // re-deriving block membership or guarding their walks with a counter.
 BUSTER_F_DECL IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners);
 BUSTER_F_DECL IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module);
+// Requires canonical validation (or a producer/pass contract) for instruction
+// semantics. Independently checks exact CFG/list extents before publication;
+// it is not a semantic certificate. Publication provides one instruction ID
+// remap when reordering is needed, preserving value/block/label identities,
+// source provenance and relocations. Explicit mutators must invalidate BEFORE
+// writing rows/CFG/value data and reacquire their mutable builder pointers.
+BUSTER_F_DECL IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function);
+// Verifiers can also inspect mutable builders. Published consumers should use
+// the span directly; this compatibility helper keeps validation on one path.
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE IrInstructionId ir_block_next_instruction(IrFunction const* function, IrBlock const* block,
+                                                                                              IrInstructionId instruction)
+{
+    return function->published_cfg ? (IrInstructionId){.value = instruction.value == block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction.value + 1}
+                                   : function->instructions[instruction.value].next;
+}
+
+BUSTER_F_DECL void ir_function_invalidate_cfg(IrFunction* function);
+BUSTER_F_DECL IrCfgEdge const* ir_function_cfg_edge(IrFunction const* function, IrBlockId source, IrBlockId destination);
+
 
 // Shared storage-normalization contract for canonical and frontend promotion.
 BUSTER_F_DECL bool ir_local_type_promotable(IrProgram* program, IrTypeId type);
@@ -932,6 +1076,11 @@ BUSTER_F_DECL bool ir_local_promotion_call_barrier(IrProgram* program, IrInstruc
 // is always revalidated. Debug/test/sanitizer builds also revalidate changed
 // certified IR; optimized production may trust the promotion implementation.
 // local_promotion_complete prevents rerunning the pass, not validation after a
-// later mutation. Consumers must pass false after mutating a prepared module.
+// later mutation. Reopen construction with ir_function_invalidate_cfg BEFORE
+// mutating a prepared function, then pass false to validate the changed input.
 // Unsafe locals remain in memory; no implicit zero/undef initialization.
+// Conservative semantic authority for dead canonical rows; reads, traps,
+// floating exceptions and unknown/exact effects remain observable.
+BUSTER_F_DECL bool ir_instruction_is_pure(IrProgram* program, IrFunction* function, IrInstruction const* row);
+BUSTER_F_DECL String8 ir_fast_pass_name(IrFastPass pass);
 BUSTER_F_DECL IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified);

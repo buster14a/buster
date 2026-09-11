@@ -6,7 +6,7 @@
 
 - `MachineInstruction` is the 24-byte hot row. Keep static scheduling,
   memory-effect, fixed-register, tie, early-clobber, register-clobber, and
-  active implicit-resource facts in `MachineOpcodeInfo`, accessed through the
+  implicit-vector-scratch membership in `MachineOpcodeInfo`, accessed through the
   `machine_opcode_*` helpers.
 - Emission recipes come from the separate immutable recipe projection;
   exact x86 forms come from checked encoding metadata. The unused descriptor
@@ -16,13 +16,21 @@
   not a policy seam. See the [identity joins](../machine-metadata-ownership.md#removed-unused-form-and-expansion-identities)
   before deferring a form choice past scheduling or placement.
 - `MachineOpcodeInfo` retains a 96-byte stride. Operand and allocation
-  constraints occupy its first 32 bytes; diagnostic names follow scheduling
-  and implicit-effect metadata. Keep opcode initializers designated and the
+  constraints occupy its first 32 bytes; explicit barrier and implicit-vector
+  membership are cold. Unused names and speculative resource/cost bits are removed. Keep opcode initializers designated and the
   layout checks intact. Simple FAST rows use the separate 16-byte
   `MachineOpcodeRow` projection instead of loading the full descriptor.
-- Address expressions remain canonical IR / selector-owned; no
-  `MachineAddress` side table is produced. Keep the reserved
-  `MACHINE_REF_ADDRESS` tag stable for encoded references.
+- Address expressions remain canonical IR / selector-owned. Both native
+  selectors consume `machine_selection_address` from `machine_select.c` for
+  field offsets, index scale/extension and transparent address bases. Its
+  demand cache uses at most 4 KiB per selection attempt, with no function scan
+  or per-value allocation; bounded chains/collisions remain conservative.
+  Discard the cache whenever canonical IR changes. Exact expression ids retain
+  subobject and computed-label identity; only LOCAL/GLOBAL roots name objects.
+  Loads, atomics, casts and pointer/integer arithmetic stay opaque. Original
+  symbol rows own TLS/GOT/relocations, and offset folding never modifies them.
+  These facts authorize no memory reordering or dereference. No `MachineAddress`
+  MIR side table is produced; keep `MACHINE_REF_ADDRESS` stable.
 - `MachineFunction` owns CFG edges, block parameters, and incoming edge
   parallel-copy sources. Edge source `i` maps to destination block parameter
   `i`; keep these copies parallel through allocation so cycles are resolved as
@@ -34,8 +42,9 @@
   `MachineOperandShape` bits; give every active operand a shape. This preserves
   both the 24-byte row and the opcode record size. `VA_ARG` result operands
   admit registers or frame slots, with the side row selecting the valid kind.
-  Physical references must fit `MACHINE_TARGET_REGISTER_LIMIT` and the active
-  target's file; `vector_register_mask` describes class membership including
+  General/vector physical references must fit `MACHINE_TARGET_REGISTER_LIMIT`
+  and the active target's file; the separate x86 predicate IDs admit only k1-k7.
+  `vector_register_mask` describes class membership including
   nonallocatable registers. Target-less synthetic functions still accept
   bounded physical references without imposing a target class map.
 - Stack alignments and call-target reference forms remain optional, defaulting
@@ -48,7 +57,7 @@
   use, including an edge-copy source, is dominated by it. The temporary
   `MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE` exception is explicit and counted;
   FAST/QUALITY liveness scans all textual touches, the scheduler preserves
-  their source order, and SSA-only consumers must reject mutable values.
+  ordering across writes, and SSA-only consumers must reject mutable values.
 - Canonical block parameters are defined by incoming edges, so their
   `IrValue.definition` is invalid by design. Selectors must still classify
   them as values and accept their pointer registers as address bases.
@@ -72,7 +81,7 @@
   Add a selection to the target switch and its direct helpers, with MIR and
   generated-code regressions; do not add a parallel matcher that reports a
   rule without producing the selected MIR. `machine_select.{c,h}` owns only
-  consumed type/value facts, row layout, and the unvalidated entry's shape
+  consumed type/value/address facts, row layout, and the unvalidated entry's shape
   check. The canonical IR verifier remains the pipeline validation authority.
   Unsupported machine selections return `supported = false` and
   `failed_opcode`; `CodegenStatistics.fallback_opcode_counts` and
@@ -97,26 +106,70 @@
   and implicit vector-state chain membership through the published
   `MachineOpcodeRow.schedule_flags` byte. There are no parallel scheduler
   opcode classifiers. The [metadata ownership inventory](../machine-metadata-ownership.md)
-  documents producers, consumers, publication, invalidation, and remaining
-  dormant fields; incomplete descriptor fields are not a hazard model.
+  documents every shared record's producer, consumer, publication and invalidation.
+  Explicit barrier/vector membership is not a latency or hazard model.
 - Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is
   removed. Calls, side effects and terminators still impose independent
   barriers. A missing memory effect is not permission to reorder a barrier.
-- Memory scheduling uses whole-stack-object alias classes only when the
-  selector's existing canonical walk certifies no volatile access in the
-  function. Unknown/manual/structural-replay functions default to the original
-  all-memory chain; replay intentionally drops this performance-only proof.
-  A producer adding volatile accesses must clear `nonvolatile_memory_certified`.
-  Known scalar frame forms and x86 512-bit frame transfers qualify only after
-  their slot id and byte range are checked. Overlapping and disjoint ranges
-  within one slot stay ordered. Pointer, aggregate-copy, incoming-argument, and
+- Memory scheduling uses explicit stack-range alias classes only when the
+  selector certifies no volatile access in the function or the particular
+  frame object. Mixed functions derive optional `stack_slot_memory_flags`
+  before canonical-to-machine row spans are remapped; every frame operand in
+  a volatile source span taints its entire object, including split accesses.
+  The compact object certificates are immutable and survive CFG/SSA/schedule
+  row changes. Unknown/manual/structural-replay functions default to the
+  original all-memory chain; replay drops both certificate forms. A producer
+  adding volatile accesses must clear `nonvolatile_memory_certified` and
+  invalidate the affected object certificates. Invalid certificate bits are
+  rejected by the machine verifier; invalid source spans publish no proof.
+  Known scalar frame forms, x86 512-bit frame transfers, and scalar pointer
+  operations with a checked immutable SSA `LEA_FRAME` definition qualify only
+  after their slot id and byte range are checked. The volatile producer uses
+  that same raw address proof to taint pointer-based accesses before publishing
+  certificates. Mutable pointers, incoming/phi pointers and pointer arithmetic
+  remain unknown. Each object owns one, two, four,
+  or eight dependency cells covering eight-byte ranges. Larger objects fold
+  cell indices modulo eight: collisions retain conservative ordering. Every
+  overlapping access shares a dependency; disjoint fields can move. Unknown
+  pointer, aggregate-copy, incoming-argument, and
   unrecognized memory rows flush all pending slot chains; calls, atomics,
   fences, and physical-register rows retain their full barriers. Explicit
-  mutable-vreg touch ordering remains necessary for target-promotion fallback.
+  mutable-vreg touch ordering remains necessary for target-promotion fallback,
+  including a mutable block parameter with only one textual update. Reads
+  after a sole update may remain independent, while earlier reads precede
+  that update. A definition count does not replace mutable classification.
   The dependency builder uses epoch-stamped slot tails and a compact pending
-  list, with at most 9N+8 edges for N rows and source-order fallback before a
-  scratch count can overflow. No alias classification runs in the FAST tier.
+  list, with at most 23N+8 edges for N rows and source-order fallback before a
+  scratch count can overflow. The FAST allocator does not build alias chains;
+  only mixed volatile functions add the selector's optional certificate work.
+- x86 predicate values use `MACHINE_REGISTER_CLASS_MASK` in a separate k1-k7
+  bank; k0 is never allocatable or a valid explicit predicate operand. The
+  GPR/ZMM register tile stays at 48 entries. `machine_x64_select_predicates`
+  retains compare/copy/AND/OR/XOR chains in predicates for FAST/QUALITY and materializes the
+  ordinary integer representation only for integer, storage, call or CFG-edge
+  users. Byte predicates carry 64 bits; dword compares clear the upper 48 and
+  return through KMOVW. Explicit mask moves support 8/16/32/64-bit truncation.
+  Source bridges use 16/64-bit forms under the SIMD feature gate; synthetic
+  8-bit KMOVB rows also require AVX-512DQ on the executing CPU. MIR targets
+  describe the ABI/register file, not per-function CPU feature permissions.
+  Mixed integer constants and full-width C integer complement retain scalar
+  bridges; their semantics do not become a narrower predicate complement.
+- `register_allocator_predicate.c` projects MASK operands out of ordinary
+  FAST/QUALITY placement, then places the tiny bank separately. Call-clobbered
+  predicates and escaping block values reach eight-byte homes. Predicate edge
+  copies capture all outgoing sources before publishing any destination, with
+  fixed physical sources captured before reload scratch can overwrite them.
+  Unused predicate homes are removed, and zero/all-ones integer bridge values
+  rematerialize without a memory reload. Explicit MASK MIR is supported in
+  MIR_STACK, where it flushes after each row. Source MIR_STACK selection keeps
+  its existing integer bridges because it cannot retain K values between rows;
+  the selector's `predicate_residency` argument records that allocator policy.
+  `predicate_absence_certified` skips this discovery for fresh scalar functions;
+  a rewrite adding MASK references must clear that proof. Replay defaults to
+  discovery. Predicate pressure has its own seven-register scheduler budget.
+  `basic_c_predicate_bank.c` and the machine module cover source selection,
+  independent residency, spills, calls, widths, fixed operands and edge cycles.
 - System V x86-64 machine callers use a sixteen-aligned push area. A stack
   argument needing greater alignment falls back per function to the canonical
   caller, even when its offset is zero: an aligned offset does not align the

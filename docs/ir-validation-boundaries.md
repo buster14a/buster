@@ -4,7 +4,8 @@ This contract complements the [frontend guide](agents/frontend/foundations.md),
 [machine ownership inventory](machine-metadata-ownership.md), and
 [differential testing](differential-testing.md). The focused implementation is
 [GitHub #294](https://github.com/buster14a/buster/issues/294), not a replacement
-for dense canonical finalization (#38) or machine metadata work (#45).
+for machine metadata work (#45). Dense canonical finalization is described in
+[canonical CFG publication](canonical-cfg-publication.md).
 
 ## A certificate describes one input
 
@@ -33,17 +34,22 @@ and native MIR/placement checks, including in optimized production builds.
 
 `local_promotion_complete` records successful pass completion, **not** a general
 IR certificate. Failed output validation does not publish that marker. A caller
-that later mutates prepared IR must discard its certificate and supply
-`input_certified=false`; preparation performs input validation even when the
-pass-completion marker is already set. A failed result must not be consumed by
-code generation or retried with the stale input certificate.
+that later mutates prepared IR must call `ir_function_invalidate_cfg` before
+editing, reacquire any builder-node pointers, discard its certificate and supply
+`input_certified=false`. Preparation validates the current representation even
+when the pass-completion marker is already set. A failed result must not be
+consumed by code generation or retried with the stale input certificate.
 
 `IrValidationResult.boundary` identifies the last preparation scan, on both
 success and failure: `CANONICAL_INPUT` or `LOCAL_PROMOTION_OUTPUT`. Raw verifier
 calls and certified preparation that performs no scan return `UNSPECIFIED`.
 The field is diagnostic context, not a persistent proof or mutation counter.
 The driver reports it alongside the existing error, function, block,
-instruction and opcode context. The cold result grows; authoritative canonical
+instruction and opcode context. Failed finalization reports `CFG_PUBLICATION`;
+successful publication preserves the preceding scan's boundary. Publication
+checks topology/ownership and explicitly remaps instruction identities, source
+rows and sparse extras, without granting a semantic certificate to future
+mutations. The cold result grows; authoritative canonical
 instruction/value rows and machine rows do not change size.
 
 ## Existing checks and limits of the evidence
@@ -51,6 +57,7 @@ instruction/value rows and machine rows do not change size.
 | Boundary / owner | Existing checks reused | What a successful check does not establish |
 | --- | --- | --- |
 | Canonical input and promotion output / `ir_validate_canonical_module` | Required storage; instruction-chain ownership; block sealing and termination; value and operation types; call/return signatures; parameter/incoming types, counts and predecessor order; branch-target validity; global alignment, initializer and relocation ownership | This change does not add a whole-function canonical dominance proof or prove full CFG predecessor/successor symmetry. Those properties must not be inferred merely from valid IDs and parameter counts. |
+| Dense CFG publication / `ir_function_publish_cfg` and published-shape validation | Bounded instruction ownership; terminator-derived unique edges, including parameter-free edges; exact optional builder predecessor lists and incoming extents; dense parameter/argument slices; remapped instruction sources, value definitions and sparse extras | These structural checks do not replace canonical type/operation/provenance validation or grant a semantic certificate. They do not prove whole-function canonical dominance. |
 | Selected MIR / `machine_verify_function` | Side-table bounds; opcode and operand kinds; register classes and physical limits; fixed/tied constraints; block instruction coverage and terminators; parameter/edge-copy classes; definition counts/points and immutable-register dominance, including edge uses | Opcode-specific payload validation is not an independent proof of every emitted instruction's width/encoding. Legacy explicitly mutable registers retain their separate definition contract. Bounded edge spans alone are not a proof of complete CFG symmetry. |
 | Scheduled MIR / native code-generation verification path | With `verify_invariants`, reruns the same machine verifier on the reordered candidate, before replacing the accepted function or using its rebuilt placement | The selector's original certificate cannot certify reordered rows, remapped definition points or the new placement. This slice leaves the existing opt-in scheduled-MIR hook and its counters unchanged. |
 | Placement / native code generation | Existing valid-placement checks and strict `verify_invariants` failure handling | Structural IR verification does not prove ABI behavior or generated-program semantics. Use the existing independent compiler/runtime matrix. |

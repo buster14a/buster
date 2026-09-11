@@ -1,0 +1,39 @@
+{
+  "baseline_commit": "44a90fcbff44988624878aff9db3346a8bc6550b",
+  "candidate_code_commit": "194bd50b7a6e7da362f80614771b49f8a0d4c294",
+  "candidate_reviewed_commit": "1ccbb9216bf065f6a0b5995bb4f87cc79e06047b",
+  "candidate_tree": "e2a05f9aef085f8979100461fb41e4184983384d",
+  "descriptor_rows": 246,
+  "descriptors_identical": true,
+  "descriptor_sha256": "e17b56321953bd5a54683b7a8612854146dbb46fbf547338e3bd329ab9e56b8e",
+  "variants": {
+    "baseline": {
+      "binary": "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "sha256": "f313dc8d51c6b3ef51e04b2e7a13c6317197f7bed3d26feb248ebd09f1f4109c",
+      "bytes": 23534280,
+      "cmake_debug_info": false,
+      "cmake_frame_pointers": false,
+      "target_optimization": "O3 followed by project -O2",
+      "nonunity": true,
+      "include_tests": true,
+      "selfhost_fast_fixedpoint_bytes": 38911304
+    },
+    "candidate": {
+      "binary": "/workspace/scratch/938e5009f152/issue45/build/Release/ide",
+      "sha256": "0fb165ca5b0e5a4db4c68cfe9efc1027b44145cd573687d801ad57e19efcf1e5",
+      "bytes": 23530136,
+      "cmake_debug_info": false,
+      "cmake_frame_pointers": false,
+      "target_optimization": "O3 followed by project -O2",
+      "nonunity": true,
+      "include_tests": true,
+      "selfhost_fast_fixedpoint_bytes": 38893376
+    }
+  },
+  "throughput_archive": {
+    "file": "throughput-raw.tar.gz",
+    "sha256": "3e9c1021c648687d4643de887b0e9a530125c5ec8652b49512d9887ff87aa7b7",
+    "bytes": 191394,
+    "excluded": "Generated .o artifacts; all seal-covered data, input sources, commands, source metrics and logs retained."
+  }
+}

@@ -1117,16 +1117,11 @@ static bool ebpf_fe_allocate(EbpfFunctionEmitter* emitter)
         {
             maximum_parameters = block->parameter_count;
         }
-        for (IrBlockParameter* parameter = block->first_parameter; parameter; parameter = parameter->next)
-        {
-            for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
-            {
-                if (incoming->value.value < function->value_count)
-                {
-                    emitter->use_counts[incoming->value.value] += 1;
-                }
-            }
-        }
+    }
+    IrPublishedCfg const* cfg = function->published_cfg;
+    for (u32 index = 0; index < cfg->argument_count; index += 1)
+    {
+        emitter->use_counts[cfg->arguments[index].value] += 1;
     }
 
     u64 cursor = 0;
@@ -1159,8 +1154,10 @@ static bool ebpf_fe_allocate(EbpfFunctionEmitter* emitter)
 
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
-        for (IrBlockParameter* parameter = function->blocks[block_index].first_parameter; parameter; parameter = parameter->next)
+        IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
+        for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
         {
+            IrCfgParameter const* parameter = function->published_cfg->parameters + published_block->parameter_offset + parameter_index;
             if (parameter->value.value >= function->value_count || !ebpf_type_is_scalar(ebpf_type(context, parameter->canonical_type)))
             {
                 ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_AGGREGATE, ebpf_s8("aggregate eBPF block parameters are unsupported"), function,
@@ -1333,44 +1330,36 @@ static void ebpf_fe_emit_prologue(EbpfFunctionEmitter* emitter)
     }
 }
 
-static IrIncoming* ebpf_fe_incoming(IrBlockParameter* parameter, IrBlockId predecessor)
-{
-    for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
-    {
-        if (incoming->predecessor.value == predecessor.value)
-        {
-            return incoming;
-        }
-    }
-    return 0;
-}
-
 static void ebpf_fe_parallel_copy(EbpfFunctionEmitter* emitter, IrBlock* predecessor, IrBlock* target)
 {
-    u32 index = 0;
-    for (IrBlockParameter* parameter = target->first_parameter; parameter; parameter = parameter->next, index += 1)
+    IrPublishedCfg const* cfg = emitter->function->published_cfg;
+    IrCfgEdge const* edge = ir_function_cfg_edge(emitter->function, predecessor->id, target->id);
+    bool valid = edge && target->parameter_count <= emitter->temporary_count;
+    if (!valid)
     {
-        IrIncoming* incoming = ebpf_fe_incoming(parameter, predecessor->id);
-        if (!incoming || index >= emitter->temporary_count)
-        {
-            ebpf_fail(emitter->context, EBPF_ERROR_IR_VALIDATION, ebpf_s8("missing eBPF block-parameter incoming value"), emitter->function,
-                      predecessor, 0, IR_SYMBOL_ID_INVALID);
-            return;
-        }
-        ebpf_fe_emit_value(emitter, EBPF_REG_0, incoming->value);
+        ebpf_fail(emitter->context, EBPF_ERROR_IR_VALIDATION, ebpf_s8("missing eBPF block-parameter incoming value"), emitter->function,
+                  predecessor, 0, IR_SYMBOL_ID_INVALID);
+    }
+    for (u32 index = 0; valid && index < target->parameter_count; index += 1)
+    {
+        ebpf_fe_emit_value(emitter, EBPF_REG_0, cfg->arguments[edge->argument_offset + index]);
         ebpf_fe_store_stack(emitter, (s16)(emitter->temporary_base - (s16)(index * 8)), EBPF_REG_0);
     }
-    index = 0;
-    for (IrBlockParameter* parameter = target->first_parameter; parameter; parameter = parameter->next, index += 1)
+    for (u32 index = 0; valid && index < target->parameter_count; index += 1)
     {
-        if (parameter->value.value >= emitter->function->value_count || emitter->value_slots[parameter->value.value] == EBPF_SLOT_NONE)
+        IrCfgBlock const* block = cfg->blocks + target->id.value;
+        IrCfgParameter const* parameter = cfg->parameters + block->parameter_offset + index;
+        valid = emitter->value_slots[parameter->value.value] != EBPF_SLOT_NONE;
+        if (!valid)
         {
             ebpf_fail(emitter->context, EBPF_ERROR_IR_VALIDATION, ebpf_s8("eBPF block parameter has no destination slot"), emitter->function,
                       target, 0, IR_SYMBOL_ID_INVALID);
-            return;
         }
-        ebpf_fe_load_stack(emitter, EBPF_REG_0, (s16)(emitter->temporary_base - (s16)(index * 8)));
-        ebpf_fe_store_stack(emitter, emitter->value_slots[parameter->value.value], EBPF_REG_0);
+        else
+        {
+            ebpf_fe_load_stack(emitter, EBPF_REG_0, (s16)(emitter->temporary_base - (s16)(index * 8)));
+            ebpf_fe_store_stack(emitter, emitter->value_slots[parameter->value.value], EBPF_REG_0);
+        }
     }
 }
 
@@ -1913,7 +1902,7 @@ static void ebpf_fe_emit_instruction(EbpfFunctionEmitter* emitter, IrBlock* bloc
                   block, instruction, IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_SIMD:
-        ebpf_fail(context, EBPF_ERROR_SIMD, ebpf_s8("SIMD operations are unsupported by eBPF"), emitter->function, block, instruction,
+        ebpf_fail(context, EBPF_ERROR_SIMD, ebpf_s8("exact SIMD intrinsics are unsupported by eBPF; select an explicit source fallback"), emitter->function, block, instruction,
                   IR_SYMBOL_ID_INVALID);
         break;
     case IR_OPCODE_INLINE_ASSEMBLY:
@@ -1977,7 +1966,7 @@ static bool ebpf_emit_function(EbpfContext* context, EbpfFunctionRecord* record)
             }
             IrInstruction* instruction = emitter.function->instructions + instruction_id.value;
             ebpf_fe_emit_instruction(&emitter, block, instruction);
-            instruction_id = instruction->next;
+            instruction_id.value = instruction_id.value == block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
         }
     }
     for (u32 patch_index = 0; patch_index < emitter.patch_count && !ebpf_failed(context); patch_index += 1)

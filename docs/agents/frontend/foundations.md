@@ -111,7 +111,22 @@ it is not a durable certificate. `local_promotion_complete` is only a pass
 completion marker. A later mutator must invalidate its own certificate and
 request validation again. See [the boundary inventory](../../ir-validation-boundaries.md).
 
+## Published canonical CFG
+
+After canonical transforms, `ir_prepare_canonical_module` publishes immutable
+block/edge/parameter/argument slices shared by native, Wasm, eBPF and LLVM
+consumers. Terminators own topology, including parameter-free destinations and
+duplicate-target suppression. `ir_function_cfg_edge` replaces incoming-list
+searches. Mutation must invalidate `IrFunction.published_cfg`; it is not a
+semantic certificate. See [publication and lifetime details](../../canonical-cfg-publication.md).
+
 ## C frontend and canonical IR rules
+
+- [Vector semantics](../../ir-vector-semantics.md) classifies every dedicated
+  vector opcode. Generic lane operations can legalize without changing their
+  semantics; exact SIMD uses a shared feature gate and explicit refusal.
+  `IrSimdShape` owns integer/internal-predicate boundaries, consumed by C
+  result typing and canonical validation. C masks remain integer values.
 
 - `c_parse_binding_bind` publishes a previously unbound enclosing-scope name
   without scanning unrelated undo records. A live undo record implies a valid

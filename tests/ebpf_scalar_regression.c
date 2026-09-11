@@ -27,6 +27,7 @@ BUSTER_GLOBAL_LOCAL void audit_initialize(void)
 }
 
 #include <buster/lib/hash.c>
+#include <buster/lib/time.c>
 #include <buster/lib/compiler/ir/ir.c>
 #include <buster/lib/compiler/ebpf/ebpf.c>
 
