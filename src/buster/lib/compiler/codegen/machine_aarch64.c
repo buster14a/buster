@@ -2673,18 +2673,28 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_global_address(MachineA64Selector* s
     bool selected = false;
     IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
     bool thread_local_global = symbol && instruction->opcode == IR_OPCODE_GLOBAL && symbol->is_thread_local;
-    // ELF local-exec thread locals resolve through tpidr_el0 plus the
-    // TPREL add pair; Darwin's tlv-call model stays canonical.
-    bool thread_local_supported =
+    bool darwin = selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS;
+    bool windows = selector->target.os == OPERATING_SYSTEM_WINDOWS;
+    bool thread_local_supported = darwin || windows ||
         selector->target.os == OPERATING_SYSTEM_LINUX || selector->target.os == OPERATING_SYSTEM_ANDROID;
     if (result_register != UINT32_MAX && symbol && thread_local_global && thread_local_supported)
     {
         u32 target_index = machine_a64_call_target_append(selector, instruction->symbol, false);
-        u32 row = machine_a64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
-                                                       .payload = target_index,
-                                                       .opcode = MACHINE_A64_LEA_TLS,
-                                                   });
+        u32 row;
+        if (darwin)
+        {
+            machine_a64_select_row(selector, (MachineInstruction){.payload = target_index, .opcode = MACHINE_A64_TLS_DARWIN});
+            row = machine_a64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
+                             machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X0)},
+                .opcode = MACHINE_A64_MOV_RR});
+        }
+        else
+        {
+            row = machine_a64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                .payload = target_index, .opcode = (u16)(windows ? MACHINE_A64_TLS_WINDOWS : MACHINE_A64_LEA_TLS)});
+        }
         machine_a64_define(selector, result_register, row);
         selected = true;
     }
@@ -8288,6 +8298,45 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                     };
                     machine_a64_emit(&encoder, 0);
                     machine_a64_emit(&encoder, 0);
+                }
+            }
+            break;
+            case MACHINE_A64_TLS_WINDOWS:
+            case MACHINE_A64_TLS_DARWIN:
+            {
+                bool windows = instruction->opcode == MACHINE_A64_TLS_WINDOWS;
+                u32 destination = windows ? MACHINE_A64_X9 : MACHINE_A64_X0;
+                MachineThreadLocalSite site_kind = windows ? MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX : MACHINE_THREAD_LOCAL_SITE_DARWIN_DESCRIPTOR;
+                MachineCallSite* high = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                *high = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload,
+                    .is_thread_local = 1, .thread_local_site = (u32)site_kind};
+                machine_a64_emit_mc(&encoder, (A64MCInst){
+                    .operands = {{.value = destination, .kind = A64_MC_OPERAND_REGISTER},
+                                 {.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE}},
+                    .opcode = A64_OPCODE_ADRP, .operand_count = 2});
+                MachineCallSite* low = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                *low = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload,
+                    .is_thread_local = 1, .thread_local_low = 1, .thread_local_site = (u32)site_kind};
+                machine_a64_emit_generated_unsigned_memory(&encoder, destination, destination, 0, windows ? 4u : 8u, false);
+                if (windows)
+                {
+                    // X18 is the Windows TEB; its TLS array pointer is at 0x58.
+                    machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_X10, 18, 0x58, 8, false);
+                    u32 index_fields[] = {destination, MACHINE_A64_X10, 3, destination};
+                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, index_fields, BUSTER_ARRAY_LENGTH(index_fields));
+                    machine_a64_emit_generated_unsigned_memory(&encoder, destination, destination, 0, 8, false);
+                    MachineCallSite* offset_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                    *offset_site = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload,
+                        .is_thread_local = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
+                    u32 offset_fields[] = {destination, destination, 0};
+                    machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, offset_fields, BUSTER_ARRAY_LENGTH(offset_fields));
+                }
+                else
+                {
+                    machine_a64_emit_generated_unsigned_memory(&encoder, MACHINE_A64_X8, destination, 0, 8, false);
+                    machine_a64_emit_mc(&encoder, (A64MCInst){
+                        .operands = {{.value = MACHINE_A64_X8, .kind = A64_MC_OPERAND_REGISTER}},
+                        .opcode = A64_OPCODE_BLR, .operand_count = 1});
                 }
             }
             break;

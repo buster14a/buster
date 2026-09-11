@@ -3180,13 +3180,17 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 246);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 250);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_A64_UMULH64] = 0, // Pure GPR dataflow; no implicit chain.
         [MACHINE_A64_CLZ32] = 0,
         [MACHINE_A64_CLZ64] = 0,
         [MACHINE_A64_RBIT32] = 0,
         [MACHINE_A64_RBIT64] = 0,
+        [MACHINE_X64_TLS_WINDOWS] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_TLS_WINDOWS] = MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_X64_TLS_DARWIN] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
+        [MACHINE_A64_TLS_DARWIN] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_OPCODE_SKELETON_RETURN] = MACHINE_SCHEDULE_UNIT_BARRIER,
         [MACHINE_X64_CVT_U64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_X64_CVT_U64_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
@@ -3545,7 +3549,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 103);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 53);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 86);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 90);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     // Equal recipe indices in different categories are distinct identities.
@@ -3793,7 +3797,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     result.succeeded_test_count += movabs_result.succeeded_test_count;
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
-    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 173);
+    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 179);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
 
     // Canonical metadata authorities and neutral patch helpers are separate

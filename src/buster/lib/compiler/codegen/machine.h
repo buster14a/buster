@@ -666,6 +666,10 @@ typedef enum MachineOpcode
     MACHINE_A64_CLZ64,
     MACHINE_A64_RBIT32, // def, use; reverse bits within the selected width
     MACHINE_A64_RBIT64,
+    MACHINE_X64_TLS_WINDOWS, // def fixed RAX; clobber RDX; payload = call-target index
+    MACHINE_X64_TLS_DARWIN,  // descriptor call; address returned in RAX
+    MACHINE_A64_TLS_WINDOWS, // def fixed X9; clobber X10; payload = call-target index
+    MACHINE_A64_TLS_DARWIN,  // descriptor call; address returned in X0
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
@@ -1440,7 +1444,7 @@ struct MachineStackPlacement
     u8 reserved[3];
 };
 
-// Which field of an x86-64 thread-local sequence a call site names. The
+// Which field of a native thread-local sequence a call site names. The
 // general-dynamic sequence has two -- the lea that addresses the loader-filled
 // pair and the call to __tls_get_addr beside it -- so one selected row can
 // produce two sites.
@@ -1450,6 +1454,9 @@ typedef enum MachineThreadLocalSite
     MACHINE_THREAD_LOCAL_SITE_INITIAL_EXEC,
     MACHINE_THREAD_LOCAL_SITE_GENERAL_DYNAMIC,
     MACHINE_THREAD_LOCAL_SITE_TLS_GET_ADDR,
+    MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX,
+    MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET,
+    MACHINE_THREAD_LOCAL_SITE_DARWIN_DESCRIPTOR,
 } MachineThreadLocalSite;
 
 // A relocation site: the function-relative offset of the field to patch
@@ -1471,7 +1478,7 @@ struct MachineCallSite
     u32 is_thread_local;
     // AArch64 TPREL pairs: distinguishes the LO12 add from the HI12 one.
     u32 thread_local_low;
-    // x86-64 only: which thread-local sequence this site belongs to, as a
+    // Which thread-local sequence this site belongs to, as a
     // MachineThreadLocalSite. The encoder knows the byte layout, so it says
     // which relocation each field wants rather than leaving the module layer
     // to re-derive it from the instruction bytes.

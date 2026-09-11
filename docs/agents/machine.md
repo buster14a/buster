@@ -191,6 +191,14 @@
   against an independent scalar-limb reference and exercises surrounding CFG
   edges. It and the unchanged wide-integer fixture require zero fallback on
   all desktop AArch64 targets and all MIR allocators with both frontend forms.
+- Native Windows TLS addresses read the module index and the TEB's TLS array,
+  then add the object's thread offset. Constrained rows define RAX/X9 and
+  declare RDX/X10 scratch clobbers. Darwin TLS descriptor rows have ordinary
+  call effects; a following move captures RAX/X0 into an SSA value. Every
+  relocation site distinguishes the index, value offset, or descriptor field.
+  The thread-local model fixture requires zero fallback with all desktop
+  targets, allocators, frontend forms, and PIC settings; native hosts execute
+  its separate definition object and values held across repeated TLS accesses.
 - x86-64 i128 bitwise complement reads both frame-backed limbs and emits
   ordinary three-operand XOR64 rows against one all-ones constant. Each limb
   result has one definition; do not use mutable NOT rows for this expansion.

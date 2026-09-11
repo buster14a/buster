@@ -412,6 +412,34 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .name = S8_INITIALIZER("x64_tls_general_dynamic"),
         .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
     },
+    [MACHINE_X64_TLS_WINDOWS] = {
+        .name = S8_INITIALIZER("x64_tls_windows"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ,
+        .clobber_mask = 1u << MACHINE_X64_RDX,
+        .fixed_register_mask = 1, .fixed_registers = {MACHINE_X64_RAX},
+    },
+    [MACHINE_X64_TLS_DARWIN] = {
+        .name = S8_INITIALIZER("x64_tls_darwin"),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+    },
+    [MACHINE_A64_TLS_WINDOWS] = {
+        .name = S8_INITIALIZER("a64_tls_windows"),
+        .operand_count = 1,
+        .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ,
+        .clobber_mask = 1u << MACHINE_A64_X10,
+        .fixed_register_mask = 1, .fixed_registers = {MACHINE_A64_X9},
+    },
+    [MACHINE_A64_TLS_DARWIN] = {
+        .name = S8_INITIALIZER("a64_tls_darwin"),
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CALL | MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+        .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+    },
     [MACHINE_X64_SWITCH] = {
         .name = S8_INITIALIZER("x64_switch"),
         .operand_count = 2,
@@ -1361,6 +1389,10 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_X64_XGETBV] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 54,
     [MACHINE_X64_WIN_VA_SAVE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 55,
     [MACHINE_X64_LEA_INCOMING] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 56,
+    [MACHINE_X64_TLS_WINDOWS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 57,
+    [MACHINE_X64_TLS_DARWIN] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 58,
+    [MACHINE_A64_TLS_WINDOWS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 59,
+    [MACHINE_A64_TLS_DARWIN] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 60,
 };
 
 MachineOpcodeInfo const* machine_opcode_info(u16 opcode)
@@ -1452,6 +1484,7 @@ BUSTER_GLOBAL_LOCAL void machine_opcode_rows_once(void)
             // per eightbyte, frame stores, and the complete overflow copy.
             encode_budget = 640;
             break;
+        case MACHINE_X64_TLS_WINDOWS:
         case MACHINE_X64_FCMP_SET:
         case MACHINE_X64_CPUID:
         case MACHINE_X64_WIN_VA_SAVE:
@@ -2596,6 +2629,10 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
         case MACHINE_X64_LEA_TLS:
         case MACHINE_X64_LEA_TLS_INITIAL_EXEC:
         case MACHINE_X64_TLS_GENERAL_DYNAMIC:
+        case MACHINE_X64_TLS_WINDOWS:
+        case MACHINE_X64_TLS_DARWIN:
+        case MACHINE_A64_TLS_WINDOWS:
+        case MACHINE_A64_TLS_DARWIN:
         case MACHINE_A64_CALL_DIRECT:
         case MACHINE_A64_LEA_SYMBOL:
         case MACHINE_A64_LEA_TLS:
