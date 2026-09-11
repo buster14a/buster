@@ -235,6 +235,27 @@
   binary is a clang PIE like the Debug one. Pass
   `-DBUSTER_FRAME_POINTERS=OFF` when the point of the measurement is the
   frame-pointer cost itself, or when reproducing a CI Release number exactly.
+- **`tools/remote_superluminal_capture.py` records the same stage-1 workload on
+  a remote Linux Zen 5 host.** It requires a clean remote checkout, verifies
+  that the source identity stays fixed across the Release build, deploys a
+  Superluminal command-line redistributable only when the host lacks one, and
+  records/resolves/exports the canonical unity self-compile. The portable
+  `.slp`, raw `.linux` capture, source metrics, hashes, and machine/source/tool
+  provenance are downloaded together. The capture process needs passwordless
+  permission for the narrow `sudo` profiler invocation; profiler installation
+  and privilege policy remain operator responsibilities.
+
+  ```sh
+  tools/remote_superluminal_capture.py --host david@benchpress
+  tools/remote_superluminal_capture.py --self-test
+  ```
+
+  This is a sampling diagnostic, not a replacement for the paired native
+  throughput harness or its dedicated-host qualification. It refuses a
+  non-Zen-5 host by default; `--allow-non-zen5` is an explicit diagnostic-only
+  escape for method testing. `--skip-build` reuses the existing Release binary
+  and therefore belongs only in a controlled workflow that already established
+  that binary's provenance.
 - **Sampling the sanitized (ASan+UBSan) Debug tree with `perf` works.** It is
   the CI critical path, so it is the configuration most worth profiling. Record
   it exactly like any other build; there is no sanitizer-specific obstacle:
