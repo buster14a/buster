@@ -5989,6 +5989,10 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         {
             result.function.virtual_registers[register_index].definition_point = selector.virtual_register_definitions[register_index];
         }
+        if (!nonvolatile_memory)
+        {
+            machine_selection_certify_stack_memory(arena, &result.function, function);
+        }
         if (!machine_function_split_parameter_edges(arena, &result.function))
         {
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};

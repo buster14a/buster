@@ -48,7 +48,7 @@
   use, including an edge-copy source, is dominated by it. The temporary
   `MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE` exception is explicit and counted;
   FAST/QUALITY liveness scans all textual touches, the scheduler preserves
-  their source order, and SSA-only consumers must reject mutable values.
+  ordering across writes, and SSA-only consumers must reject mutable values.
 - Canonical block parameters are defined by incoming edges, so their
   `IrValue.definition` is invalid by design. Selectors must still classify
   them as values and accept their pointer registers as address bases.
@@ -103,20 +103,37 @@
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is
   removed. Calls, side effects and terminators still impose independent
   barriers. A missing memory effect is not permission to reorder a barrier.
-- Memory scheduling uses whole-stack-object alias classes only when the
-  selector's existing canonical walk certifies no volatile access in the
-  function. Unknown/manual/structural-replay functions default to the original
-  all-memory chain; replay intentionally drops this performance-only proof.
-  A producer adding volatile accesses must clear `nonvolatile_memory_certified`.
-  Known scalar frame forms and x86 512-bit frame transfers qualify only after
-  their slot id and byte range are checked. Overlapping and disjoint ranges
-  within one slot stay ordered. Pointer, aggregate-copy, incoming-argument, and
+- Memory scheduling uses explicit stack-range alias classes only when the
+  selector certifies no volatile access in the function or the particular
+  frame object. Mixed functions derive optional `stack_slot_memory_flags`
+  before canonical-to-machine row spans are remapped; every frame operand in
+  a volatile source span taints its entire object, including split accesses.
+  The compact object certificates are immutable and survive CFG/SSA/schedule
+  row changes. Unknown/manual/structural-replay functions default to the
+  original all-memory chain; replay drops both certificate forms. A producer
+  adding volatile accesses must clear `nonvolatile_memory_certified` and
+  invalidate the affected object certificates. Invalid certificate bits are
+  rejected by the machine verifier; invalid source spans publish no proof.
+  Known scalar frame forms, x86 512-bit frame transfers, and scalar pointer
+  operations with a checked immutable SSA `LEA_FRAME` definition qualify only
+  after their slot id and byte range are checked. The volatile producer uses
+  that same raw address proof to taint pointer-based accesses before publishing
+  certificates. Mutable pointers, incoming/phi pointers and pointer arithmetic
+  remain unknown. Each object owns one, two, four,
+  or eight dependency cells covering eight-byte ranges. Larger objects fold
+  cell indices modulo eight: collisions retain conservative ordering. Every
+  overlapping access shares a dependency; disjoint fields can move. Unknown
+  pointer, aggregate-copy, incoming-argument, and
   unrecognized memory rows flush all pending slot chains; calls, atomics,
   fences, and physical-register rows retain their full barriers. Explicit
-  mutable-vreg touch ordering remains necessary for target-promotion fallback.
+  mutable-vreg touch ordering remains necessary for target-promotion fallback,
+  including a mutable block parameter with only one textual update. Reads
+  after a sole update may remain independent, while earlier reads precede
+  that update. A definition count does not replace mutable classification.
   The dependency builder uses epoch-stamped slot tails and a compact pending
-  list, with at most 9N+8 edges for N rows and source-order fallback before a
-  scratch count can overflow. No alias classification runs in the FAST tier.
+  list, with at most 23N+8 edges for N rows and source-order fallback before a
+  scratch count can overflow. The FAST allocator does not build alias chains;
+  only mixed volatile functions add the selector's optional certificate work.
 - System V x86-64 machine callers use a sixteen-aligned push area. A stack
   argument needing greater alignment falls back per function to the canonical
   caller, even when its offset is zero: an aligned offset does not align the

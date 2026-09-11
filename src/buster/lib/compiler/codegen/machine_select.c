@@ -1,10 +1,14 @@
 #include <buster/lib/compiler/codegen/machine_select.h>
+#include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/codegen/machine_schedule_internal.h>
 #include <buster/lib/integer.h>
 
 // Shared selector storage and validation; target opcode switches own lowering.
 // machine_selection_value_facts_allocate supplies the AArch64 row walk,
 // machine_type_classes_build projects the shared module type table, and
 // machine_selection_validate_function guards the unvalidated public entry.
+// machine_selection_certify_stack_memory publishes optional frame-object
+// provenance before the selector's canonical-to-machine row spans are remapped.
 
 MachineSelectionValueFacts machine_selection_value_facts_allocate(Arena* arena, u32 value_count)
 {
@@ -148,4 +152,62 @@ MachineSelectionValidationError machine_selection_validate_function(Arena* arena
         }
     }
     return error;
+}
+
+void machine_selection_certify_stack_memory(Arena* arena, MachineFunction* machine, IrFunction const* source)
+{
+    machine->stack_slot_memory_flags = 0;
+    bool valid = !machine->nonvolatile_memory_certified && machine->stack_slot_count && machine->stack_slot_sizes &&
+                 machine->instructions && machine->line_mark_count && machine->line_marks && source && source->instructions;
+    bool volatile_seen = false;
+    for (u32 mark_index = 0; valid && mark_index < machine->line_mark_count; mark_index += 1)
+    {
+        MachineLineMark mark = machine->line_marks[mark_index];
+        valid = mark.instruction < source->instruction_count && mark.row <= machine->instruction_count &&
+                (!mark_index || machine->line_marks[mark_index - 1].row <= mark.row);
+        if (valid)
+        {
+            volatile_seen |= source->instructions[mark.instruction].volatile_access;
+        }
+    }
+    if (valid && volatile_seen)
+    {
+        u8* flags = arena_allocate(arena, u8, machine->stack_slot_count);
+        memset(flags, MACHINE_STACK_SLOT_MEMORY_NONVOLATILE, machine->stack_slot_count);
+        for (u32 mark_index = 0; mark_index < machine->line_mark_count; mark_index += 1)
+        {
+            MachineLineMark mark = machine->line_marks[mark_index];
+            if (source->instructions[mark.instruction].volatile_access)
+            {
+                u32 end = mark_index + 1 < machine->line_mark_count ? machine->line_marks[mark_index + 1].row : machine->instruction_count;
+                for (u32 row = mark.row; row < end; row += 1)
+                {
+                    // All frame operands are tainted, including helper loads,
+                    // stores and addresses. This may lose precision, but cannot
+                    // accidentally certify one piece of a split volatile access.
+                    MachineInstruction const* instruction = machine->instructions + row;
+                    MachineScheduleMemoryAccess access = machine_schedule_frame_access(machine, instruction);
+                    if (access.kind == MACHINE_SCHEDULE_MEMORY_STACK_RANGE)
+                    {
+                        flags[access.stack_slot] = 0;
+                    }
+                    for (u32 operand = 0; operand < MACHINE_INSTRUCTION_OPERAND_COUNT; operand += 1)
+                    {
+                        MachineRef reference = instruction->operands[operand];
+                        if (machine_ref_kind(reference) == MACHINE_REF_STACK_SLOT)
+                        {
+                            u32 slot = machine_ref_payload(reference);
+                            if (slot < machine->stack_slot_count)
+                            {
+                                flags[slot] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Incoming ABI rows before the first source mark are nonvolatile;
+        // volatile accesses through pointers remain UNKNOWN to the scheduler.
+        machine->stack_slot_memory_flags = flags;
+    }
 }

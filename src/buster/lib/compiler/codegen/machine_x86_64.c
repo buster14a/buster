@@ -6674,6 +6674,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     }
     result.function.line_marks = line_marks;
     result.function.line_mark_count = (u32)(line_mark_cursor - line_marks);
+    if (!nonvolatile_memory)
+    {
+        machine_selection_certify_stack_memory(arena, &result.function, function);
+    }
     machine_stream_cursor_close(&selector.switch_cases, selector.switch_case_cursor);
     result.function.switch_cases =
         (MachineSwitchCase*)machine_stream_materialize(arena, arena, &selector.switch_cases, BUSTER_ALIGN_OF(MachineSwitchCase));

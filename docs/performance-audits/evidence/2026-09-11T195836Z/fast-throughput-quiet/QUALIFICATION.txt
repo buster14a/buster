@@ -1,0 +1,1 @@
+The root task explicitly assigned slot 41 after all other agents confirmed heavy work idle. CPU 8 affinity. Shared container; ambient host interference cannot be excluded. Diagnostic only: guard disabled, not physical Ryzen 9700X acceptance.

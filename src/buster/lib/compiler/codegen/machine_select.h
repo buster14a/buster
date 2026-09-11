@@ -136,3 +136,9 @@ struct MachineSelectionModule
 // this is a shape check, not a substitute for the canonical IR verifier.
 BUSTER_F_DECL MachineSelectionValidationError machine_selection_validate_function(Arena* arena, IrProgram* program, IrFunction* function);
 BUSTER_F_DECL MachineSelectionValueFacts machine_selection_value_facts_allocate(Arena* arena, u32 value_count);
+
+struct MachineFunction;
+// Called at selector publication, before row/line-mark remapping. Existing
+// canonical-to-machine spans identify every frame object touched by volatile
+// lowering. Only mixed functions allocate this optional per-object proof.
+BUSTER_F_DECL void machine_selection_certify_stack_memory(Arena* arena, struct MachineFunction* machine, IrFunction const* source);
