@@ -1,0 +1,1005 @@
+{
+  "cpu": 8,
+  "host_qualification": "shared container; diagnostic only",
+  "compilers": {
+    "baseline": "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+    "candidate": "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide"
+  },
+  "compiler_sha256": {
+    "baseline": "f313dc8d51c6b3ef51e04b2e7a13c6317197f7bed3d26feb248ebd09f1f4109c",
+    "candidate": "b2c3c885f25a4df266d9e808f72509e3a42c91f4a810dd7a974df337e5deab09"
+  },
+  "source": "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+  "source_bytes": 23045,
+  "source_sha256": "e25d83e55ec13218ed1a595acdb6baa1168d4f4f0cd2b9a4203cd62785fcb48f",
+  "summary": {
+    "fast": {
+      "baseline_median_wall_s": 0.022506532500000002,
+      "candidate_median_wall_s": 0.021612034000000002,
+      "median_paired_ratio": 0.9908063628683356,
+      "paired_bootstrap_95": [
+        0.9214581592220676,
+        1.1005822746316785
+      ],
+      "baseline_output_bytes": 35048,
+      "candidate_output_bytes": 35048,
+      "output_identical": true
+    },
+    "quality": {
+      "baseline_median_wall_s": 0.0253681955,
+      "candidate_median_wall_s": 0.023771091,
+      "median_paired_ratio": 0.9572484386237312,
+      "paired_bootstrap_95": [
+        0.8725527865275331,
+        1.0449356917442256
+      ],
+      "baseline_output_bytes": 32952,
+      "candidate_output_bytes": 31944,
+      "output_identical": false
+    }
+  },
+  "samples": [
+    {
+      "mode": "fast",
+      "pair": 0,
+      "variant": "baseline",
+      "wall_s": 0.023443128,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 0,
+      "variant": "candidate",
+      "wall_s": 0.02158887,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 1,
+      "variant": "candidate",
+      "wall_s": 0.021174636,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 1,
+      "variant": "baseline",
+      "wall_s": 0.021152657,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 2,
+      "variant": "baseline",
+      "wall_s": 0.022215346,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 2,
+      "variant": "candidate",
+      "wall_s": 0.020482823,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 3,
+      "variant": "candidate",
+      "wall_s": 0.021515356,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 3,
+      "variant": "baseline",
+      "wall_s": 0.021941601,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 4,
+      "variant": "baseline",
+      "wall_s": 0.022320094,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 4,
+      "variant": "candidate",
+      "wall_s": 0.024707211,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 5,
+      "variant": "candidate",
+      "wall_s": 0.020925467,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 5,
+      "variant": "baseline",
+      "wall_s": 0.022869706,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 6,
+      "variant": "baseline",
+      "wall_s": 0.023216673,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 6,
+      "variant": "candidate",
+      "wall_s": 0.026627429,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 7,
+      "variant": "candidate",
+      "wall_s": 0.026280754,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 7,
+      "variant": "baseline",
+      "wall_s": 0.022573664,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 8,
+      "variant": "baseline",
+      "wall_s": 0.022196266,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 8,
+      "variant": "candidate",
+      "wall_s": 0.023176395,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 9,
+      "variant": "candidate",
+      "wall_s": 0.021635198,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 9,
+      "variant": "baseline",
+      "wall_s": 0.022489392,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 10,
+      "variant": "baseline",
+      "wall_s": 0.022523673,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 10,
+      "variant": "candidate",
+      "wall_s": 0.020740427,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 11,
+      "variant": "candidate",
+      "wall_s": 0.024730473,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "fast",
+      "pair": 11,
+      "variant": "baseline",
+      "wall_s": 0.022601103,
+      "output_bytes": 35048,
+      "output_sha256": "8f75abbbcaf24e0a6a5a3327d484945c37c450924fe9b10c2231a847a3884fed"
+    },
+    {
+      "mode": "quality",
+      "pair": 0,
+      "variant": "baseline",
+      "wall_s": 0.023690694,
+      "output_bytes": 32952,
+      "output_sha256": "09071f305842a7b5b9f5332ff06e5013aabe55a24d9c62d36c5dcb17b7db0e44"
+    },
+    {
+      "mode": "quality",
+      "pair": 0,
+      "variant": "candidate",
+      "wall_s": 0.021480057,
+      "output_bytes": 31944,
+      "output_sha256": "ec90da886f44f9bd7f2982cdd3f442348a5cd9ea5fe87473e1783cb5372ec132"
+    },
+    {
+      "mode": "quality",
+      "pair": 1,
+      "variant": "candidate",
+      "wall_s": 0.022520442,
+      "output_bytes": 31944,
+      "output_sha256": "ec90da886f44f9bd7f2982cdd3f442348a5cd9ea5fe87473e1783cb5372ec132"
+    },
+    {
+      "mode": "quality",
+      "pair": 1,
+      "variant": "baseline",
+      "wall_s": 0.026391694,
+      "output_bytes": 32952,
+      "output_sha256": "09071f305842a7b5b9f5332ff06e5013aabe55a24d9c62d36c5dcb17b7db0e44"
+    },
+    {
+      "mode": "quality",
+      "pair": 2,
+      "variant": "baseline",
+      "wall_s": 0.021826259,
+      "output_bytes": 32952,
+      "output_sha256": "09071f305842a7b5b9f5332ff06e5013aabe55a24d9c62d36c5dcb17b7db0e44"
+    },
+    {
+      "mode": "quality",
+      "pair": 2,
+      "variant": "candidate",
+      "wall_s": 0.023681274,
+      "output_bytes": 31944,
+      "output_sha256": "ec90da886f44f9bd7f2982cdd3f442348a5cd9ea5fe87473e1783cb5372ec132"
+    },
+    {
+      "mode": "quality",
+      "pair": 3,
+      "variant": "candidate",
+      "wall_s": 0.026876201,
+      "output_bytes": 31944,
+      "output_sha256": "ec90da886f44f9bd7f2982cdd3f442348a5cd9ea5fe87473e1783cb5372ec132"
+    },
+    {
+      "mode": "quality",
+      "pair": 3,
+      "variant": "baseline",
+      "wall_s": 0.026000915,
+      "output_bytes": 32952,
+      "output_sha256": "09071f305842a7b5b9f5332ff06e5013aabe55a24d9c62d36c5dcb17b7db0e44"
+    },
+    {
+      "mode": "quality",
+      "pair": 4,
+      "variant": "baseline",
+      "wall_s": 0.024735476,
+      "output_bytes": 32952,
+      "output_sha256": "09071f305842a7b5b9f5332ff06e5013aabe55a24d9c62d36c5dcb17b7db0e44"
+    },
+    {
+      "mode": "quality",
+      "pair": 4,
+      "variant": "candidate",
+      "wall_s": 0.059171671,
+      "output_bytes": 31944,
+      "output_sha256": "ec90da886f44f9bd7f2982cdd3f442348a5cd9ea5fe87473e1783cb5372ec132"
+    },
+    {
+      "mode": "quality",
+      "pair": 5,
+      "variant": "candidate",
+      "wall_s": 0.028791309,
+      "output_bytes": 31944,
+      "output_sha256": "ec90da886f44f9bd7f2982cdd3f442348a5cd9ea5fe87473e1783cb5372ec132"
+    },
+    {
+      "mode": "quality",
+      "pair": 5,
+      "variant": "baseline",
+      "wall_s": 0.059010223,
+      "output_bytes": 32952,
+      "output_sha256": "09071f305842a7b5b9f5332ff06e5013aabe55a24d9c62d36c5dcb17b7db0e44"
+    },
+    {
+      "mode": "quality",
+      "pair": 6,
+      "variant": "baseline",
+      "wall_s": 0.027124538,
+      "output_bytes": 32952,
+      "output_sha256": "09071f305842a7b5b9f5332ff06e5013aabe55a24d9c62d36c5dcb17b7db0e44"
+    },
+    {
+      "mode": "quality",
+      "pair": 6,
+      "variant": "candidate",
+      "wall_s": 0.024422539,
+      "output_bytes": 31944,
+      "output_sha256": "ec90da886f44f9bd7f2982cdd3f442348a5cd9ea5fe87473e1783cb5372ec132"
+    },
+    {
+      "mode": "quality",
+      "pair": 7,
+      "variant": "candidate",
+      "wall_s": 0.023500189,
+      "output_bytes": 31944,
+      "output_sha256": "ec90da886f44f9bd7f2982cdd3f442348a5cd9ea5fe87473e1783cb5372ec132"
+    },
+    {
+      "mode": "quality",
+      "pair": 7,
+      "variant": "baseline",
+      "wall_s": 0.02329885,
+      "output_bytes": 32952,
+      "output_sha256": "09071f305842a7b5b9f5332ff06e5013aabe55a24d9c62d36c5dcb17b7db0e44"
+    },
+    {
+      "mode": "quality",
+      "pair": 8,
+      "variant": "baseline",
+      "wall_s": 0.022833812,
+      "output_bytes": 32952,
+      "output_sha256": "09071f305842a7b5b9f5332ff06e5013aabe55a24d9c62d36c5dcb17b7db0e44"
+    },
+    {
+      "mode": "quality",
+      "pair": 8,
+      "variant": "candidate",
+      "wall_s": 0.023012129,
+      "output_bytes": 31944,
+      "output_sha256": "ec90da886f44f9bd7f2982cdd3f442348a5cd9ea5fe87473e1783cb5372ec132"
+    },
+    {
+      "mode": "quality",
+      "pair": 9,
+      "variant": "candidate",
+      "wall_s": 0.02392813,
+      "output_bytes": 31944,
+      "output_sha256": "ec90da886f44f9bd7f2982cdd3f442348a5cd9ea5fe87473e1783cb5372ec132"
+    },
+    {
+      "mode": "quality",
+      "pair": 9,
+      "variant": "baseline",
+      "wall_s": 0.026831573,
+      "output_bytes": 32952,
+      "output_sha256": "09071f305842a7b5b9f5332ff06e5013aabe55a24d9c62d36c5dcb17b7db0e44"
+    },
+    {
+      "mode": "quality",
+      "pair": 10,
+      "variant": "baseline",
+      "wall_s": 0.026616742,
+      "output_bytes": 32952,
+      "output_sha256": "09071f305842a7b5b9f5332ff06e5013aabe55a24d9c62d36c5dcb17b7db0e44"
+    },
+    {
+      "mode": "quality",
+      "pair": 10,
+      "variant": "candidate",
+      "wall_s": 0.021467738,
+      "output_bytes": 31944,
+      "output_sha256": "ec90da886f44f9bd7f2982cdd3f442348a5cd9ea5fe87473e1783cb5372ec132"
+    },
+    {
+      "mode": "quality",
+      "pair": 11,
+      "variant": "candidate",
+      "wall_s": 0.023860908,
+      "output_bytes": 31944,
+      "output_sha256": "ec90da886f44f9bd7f2982cdd3f442348a5cd9ea5fe87473e1783cb5372ec132"
+    },
+    {
+      "mode": "quality",
+      "pair": 11,
+      "variant": "baseline",
+      "wall_s": 0.022591113,
+      "output_bytes": 32952,
+      "output_sha256": "09071f305842a7b5b9f5332ff06e5013aabe55a24d9c62d36c5dcb17b7db0e44"
+    }
+  ],
+  "commands": [
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=fast",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/fast.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/issue41-evidence/comparable/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ],
+    [
+      "/workspace/scratch/938e5009f152/buster/build/Release/ide",
+      "cc",
+      "-c",
+      "-g0",
+      "-O0",
+      "-fregister-allocator=quality",
+      "-fno-machine-fallback",
+      "/workspace/scratch/938e5009f152/issue41/tests/basic_c_machine_alias.c",
+      "-o",
+      "/workspace/scratch/938e5009f152/issue41-evidence/alias-throughput-quiet/quality.o"
+    ]
+  ]
+}

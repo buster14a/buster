@@ -1,0 +1,7 @@
+INVALID FOR THROUGHPUT CONCLUSIONS
+
+The coordinating task had not started the quiet timing window. Another task
+was still performing Debug verification and sanitizer work had not confirmed
+idle. Retain all samples, but exclude both this FAST suite and its immediately
+following alias fixture run from timing conclusions. Output hash and size
+observations are deterministic correctness observations only.
