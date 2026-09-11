@@ -183,6 +183,11 @@
   against an independent scalar-limb reference and exercises surrounding CFG
   edges. It and the unchanged wide-integer fixture require zero fallback on
   all desktop AArch64 targets and all MIR allocators with both frontend forms.
+- x86-64 i128 bitwise complement reads both frame-backed limbs and emits
+  ordinary three-operand XOR64 rows against one all-ones constant. Each limb
+  result has one definition; do not use mutable NOT rows for this expansion.
+  `basic_c_x86_64_i128_complement.c` checks signed/unsigned loaded values,
+  every bit position and in-place stores in all modes and both frontend forms.
 - AArch64 f32/f64-to-i128 casts use scalar MIR conversions and arithmetic.
   Widen f32 before splitting the absolute magnitude at 2^64, convert both
   unsigned limbs with truncation toward zero, and restore signed results
