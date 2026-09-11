@@ -9943,7 +9943,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                                 CODEGEN_UNWIND_ACTION_PUSH_REGISTER, (u8)machine_saved_register, 0) &&
                                                    machine_unwind_valid;
                         }
-                        if (machine_saves_first)
+                        if (machine_saves_first && !encoded.frame_pointer_offset)
                         {
                             machine_prologue_cursor += 3;
                             machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
@@ -9974,6 +9974,13 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                    machine_unwind_valid;
                             machine_prologue_cursor += 4;
                             machine_frame_remaining -= machine_frame_chunk;
+                        }
+                        if (encoded.frame_pointer_offset)
+                        {
+                            machine_prologue_cursor = encoded.frame_pointer_offset;
+                            machine_unwind_valid = codegen_unwind_action_append(descriptor, unwind_action_capacity, machine_prologue_cursor,
+                                                                                CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, X64_REGISTER_RBP, 0) &&
+                                                   machine_unwind_valid;
                         }
                         if (machine_unwind_valid)
                         {

@@ -1452,7 +1452,10 @@ struct MachineEncodeResult
     u32 call_site_count;
     u32 epilog_count;
     bool valid;
-    u8 reserved[3];
+    // Win64 prologues fit the PE byte-sized offset. Dynamic frames
+    // establish RBP after the fixed allocation, at this instruction end.
+    u8 frame_pointer_offset;
+    u8 reserved[2];
     // x86 exact-form encoder telemetry. A failed encode still returns the
     // attempted counts so the caller can aggregate them before falling back.
     u32 exact_attempts;

@@ -203,6 +203,7 @@ struct MachineX64Selector
     // size once selection is done, because the size is only known then.
     u32 outgoing_slot;
     u32 outgoing_bytes;
+    bool dynamic_stack;
     // The classification virtual registers' rows — the builder's first
     // chunk, where machine_x64_define writes a definition point in place.
     // The rows past that chunk's capacity are reached by the chunk walk,
@@ -1780,13 +1781,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_stack_allocate(MachineX64Selector* s
 {
     bool selected = false;
     u32 size_register;
-    // A dynamic allocation moves the stack pointer away from the outgoing
-    // argument area's base, which every Win64 call in the function reads
-    // as its own stack pointer. The canonical path models that with a
-    // frame base at the bottom of the frame; this subset does not, so
-    // such functions stay canonical.
-    if (result_register != UINT32_MAX && instruction->immediate_count && instruction->immediates &&
-        !machine_x64_target_is_windows(selector->target))
+    if (result_register != UINT32_MAX && instruction->immediate_count && instruction->immediates)
     {
         u64 requested_alignment = instruction->immediates[0];
         // An out-of-range request lands on zero, which the power-of-two test
@@ -1812,7 +1807,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_stack_restore(MachineX64Selector* se
 {
     bool selected = false;
     u32 saved_register;
-    if (!machine_x64_target_is_windows(selector->target) && machine_x64_operand_register(selector, instruction->operands[0], &saved_register))
+    if (machine_x64_operand_register(selector, instruction->operands[0], &saved_register))
     {
         machine_x64_select_row(selector, (MachineInstruction){
                                              .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RSP),
@@ -4405,11 +4400,33 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
     // which the allocator is free to pick because nothing here is fixed.
     if (plan->windows_call)
     {
-        if (selector->outgoing_slot == UINT32_MAX)
+        u32 outgoing_register = UINT32_MAX;
+        if (selector->dynamic_stack)
+        {
+            // Calls reserve their own area below the live VLA. Frame-relative
+            // staging would otherwise leave arguments above the current RSP.
+            u32 size = machine_x64_synthesize_register(selector);
+            machine_x64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size),
+                             machine_ref_make(MACHINE_REF_IMMEDIATE, machine_x64_append_immediate(selector, plan->outgoing_bytes))},
+                .opcode = MACHINE_X64_MOV_RI,
+            });
+            outgoing_register = machine_x64_synthesize_register(selector);
+            machine_x64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, outgoing_register),
+                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, size)},
+                .payload = 16,
+                .opcode = MACHINE_X64_STACK_ALLOCATE,
+            });
+        }
+        else if (selector->outgoing_slot == UINT32_MAX)
         {
             selector->outgoing_slot = machine_x64_append_slot(selector, plan->outgoing_bytes, 16);
         }
-        selector->outgoing_bytes = BUSTER_MAX(selector->outgoing_bytes, plan->outgoing_bytes);
+        if (!selector->dynamic_stack)
+        {
+            selector->outgoing_bytes = BUSTER_MAX(selector->outgoing_bytes, plan->outgoing_bytes);
+        }
         u32 copy_offset = (32u + plan->stack_part_count * 8u + 15u) & ~15u;
         for (u32 argument_index = 0; argument_index < plan->argument_count; argument_index += 1)
         {
@@ -4420,13 +4437,27 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
                 // The callee may modify its parameter. Copy exact bytes into
                 // the shared outgoing area after shadow/stack arguments;
                 // all call sites reuse this area at their maximum size.
-                u32 pointer = machine_x64_synthesize_register(selector);
-                machine_x64_select_row(selector, (MachineInstruction){
-                    .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer),
-                                 machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot)},
-                    .payload = copy_offset,
-                    .opcode = MACHINE_X64_LEA_FRAME,
-                });
+                u32 pointer;
+                if (selector->dynamic_stack)
+                {
+                    u32 offset = machine_x64_synthesize_register(selector);
+                    machine_x64_select_row(selector, (MachineInstruction){
+                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, offset),
+                                     machine_ref_make(MACHINE_REF_IMMEDIATE, machine_x64_append_immediate(selector, copy_offset))},
+                        .opcode = MACHINE_X64_MOV_RI,
+                    });
+                    pointer = machine_x64_select_arithmetic_row(selector, MACHINE_X64_ADD64, outgoing_register, offset);
+                }
+                else
+                {
+                    pointer = machine_x64_synthesize_register(selector);
+                    machine_x64_select_row(selector, (MachineInstruction){
+                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer),
+                                     machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot)},
+                        .payload = copy_offset,
+                        .opcode = MACHINE_X64_LEA_FRAME,
+                    });
+                }
                 machine_x64_select_row(selector, (MachineInstruction){
                     .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer),
                                  machine_ref_make(MACHINE_REF_STACK_SLOT, plan->argument_slots[argument_index])},
@@ -4454,11 +4485,24 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
                                                          .opcode = MACHINE_X64_LOAD_FRAME,
                                                      });
                 }
+                u32 outgoing_address = outgoing_register;
+                if (selector->dynamic_stack)
+                {
+                    u32 offset = machine_x64_synthesize_register(selector);
+                    machine_x64_select_row(selector, (MachineInstruction){
+                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, offset),
+                                     machine_ref_make(MACHINE_REF_IMMEDIATE, machine_x64_append_immediate(selector, outgoing_offset))},
+                        .opcode = MACHINE_X64_MOV_RI,
+                    });
+                    outgoing_address = machine_x64_select_arithmetic_row(selector, MACHINE_X64_ADD64, outgoing_register, offset);
+                }
                 machine_x64_select_row(selector, (MachineInstruction){
-                                                     .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot),
+                                                     .operands = {selector->dynamic_stack
+                                                                      ? machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, outgoing_address)
+                                                                      : machine_ref_make(MACHINE_REF_STACK_SLOT, selector->outgoing_slot),
                                                                   machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, part_register)},
-                                                     .payload = outgoing_offset,
-                                                     .opcode = MACHINE_X64_STORE_FRAME64,
+                                                     .payload = selector->dynamic_stack ? 0 : outgoing_offset,
+                                                     .opcode = selector->dynamic_stack ? MACHINE_X64_STORE_PTR64 : MACHINE_X64_STORE_FRAME64,
                                                  });
             }
         }
@@ -4781,7 +4825,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_call(MachineX64Selector* selector, I
                                                  .flags = call_flags,
                                              });
         }
-        u32 call_stack_release = plan.windows_call ? 0u : plan.stack_part_count * 8 + (plan.stack_padding ? 8u : 0);
+        u32 call_stack_release = plan.windows_call ? (selector->dynamic_stack ? plan.outgoing_bytes : 0u)
+                                                 : plan.stack_part_count * 8 + (plan.stack_padding ? 8u : 0);
         if (call_stack_release)
         {
             machine_x64_select_row(selector, (MachineInstruction){
@@ -5301,6 +5346,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .type_class_count = module->type_count,
         .position_independent = position_independent,
         .supported = true,
+        .dynamic_stack = ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) | IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE)),
         .failed_opcode = IR_OPCODE_COUNT,
     };
     if (!assume_validated && machine_selection_validate_function(arena, program, function) != MACHINE_SELECTION_VALIDATION_NONE)
@@ -6709,6 +6755,9 @@ struct MachineX64Encoder
     u8* bytes;
     u32 count;
     u32 capacity;
+    // Logical frame offsets remain relative to the top of the fixed frame.
+    // Dynamic Win64 frames put physical RBP at its bottom for PE unwinding.
+    u32 frame_base_offset;
     bool overflow;
     u8 reserved[3];
 };
@@ -10138,6 +10187,22 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder,
     u32 output_capacity = encoder->capacity - encoder->count;
     if (output_capacity > 16u) output_capacity = 16u;
     u8* output = encoder->bytes + encoder->count;
+    BusterX86MetadataPhysicalOperand rebased_operands[4];
+    if (encoder->frame_base_offset)
+    {
+        BUSTER_CHECK(operand_count <= BUSTER_ARRAY_LENGTH(rebased_operands));
+        for (u32 index = 0; index < operand_count; index += 1)
+        {
+            rebased_operands[index] = operands[index];
+            if (operands[index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY && operands[index].memory.has_base &&
+                operands[index].memory.base.index == MACHINE_X64_RBP)
+            {
+                rebased_operands[index].memory.displacement += encoder->frame_base_offset;
+                rebased_operands[index].memory.has_displacement = true;
+            }
+        }
+        operands = rebased_operands;
+    }
     BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_exact_machine(metadata_token, (BusterX86MetadataMachineExactQuery){
         .operands = operands,
         .operand_count = operand_count,
@@ -10998,6 +11063,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     if (!table_plus_one || table_plus_one > machine_x64_variable_memory_encoding_table_count || reg >= 16 || base >= 16)
         return false;
 
+    if (base == MACHINE_X64_RBP)
+    {
+        displacement = (s32)((u32)displacement + encoder->frame_base_offset);
+    }
+
     u32 displacement_class = force_disp32 ? 2 : displacement == 0 ? 0 : displacement >= INT8_MIN && displacement <= INT8_MAX ? 1 : 2;
     MachineX64VariableMemoryEncodingTable const* table =
         machine_x64_variable_memory_encoding_tables + (table_plus_one - 1u);
@@ -11207,6 +11277,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
                     u32 offset = placement->stack_slot_offsets[machine_ref_payload(instruction->operands[operand_slot])] - payload;
                     displacement = -(s32)offset;
                 }
+                displacement = (s32)((u32)displacement + encoder->frame_base_offset);
             }
             if (counters) counters->attempts += 1;
             if (encoder->count > encoder->capacity || byte_count > encoder->capacity - encoder->count)
@@ -11748,10 +11819,12 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     // instead of a nine-way dispatch on every one of 1,7 M rows.
     MachineOpcodeRow const* opcode_rows = machine_opcode_row_table();
     u64 capacity64 = 64;
+    bool dynamic_stack = false;
     for (u32 capacity_index = 0; capacity_index < function->instruction_count; capacity_index += 1)
     {
         MachineInstruction* capacity_row = function->instructions + capacity_index;
         MachineOpcodeRow row = opcode_rows[capacity_row->opcode];
+        dynamic_stack |= capacity_row->opcode == MACHINE_X64_STACK_ALLOCATE;
         capacity64 += row.encode_budget;
         if (BUSTER_UNLIKELY((row.flags & MACHINE_OPCODE_ROW_VARIABLE_BUDGET) != 0))
         {
@@ -11802,6 +11875,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
     // the placement's callee-saved registers push right after it in fixed
     // RBX, R14, R15 order so the unwind actions can name exact offsets.
     bool saves_first = function->target && function->target->saves_precede_frame_pointer;
+    bool windows_dynamic_stack = saves_first && dynamic_stack;
+    if (windows_dynamic_stack && placement->frame_size > INT32_MAX)
+    {
+        return result;
+    }
     machine_x64_emit_fixed_register(&encoder, MACHINE_X64_FIXED_TEMPLATE_PUSH + MACHINE_X64_RBP, S8("PUSH"), MACHINE_X64_RBP, 64);
     if (!saves_first)
     {
@@ -11817,7 +11895,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             machine_x64_emit_fixed_register(&encoder, MACHINE_X64_FIXED_TEMPLATE_PUSH + push_register, S8("PUSH"), push_register, 64);
         }
     }
-    if (saves_first)
+    if (saves_first && !windows_dynamic_stack)
     {
         // The frame pointer lands below the saves, so they sit at its
         // positive offsets. Its fixed epilogue adds back the allocation.
@@ -11855,6 +11933,13 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
             (void)machine_x64_emit_metadata_memory_immediate(&encoder, S8("TEST"), MACHINE_X64_RSP, 0, 0, 8, 8, 0);
         }
         frame_remaining -= frame_chunk;
+    }
+    if (windows_dynamic_stack)
+    {
+        machine_x64_emit_fixed_registers(&encoder, MACHINE_X64_FIXED_TEMPLATE_MOV_RBP_RSP, S8("MOV"), MACHINE_X64_RBP, MACHINE_X64_RSP, 64);
+        BUSTER_CHECK(encoder.count <= UINT8_MAX);
+        result.frame_pointer_offset = (u8)encoder.count;
+        encoder.frame_base_offset = placement->frame_size;
     }
     u32 edit_cursor = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
@@ -12019,7 +12104,13 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         // Windows fixed-stack unwind records use RSP alone.
                         // Its epilogue grammar requires ADD RSP, constant (not
                         // MOV RSP, RBP), followed only by the saved-register pops.
-                        if (saves_first && placement->frame_size)
+                        if (windows_dynamic_stack)
+                        {
+                            // LEA restores from the bottom frame register plus
+                            // the fixed allocation, a legal Windows epilogue.
+                            (void)machine_x64_emit_metadata_register_memory(&encoder, S8("LEA"), MACHINE_X64_RSP, MACHINE_X64_RBP, 0, 64, 64, 0);
+                        }
+                        else if (saves_first && placement->frame_size)
                         {
                             (void)machine_x64_emit_metadata_register_immediate(&encoder, S8("ADD"), MACHINE_X64_RSP,
                                                                                placement->frame_size, 64,
