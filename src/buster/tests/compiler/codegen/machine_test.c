@@ -2078,6 +2078,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_pointer_block_parameters(UnitTes
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_i128_complement(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ByteSlice input = file_read(arguments->arena, S8("tests/basic_c_x86_64_i128_complement.c"), (FileReadOptions){0});
+    String8 source = {.pointer = (char8*)input.pointer, .length = input.length};
+    BUSTER_TEST(arguments, source.length != 0);
+    String8 names[] = {S8("complement_unsigned"), S8("complement_signed")};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+    };
+    for (u32 target = 0; source.length && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("i128-complement.c"), source, targets[target],
+                                                                     (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                {
+                    IrFunction* function = machine_test_ir_function_find(program->modules, names[name]);
+                    BUSTER_TEST(arguments, function != 0);
+                    if (function)
+                    {
+                        u32 complements = 0;
+                        for (u32 row = 0; row < function->instruction_count; row += 1)
+                        {
+                            IrInstruction* instruction = function->instructions + row;
+                            if (instruction->opcode == IR_OPCODE_UNARY && instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT)
+                            {
+                                IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+                                complements += type && type->kind == IR_TYPE_INTEGER && type->bit_width == 128;
+                            }
+                        }
+                        BUSTER_TEST(arguments, complements == 1);
+                        MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, targets[target]);
+                        BUSTER_TEST_RAW(arguments, selected.supported, names[name]);
+                        if (selected.supported)
+                        {
+                            BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                            u32 limb_results = 0;
+                            for (u32 row = 0; row < selected.function.instruction_count; row += 1)
+                            {
+                                MachineInstruction* instruction = selected.function.instructions + row;
+                                if (instruction->opcode == MACHINE_X64_XOR64)
+                                {
+                                    limb_results += 1;
+                                    u32 reg = machine_ref_payload(instruction->operands[0]);
+                                    bool valid = machine_ref_kind(instruction->operands[0]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                                                 reg < selected.function.virtual_register_count;
+                                    BUSTER_TEST(arguments, valid);
+                                    if (valid)
+                                    {
+                                        MachineVirtualRegister* definition = selected.function.virtual_registers + reg;
+                                        BUSTER_TEST(arguments, definition->definition_point == machine_point_make(row, MACHINE_POINT_AFTER));
+                                        BUSTER_TEST(arguments, !(definition->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE));
+                                    }
+                                }
+                            }
+                            BUSTER_TEST(arguments, limb_results == 2);
+                        }
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_unsigned_switch(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2695,6 +2769,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     UnitTestResult edge_index_result = machine_test_fast_edge_index(arguments);
     result.test_count += edge_index_result.test_count;
     result.succeeded_test_count += edge_index_result.succeeded_test_count;
+    UnitTestResult complement_result = machine_test_x64_i128_complement(arguments);
+    result.test_count += complement_result.test_count;
+    result.succeeded_test_count += complement_result.succeeded_test_count;
 
     // Malformed publication inputs must fail before placement or encoding.
     MachineInstruction storage_rows[2] = {{.opcode = MACHINE_X64_MOV_RI}, {.opcode = MACHINE_X64_RET}};
