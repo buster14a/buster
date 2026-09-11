@@ -1854,11 +1854,58 @@ u32 machine_builder_edge(MachineFunctionBuilder* builder, MachineEdge edge)
     return index;
 }
 
+// Wide canonical values retain their frame representation in selected bodies.
+// Only values participating in i128 joins need register pairs. Snapshot each
+// incoming value at its definition so ordinary parallel edge copies also handle
+// backedges and cycles without reading slots overwritten by another assignment.
+typedef struct MachineCanonicalPair MachineCanonicalPair;
+struct MachineCanonicalPair
+{
+    u32 registers[2];
+};
+
+BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_pair_parameter(MachineFunctionBuilder* builder, IrFunction* function,
+                                                                 IrBlockParameter* parameter, MachineCanonicalPair** pairs)
+{
+    if (!*pairs)
+    {
+        *pairs = arena_allocate(builder->arena, MachineCanonicalPair, function->value_count);
+        memset(*pairs, 0xff, sizeof(**pairs) * function->value_count);
+    }
+    bool valid = true;
+    IrIncoming* incoming = parameter->first_incoming;
+    u32 value = parameter->value.value;
+    for (;;)
+    {
+        if (value >= function->value_count)
+        {
+            valid = false;
+        }
+        else if ((*pairs)[value].registers[0] == UINT32_MAX)
+        {
+            for (u32 part = 0; part < 2; part += 1)
+            {
+                (*pairs)[value].registers[part] = machine_builder_virtual_register(builder, (MachineVirtualRegister){
+                    .definition_point = MACHINE_POINT_INVALID, .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                    .typed_origin = IR_ID_UNDERLYING_INVALID});
+            }
+        }
+        if (!valid || !incoming)
+        {
+            break;
+        }
+        value = incoming->value.value;
+        incoming = incoming->next;
+    }
+    return valid;
+}
+
 // Canonical predecessor lists are optional when a block has no parameters.
 // Terminator targets are the authoritative CFG, including ordinary branches,
 // repeated switch destinations and computed gotos. Publish every edge once;
 // otherwise cross-block SSA uses are invisible to dominance and allocation.
-BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder* builder, IrFunction* function, u32 const* value_registers)
+BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder* builder, IrFunction* function, u32 const* value_registers,
+                                                        MachineCanonicalPair const* pairs)
 {
     IR_CONSTRUCTION_RECORD(CFG_BUILDS, 1);
     IR_CONSTRUCTION_RECORD(CFG_SCRATCH_SLOTS, function->block_count);
@@ -1900,17 +1947,29 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder*
                             incoming = incoming->next;
                         }
                         IR_CONSTRUCTION_RECORD(CFG_INCOMING_VISITS, incoming != 0);
-                        valid = incoming && incoming->value.value < function->value_count && value_registers[incoming->value.value] != UINT32_MAX;
+                        valid = incoming && incoming->value.value < function->value_count;
                         if (valid)
                         {
-                            IR_CONSTRUCTION_RECORD(CFG_COPY_SOURCES, 1);
-                            machine_builder_edge_copy_source(builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value_registers[incoming->value.value]));
+                            bool wide = pairs && pairs[parameter->value.value].registers[0] != UINT32_MAX;
+                            u32 count = wide ? 2u : 1u;
+                            u32 const* registers = wide ? pairs[incoming->value.value].registers : value_registers + incoming->value.value;
+                            for (u32 part = 0; valid && part < count; part += 1)
+                            {
+                                valid = registers[part] != UINT32_MAX;
+                                if (valid)
+                                {
+                                    IR_CONSTRUCTION_RECORD(CFG_COPY_SOURCES, 1);
+                                    machine_builder_edge_copy_source(builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, registers[part]));
+                                }
+                            }
                         }
                     }
+                    u32 copy_count = builder->edge_copy_sources.total_count - copy_offset;
+                    valid = valid && copy_count <= UINT16_MAX;
                     if (valid)
                     {
                         machine_builder_edge(builder, (MachineEdge){.source_block = source, .destination_block = target,
-                                                                   .copy_offset = copy_offset, .copy_count = (u16)destination->parameter_count});
+                                                                   .copy_offset = copy_offset, .copy_count = (u16)copy_count});
                     }
                 }
             }

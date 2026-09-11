@@ -54,6 +54,14 @@
   them as values and accept their pointer registers as address bases.
   Only instruction-defined locals take the frame-address path; an absent
   instruction definition is not a missing value.
+- Native i128 block parameters expand to two general-register MIR parameters.
+  The selector allocates pair mappings only for functions with wide joins and
+  snapshots each incoming instruction result at its definition. Entry stores
+  restore the parameter's frame representation for body operations; ordinary
+  parallel edge copies preserve both limbs through loops and assignment cycles.
+  Keep limb mappings separate from scalar value registers and leave parameter
+  definition points invalid. `basic_c_i128_block_parameters.c` covers all six
+  desktop targets, every allocator and both frontend forms with zero fallback.
 - The verifier separates entry-reachable code from unreachable components.
   Unreachable source SCCs attach to a synthetic dominator root, with every
   member of a closed source cycle treated as an entry. Block storage order
