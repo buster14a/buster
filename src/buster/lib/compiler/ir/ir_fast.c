@@ -426,7 +426,7 @@ BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* functi
             if (!(program->fast_passes & IR_FAST_PASS_BIT(pass))) continue;
             IrFastPassStatistics* measurement = statistics->passes + pass;
             u64 before = measurement->changes;
-            TimeDataType start = program->measure_fast_passes ? timestamp_take() : 0;
+            TimeDataType start = program->measure_fast_passes ? timestamp_take() : (TimeDataType){0};
             if (pass == IR_FAST_FOLD || pass == IR_FAST_ADDRESS)
             {
                 ir_fast_fold(program, function, replacements, removed, (IrFastPass)pass, measurement);
@@ -444,7 +444,7 @@ BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* functi
         }
         if (changes)
         {
-            TimeDataType start = program->measure_fast_passes ? timestamp_take() : 0;
+            TimeDataType start = program->measure_fast_passes ? timestamp_take() : (TimeDataType){0};
             ir_rewrite_compact(arena, program, function, replacements, removed);
             if (program->measure_fast_passes) statistics->compact_nanoseconds += timestamp_ns_between(start, timestamp_take());
             statistics->retained_bytes += retained_bytes;

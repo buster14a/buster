@@ -100,7 +100,9 @@ gates independently of performance acceptance.
 retained calls/memory effects, existing trivial parameters, repeat preparation,
 classification exclusions and budget refusal before value-storage access.
 `driver_fast_test.c` executes the fixed-result C fixture for all 16 subsets in
-NONE/MIR_STACK/FAST/QUALITY with zero fallback; each subset also compiles to
+NONE/MIR_STACK/FAST/QUALITY with zero fallback on desktop hosts. Android/iOS
+retain all 64 native object-generation checks; their application process cannot
+launch generated executables. Each subset also compiles to
 Wasm64, eBPF and LLVM bitcode. The bounded existing eBPF VM executes four inputs
 including unsigned wraparound. Wasm and bitcode magic checks establish artifact
 production, not engine execution; stronger engine/external-compiler checks are

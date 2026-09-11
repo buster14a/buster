@@ -11,14 +11,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
         {
             TemporalArena temporary = arena_begin_temporal(arguments->arena);
             Arena* arena = temporary.arena;
-            String8 path = buster_test_temporary_path(arena, S8("buster-canonical-fast"), backend < 4 ? S8(".exe") : S8(".artifact"));
+            String8 path = buster_test_temporary_path(arena, S8("buster-canonical-fast"),
+                backend < 4 && !BUSTER_ANDROID && !BUSTER_IOS ? S8(".exe") : S8(".artifact"));
             String8 command[16];
             u32 count = 0;
             command[count++] = S8("-nostdinc");
             command[count++] = S8("-o");
             command[count++] = path;
             command[count++] = backend < 4 ? S8("tests/basic_c_canonical_fast.c") : S8("tests/basic_c_canonical_fast_scalar.c");
-            if (backend < 4) command[count++] = string_format(arena, S8("-fregister-allocator={S8}"), modes[backend]);
+            if (backend < 4)
+            {
+                command[count++] = string_format(arena, S8("-fregister-allocator={S8}"), modes[backend]);
+#if BUSTER_ANDROID || BUSTER_IOS
+                // Mobile tests run in an application process. They cannot
+                // launch generated executables, but still validate every
+                // native subset through machine selection and object writing.
+                command[count++] = S8("-c");
+#endif
+            }
             else if (backend < 6)
             {
                 command[count++] = S8("-target");
@@ -44,6 +54,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
                 if (backend < 4)
                 {
                     BUSTER_TEST(arguments, !compiled.codegen_statistics.fallback_function_count);
+#if !BUSTER_ANDROID && !BUSTER_IOS
                     String8 run[] = {path};
                     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
                                                                (ProcessSpawnOptions){.use_process_environment = 1});
@@ -53,6 +64,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
                         ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30000000);
                         BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
                     }
+#else
+                    ByteSlice object = file_read(arena, path, (FileReadOptions){0});
+                    BUSTER_TEST(arguments, compiled.has_object && object.length >= 8);
+#endif
                 }
                 else
                 {
