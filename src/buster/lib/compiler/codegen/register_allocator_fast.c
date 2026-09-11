@@ -404,7 +404,34 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_owner_match_mask(u32 const* owner, u64 acti
     return matches;
 }
 
+// Existence-only consumers need not finish a sparse walk after finding an
+// owner. Dense populations keep the full-mask helper's guarded SIMD tiles;
+// duplicate removal still requests every match through that helper directly.
+BUSTER_GLOBAL_LOCAL bool machine_fast_owner_contains(u32 const* owner, u64 active, u32 value)
+{
+    bool result = false;
+#if BUSTER_SIMD_512
+    if (mask64_count(active) >= 16)
+    {
+        result = machine_fast_owner_match_mask(owner, active, value) != 0;
+    }
+    else
+#endif
+    {
+        for (; active && !result; active &= active - 1u)
+        {
+            result = owner[machine_fast_first_set(active)] == value;
+        }
+    }
+    return result;
+}
+
 #if BUSTER_INCLUDE_TESTS
+bool machine_fast_owner_contains_test(u32 const* owner, u64 active, u32 value)
+{
+    return machine_fast_owner_contains(owner, active, value);
+}
+
 u64 machine_fast_owner_match_mask_test(u32 const* owner, u64 active, u32 value)
 {
     return machine_fast_owner_match_mask(owner, active, value);
@@ -450,7 +477,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
     {
         u32 physical_register = machine_fast_first_set(remaining);
         u32 resident = owner[physical_register];
-        if (machine_fast_owner_match_mask(contract_owner, contract_held, resident))
+        if (machine_fast_owner_contains(contract_owner, contract_held, resident))
         {
             continue;
         }
@@ -500,7 +527,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
                 // pending value's single dirty copy; a clean occupant
                 // reloads at its own turn, its slot current by the
                 // clean-implies-stored invariant.
-                if (machine_fast_owner_match_mask(contract_owner, pending, resident))
+                if (machine_fast_owner_contains(contract_owner, pending, resident))
                 {
                     continue;
                 }
@@ -1743,7 +1770,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                             }
                             else if (repairs_fully && !((repair_pin_active >> contract_register) & 1u))
                             {
-                                entry_dirty |= machine_fast_owner_match_mask(edge_owner, edge_dirty, value) ? machine_fast_lane(contract_register) : 0u;
+                                entry_dirty |= machine_fast_owner_contains(edge_owner, edge_dirty, value) ? machine_fast_lane(contract_register) : 0u;
                             }
                             else
                             {

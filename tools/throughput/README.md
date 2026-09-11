@@ -86,6 +86,47 @@ cache experiment. Every invocation is a new compiler process, including every
 warmup and sample. The harness does not drop host caches, disable security
 controls, change the governor or attempt privileged machine configuration.
 
+### Assembly-output experiments
+
+`--artifact object|assembly` selects the final artifact for the six ordinary
+workload classes. The default is unchanged: `-c` with a `.o` output. Assembly
+mode uses `-S` with a `.s` output and adds `/assembly` to each ordinary series
+name in `jobs.tsv` and the comparison summaries. Each metadata job explicitly
+records `object`, `assembly` or `executable`. Source generation, source hashes,
+mode selection, pair counts and statistical thresholds are unchanged.
+
+```sh
+./build.sh bench_throughput run --baseline /base/ide --candidate /candidate/ide --output build/throughput-assembly --artifact assembly --mode all --require-identical-output
+./build.sh bench_throughput compare --output build/throughput-assembly
+```
+
+Use the same Clang-built compiler for both inputs first to validate A/A
+collection. Then compare frozen baseline/candidate compilers on an idle runner.
+The existing tiny-startup case retains the small-output control. For the
+many-function scaling series, `--profile ci --scale 2`, `4`, `8` and `16`
+produce 1,024, 2,048, 4,096 and 8,192 definitions respectively. Every run still
+includes all six workload classes; use a different output directory at each
+scale. Large cases must finish under the existing deadline, not be discarded
+or assigned a larger timeout merely to obtain a passing result.
+
+This times the whole compiler process through final assembly-file generation,
+including any printer index/sort construction, scratch management and writes.
+It does not isolate printer time or establish a speedup by itself. Existing
+`--pmu` and allocation options reuse the same assembly command through separate
+diagnostic replays; their output must match the ordinary timing artifact.
+Retain both assembly and ordinary object comparisons. Hardware requirements,
+paired uncertainty, source/binary hashes and unavailable-counter rules remain
+those documented below. An absent regression verdict is not proof of a win.
+
+With frozen self-host inputs, stage 1/2/3 remain executable compiler builds:
+assembly mode applies only to ordinary jobs. `--flag -S`, `--flag -c` and
+`--flag -E` remain forbidden. No assembler or generated program runs inside the
+timing samples. Exact A/B assembly hashes do not replace independent assembler
+checks or the compiler's full, mode, sanitizer, platform and self-host gates.
+Crafted empty/tied-symbol/relocation cases and printer phase attribution remain
+separate correctness/profiling work for #116; no new compiler timing hooks or
+parallel measurement framework are introduced here.
+
 ## Measurements and their limits
 
 `wall_seconds` spans process launch through wait completion. User and system
@@ -152,9 +193,9 @@ multiplexed-out observations are `NA`/`null`, never fabricated zero counts.
 from normal allocation paths. The diagnostic build counts **calling-thread arena
 bump requests and requested bytes**, including repeated allocations after arena
 rewinds, excluding alignment padding. These are not libc `malloc` counts, OS
-reservation/commit counts, peak live allocation, or all-thread totals. A single
-compiler invocation is currently serial; this explicit scope must be revisited
-when the compiler itself becomes parallel. The metrics snapshot precedes report
+reservation/commit counts, peak live allocation, or all-thread totals. With opt-in `-fcompile-jobs=N`, these calling-thread keys exclude worker
+bumps and must not be labeled whole-compiler allocation totals. The separate
+exit census aggregates worker records; its snapshot and teardown scope differ. The metrics snapshot precedes report
 formatting so the report does not count itself. Zero-size requests count as calls.
 
 The two new fields are `allocation.arena_calls` and `allocation.arena_bytes` in
@@ -163,6 +204,52 @@ fields and must produce exactly the same output hash as their uninstrumented
 counterpart. Instrumented compilers are rejected as timing baselines/candidates.
 For an old revision without the hook, backport only this diagnostic hook into a
 separate probe build; do not measure that modified build as the timing baseline.
+
+### Canonical construction census in allocation probes
+
+The same `BUSTER_BENCH_ALLOCATIONS` build emits `ir_construction.*` fields
+in `-fsource-metrics`. Use the existing allocation-probe arguments above;
+normal timing compilers must remain uninstrumented. Raw metric files are
+retained in the native harness artifacts even though its allocation summary
+contains only arena calls/bytes. There is no second measurement runner.
+
+`version=1` identifies the construction vocabulary. `overflowed=1` invalidates
+the census: counters saturate rather than wrapping. Counts are cumulative
+**calling-thread** totals since process start, including failed attempts
+that reached each hook. They are not all-lane aggregates. The compiler is
+currently serial; future parallel compilation must explicitly aggregate
+lane-owned results. The snapshot precedes report formatting and resets
+nothing. No extra arena storage or whole-function row stream is retained.
+
+- `block_appends`, `value_appends`, `instruction_appends` count successful
+  checked-builder appends, including later-retracted rows; direct writes
+  to arrays do not count as appends.
+- `*_grows`, `*_rows_copied`, `source_rows_cleared` count builder growth
+  and copied/cleared rows, not capacity bytes or peak resident memory.
+- `function_starts`, `body_tokens`, `parameters`, `initial_*_slots` count
+  C body-lowering starts and initial estimates, once per started function.
+- `ssa_finish_calls`, `ssa_finish_failures`, `before_ssa_*_rows`,
+  `after_ssa_*_rows`, `final_*_slots` describe frontend finish entry/exit,
+  including failed finish calls. Earlier failures have no exit snapshot.
+  This is not general canonical finalization or later promotion.
+- `place_load_retractions`, `place_atomic_load_retractions`,
+  `ssa_read_retractions`, `place_repair_steps` count recovered memory
+  loads, SSA read aliases, and previous-instruction traversal steps.
+- `cfg_*` count shared native edge-builder calls/failures, scratch `u32`
+  slots, target visits, attempted unique source/target pairs, parameter
+  visits, incoming nodes examined including matches, and emitted copy
+  sources. Direct/non-native consumers do not call this builder: zero
+  means no work at this hook, not absence of all CFG work.
+- `operand_slots_appended` sums appended rows' operand counts. It does
+  not count unique operands or repeated downstream decoding passes.
+
+Initial estimates and finish populations cover different failure boundaries;
+do not subtract them blindly on invalid sources. Counts do not measure
+append latency, phase times, retained arena memory, or all-consumer cost.
+Reuse per-site allocation diagnostics and uninstrumented paired experiments.
+A smaller count is not a speedup. Normal builds preprocess recording calls
+away and retain neither counter storage nor reporting API. Row layout,
+IDs, source/label provenance, and arena lifetimes are unchanged.
 
 ## Frozen-source self-host stages
 
@@ -246,6 +333,14 @@ A completed run seals the six primary machine-readable evidence files with
 SHA-256 in `complete.txt`. Comparison rechecks the seal, strict row counts,
 unique pair slots/order positions, numeric validity, invariant workload units
 and repeat output hashes, then regenerates `summary.json` and `summary.md`.
+These two reports are derived outputs, not retained evidence: comparison removes
+old reports before validation and discards newly written reports on validation
+or stream failure. A failed replay therefore cannot reuse an earlier verdict or
+publish a partial Markdown result. Failure to remove either report is diagnosed
+and comparison fails without a verdict; consumers must still honor the exit
+status, particularly after filesystem errors or interruption. Raw evidence and
+`complete.txt` are not removed by report cleanup. Valid comparisons retain both
+reports, including when the result is a confirmed regression (exit status 1).
 The seal detects accidental corruption; it is not a signature against a party
 who can edit both files and hashes. Incomplete runs retain diagnostics but have
 no valid completion marker. CI publishes the summary and keeps raw evidence for
@@ -260,3 +355,81 @@ its saved stderr with the offline reader. This exit report includes worker and
 cleanup traffic, whereas source metrics retain the original calling-thread
 pre-formatting snapshot. Keep each process log separate and do not substitute
 census timings for the normal uninstrumented series.
+
+
+## Result schema 2: process diagnostics (#345)
+
+The generated-input format remains **schema 1**: changing result columns does
+not alter the six workload files, PRNG sequence, flags, modes or default guard
+family. The result bundle is **schema 2**. Its CSV files append `minor_faults`,
+`major_faults`, `voluntary_context_switches` and `involuntary_context_switches`
+after `output_sha256`. These are optional exact unsigned integer counts; `NA`
+means unavailable, whereas `0` is an observed zero. Negative, fractional,
+malformed and overflowing counts are rejected. Raw values retain all 64 bits;
+summary medians use the same floating-point presentation as other metrics.
+
+Linux copies `ru_minflt`, `ru_majflt`, `ru_nvcsw` and `ru_nivcsw` from the
+**existing per-invocation `wait4` result**, after stopping the wall clock. No
+extra process, timer, PMU event, polling loop or allocation observer is enabled
+in a timing trial. These are child usage counts, not the harness's cumulative
+children totals. The operating system may include descendants whose resource
+usage the child waited for; this is not live process-tree aggregation. macOS
+and Windows currently leave these four observations unavailable. In particular,
+a Windows total fault count is not invented as a minor/major split.
+
+Both `samples.csv` and the independent PMU/allocation `telemetry.csv` retain
+the counts. `summary.json` includes their timing medians and separate replay
+medians with availability counts; an incomplete diagnostic series has a null
+median rather than silently selecting its available subset. An unavailable OS
+counter does not invalidate an otherwise complete allocation probe. Missing
+allocation metrics still invalidate an explicitly requested allocation probe.
+The existing output-hash, source-work and bundle-completion checks apply.
+
+**These fields never gate performance.** The two rounds, adjacent pairs,
+15%/2 ms wall margin, 20%/16 MiB RSS margin, exact sign test, Bonferroni family,
+warmups, pair minimum and inconclusive status are unchanged. Synthetic tests
+increase all four diagnostics by twelve orders of magnitude without changing
+a guard decision. They are evidence for investigating scheduling or paging,
+not grounds for deleting inconvenient samples or attributing a speedup.
+
+The new reader rejects a schema-1 result with an explicit version diagnostic;
+it does not reinterpret old column positions. Keep the original harness to
+replay an old bundle, or collect a fresh experiment with schema 2. Do not edit
+an old completion manifest to claim compatibility.
+
+The native regression suite checks exact zero/UINT64_MAX/unavailable replay,
+invalid counters, legacy rejection, optional probe completeness, and unchanged
+corpus hashing. On Linux it compares one allocation-and-sleep child's `wait4`
+counts with an independently obtained `getrusage(RUSAGE_CHILDREN)` delta,
+without another child between snapshots. Other platforms check unavailability.
+The existing Linux harness job additionally runs the suite under ASan/UBSan:
+
+```sh
+clang -std=c11 -O2 -g -Wall -Wextra -Werror -Wpedantic \
+  -fwrapv -fno-strict-aliasing -funsigned-char \
+  -fsanitize=address,undefined -fno-sanitize-recover=all \
+  tools/throughput/tests.c -lm -o build/throughput-tests-sanitized
+ASAN_OPTIONS=halt_on_error=1:detect_leaks=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  build/throughput-tests-sanitized build/throughput-tool-tests-sanitized
+```
+
+This closes a collection gap, not physical-hardware acceptance. Hosted runner
+labels, generic PMU availability and these OS counters do not establish Zen 5
+identity, physical isolation, instruction throughput or a compiler speedup.
+#46/#128 still require verified physical Zen 5 experiments and separate Zen 4
+nonregression. #346's optional macro/aggregate workloads remain separate; no
+preprocessing/debug-specific case or default corpus expansion is added here.
+
+
+### QUALITY scratch/work census
+
+The existing `BUSTER_BENCH_ALLOCATIONS=ON` diagnostic compiler also emits
+`quality_census.version=1` and `quality_census.*` integer fields in each
+`-fsource-metrics` file. The native runner already retains these files beside
+its artifacts during the separate `--allocation-baseline` / `--allocation-candidate`
+replays and requires their object bytes to match the uninstrumented subjects.
+Unknown additive keys do not change its timing or allocation schema. See
+[QUALITY census](../../docs/quality-scratch-census.md) for exact meanings,
+scope, exclusions and interpretation. These diagnostic runs are not latency,
+RSS or hardware-counter acceptance evidence.

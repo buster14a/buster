@@ -23,7 +23,7 @@ recorder. The preference is captured before worker creation. Without that
 request, an instrumented compiler remains quiet and still provides the existing
 `allocation.arena_calls` and `allocation.arena_bytes` source-metrics keys. Those
 keys keep their original calling-thread snapshot boundary, before metrics
-formatting. The exit census includes later formatting and cleanup, and includes
+formatting; opt-in TU-worker allocation traffic is not included in those keys. The exit census includes later formatting and cleanup, and includes
 retired OS workers, so its totals need not equal that earlier snapshot.
 
 The offline reader validates a saved log and exports JSON and per-site CSV. It

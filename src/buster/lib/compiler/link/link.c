@@ -11,7 +11,9 @@
 // veneers, ELF .eh_frame table construction, PE export/import plumbing,
 // CodeView/PDB resolution (link_pe_resolved_codeview), SHA-256 for build
 // ids — but each owns its image layout whole, because the formats agree
-// on almost nothing.
+// on almost nothing. Before x86-64 Linux writer selection,
+// link_elf_without_unused_got_marker removes only unreferenced reserved markers
+// from a private symbol/relocation view; the input object is never changed.
 //
 // One rule crosses every writer that synthesizes an entry point: C 5.1.2.2.3
 // makes a return from `main` equivalent to calling `exit` with that value, so
@@ -5020,6 +5022,18 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             }
             link_write_u32(bytes, output_offset, patched);
         }
+        else if (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
+        {
+            u32 patched = 0;
+            if (section->alignment < 4 ||
+                !object_aarch64_elf_page_relocate(relocation->kind, link_read_u32(section->data.pointer, relocation->offset),
+                                                place_address, symbol_address, relocation->addend, &patched))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, patched);
+        }
         else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
         {
             s64 value = 0;
@@ -5176,26 +5190,46 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         return result;
     }
     ObjectRelocation* converted_relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count);
+    u32 converted_count = 0;
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
-        converted_relocations[index] = object->relocations[index];
-        if (converted_relocations[index].kind == OBJECT_RELOCATION_AARCH64_CALL26 ||
-            converted_relocations[index].kind == OBJECT_RELOCATION_AARCH64_JUMP26)
+        ObjectRelocation relocation = object->relocations[index];
+        if (relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
         {
-            converted_relocations[index].kind = OBJECT_RELOCATION_X86_64_PC32;
+            // The layout staging writer cannot patch an A64 page field. Do
+            // not impose an unrelated x86 rel32/absolute32 range on it; the
+            // overlay below applies the original relocation after layout.
+            if (relocation.section >= OBJECT_SECTION_COUNT || relocation.symbol >= object->symbol_count)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            ObjectSection* section = object->sections + relocation.section;
+            if (section->alignment < 4 || (relocation.offset & 3) || relocation.offset > section->data.length ||
+                4 > section->data.length - relocation.offset)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
         }
-        else if (converted_relocations[index].kind == OBJECT_RELOCATION_AARCH64_PREL32)
+        else
         {
-            converted_relocations[index].kind = OBJECT_RELOCATION_X86_64_PC32;
-        }
-        else if (converted_relocations[index].kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ||
-                 converted_relocations[index].kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12)
-        {
-            converted_relocations[index].kind = OBJECT_RELOCATION_X86_64_TPOFF32;
+            if (relocation.kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation.kind == OBJECT_RELOCATION_AARCH64_JUMP26 ||
+                relocation.kind == OBJECT_RELOCATION_AARCH64_PREL32)
+            {
+                relocation.kind = OBJECT_RELOCATION_X86_64_PC32;
+            }
+            else if (relocation.kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 ||
+                     relocation.kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12)
+            {
+                relocation.kind = OBJECT_RELOCATION_X86_64_TPOFF32;
+            }
+            converted_relocations[converted_count++] = relocation;
         }
     }
     ObjectFile converted = *object;
     converted.relocations = converted_relocations;
+    converted.relocation_count = converted_count;
     NativeExecutableLinkOptions staging_options = options;
     staging_options.output_path = (String8){0};
     // The staging link is handed the object with its initializer arrays still
@@ -5242,6 +5276,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     u64 dynamic_program_header = ELF_HEADER_SIZE + 4 * ELF_PROGRAM_HEADER_SIZE;
     u64 dynamic_offset = link_read_u64(bytes, dynamic_program_header + 8);
     u64 relocation_offset = 0;
+    u64 dynamic_symbol_offset = 0;
     u64 copy_relocation_offset = 0;
     u64 copy_relocation_size = 0;
     // Walked to its DT_NULL terminator, over the extent PT_DYNAMIC states,
@@ -5269,6 +5304,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         {
             u64 address = link_read_u64(bytes, entry + 8);
             relocation_offset = address - image_base;
+        }
+        else if (tag == 6)
+        {
+            u64 address = link_read_u64(bytes, entry + 8);
+            dynamic_symbol_offset = address - image_base;
         }
         else if (tag == 7)
         {
@@ -5383,10 +5423,13 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         ObjectRelocation* relocation = &object->relocations[index];
         if (relocation->kind != OBJECT_RELOCATION_AARCH64_CALL26 && relocation->kind != OBJECT_RELOCATION_AARCH64_JUMP26 &&
             relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 &&
-            relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12)
+            relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 &&
+            relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_PAGE21 && relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12)
         {
             continue;
         }
+        bool page_relocation = relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 ||
+                               relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12;
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
         if (relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12)
@@ -5423,9 +5466,21 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             // decided that, exactly as in the x86-64 writer.
             symbol_address = 0;
         }
+        else if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_DATA && page_relocation)
+        {
+            // The staging writer already assigned copy slots, including
+            // aliases. Their dynamic symbols carry the authoritative address.
+            u64 value_offset = dynamic_symbol_offset + ((u64)import_indices[relocation->symbol] + 1) * ELF_SYMBOL_SIZE + 8;
+            if (!dynamic_symbol_offset || value_offset > result.executable.length || 8 > result.executable.length - value_offset)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                return result;
+            }
+            symbol_address = link_read_u64(bytes, value_offset);
+        }
         else if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
-            if (relocation->addend)
+            if (relocation->addend && !page_relocation)
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;
@@ -5462,8 +5517,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         s64 displacement = 0;
         u32 instruction = link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset);
         u32 patched = 0;
-        if ((place_address & 3) || !link_address_difference(symbol_address, place_address, relocation->addend, &displacement) ||
-            !link_aarch64_branch_relocate(relocation->kind, instruction, displacement, &patched))
+        bool relocated = page_relocation
+                             ? object_aarch64_elf_page_relocate(relocation->kind, instruction, place_address, symbol_address, relocation->addend, &patched)
+                             : !(place_address & 3) && link_address_difference(symbol_address, place_address, relocation->addend, &displacement) &&
+                               link_aarch64_branch_relocate(relocation->kind, instruction, displacement, &patched);
+        if (!relocated)
         {
             result.error = LINK_ERROR_RELOCATION;
             return result;
@@ -10645,6 +10703,75 @@ String8 link_error_name(LinkError error)
     return error < LINK_ERROR_COUNT ? names[error] : S8("unknown error");
 }
 
+// GCC's x86-64 PIC objects carry this reserved undefined marker even when
+// their GOTPCREL relocations name only the actual data symbols. An unused
+// marker requests no GOT address. Remove it from a private symbol view before
+// selecting the writer; real references and explicit entry requests stay strict.
+BUSTER_GLOBAL_LOCAL LinkObjectResult link_elf_without_unused_got_marker(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
+{
+    LinkObjectResult result = {.object = *object};
+    String8 marker = S8("_GLOBAL_OFFSET_TABLE_");
+    bool has_marker = false;
+    for (u32 index = 0; !has_marker && index < object->symbol_count; index += 1)
+    {
+        ObjectSymbol* symbol = object->symbols + index;
+        has_marker = symbol->global && symbol->section == OBJECT_SECTION_UNDEFINED && string_equal(symbol->name, marker);
+    }
+    if (has_marker && !string_equal(options.entry_symbol, marker))
+    {
+        TemporalArena temporary = scratch_begin(&arena, 1);
+        u32* remap = arena_allocate(temporary.arena, u32, object->symbol_count);
+        for (u32 index = 0; index < object->symbol_count; index += 1)
+        {
+            ObjectSymbol* symbol = object->symbols + index;
+            bool unused_marker = symbol->global && symbol->section == OBJECT_SECTION_UNDEFINED && string_equal(symbol->name, marker);
+            remap[index] = unused_marker ? UINT32_MAX : 0;
+        }
+        for (u32 index = 0; result.error == LINK_ERROR_NONE && index < object->relocation_count; index += 1)
+        {
+            u32 symbol = object->relocations[index].symbol;
+            if (symbol >= object->symbol_count)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+            }
+            else
+            {
+                remap[symbol] = 0;
+            }
+        }
+        u32 retained = 0;
+        for (u32 index = 0; result.error == LINK_ERROR_NONE && index < object->symbol_count; index += 1)
+        {
+            if (remap[index] != UINT32_MAX)
+            {
+                remap[index] = retained++;
+            }
+        }
+        if (result.error == LINK_ERROR_NONE && retained != object->symbol_count)
+        {
+            result.object.symbols = arena_allocate(arena, ObjectSymbol, retained);
+            result.object.symbol_count = retained;
+            result.object.relocations = arena_allocate(arena, ObjectRelocation, object->relocation_count);
+            for (u32 index = 0; index < object->symbol_count; index += 1)
+            {
+                if (remap[index] != UINT32_MAX)
+                {
+                    result.object.symbols[remap[index]] = object->symbols[index];
+                }
+            }
+            for (u32 index = 0; index < object->relocation_count; index += 1)
+            {
+                ObjectRelocation relocation = object->relocations[index];
+                relocation.symbol = remap[relocation.symbol];
+                result.object.relocations[index] = relocation;
+            }
+        }
+        scratch_end(temporary);
+    }
+
+    return result;
+}
+
 NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
@@ -10654,65 +10781,58 @@ NativeExecutableLinkResult link_native_executable(Arena* arena, ObjectFile* obje
         (options.framework_count && !options.frameworks) || (options.linker_argument_count && !options.linker_arguments))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
-        return result;
     }
-    if (object->target.os == OPERATING_SYSTEM_LINUX && object->target.cpu_arch == CPU_ARCH_X86_64)
+    else if (object->target.os == OPERATING_SYSTEM_LINUX &&
+             (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        if (options.dynamic_library_count)
+        LinkObjectResult normalized = {.object = *object};
+        if (object->target.cpu_arch == CPU_ARCH_X86_64)
         {
-            return link_native_executable_elf64_x86_64_dynamic(arena, object, options);
+            normalized = link_elf_without_unused_got_marker(arena, object, options);
         }
-        if (object->section_count > OBJECT_SECTION_THREAD_LOCAL_DATA && object->sections &&
-            (object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length || object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size))
+        result.error = normalized.error;
+        if (result.error == LINK_ERROR_NONE)
         {
-            return link_native_executable_elf64_x86_64_dynamic(arena, object, options);
-        }
-        for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
-        {
-            if (link_elf_symbol_needs_dynamic_import(options, &object->symbols[symbol_index]))
+            object = &normalized.object;
+            bool dynamic_image = options.dynamic_library_count || object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
+                                 object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
+            for (u32 index = 0; !dynamic_image && index < object->symbol_count; index += 1)
             {
-                return link_native_executable_elf64_x86_64_dynamic(arena, object, options);
+                dynamic_image = link_elf_symbol_needs_dynamic_import(options, object->symbols + index);
+            }
+            if (object->target.cpu_arch == CPU_ARCH_X86_64)
+            {
+                result = dynamic_image ? link_native_executable_elf64_x86_64_dynamic(arena, object, options)
+                                       : link_native_executable_elf64_x86_64(arena, object, options);
+            }
+            else
+            {
+                result = dynamic_image ? link_native_executable_elf64_aarch64_dynamic(arena, object, options)
+                                       : link_native_executable_elf64_aarch64(arena, object, options);
             }
         }
-        return link_native_executable_elf64_x86_64(arena, object, options);
     }
-    if (object->target.os == OPERATING_SYSTEM_WINDOWS && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
+    else if (object->target.os == OPERATING_SYSTEM_WINDOWS && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        return link_native_executable_pe64(arena, object, options);
+        result = link_native_executable_pe64(arena, object, options);
     }
-    if (object->target.os == OPERATING_SYSTEM_UEFI && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
+    else if (object->target.os == OPERATING_SYSTEM_UEFI && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        return link_native_executable_uefi_pe64(arena, object, options);
+        result = link_native_executable_uefi_pe64(arena, object, options);
     }
-    if ((object->target.os == OPERATING_SYSTEM_MACOS || object->target.os == OPERATING_SYSTEM_IOS) &&
-        (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
+    else if ((object->target.os == OPERATING_SYSTEM_MACOS || object->target.os == OPERATING_SYSTEM_IOS) &&
+             (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        return link_native_executable_mach_o64(arena, object, options);
+        result = link_native_executable_mach_o64(arena, object, options);
     }
-    if (object->target.os == OPERATING_SYSTEM_ANDROID && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
+    else if (object->target.os == OPERATING_SYSTEM_ANDROID && (object->target.cpu_arch == CPU_ARCH_X86_64 || object->target.cpu_arch == CPU_ARCH_AARCH64))
     {
-        return link_native_executable_android_elf64(arena, object, options);
+        result = link_native_executable_android_elf64(arena, object, options);
     }
-    if (object->target.os == OPERATING_SYSTEM_LINUX && object->target.cpu_arch == CPU_ARCH_AARCH64)
+    else
     {
-        if (options.dynamic_library_count)
-        {
-            return link_native_executable_elf64_aarch64_dynamic(arena, object, options);
-        }
-        if (object->section_count > OBJECT_SECTION_THREAD_LOCAL_DATA && object->sections &&
-            (object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length || object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size))
-        {
-            return link_native_executable_elf64_aarch64_dynamic(arena, object, options);
-        }
-        for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
-        {
-            if (link_elf_symbol_needs_dynamic_import(options, &object->symbols[symbol_index]))
-            {
-                return link_native_executable_elf64_aarch64_dynamic(arena, object, options);
-            }
-        }
-        return link_native_executable_elf64_aarch64(arena, object, options);
+        result.error = LINK_ERROR_UNSUPPORTED_HOST;
     }
-    result.error = LINK_ERROR_UNSUPPORTED_HOST;
+
     return result;
 }

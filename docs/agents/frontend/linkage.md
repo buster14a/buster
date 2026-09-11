@@ -4,6 +4,22 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- **Windows x64 frame records describe instruction-time RSP.**
+  `object_windows_x64_unwind_layout` retains SET_FPREG only when no fixed
+  allocation follows frame establishment; its displacement is the action's
+  own value. Current fixed-stack producers establish RBP before allocation
+  and keep RSP stable in the body. They therefore use PUSH/ALLOC/SAVE records
+  without a declared frame register, with SAVE slots relative to final RSP.
+  MIR emits the documented ADD/pops/RET fixed epilogue. The direct dynamic-stack
+  producer allocates first, then establishes RBP, and retains its frame record
+  and LEA epilogue. Do not drop that dynamic-frame information.
+  `object_test.c` pins both action orders, real nonzero frame offsets, saved
+  registers and small/large allocations. The existing native Windows x64
+  stack-walk fixture also checks fixed-frame instruction boundaries using
+  `RtlVirtualUnwind` in all four allocators, with and without debug information
+  (GitHub #363); object parsing alone is not runtime-unwind evidence.
+  Its metadata checker accepts both SAVE_NONVOL slot widths, rejects truncated
+  saves, and keeps saved-register offsets separate from stack-allocation sizes.
 - **Merged file-backed sections have zeroed background bytes.** `link_objects`
   initializes alignment gaps and each input's virtual tail before copying its
   data, so reused arenas produce the same bytes as fresh mappings. The zeroed
@@ -259,3 +275,28 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `_onexit` is deliberately absent — it answers with the handler rather than
   with a status, so it cannot be a tail branch, and a stub that called and
   then chose would need Windows unwind data of its own.
+
+- Ordinary AArch64 ELF ADRP/ADD address pairs use distinct `ELF_PAGE21` and
+  `ELF_ADD_LO12` object kinds (AAELF64 relocations 275/277). The reader keeps
+  RELA's explicit addend and clears the encoded immediate. REL ADRP's initial
+  addend is its **unscaled signed imm21**, unlike the executed displacement
+  or the Mach-O contract; REL ADD uses the unshifted unsigned imm12. Reject
+  misaligned sites, wrong instruction classes and shifted ADD forms.
+  `object_aarch64_elf_page_relocate` shares checked address arithmetic with
+  in-memory and native ELF linking, and the generated A64 ADD plan owns the
+  immediate bits. The dynamic writer omits these sites from x86 layout
+  staging and patches them after layout; imported data uses its dynamic
+  symbol's copy-slot address, including aliases. Untyped exported AArch64
+  ELF text labels can serve as assembly entry points; explicit object types
+  remain data. Mach-O, PE and TLS relocation contracts remain separate.
+
+  Independent Clang/QEMU fixtures for GitHub #355:
+
+  ```sh
+  clang -target aarch64-unknown-linux -c tests/basic_aarch64_elf_page.s -o /tmp/page.o
+  build/Release/ide cc -target aarch64-unknown-linux /tmp/page.o -o /tmp/page
+  qemu-aarch64 /tmp/page
+  clang -target aarch64-unknown-linux -O2 -c tests/basic_c_aarch64_elf_page_caller.c -o /tmp/page-caller.o
+  build/Release/ide cc -target aarch64-unknown-linux -fverify-codegen -fregister-allocator=quality tests/basic_c_aarch64_elf_page_callee.c /tmp/page-caller.o -o /tmp/page-caller
+  qemu-aarch64 /tmp/page-caller
+  ```
