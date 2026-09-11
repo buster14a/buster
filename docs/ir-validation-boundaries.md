@@ -77,6 +77,16 @@ revokes the certificate after a later mutation of already prepared IR.
 These are negative hook controls, not frontend or promotion miscompilation
 reproducers. They use the existing registered IR module, not a parallel harness.
 
+Integration against main also exposed previously certified invalid frontend
+output: complex predicates used integer bitwise operations on Boolean values,
+and qualified field initializers could capture an unqualified value at a
+different field type. `basic_c_ir_validation_values.c` exercises the repairs
+with strict native verification/execution in both frontend forms and all four
+allocators. The registered IR tests validate the raw producer output across
+x86-64, AArch64 and Wasm64 layouts, retain volatile accesses, then prepare it.
+Negative Boolean-operation controls reject integer opcodes, non-Boolean results
+and place results. The existing aggregate operand/type checks remain intact.
+
 For a negative control, restore only the old post-promotion condition
 `!input_certified` in an isolated CI workspace while retaining the new tests and
 context. The certified-output assertions must fail. This control is not an

@@ -1,6 +1,7 @@
 // Complex construction stays in the existing immutable AGGREGATE vocabulary.
 // These publication-boundary checks protect the row/temporary reduction and
 // reject constructors that smuggle a memory place in as a captured value.
+#include <buster/lib/file.h>
 
 BUSTER_GLOBAL_LOCAL CIRLowerResult ir_complex_test_lower(Arena* arena, String8 source, Target target, bool disable_direct_ssa)
 {
@@ -18,9 +19,73 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult ir_complex_test_lower(Arena* arena, String8 s
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult ir_complex_value_mode_tests(UnitTestArguments* arguments, Target target, bool disable_direct_ssa)
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_validation_value_tests(UnitTestArguments* arguments, Target target, bool disable_direct_ssa)
 {
     UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    ByteSlice input = file_read(temporary.arena, S8("tests/basic_c_ir_validation_values.c"), (FileReadOptions){0});
+    BUSTER_TEST(arguments, input.length != 0);
+    CIRLowerResult lowered = ir_complex_test_lower(temporary.arena, (String8){.pointer = (char*)input.pointer, .length = input.length},
+                                                 target, disable_direct_ssa);
+    BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified);
+    if (lowered.program && !lowered.diagnostic_count)
+    {
+        IrProgram* program = lowered.program;
+        IrModule* module = program->modules;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+        u32 boolean_operations = 0;
+        u32 volatile_loads = 0;
+        u32 volatile_stores = 0;
+        for (u32 fi = 0; fi < module->function_count; fi += 1)
+        {
+            IrFunction* function = module->functions + fi;
+            for (u32 index = 0; index < function->instruction_count; index += 1)
+            {
+                IrInstruction* instruction = function->instructions + index;
+                volatile_loads += instruction->opcode == IR_OPCODE_LOAD && instruction->volatile_access;
+                volatile_stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
+                if (instruction->opcode == IR_OPCODE_BINARY &&
+                    (instruction->binary_operation == IR_BINARY_BOOLEAN_AND || instruction->binary_operation == IR_BINARY_BOOLEAN_OR))
+                {
+                    boolean_operations += 1;
+                    u8 operation = instruction->binary_operation;
+                    instruction->binary_operation = operation == IR_BINARY_BOOLEAN_AND ? IR_BINARY_INTEGER_BITWISE_AND : IR_BINARY_INTEGER_BITWISE_OR;
+                    IrValidationResult invalid = ir_validate_canonical_module(program, module);
+                    BUSTER_TEST(arguments, invalid.error == IR_VALIDATION_OPERATION && invalid.function.value == fi && invalid.instruction.value == index);
+                    instruction->binary_operation = operation;
+
+                    IrValue* value = function->values + instruction->result.value;
+                    IrTypeId type = value->canonical_type;
+                    IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
+                    value->canonical_type = signature->return_type;
+                    instruction->canonical_type = signature->return_type;
+                    invalid = ir_validate_canonical_module(program, module);
+                    BUSTER_TEST(arguments, invalid.error == IR_VALIDATION_OPERATION && invalid.function.value == fi && invalid.instruction.value == index);
+                    value->canonical_type = type;
+                    instruction->canonical_type = type;
+
+                    u8 category = value->category;
+                    value->category = IR_VALUE_PLACE;
+                    invalid = ir_validate_canonical_module(program, module);
+                    BUSTER_TEST(arguments, invalid.error == IR_VALIDATION_OPERATION && invalid.function.value == fi && invalid.instruction.value == index);
+                    value->category = category;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, boolean_operations >= 5 && volatile_loads != 0 && volatile_stores != 0);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+        IrValidationResult prepared = ir_prepare_canonical_module(program, module, true);
+        BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && module->local_promotion_complete);
+        BUSTER_TEST(arguments, prepared.boundary == (module->local_promotion.promoted_locals ? IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT
+                                                                                          : IR_VALIDATION_BOUNDARY_UNSPECIFIED));
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_complex_value_mode_tests(UnitTestArguments* arguments, Target target, bool disable_direct_ssa)
+{
+    UnitTestResult result = ir_validation_value_tests(arguments, target, disable_direct_ssa);
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     CIRLowerResult lowered = ir_complex_test_lower(temporary.arena, S8(
         "double _Complex construct(double r, double i) { return __builtin_complex(r, i); }\n"

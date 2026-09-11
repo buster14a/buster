@@ -5044,6 +5044,12 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
                                 matching_operands && left->canonical_type.value == instruction->canonical_type.value;
         bool valid_comparison = comparison && result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands && operand_type &&
                                 (operand_type->kind == IR_TYPE_INTEGER || operand_type->kind == IR_TYPE_FLOAT);
+        bool valid_boolean = (instruction->binary_operation == IR_BINARY_BOOLEAN_AND || instruction->binary_operation == IR_BINARY_BOOLEAN_OR) &&
+                             result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands &&
+                             left->canonical_type.value == instruction->canonical_type.value &&
+                             left->category == IR_VALUE_VALUE && right->category == IR_VALUE_VALUE &&
+                             instruction->result.value < function->value_count &&
+                             function->values[instruction->result.value].category == IR_VALUE_VALUE;
         IrType* operand_element =
             operand_type && operand_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, operand_type->element_type) : 0;
         IrType* result_element =
@@ -5066,7 +5072,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         bool valid_pointer_comparison =
             (instruction->binary_operation == IR_BINARY_POINTER_EQUAL || instruction->binary_operation == IR_BINARY_POINTER_NOT_EQUAL) &&
             result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands && operand_type && operand_type->kind == IR_TYPE_POINTER;
-        if ((!valid_arithmetic && !valid_comparison && !valid_vector_operation && !valid_pointer_comparison) ||
+        if ((!valid_arithmetic && !valid_comparison && !valid_boolean && !valid_vector_operation && !valid_pointer_comparison) ||
             instruction->result.value == IR_ID_UNDERLYING_INVALID)
         {
             error = IR_VALIDATION_OPERATION;

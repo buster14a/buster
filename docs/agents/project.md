@@ -47,7 +47,7 @@ Top level:
 | `tests/` | C frontend, driver, object/archive, fuzz, and CI-script fixtures. |
 | `tools/` | Python generators, scanners, and measurement scripts run by hand; outside the build graph. |
 | `.forgejo/` | Forgejo CI workflows/scripts and the source-free GitHub broker workflow template. |
-| `PERFORMANCE_AUDITS.md` | Index of the append-only measurement history; one line per audit. |
+| `PERFORMANCE_AUDITS.md` | Guide to the append-only measurement history and its closed index; `tools/new_audit.py --list` lists every audit. |
 | `docs/performance-audits/` | One file per audit, named for its id; older entries may describe components that no longer exist. |
 | `WASM64.md` | Direct core Wasm64 target contract and usage. |
 | `LLVM_BITCODE.md` | Direct LLVM bitcode output, driver usage, emitter API, validation, and current limitations. |

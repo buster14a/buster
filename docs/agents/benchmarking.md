@@ -342,30 +342,34 @@
 
 ## Performance audit notes
 
-Audit history lives in `PERFORMANCE_AUDITS.md`, newest first — it is kept out
-of this file because it is a growing record rather than a rule. **Read its
-newest entry before any performance work**: it holds the reference numbers a
-new measurement is compared against (stage 1 instructions, sanitized and
-Release `ide test`, `ide bench` medians), the finds that were deliberately
-left untaken, and the traps an earlier audit already paid for. Record a new
-audit there, not here; this file keeps the method, that file keeps the
-history.
+Audit history lives in `docs/performance-audits/`, one file per audit, and
+`PERFORMANCE_AUDITS.md` explains it — it is kept out of this file because it
+is a growing record rather than a rule. **Read the newest audit before any
+performance work** (`tools/new_audit.py --newest` prints its path): it holds
+the reference numbers a new measurement is compared against (stage 1
+instructions, sanitized and Release `ide test`, `ide bench` medians), the finds
+that were deliberately left untaken, and the traps an earlier audit already
+paid for. Record a new audit there, not here; this file keeps the method, that
+directory keeps the history.
 
-An audit is a **new file**, `docs/performance-audits/<id>.md`, plus one line at
-the top of the index in `PERFORMANCE_AUDITS.md`. Never append an entry into an
-existing audit file and never rewrite one: the split exists so that two audit
-branches open at once touch disjoint files, which is what the single prepended
-history could not do. The index line is the only shared text, and
-`.gitattributes` marks `PERFORMANCE_AUDITS.md` `merge=union` so concurrent
-inserts keep both lines rather than conflicting — after such a merge, check
-that the newest id is on top, because union does not know which line is newer.
+An audit is a **new file**, `docs/performance-audits/<id>.md`, and nothing
+else. Never append an entry into an existing audit file, never rewrite one, and
+never add a line to the index in `PERFORMANCE_AUDITS.md`: it is closed at the
+id in its heading. Every audit used to add a line at its top, so any two open
+audit branches conflicted as soon as either landed. `merge=union` in
+`.gitattributes` cleared that only for a local merge, because GitHub's
+mergeability check does not apply it, and the union merges duplicated lines and
+lost their order. Timestamp ids sort chronologically, so the directory orders
+every audit past the closing id. `tools/new_audit.py --list` prints the whole
+history newest first, and `--check`, which CI runs, verifies the index and the
+directory agree.
 
 The id is the **UTC timestamp at which the audit is recorded**,
 `2026-08-22T140351Z` — ISO 8601 with the colons dropped, because Windows
-forbids them in filenames. `tools/new_audit.py` mints one, creates the file and
-inserts the index line; use it rather than typing an id by hand, because the id
-is the one field two concurrent sessions can independently choose the same
-value for. Audits before 2026-08-22 are named by date plus a sequence letter
+forbids them in filenames. `tools/new_audit.py` mints one and creates the
+file; use it rather than typing an id by hand, because the id is the one field
+two concurrent sessions can independently choose the same value for. Audits
+before 2026-08-22 are named by date plus a sequence letter
 (`2026-08-08k`), and that is precisely what collided: the letter is picked by
 counting the day's existing entries, so two sessions auditing the same day
 always picked the same letter, and three of the four PRs open when the history
