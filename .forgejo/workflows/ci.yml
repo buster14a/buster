@@ -17,6 +17,12 @@ jobs:
           set -euo pipefail
           python3 .forgejo/scripts/check_action_pins.py
           python3 tests/action_pins_test.py
+      - name: Validate the performance audit index
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/new_audit.py --self-test
+          python3 tools/new_audit.py --check
       - name: Check merged SHA statuses
         id: gate
         env:

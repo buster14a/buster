@@ -1,28 +1,37 @@
 # Performance audit notes
 
-Performance audit history for this repository, newest first. Every entry is a
-record of what was measured, what was fixed, and what the numbers were at the
-time; the methodology for taking new measurements — which benchmark to trust,
-how to profile the sanitized and Release trees, how to symbolize — stays in
-the [benchmarking and diagnostics guide](docs/agents/benchmarking.md).
+Performance audit history for this repository. Every entry is a record of what
+was measured, what was fixed, and what the numbers were at the time; the
+methodology for taking new measurements — which benchmark to trust, how to
+profile the sanitized and Release trees, how to symbolize — stays in the
+[benchmarking and diagnostics guide](docs/agents/benchmarking.md).
 
-Each audit is one file under `docs/performance-audits/`, named for its id, and
-this file is the index. **A new audit adds a file, never a paragraph to an
-existing one:** write `docs/performance-audits/<id>.md`, then add one line at
-the top of the index below. That is what keeps concurrent audit branches from
-colliding — every audit used to be prepended to this file at the same line, so
-any two open audit branches conflicted by construction. The index line is the
-only shared text left, and `.gitattributes` marks this file `merge=union` so
-even that merges without a conflict; check the order after a union merge, since
-union keeps both lines but does not know which is newer.
+Each audit is one file under `docs/performance-audits/`, named for its id.
+**A new audit adds its file and touches nothing shared:** `tools/new_audit.py`
+mints the id and writes `docs/performance-audits/<id>.md`. Do not add a line to
+the index below, and never edit an existing audit. The index is closed at the
+id in its heading. Until then every audit also added a line at its top, so any
+two open audit branches conflicted as soon as either one landed:
+`.gitattributes` marked this file `merge=union`, but GitHub's mergeability
+check does not apply it, so the pull request still showed the conflict, and the
+local union merges that cleared it kept both sides' lines without knowing which
+was newer — the index came out with duplicated lines, out of order.
+
+**`tools/new_audit.py --newest` prints the newest audit's path, and `--list`
+prints every audit, newest first.** Timestamp ids sort chronologically, so past
+the closing id the directory itself is the index; on GitHub, the newest audit
+is the last timestamp-named `.md` file in
+[`docs/performance-audits/`](docs/performance-audits/). `--list` keeps the
+headlines written below for the audits the index lists and reads a later
+audit's headline from its opening line. CI runs `tools/new_audit.py --check`,
+which fails a pull request that adds a line to the closed index.
 
 An audit's id is the UTC timestamp at which it is recorded,
 `2026-08-22T140351Z`, which is ISO 8601 with the colons dropped because Windows
-forbids them in filenames. `tools/new_audit.py` mints it, writes the file and
-inserts the index line — mint the id rather than typing one, since it is the
-only field two concurrent sessions can pick identically. Seconds resolution is
-enough because the id is stamped when a human writes the entry, not when a
-benchmark iterates.
+forbids them in filenames. `tools/new_audit.py` mints it and writes the file —
+mint the id rather than typing one, since it is the only field two concurrent
+sessions can pick identically. Seconds resolution is enough because the id is
+stamped when a human writes the entry, not when a benchmark iterates.
 
 Audits up to 2026-08-22 carry the older name: a date plus a sequence letter,
 `2026-08-08k`. That scheme is what the timestamp replaces — the letter is
@@ -32,11 +41,11 @@ them, and they stay as written; the two audits both dated `2026-08-02` became
 `2026-08-02` and `2026-08-02b` when the split gave each its own file, and no
 other entry text changed.
 
-The index carries the order, not the directory listing. Timestamp ids do sort
-chronologically, but the older letter ids do not past `z` (`aa` sorts before
-`b`), a few entries were deliberately recorded out of id order (`2026-08-08k`
-says so itself), and `T` sorts before a lowercase letter, so a timestamp id
-lands above the same day's letter ids.
+The index carries the letter ids' order, which their names cannot: they do not
+sort past `z` (`aa` sorts before `b`), a few entries were deliberately recorded
+out of id order (`2026-08-08k` says so itself), and `T` sorts before a
+lowercase letter, so a timestamp id lands above the same day's letter ids.
+Timestamp ids need no index for order, which is what lets it close.
 
 Entries written before the C-only consolidation on 2026-08-14 may mention the
 removed experimental frontend, its fixtures, or its editor model. The `.bbb`
@@ -44,13 +53,13 @@ fixtures and historical documentation remain in-tree for future work, while
 the C implementation and C tests are gone. Older entries remain historical
 measurement context rather than current implementation guidance.
 
-**Read the newest entry before starting performance work.** It carries the
+**Read the newest audit before starting performance work.** It carries the
 reference points the next audit is measured against, the finds that were
 deliberately left untaken, and the mistakes an earlier audit already paid for.
 Leave the older entries as written — they are a record, not documentation to
 keep current.
 
-## Audits, newest first
+## Audits through `2026-09-11T131903Z`, newest first
 
 - [`2026-09-11T131903Z`](docs/performance-audits/2026-09-11T131903Z.md) — Recover post-139 survey validation and SIMD evidence without reviving compiler changes
 - [`2026-09-11T130113Z`](docs/performance-audits/2026-09-11T130113Z.md) — Clang Release unity-object attribution for #413: CodeGen Prepare rescans in the direct canonical emitter
@@ -59,13 +68,6 @@ keep current.
 - [`2026-09-10T191117Z`](docs/performance-audits/2026-09-10T191117Z.md) — Z16: recover explicit object and assembly measurement through the existing harness
 - [`2026-09-10T190535Z`](docs/performance-audits/2026-09-10T190535Z.md) — Z02: recover process diagnostics with exact availability and unchanged guard semantics
 - [`2026-09-10T190027Z`](docs/performance-audits/2026-09-10T190027Z.md) — Z02: invalidate rejected throughput summaries and preserve sealed evidence
-- [`2026-09-10T012048Z`](docs/performance-audits/2026-09-10T012048Z.md) — Z17 bounded native C translation-unit cohorts, no speedup claim
-- [`2026-09-10T011012Z`](docs/performance-audits/2026-09-10T011012Z.md) — Z05 literal-call census and single-fragment scratch candidate
-- [`2026-09-10T010529Z`](docs/performance-audits/2026-09-10T010529Z.md) — Z11 parameter-edge splitter: stable scratch-only outgoing indexes (#296)
-- [`2026-09-10T005633Z`](docs/performance-audits/2026-09-10T005633Z.md) — Reproduce quadratic fresh-name publication on frozen main (#302)
-- [`2026-09-10T010336Z`](docs/performance-audits/2026-09-10T010336Z.md) — Z07 semantic-query census and constexpr leaf storage candidate (#259)
-- [`2026-09-10T191815Z`](docs/performance-audits/2026-09-10T191815Z.md) — Integrate lazy syntax diagnostics with integer validation and retained iOS evidence
-- [`2026-09-10T011438Z`](docs/performance-audits/2026-09-10T011438Z.md) — Z01 compiler census and first-error syntax storage (#128, #248)
 - [`2026-09-10T184045Z`](docs/performance-audits/2026-09-10T184045Z.md) — Local aggregate-copy completion for the wider metamorphic campaign (#366)
 - [`2026-09-10T180045Z`](docs/performance-audits/2026-09-10T180045Z.md) — SysV unnamed-bitfield interoperability with unchanged default classification (#66, #391)
 - [`2026-09-10T164337Z`](docs/performance-audits/2026-09-10T164337Z.md) — Import ordinary AArch64 ELF page addresses (#355)
@@ -78,7 +80,9 @@ keep current.
 - [`2026-09-10T010755Z`](docs/performance-audits/2026-09-10T010755Z.md) — isel: reuse AArch64 direct-call facts in the operand walk (#132)
 - [`2026-09-10T010600Z`](docs/performance-audits/2026-09-10T010600Z.md) — QUALITY scratch census through existing diagnostic replays; no optimization claim
 - [`2026-09-10T010529Z`](docs/performance-audits/2026-09-10T010529Z.md) — Z11 parameter-edge splitter: stable scratch-only outgoing indexes (#296)
+- [`2026-09-10T010336Z`](docs/performance-audits/2026-09-10T010336Z.md) — Z07 semantic-query census and constexpr leaf storage candidate (#259)
 - [`2026-09-10T010143Z`](docs/performance-audits/2026-09-10T010143Z.md) — Z15: reuse the prepared fixed-width switch MOVABS plan
+- [`2026-09-10T005633Z`](docs/performance-audits/2026-09-10T005633Z.md) — Reproduce quadratic fresh-name publication on frozen main (#302)
 - [`2026-09-09T174124Z`](docs/performance-audits/2026-09-09T174124Z.md) — Lower Win64 indirect aggregate arguments through MIR (#36)
 - [`2026-09-09T163649Z`](docs/performance-audits/2026-09-09T163649Z.md) — Repair ELF AArch64 variadic register cursors and HFA overflow (#36)
 - [`2026-09-09T151546Z`](docs/performance-audits/2026-09-09T151546Z.md) — Lower Windows x86-64 variadic calls through MIR (#36)
