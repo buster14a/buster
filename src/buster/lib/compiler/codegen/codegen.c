@@ -9873,11 +9873,22 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                               encoded.row_offsets, (u32)buffer.count);
                             for (u32 site_index = 0; site_index < encoded.call_site_count; site_index += 1)
                             {
+                                MachineThreadLocalSite thread_local_site = (MachineThreadLocalSite)encoded.call_sites[site_index].thread_local_site;
                                 result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                     .symbol = selected.function.call_targets[encoded.call_sites[site_index].target],
                                     .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
                                     .kind = (u8)(encoded.call_sites[site_index].is_thread_local
-                                                     ? (encoded.call_sites[site_index].thread_local_low
+                                                     ? (thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX
+                                                            ? (encoded.call_sites[site_index].thread_local_low
+                                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
+                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP)
+                                                        : thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET
+                                                            ? CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12
+                                                        : thread_local_site == MACHINE_THREAD_LOCAL_SITE_DARWIN_DESCRIPTOR
+                                                            ? (encoded.call_sites[site_index].thread_local_low
+                                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12
+                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGE21)
+                                                        : encoded.call_sites[site_index].thread_local_low
                                                             ? CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
                                                             : CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12)
                                                      : encoded.call_sites[site_index].page_relative
@@ -9890,6 +9901,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .absolute = encoded.call_sites[site_index].absolute != 0,
                                     .is_thread_local = encoded.call_sites[site_index].is_thread_local != 0,
                                     .thread_local_low = encoded.call_sites[site_index].thread_local_low != 0,
+                                    .thread_local_index = thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX,
                                 };
                             }
                             buffer.count += encoded.byte_count;
@@ -10013,6 +10025,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 CodegenModuleRelocationKind site_kind =
                                     thread_local_site == MACHINE_THREAD_LOCAL_SITE_TLS_GET_ADDR ? CODEGEN_MODULE_RELOCATION_X86_64_TLS_GET_ADDR_PLT32
                                     : !site_is_thread_local                                     ? site_direct_kind
+                                    : thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX ? CODEGEN_MODULE_RELOCATION_X86_64_PE_TLS_INDEX_PC32
                                     : target.os == OPERATING_SYSTEM_WINDOWS                     ? CODEGEN_MODULE_RELOCATION_PE_TLS_OFFSET32
                                     : (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
                                         ? CODEGEN_MODULE_RELOCATION_X86_64_MACH_TLV_PC32
@@ -10024,6 +10037,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     .offset = (u32)buffer.count + encoded.call_sites[site_index].code_offset,
                                     .kind = (u8)site_kind,
                                     .is_thread_local = site_is_thread_local,
+                                    .thread_local_index = thread_local_site == MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX,
                                 };
                             }
                             buffer.count += encoded.byte_count;

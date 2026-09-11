@@ -2965,10 +2965,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_global_address(MachineX64Selector* s
 
     bool selected = false;
     IrSymbol* symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
-    // Thread-local addresses select only where the ELF sequences apply;
-    // other OSes keep the canonical fallback.
-    bool thread_local_supported =
-        symbol && (!symbol->is_thread_local || selector->target.os == OPERATING_SYSTEM_LINUX || selector->target.os == OPERATING_SYSTEM_ANDROID);
+    bool darwin = selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS;
+    bool windows = selector->target.os == OPERATING_SYSTEM_WINDOWS;
+    bool thread_local_supported = symbol && (!symbol->is_thread_local || darwin || windows ||
+        selector->target.os == OPERATING_SYSTEM_LINUX || selector->target.os == OPERATING_SYSTEM_ANDROID);
     if (result_register != UINT32_MAX && thread_local_supported)
     {
         // A thread-local address is the loader's to compute whatever the code
@@ -2977,10 +2977,11 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_global_address(MachineX64Selector* s
         u8 reference =
             symbol->is_thread_local ? (u8)MACHINE_SYMBOL_REFERENCE_DIRECT : machine_x64_symbol_reference(selector, instruction->symbol, false);
         u32 target_index = machine_x64_call_target(selector, instruction->symbol, reference);
-        CodegenThreadLocalModel model = symbol->is_thread_local
+        CodegenThreadLocalModel model = symbol->is_thread_local && !darwin && !windows
                                             ? codegen_thread_local_model(selector->position_independent, symbol->is_definition)
                                             : CODEGEN_THREAD_LOCAL_LOCAL_EXEC;
-        if (model == CODEGEN_THREAD_LOCAL_GENERAL_DYNAMIC)
+        bool descriptor_call = symbol->is_thread_local && darwin;
+        if (model == CODEGEN_THREAD_LOCAL_GENERAL_DYNAMIC || descriptor_call)
         {
             // The address comes back from __tls_get_addr in RAX, so this
             // reads exactly like a direct call: the call row itself defines
@@ -2988,7 +2989,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_global_address(MachineX64Selector* s
             // result register is what the value is defined by.
             machine_x64_select_row(selector, (MachineInstruction){
                                                  .payload = target_index,
-                                                 .opcode = MACHINE_X64_TLS_GENERAL_DYNAMIC,
+                                                 .opcode = (u16)(descriptor_call ? MACHINE_X64_TLS_DARWIN : MACHINE_X64_TLS_GENERAL_DYNAMIC),
                                              });
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
@@ -3001,6 +3002,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_global_address(MachineX64Selector* s
         {
             u16 address_opcode = (u16)(!symbol->is_thread_local
                                            ? (reference == MACHINE_SYMBOL_REFERENCE_GOT ? MACHINE_X64_LOAD_SYMBOL_GOT : MACHINE_X64_LEA_SYMBOL)
+                                       : windows ? MACHINE_X64_TLS_WINDOWS
                                        : model == CODEGEN_THREAD_LOCAL_INITIAL_EXEC ? MACHINE_X64_LEA_TLS_INITIAL_EXEC
                                                                                     : MACHINE_X64_LEA_TLS);
             u32 row = machine_x64_select_row(selector,
@@ -9988,6 +9990,25 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_memory(void)
         rip_operands[0] = machine_x64_exact_gpr_operand(register_index, 64);
         (void)machine_x64_metadata_shape_cache_add(S8("LEA"), rip_operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
     }
+    // Initial-exec TLS adds the GOT offset; PIC symbols load a GOT pointer.
+    (void)machine_x64_metadata_shape_cache_add(S8("MOV"), rip_operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("ADD"), rip_operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+    // Windows uses the module's 32-bit index and GS-relative TLS array;
+    // Darwin calls the resolver pointer loaded from its descriptor.
+    rip_operands[0] = machine_x64_exact_gpr_operand(MACHINE_X64_RAX, 32);
+    rip_operands[1].width = 32;
+    (void)machine_x64_metadata_shape_cache_add(S8("MOV"), rip_operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+    fs_operands[1].memory.segment = BUSTER_X86_METADATA_SEGMENT_GS;
+    fs_operands[1].memory.displacement = 0x58;
+    (void)machine_x64_metadata_shape_cache_add(S8("MOV"), fs_operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+    BusterX86MetadataPhysicalOperand indexed_memory = machine_x64_exact_memory_operand(MACHINE_X64_RDX, 64, 0, false);
+    indexed_memory.memory.has_index = true;
+    indexed_memory.memory.index = machine_x64_exact_gpr_operand(MACHINE_X64_RAX, 64).reg;
+    indexed_memory.memory.scale = 8;
+    BusterX86MetadataPhysicalOperand indexed_operands[] = {machine_x64_exact_gpr_operand(MACHINE_X64_RAX, 64), indexed_memory};
+    (void)machine_x64_metadata_shape_cache_add(S8("MOV"), indexed_operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
+    BusterX86MetadataPhysicalOperand call_memory = machine_x64_exact_memory_operand(MACHINE_X64_RDI, 64, 0, false);
+    (void)machine_x64_metadata_shape_cache_add(S8("CALL"), &call_memory, 1, (BusterX86MetadataFeatureInput){0}, attributes);
 }
 
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_relative(void)
@@ -12245,6 +12266,63 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                             .is_thread_local = 1,
                             .thread_local_site = MACHINE_THREAD_LOCAL_SITE_INITIAL_EXEC,
                         };
+                    }
+                    break; case MACHINE_X64_TLS_WINDOWS:
+                    {
+                        BusterX86MetadataPhysicalOperand index_memory = machine_x64_exact_rip_memory_operand();
+                        index_memory.width = 32;
+                        BusterX86MetadataPhysicalOperand index_operands[] = {
+                            machine_x64_exact_gpr_operand(MACHINE_X64_RAX, 32), index_memory,
+                        };
+                        (void)machine_x64_emit_metadata_instruction(&encoder, S8("MOV"), index_operands, 2,
+                            (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
+                        MachineCallSite* index_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                        *index_site = (MachineCallSite){.code_offset = encoder.count - 4, .target = instruction->payload,
+                            .is_thread_local = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_INDEX};
+                        BusterX86MetadataPhysicalOperand thread_operands[] = {
+                            machine_x64_exact_gpr_operand(MACHINE_X64_RDX, 64),
+                            {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
+                             .memory = {.displacement = 0x58, .address_size = 64, .scale = 1,
+                                .segment = BUSTER_X86_METADATA_SEGMENT_GS, .has_displacement = true, .has_segment = true}},
+                        };
+                        (void)machine_x64_emit_metadata_instruction(&encoder, S8("MOV"), thread_operands, 2,
+                            (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
+                        BusterX86MetadataPhysicalOperand slot_memory = machine_x64_exact_memory_operand(MACHINE_X64_RDX, 64, 0, false);
+                        slot_memory.memory.has_index = true;
+                        slot_memory.memory.index = machine_x64_exact_gpr_operand(MACHINE_X64_RAX, 64).reg;
+                        slot_memory.memory.scale = 8;
+                        BusterX86MetadataPhysicalOperand slot_operands[] = {
+                            machine_x64_exact_gpr_operand(MACHINE_X64_RAX, 64), slot_memory,
+                        };
+                        (void)machine_x64_emit_metadata_instruction(&encoder, S8("MOV"), slot_operands, 2,
+                            (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
+                        MachineX64PreparedExactOpcode const* lea_entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_LEA_FRAME);
+                        BusterX86MetadataPhysicalOperand lea_operands[] = {
+                            machine_x64_exact_gpr_operand(MACHINE_X64_RAX, 64),
+                            machine_x64_exact_memory_operand(MACHINE_X64_RAX, 64, 0, true),
+                        };
+                        if (!lea_entry || !lea_entry->descriptor || !lea_entry->plan_valid ||
+                            !machine_x64_emit_exact_form(&encoder, lea_entry->metadata_tokens[0], lea_operands, 2, true, false, 0, false, 0))
+                        {
+                            encoder.overflow = true;
+                        }
+                        MachineCallSite* offset_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                        *offset_site = (MachineCallSite){.code_offset = encoder.count - 4, .target = instruction->payload,
+                            .is_thread_local = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
+                    }
+                    break; case MACHINE_X64_TLS_DARWIN:
+                    {
+                        BusterX86MetadataPhysicalOperand descriptor_operands[] = {
+                            machine_x64_exact_gpr_operand(MACHINE_X64_RDI, 64), machine_x64_exact_rip_memory_operand(),
+                        };
+                        (void)machine_x64_emit_metadata_instruction(&encoder, S8("MOV"), descriptor_operands, 2,
+                            (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
+                        MachineCallSite* descriptor_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                        *descriptor_site = (MachineCallSite){.code_offset = encoder.count - 4, .target = instruction->payload,
+                            .is_thread_local = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_DARWIN_DESCRIPTOR};
+                        BusterX86MetadataPhysicalOperand call_operand = machine_x64_exact_memory_operand(MACHINE_X64_RDI, 64, 0, false);
+                        (void)machine_x64_emit_metadata_instruction(&encoder, S8("CALL"), &call_operand, 1,
+                            (BusterX86MetadataFeatureInput){0}, (BusterX86MetadataPhysicalAttributes){0}, 0);
                     }
                     break; case MACHINE_X64_TLS_GENERAL_DYNAMIC:
                     {

@@ -1387,6 +1387,85 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_windows_arm64_unwind(Uni
     return result;
 }
 
+// TLS addresses are loader operations on every desktop target. Exercise live
+// values across repeated accesses, plus declarations resolved in another object.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_tls(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("x86_64-linux"), S8("aarch64-linux"), S8("x86_64-windows"),
+                         S8("aarch64-windows"), S8("x86_64-macos"), S8("aarch64-macos")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    ObjectRelocationKind first_kinds[] = {OBJECT_RELOCATION_X86_64_TPOFF32, OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12,
+        OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32, OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP,
+        OBJECT_RELOCATION_X86_64_MACH_TLV_PC32, OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21};
+    ObjectRelocationKind second_kinds[] = {OBJECT_RELOCATION_X86_64_GOTTPOFF, OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12,
+        OBJECT_RELOCATION_PE_TLS_OFFSET32, OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12,
+        OBJECT_RELOCATION_X86_64_MACH_TLV_PC32, OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 pic = 0; pic < 2; pic += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-native-tls"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
+                        pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fverify-codegen"), S8("-o"), output,
+                        S8("tests/basic_c_thread_local_models.c")};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 description = string_format(temporary.arena, S8("native_tls {S8} {S8} {S8} pic={u32}: {S8}"),
+                        targets[target], modes[mode], frontends[frontend], pic, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 2 &&
+                        compiled.codegen_statistics.fallback_function_count == 0, description);
+                    ObjectRelocationKind first_kind = target == 0 && pic ? OBJECT_RELOCATION_X86_64_TLSGD : first_kinds[target];
+                    ObjectRelocationKind second_kind = target == 0 && pic ? OBJECT_RELOCATION_X86_64_PLT32 : second_kinds[target];
+                    bool first = false;
+                    bool second = false;
+                    bool index_low = target != 3;
+                    for (u32 relocation_index = 0; relocation_index < compiled.object.relocation_count; relocation_index += 1)
+                    {
+                        ObjectRelocation* relocation = compiled.object.relocations + relocation_index;
+                        first |= relocation->kind == first_kind;
+                        second |= relocation->kind == second_kind;
+                        index_low |= relocation->kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12;
+                    }
+                    BUSTER_TEST_RAW(arguments, first && second && index_low, description);
+#if !BUSTER_ANDROID && !BUSTER_IOS
+                    bool native_arch = (target % 2 == 0 && BUSTER_CPU_ARCH_X86_64) || (target % 2 == 1 && BUSTER_CPU_ARCH_AARCH64);
+                    bool native_os = (target < 2 && BUSTER_LINUX) || (target >= 2 && target < 4 && BUSTER_WINDOWS) ||
+                                     (target >= 4 && BUSTER_MACOS);
+                    if (native_arch && native_os && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-native-tls-run"), S8(".exe"));
+                        String8 native_command[] = {modes[mode], frontends[frontend], pic ? S8("-fPIC") : S8("-fno-pic"),
+                            S8("-fverify-codegen"), S8("-o"), executable, S8("tests/basic_c_thread_local_models.c"),
+                            S8("tests/basic_c_thread_local_models_extern.c")};
+                        CompilerDriverInvocation native_invocation = compiler_driver_parse_arguments(temporary.arena,
+                            (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command));
+                        native_invocation.reject_machine_fallback = mode != 0;
+                        CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena, native_invocation);
+                        BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
+                        if (native.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                        }
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 // Keep runtime complements strict on every desktop x86-64 target.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x86_64_i128_complement(UnitTestArguments* arguments)
 {
@@ -2609,6 +2688,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     UnitTestResult float_to_i128 = compiler_driver_test_aarch64_float_to_i128(arguments);
     result.test_count += float_to_i128.test_count;
     result.succeeded_test_count += float_to_i128.succeeded_test_count;
+    UnitTestResult native_tls = compiler_driver_test_native_tls(arguments);
+    result.test_count += native_tls.test_count;
+    result.succeeded_test_count += native_tls.succeeded_test_count;
     UnitTestResult complement = compiler_driver_test_x86_64_i128_complement(arguments);
     result.test_count += complement.test_count;
     result.succeeded_test_count += complement.succeeded_test_count;
