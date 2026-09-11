@@ -5062,7 +5062,7 @@ BUSTER_C_INTERNAL void c_ir_ssa_classify_places(CIntegerIrBuilder* builder, u8* 
 }
 
 BUSTER_C_INTERNAL void c_ir_ssa_classify_initialization(CIntegerIrBuilder* builder, u8* memory, u32* replacements,
-                                                       void** value_pointers)
+                                                       CIrSsaParameter** pending_by_value)
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
     IrFunction* function = builder->function;
@@ -5119,7 +5119,7 @@ BUSTER_C_INTERNAL void c_ir_ssa_classify_initialization(CIntegerIrBuilder* build
             }
             else
             {
-                CIrSsaParameter* pending = (CIrSsaParameter*)value_pointers[value];
+                CIrSsaParameter* pending = pending_by_value[value];
                 if (pending && !memory[pending->local] && !ssa->locals[pending->local].initialized_entry)
                 {
                     IrBlockParameter* parameter = pending->parameter;
@@ -5390,15 +5390,15 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         {
             replacements[ssa->reads[index].value.value] = ssa->reads[index].replacement.value;
         }
-        void** value_pointers = arena_allocate(builder->scratch_arena, void*, count);
+        CIrSsaParameter** pending_by_value = arena_allocate(builder->scratch_arena, CIrSsaParameter*, count);
         IR_CONSTRUCTION_RECORD(SSA_VALUE_POINTER_SLOTS_ALLOCATED, count);
         IR_CONSTRUCTION_RECORD(SSA_VALUE_POINTER_SLOTS_CLEARED, count);
-        memset(value_pointers, 0, sizeof(*value_pointers) * count);
+        memset(pending_by_value, 0, sizeof(*pending_by_value) * count);
         for (CIrSsaParameter* pending = ssa->first_parameter; pending; pending = pending->next)
         {
-            value_pointers[pending->parameter->value.value] = (void*)pending;
+            pending_by_value[pending->parameter->value.value] = pending;
         }
-        c_ir_ssa_classify_initialization(builder, memory, replacements, value_pointers);
+        c_ir_ssa_classify_initialization(builder, memory, replacements, pending_by_value);
         valid = c_ir_ssa_restore_memory(builder, memory);
         for (CIrSsaParameter* pending = ssa->first_parameter; pending; pending = pending->next)
         {
@@ -5436,7 +5436,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
                 {
                     IR_CONSTRUCTION_RECORD(SSA_PARAMETER_VISITS, 1);
                     IrBlockParameter* parameter = *link;
-                    CIrSsaParameter* pending = (CIrSsaParameter*)value_pointers[parameter->value.value];
+                    CIrSsaParameter* pending = pending_by_value[parameter->value.value];
                     if ((pending && memory[pending->local]) || replacements[parameter->value.value] != parameter->value.value)
                     {
                         *link = parameter->next;
@@ -5476,9 +5476,10 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         // consuming its provisional value. Prune such parameters (including
         // unused cyclic groups), starting only at actual instruction operands.
         // The pending-parameter map is now dead. Reuse its identically sized
-        // union rows instead of allocating another value-count-sized table.
+        // pointer rows instead of allocating another value-count-sized table.
+        IrBlockParameter** parameter_by_value = (IrBlockParameter**)pending_by_value;
         IR_CONSTRUCTION_RECORD(SSA_VALUE_POINTER_SLOTS_CLEARED, count);
-        memset(value_pointers, 0, sizeof(*value_pointers) * count);
+        memset(parameter_by_value, 0, sizeof(*parameter_by_value) * count);
         memset(value_map, 0xff, sizeof(*value_map) * count);
         u32* work = arena_allocate(builder->scratch_arena, u32, count);
         u32 work_count = 0;
@@ -5487,7 +5488,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         {
             for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
             {
-                value_pointers[parameter->value.value] = (void*)parameter;
+                parameter_by_value[parameter->value.value] = parameter;
             }
         }
         for (u32 index = 0; index < function->instruction_count; index += 1)
@@ -5501,7 +5502,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
             for (u32 operand = 0; operand < instruction->operand_count; operand += 1)
             {
                 u32 value = c_ir_ssa_root(replacements, instruction->operands[operand].value);
-                if (value_pointers[value] && value_map[value] == UINT32_MAX)
+                if (parameter_by_value[value] && value_map[value] == UINT32_MAX)
                 {
                     value_map[value] = 0;
                     work[work_count++] = value;
@@ -5510,11 +5511,10 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         }
         for (u32 index = 0; index < work_count; index += 1)
         {
-            IrBlockParameter* parameter = (IrBlockParameter*)value_pointers[work[index]];
-            for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+            for (IrIncoming* incoming = parameter_by_value[work[index]]->first_incoming; incoming; incoming = incoming->next)
             {
                 u32 value = c_ir_ssa_root(replacements, incoming->value.value);
-                if (value_pointers[value] && value_map[value] == UINT32_MAX)
+                if (parameter_by_value[value] && value_map[value] == UINT32_MAX)
                 {
                     value_map[value] = 0;
                     work[work_count++] = value;
