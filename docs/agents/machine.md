@@ -165,6 +165,14 @@
   ahead of their definitions publishes incorrect verifier metadata.
   `basic_c_x86_64_i128_binary.c` and `basic_c_i128_shift_edges.c` require strict
   MIR selection and cover product carries and counts below, at and above 64.
+- AArch64 f32/f64-to-i128 casts use scalar MIR conversions and arithmetic.
+  Widen f32 before splitting the absolute magnitude at 2^64, convert both
+  unsigned limbs with truncation toward zero, and restore signed results
+  with an explicit low-limb borrow. Both destination limbs are overwritten.
+  The registered finite-input fixture decodes IEEE images with integer
+  operations and requires strict compilation across all desktop AArch64
+  targets, all MIR allocators, and both frontend forms; native hosts execute
+  the same cases, retaining NONE as the direct reference.
 - AArch64 leading/trailing-zero counts use importer-generated CLZ and RBIT
   forms for ordinary 32/64-bit scalar rows. A 128-bit count operates on both
   slot-backed limbs, selecting the primary limb's count or 64 plus the other
