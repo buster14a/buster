@@ -1,4 +1,5 @@
 #include <buster/lib/compiler/ebpf/ebpf.h>
+#include <buster/lib/compiler/ebpf/ebpf_internal.h>
 
 // Linux eBPF direct backend. The emitter deliberately owns its instruction,
 // ELF, relocation, and BTF encoders: canonical IR remains target-neutral and
@@ -7,6 +8,9 @@
 // the defining instruction, never by aliasing mutable C storage. All storage
 // still counts toward the existing 512-byte frame limit; aggregate ABIs and
 // aggregate block parameters remain explicit unsupported cases.
+// ebpf_initialize_symbols seeds the dense key domain; ebpf_add_symbol_record
+// publishes stable record indices, and ebpf_symbol_by_key also serves ELF
+// relocation resolution. Symbol rows retain insertion order through emission.
 
 typedef struct EbpfBuffer EbpfBuffer;
 struct EbpfBuffer
@@ -129,8 +133,15 @@ struct EbpfContext
     EbpfSymbolRecord* symbols;
     u32 symbol_count;
     u32 symbol_capacity;
-    u32* ir_symbol_keys;
+    // Zero means absent; otherwise record index + 1. The key domain includes
+    // filtered IR-symbol gaps and then sequential synthetic string keys.
+    // Indices survive symbols-vector growth; this map owns no record pointers.
+    u32* symbol_indices;
+    u32 symbol_index_capacity;
     u32 next_symbol_key;
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+    u64 symbol_lookup_steps;
+#endif
 
     EbpfBtfRecord* btf_records;
     u32 btf_record_count;
@@ -370,7 +381,13 @@ static bool ebpf_buffer_bytes(EbpfBuffer* buffer, void const* bytes, u64 length)
 static bool ebpf_buffer_zeros(EbpfBuffer* buffer, u64 length)
 {
     bool result;
-    if (!ebpf_buffer_reserve(buffer, length))
+    if (!length)
+    {
+        // Aligning an empty section needs no storage. Its data may be null,
+        // which is not a valid memset destination even for a zero byte count.
+        result = true;
+    }
+    else if (!ebpf_buffer_reserve(buffer, length))
     {
         result = false;
     }
@@ -579,27 +596,41 @@ static void ebpf_section_add_relocation(EbpfContext* context, EbpfSection* secti
 
 static EbpfSymbolRecord* ebpf_symbol_by_key(EbpfContext* context, u32 key)
 {
-    for (u32 index = 0; index < context->symbol_count; index += 1)
+    EbpfSymbolRecord* result = 0;
+    if (key < context->symbol_index_capacity)
     {
-        if (context->symbols[index].key == key)
+#if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
+        context->symbol_lookup_steps += 1;
+#endif
+        u32 index = context->symbol_indices[key];
+        if (index)
         {
-            return context->symbols + index;
+            result = context->symbols + index - 1;
         }
     }
-    return 0;
+    return result;
 }
 
 static EbpfSymbolRecord* ebpf_add_symbol_record(EbpfContext* context, u32 key, String8 name, IrSymbol* symbol, u8 binding, u8 type, bool synthetic)
 {
-    EbpfSymbolRecord* existing = ebpf_symbol_by_key(context, key);
-    if (existing)
+    EbpfSymbolRecord* result = ebpf_symbol_by_key(context, key);
+    if (!result && (key == UINT32_MAX || context->symbol_count == UINT32_MAX))
     {
-        return existing;
+        ebpf_fail(context, EBPF_ERROR_ENCODING, S8("eBPF symbol key or record count exceeds 32 bits"), 0, 0, 0, IR_SYMBOL_ID_INVALID);
     }
-    ebpf_vector_reserve(context->arena, (void**)&context->symbols, &context->symbol_capacity, context->symbol_count + 1,
-                        sizeof(*context->symbols));
-    EbpfSymbolRecord* result = context->symbols + context->symbol_count++;
-    *result = (EbpfSymbolRecord){.name = name, .symbol = symbol, .key = key, .binding = binding, .type = type, .synthetic = synthetic};
+    else if (!result)
+    {
+        // vector_reserve preserves old indices and zeroes every new slot,
+        // including filtered keys that are never assigned a symbol record.
+        ebpf_vector_reserve(context->arena, (void**)&context->symbol_indices, &context->symbol_index_capacity, key + 1,
+                            sizeof(*context->symbol_indices));
+        ebpf_vector_reserve(context->arena, (void**)&context->symbols, &context->symbol_capacity, context->symbol_count + 1,
+                            sizeof(*context->symbols));
+        result = context->symbols + context->symbol_count;
+        *result = (EbpfSymbolRecord){.name = name, .symbol = symbol, .key = key, .binding = binding, .type = type, .synthetic = synthetic};
+        context->symbol_count += 1;
+        context->symbol_indices[key] = context->symbol_count;
+    }
     return result;
 }
 
@@ -612,11 +643,59 @@ static u32 ebpf_ir_symbol_key(EbpfContext* context, IrSymbolId id)
     }
     else
     {
-        result = context->ir_symbol_keys[id.value];
+        result = id.value;
     }
 
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+EbpfSymbolIndexProbe ebpf_test_symbol_index(Arena* arena, u32 count)
+{
+    EbpfSymbolIndexProbe result = {.valid = count <= 4096};
+    EbpfContext context = {.arena = arena};
+    result.valid &= !ebpf_symbol_by_key(&context, 0) && !ebpf_symbol_by_key(&context, UINT32_MAX);
+    for (u32 index = 0; index < count && result.valid; index += 1)
+    {
+        // Sparse keys grow both vectors; reverse lookups below must retain
+        // every old row. Newly reserved odd-key gaps must remain absent.
+        u32 key = index * 2;
+        EbpfSymbolRecord* symbol = ebpf_add_symbol_record(&context, key, S8("original"), 0, EBPF_STB_LOCAL, EBPF_STT_OBJECT, false);
+        result.valid &= symbol && symbol == context.symbols + index && symbol->key == key;
+        if (symbol)
+        {
+            symbol->value = (u64)index + 17;
+            symbol->size = (u64)index + 1;
+        }
+        result.valid &= !ebpf_symbol_by_key(&context, key + 1);
+    }
+    for (u32 index = 0; index < count && result.valid; index += 1)
+    {
+        u32 key = (count - index - 1) * 2;
+        u32 original = count - index - 1;
+        EbpfSymbolRecord* repeated = ebpf_add_symbol_record(&context, key, S8("replacement"), 0, EBPF_STB_GLOBAL, EBPF_STT_FUNC, true);
+        EbpfSymbolRecord* found = ebpf_symbol_by_key(&context, key);
+        result.valid &= found && found == repeated && found == context.symbols + original;
+        if (found)
+        {
+            result.valid &= found->value == (u64)original + 17 && found->size == (u64)original + 1 &&
+                            ebpf_string_equal(found->name, S8("original")) && found->binding == EBPF_STB_LOCAL &&
+                            found->type == EBPF_STT_OBJECT && !found->synthetic;
+        }
+    }
+#if BUSTER_BENCH_ALLOCATIONS
+    result.lookup_steps = context.symbol_lookup_steps;
+#endif
+    result.symbol_count = context.symbol_count;
+    u64 before = arena->position;
+    result.invalid_key_rejected = !ebpf_add_symbol_record(&context, UINT32_MAX, S8("invalid"), 0, EBPF_STB_LOCAL, EBPF_STT_OBJECT, true) &&
+                                  context.error.code == EBPF_ERROR_ENCODING && context.symbol_count == count && arena->position == before;
+    EbpfContext full = {.arena = arena, .symbol_count = UINT32_MAX};
+    result.full_count_rejected = !ebpf_add_symbol_record(&full, 0, S8("overflow"), 0, EBPF_STB_LOCAL, EBPF_STT_OBJECT, false) &&
+                                 full.error.code == EBPF_ERROR_ENCODING && arena->position == before;
+    return result;
+}
+#endif
 
 static bool ebpf_parse_helper_id(String8 name, u32* id)
 {
@@ -1993,11 +2072,12 @@ static bool ebpf_emit_function(EbpfContext* context, EbpfFunctionRecord* record)
 static bool ebpf_initialize_symbols(EbpfContext* context)
 {
     u32 count = context->program->symbols.count;
-    context->ir_symbol_keys = arena_allocate(context->arena, u32, count ? count : 1);
+    context->symbol_index_capacity = count;
+    context->symbol_indices = count ? arena_allocate_zeroed(context->arena, u32, count) : 0;
     context->next_symbol_key = count;
-    for (u32 index = 0; index < count; index += 1)
+    bool result = true;
+    for (u32 index = 0; index < count && result; index += 1)
     {
-        context->ir_symbol_keys[index] = index;
         IrSymbol* symbol = context->program->symbols.symbols + index;
         u32 helper_id = 0;
         if (symbol->kind != IR_SYMBOL_FUNCTION && symbol->kind != IR_SYMBOL_DATA)
@@ -2010,9 +2090,9 @@ static bool ebpf_initialize_symbols(EbpfContext* context)
         }
         u8 binding = symbol->linkage == IR_LINKAGE_INTERNAL ? EBPF_STB_LOCAL : EBPF_STB_GLOBAL;
         u8 type = symbol->kind == IR_SYMBOL_FUNCTION ? EBPF_STT_FUNC : EBPF_STT_OBJECT;
-        ebpf_add_symbol_record(context, index, ebpf_symbol_name(symbol), symbol, binding, type, false);
+        result = ebpf_add_symbol_record(context, index, ebpf_symbol_name(symbol), symbol, binding, type, false) != 0;
     }
-    return true;
+    return result;
 }
 
 static bool ebpf_reserve_sections(EbpfContext* context)
@@ -2088,6 +2168,10 @@ static bool ebpf_collect_functions(EbpfContext* context)
                 symbol_record = ebpf_add_symbol_record(context, key, ebpf_symbol_name(symbol), symbol,
                                                        symbol->linkage == IR_LINKAGE_INTERNAL ? EBPF_STB_LOCAL : EBPF_STB_GLOBAL,
                                                        EBPF_STT_FUNC, false);
+            }
+            if (!symbol_record)
+            {
+                return false;
             }
             if (symbol_record->defined)
             {
@@ -2300,6 +2384,10 @@ static bool ebpf_collect_global(EbpfContext* context, IrGlobal* global)
                                                symbol->linkage == IR_LINKAGE_INTERNAL ? EBPF_STB_LOCAL : EBPF_STB_GLOBAL,
                                                EBPF_STT_OBJECT, false);
     }
+    if (!symbol_record)
+    {
+        return false;
+    }
     if (symbol_record->defined)
     {
         ebpf_fail(context, EBPF_ERROR_DUPLICATE_SYMBOL, ebpf_s8("duplicate eBPF global definition"), 0, 0, 0, global->symbol);
@@ -2367,8 +2455,13 @@ static bool ebpf_collect_strings(EbpfContext* context)
                     return false;
                 }
                 section->logical_size = section->data.length;
-                u32 key = context->next_symbol_key++;
+                u32 key = context->next_symbol_key;
                 EbpfSymbolRecord* symbol = ebpf_add_symbol_record(context, key, S8(".L.str"), 0, EBPF_STB_LOCAL, EBPF_STT_OBJECT, true);
+                if (!symbol)
+                {
+                    return false;
+                }
+                context->next_symbol_key += 1;
                 symbol->defined = true;
                 symbol->section = section;
                 symbol->value = offset;
