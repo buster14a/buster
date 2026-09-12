@@ -1210,6 +1210,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_batches(UnitTestArg
     return result;
 }
 
+// Drive a nonstandard-suffix assembly unit through parsing, assembly, object
+// serialization and object reading. This reaches the native target resolver,
+// unlike an assembly_unit_encode-only test.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembler_language(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 invalid_input = S8("unused.input");
+    String8 gpu_option_arguments[] = {S8("--gpu-entry"), S8("main"), invalid_input};
+    CompilerDriverInvocation gpu_option =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(gpu_option_arguments));
+    BUSTER_TEST(arguments, gpu_option.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
+                               string_starts_with_sequence(gpu_option.diagnostic, S8("GPU option requires a GPU target")));
+
+    String8 input = buster_test_temporary_path(arena, S8("buster-issue535-assembly"), S8(".input"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-issue535-assembly"), S8(".o"));
+    String8 source = S8(".text\n.globl issue535_entry\n.type issue535_entry,@function\nissue535_entry:\n    ret\n.size issue535_entry, .-issue535_entry\n");
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    String8 command[] = {S8("-x"), S8("assembler"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-c"), S8("-o"), output, input};
+    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+    if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+    {
+        FileMapRead object_map = file_map_read(arena, output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, object_map.bytes.length != 0);
+        ObjectFile round_trip = object_read(arena, object_map.bytes, compiled.object.target);
+        BUSTER_TEST(arguments, round_trip.error == OBJECT_ERROR_NONE);
+        if (round_trip.error == OBJECT_ERROR_NONE)
+        {
+            ObjectSymbol const* symbol = compiler_driver_test_object_symbol(&round_trip, S8("issue535_entry"));
+            BUSTER_TEST(arguments, symbol && symbol->global && symbol->kind == OBJECT_SYMBOL_FUNCTION && symbol->size == 1 &&
+                                       symbol->section < round_trip.section_count);
+            if (symbol && symbol->section < round_trip.section_count)
+            {
+                ByteSlice text = round_trip.sections[symbol->section].data;
+                BUSTER_TEST(arguments, symbol->value < text.length && text.pointer[symbol->value] == 0xc3);
+            }
+        }
+        file_map_unmap(object_map);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_include_population(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4064,6 +4110,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_unwind_link);
