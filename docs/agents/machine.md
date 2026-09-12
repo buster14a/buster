@@ -20,9 +20,17 @@
   membership are cold. Unused names and speculative resource/cost bits are removed. Keep opcode initializers designated and the
   layout checks intact. Simple FAST rows use the separate 16-byte
   `MachineOpcodeRow` projection instead of loading the full descriptor.
-- Address expressions remain canonical IR / selector-owned; no
-  `MachineAddress` side table is produced. Keep the reserved
-  `MACHINE_REF_ADDRESS` tag stable for encoded references.
+- Address expressions remain canonical IR / selector-owned. Both native
+  selectors consume `machine_selection_address` from `machine_select.c` for
+  field offsets, index scale/extension and transparent address bases. Its
+  demand cache uses at most 4 KiB per selection attempt, with no function scan
+  or per-value allocation; bounded chains/collisions remain conservative.
+  Discard the cache whenever canonical IR changes. Exact expression ids retain
+  subobject and computed-label identity; only LOCAL/GLOBAL roots name objects.
+  Loads, atomics, casts and pointer/integer arithmetic stay opaque. Original
+  symbol rows own TLS/GOT/relocations, and offset folding never modifies them.
+  These facts authorize no memory reordering or dereference. No `MachineAddress`
+  MIR side table is produced; keep `MACHINE_REF_ADDRESS` stable.
 - `MachineFunction` owns CFG edges, block parameters, and incoming edge
   parallel-copy sources. Edge source `i` maps to destination block parameter
   `i`; keep these copies parallel through allocation so cycles are resolved as
@@ -34,8 +42,9 @@
   `MachineOperandShape` bits; give every active operand a shape. This preserves
   both the 24-byte row and the opcode record size. `VA_ARG` result operands
   admit registers or frame slots, with the side row selecting the valid kind.
-  Physical references must fit `MACHINE_TARGET_REGISTER_LIMIT` and the active
-  target's file; `vector_register_mask` describes class membership including
+  General/vector physical references must fit `MACHINE_TARGET_REGISTER_LIMIT`
+  and the active target's file; the separate x86 predicate IDs admit only k1-k7.
+  `vector_register_mask` describes class membership including
   nonallocatable registers. Target-less synthetic functions still accept
   bounded physical references without imposing a target class map.
 - Stack alignments and call-target reference forms remain optional, defaulting
@@ -72,7 +81,7 @@
   Add a selection to the target switch and its direct helpers, with MIR and
   generated-code regressions; do not add a parallel matcher that reports a
   rule without producing the selected MIR. `machine_select.{c,h}` owns only
-  consumed type/value facts, row layout, and the unvalidated entry's shape
+  consumed type/value/address facts, row layout, and the unvalidated entry's shape
   check. The canonical IR verifier remains the pipeline validation authority.
   Unsupported machine selections return `supported = false` and
   `failed_opcode`; `CodegenStatistics.fallback_opcode_counts` and
@@ -134,6 +143,33 @@
   list, with at most 23N+8 edges for N rows and source-order fallback before a
   scratch count can overflow. The FAST allocator does not build alias chains;
   only mixed volatile functions add the selector's optional certificate work.
+- x86 predicate values use `MACHINE_REGISTER_CLASS_MASK` in a separate k1-k7
+  bank; k0 is never allocatable or a valid explicit predicate operand. The
+  GPR/ZMM register tile stays at 48 entries. `machine_x64_select_predicates`
+  retains compare/copy/AND/OR/XOR chains in predicates for FAST/QUALITY and materializes the
+  ordinary integer representation only for integer, storage, call or CFG-edge
+  users. Byte predicates carry 64 bits; dword compares clear the upper 48 and
+  return through KMOVW. Explicit mask moves support 8/16/32/64-bit truncation.
+  Source bridges use 16/64-bit forms under the SIMD feature gate; synthetic
+  8-bit KMOVB rows also require AVX-512DQ on the executing CPU. MIR targets
+  describe the ABI/register file, not per-function CPU feature permissions.
+  Mixed integer constants and full-width C integer complement retain scalar
+  bridges; their semantics do not become a narrower predicate complement.
+- `register_allocator_predicate.c` projects MASK operands out of ordinary
+  FAST/QUALITY placement, then places the tiny bank separately. Call-clobbered
+  predicates and escaping block values reach eight-byte homes. Predicate edge
+  copies capture all outgoing sources before publishing any destination, with
+  fixed physical sources captured before reload scratch can overwrite them.
+  Unused predicate homes are removed, and zero/all-ones integer bridge values
+  rematerialize without a memory reload. Explicit MASK MIR is supported in
+  MIR_STACK, where it flushes after each row. Source MIR_STACK selection keeps
+  its existing integer bridges because it cannot retain K values between rows;
+  the selector's `predicate_residency` argument records that allocator policy.
+  `predicate_absence_certified` skips this discovery for fresh scalar functions;
+  a rewrite adding MASK references must clear that proof. Replay defaults to
+  discovery. Predicate pressure has its own seven-register scheduler budget.
+  `basic_c_predicate_bank.c` and the machine module cover source selection,
+  independent residency, spills, calls, widths, fixed operands and edge cycles.
 - System V x86-64 machine callers use a sixteen-aligned push area. A stack
   argument needing greater alignment falls back per function to the canonical
   caller, even when its offset is zero: an aligned offset does not align the

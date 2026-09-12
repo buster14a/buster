@@ -416,6 +416,7 @@ MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* f
         // allocator and parser.
         class_capacities[MACHINE_REGISTER_CLASS_GENERAL] = mask64_count((Mask64)function->target->allocatable_mask);
         class_capacities[MACHINE_REGISTER_CLASS_VECTOR] = mask64_count((Mask64)function->target->vector_allocatable_mask);
+        class_capacities[MACHINE_REGISTER_CLASS_MASK] = mask64_count((Mask64)function->target->predicate_allocatable_mask);
         u32 allocatable_count = BUSTER_MAX(class_capacities[MACHINE_REGISTER_CLASS_GENERAL], class_capacities[MACHINE_REGISTER_CLASS_VECTOR]);
         u32 maximum_block_rows = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)

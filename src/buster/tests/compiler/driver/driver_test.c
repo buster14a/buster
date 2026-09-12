@@ -2702,9 +2702,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_validation_values(UnitTe
     return result;
 }
 
+#include <buster/tests/compiler/driver/driver_fast_test.c>
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_test_include_population(arguments);
+    UnitTestResult fast = compiler_driver_test_fast(arguments);
+    result.test_count += fast.test_count;
+    result.succeeded_test_count += fast.succeeded_test_count;
     UnitTestResult validation_values = compiler_driver_test_validation_values(arguments);
     result.test_count += validation_values.test_count;
     result.succeeded_test_count += validation_values.succeeded_test_count;
@@ -8694,9 +8699,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
     }
     // The declarator beside list_noreturn carries no marker of its own, so its
-    // own call falls through.  Scanning the whole declarator list marked it
-    // too, and the ud2 planted after this call is what the fixture then
-    // executed at run time.
+    // own call returns. Scanning the whole declarator list marked it too and
+    // replaced the explicit return after this call with a noreturn terminator.
     u64 sibling_body = string_first_sequence(noreturn_assembly.output, S8("through_list_sibling:\n"));
     BUSTER_TEST(arguments, sibling_body != BUSTER_STRING_NO_MATCH);
     if (sibling_body != BUSTER_STRING_NO_MATCH)
@@ -8724,6 +8728,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_switch_case_blocks.c"),
         S8("tests/basic_c_narrow_place_update.c"),
         S8("tests/basic_c_pointer_index_address.c"),
+        S8("tests/basic_c_shared_address_facts.c"),
         S8("tests/basic_c_pointer_array_initializers.c"),
         S8("tests/basic_c_indirect_call_targets.c"),
         S8("tests/basic_c_atexit_handler.c"),
@@ -8733,6 +8738,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-switch-case-blocks"),
         S8("buster-c-narrow-place-update"),
         S8("buster-c-pointer-index-address"),
+        S8("buster-c-shared-address-facts"),
         S8("buster-c-pointer-array-initializers"),
         S8("buster-c-indirect-call-targets"),
         S8("buster-c-atexit-handler"),

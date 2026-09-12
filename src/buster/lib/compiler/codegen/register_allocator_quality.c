@@ -180,7 +180,7 @@ BUSTER_GLOBAL_LOCAL u32* machine_quality_foreclosure_prefix_ensure(u32* foreclos
     return prefix;
 }
 
-MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunction* function)
+BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(Arena* arena, MachineFunction* function)
 {
     BUSTER_QUALITY_COUNT(functions, 1);
     MachineTargetDescription const* description = function->target;
@@ -196,7 +196,7 @@ MachineStackPlacement machine_quality_placement_build(Arena* arena, MachineFunct
     if (function->switch_case_count)
     {
         BUSTER_QUALITY_COUNT(switch_fallback_functions, 1);
-        return machine_fast_placement_build(arena, function);
+        return machine_fast_placement_build_core(arena, function);
     }
     // Frequency classes are consumed only by the economics below, so only
     // QUALITY pays the stamping walk — measured at +0.9% of fast-mode

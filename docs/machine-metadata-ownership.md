@@ -262,13 +262,15 @@ before a consumer runs.
 | `stack_slot_sizes`, `stack_slot_alignments`, `stack_slot_count` | Authoritative selected storage requirements; target selector | Reference validation and frame placement; changing size/alignment/identity invalidates placement offsets. Missing alignment array uses the existing eight-byte compatibility default |
 | `call_targets`, `call_target_references`, `call_target_count` | Authoritative symbol IDs and PIC relocation choice; target selector; x86 publishes parallel arrays | Module codegen resolves encoded call-site indices into symbol relocations. Null reference array means the existing DIRECT model, including AArch64. Symbol linkage/code-model changes require reselection |
 | `switch_cases`, `switch_case_count` | Authoritative switch comparisons or indirect-branch target set; selector; edge splitter remaps block IDs | Verifier, CFG/liveness/frequency walks and encoders; changes invalidate CFG-derived facts and any prior encoding |
-| `line_marks`, `line_mark_count` | Debug provenance only; selectors map machine row starts to canonical instruction IDs | Module debug-line emission resolves source ranges on demand. Scheduler copies, remaps and sorts marks; edge splitting remaps them. Retain canonical source context |
+| `line_marks`, `line_mark_count` | Derived canonical provenance; selectors map machine row starts to canonical instruction IDs | Debug-line emission resolves source ranges; before row remapping, stack-memory certification uses source spans to taint volatile frame objects. Scheduler copies, remaps and sorts marks; edge splitting remaps them. Retain canonical source context; remap canonical IDs with instruction publication |
 | `va_args`, `va_arg_count` | Derived ABI classification, authoritative once selected; target selector | x86/AArch64 VA_ARG encoders consume `size`, `alignment`, `stack_size`, `part_count`, `parts`, `result_slot`, `result_is_frame`, `scalar_size`; each part carries `value_offset`, `save_offset`, `size`, `is_float`, `is_memory`. Reserved bytes are padding. Type/ABI/stack-slot changes require reselection |
 | `target` | Borrowed immutable target/register-file descriptor; selector | Verifier, placement, scheduling and encoders; static lifetime. Changing target requires reselection and placement rebuild |
 | `outgoing_bytes`, `outgoing_slot` | Derived fixed outgoing call-area requirement and selected slot; target selector | Placement pins the slot to the frame bottom; AArch64 store emission respects its base. ABI/call-argument changes invalidate frame placement; zero bytes makes the slot irrelevant |
 | `nonvolatile_memory_certified` | Performance-only selector proof that the existing canonical walk found no volatile memory access | Enables bounded stack-slot alias classes in scheduling. Unknown/manual functions default to false; structural replay deliberately drops the proof. Producers introducing volatile accesses must clear it; row reordering and CFG/SSA rewrites preserve it only while they add no volatile access |
 | `windows_aarch64_frame` | Authoritative target ABI property; AArch64 selector | Stack placement and native encoder/unwind construction; preserve through scheduling and rebuild after a target change |
-| `reserved[6]` | Padding | No semantic producer or consumer; preserve the `MachineFunction` layout |
+| `predicate_absence_certified` | Selector proof from the existing SIMD-operation census or disabled predicate-residency policy that no predicate allocation is needed | Predicate placement admission skips its private inspection. Manual/replayed functions default to false; any producer adding predicate values must clear it before placement |
+| `stack_slot_memory_flags` | Optional derived byte per frame object, built from checked canonical-to-machine source spans only for mixed volatile functions | Scheduler admits only explicit NONVOLATILE objects; verifier rejects unknown bits, replay drops the proof. Slot-preserving row/CFG rewrites may share the table. A new volatile access clears its affected object and the whole-function certificate; changing slot identities requires remapping/rebuilding |
+| `reserved[5]` | Padding | No semantic producer or consumer; preserve the `MachineFunction` layout |
 
 Scheduling shares arrays other than instructions, virtual registers and line
 marks with its input. Its candidate and original must retain the input arena.
@@ -353,6 +355,7 @@ have the same size.
 | `allocatable_mask`, `callee_saved_mask`, `register_count` | Verifier physical bounds, all placement modes, QUALITY pinning and encoder save areas |
 | `slot_scratch`, `vector_slot_scratch` | MIR_STACK and constrained operand assignment |
 | `vector_allocatable_mask`, `vector_register_mask` | Class validation, active register-file bounds, liveness and placement |
+| `predicate_allocatable_mask` | Separate predicate placement admits only k1-k7 on supported x86 targets; zero disables the bank. The mask never expands the shared 48-register GPR/ZMM tile; k0 remains reserved |
 | `copy_opcode`, `vector_copy_opcode`, `constant_opcode` | Copy coalescing, literal rematerialization and emission |
 | `indirect_call_opcode`, `indirect_call_register` | Call barriers and callee-pointer staging |
 | `unconditional_branch_opcode`, `switch_opcode` | Edge normalization and cold-entry/edge-contract construction |
@@ -360,6 +363,28 @@ have the same size.
 | `quality_pin_registers`, `quality_pin_register_count` | QUALITY candidate admission in stable target preference order |
 | `saves_precede_frame_pointer` | Placement incoming offsets and encoder prologue/unwind ordering |
 | `reserved` | Padding, no consumer |
+
+## Address facts used during native selection
+
+The shared `MachineSelectionAddress` is an attempt-local interpretation of one
+validated canonical value. Both native selectors consume it instead of their
+former duplicate definition walks. It does not replace canonical identity or
+prove that arbitrary pointers do not alias. Reuse of an already materialized
+zero-offset address preserves its selected register and avoids rematerializing
+the root. Target emission still owns address encoding and relocations.
+
+| Record / fields | Producer and consumer | Lifetime and invalidation |
+| --- | --- | --- |
+| `MachineSelectionAddress.displacement`, `scale`, `field_offset` | Bounded canonical address walk; native local/global/field/index lowering | Temporary fact; offsets keep object/subobject meaning. Unsupported chains stay opaque. Discard before canonical mutation |
+| `base_value`, `index_value`, `object_value`, `expression_value`, `symbol` | Same walk; both native selectors preserve original value, root, subobject and symbol/label identity | Borrow immutable canonical ID domains. Canonical remapping or symbol/model changes require rebuilding; TLS and label producers retain their original selected identity |
+| `alignment`, `flags`, `opcode`, `index_bit_width` | Checked canonical type/definition facts and the existing type projection; native addressing eligibility and fallback | Conservative derived properties, never general alias certificates. Invalid/unresolved properties force existing fallback behavior |
+| `MachineSelectionAddressEntry.address`, `value_plus_one` | Demand cache fill; subsequent address queries compare the exact canonical key | 64 entries of 64 bytes, allocated only on first demand. Zero key means empty; collision replaces a whole entry. Owner is one immutable function and one selection attempt |
+| `MachineSelectionAddressCache.entries`, `type_classes`, `type_count` | Zero-initialized attempt state; cache allocation and borrowed per-module type projection | Entry storage belongs to the selection arena; type projection outlives the attempt. Discard the cache before function/type mutation or switching the owning function |
+
+Canonical instruction spans, operand pools and CFG publication are owned by
+`IrPublishedCfg`, documented in the canonical IR contract. The native cache
+borrows canonical values; it does not retain an alternative instruction order
+or reconstruct a private CFG.
 
 ## Derived analysis, placement and result records
 

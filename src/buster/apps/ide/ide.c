@@ -936,6 +936,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "parameters_created={u64} parameters_removed={u64} temporaries={u64} fallback_locals={u64}\n"),
                      direct.functions, direct.locals, direct.reads, direct.writes, direct.parameters_created, direct.parameters_removed,
                      direct.temporaries, direct.fallback_locals);
+        if (invocation.fast_passes)
+        {
+            for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
+            {
+                IrFastPassStatistics measurement = compile.fast.passes[pass];
+                string_print(S8("IR_FAST_PASS name={S8} enabled={u32} timed={u32} ns={u64} visits={u64} changes={u64}\n"),
+                             ir_fast_pass_name((IrFastPass)pass), (u32)((invocation.fast_passes & IR_FAST_PASS_BIT(pass)) != 0),
+                             (u32)invocation.measure_fast_passes, measurement.nanoseconds, measurement.visits, measurement.changes);
+            }
+            IrFastStatistics measurement = compile.fast;
+            string_print(S8("IR_FAST functions={u64} validation_skips={u64} budget_skips={u64} provenance_skips={u64} parameter_budget_hits={u64} "
+                            "scratch_peak_bound={u64} retained_bound={u64} compact_ns={u64} instructions_before={u64} instructions_after={u64}\n"),
+                         measurement.functions, measurement.validation_skips, measurement.budget_skips, measurement.provenance_skips, measurement.parameter_budget_hits,
+                         measurement.scratch_peak_bytes, measurement.retained_bytes, measurement.compact_nanoseconds,
+                         measurement.instructions_before, measurement.instructions_after);
+        }
         IrLocalPromotionStatistics p = compile.local_promotion;
         string_print(S8("IR_LOCAL_PROMOTION candidates={u64} promoted={u64} loads_removed={u64} stores_removed={u64} "
                         "parameters_inserted={u64} parameters_removed={u64} uninitialized={u64} barriers={u64} "

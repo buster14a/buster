@@ -2490,7 +2490,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
     return placement;
 }
 
-MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function)
+BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_fast_placement_build_core(Arena* arena, MachineFunction* function)
 {
     return machine_fast_placement_build_pinned(arena, function, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 }

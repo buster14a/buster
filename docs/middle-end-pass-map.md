@@ -8,6 +8,16 @@ not generated-program runtime. Pressure-reduction policy belongs to
 [#56](https://github.com/buster14a/buster/issues/56); CFG ownership belongs to
 [#38](https://github.com/buster14a/buster/issues/38).
 
+## Implementation update
+
+The map below preserves the promotion-census context. The separately selectable
+folding, address normalization, DCE and parameter cleanup now exist in
+[`ir_fast.c`](../src/buster/lib/compiler/ir/ir_fast.c); their order, purity,
+certification, deterministic limits and adoption gate are specified in
+[the FAST pipeline contract](canonical-fast-pipeline.md). They are enabled by
+default after paired end-to-end acceptance; #371's observability was not itself
+implementation of those transformations.
+
 ## Current order, prerequisites and invalidation
 
 `compiler_driver_execute_c_single` lowers C and calls

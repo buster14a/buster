@@ -138,6 +138,8 @@ struct CompilerDriverInvocation
     bool disable_direct_ssa;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
+    u32 fast_passes;
+    bool measure_fast_passes;
     bool verify_codegen;
     bool sysv_unnamed_bitfields_integer;
     bool sysv_bitfield_abi_explicit;
@@ -165,6 +167,7 @@ typedef struct CompilerDriverResult CompilerDriverResult;
 struct CompilerDriverResult
 {
     IrLocalPromotionStatistics local_promotion;
+    IrFastStatistics fast;
     CIRDirectSsaStatistics direct_ssa;
     String8 diagnostic;
     String8 warning;

@@ -743,6 +743,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         // optimization is disabled. Match LLVM's -O0 policy by using the
         // low-latency allocator unless the caller explicitly opts out.
         .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST,
+        // The bounded canonical pipeline passed its dedicated-host total-time
+        // and peak-RSS adoption gates. Keep every pass independently
+        // selectable below, including a whole-pipeline opt-out.
+        .fast_passes = IR_FAST_ALL,
     };
     if (!arena)
     {
@@ -1238,6 +1242,33 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         {
             invocation.disable_local_promotion = string_equal(argument, S8("-fno-canonical-local-promotion"));
             continue;
+        }
+        if (string_equal(argument, S8("-fcanonical-fast")) || string_equal(argument, S8("-fno-canonical-fast")))
+        {
+            invocation.fast_passes = string_equal(argument, S8("-fcanonical-fast")) ? IR_FAST_ALL : 0;
+            continue;
+        }
+        if (string_equal(argument, S8("-ftime-canonical-fast")))
+        {
+            invocation.measure_fast_passes = true;
+            continue;
+        }
+        String8 fast_enable = compiler_driver_option_value(argument, S8("-fcanonical-fast-"));
+        String8 fast_disable = compiler_driver_option_value(argument, S8("-fno-canonical-fast-"));
+        if (fast_enable.length || fast_disable.length)
+        {
+            bool fast_option = false;
+            for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
+            {
+                String8 name = ir_fast_pass_name((IrFastPass)pass);
+                if (string_equal(fast_enable, name) || string_equal(fast_disable, name))
+                {
+                    if (fast_enable.length) invocation.fast_passes |= IR_FAST_PASS_BIT(pass);
+                    else invocation.fast_passes &= ~IR_FAST_PASS_BIT(pass);
+                    fast_option = true;
+                }
+            }
+            if (fast_option) continue;
         }
         if (string_equal(argument, S8("-fno-target-local-promotion")) || string_equal(argument, S8("-ftarget-local-promotion")))
         {
@@ -3364,9 +3395,12 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     IrModule* module = &lowered.program->modules[0];
     lowered.program->disable_local_promotion = invocation.disable_local_promotion;
     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion;
+    lowered.program->fast_passes = invocation.fast_passes;
+    lowered.program->measure_fast_passes = invocation.measure_fast_passes;
     IrValidationResult validation = ir_prepare_canonical_module(lowered.program, module,
                                                                 lowered.canonical_ir_certified && !invocation.bootstrap_trace_prefix.length && !invocation.verify_codegen);
     result.local_promotion = module->local_promotion;
+    result.fast = module->fast;
     if (validation.error != IR_VALIDATION_NONE)
     {
         String8 function_name = validation.function.value < module->function_count ? module->functions[validation.function.value].name : S8("<invalid>");
@@ -3379,7 +3413,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                 opcode = (u32)failed_function->instructions[validation.instruction.value].opcode;
             }
         }
-        String8 boundary = validation.boundary == IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT ? S8("local-promotion output") : S8("canonical input");
+        String8 boundary = validation.boundary == IR_VALIDATION_BOUNDARY_CFG_PUBLICATION ? S8("canonical CFG publication") :
+                           validation.boundary == IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT ? S8("local-promotion output") :
+                           validation.boundary == IR_VALIDATION_BOUNDARY_FAST_OUTPUT ? S8("FAST output") : S8("canonical input");
         result.error = COMPILER_DRIVER_ERROR_IR;
         result.diagnostic =
             string_format(arena, S8("canonical C IR validation failed: boundary {S8}, error {u32}, function {u32} ('{S8}'), block {u32}, instruction {u32}, opcode {u32}"),
@@ -4165,6 +4201,22 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.local_promotion.parameter_block_visits += unit.local_promotion.parameter_block_visits;
         result.local_promotion.parameter_visits += unit.local_promotion.parameter_visits;
         result.local_promotion.parameter_incoming_visits += unit.local_promotion.parameter_incoming_visits;
+        for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
+        {
+            result.fast.passes[pass].nanoseconds += unit.fast.passes[pass].nanoseconds;
+            result.fast.passes[pass].visits += unit.fast.passes[pass].visits;
+            result.fast.passes[pass].changes += unit.fast.passes[pass].changes;
+        }
+        result.fast.functions += unit.fast.functions;
+        result.fast.validation_skips += unit.fast.validation_skips;
+        result.fast.budget_skips += unit.fast.budget_skips;
+        result.fast.provenance_skips += unit.fast.provenance_skips;
+        result.fast.parameter_budget_hits += unit.fast.parameter_budget_hits;
+        result.fast.scratch_peak_bytes = BUSTER_MAX(result.fast.scratch_peak_bytes, unit.fast.scratch_peak_bytes);
+        result.fast.retained_bytes += unit.fast.retained_bytes;
+        result.fast.compact_nanoseconds += unit.fast.compact_nanoseconds;
+        result.fast.instructions_before += unit.fast.instructions_before;
+        result.fast.instructions_after += unit.fast.instructions_after;
         codegen_statistics_add(&result.codegen_statistics, &unit.codegen_statistics);
         if (unit.error != COMPILER_DRIVER_ERROR_NONE)
         {
