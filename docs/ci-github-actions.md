@@ -197,10 +197,25 @@ after the shell is entered, and the step asserts clang's default target
 matches the runner rather than letting a wall of unresolved externals explain
 it a minute later.
 
-Two rows are weaker than they look. On macOS `/usr/bin/gcc` is an Apple Clang
-shim, so the GCC row is a second Clang row; the images do carry real Homebrew
-GCC, but only under versioned names (`gcc-15`), which is not what `build.c`
-resolves. And the self-host fan-out runs only where the fixed point exists —
+The native driver selects `gcc-15` for the macOS GCC row and verifies its
+preprocessor identity before configuration. `BUSTER_GCC` can select a different
+installed GCC explicitly; missing compilers and Clang shims fail the row rather
+than substituting another compiler. Discovery prints the resolved executable,
+identity, target and version in `combinations.log`. The regression also records
+the unversioned `gcc` identity on both macOS architectures and checks that
+Clang and missing-compiler failures preserve an existing build tree. The GCC
+row remains an unsanitized Debug compilation with warnings as errors; all
+AppleClang, Zig, sanitizer, unity/split and static-analysis work is retained.
+
+The baseline main run [34708311595](https://github.com/buster14a/buster/actions/runs/34708311595)
+at `f75949b0e27820b02a0fe337b58db1fe700e8f54` reported Apple Clang
+21.0.0 for `gcc` on both macOS architectures, confirming the former coverage
+gap. [PR #500](https://github.com/buster14a/buster/pull/500) records the
+replacement compilers, exact tested revisions and complete CI results. Discovery
+alone does not establish compilation: the GCC Debug build and the full macOS
+matrices must also pass.
+
+The self-host fan-out runs only where the fixed point exists —
 the x86-64 Linux and Windows runners and both macOS runners — so the two
 AArch64 desktop rows build and test without it.
 

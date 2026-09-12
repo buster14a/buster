@@ -389,6 +389,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_error_code(CompilerDriverError error
         [COMPILER_DRIVER_ERROR_EBPF] = S8_INITIALIZER("driver.ebpf"),
         [COMPILER_DRIVER_ERROR_OBJECT] = S8_INITIALIZER("driver.object"),
         [COMPILER_DRIVER_ERROR_LINK] = S8_INITIALIZER("driver.link"),
+        [COMPILER_DRIVER_ERROR_FILE_WRITE] = S8_INITIALIZER("driver.file-write"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == COMPILER_DRIVER_ERROR_COUNT);
     return (u32)error < (u32)BUSTER_ARRAY_LENGTH(names) ? names[error] : S8("driver.unknown");
