@@ -11,8 +11,7 @@ BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResu
 {
     UnitTestResult result = {0};
     BUSTER_UNUSED(arguments);
-    BUSTER_TEST(arguments, index < lex.token_count);
-    if (index < lex.token_count)
+    if (BUSTER_REQUIRE(arguments, lex.tokens != 0 && lex.spelling_base != 0 && index < lex.token_count))
     {
         BUSTER_TEST(arguments, lex.tokens[index].kind == kind);
         BUSTER_STRING_TEST(arguments, c_token_spelling(lex.spelling_base, lex.tokens[index]), spelling);
@@ -26,8 +25,7 @@ BUSTER_GLOBAL_LOCAL void c_test_preprocessed_token(UnitTestArguments* arguments,
 {
     UnitTestResult result = {0};
     BUSTER_UNUSED(arguments);
-    BUSTER_TEST(arguments, index < preprocess.token_count);
-    if (index < preprocess.token_count)
+    if (BUSTER_REQUIRE(arguments, preprocess.tokens != 0 && preprocess.spelling_base != 0 && index < preprocess.token_count))
     {
         BUSTER_TEST(arguments, preprocess.tokens[index].kind == kind);
         BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), spelling);
@@ -576,38 +574,48 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_static_aggregates(UnitTestArgume
         }
         if (brace_elision_global)
         {
-            BUSTER_TEST(arguments, brace_elision_global->bytes.length == 16);
-            u32 second = 0;
-            memcpy(&second, brace_elision_global->bytes.pointer + 12, sizeof(second));
-            BUSTER_TEST(arguments, second == 4);
+            if (BUSTER_REQUIRE(arguments, brace_elision_global->bytes.pointer && brace_elision_global->bytes.length == 16))
+            {
+                u32 second = 0;
+                memcpy(&second, brace_elision_global->bytes.pointer + 12, sizeof(second));
+                BUSTER_TEST(arguments, second == 4);
+            }
         }
         if (nested_elision_global)
         {
-            BUSTER_TEST(arguments, nested_elision_global->bytes.length == 16);
-            u32 second = 0;
-            memcpy(&second, nested_elision_global->bytes.pointer + 12, sizeof(second));
-            BUSTER_TEST(arguments, second == 4);
+            if (BUSTER_REQUIRE(arguments, nested_elision_global->bytes.pointer && nested_elision_global->bytes.length == 16))
+            {
+                u32 second = 0;
+                memcpy(&second, nested_elision_global->bytes.pointer + 12, sizeof(second));
+                BUSTER_TEST(arguments, second == 4);
+            }
         }
         if (chained_global)
         {
-            BUSTER_TEST(arguments, chained_global->bytes.length == 32);
-            u32 value = 0;
-            memcpy(&value, chained_global->bytes.pointer + 28, sizeof(value));
-            BUSTER_TEST(arguments, value == 7);
+            if (BUSTER_REQUIRE(arguments, chained_global->bytes.pointer && chained_global->bytes.length == 32))
+            {
+                u32 value = 0;
+                memcpy(&value, chained_global->bytes.pointer + 28, sizeof(value));
+                BUSTER_TEST(arguments, value == 7);
+            }
         }
         if (cast_index_global)
         {
-            BUSTER_TEST(arguments, cast_index_global->bytes.length == 4);
-            u32 value = 0;
-            memcpy(&value, cast_index_global->bytes.pointer, sizeof(value));
-            BUSTER_TEST(arguments, value == 1);
+            if (BUSTER_REQUIRE(arguments, cast_index_global->bytes.pointer && cast_index_global->bytes.length == 4))
+            {
+                u32 value = 0;
+                memcpy(&value, cast_index_global->bytes.pointer, sizeof(value));
+                BUSTER_TEST(arguments, value == 1);
+            }
         }
         if (duplicate_designator_global)
         {
-            BUSTER_TEST(arguments, duplicate_designator_global->bytes.length == 16);
-            u32 value = 0;
-            memcpy(&value, duplicate_designator_global->bytes.pointer + 12, sizeof(value));
-            BUSTER_TEST(arguments, value == 5);
+            if (BUSTER_REQUIRE(arguments, duplicate_designator_global->bytes.pointer && duplicate_designator_global->bytes.length == 16))
+            {
+                u32 value = 0;
+                memcpy(&value, duplicate_designator_global->bytes.pointer + 12, sizeof(value));
+                BUSTER_TEST(arguments, value == 5);
+            }
         }
         BUSTER_TEST(arguments, local_static_ir.canonical_ir_certified);
         BUSTER_TEST(arguments, ir_validate_canonical_module(local_static_ir.program, module).error == IR_VALIDATION_NONE);
@@ -1633,10 +1641,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_corrections(UnitTestArgument
         if (const_zero_global)
         {
             BUSTER_TEST(arguments, const_zero_global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES);
-            BUSTER_TEST(arguments, const_zero_global->is_read_only && const_zero_global->bytes.length != 0);
-            for (u64 byte_index = 0; byte_index < const_zero_global->bytes.length; byte_index += 1)
+            if (BUSTER_REQUIRE(arguments, const_zero_global->is_read_only && const_zero_global->bytes.pointer && const_zero_global->bytes.length != 0))
             {
-                BUSTER_TEST(arguments, const_zero_global->bytes.pointer[byte_index] == 0);
+                for (u64 byte_index = 0; byte_index < const_zero_global->bytes.length; byte_index += 1)
+                {
+                    BUSTER_TEST(arguments, const_zero_global->bytes.pointer[byte_index] == 0);
+                }
             }
         }
         if (mutable_scalar_zero_global)
@@ -1690,8 +1700,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_corrections(UnitTestArgument
         if (positional_bits_global)
         {
             IrType* bits_type = ir_type_from_id(&aggregate_correction_ir.program->types, positional_bits_global->type);
-            BUSTER_TEST(arguments, bits_type && bits_type->field_count == 3);
-            if (bits_type && bits_type->field_count == 3)
+            if (BUSTER_REQUIRE(arguments, bits_type && bits_type->field_count == 3))
             {
                 BUSTER_TEST(arguments, c_test_ir_bit_field_value(aggregate_correction_ir.program, positional_bits_global, bits_type->fields + 1) == 5);
                 BUSTER_TEST(arguments, c_test_ir_bit_field_value(aggregate_correction_ir.program, positional_bits_global, bits_type->fields + 2) == 9);
@@ -1700,8 +1709,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_corrections(UnitTestArgument
         if (zero_width_bits_global)
         {
             IrType* bits_type = ir_type_from_id(&aggregate_correction_ir.program->types, zero_width_bits_global->type);
-            BUSTER_TEST(arguments, bits_type && bits_type->field_count == 2);
-            if (bits_type && bits_type->field_count == 2)
+            if (BUSTER_REQUIRE(arguments, bits_type && bits_type->field_count == 2))
             {
                 BUSTER_TEST(arguments, c_test_ir_bit_field_value(aggregate_correction_ir.program, zero_width_bits_global, bits_type->fields + 1) == 5);
             }
@@ -1709,7 +1717,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_corrections(UnitTestArgument
         if (nonzero_global)
         {
             BUSTER_TEST(arguments, nonzero_global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES);
-            BUSTER_TEST(arguments, nonzero_global->bytes.length != 0 && nonzero_global->bytes.pointer[sizeof(u32)] == 1);
+            BUSTER_TEST(arguments,
+                        nonzero_global->bytes.pointer && nonzero_global->bytes.length > sizeof(u32) && nonzero_global->bytes.pointer[sizeof(u32)] == 1);
         }
         if (relocation_guard_global)
         {
@@ -1747,11 +1756,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_corrections(UnitTestArgument
         }
         if (nested_string_global && nested_string_global->bytes.pointer)
         {
-            BUSTER_TEST(arguments, nested_string_global->bytes.length >= 4 + sizeof(u32));
-            BUSTER_TEST(arguments, memcmp(nested_string_global->bytes.pointer, "abc\0", 4) == 0);
-            u32 value = 0;
-            memcpy(&value, nested_string_global->bytes.pointer + 4, sizeof(value));
-            BUSTER_TEST(arguments, value == 7);
+            if (BUSTER_REQUIRE(arguments, nested_string_global->bytes.length >= 4 + sizeof(u32)))
+            {
+                BUSTER_TEST(arguments, memcmp(nested_string_global->bytes.pointer, "abc\0", 4) == 0);
+                u32 value = 0;
+                memcpy(&value, nested_string_global->bytes.pointer + 4, sizeof(value));
+                BUSTER_TEST(arguments, value == 7);
+            }
         }
         else
         {
@@ -1759,11 +1770,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_corrections(UnitTestArgument
         }
         if (exact_nested_string_global && exact_nested_string_global->bytes.pointer)
         {
-            BUSTER_TEST(arguments, exact_nested_string_global->bytes.length >= 3 + sizeof(u32));
-            BUSTER_TEST(arguments, memcmp(exact_nested_string_global->bytes.pointer, "abc", 3) == 0);
-            u32 value = 0;
-            memcpy(&value, exact_nested_string_global->bytes.pointer + 4, sizeof(value));
-            BUSTER_TEST(arguments, value == 9);
+            if (BUSTER_REQUIRE(arguments, exact_nested_string_global->bytes.length >= 4 + sizeof(u32)))
+            {
+                BUSTER_TEST(arguments, memcmp(exact_nested_string_global->bytes.pointer, "abc", 3) == 0);
+                u32 value = 0;
+                memcpy(&value, exact_nested_string_global->bytes.pointer + 4, sizeof(value));
+                BUSTER_TEST(arguments, value == 9);
+            }
         }
         else
         {
@@ -1910,8 +1923,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_brace_designators(UnitTestArguments* a
             u64 z_offset = z_field ? z_field->offset : UINT64_MAX;
             bool scalar_offsets_valid = scalar_global->bytes.pointer && scalar_global->bytes.length >= sizeof(u32) &&
                                         x_offset <= scalar_global->bytes.length - sizeof(u32) && z_offset <= scalar_global->bytes.length - sizeof(u32);
-            BUSTER_TEST(arguments, scalar_offsets_valid);
-            if (scalar_offsets_valid)
+            if (BUSTER_REQUIRE(arguments, scalar_offsets_valid))
             {
                 u32 x = 0;
                 u32 z = 0;
@@ -3863,8 +3875,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         BUSTER_TEST(arguments, lex.diagnostic_count == 0);
         bool lex_found = false;
         CToken lex_token = c_test_find_token_kind(lex.tokens, lex.token_count, C_TOKEN_STRING_LITERAL, &lex_found);
-        BUSTER_TEST(arguments, lex_found);
-        if (lex_found)
+        if (BUSTER_REQUIRE(arguments, lex_found))
         {
             BUSTER_STRING_TEST(arguments, c_token_spelling(lex.spelling_base, lex_token), literal);
         }
@@ -3878,8 +3889,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         BUSTER_TEST(arguments, lower.diagnostic_count == 0);
         bool preprocessed_found = false;
         CToken preprocessed_token = c_test_find_token_kind(preprocess.tokens, preprocess.token_count, C_TOKEN_STRING_LITERAL, &preprocessed_found);
-        BUSTER_TEST(arguments, preprocessed_found);
-        if (preprocessed_found)
+        if (BUSTER_REQUIRE(arguments, preprocessed_found))
         {
             BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, preprocessed_token), literal);
         }
@@ -3888,8 +3898,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         {
             big_global = lower.program->modules[0].globals;
         }
-        BUSTER_TEST(arguments, big_global && big_global->bytes.pointer && big_global->bytes.length == decoded.length + 1);
-        if (big_global && big_global->bytes.pointer && big_global->bytes.length == decoded.length + 1)
+        if (BUSTER_REQUIRE(arguments, big_global && big_global->bytes.pointer && big_global->bytes.length == decoded.length + 1))
         {
             BUSTER_TEST(arguments, memcmp(big_global->bytes.pointer, decoded.pointer, decoded.length) == 0);
             BUSTER_TEST(arguments, big_global->bytes.pointer[decoded.length] == 0);
@@ -3905,8 +3914,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_oversized_token_spellings(UnitTestArgu
         BUSTER_TEST(arguments, lex.diagnostic_count == 0);
         bool found = false;
         CToken token = c_test_find_token_kind(lex.tokens, lex.token_count, C_TOKEN_CHARACTER_LITERAL, &found);
-        BUSTER_TEST(arguments, found);
-        if (found)
+        if (BUSTER_REQUIRE(arguments, found))
         {
             BUSTER_STRING_TEST(arguments, c_token_spelling(lex.spelling_base, token), character_literal);
         }

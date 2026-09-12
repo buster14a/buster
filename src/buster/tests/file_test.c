@@ -40,8 +40,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_write_failures(UnitTestArguments* a
         if (index == 0 || index == 1 || index == 3 || index == 7) BUSTER_TEST(arguments, written.error.v == 12345);
         if (index == 6) BUSTER_TEST(arguments, written.error.v == 23456);
         ByteSlice actual = file_read(arguments->arena, path, (FileReadOptions){0});
-        BUSTER_TEST(arguments, actual.length == transferred[index]);
-        if (actual.length) BUSTER_TEST(arguments, memory_compare(actual.pointer, data, actual.length));
+        if (BUSTER_REQUIRE(arguments, actual.length == transferred[index]))
+        {
+            if (actual.length)
+                BUSTER_TEST(arguments, memory_compare(actual.pointer, data, actual.length));
+        }
         // The existing boolean entry must propagate the same outcome.
         os_file_test_begin(path, scripts[index], counts[index]);
         bool success = file_write(path, content);
@@ -158,19 +161,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_read_failures(UnitTestArguments* ar
         os_file_test_begin(path, scripts[index], counts[index]);
         FileReadResult read = file_read_checked(arguments->arena, path, (FileReadOptions){.start_padding = 3, .end_padding = 5});
         BUSTER_TEST(arguments, os_file_test_end() == counts[index]);
-        BUSTER_TEST(arguments, (read.bytes.pointer != 0) == success);
+        bool read_pointer_matches = (read.bytes.pointer != 0) == success;
         BUSTER_TEST(arguments, (read.status == OS_FILE_READ_OK) == success);
-        if (success)
+        if (BUSTER_REQUIRE(arguments, read_pointer_matches))
         {
-            BUSTER_TEST(arguments, read.bytes.length == (index == 6 ? 7 : text.length));
-            BUSTER_TEST(arguments, memory_compare(read.bytes.pointer, text.pointer, read.bytes.length));
-            BUSTER_TEST(arguments, read.bytes.pointer[read.bytes.length] == 0 && read.bytes.pointer[read.bytes.length + 4] == 0);
-        }
-        else
-        {
-            BUSTER_TEST(arguments, arguments->arena->position == mark && read.bytes.length == 0);
-            if (index == 4 || index == 5) BUSTER_TEST(arguments, read.status == OS_FILE_READ_EOF && !read.error.v);
-            else BUSTER_TEST(arguments, read.error.v == (index == 9 ? 23456u : 12345u));
+            if (success)
+            {
+                if (BUSTER_REQUIRE(arguments, read.bytes.length == (index == 6 ? 7 : text.length)))
+                {
+                    BUSTER_TEST(arguments, memory_compare(read.bytes.pointer, text.pointer, read.bytes.length));
+                    BUSTER_TEST(arguments, read.bytes.pointer[read.bytes.length] == 0 && read.bytes.pointer[read.bytes.length + 4] == 0);
+                }
+            }
+            else
+            {
+                BUSTER_TEST(arguments, arguments->arena->position == mark && read.bytes.length == 0);
+                if (index == 4 || index == 5)
+                    BUSTER_TEST(arguments, read.status == OS_FILE_READ_EOF && !read.error.v);
+                else
+                    BUSTER_TEST(arguments, read.error.v == (index == 9 ? 23456u : 12345u));
+            }
         }
         arena_set_position(arguments->arena, mark);
         os_file_test_begin(path, scripts[index], counts[index]);
@@ -254,8 +264,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
         {
             FileMapRead relative_map = file_map_read(arguments->arena, relative_paths[path_index], (FileReadOptions){.map_required = map_required});
             bool mapped = relative_map.mapped_pointer != 0 && relative_map.bytes.pointer != 0;
-            BUSTER_TEST(arguments, mapped);
-            if (mapped)
+            if (BUSTER_REQUIRE(arguments, mapped))
             {
                 BUSTER_STRING_TEST(arguments, ((String8){(char8*)relative_map.bytes.pointer, relative_map.bytes.length}), mapped_content);
             }
@@ -268,8 +277,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, padded_required.bytes.pointer == 0 && padded_required.mapped_pointer == 0);
     file_map_unmap(padded_required);
     FileMapRead padded_fallback = file_map_read(arguments->arena, relative_paths[0], (FileReadOptions){.end_padding = 4});
-    BUSTER_TEST(arguments, padded_fallback.bytes.pointer != 0 && padded_fallback.mapped_pointer == 0);
-    if (padded_fallback.bytes.pointer)
+    if (BUSTER_REQUIRE(arguments, padded_fallback.bytes.pointer != 0 && padded_fallback.mapped_pointer == 0))
     {
         BUSTER_STRING_TEST(arguments, ((String8){(char8*)padded_fallback.bytes.pointer, padded_fallback.bytes.length}), mapped_content);
         bool padding_zero = true;
@@ -288,15 +296,13 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
                                     .start_alignment = 4,
                                     .end_padding = 4,
                                 });
-    BUSTER_TEST(arguments, empty.pointer != 0);
-    BUSTER_TEST(arguments, empty.length == 0);
-    BUSTER_TEST(arguments, ((u64)empty.pointer & 3) == 0);
-    bool padding_is_zero = false;
-    if (empty.pointer)
+    if (BUSTER_REQUIRE(arguments, empty.pointer != 0))
     {
-        padding_is_zero = empty.pointer[0] == 0 && empty.pointer[1] == 0 && empty.pointer[2] == 0 && empty.pointer[3] == 0;
+        BUSTER_TEST(arguments, empty.length == 0);
+        BUSTER_TEST(arguments, ((u64)empty.pointer & 3) == 0);
+        bool padding_is_zero = empty.pointer[0] == 0 && empty.pointer[1] == 0 && empty.pointer[2] == 0 && empty.pointer[3] == 0;
+        BUSTER_TEST(arguments, padding_is_zero);
     }
-    BUSTER_TEST(arguments, padding_is_zero);
     arena_set_position(arguments->arena, arena_position);
 
 #if BUSTER_LINUX

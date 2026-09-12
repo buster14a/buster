@@ -23,7 +23,10 @@ PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS x86-64", "macOS AArch64",
 MOBILE = ("Android x86-64", "iOS x86-64", "iOS AArch64")
 SHARDED_JOBS = PLATFORMS + MOBILE + ("Workflow lint", "CI complete")
 NATIVE = tuple(name + " native" for name in PLATFORMS if not name.startswith("Windows"))
-SUITE_JOBS = SHARDED_JOBS + NATIVE
+PARTITIONED_JOBS = SHARDED_JOBS + NATIVE
+UEFI = ("UEFI firmware boot",)
+ANALYZER = ("Clang analyzer shards",)
+SUITE_JOBS = PARTITIONED_JOBS + UEFI + ANALYZER
 RUN_FIELDS = ("id", "head_sha", "head_branch", "event", "path", "status", "conclusion",
               "run_attempt", "created_at", "run_started_at", "html_url")
 JOB_FIELDS = ("id", "name", "run_attempt", "status", "conclusion", "started_at", "completed_at", "labels")
@@ -43,7 +46,7 @@ def measure(run):
     result = None
     jobs = run.get("jobs", [])
     names = sorted(job.get("name", "") for job in jobs)
-    suites = names == sorted(SUITE_JOBS)
+    suites = names == sorted(PARTITIONED_JOBS) or names == sorted(SUITE_JOBS)
     sharded = names == sorted(SHARDED_JOBS) or suites
     if run.get("status") != "completed":
         reason = "not-completed"
@@ -83,6 +86,11 @@ def measure(run):
                 required.add("Validate every GitHub workflow")
             elif name == "CI complete":
                 required.add("Require every shard")
+            elif name in UEFI:
+                required.add("Build compiler and boot both architectures in all allocators")
+            elif name in ANALYZER:
+                required.update(("Exercise analyzer failure and coverage controls",
+                                 "Compare reference analysis and aggregate all module shards"))
             passed = {step["name"] for step in job.get("steps", []) if step.get("conclusion") == "success"}
             if job.get("conclusion") != "success" or job.get("run_attempt") != 1 or not required <= passed:
                 reason = "incomplete-coverage"

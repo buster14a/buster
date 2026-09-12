@@ -584,6 +584,39 @@ BUSTER_GLOBAL_LOCAL bool test_arena_self_test(void)
     return passed;
 }
 
+BUSTER_GLOBAL_LOCAL bool test_require_self_test(void)
+{
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
+    Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
+    BUSTER_CHECK(arena != 0 && output != 0);
+    TestParallelArguments arguments = {
+        .base = {.arena = arena, .show = &test_parallel_show},
+        .output_arena = output,
+    };
+    UnitTestResult result = {0};
+    String8 missing_path = string_format_z(arena, S8("tests/buster-require-missing-fixture-{u64}"), os_get_current_process_id());
+    ByteSlice missing_fixture = file_read(arena, missing_path, (FileReadOptions){0});
+    bool failed_dependent_called = false;
+    if (BUSTER_REQUIRE(&arguments.base, missing_fixture.pointer != 0))
+    {
+        failed_dependent_called = true;
+        BUSTER_TEST(&arguments.base, missing_fixture.pointer[0] == 0);
+    }
+    bool successful_dependent_called = false;
+    bool prerequisite_available = true;
+    if (BUSTER_REQUIRE(&arguments.base, prerequisite_available))
+    {
+        successful_dependent_called = true;
+        BUSTER_TEST(&arguments.base, true);
+    }
+    String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
+    bool passed = !failed_dependent_called && successful_dependent_called && result.test_count == 3 && result.succeeded_test_count == 2 &&
+                  string_first_sequence(text, S8("missing_fixture.pointer != 0 failed at")) != BUSTER_STRING_NO_MATCH;
+    passed = arena_destroy(arena, 1) && passed;
+    passed = arena_destroy(output, 1) && passed;
+    return passed;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult test_parallel_call(TestDescriptorParallelKind kind, UnitTestArguments* arguments)
 {
     switch (kind)
@@ -681,6 +714,18 @@ void buster_test_error_arguments(UnitTestArguments* arguments, u32 line, String8
     {
         os_fail();
     }
+}
+
+bool buster_test_require_arguments(UnitTestArguments* arguments, UnitTestResult* result, bool success, u32 line, String8 function, String8 file_path,
+                                   String8 expression)
+{
+    if (!success)
+    {
+        buster_test_error_arguments(arguments, line, function, file_path, S8("{S8}"), expression);
+    }
+    result->succeeded_test_count += success;
+    result->test_count += 1;
+    return success;
 }
 
 BUSTER_GLOBAL_LOCAL String8 buster_test_temporary_root;
@@ -1158,6 +1203,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
 
     BUSTER_CHECK(buster_test_temporary_root_failure_self_test(arguments));
     BUSTER_VALIDATE(test_arena_self_test());
+    BUSTER_VALIDATE(test_require_self_test());
 
     bool timing_enabled = program_state != 0 && program_flag_get(PROGRAM_FLAG_VERBOSE);
     arguments->memory_report = program_state != 0 && (timing_enabled || program_flag_get(PROGRAM_FLAG_CI));

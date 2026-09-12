@@ -306,10 +306,11 @@ attached launch-monitor ownership suite continues to use macOS `/bin/bash`.
 Collect timing using `python3 tools/github_ci_time.py collect --branch main --limit 30 --output /tmp/before.json`
 and summarize using `python3 tools/github_ci_time.py summarize /tmp/before.json`.
 For a candidate, replace `--branch main` with `--head-sha COMMIT`. The collector
-accepts historical six- and eleven-job workflows and the current fifteen-job
-suite-partitioned workflow; all applicable suites must succeed on a complete
-first attempt. The four native jobs must report both mode and differential
-success, and their execution intervals and runner seconds are included. Workflow hashes
+accepts historical six-, eleven- and fifteen-job workflows and the current
+seventeen-job suite-partitioned workflow; all applicable suites must succeed on
+a complete first attempt. The four native jobs must report both mode and
+differential success, and the UEFI and analyzer gates must report their key
+coverage steps. Their execution intervals and runner seconds are included. Workflow hashes
 and runner labels define separate cohorts. Reports include queue delay, elapsed
 time, execution span and summed runner seconds, including mobile/lint/aggregate
 jobs. Never attribute differences to this PR without matching source/cache state

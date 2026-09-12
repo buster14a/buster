@@ -619,29 +619,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_scaling(UnitTestArgument
                 TimeDataType start = timestamp_take();
                 String8 assembly = object_print_assembly(output, &object);
                 u64 ns = timestamp_ns_between(start, timestamp_take());
-                BUSTER_TEST(arguments, assembly.length > 0);
-                u64 hash = UINT64_C(14695981039346656037);
-                for (u64 byte = 0; byte < assembly.length; byte += 1)
+                if (BUSTER_REQUIRE(arguments, assembly.pointer && assembly.length > 0))
                 {
-                    hash = (hash ^ assembly.pointer[byte]) * UINT64_C(1099511628211);
-                }
-                if (!iteration)
-                {
-                    first_hash = hash;
-                    String8 directory = os_get_environment_variable(S8("BUSTER_OBJECT_ASSEMBLY_OUTPUT"));
-                    if (benchmark && directory.length)
+                    u64 hash = UINT64_C(14695981039346656037);
+                    for (u64 byte = 0; byte < assembly.length; byte += 1)
                     {
-                        String8 path = string_format(arguments->arena, S8("{S8}/assembly_{u32}_{u32}.s"), directory, count, order);
-                        path = string_duplicate_arena(arguments->arena, path, true);
-                        BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(assembly)));
+                        hash = (hash ^ assembly.pointer[byte]) * UINT64_C(1099511628211);
                     }
-                }
-                BUSTER_TEST(arguments, hash == first_hash);
-                if (benchmark && iteration)
-                {
-                    string_print(S8("BENCH_OBJECT_ASSEMBLY count={u32} symbols={u32} relocations={u32} order={u32} iteration={u32} ns={u64} bytes={u64} retained={u64} peak={u64} hash={u64}\n"),
-                                 count, object.symbol_count, object.relocation_count, order, iteration, ns, assembly.length,
-                                 output->position - position, arena_dirty_position(output) - position, hash);
+                    if (!iteration)
+                    {
+                        first_hash = hash;
+                        String8 directory = os_get_environment_variable(S8("BUSTER_OBJECT_ASSEMBLY_OUTPUT"));
+                        if (benchmark && directory.length)
+                        {
+                            String8 path = string_format(arguments->arena, S8("{S8}/assembly_{u32}_{u32}.s"), directory, count, order);
+                            path = string_duplicate_arena(arguments->arena, path, true);
+                            BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(assembly)));
+                        }
+                    }
+                    BUSTER_TEST(arguments, hash == first_hash);
+                    if (benchmark && iteration)
+                    {
+                        string_print(S8("BENCH_OBJECT_ASSEMBLY count={u32} symbols={u32} relocations={u32} order={u32} iteration={u32} ns={u64} bytes={u64} "
+                                        "retained={u64} peak={u64} hash={u64}\n"),
+                                     count, object.symbol_count, object.relocation_count, order, iteration, ns, assembly.length, output->position - position,
+                                     arena_dirty_position(output) - position, hash);
+                    }
                 }
                 arena_set_position(output, position);
             }
@@ -697,8 +700,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_dwarf5_sections(UnitTestArguments
         ObjectArtifact artifact = object_write(temporary.arena, &object, OBJECT_FORMAT_ELF64);
         BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE);
         ObjectFile restored = object_read(temporary.arena, artifact.bytes, object.target);
-        BUSTER_TEST(arguments, restored.error == OBJECT_ERROR_NONE);
-        if (restored.error == OBJECT_ERROR_NONE)
+        if (BUSTER_REQUIRE(arguments, restored.error == OBJECT_ERROR_NONE))
         {
             BUSTER_TEST(arguments, restored.relocation_count == BUSTER_ARRAY_LENGTH(relocations));
             for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(kinds); index += 1)
@@ -983,19 +985,19 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     result.succeeded_test_count += capacity_tests.succeeded_test_count;
     result.test_count += capacity_tests.test_count;
     ObjectFile elf_roundtrip = object_read(arguments->arena, elf.bytes, object.target);
-    BUSTER_TEST(arguments, elf_roundtrip.error == OBJECT_ERROR_NONE);
+    bool elf_roundtrip_valid = BUSTER_REQUIRE(arguments, elf_roundtrip.error == OBJECT_ERROR_NONE);
     BUSTER_TEST(arguments, elf_roundtrip.section_count == OBJECT_SECTION_COUNT);
     BUSTER_TEST(arguments, elf_roundtrip.symbol_count == object.symbol_count);
     BUSTER_TEST(arguments, elf_roundtrip.relocation_count == object.relocation_count);
-    bool elf_sections_valid =
-        elf_roundtrip.sections && elf_roundtrip.section_count > OBJECT_SECTION_TEXT && elf_roundtrip.sections[OBJECT_SECTION_TEXT].data.pointer;
+    bool elf_sections_valid = elf_roundtrip_valid && elf_roundtrip.sections && elf_roundtrip.section_count > OBJECT_SECTION_TEXT &&
+                              elf_roundtrip.sections[OBJECT_SECTION_TEXT].data.pointer;
     BUSTER_TEST(arguments, elf_sections_valid);
     if (elf_sections_valid)
     {
         BUSTER_TEST(arguments, elf_roundtrip.sections[OBJECT_SECTION_TEXT].data.length == sizeof(x86_text));
         BUSTER_TEST(arguments, memcmp(elf_roundtrip.sections[OBJECT_SECTION_TEXT].data.pointer, x86_text, sizeof(x86_text)) == 0);
     }
-    bool elf_zero_section_valid = elf_roundtrip.sections && elf_roundtrip.section_count > OBJECT_SECTION_ZERO;
+    bool elf_zero_section_valid = elf_roundtrip_valid && elf_roundtrip.sections && elf_roundtrip.section_count > OBJECT_SECTION_ZERO;
     BUSTER_TEST(arguments, elf_zero_section_valid);
     if (elf_zero_section_valid)
     {
@@ -1060,13 +1062,12 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, object_bytes_contain(initializer_elf.bytes, S8(".init_array.00101")));
         BUSTER_TEST(arguments, object_bytes_contain(initializer_elf.bytes, S8(".fini_array.00101")));
         ObjectFile initializer_roundtrip = object_read(arguments->arena, initializer_elf.bytes, initializer_object.target);
-        BUSTER_TEST(arguments, initializer_roundtrip.error == OBJECT_ERROR_NONE);
         bool initializer_read_valid = initializer_roundtrip.error == OBJECT_ERROR_NONE && initializer_roundtrip.initializer_priorities[0] &&
-                                      initializer_roundtrip.initializer_priorities[1] &&
+                                      initializer_roundtrip.initializer_priorities[1] && initializer_roundtrip.sections &&
+                                      initializer_roundtrip.section_count > OBJECT_SECTION_FINI_ARRAY &&
                                       initializer_roundtrip.sections[OBJECT_SECTION_INIT_ARRAY].data.length == sizeof(initializer_entries) &&
                                       initializer_roundtrip.sections[OBJECT_SECTION_FINI_ARRAY].data.length == sizeof(terminator_entries);
-        BUSTER_TEST(arguments, initializer_read_valid);
-        if (initializer_read_valid)
+        if (BUSTER_REQUIRE(arguments, initializer_read_valid))
         {
             for (u64 entry = 0; entry < BUSTER_ARRAY_LENGTH(written_priorities); entry += 1)
             {
@@ -1237,19 +1238,23 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                                 .cpu_arch = CPU_ARCH_X86_64,
                                                 .os = OPERATING_SYSTEM_WINDOWS,
                                             });
-    BUSTER_TEST(arguments, coff_roundtrip.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, coff_roundtrip.symbol_count == object.symbol_count);
-    BUSTER_TEST(arguments, coff_roundtrip.relocation_count == object.relocation_count);
-    BUSTER_TEST(arguments, coff_roundtrip.sections[OBJECT_SECTION_ZERO].data.length == 0);
-    BUSTER_TEST(arguments, coff_roundtrip.sections[OBJECT_SECTION_ZERO].virtual_size == BUSTER_MB(1));
-    bool coff_relocation_valid = coff_roundtrip.relocations && coff_roundtrip.relocation_count && coff_roundtrip.symbols &&
-                                 coff_roundtrip.relocations[0].symbol < coff_roundtrip.symbol_count;
-    BUSTER_TEST(arguments, coff_relocation_valid);
-    if (coff_relocation_valid)
+    if (BUSTER_REQUIRE(arguments, coff_roundtrip.error == OBJECT_ERROR_NONE))
     {
-        BUSTER_TEST(arguments, coff_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
-        BUSTER_TEST(arguments, coff_roundtrip.relocations[0].addend == -4);
-        BUSTER_STRING_TEST(arguments, coff_roundtrip.symbols[coff_roundtrip.relocations[0].symbol].name, S8("object_callee"));
+        BUSTER_TEST(arguments, coff_roundtrip.symbol_count == object.symbol_count);
+        BUSTER_TEST(arguments, coff_roundtrip.relocation_count == object.relocation_count);
+        if (BUSTER_REQUIRE(arguments, coff_roundtrip.sections && coff_roundtrip.section_count > OBJECT_SECTION_ZERO))
+        {
+            BUSTER_TEST(arguments, coff_roundtrip.sections[OBJECT_SECTION_ZERO].data.length == 0);
+            BUSTER_TEST(arguments, coff_roundtrip.sections[OBJECT_SECTION_ZERO].virtual_size == BUSTER_MB(1));
+        }
+        bool coff_relocation_valid = coff_roundtrip.relocations && coff_roundtrip.relocation_count && coff_roundtrip.symbols &&
+                                     coff_roundtrip.relocations[0].symbol < coff_roundtrip.symbol_count;
+        if (BUSTER_REQUIRE(arguments, coff_relocation_valid))
+        {
+            BUSTER_TEST(arguments, coff_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
+            BUSTER_TEST(arguments, coff_roundtrip.relocations[0].addend == -4);
+            BUSTER_STRING_TEST(arguments, coff_roundtrip.symbols[coff_roundtrip.relocations[0].symbol].name, S8("object_callee"));
+        }
     }
     {
         TemporalArena comdat_scope = arena_begin_temporal(arguments->arena);
@@ -1350,8 +1355,11 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                                          .cpu_arch = CPU_ARCH_X86_64,
                                                          .os = OPERATING_SYSTEM_WINDOWS,
                                                      });
-        BUSTER_TEST(arguments, long_coff_roundtrip.error == OBJECT_ERROR_NONE);
-        BUSTER_TEST(arguments, long_coff_roundtrip.sections[OBJECT_SECTION_DEBUG_INFO].data.length == sizeof(debug_data));
+        if (BUSTER_REQUIRE(arguments, long_coff_roundtrip.error == OBJECT_ERROR_NONE && long_coff_roundtrip.sections != 0 &&
+                                          long_coff_roundtrip.section_count > OBJECT_SECTION_DEBUG_INFO))
+        {
+            BUSTER_TEST(arguments, long_coff_roundtrip.sections[OBJECT_SECTION_DEBUG_INFO].data.length == sizeof(debug_data));
+        }
         if (long_coff.bytes.pointer && long_coff.bytes.length > 0)
         {
             u64 section = 20 + (u64)OBJECT_SECTION_DEBUG_INFO * 40;
@@ -1393,19 +1401,23 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                                 .cpu_arch = CPU_ARCH_X86_64,
                                                 .os = OPERATING_SYSTEM_MACOS,
                                             });
-    BUSTER_TEST(arguments, mach_roundtrip.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, mach_roundtrip.symbol_count == object.symbol_count);
-    BUSTER_TEST(arguments, mach_roundtrip.relocation_count == object.relocation_count);
-    BUSTER_TEST(arguments, mach_roundtrip.sections[OBJECT_SECTION_ZERO].data.length == 0);
-    BUSTER_TEST(arguments, mach_roundtrip.sections[OBJECT_SECTION_ZERO].virtual_size == BUSTER_MB(1));
-    bool mach_relocation_valid = mach_roundtrip.relocations && mach_roundtrip.relocation_count && mach_roundtrip.symbols &&
-                                 mach_roundtrip.relocations[0].symbol < mach_roundtrip.symbol_count;
-    BUSTER_TEST(arguments, mach_relocation_valid);
-    if (mach_relocation_valid)
+    if (BUSTER_REQUIRE(arguments, mach_roundtrip.error == OBJECT_ERROR_NONE))
     {
-        BUSTER_TEST(arguments, mach_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
-        BUSTER_TEST(arguments, mach_roundtrip.relocations[0].addend == -4);
-        BUSTER_STRING_TEST(arguments, mach_roundtrip.symbols[mach_roundtrip.relocations[0].symbol].name, S8("object_callee"));
+        BUSTER_TEST(arguments, mach_roundtrip.symbol_count == object.symbol_count);
+        BUSTER_TEST(arguments, mach_roundtrip.relocation_count == object.relocation_count);
+        if (BUSTER_REQUIRE(arguments, mach_roundtrip.sections && mach_roundtrip.section_count > OBJECT_SECTION_ZERO))
+        {
+            BUSTER_TEST(arguments, mach_roundtrip.sections[OBJECT_SECTION_ZERO].data.length == 0);
+            BUSTER_TEST(arguments, mach_roundtrip.sections[OBJECT_SECTION_ZERO].virtual_size == BUSTER_MB(1));
+        }
+        bool mach_relocation_valid = mach_roundtrip.relocations && mach_roundtrip.relocation_count && mach_roundtrip.symbols &&
+                                     mach_roundtrip.relocations[0].symbol < mach_roundtrip.symbol_count;
+        if (BUSTER_REQUIRE(arguments, mach_relocation_valid))
+        {
+            BUSTER_TEST(arguments, mach_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
+            BUSTER_TEST(arguments, mach_roundtrip.relocations[0].addend == -4);
+            BUSTER_STRING_TEST(arguments, mach_roundtrip.symbols[mach_roundtrip.relocations[0].symbol].name, S8("object_callee"));
+        }
     }
     u32 mach_magic = 0;
     if (mach.bytes.pointer && mach.bytes.length >= 4)
@@ -2471,24 +2483,24 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                                                                 .cpu_arch = CPU_ARCH_X86_64,
                                                                 .os = OPERATING_SYSTEM_LINUX,
                                                             });
-    BUSTER_TEST(arguments, separate_object.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, separate_object.symbol_count == 2);
-    BUSTER_TEST(arguments, separate_object.sections[OBJECT_SECTION_UNWIND].data.length > 0);
-    bool separate_symbol_is_undefined = false;
-    if (separate_object.symbols && separate_object.symbol_count >= 2)
+    bool separate_object_valid = BUSTER_REQUIRE(arguments, separate_object.error == OBJECT_ERROR_NONE && separate_object.sections != 0 &&
+                                                               separate_object.section_count > OBJECT_SECTION_UNWIND && separate_object.symbols != 0 &&
+                                                               separate_object.relocations != 0);
+    if (separate_object_valid)
     {
-        separate_symbol_is_undefined = separate_object.symbols[1].section == OBJECT_SECTION_UNDEFINED;
+        BUSTER_TEST(arguments, separate_object.symbol_count == 2);
+        BUSTER_TEST(arguments, separate_object.sections[OBJECT_SECTION_UNWIND].data.length > 0);
+        BUSTER_TEST(arguments, separate_object.symbol_count >= 2 && separate_object.symbols[1].section == OBJECT_SECTION_UNDEFINED);
+        BUSTER_TEST(arguments, separate_object.relocation_count == 2);
+        bool separate_cfi_relocation = false;
+        for (u32 relocation_index = 0; relocation_index < separate_object.relocation_count; relocation_index += 1)
+        {
+            ObjectRelocation* candidate = separate_object.relocations + relocation_index;
+            separate_cfi_relocation |=
+                candidate->section == OBJECT_SECTION_UNWIND && candidate->symbol == 0 && candidate->kind == OBJECT_RELOCATION_X86_64_PC32;
+        }
+        BUSTER_TEST(arguments, separate_cfi_relocation);
     }
-    BUSTER_TEST(arguments, separate_symbol_is_undefined);
-    BUSTER_TEST(arguments, separate_object.relocation_count == 2);
-    bool separate_cfi_relocation = false;
-    for (u32 relocation_index = 0; relocation_index < separate_object.relocation_count; relocation_index += 1)
-    {
-        ObjectRelocation* candidate = separate_object.relocations + relocation_index;
-        separate_cfi_relocation |= candidate->section == OBJECT_SECTION_UNWIND && candidate->symbol == 0 &&
-                                   candidate->kind == OBJECT_RELOCATION_X86_64_PC32;
-    }
-    BUSTER_TEST(arguments, separate_cfi_relocation);
 
     enum
     {
@@ -2568,21 +2580,29 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, lookup_stress_mapping_valid);
     }
 
-    ObjectArtifact separate_elf = object_write(arguments->arena, &separate_object, OBJECT_FORMAT_ELF64);
-    BUSTER_TEST(arguments, separate_elf.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, object_bytes_contain(separate_elf.bytes, S8(".eh_frame")));
-    BUSTER_TEST(arguments, object_bytes_contain(separate_elf.bytes, S8(".rela.eh_frame")));
-    ObjectFile separate_roundtrip = object_read(arguments->arena, separate_elf.bytes, separate_object.target);
-    BUSTER_TEST(arguments, separate_roundtrip.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, separate_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length ==
-                               separate_object.sections[OBJECT_SECTION_UNWIND].data.length);
-    bool separate_roundtrip_cfi = false;
-    for (u32 relocation_index = 0; relocation_index < separate_roundtrip.relocation_count; relocation_index += 1)
+    if (separate_object_valid)
     {
-        ObjectRelocation* candidate = separate_roundtrip.relocations + relocation_index;
-        separate_roundtrip_cfi |= candidate->section == OBJECT_SECTION_UNWIND && candidate->kind == OBJECT_RELOCATION_X86_64_PC32;
+        ObjectArtifact separate_elf = object_write(arguments->arena, &separate_object, OBJECT_FORMAT_ELF64);
+        if (BUSTER_REQUIRE(arguments, separate_elf.error == OBJECT_ERROR_NONE))
+        {
+            BUSTER_TEST(arguments, object_bytes_contain(separate_elf.bytes, S8(".eh_frame")));
+            BUSTER_TEST(arguments, object_bytes_contain(separate_elf.bytes, S8(".rela.eh_frame")));
+            ObjectFile separate_roundtrip = object_read(arguments->arena, separate_elf.bytes, separate_object.target);
+            if (BUSTER_REQUIRE(arguments, separate_roundtrip.error == OBJECT_ERROR_NONE && separate_roundtrip.sections != 0 &&
+                                              separate_roundtrip.section_count > OBJECT_SECTION_UNWIND && separate_roundtrip.relocations != 0))
+            {
+                BUSTER_TEST(arguments,
+                            separate_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length == separate_object.sections[OBJECT_SECTION_UNWIND].data.length);
+                bool separate_roundtrip_cfi = false;
+                for (u32 relocation_index = 0; relocation_index < separate_roundtrip.relocation_count; relocation_index += 1)
+                {
+                    ObjectRelocation* candidate = separate_roundtrip.relocations + relocation_index;
+                    separate_roundtrip_cfi |= candidate->section == OBJECT_SECTION_UNWIND && candidate->kind == OBJECT_RELOCATION_X86_64_PC32;
+                }
+                BUSTER_TEST(arguments, separate_roundtrip_cfi);
+            }
+        }
     }
-    BUSTER_TEST(arguments, separate_roundtrip_cfi);
 
     u8 windows_unwind_code[32] = {0};
     CodegenUnwindAction windows_unwind_actions[] = {
@@ -2620,37 +2640,53 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_X86_64,
         .os = OPERATING_SYSTEM_WINDOWS,
     };
-    ObjectFile windows_unwind_object =
-        object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_unwind_module, windows_unwind_target);
-    BUSTER_TEST(arguments, windows_unwind_object.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_UNWIND].data.length == 0);
-    BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 12);
-    BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == 12);
+    ObjectFile windows_unwind_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_unwind_module, windows_unwind_target);
     u8 expected_windows_xdata[] = {
         1, 11, 3, 0, 11, 1, 18, 0, 1, 0x50, 0, 0,
     };
-    BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_xdata) &&
-                               memcmp(windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.pointer, expected_windows_xdata,
-                                      sizeof(expected_windows_xdata)) == 0);
-    BUSTER_TEST(arguments, windows_unwind_object.relocation_count == 3);
-    for (u32 relocation_index = 0; relocation_index < windows_unwind_object.relocation_count; relocation_index += 1)
+    bool windows_unwind_object_valid =
+        BUSTER_REQUIRE(arguments, windows_unwind_object.error == OBJECT_ERROR_NONE && windows_unwind_object.sections != 0 &&
+                                      windows_unwind_object.section_count > OBJECT_SECTION_WINDOWS_XDATA && windows_unwind_object.relocations != 0);
+    if (windows_unwind_object_valid)
     {
-        BUSTER_TEST(arguments, windows_unwind_object.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
-        BUSTER_TEST(arguments, windows_unwind_object.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
-    }
-    ObjectArtifact windows_unwind_coff = object_write(arguments->arena, &windows_unwind_object, OBJECT_FORMAT_COFF);
-    BUSTER_TEST(arguments, windows_unwind_coff.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, object_bytes_contain(windows_unwind_coff.bytes, S8(".pdata")));
-    BUSTER_TEST(arguments, object_bytes_contain(windows_unwind_coff.bytes, S8(".xdata")));
-    ObjectFile windows_unwind_roundtrip = object_read(arguments->arena, windows_unwind_coff.bytes, windows_unwind_target);
-    BUSTER_TEST(arguments, windows_unwind_roundtrip.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, windows_unwind_roundtrip.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 12);
-    BUSTER_TEST(arguments, windows_unwind_roundtrip.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_xdata));
-    BUSTER_TEST(arguments, windows_unwind_roundtrip.relocation_count == 3);
-    for (u32 relocation_index = 0; relocation_index < windows_unwind_roundtrip.relocation_count; relocation_index += 1)
-    {
-        BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
-        BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+        BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_UNWIND].data.length == 0);
+        BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 12);
+        BUSTER_TEST(arguments, windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == 12);
+        ByteSlice windows_unwind_xdata = windows_unwind_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+        if (BUSTER_REQUIRE(arguments, windows_unwind_xdata.pointer != 0 && windows_unwind_xdata.length == sizeof(expected_windows_xdata)))
+        {
+            BUSTER_TEST(arguments, memcmp(windows_unwind_xdata.pointer, expected_windows_xdata, sizeof(expected_windows_xdata)) == 0);
+        }
+        if (BUSTER_REQUIRE(arguments, windows_unwind_object.relocation_count == 3))
+        {
+            for (u32 relocation_index = 0; relocation_index < windows_unwind_object.relocation_count; relocation_index += 1)
+            {
+                BUSTER_TEST(arguments, windows_unwind_object.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
+                BUSTER_TEST(arguments, windows_unwind_object.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+            }
+        }
+        ObjectArtifact windows_unwind_coff = object_write(arguments->arena, &windows_unwind_object, OBJECT_FORMAT_COFF);
+        if (BUSTER_REQUIRE(arguments, windows_unwind_coff.error == OBJECT_ERROR_NONE))
+        {
+            BUSTER_TEST(arguments, object_bytes_contain(windows_unwind_coff.bytes, S8(".pdata")));
+            BUSTER_TEST(arguments, object_bytes_contain(windows_unwind_coff.bytes, S8(".xdata")));
+            ObjectFile windows_unwind_roundtrip = object_read(arguments->arena, windows_unwind_coff.bytes, windows_unwind_target);
+            if (BUSTER_REQUIRE(arguments, windows_unwind_roundtrip.error == OBJECT_ERROR_NONE && windows_unwind_roundtrip.sections != 0 &&
+                                              windows_unwind_roundtrip.section_count > OBJECT_SECTION_WINDOWS_XDATA &&
+                                              windows_unwind_roundtrip.relocations != 0))
+            {
+                BUSTER_TEST(arguments, windows_unwind_roundtrip.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 12);
+                BUSTER_TEST(arguments, windows_unwind_roundtrip.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_xdata));
+                if (BUSTER_REQUIRE(arguments, windows_unwind_roundtrip.relocation_count == 3))
+                {
+                    for (u32 relocation_index = 0; relocation_index < windows_unwind_roundtrip.relocation_count; relocation_index += 1)
+                    {
+                        BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
+                        BUSTER_TEST(arguments, windows_unwind_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+                    }
+                }
+            }
+        }
     }
     // #363: an early RBP establishment cannot be shifted to describe a
     // later allocation. Pin both prologue orders, SAVE offsets, and the
@@ -2737,41 +2773,59 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     windows_save_module.code = (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_save_code);
     windows_save_module.functions = &windows_save_function;
     ObjectFile windows_save_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_save_module, windows_unwind_target);
-    BUSTER_TEST(arguments, windows_save_object.error == OBJECT_ERROR_NONE);
     u8 expected_windows_save_xdata[] = {
         1, 8, 2, 0, 8, 0x34, 64, 0,
     };
-    ByteSlice windows_save_xdata = windows_save_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
-    BUSTER_TEST(arguments, windows_save_xdata.length == sizeof(expected_windows_save_xdata) &&
-                               memcmp(windows_save_xdata.pointer, expected_windows_save_xdata, sizeof(expected_windows_save_xdata)) == 0);
+    if (BUSTER_REQUIRE(arguments, windows_save_object.error == OBJECT_ERROR_NONE && windows_save_object.sections != 0 &&
+                                      windows_save_object.section_count > OBJECT_SECTION_WINDOWS_XDATA))
+    {
+        ByteSlice windows_save_xdata = windows_save_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+        if (BUSTER_REQUIRE(arguments, windows_save_xdata.pointer != 0 && windows_save_xdata.length == sizeof(expected_windows_save_xdata)))
+        {
+            BUSTER_TEST(arguments, memcmp(windows_save_xdata.pointer, expected_windows_save_xdata, sizeof(expected_windows_save_xdata)) == 0);
+        }
+    }
     u8 windows_far_save_code[16] = {0};
     windows_save_actions[0].value = 524288;
     CodegenModule windows_far_save_module = windows_save_module;
     windows_far_save_module.code = (ByteSlice)BUSTER_ARRAY_TO_SLICE(windows_far_save_code);
-    ObjectFile windows_far_save_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_far_save_module, windows_unwind_target);
-    BUSTER_TEST(arguments, windows_far_save_object.error == OBJECT_ERROR_NONE);
+    ObjectFile windows_far_save_object =
+        object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_far_save_module, windows_unwind_target);
     u8 expected_windows_far_save_xdata[] = {
         1, 8, 3, 0, 8, 0x35, 0, 0, 8, 0, 0, 0,
     };
-    ByteSlice windows_far_save_xdata = windows_far_save_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
-    BUSTER_TEST(arguments, windows_far_save_xdata.length == sizeof(expected_windows_far_save_xdata) &&
-                               memcmp(windows_far_save_xdata.pointer, expected_windows_far_save_xdata, sizeof(expected_windows_far_save_xdata)) == 0);
-    ObjectArtifact windows_far_save_coff = object_write(arguments->arena, &windows_far_save_object, OBJECT_FORMAT_COFF);
-    BUSTER_TEST(arguments, windows_far_save_coff.error == OBJECT_ERROR_NONE);
-    ObjectFile windows_far_save_roundtrip = object_read(arguments->arena, windows_far_save_coff.bytes, windows_unwind_target);
-    BUSTER_TEST(arguments, windows_far_save_roundtrip.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, windows_far_save_roundtrip.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_far_save_xdata));
-    if (windows_far_save_roundtrip.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_far_save_xdata))
+    if (BUSTER_REQUIRE(arguments, windows_far_save_object.error == OBJECT_ERROR_NONE && windows_far_save_object.sections != 0 &&
+                                      windows_far_save_object.section_count > OBJECT_SECTION_WINDOWS_XDATA))
     {
-        BUSTER_TEST(arguments, memcmp(windows_far_save_roundtrip.sections[OBJECT_SECTION_WINDOWS_XDATA].data.pointer, expected_windows_far_save_xdata,
-                                      sizeof(expected_windows_far_save_xdata)) == 0);
+        ByteSlice windows_far_save_xdata = windows_far_save_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+        if (BUSTER_REQUIRE(arguments, windows_far_save_xdata.pointer != 0 && windows_far_save_xdata.length == sizeof(expected_windows_far_save_xdata)))
+        {
+            BUSTER_TEST(arguments, memcmp(windows_far_save_xdata.pointer, expected_windows_far_save_xdata, sizeof(expected_windows_far_save_xdata)) == 0);
+        }
+        ObjectArtifact windows_far_save_coff = object_write(arguments->arena, &windows_far_save_object, OBJECT_FORMAT_COFF);
+        if (BUSTER_REQUIRE(arguments, windows_far_save_coff.error == OBJECT_ERROR_NONE))
+        {
+            ObjectFile windows_far_save_roundtrip = object_read(arguments->arena, windows_far_save_coff.bytes, windows_unwind_target);
+            if (BUSTER_REQUIRE(arguments, windows_far_save_roundtrip.error == OBJECT_ERROR_NONE && windows_far_save_roundtrip.sections != 0 &&
+                                              windows_far_save_roundtrip.section_count > OBJECT_SECTION_WINDOWS_XDATA))
+            {
+                ByteSlice roundtrip_xdata = windows_far_save_roundtrip.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+                if (BUSTER_REQUIRE(arguments, roundtrip_xdata.pointer != 0 && roundtrip_xdata.length == sizeof(expected_windows_far_save_xdata)))
+                {
+                    BUSTER_TEST(arguments, memcmp(roundtrip_xdata.pointer, expected_windows_far_save_xdata, sizeof(expected_windows_far_save_xdata)) == 0);
+                }
+            }
+        }
     }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
-    ObjectExecutable windows_unwind_executable = object_link_executable(&windows_unwind_object);
-    BUSTER_TEST(arguments, windows_unwind_executable.error == OBJECT_ERROR_NONE);
-    if (windows_unwind_executable.address)
+    if (windows_unwind_object_valid)
     {
-        object_release_executable(windows_unwind_executable);
+        ObjectExecutable windows_unwind_executable = object_link_executable(&windows_unwind_object);
+        BUSTER_TEST(arguments, windows_unwind_executable.error == OBJECT_ERROR_NONE);
+        if (windows_unwind_executable.address)
+        {
+            object_release_executable(windows_unwind_executable);
+        }
     }
 #endif
 
@@ -2807,29 +2861,40 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         .cpu_arch = CPU_ARCH_AARCH64,
         .os = OPERATING_SYSTEM_WINDOWS,
     };
-    ObjectFile windows_arm64_object =
-        object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_arm64_module, windows_arm64_target);
-    BUSTER_TEST(arguments, windows_arm64_object.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, windows_arm64_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 8);
+    ObjectFile windows_arm64_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_arm64_module, windows_arm64_target);
     u8 expected_windows_arm64_xdata[] = {
         0x10, 0x00, 0x40, 0x20, 0x0c, 0x00, 0x00, 0x02, 0xe3, 0xd2, 0x40, 0xe3, 0x03, 0xe1, 0x81, 0xe4, 0xe3, 0xd2, 0x40, 0x03,
         0x81, 0xe4, 0x00, 0x00,
     };
-    ByteSlice windows_arm64_xdata = windows_arm64_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
-    BUSTER_TEST(arguments, windows_arm64_xdata.length == sizeof(expected_windows_arm64_xdata) &&
-                               memcmp(windows_arm64_xdata.pointer, expected_windows_arm64_xdata, sizeof(expected_windows_arm64_xdata)) == 0);
-    BUSTER_TEST(arguments, windows_arm64_object.relocation_count == 2);
-    ObjectArtifact windows_arm64_coff = object_write(arguments->arena, &windows_arm64_object, OBJECT_FORMAT_COFF);
-    BUSTER_TEST(arguments, windows_arm64_coff.error == OBJECT_ERROR_NONE);
-    ObjectFile windows_arm64_roundtrip = object_read(arguments->arena, windows_arm64_coff.bytes, windows_arm64_target);
-    BUSTER_TEST(arguments, windows_arm64_roundtrip.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, windows_arm64_roundtrip.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 8);
-    BUSTER_TEST(arguments, windows_arm64_roundtrip.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_arm64_xdata));
-    BUSTER_TEST(arguments, windows_arm64_roundtrip.relocation_count == 2);
-    for (u32 relocation_index = 0; relocation_index < windows_arm64_roundtrip.relocation_count; relocation_index += 1)
+    if (BUSTER_REQUIRE(arguments, windows_arm64_object.error == OBJECT_ERROR_NONE && windows_arm64_object.sections != 0 &&
+                                      windows_arm64_object.section_count > OBJECT_SECTION_WINDOWS_XDATA))
     {
-        BUSTER_TEST(arguments, windows_arm64_roundtrip.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
-        BUSTER_TEST(arguments, windows_arm64_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+        BUSTER_TEST(arguments, windows_arm64_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 8);
+        ByteSlice windows_arm64_xdata = windows_arm64_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+        if (BUSTER_REQUIRE(arguments, windows_arm64_xdata.pointer != 0 && windows_arm64_xdata.length == sizeof(expected_windows_arm64_xdata)))
+        {
+            BUSTER_TEST(arguments, memcmp(windows_arm64_xdata.pointer, expected_windows_arm64_xdata, sizeof(expected_windows_arm64_xdata)) == 0);
+        }
+        BUSTER_TEST(arguments, windows_arm64_object.relocation_count == 2);
+        ObjectArtifact windows_arm64_coff = object_write(arguments->arena, &windows_arm64_object, OBJECT_FORMAT_COFF);
+        if (BUSTER_REQUIRE(arguments, windows_arm64_coff.error == OBJECT_ERROR_NONE))
+        {
+            ObjectFile windows_arm64_roundtrip = object_read(arguments->arena, windows_arm64_coff.bytes, windows_arm64_target);
+            if (BUSTER_REQUIRE(arguments, windows_arm64_roundtrip.error == OBJECT_ERROR_NONE && windows_arm64_roundtrip.sections != 0 &&
+                                              windows_arm64_roundtrip.section_count > OBJECT_SECTION_WINDOWS_XDATA && windows_arm64_roundtrip.relocations != 0))
+            {
+                BUSTER_TEST(arguments, windows_arm64_roundtrip.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length == 8);
+                BUSTER_TEST(arguments, windows_arm64_roundtrip.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length == sizeof(expected_windows_arm64_xdata));
+                if (BUSTER_REQUIRE(arguments, windows_arm64_roundtrip.relocation_count == 2))
+                {
+                    for (u32 relocation_index = 0; relocation_index < windows_arm64_roundtrip.relocation_count; relocation_index += 1)
+                    {
+                        BUSTER_TEST(arguments, windows_arm64_roundtrip.relocations[relocation_index].section == OBJECT_SECTION_WINDOWS_PDATA);
+                        BUSTER_TEST(arguments, windows_arm64_roundtrip.relocations[relocation_index].kind == OBJECT_RELOCATION_COFF_ADDR32NB);
+                    }
+                }
+            }
+        }
     }
 
     // MIR saves precede X29 establishment. Its epilog shares the suffix
@@ -2861,26 +2926,48 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     windows_arm64_machine_module.functions = &windows_arm64_machine_function;
     ObjectFile windows_arm64_machine_object =
         object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_arm64_machine_module, windows_arm64_target);
-    BUSTER_TEST(arguments, windows_arm64_machine_object.error == OBJECT_ERROR_NONE);
+    bool windows_arm64_machine_object_valid = BUSTER_REQUIRE(arguments, windows_arm64_machine_object.error == OBJECT_ERROR_NONE);
+    if (windows_arm64_machine_object_valid)
+    {
+        windows_arm64_machine_object_valid =
+            BUSTER_REQUIRE(arguments, windows_arm64_machine_object.sections != 0 && windows_arm64_machine_object.section_count > OBJECT_SECTION_WINDOWS_XDATA);
+    }
     u8 expected_windows_arm64_machine_xdata[] = {
-        0x14, 0x00, 0x40, 0x18, 0x0e, 0x00, 0xc0, 0x00,
-        0xe3, 0xe3, 0x04, 0xe1, 0xd2, 0x44, 0xd2, 0x03, 0xd0, 0x02, 0x85, 0xe4,
+        0x14, 0x00, 0x40, 0x18, 0x0e, 0x00, 0xc0, 0x00, 0xe3, 0xe3, 0x04, 0xe1, 0xd2, 0x44, 0xd2, 0x03, 0xd0, 0x02, 0x85, 0xe4,
     };
-    ByteSlice windows_arm64_machine_xdata = windows_arm64_machine_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
-    BUSTER_TEST(arguments, windows_arm64_machine_xdata.length == sizeof(expected_windows_arm64_machine_xdata) &&
-                               memcmp(windows_arm64_machine_xdata.pointer, expected_windows_arm64_machine_xdata,
-                                      sizeof(expected_windows_arm64_machine_xdata)) == 0);
+    if (windows_arm64_machine_object_valid)
+    {
+        ByteSlice windows_arm64_machine_xdata = windows_arm64_machine_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+        BUSTER_TEST(arguments,
+                    windows_arm64_machine_xdata.length == sizeof(expected_windows_arm64_machine_xdata) &&
+                        memcmp(windows_arm64_machine_xdata.pointer, expected_windows_arm64_machine_xdata, sizeof(expected_windows_arm64_machine_xdata)) == 0);
+    }
     for (u32 malformed = 0; malformed < 5; malformed += 1)
     {
         CodegenUnwindAction invalid_actions[BUSTER_ARRAY_LENGTH(windows_arm64_machine_actions)];
         memcpy(invalid_actions, windows_arm64_machine_actions, sizeof(invalid_actions));
         CodegenFunctionDescriptor invalid_function = windows_arm64_machine_function;
         invalid_function.unwind_actions = invalid_actions;
-        if (malformed == 0) { invalid_actions[5].value += 8; }
-        if (malformed == 1) { invalid_actions[4].register_index = 19; }
-        if (malformed == 2) { invalid_actions[7].code_offset += 4; }
-        if (malformed == 3) { invalid_actions[6].kind = CODEGEN_UNWIND_ACTION_NOP; }
-        if (malformed == 4) { invalid_function.prolog_size += 4; }
+        if (malformed == 0)
+        {
+            invalid_actions[5].value += 8;
+        }
+        if (malformed == 1)
+        {
+            invalid_actions[4].register_index = 19;
+        }
+        if (malformed == 2)
+        {
+            invalid_actions[7].code_offset += 4;
+        }
+        if (malformed == 3)
+        {
+            invalid_actions[6].kind = CODEGEN_UNWIND_ACTION_NOP;
+        }
+        if (malformed == 4)
+        {
+            invalid_function.prolog_size += 4;
+        }
         CodegenModule invalid_module = windows_arm64_machine_module;
         invalid_module.functions = &invalid_function;
         ObjectFile invalid_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &invalid_module, windows_arm64_target);
@@ -2891,106 +2978,130 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     mach_cfi_module.relocations = 0;
     mach_cfi_module.relocation_count = 0;
     ObjectFile mach_cfi_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &mach_cfi_module,
-                                                            (Target){
-                                                                .cpu_arch = CPU_ARCH_X86_64,
-                                                                .os = OPERATING_SYSTEM_MACOS,
-                                                            });
-    BUSTER_TEST(arguments, mach_cfi_object.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, mach_cfi_object.sections[OBJECT_SECTION_UNWIND].data.length > 0);
-    ObjectArtifact mach_cfi_artifact = object_write(arguments->arena, &mach_cfi_object, OBJECT_FORMAT_MACH_O64);
-    BUSTER_TEST(arguments, mach_cfi_artifact.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, object_bytes_contain(mach_cfi_artifact.bytes, S8("__eh_frame")));
-    ObjectFile mach_cfi_roundtrip = object_read(arguments->arena, mach_cfi_artifact.bytes, mach_cfi_object.target);
-    BUSTER_TEST(arguments, mach_cfi_roundtrip.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, mach_cfi_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length ==
-                               mach_cfi_object.sections[OBJECT_SECTION_UNWIND].data.length);
-    BUSTER_TEST(arguments, mach_cfi_roundtrip.relocation_count == 1);
-    if (mach_cfi_roundtrip.relocation_count == 1)
+                                                                      (Target){
+                                                                          .cpu_arch = CPU_ARCH_X86_64,
+                                                                          .os = OPERATING_SYSTEM_MACOS,
+                                                                      });
+    bool mach_cfi_object_valid = BUSTER_REQUIRE(arguments, mach_cfi_object.error == OBJECT_ERROR_NONE);
+    if (mach_cfi_object_valid)
     {
-        BUSTER_TEST(arguments, mach_cfi_roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND);
-        BUSTER_TEST(arguments, mach_cfi_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
+        mach_cfi_object_valid =
+            BUSTER_REQUIRE(arguments, mach_cfi_object.section_count > OBJECT_SECTION_UNWIND && mach_cfi_object.sections != 0 &&
+                                          mach_cfi_object.relocation_count == 1 && mach_cfi_object.relocations != 0 &&
+                                          mach_cfi_object.relocations[0].symbol < mach_cfi_object.symbol_count && mach_cfi_object.symbols != 0);
     }
-
-    // Apple ld accepts a SUBTRACTOR/UNSIGNED pair in x86 __eh_frame, not the
-    // SIGNED relocation used for instruction operands. Keep the section at a
-    // noncanonical index to test classification by kind rather than array slot.
-    ObjectSection x86_cfi_sections[] = {
-        mach_cfi_object.sections[OBJECT_SECTION_TEXT], mach_cfi_object.sections[OBJECT_SECTION_UNWIND],
-    };
-    x86_cfi_sections[1].data.pointer = arena_allocate(arguments->arena, u8, x86_cfi_sections[1].data.length);
-    memcpy(x86_cfi_sections[1].data.pointer, mach_cfi_object.sections[OBJECT_SECTION_UNWIND].data.pointer,
-           (size_t)x86_cfi_sections[1].data.length);
-    ObjectRelocation x86_cfi_relocation = mach_cfi_object.relocations[0];
-    ObjectSymbol x86_cfi_symbol = mach_cfi_object.symbols[x86_cfi_relocation.symbol];
-    x86_cfi_symbol.section = 0;
-    x86_cfi_relocation.section = 1;
-    x86_cfi_relocation.symbol = 0;
-    ObjectFile x86_cfi_sparse = mach_cfi_object;
-    x86_cfi_sparse.sections = x86_cfi_sections;
-    x86_cfi_sparse.section_count = BUSTER_ARRAY_LENGTH(x86_cfi_sections);
-    x86_cfi_sparse.symbols = &x86_cfi_symbol;
-    x86_cfi_sparse.symbol_count = 1;
-    x86_cfi_sparse.relocations = &x86_cfi_relocation;
-    x86_cfi_sparse.relocation_count = 1;
-    s64 x86_cfi_addends[] = {INT32_MIN, -17, 0, 23, INT32_MAX};
-    ObjectArtifact x86_cfi_pair = {0};
-    u32 x86_cfi_relocations_offset = 0;
-    for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(x86_cfi_addends); addend_index += 1)
+    if (mach_cfi_object_valid)
     {
-        x86_cfi_relocation.addend = x86_cfi_addends[addend_index];
-        memset(x86_cfi_sections[1].data.pointer + x86_cfi_relocation.offset, 0xa5, 4);
-        x86_cfi_pair = object_write(arguments->arena, &x86_cfi_sparse, OBJECT_FORMAT_MACH_O64);
-        BUSTER_TEST(arguments, x86_cfi_pair.error == OBJECT_ERROR_NONE);
-        u32 raw_offset = 0;
-        u32 relocation_count = 0;
-        bool located = object_test_mach_section_offsets(x86_cfi_pair.bytes, 1, &raw_offset, &x86_cfi_relocations_offset, &relocation_count);
-        BUSTER_TEST(arguments, located && relocation_count == 2);
-        if (located && relocation_count == 2)
+        BUSTER_TEST(arguments, mach_cfi_object.sections[OBJECT_SECTION_UNWIND].data.length > 0);
+        ObjectArtifact mach_cfi_artifact = object_write(arguments->arena, &mach_cfi_object, OBJECT_FORMAT_MACH_O64);
+        if (BUSTER_REQUIRE(arguments, mach_cfi_artifact.error == OBJECT_ERROR_NONE))
         {
-            u32 words[4] = {0};
-            u32 stored = 0;
-            memcpy(words, x86_cfi_pair.bytes.pointer + x86_cfi_relocations_offset, sizeof(words));
-            memcpy(&stored, x86_cfi_pair.bytes.pointer + raw_offset + x86_cfi_relocation.offset, sizeof(stored));
-            // The wire representation is also checked independently against
-            // LLVM assembly output; these bits are the Mach-O contract.
-            BUSTER_TEST(arguments, words[0] == x86_cfi_relocation.offset && words[2] == words[0]);
-            BUSTER_TEST(arguments, (words[1] >> 28) == 5 && (words[3] >> 28) == 0);
-            BUSTER_TEST(arguments, ((words[1] >> 24) & 15) == 12 && ((words[3] >> 24) & 15) == 12);
-            BUSTER_TEST(arguments, (s32)stored == x86_cfi_addends[addend_index]);
-        }
-        ObjectFile roundtrip = object_read(arguments->arena, x86_cfi_pair.bytes, x86_cfi_sparse.target);
-        BUSTER_TEST(arguments, roundtrip.error == OBJECT_ERROR_NONE && roundtrip.relocation_count == 1);
-        if (roundtrip.error == OBJECT_ERROR_NONE && roundtrip.relocation_count == 1)
-        {
-            BUSTER_TEST(arguments, roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32 &&
-                                   roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND &&
-                                   roundtrip.relocations[0].offset == x86_cfi_relocation.offset &&
-                                   roundtrip.relocations[0].addend == x86_cfi_addends[addend_index]);
-        }
-    }
-    x86_cfi_relocation.addend = (s64)INT32_MAX + 1;
-    BUSTER_TEST(arguments, object_write(arguments->arena, &x86_cfi_sparse, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
-    x86_cfi_relocation.addend = (s64)INT32_MIN - 1;
-    BUSTER_TEST(arguments, object_write(arguments->arena, &x86_cfi_sparse, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
-    if (x86_cfi_pair.error == OBJECT_ERROR_NONE && x86_cfi_relocations_offset)
-    {
-        for (u32 defect = 0; defect < 6; defect += 1)
-        {
-            ByteSlice broken = {.pointer = arena_allocate(arguments->arena, u8, x86_cfi_pair.bytes.length), .length = x86_cfi_pair.bytes.length};
-            memcpy(broken.pointer, x86_cfi_pair.bytes.pointer, (size_t)broken.length);
-            u32 words[4] = {0};
-            memcpy(words, broken.pointer + x86_cfi_relocations_offset, sizeof(words));
-            switch (defect)
+            BUSTER_TEST(arguments, object_bytes_contain(mach_cfi_artifact.bytes, S8("__eh_frame")));
+            ObjectFile mach_cfi_roundtrip = object_read(arguments->arena, mach_cfi_artifact.bytes, mach_cfi_object.target);
+            if (BUSTER_REQUIRE(arguments, mach_cfi_roundtrip.error == OBJECT_ERROR_NONE && mach_cfi_roundtrip.sections != 0 &&
+                                              mach_cfi_roundtrip.section_count > OBJECT_SECTION_UNWIND))
             {
-            case 0: words[2] += 4; break; // Pair offsets differ.
-            case 1: words[1] |= 1u << 24; break; // Subtraction is not PC-relative.
-            case 2: words[3] |= 1u << 28; break; // Second record must be UNSIGNED.
-            case 3: words[3] &= ~(1u << 27); break; // Both symbols must be external.
-            case 4: words[1] |= 0x00ffffff; break; // Invalid subtractor symbol.
-            case 5: words[1] &= 0xff000000; break; // Text symbol is not the place.
+                BUSTER_TEST(arguments,
+                            mach_cfi_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length == mach_cfi_object.sections[OBJECT_SECTION_UNWIND].data.length);
+                if (BUSTER_REQUIRE(arguments, mach_cfi_roundtrip.relocation_count == 1 && mach_cfi_roundtrip.relocations != 0))
+                {
+                    BUSTER_TEST(arguments, mach_cfi_roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND);
+                    BUSTER_TEST(arguments, mach_cfi_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
+                }
             }
-            memcpy(broken.pointer + x86_cfi_relocations_offset, words, sizeof(words));
-            BUSTER_TEST(arguments, object_read(arguments->arena, broken, x86_cfi_sparse.target).error != OBJECT_ERROR_NONE);
+        }
+
+        // Apple ld accepts a SUBTRACTOR/UNSIGNED pair in x86 __eh_frame, not the
+        // SIGNED relocation used for instruction operands. Keep the section at a
+        // noncanonical index to test classification by kind rather than array slot.
+        ObjectSection x86_cfi_sections[] = {
+            mach_cfi_object.sections[OBJECT_SECTION_TEXT],
+            mach_cfi_object.sections[OBJECT_SECTION_UNWIND],
+        };
+        x86_cfi_sections[1].data.pointer = arena_allocate(arguments->arena, u8, x86_cfi_sections[1].data.length);
+        memcpy(x86_cfi_sections[1].data.pointer, mach_cfi_object.sections[OBJECT_SECTION_UNWIND].data.pointer, (size_t)x86_cfi_sections[1].data.length);
+        ObjectRelocation x86_cfi_relocation = mach_cfi_object.relocations[0];
+        ObjectSymbol x86_cfi_symbol = mach_cfi_object.symbols[x86_cfi_relocation.symbol];
+        x86_cfi_symbol.section = 0;
+        x86_cfi_relocation.section = 1;
+        x86_cfi_relocation.symbol = 0;
+        ObjectFile x86_cfi_sparse = mach_cfi_object;
+        x86_cfi_sparse.sections = x86_cfi_sections;
+        x86_cfi_sparse.section_count = BUSTER_ARRAY_LENGTH(x86_cfi_sections);
+        x86_cfi_sparse.symbols = &x86_cfi_symbol;
+        x86_cfi_sparse.symbol_count = 1;
+        x86_cfi_sparse.relocations = &x86_cfi_relocation;
+        x86_cfi_sparse.relocation_count = 1;
+        s64 x86_cfi_addends[] = {INT32_MIN, -17, 0, 23, INT32_MAX};
+        ObjectArtifact x86_cfi_pair = {0};
+        u32 x86_cfi_relocations_offset = 0;
+        for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(x86_cfi_addends); addend_index += 1)
+        {
+            x86_cfi_relocation.addend = x86_cfi_addends[addend_index];
+            memset(x86_cfi_sections[1].data.pointer + x86_cfi_relocation.offset, 0xa5, 4);
+            x86_cfi_pair = object_write(arguments->arena, &x86_cfi_sparse, OBJECT_FORMAT_MACH_O64);
+            BUSTER_TEST(arguments, x86_cfi_pair.error == OBJECT_ERROR_NONE);
+            u32 raw_offset = 0;
+            u32 relocation_count = 0;
+            bool located = object_test_mach_section_offsets(x86_cfi_pair.bytes, 1, &raw_offset, &x86_cfi_relocations_offset, &relocation_count);
+            if (BUSTER_REQUIRE(arguments, located && relocation_count == 2))
+            {
+                u32 words[4] = {0};
+                u32 stored = 0;
+                memcpy(words, x86_cfi_pair.bytes.pointer + x86_cfi_relocations_offset, sizeof(words));
+                memcpy(&stored, x86_cfi_pair.bytes.pointer + raw_offset + x86_cfi_relocation.offset, sizeof(stored));
+                // The wire representation is also checked independently against
+                // LLVM assembly output; these bits are the Mach-O contract.
+                BUSTER_TEST(arguments, words[0] == x86_cfi_relocation.offset && words[2] == words[0]);
+                BUSTER_TEST(arguments, (words[1] >> 28) == 5 && (words[3] >> 28) == 0);
+                BUSTER_TEST(arguments, ((words[1] >> 24) & 15) == 12 && ((words[3] >> 24) & 15) == 12);
+                BUSTER_TEST(arguments, (s32)stored == x86_cfi_addends[addend_index]);
+            }
+            ObjectFile roundtrip = object_read(arguments->arena, x86_cfi_pair.bytes, x86_cfi_sparse.target);
+            if (BUSTER_REQUIRE(arguments, roundtrip.error == OBJECT_ERROR_NONE && roundtrip.relocation_count == 1 && roundtrip.relocations != 0))
+            {
+                BUSTER_TEST(arguments, roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32 &&
+                                           roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND &&
+                                           roundtrip.relocations[0].offset == x86_cfi_relocation.offset &&
+                                           roundtrip.relocations[0].addend == x86_cfi_addends[addend_index]);
+            }
+        }
+        x86_cfi_relocation.addend = (s64)INT32_MAX + 1;
+        BUSTER_TEST(arguments, object_write(arguments->arena, &x86_cfi_sparse, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        x86_cfi_relocation.addend = (s64)INT32_MIN - 1;
+        BUSTER_TEST(arguments, object_write(arguments->arena, &x86_cfi_sparse, OBJECT_FORMAT_MACH_O64).error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        if (x86_cfi_pair.error == OBJECT_ERROR_NONE && x86_cfi_relocations_offset)
+        {
+            for (u32 defect = 0; defect < 6; defect += 1)
+            {
+                ByteSlice broken = {.pointer = arena_allocate(arguments->arena, u8, x86_cfi_pair.bytes.length), .length = x86_cfi_pair.bytes.length};
+                memcpy(broken.pointer, x86_cfi_pair.bytes.pointer, (size_t)broken.length);
+                u32 words[4] = {0};
+                memcpy(words, broken.pointer + x86_cfi_relocations_offset, sizeof(words));
+                switch (defect)
+                {
+                case 0:
+                    words[2] += 4;
+                    break; // Pair offsets differ.
+                case 1:
+                    words[1] |= 1u << 24;
+                    break; // Subtraction is not PC-relative.
+                case 2:
+                    words[3] |= 1u << 28;
+                    break; // Second record must be UNSIGNED.
+                case 3:
+                    words[3] &= ~(1u << 27);
+                    break; // Both symbols must be external.
+                case 4:
+                    words[1] |= 0x00ffffff;
+                    break; // Invalid subtractor symbol.
+                case 5:
+                    words[1] &= 0xff000000;
+                    break; // Text symbol is not the place.
+                }
+                memcpy(broken.pointer + x86_cfi_relocations_offset, words, sizeof(words));
+                BUSTER_TEST(arguments, object_read(arguments->arena, broken, x86_cfi_sparse.target).error != OBJECT_ERROR_NONE);
+            }
         }
     }
 
@@ -2999,45 +3110,61 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     a64_cfi_module.relocation_count = 0;
     a64_cfi_module.abi = CODEGEN_ABI_AARCH64_AAPCS64;
     ObjectFile a64_cfi_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &a64_cfi_module,
-                                                           (Target){
-                                                               .cpu_arch = CPU_ARCH_AARCH64,
-                                                               .os = OPERATING_SYSTEM_LINUX,
-                                                           });
-    BUSTER_TEST(arguments, a64_cfi_object.error == OBJECT_ERROR_NONE);
-    ObjectArtifact a64_cfi_elf = object_write(arguments->arena, &a64_cfi_object, OBJECT_FORMAT_ELF64);
-    BUSTER_TEST(arguments, a64_cfi_elf.error == OBJECT_ERROR_NONE);
-    ObjectFile a64_cfi_roundtrip = object_read(arguments->arena, a64_cfi_elf.bytes, a64_cfi_object.target);
-    BUSTER_TEST(arguments, a64_cfi_roundtrip.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, a64_cfi_roundtrip.relocation_count == 1);
-    if (a64_cfi_roundtrip.relocation_count == 1)
+                                                                     (Target){
+                                                                         .cpu_arch = CPU_ARCH_AARCH64,
+                                                                         .os = OPERATING_SYSTEM_LINUX,
+                                                                     });
+    if (BUSTER_REQUIRE(arguments, a64_cfi_object.error == OBJECT_ERROR_NONE))
     {
-        BUSTER_TEST(arguments, a64_cfi_roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND);
-        BUSTER_TEST(arguments, a64_cfi_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_PREL32);
+        ObjectArtifact a64_cfi_elf = object_write(arguments->arena, &a64_cfi_object, OBJECT_FORMAT_ELF64);
+        if (BUSTER_REQUIRE(arguments, a64_cfi_elf.error == OBJECT_ERROR_NONE))
+        {
+            ObjectFile a64_cfi_roundtrip = object_read(arguments->arena, a64_cfi_elf.bytes, a64_cfi_object.target);
+            if (BUSTER_REQUIRE(arguments, a64_cfi_roundtrip.error == OBJECT_ERROR_NONE))
+            {
+                if (BUSTER_REQUIRE(arguments, a64_cfi_roundtrip.relocation_count == 1 && a64_cfi_roundtrip.relocations != 0))
+                {
+                    BUSTER_TEST(arguments, a64_cfi_roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND);
+                    BUSTER_TEST(arguments, a64_cfi_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_PREL32);
+                }
+            }
+        }
     }
     ObjectFile a64_mach_cfi_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &a64_cfi_module,
                                                                 (Target){
                                                                     .cpu_arch = CPU_ARCH_AARCH64,
                                                                     .os = OPERATING_SYSTEM_MACOS,
                                                                 });
-    BUSTER_TEST(arguments, a64_mach_cfi_object.error == OBJECT_ERROR_NONE);
-    ObjectArtifact a64_mach_cfi_artifact = object_write(arguments->arena, &a64_mach_cfi_object, OBJECT_FORMAT_MACH_O64);
-    BUSTER_TEST(arguments, a64_mach_cfi_artifact.error == OBJECT_ERROR_NONE);
-    u64 a64_mach_cfi_section_header = 32 + 72 + (u64)OBJECT_SECTION_UNWIND * 80;
-    u32 a64_mach_cfi_flags = 0;
-    if (a64_mach_cfi_section_header + 68 <= a64_mach_cfi_artifact.bytes.length)
+    bool a64_mach_cfi_object_valid = BUSTER_REQUIRE(arguments, a64_mach_cfi_object.error == OBJECT_ERROR_NONE);
+    if (a64_mach_cfi_object_valid)
     {
-        memcpy(&a64_mach_cfi_flags, a64_mach_cfi_artifact.bytes.pointer + a64_mach_cfi_section_header + 64, sizeof(a64_mach_cfi_flags));
+        a64_mach_cfi_object_valid = BUSTER_REQUIRE(arguments, a64_mach_cfi_object.section_count > OBJECT_SECTION_UNWIND && a64_mach_cfi_object.sections != 0);
     }
-    BUSTER_TEST(arguments, a64_mach_cfi_flags == 0x6800000b);
-    ObjectFile a64_mach_cfi_roundtrip = object_read(arguments->arena, a64_mach_cfi_artifact.bytes, a64_mach_cfi_object.target);
-    BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length ==
-                               a64_mach_cfi_object.sections[OBJECT_SECTION_UNWIND].data.length);
-    BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.relocation_count == 1);
-    if (a64_mach_cfi_roundtrip.relocation_count == 1)
+    if (a64_mach_cfi_object_valid)
     {
-        BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND);
-        BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_PREL32);
+        ObjectArtifact a64_mach_cfi_artifact = object_write(arguments->arena, &a64_mach_cfi_object, OBJECT_FORMAT_MACH_O64);
+        if (BUSTER_REQUIRE(arguments, a64_mach_cfi_artifact.error == OBJECT_ERROR_NONE))
+        {
+            u64 a64_mach_cfi_section_header = 32 + 72 + (u64)OBJECT_SECTION_UNWIND * 80;
+            if (BUSTER_REQUIRE(arguments, a64_mach_cfi_artifact.bytes.pointer != 0 && a64_mach_cfi_section_header + 68 <= a64_mach_cfi_artifact.bytes.length))
+            {
+                u32 a64_mach_cfi_flags = 0;
+                memcpy(&a64_mach_cfi_flags, a64_mach_cfi_artifact.bytes.pointer + a64_mach_cfi_section_header + 64, sizeof(a64_mach_cfi_flags));
+                BUSTER_TEST(arguments, a64_mach_cfi_flags == 0x6800000b);
+            }
+            ObjectFile a64_mach_cfi_roundtrip = object_read(arguments->arena, a64_mach_cfi_artifact.bytes, a64_mach_cfi_object.target);
+            if (BUSTER_REQUIRE(arguments, a64_mach_cfi_roundtrip.error == OBJECT_ERROR_NONE && a64_mach_cfi_roundtrip.sections != 0 &&
+                                              a64_mach_cfi_roundtrip.section_count > OBJECT_SECTION_UNWIND))
+            {
+                BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length ==
+                                           a64_mach_cfi_object.sections[OBJECT_SECTION_UNWIND].data.length);
+                if (BUSTER_REQUIRE(arguments, a64_mach_cfi_roundtrip.relocation_count == 1 && a64_mach_cfi_roundtrip.relocations != 0))
+                {
+                    BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.relocations[0].section == OBJECT_SECTION_UNWIND);
+                    BUSTER_TEST(arguments, a64_mach_cfi_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_PREL32);
+                }
+            }
+        }
     }
 
     u32 a64_mach_prel_text_data[2] = {0};
@@ -3154,8 +3281,6 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, a64_mach_prel_shape_valid);
     ObjectFile a64_mach_prel_roundtrip = object_read(arguments->arena, a64_mach_prel_artifact.bytes, a64_mach_prel_object.target);
-    BUSTER_TEST(arguments, a64_mach_prel_roundtrip.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, a64_mach_prel_roundtrip.relocation_count == BUSTER_ARRAY_LENGTH(a64_mach_prel_relocations));
     ObjectSectionKind a64_mach_prel_expected_sections[] = {
         OBJECT_SECTION_TEXT,
         OBJECT_SECTION_READ_ONLY_DATA,
@@ -3166,8 +3291,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         S8("prel_data_target"),
         S8("prel_text_target"),
     };
-    if (a64_mach_prel_roundtrip.error == OBJECT_ERROR_NONE &&
-        a64_mach_prel_roundtrip.relocation_count == BUSTER_ARRAY_LENGTH(a64_mach_prel_relocations))
+    if (BUSTER_REQUIRE(arguments, a64_mach_prel_roundtrip.error == OBJECT_ERROR_NONE && a64_mach_prel_roundtrip.relocations != 0 &&
+                                      a64_mach_prel_roundtrip.symbols != 0 &&
+                                      a64_mach_prel_roundtrip.relocation_count == BUSTER_ARRAY_LENGTH(a64_mach_prel_relocations)))
     {
         for (u32 relocation_index = 0; relocation_index < BUSTER_ARRAY_LENGTH(a64_mach_prel_relocations); relocation_index += 1)
         {
@@ -3303,20 +3429,30 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     {
         memcpy(&zero_slot, a64_mach_prel_zero_artifact.bytes.pointer + zero_raw_offset + sizeof(u32), sizeof(zero_slot));
     }
-    BUSTER_TEST(arguments, a64_mach_prel_zero_artifact.error == OBJECT_ERROR_NONE && zero_offsets_valid && zero_slot == 0);
-    ObjectFile a64_mach_prel_zero_roundtrip = object_read(arguments->arena, a64_mach_prel_zero_artifact.bytes, a64_mach_prel_object.target);
-    BUSTER_TEST(arguments, a64_mach_prel_zero_roundtrip.error == OBJECT_ERROR_NONE && a64_mach_prel_zero_roundtrip.relocation_count == 3 &&
-                               a64_mach_prel_zero_roundtrip.relocations[0].addend == 0);
+    if (BUSTER_REQUIRE(arguments, a64_mach_prel_zero_artifact.error == OBJECT_ERROR_NONE && zero_offsets_valid && zero_slot == 0))
+    {
+        ObjectFile a64_mach_prel_zero_roundtrip = object_read(arguments->arena, a64_mach_prel_zero_artifact.bytes, a64_mach_prel_object.target);
+        if (BUSTER_REQUIRE(arguments, a64_mach_prel_zero_roundtrip.error == OBJECT_ERROR_NONE && a64_mach_prel_zero_roundtrip.relocation_count == 3 &&
+                                          a64_mach_prel_zero_roundtrip.relocations != 0))
+        {
+            BUSTER_TEST(arguments, a64_mach_prel_zero_roundtrip.relocations[0].addend == 0);
+        }
+    }
     a64_mach_prel_relocations[0].addend = INT32_MAX;
     a64_mach_prel_relocations[1].addend = INT32_MIN;
     a64_mach_prel_relocations[2].addend = 0;
     ObjectArtifact a64_mach_prel_boundary_artifact = object_write(arguments->arena, &a64_mach_prel_object, OBJECT_FORMAT_MACH_O64);
-    BUSTER_TEST(arguments, a64_mach_prel_boundary_artifact.error == OBJECT_ERROR_NONE);
-    ObjectFile a64_mach_prel_boundary_roundtrip = object_read(arguments->arena, a64_mach_prel_boundary_artifact.bytes, a64_mach_prel_object.target);
-    BUSTER_TEST(arguments, a64_mach_prel_boundary_roundtrip.error == OBJECT_ERROR_NONE && a64_mach_prel_boundary_roundtrip.relocation_count == 3 &&
-                               a64_mach_prel_boundary_roundtrip.relocations[0].addend == INT32_MAX &&
-                               a64_mach_prel_boundary_roundtrip.relocations[1].addend == INT32_MIN &&
-                               a64_mach_prel_boundary_roundtrip.relocations[2].addend == 0);
+    if (BUSTER_REQUIRE(arguments, a64_mach_prel_boundary_artifact.error == OBJECT_ERROR_NONE))
+    {
+        ObjectFile a64_mach_prel_boundary_roundtrip = object_read(arguments->arena, a64_mach_prel_boundary_artifact.bytes, a64_mach_prel_object.target);
+        if (BUSTER_REQUIRE(arguments, a64_mach_prel_boundary_roundtrip.error == OBJECT_ERROR_NONE && a64_mach_prel_boundary_roundtrip.relocation_count == 3 &&
+                                          a64_mach_prel_boundary_roundtrip.relocations != 0))
+        {
+            BUSTER_TEST(arguments, a64_mach_prel_boundary_roundtrip.relocations[0].addend == INT32_MAX &&
+                                       a64_mach_prel_boundary_roundtrip.relocations[1].addend == INT32_MIN &&
+                                       a64_mach_prel_boundary_roundtrip.relocations[2].addend == 0);
+        }
+    }
     s64 invalid_a64_mach_prel_addends[] = {(s64)INT32_MIN - 1, (s64)INT32_MAX + 1};
     for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(invalid_a64_mach_prel_addends); addend_index += 1)
     {
@@ -3388,72 +3524,88 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     u32 compact_x64_encoding = 0x01000000;
     memcpy(compact_x64_entry + 8, &compact_x64_size, sizeof(compact_x64_size));
     memcpy(compact_x64_entry + 12, &compact_x64_encoding, sizeof(compact_x64_encoding));
-    ObjectSection* compact_x64_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
-    memcpy(compact_x64_sections, mach_cfi_object.sections, sizeof(*compact_x64_sections) * OBJECT_SECTION_COUNT);
-    compact_x64_sections[OBJECT_SECTION_TEXT].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(compact_x64_code);
-    compact_x64_sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(compact_x64_entry);
-    compact_x64_sections[OBJECT_SECTION_UNWIND].data = (ByteSlice){0};
-    ObjectSymbol compact_x64_symbol = {
-        .name = S8("compact_x64"),
-        .size = sizeof(compact_x64_code),
-        .section = OBJECT_SECTION_TEXT,
-        .kind = OBJECT_SYMBOL_FUNCTION,
-        .global = true,
-    };
-    ObjectRelocation compact_x64_relocation = {
-        .section = OBJECT_SECTION_READ_ONLY_DATA,
-        .symbol = 0,
-        .kind = OBJECT_RELOCATION_ABSOLUTE64,
-    };
-    ObjectFile compact_x64_object = mach_cfi_object;
-    compact_x64_object.sections = compact_x64_sections;
-    compact_x64_object.symbols = &compact_x64_symbol;
-    compact_x64_object.relocations = &compact_x64_relocation;
-    compact_x64_object.symbol_count = 1;
-    compact_x64_object.relocation_count = 1;
-    ObjectArtifact compact_x64_artifact = object_write(arguments->arena, &compact_x64_object, OBJECT_FORMAT_MACH_O64);
-    BUSTER_TEST(arguments, compact_x64_artifact.error == OBJECT_ERROR_NONE && object_test_mach_compact_section_rewrite(compact_x64_artifact.bytes));
-    ObjectFile compact_x64_roundtrip = object_read(arguments->arena, compact_x64_artifact.bytes, compact_x64_object.target);
-    BUSTER_TEST(arguments, compact_x64_roundtrip.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, compact_x64_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length > 0);
-    BUSTER_TEST(arguments, compact_x64_roundtrip.relocation_count == 1 &&
-                               compact_x64_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
+    if (mach_cfi_object_valid)
+    {
+        ObjectSection* compact_x64_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
+        memcpy(compact_x64_sections, mach_cfi_object.sections, sizeof(*compact_x64_sections) * OBJECT_SECTION_COUNT);
+        compact_x64_sections[OBJECT_SECTION_TEXT].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(compact_x64_code);
+        compact_x64_sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(compact_x64_entry);
+        compact_x64_sections[OBJECT_SECTION_UNWIND].data = (ByteSlice){0};
+        ObjectSymbol compact_x64_symbol = {
+            .name = S8("compact_x64"),
+            .size = sizeof(compact_x64_code),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        };
+        ObjectRelocation compact_x64_relocation = {
+            .section = OBJECT_SECTION_READ_ONLY_DATA,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_ABSOLUTE64,
+        };
+        ObjectFile compact_x64_object = mach_cfi_object;
+        compact_x64_object.sections = compact_x64_sections;
+        compact_x64_object.symbols = &compact_x64_symbol;
+        compact_x64_object.relocations = &compact_x64_relocation;
+        compact_x64_object.symbol_count = 1;
+        compact_x64_object.relocation_count = 1;
+        ObjectArtifact compact_x64_artifact = object_write(arguments->arena, &compact_x64_object, OBJECT_FORMAT_MACH_O64);
+        BUSTER_TEST(arguments, compact_x64_artifact.error == OBJECT_ERROR_NONE && object_test_mach_compact_section_rewrite(compact_x64_artifact.bytes));
+        ObjectFile compact_x64_roundtrip = object_read(arguments->arena, compact_x64_artifact.bytes, compact_x64_object.target);
+        if (BUSTER_REQUIRE(arguments, compact_x64_roundtrip.error == OBJECT_ERROR_NONE && compact_x64_roundtrip.sections != 0 &&
+                                          compact_x64_roundtrip.section_count > OBJECT_SECTION_UNWIND))
+        {
+            BUSTER_TEST(arguments, compact_x64_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length > 0);
+            if (BUSTER_REQUIRE(arguments, compact_x64_roundtrip.relocation_count == 1 && compact_x64_roundtrip.relocations != 0))
+            {
+                BUSTER_TEST(arguments, compact_x64_roundtrip.relocations[0].kind == OBJECT_RELOCATION_X86_64_PC32);
+            }
+        }
+    }
 
     u8 compact_a64_entry[32] = {0};
     u32 compact_a64_size = (u32)sizeof(compact_a64_code);
     u32 compact_a64_encoding = 0x04000000;
     memcpy(compact_a64_entry + 8, &compact_a64_size, sizeof(compact_a64_size));
     memcpy(compact_a64_entry + 12, &compact_a64_encoding, sizeof(compact_a64_encoding));
-    ObjectSection* compact_a64_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
-    memcpy(compact_a64_sections, a64_mach_cfi_object.sections, sizeof(*compact_a64_sections) * OBJECT_SECTION_COUNT);
-    compact_a64_sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = (u8*)compact_a64_code, .length = sizeof(compact_a64_code)};
-    compact_a64_sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(compact_a64_entry);
-    compact_a64_sections[OBJECT_SECTION_UNWIND].data = (ByteSlice){0};
-    ObjectSymbol compact_a64_symbol = {
-        .name = S8("compact_a64"),
-        .size = sizeof(compact_a64_code),
-        .section = OBJECT_SECTION_TEXT,
-        .kind = OBJECT_SYMBOL_FUNCTION,
-        .global = true,
-    };
-    ObjectRelocation compact_a64_relocation = {
-        .section = OBJECT_SECTION_READ_ONLY_DATA,
-        .symbol = 0,
-        .kind = OBJECT_RELOCATION_ABSOLUTE64,
-    };
-    ObjectFile compact_a64_object = a64_mach_cfi_object;
-    compact_a64_object.sections = compact_a64_sections;
-    compact_a64_object.symbols = &compact_a64_symbol;
-    compact_a64_object.relocations = &compact_a64_relocation;
-    compact_a64_object.symbol_count = 1;
-    compact_a64_object.relocation_count = 1;
-    ObjectArtifact compact_a64_artifact = object_write(arguments->arena, &compact_a64_object, OBJECT_FORMAT_MACH_O64);
-    BUSTER_TEST(arguments, compact_a64_artifact.error == OBJECT_ERROR_NONE && object_test_mach_compact_section_rewrite(compact_a64_artifact.bytes));
-    ObjectFile compact_a64_roundtrip = object_read(arguments->arena, compact_a64_artifact.bytes, compact_a64_object.target);
-    BUSTER_TEST(arguments, compact_a64_roundtrip.error == OBJECT_ERROR_NONE);
-    BUSTER_TEST(arguments, compact_a64_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length > 0);
-    BUSTER_TEST(arguments, compact_a64_roundtrip.relocation_count == 1 &&
-                               compact_a64_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_PREL32);
+    if (a64_mach_cfi_object_valid)
+    {
+        ObjectSection* compact_a64_sections = arena_allocate(arguments->arena, ObjectSection, OBJECT_SECTION_COUNT);
+        memcpy(compact_a64_sections, a64_mach_cfi_object.sections, sizeof(*compact_a64_sections) * OBJECT_SECTION_COUNT);
+        compact_a64_sections[OBJECT_SECTION_TEXT].data = (ByteSlice){.pointer = (u8*)compact_a64_code, .length = sizeof(compact_a64_code)};
+        compact_a64_sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(compact_a64_entry);
+        compact_a64_sections[OBJECT_SECTION_UNWIND].data = (ByteSlice){0};
+        ObjectSymbol compact_a64_symbol = {
+            .name = S8("compact_a64"),
+            .size = sizeof(compact_a64_code),
+            .section = OBJECT_SECTION_TEXT,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        };
+        ObjectRelocation compact_a64_relocation = {
+            .section = OBJECT_SECTION_READ_ONLY_DATA,
+            .symbol = 0,
+            .kind = OBJECT_RELOCATION_ABSOLUTE64,
+        };
+        ObjectFile compact_a64_object = a64_mach_cfi_object;
+        compact_a64_object.sections = compact_a64_sections;
+        compact_a64_object.symbols = &compact_a64_symbol;
+        compact_a64_object.relocations = &compact_a64_relocation;
+        compact_a64_object.symbol_count = 1;
+        compact_a64_object.relocation_count = 1;
+        ObjectArtifact compact_a64_artifact = object_write(arguments->arena, &compact_a64_object, OBJECT_FORMAT_MACH_O64);
+        BUSTER_TEST(arguments, compact_a64_artifact.error == OBJECT_ERROR_NONE && object_test_mach_compact_section_rewrite(compact_a64_artifact.bytes));
+        ObjectFile compact_a64_roundtrip = object_read(arguments->arena, compact_a64_artifact.bytes, compact_a64_object.target);
+        if (BUSTER_REQUIRE(arguments, compact_a64_roundtrip.error == OBJECT_ERROR_NONE && compact_a64_roundtrip.sections != 0 &&
+                                          compact_a64_roundtrip.section_count > OBJECT_SECTION_UNWIND))
+        {
+            BUSTER_TEST(arguments, compact_a64_roundtrip.sections[OBJECT_SECTION_UNWIND].data.length > 0);
+            if (BUSTER_REQUIRE(arguments, compact_a64_roundtrip.relocation_count == 1 && compact_a64_roundtrip.relocations != 0))
+            {
+                BUSTER_TEST(arguments, compact_a64_roundtrip.relocations[0].kind == OBJECT_RELOCATION_AARCH64_PREL32);
+            }
+        }
+    }
     CodegenFunctionDescriptor invalid_function = separate_function;
     invalid_function.prolog_size = invalid_function.code_size + 1;
     CodegenModule invalid_module = separate_module;
