@@ -410,6 +410,67 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_test_coff_comdat_object(Arena* arena)
     return (ByteSlice){.pointer = bytes, .length = length};
 }
 
+// Sweep every remaining-capacity boundary of a valid object, not only the
+// first allocation. Reuse one real, fully committed arena and narrow its
+// logical limit; the small sentinel immediately beyond that limit is never
+// available to the reader. Restore the actual mapping sizes before destruction.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_arena_capacities(UnitTestArguments* arguments, ByteSlice bytes, Target target)
+{
+    UnitTestResult result = {0};
+    enum { OBJECT_TEST_READER_ARENA_SIZE = 16384, OBJECT_TEST_READER_SENTINEL_SIZE = 16 };
+    Arena* arena = arena_create((ArenaCreation){
+        .reserved_size = OBJECT_TEST_READER_ARENA_SIZE,
+        .initial_size = OBJECT_TEST_READER_ARENA_SIZE,
+        .granularity = 1,
+        .flags = {.no_pool = 1},
+    });
+    BUSTER_TEST(arguments, arena != 0);
+    if (arena)
+    {
+        u64 reserved_size = arena->reserved_size;
+        u64 os_position = arena->os_position;
+        u64 start_padding[] = {0, 1, 7};
+        for (u32 run = 0; run < BUSTER_ARRAY_LENGTH(start_padding); run += 1)
+        {
+            u64 start = arena_minimum_position + start_padding[run];
+            arena_set_position(arena, start);
+            ObjectFile reference = object_read(arena, bytes, target);
+            u64 required = arena->position;
+            BUSTER_TEST(arguments, reference.error == OBJECT_ERROR_NONE);
+            BUSTER_TEST(arguments, required > start && required <= reserved_size - OBJECT_TEST_READER_SENTINEL_SIZE);
+            if (reference.error == OBJECT_ERROR_NONE && required > start && required <= reserved_size - OBJECT_TEST_READER_SENTINEL_SIZE)
+            {
+                for (u64 capacity = start; capacity <= required; capacity += 1)
+                {
+                    arena_set_position(arena, start);
+                    arena->reserved_size = capacity;
+                    arena->os_position = capacity;
+                    u8* sentinel = (u8*)arena + capacity;
+                    memset(sentinel, 0xa5, OBJECT_TEST_READER_SENTINEL_SIZE);
+                    ObjectFile decoded = object_read(arena, bytes, target);
+                    BUSTER_TEST(arguments, arena->position <= capacity);
+                    BUSTER_TEST(arguments, decoded.error == (capacity == required ? OBJECT_ERROR_NONE : OBJECT_ERROR_INVALID_INPUT));
+                    for (u32 byte = 0; byte < OBJECT_TEST_READER_SENTINEL_SIZE; byte += 1)
+                    {
+                        BUSTER_TEST(arguments, sentinel[byte] == 0xa5);
+                    }
+                    if (decoded.error == OBJECT_ERROR_NONE)
+                    {
+                        BUSTER_TEST(arguments, decoded.section_count == reference.section_count);
+                        BUSTER_TEST(arguments, decoded.symbol_count == reference.symbol_count);
+                        BUSTER_TEST(arguments, decoded.relocation_count == reference.relocation_count);
+                        BUSTER_TEST(arguments, arena->position == required);
+                    }
+                    arena->reserved_size = reserved_size;
+                    arena->os_position = os_position;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, arena_destroy(arena, 1));
+    }
+    return result;
+}
+
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -652,6 +713,9 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, arena_destroy(constrained_arena, 1));
         }
     }
+    UnitTestResult capacity_tests = object_test_elf_arena_capacities(arguments, elf.bytes, object.target);
+    result.succeeded_test_count += capacity_tests.succeeded_test_count;
+    result.test_count += capacity_tests.test_count;
     ObjectFile elf_roundtrip = object_read(arguments->arena, elf.bytes, object.target);
     BUSTER_TEST(arguments, elf_roundtrip.error == OBJECT_ERROR_NONE);
     BUSTER_TEST(arguments, elf_roundtrip.section_count == OBJECT_SECTION_COUNT);
@@ -1887,10 +1951,23 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         memcpy(&target_index, underaligned_elf.bytes.pointer + underaligned_relocation_section + 44, sizeof(target_index));
         object_test_write_u64(underaligned_elf.bytes, section_table + (u64)target_index * 64 + 48, 1);
     }
-    BUSTER_TEST(arguments, underaligned_offsets_valid &&
-                               object_read(arguments->arena, underaligned_elf.bytes,
-                                           (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX})
-                                       .error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+    BUSTER_TEST(arguments, underaligned_offsets_valid);
+    if (underaligned_offsets_valid)
+    {
+        ObjectFile rejected = object_read(arguments->arena, underaligned_elf.bytes,
+                                          (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX});
+        BUSTER_TEST(arguments, rejected.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+        // The reader owns this copied section, but must not canonicalize an
+        // instruction after its relocation validation has already failed.
+        bool text_present = rejected.sections && rejected.section_count > OBJECT_SECTION_TEXT &&
+                            rejected.sections[OBJECT_SECTION_TEXT].data.length == sizeof(aarch64_text);
+        BUSTER_TEST(arguments, text_present);
+        if (text_present)
+        {
+            BUSTER_TEST(arguments, memcmp(rejected.sections[OBJECT_SECTION_TEXT].data.pointer, aarch64_text, sizeof(aarch64_text)) == 0);
+        }
+        BUSTER_TEST(arguments, rejected.relocation_count == 0);
+    }
     sections[0].alignment = 1;
     BUSTER_TEST(arguments, object_write(arguments->arena, &object, OBJECT_FORMAT_ELF64).error == OBJECT_ERROR_INVALID_INPUT);
     sections[0].alignment = 16;
