@@ -1,5 +1,8 @@
 #include <buster/tests/compiler/object/object_test.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
+#include <buster/lib/compiler/object/object_internal.h>
+#include <buster/lib/time.h>
+#include <buster/lib/file.h>
 #if BUSTER_INCLUDE_TESTS
 
 BUSTER_GLOBAL_LOCAL bool object_bytes_contain(ByteSlice bytes, String8 value)
@@ -471,9 +474,190 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_arena_capacities(UnitTestArgu
     return result;
 }
 
-UnitTestResult object_tests(UnitTestArguments* arguments)
+// Generated printer populations and exact-output oracles. The optional
+// BUSTER_OBJECT_ASSEMBLY_BENCH replay times only object_print_assembly,
+// including index construction and cleanup; ordinary tests never time-gate.
+BUSTER_GLOBAL_LOCAL ObjectFile object_test_assembly_population(Arena* arena, u32 count, u32 order)
+{
+    ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                         .section_count = 2, .symbol_count = count * 2 + 1, .relocation_count = count * 2};
+    object.sections = arena_allocate_zeroed(arena, ObjectSection, 2);
+    object.symbols = arena_allocate_zeroed(arena, ObjectSymbol, object.symbol_count);
+    object.relocations = arena_allocate_zeroed(arena, ObjectRelocation, object.relocation_count);
+    object.sections[0] = (ObjectSection){.kind = OBJECT_SECTION_TEXT, .data = {.pointer = arena_allocate_zeroed(arena, u8, (u64)count * 6),
+                                                                          .length = (u64)count * 6}};
+    object.sections[1] = (ObjectSection){.kind = OBJECT_SECTION_DATA, .data = {.pointer = arena_allocate_zeroed(arena, u8, (u64)count * 8),
+                                                                          .length = (u64)count * 8}};
+    object.symbols[count * 2] = (ObjectSymbol){.name = S8("external"), .section = OBJECT_SECTION_UNDEFINED};
+    for (u32 index = 0; index < count; index += 1)
+    {
+        u32 slot = order == 1 ? count - index - 1 : order == 2 ? (index * 4051u) % count : index;
+        object.sections[0].data.pointer[(u64)slot * 6] = 0xe8;
+        object.sections[0].data.pointer[(u64)slot * 6 + 5] = 0xc3;
+        object.symbols[index * 2] = (ObjectSymbol){.name = string_format(arena, S8("function_{u32}"), slot),
+                                                  .section = 0, .value = (u64)slot * 6, .size = 6, .kind = OBJECT_SYMBOL_FUNCTION};
+        object.symbols[index * 2 + 1] = (ObjectSymbol){.name = string_format(arena, S8("pointer_{u32}"), slot),
+                                                      .section = 1, .value = (u64)slot * 8, .size = 8, .kind = OBJECT_SYMBOL_DATA};
+        object.relocations[index * 2] = (ObjectRelocation){.section = 0, .offset = (u64)slot * 6 + 1,
+                                                           .symbol = count * 2, .kind = OBJECT_RELOCATION_X86_64_PC32, .addend = -4};
+        object.relocations[index * 2 + 1] = (ObjectRelocation){.section = 1, .offset = (u64)slot * 8,
+                                                               .symbol = index * 2, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+    }
+    return object;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_index_order(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    u8 bytes[16] = {0};
+    ObjectSection sections[] = {
+        {.kind = OBJECT_SECTION_DATA, .data = {.pointer = bytes, .length = sizeof(bytes)}},
+        {.kind = OBJECT_SECTION_READ_ONLY_DATA},
+        {.kind = OBJECT_SECTION_ZERO, .virtual_size = 3},
+        {.kind = OBJECT_SECTION_TEXT},
+    };
+    ObjectSymbol symbols[] = {
+        {.name = S8("end"), .section = 0, .value = 16, .kind = OBJECT_SYMBOL_DATA},
+        {.name = S8("external"), .section = OBJECT_SECTION_UNDEFINED},
+        {.name = S8("second"), .section = 0, .value = 8, .size = 8, .kind = OBJECT_SYMBOL_DATA},
+        {.name = S8("empty"), .section = 1, .kind = OBJECT_SYMBOL_DATA},
+        {.name = S8("first"), .section = 0, .size = 8, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        {.name = S8("alias"), .section = 0, .size = 8, .kind = OBJECT_SYMBOL_DATA},
+        {.name = S8("zero"), .section = 2, .size = 3, .kind = OBJECT_SYMBOL_DATA},
+        {.name = S8("ignored"), .section = 100, .kind = OBJECT_SYMBOL_DATA},
+    };
+    ObjectRelocation relocations[] = {
+        {.section = 0, .offset = 8, .symbol = 4, .kind = OBJECT_RELOCATION_ABSOLUTE64, .addend = 3},
+        {.section = 0, .offset = 0, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        {.section = 0, .offset = 0, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        {.section = 100, .symbol = 7, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+    };
+    ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                         .sections = sections, .section_count = BUSTER_ARRAY_LENGTH(sections),
+                         .symbols = symbols, .symbol_count = BUSTER_ARRAY_LENGTH(symbols),
+                         .relocations = relocations, .relocation_count = BUSTER_ARRAY_LENGTH(relocations)};
+    ObjectSymbol symbols_before[BUSTER_ARRAY_LENGTH(symbols)];
+    ObjectRelocation relocations_before[BUSTER_ARRAY_LENGTH(relocations)];
+    memcpy(symbols_before, symbols, sizeof(symbols));
+    memcpy(relocations_before, relocations, sizeof(relocations));
+    String8 expected = S8("\t.intel_syntax noprefix\n\t.extern external\n\t.section .data\n"
+                          "\t.globl first\n\t.type first, @object\nfirst:\n\t.type alias, @object\nalias:\n"
+                          "\t.quad \"external\"\n\t.type second, @object\nsecond:\n\t.quad \"first\" + 3\n"
+                          "\t.type end, @object\nend:\n\t.size end, 0\n\t.size second, 8\n\t.size first, 8\n\t.size alias, 8\n"
+                          "\t.section .rodata\n\t.type empty, @object\nempty:\n\t.size empty, 0\n"
+                          "\t.section .bss,\"aw\",@nobits\n\t.type zero, @object\nzero:\n\t.zero 3\n\t.size zero, 3\n");
+    BUSTER_TEST(arguments, object_assembly_test_index_queries(arguments->arena, &object));
+    String8 assembly = object_print_assembly(arguments->arena, &object);
+    BUSTER_STRING_TEST(arguments, assembly, expected);
+    BUSTER_TEST(arguments, memcmp(symbols, symbols_before, sizeof(symbols)) == 0);
+    BUSTER_TEST(arguments, memcmp(relocations, relocations_before, sizeof(relocations)) == 0);
+    BUSTER_STRING_TEST(arguments, object_print_assembly(arguments->arena, &object), expected);
+    // One section per entry catches cross-section cursor leakage and empty gaps.
+    ObjectSection many_sections[67] = {0};
+    ObjectSymbol many_symbols[33] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(many_symbols); index += 1)
+    {
+        u32 section = 2 * (32 - index);
+        many_sections[section].kind = OBJECT_SECTION_DATA;
+        many_symbols[index] = (ObjectSymbol){.name = string_format(arguments->arena, S8("section_{u32}"), section),
+                                             .section = section, .kind = OBJECT_SYMBOL_DATA};
+    }
+    object.sections = many_sections;
+    object.section_count = BUSTER_ARRAY_LENGTH(many_sections);
+    object.symbols = many_symbols;
+    object.symbol_count = BUSTER_ARRAY_LENGTH(many_symbols);
+    object.relocation_count = 0;
+    assembly = object_print_assembly(arguments->arena, &object);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(many_symbols); index += 1)
+    {
+        String8 label = string_format(arguments->arena, S8("section_{u32}:\n"), index * 2);
+        BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(assembly), label));
+    }
+    object.symbol_count = 0;
+    BUSTER_STRING_TEST(arguments, object_print_assembly(arguments->arena, &object), S8("\t.intel_syntax noprefix\n"));
+    // Literal targets are deliberately queried backward, forward, then
+    // backward again while preparing the AArch64 section's internal labels.
+    u32 literal_words[] = {0, 0, UINT32_C(0x58ffffc0), UINT32_C(0x58000021), 0, 0, UINT32_C(0x58ffffc2)};
+    ObjectSection literal_section = {.kind = OBJECT_SECTION_TEXT, .data = (ByteSlice){.pointer = (u8*)literal_words, .length = sizeof(literal_words)}};
+    ObjectSymbol literal_symbol = {.name = S8("external"), .section = OBJECT_SECTION_UNDEFINED};
+    ObjectRelocation literal_relocations[] = {
+        {.offset = 16, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64, .addend = 7},
+        {.offset = 0, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+    };
+    object = (ObjectFile){.target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+                          .sections = &literal_section, .section_count = 1, .symbols = &literal_symbol, .symbol_count = 1,
+                          .relocations = literal_relocations, .relocation_count = BUSTER_ARRAY_LENGTH(literal_relocations)};
+    expected = S8("\t.extern external\n\t.text\n.Lbuster_0_0:\n\t.quad external\n"
+                  "\tldr x0, .Lbuster_0_0\n\tldr x1, .Lbuster_0_16\n.Lbuster_0_16:\n\t.quad external + 7\n"
+                  "\tldr x2, .Lbuster_0_16\n");
+    BUSTER_TEST(arguments, object_assembly_test_index_queries(arguments->arena, &object));
+    BUSTER_STRING_TEST(arguments, object_print_assembly(arguments->arena, &object), expected);
+    literal_relocations[0].offset = 24;
+    BUSTER_TEST(arguments, object_print_assembly(arguments->arena, &object).length == 0);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_scaling(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    bool benchmark = os_get_environment_variable(S8("BUSTER_OBJECT_ASSEMBLY_BENCH")).length != 0;
+    u32 counts[] = {0, 1, 8, 17, 64, 1024, 2048, 4096, 8192};
+    for (u32 population = 0; population < BUSTER_ARRAY_LENGTH(counts); population += 1)
+    {
+        u32 count = counts[population];
+        if (!benchmark && count > 64) continue;
+        for (u32 order = 0; order < 3; order += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            ObjectFile object = object_test_assembly_population(arguments->arena, count, order);
+            BUSTER_TEST(arguments, object_assembly_test_index_queries(arguments->arena, &object));
+            Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(64)});
+            u64 first_hash = 0;
+            for (u32 iteration = 0; iteration < (benchmark ? 8u : 2u); iteration += 1)
+            {
+                u64 position = output->position;
+                TimeDataType start = timestamp_take();
+                String8 assembly = object_print_assembly(output, &object);
+                u64 ns = timestamp_ns_between(start, timestamp_take());
+                BUSTER_TEST(arguments, assembly.length > 0);
+                u64 hash = UINT64_C(14695981039346656037);
+                for (u64 byte = 0; byte < assembly.length; byte += 1)
+                {
+                    hash = (hash ^ assembly.pointer[byte]) * UINT64_C(1099511628211);
+                }
+                if (!iteration)
+                {
+                    first_hash = hash;
+                    String8 directory = os_get_environment_variable(S8("BUSTER_OBJECT_ASSEMBLY_OUTPUT"));
+                    if (benchmark && directory.length)
+                    {
+                        String8 path = string_format(arguments->arena, S8("{S8}/assembly_{u32}_{u32}.s"), directory, count, order);
+                        path = string_duplicate_arena(arguments->arena, path, true);
+                        BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(assembly)));
+                    }
+                }
+                BUSTER_TEST(arguments, hash == first_hash);
+                if (benchmark && iteration)
+                {
+                    string_print(S8("BENCH_OBJECT_ASSEMBLY count={u32} symbols={u32} relocations={u32} order={u32} iteration={u32} ns={u64} bytes={u64} retained={u64} peak={u64} hash={u64}\n"),
+                                 count, object.symbol_count, object.relocation_count, order, iteration, ns, assembly.length,
+                                 output->position - position, arena_dirty_position(output) - position, hash);
+                }
+                arena_set_position(output, position);
+            }
+            arena_destroy(output, 1);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+UnitTestResult object_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = object_test_assembly_index_order(arguments);
+    UnitTestResult scaling = object_test_assembly_scaling(arguments);
+    result.test_count += scaling.test_count;
+    result.succeeded_test_count += scaling.succeeded_test_count;
     BUSTER_TEST(arguments, sizeof(CodegenModuleRelocation) == 32);
     BUSTER_TEST(arguments, BUSTER_ALIGN_OF(CodegenModuleRelocation) == 8);
     BUSTER_TEST(arguments, BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 27);
