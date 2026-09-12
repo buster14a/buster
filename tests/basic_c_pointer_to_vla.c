@@ -31,6 +31,32 @@ static ulong local_row_offset(ulong rows, ulong columns, ulong index)
     return (ulong)((char *)cells[index] - (char *)cells);
 }
 
+// A decayed row is an address, but the fully indexed scalar still needs a
+// real load/store. Wider elements also make a missing sizeof(element) scale
+// visible, and the post-increment must be evaluated exactly once.
+static int row_access(ulong width, int rows[][width], ulong index, ulong column)
+{
+    ulong original_index = index;
+    int *row = rows[index++];
+    row[column] = 17;
+    rows[original_index][column] += 6;
+    int result = index != original_index + 1 || row[column] != 23 ||
+                 (ulong)((char *)row - (char *)rows) != original_index * width * sizeof(int);
+    return result;
+}
+
+// Both a plane and a row can decay before all three dimensions are indexed.
+// Their addresses must retain the product of the remaining runtime bounds.
+static int cube_access(ulong height, ulong width, int cells[][height][width])
+{
+    int *row = cells[1][2];
+    int (*plane)[width] = cells[1];
+    row[3] = 91;
+    int result = plane[2][3] != 91 ||
+                 (ulong)((char *)row - (char *)cells) != (height + 2) * width * sizeof(int);
+    return result;
+}
+
 static int compare_four(const void *left, const void *right)
 {
     const char *a = left;
@@ -68,7 +94,10 @@ static void *table_search(const void *key, void *base, ulong *count, ulong width
 int main(void)
 {
     char table[8][4] = {0};
-    if (row_offset(table, 4, 3) != 12 || row_offset(table, 7, 5) != 35 || row_offset(table, 1, 0) != 0)
+    // The odd-width probe needs a real six-row, seven-byte table. An offset
+    // of 35 bytes is outside the original 32-byte table even without a load.
+    char odd_table[6][7] = {0};
+    if (row_offset(table, 4, 3) != 12 || row_offset(odd_table, 7, 5) != 35 || row_offset(table, 1, 0) != 0)
     {
         return 1;
     }
@@ -107,6 +136,18 @@ int main(void)
         if (count != 2 || found != table[0])
         {
             return 7;
+        }
+    }
+    {
+        int rows[6][7] = {{0}};
+        if (row_access(7, rows, 4, 6) || rows[4][6] != 23 || rows[4][5] != 0 || rows[5][0] != 0)
+        {
+            return 8;
+        }
+        int cells[2][3][5] = {{{0}}};
+        if (cube_access(3, 5, cells) || cells[1][2][3] != 91 || cells[1][2][2] != 0 || cells[1][2][4] != 0)
+        {
+            return 9;
         }
     }
     return 0;
