@@ -726,6 +726,10 @@ typedef enum MachineOpcode
     // Complete XMM ABI transfers; explicit register operands expose dataflow.
     MACHINE_X64_LOAD_XMM_FRAME128, // vector definition, frame source
     MACHINE_X64_STORE_XMM_FRAME128, // vector use, frame destination
+    // AVX ABI transfers use explicit physical registers and owned frames.
+    // All explicit XMM/YMM frame rows use payload as a byte offset.
+    MACHINE_X64_LOAD_YMM_FRAME256,
+    MACHINE_X64_STORE_YMM_FRAME256,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 
