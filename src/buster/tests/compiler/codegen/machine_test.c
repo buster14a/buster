@@ -34,7 +34,7 @@ BUSTER_CT_CHECK(sizeof(MachineVirtualRegister) == 16);
 BUSTER_CT_CHECK(sizeof(MachineBlock) == 32);
 BUSTER_CT_CHECK(sizeof(MachineEdge) == 16);
 BUSTER_CT_CHECK(sizeof(MachineEdit) == 16);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(MachineEncodeResult) == 72);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(MachineEncodeResult) == 88);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
