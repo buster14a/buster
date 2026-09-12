@@ -190,6 +190,11 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
 - Arena ownership is part of the API contract. Returned source, syntax,
   semantic, and IR structures may reference earlier-stage storage; callers must
   retain the translation-unit arena until every downstream consumer finishes.
+- Source-map regions retain append order for equal `start` keys. Finalization
+  uses an allocation-free ordered scan or four stable byte-wise radix passes
+  over the 32-bit key. The one temporary row buffer is rewound before origin
+  recovery and publication; the original region array remains authoritative.
+  Do not restore displacement-dependent insertion sorting for `#line` splits.
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
   later members are still unresolved; an uninitialized `IrField` must never be

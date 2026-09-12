@@ -2,6 +2,7 @@
 #include <buster/lib/time.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
 #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
 #if BUSTER_INCLUDE_TESTS
 
@@ -3913,6 +3914,194 @@ BUSTER_GLOBAL_LOCAL void c_test_source_metrics_partitions(UnitTestArguments* arg
 // Shared macro tasks must preserve context floors even when a child grows
 // the array while its parent still owns a suffix. No internal stack seam is
 // needed: the token sequence and deferred locations are the public contract.
+BUSTER_GLOBAL_LOCAL bool c_test_source_region_equal(IrSourceRegion left, IrSourceRegion right)
+{
+    return left.start == right.start && left.source == right.source && left.checkpoints == right.checkpoints &&
+           left.checkpoint_offsets == right.checkpoint_offsets && left.checkpoint_pages == right.checkpoint_pages &&
+           left.checkpoint_page_count == right.checkpoint_page_count && left.checkpoint_count == right.checkpoint_count &&
+           left.base == right.base && left.line_delta == right.line_delta && left.stamp.source == right.stamp.source &&
+           left.stamp.offset == right.stamp.offset && left.stamp.line == right.stamp.line && left.stamp.column == right.stamp.column &&
+           left.kind == right.kind && left.origin_plus_one == right.origin_plus_one;
+}
+
+// Exercise the production ordering primitive directly. The ordinal stored in
+// source proves both permutation preservation and stable ordering of ties;
+// every other field must travel with that ordinal, including borrowed pointers.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_order(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    bool benchmark = os_get_environment_variable(S8("BUSTER_SOURCE_MAP_BENCH")).length != 0;
+    u32 counts[] = {0, 1, 2, 3, 7, 255, 256, 257, 1024, 4096, 16384, 65536};
+    u32 boundary_keys[] = {UINT32_MAX, 0, 0x100, 0xff, 0x10000, 0xffff, 0x1000000, 0xffffff, 0x80000000, 0x7fffffff};
+    String8 orders[] = {S8("ordered"), S8("equal"), S8("reverse"), S8("permuted"), S8("boundaries")};
+    IrSourceCheckpoint checkpoints[2] = {{.line = 1}, {.line = 2}};
+    u32 offsets[2] = {0, 1};
+    for (u32 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(counts); count_index += 1)
+    {
+        u32 count = counts[count_index];
+        if (count > 4096 && !benchmark)
+        {
+            continue;
+        }
+        for (u32 order = 0; order < BUSTER_ARRAY_LENGTH(orders); order += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrSourceRegion* original = arena_allocate(temporary.arena, IrSourceRegion, count);
+            IrSourceRegion* guarded = arena_allocate(temporary.arena, IrSourceRegion, (u64)count + 2);
+            IrSourceRegion* regions = guarded + 1;
+            bool* seen = arena_allocate(temporary.arena, bool, count);
+            IrSourceRegion canary = {.start = 0x12345678, .source = UINT32_MAX, .line_delta = -17};
+            guarded[0] = canary;
+            guarded[count + 1] = canary;
+            for (u32 index = 0; index < count; index += 1)
+            {
+                u32 key;
+                switch (order)
+                {
+                    case 0: key = index / 3; break;
+                    case 1: key = UINT32_MAX; break;
+                    case 2: key = (count - index - 1) / 3; break;
+                    case 3: key = ((index * 2654435761u) & 1023u) * 0x00400001u; break;
+                    default: key = boundary_keys[index % BUSTER_ARRAY_LENGTH(boundary_keys)]; break;
+                }
+                original[index] = (IrSourceRegion){
+                    .start = key,
+                    .source = index,
+                    .checkpoints = checkpoints + (index & 1),
+                    .checkpoint_offsets = offsets + (index & 1),
+                    .checkpoint_pages = offsets + ((index + 1) & 1),
+                    .checkpoint_page_count = index + 1,
+                    .checkpoint_count = index + 2,
+                    .base = index + 3,
+                    .line_delta = (s64)index - 19,
+                    .stamp = {.source = index + 4, .offset = index + 5, .line = index + 6, .column = index + 7},
+                    .kind = index & 1 ? IR_SOURCE_REGION_STAMP : IR_SOURCE_REGION_TEXT,
+                    .origin_plus_one = index + 8,
+                };
+            }
+            u32 repeats = benchmark && count >= 1024 ? 8 : 1;
+            for (u32 sample = 0; sample < repeats; sample += 1)
+            {
+                memcpy(regions, original, (u64)count * sizeof(*regions));
+                memset(seen, 0, count * sizeof(*seen));
+                // A reused arena retains an earlier high-water mark. Fresh
+                // storage makes this call's temporary-byte measurement exact.
+                Arena* sort_arena = arena_create((ArenaCreation){.flags = {.no_pool = true}});
+                BUSTER_TEST(arguments, sort_arena != 0);
+                if (sort_arena)
+                {
+                    u64 before = sort_arena->position;
+                    TimeDataType start = timestamp_take();
+                    c_test_source_map_sort(sort_arena, count ? regions : 0, count);
+                    u64 elapsed = timestamp_ns_between(start, timestamp_take());
+                    u64 peak = arena_dirty_position(sort_arena) - before;
+                    BUSTER_TEST(arguments, sort_arena->position == before);
+                    BUSTER_TEST(arguments, peak <= (u64)count * sizeof(*regions) + BUSTER_ALIGN_OF(IrSourceRegion) - 1);
+                    if (order < 2 || count < 2)
+                    {
+                        BUSTER_TEST(arguments, peak == 0);
+                    }
+                    // Overwrite released scratch before consulting any row.
+                    // Four passes must leave the caller's buffer authoritative.
+                    if (peak)
+                    {
+                        memset(arena_allocate(sort_arena, u8, peak), 0xa5, peak);
+                    }
+                    for (u32 index = 0; index < count; index += 1)
+                    {
+                        IrSourceRegion region = regions[index];
+                        BUSTER_TEST(arguments, region.source < count);
+                        if (region.source < count)
+                        {
+                            BUSTER_TEST(arguments, !seen[region.source]);
+                            seen[region.source] = true;
+                            BUSTER_TEST(arguments, c_test_source_region_equal(region, original[region.source]));
+                        }
+                        if (index)
+                        {
+                            IrSourceRegion previous = regions[index - 1];
+                            BUSTER_TEST(arguments, previous.start <= region.start);
+                            BUSTER_TEST(arguments, previous.start != region.start || previous.source < region.source);
+                        }
+                    }
+                    BUSTER_TEST(arguments, c_test_source_region_equal(guarded[0], canary));
+                    BUSTER_TEST(arguments, c_test_source_region_equal(guarded[count + 1], canary));
+                    u64 position = sort_arena->position;
+                    u64 dirty = arena_dirty_position(sort_arena);
+                    c_test_source_map_sort(sort_arena, count ? regions : 0, count);
+                    BUSTER_TEST(arguments, sort_arena->position == position && arena_dirty_position(sort_arena) == dirty);
+                    if (benchmark && count >= 1024 && sample)
+                    {
+                        string_print(S8("BENCH_SOURCE_MAP count={u32} order={S8} sample={u32} ns={u64} scratch_bytes={u64} row_bytes={u64}\n"),
+                                     count, orders[order], sample, elapsed, peak, (u64)sizeof(*regions));
+                    }
+                    arena_destroy(sort_arena, 1);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_locations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena,
+        S8("#define KEEP(x) x\n"
+           "#define TEXT(x) #x\n"
+           "#define JOIN(a,b) a##b\n"
+           "#line 73 \"map-first.c\"\n"
+           "KEEP(__LINE__) TEXT(alpha) JOIN(to,ken) __FILE__ first\n"
+           "#line 9 \"map-second.c\"\n"
+           "__LINE__ second\n"
+           "#line 111 \"map-third.c\"\n"
+           "KEEP(__LINE__) third\n"
+           "#line 4\n"
+           "last\n"),
+        (CPreprocessOptions){.source_path = S8("tests/source-map-original.c")});
+    String8 spellings[] = {S8("73"), S8("\"alpha\""), S8("token"), S8("\"map-first.c\""), S8("first"),
+                           S8("9"), S8("second"), S8("111"), S8("third"), S8("last")};
+    u32 lines[] = {73, 73, 73, 73, 73, 9, 9, 111, 111, 4};
+    u32 columns[] = {1, 16, 28, 41, 50, 1, 10, 1, 16, 1};
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, preprocess.token_count == BUSTER_ARRAY_LENGTH(spellings) + 1);
+    if (preprocess.token_count == BUSTER_ARRAY_LENGTH(spellings) + 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(spellings); index += 1)
+        {
+            CToken token = preprocess.tokens[index];
+            CSourceLocation location = c_preprocess_token_location(&preprocess, token);
+            BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, token), spellings[index]);
+            BUSTER_TEST(arguments, location.line == lines[index]);
+            BUSTER_TEST(arguments, location.column == columns[index]);
+            BUSTER_TEST(arguments, location.file < preprocess.file_count);
+            if (location.file < preprocess.file_count)
+            {
+                String8 path = index < 5 ? S8("map-first.c") : index < 7 ? S8("map-second.c") : S8("map-third.c");
+                BUSTER_STRING_TEST(arguments, preprocess.files[location.file], path);
+            }
+            IrSourcePosition position = ir_source_map_position(&preprocess.recovery->map, token.offset, 0);
+            BUSTER_TEST(arguments, position.source == location.file && position.line == location.line && position.column == location.column);
+        }
+    }
+    if (preprocess.recovery)
+    {
+        IrSourceMap* map = &preprocess.recovery->map;
+        for (u32 index = 1; index < map->count; index += 1)
+        {
+            BUSTER_TEST(arguments, map->regions[index - 1].start <= map->regions[index].start);
+            BUSTER_TEST(arguments, map->keys[index].start == map->regions[index].start);
+        }
+        arena_destroy(preprocess.recovery->spelling_arena, 1);
+        arena_destroy(preprocess.recovery->token_arena, 1);
+        arena_destroy(preprocess.recovery->token_shape_arena, 1);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -15765,6 +15954,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     c_test_result_add(&result, c_test_frontend_scratch_and_hardening(arguments));
     c_test_result_add(&result, c_test_inline_assembly_volatile_ir(arguments));
     c_test_result_add(&result, c_test_pasted_keyword_body_walk(arguments));
+    c_test_result_add(&result, c_test_source_map_order(arguments));
+    c_test_result_add(&result, c_test_source_map_locations(arguments));
     c_test_result_add(&result, c_test_macro_task_batches(arguments));
     c_test_result_add(&result, c_test_frontend_vla_and_ir(arguments));
     c_test_result_add(&result, c_test_local_static_aggregates(arguments));

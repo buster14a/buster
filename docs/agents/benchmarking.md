@@ -401,6 +401,23 @@ always picked the same letter, and three of the four PRs open when the history
 was split had done exactly that. Those older names are historical — entries
 cross-reference each other by them — and stay as written.
 
+## Source-map finalization
+
+`BUSTER_TEST_JOBS=1 BUSTER_SOURCE_MAP_BENCH=1 build/Release/ide test --ci=1 --verbose=0`
+adds record-level finalization measurements to the registered C frontend tests.
+Use the trusted Clang Release build. Ordered, equal, reverse, permuted and
+byte-boundary key populations cover 1,024/4,096/16,384/65,536 regions. Each has
+one warmup and seven samples; construction, payload/stability checks and scratch
+poisoning are outside the measured interval. `BENCH_SOURCE_MAP` reports the
+production sort's nanoseconds, row size and arena high-water growth, including
+scratch allocation and rewind. Arena bytes are not process peak RSS. Ordinary
+tests retain bounded populations and no timing thresholds.
+
+Keep these algorithm measurements separate from complete preprocessing with
+`ide cc -E` and the native compiler-throughput harness. The source-location
+regression separately covers fixed `#line` transitions with macro arguments,
+stringification, token pasting and builtin spellings.
+
 ## ABI context microbenchmark
 
 Run `BUSTER_ABI_CACHE_BENCH=1 build/Release/ide test --ci=1 --verbose=0` to
