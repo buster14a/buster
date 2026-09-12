@@ -133,7 +133,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
 {
     UnitTestResult result = {0};
 #if !BUSTER_ANDROID && !BUSTER_IOS
-    String8 source_path = S8("tests/basic_c_preprocess_boundaries.c");
+    String8 source_path = S8("tests/basic_c_preprocess_boundaries.txt");
     ByteSlice source_bytes = file_read(arguments->arena, source_path, (FileReadOptions){0});
     if (BUSTER_REQUIRE(arguments, source_bytes.pointer != 0))
     {
@@ -144,7 +144,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
                                                   });
         BUSTER_TEST(arguments, expected.diagnostic_count == 0);
         String8 stdout_arguments[] = {
-            program_state->input.arguments.pointer[0], S8("cc"), S8("-E"), S8("-std=c23"), source_path,
+            program_state->input.arguments.pointer[0], S8("cc"), S8("-E"), S8("-std=c23"), S8("-x"), S8("c"), source_path,
         };
         ProcessSpawnResult stdout_child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(stdout_arguments), (SliceString8){0},
                                                            (SliceString8){0},
@@ -167,7 +167,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
                 S8("signed nested_name;"),
                 S8("L \"text\";"),
                 S8("1e +2;"),
+                S8("1e ++ exponent_plus;"),
                 S8("123 number_name;"),
+                S8("123 'a';"),
+                S8("123 ... ellipsis_after_number;"),
                 S8(". . . ellipsis_tokens;"),
                 S8("/ / line_comment_tokens;"),
                 S8("/ * block_comment_tokens;"),
@@ -188,7 +191,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
 
             String8 output_path = buster_test_temporary_path(arguments->arena, S8("buster-preprocess-boundaries"), S8(".i"));
             String8 output_arguments[] = {
-                program_state->input.arguments.pointer[0], S8("cc"), S8("-E"), S8("-std=c23"), S8("-o"), output_path, source_path,
+                program_state->input.arguments.pointer[0], S8("cc"), S8("-E"), S8("-std=c23"), S8("-x"), S8("c"), S8("-o"), output_path,
+                source_path,
             };
             ProcessSpawnResult output_child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(output_arguments), (SliceString8){0},
                                                                (SliceString8){0},
@@ -214,6 +218,46 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
                     result.succeeded_test_count += identity.succeeded_test_count;
                 }
                 BUSTER_TEST(arguments, os_file_delete(output_path));
+            }
+        }
+
+        String8 backslash_path = S8("tests/basic_c_preprocess_backslash.txt");
+        ByteSlice backslash_bytes = file_read(arguments->arena, backslash_path, (FileReadOptions){0});
+        if (BUSTER_REQUIRE(arguments, backslash_bytes.pointer != 0))
+        {
+            CPreprocessorDefinition definition = {
+                .name = S8("B"),
+                .value = S8("\\"),
+            };
+            CPreprocessResult backslash_expected = c_preprocess(arguments->arena, BYTE_SLICE_TO_STRING(8, backslash_bytes),
+                                                                (CPreprocessOptions){
+                                                                    .definitions = &definition,
+                                                                    .source_path = backslash_path,
+                                                                    .dialect = C_PREPROCESS_DIALECT_C23,
+                                                                    .definition_count = 1,
+                                                                });
+            BUSTER_TEST(arguments, backslash_expected.diagnostic_count == 0);
+            String8 backslash_arguments[] = {
+                program_state->input.arguments.pointer[0], S8("cc"), S8("-E"), S8("-std=c23"), S8("-x"), S8("c"), S8("-DB=\\"),
+                backslash_path,
+            };
+            ProcessSpawnResult backslash_child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(backslash_arguments), (SliceString8){0},
+                                                                  (SliceString8){0},
+                                                                  (ProcessSpawnOptions){
+                                                                      .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
+                                                                                 ((u64)1 << STANDARD_STREAM_ERROR),
+                                                                      .use_process_environment = 1,
+                                                                  });
+            if (BUSTER_REQUIRE(arguments, backslash_child.handle != 0))
+            {
+                ProcessWaitResult backslash_waited = os_process_wait_deadline(arguments->arena, backslash_child, 30000000);
+                BUSTER_TEST(arguments, !backslash_waited.timed_out && backslash_waited.result == PROCESS_RESULT_SUCCESS);
+                BUSTER_TEST(arguments, backslash_waited.streams[STANDARD_STREAM_ERROR].length == 0);
+                String8 backslash_text = BYTE_SLICE_TO_STRING(8, backslash_waited.streams[STANDARD_STREAM_OUTPUT]);
+                BUSTER_TEST(arguments, string_first_sequence(backslash_text, S8("\\ \nint after_backslash;")) != BUSTER_STRING_NO_MATCH);
+                UnitTestResult identity = compiler_driver_test_preprocess_token_identity(arguments, backslash_expected, backslash_text);
+                result.test_count += identity.test_count;
+                result.succeeded_test_count += identity.succeeded_test_count;
             }
         }
     }
