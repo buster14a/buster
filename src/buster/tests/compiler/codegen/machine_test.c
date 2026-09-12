@@ -3710,9 +3710,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_wide_vector_boundaries(UnitTestA
     ByteSlice input = file_read(arguments->arena, S8("tests/basic_c_wide_vector_abi.c"), (FileReadOptions){0});
     BUSTER_TEST(arguments, input.length != 0);
     CpuModel models[] = {CPU_MODEL_BASELINE, CPU_MODEL_INTEL_HASWELL, CPU_MODEL_AMD_ZEN_5};
-    for (u32 model = 0; model < BUSTER_ARRAY_LENGTH(models); model += 1)
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_MACOS, OPERATING_SYSTEM_IOS};
+    for (u32 combination = 0; combination < BUSTER_ARRAY_LENGTH(models) * BUSTER_ARRAY_LENGTH(systems); combination += 1)
     {
-        Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = models[model], .os = OPERATING_SYSTEM_LINUX};
+        u32 model = combination % BUSTER_ARRAY_LENGTH(models);
+        u32 system = combination / BUSTER_ARRAY_LENGTH(models);
+        u32 alignment = system && !model ? 16u : 32u;
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = models[model], .os = systems[system]};
         for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -3738,10 +3742,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_wide_vector_boundaries(UnitTestA
                             MachineVaArg* metadata = selected.function.va_args + va;
                             if (metadata->size == 32)
                             {
-                                BUSTER_TEST(arguments, metadata->alignment == 32 && metadata->part_count == 1 && metadata->parts[0].is_memory);
+                                BUSTER_TEST(arguments, metadata->alignment == alignment && metadata->part_count == 1 && metadata->parts[0].is_memory);
                                 metadata->alignment = 128;
                                 BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_PAYLOAD);
-                                metadata->alignment = 32;
+                                metadata->alignment = alignment;
                                 metadata->parts[0].is_memory = 0;
                                 BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_PAYLOAD);
                                 metadata->parts[0].is_memory = 1;

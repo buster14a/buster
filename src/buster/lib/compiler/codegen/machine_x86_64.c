@@ -482,6 +482,18 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_type_is_f80(MachineX64Selector const* selec
     return result;
 }
 
+// Darwin caps bare vector ABI alignment at the CPU's available width.
+// ELF retains the type's alignment even when transport splits to memory.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_vector_stack_alignment(IrType* type, Target target)
+{
+    u32 result = codegen_canonical_x64_stack_argument_alignment(type);
+    if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
+    {
+        result = BUSTER_MIN(result, target_vector_register_size(target));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId type_id, IrAbiUse use, Target target, MachineX64ValueShape* shape)
 {
     IrType* type = ir_type_from_id(&program->types, type_id);
@@ -532,7 +544,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
                 .indirect = indirect,
                 .vector_part_bytes = indirect || force_stack ? 0 : (u8)part_bytes,
                 .force_stack = force_stack,
-                .stack_alignment = codegen_canonical_x64_stack_argument_alignment(type),
+                .stack_alignment = machine_x64_vector_stack_alignment(type, target),
             };
         }
         return supported;
@@ -1001,7 +1013,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_va_arg_metadata(MachineX64Selector* selecto
     if (type && type->layout.resolved && type->kind == IR_TYPE_VECTOR && result_is_frame &&
         (type->layout.size == 32 || type->layout.size == 64))
     {
-        *metadata = (MachineVaArg){.size = (u32)type->layout.size, .alignment = type->layout.alignment,
+        *metadata = (MachineVaArg){.size = (u32)type->layout.size, .alignment = machine_x64_vector_stack_alignment(type, selector->target),
             .stack_size = (u32)type->layout.size, .part_count = 1, .scalar_size = 8,
             .result_slot = result_slot, .result_is_frame = true, .parts = {{.size = 8, .is_memory = 1}}};
         result = true;

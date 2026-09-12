@@ -266,7 +266,7 @@
   its consecutive result pieces. An argument wider than one CPU register or
   exhausting the argument register file uses its aligned stack home. Unnamed
   wide vectors always use the overflow area; their MIR variadic reads retain
-  the full 32/64-byte alignment and advance by the complete value. Win64
+  the target ABI alignment and advance by the complete value. Win64
   32-byte arguments at AVX width use
   the existing private-copy pointer transport; baseline split references
   remain an unresolved retirement gap. The new part-width byte fits existing
@@ -286,7 +286,14 @@
   not reclassified as a compatibility disagreement. Native execution requires
   the relevant host CPU features; other
   matrix entries are object generation. MIR tests reject truncated frames and
-  overflowing offsets before placement.
+  overflowing offsets before placement. Darwin bare-vector ABI stack
+  alignment is capped at the CPU register
+  width (16 at baseline, 32 with AVX, 64 with AVX-512), including wide
+  overflow-list reads. ELF retains the full vector type alignment. This ABI
+  rule does not change the frontend's storage layout. Registered metadata
+  checks cover Linux/macOS/iOS and all three CPU models; native macOS Clang
+  producer/consumer tests detect a wrongly rounded overflow cursor.
+
 - System V x86-64 machine callers retain the sixteen-aligned push area for
   tightly packed arguments. A padding gap or greater base alignment selects
   a saved-RSP SSA value and an ordinary `STACK_ALLOCATE` row for the complete
