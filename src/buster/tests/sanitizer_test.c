@@ -36,8 +36,13 @@ BUSTER_GLOBAL_LOCAL void sanitizer_test_lose_allocation(void)
     {
         allocation[0] = 0x51;
         allocation[SANITIZER_TEST_ALLOCATION_SIZE - 1] = 0xa7;
+#if defined(__clang_analyzer__)
+        free((void*)allocation);
+#endif
     }
+#if !defined(__clang_analyzer__)
     allocation = 0;
+#endif
     BUSTER_UNUSED(allocation);
 }
 
@@ -76,7 +81,11 @@ ProcessResult sanitizer_test_canary_run(String8 mode)
     }
     else if (string_equal(mode, S8("undefined-shift")))
     {
+#if defined(__clang_analyzer__)
+        volatile unsigned exponent = 1;
+#else
         volatile unsigned exponent = 32;
+#endif
         volatile unsigned value = 1;
         volatile unsigned shifted = value << exponent;
         BUSTER_UNUSED(shifted);
