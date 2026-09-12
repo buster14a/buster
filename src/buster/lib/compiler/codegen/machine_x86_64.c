@@ -13778,6 +13778,8 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                 }
                 if (!exact_emitted)
                 {
+                    string_print(S8("ISSUE70_X64_EXACT opcode={u32} row={u32} entry={u32} required={u32}\n"),
+                                 (u32)instruction->opcode, instruction_index, (u32)(exact_entry != 0), (u32)exact_required);
                     // Migrated DIRECT rows have no handwritten byte fallback:
                     // an exact-form failure invalidates this result so the
                     // caller's existing codegen fallback accounting remains
