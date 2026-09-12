@@ -314,3 +314,12 @@ and runner labels define separate cohorts. Reports include queue delay, elapsed
 time, execution span and summed runner seconds, including mobile/lint/aggregate
 jobs. Never attribute differences to this PR without matching source/cache state
 and multiple completed observations. No speedup is claimed before that evidence.
+
+## Independent Clang analyzer gate
+
+`Clang analyzer shards` analyzes the generated split-source Release database
+with bounded module workers and mandatory fail-closed aggregation. Desktop
+unity analysis remains covered. The job exercises native failure controls and
+compares the reference and candidate drivers on identical commands, retaining
+coverage, diagnostics, timing and child RSS evidence. `CI complete` requires its
+result. See [the analyzer contract and reproduction](clang-analyze-shards.md).

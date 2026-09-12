@@ -839,6 +839,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, 
                                                                    AssemblySyntax syntax, String8* source_out, String8* reason_out)
 {
     String8 template_source = extra.literal;
+    // Validated assembly has one constraint and value for every operand.
+    BUSTER_CHECK(!instruction->operand_count || (instruction->immediates && instruction->operands));
     // The registers this asm has already committed to, which is what licenses a
     // template to name one of them literally. Only the pinned operand classes
     // and the clobbers are here: a generically allocated `r` operand is a
@@ -977,7 +979,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_resolve_template(Arena* arena, 
         {
             output[output_index++] = '%';
         }
-        memcpy(output + output_index, register_name.pointer, register_name.length);
+        if (register_name.length) memcpy(output + output_index, register_name.pointer, register_name.length);
         output_index += register_name.length;
         if (memory_operand)
         {
@@ -8046,7 +8048,7 @@ BUSTER_GLOBAL_LOCAL u32 c_canonical_edge_thunk(CCanonicalEmitter* emitter, IrPro
     u32 start = (u32)buffer->count;
     IrPublishedCfg const* cfg = function->published_cfg;
     IrCfgEdge const* edge = ir_function_cfg_edge(function, patch.predecessor, patch.target);
-    if (!edge)
+    if (!edge || !cfg || patch.target.value >= cfg->block_count)
     {
         buffer->error = CODEGEN_ERROR_INVALID_IR;
     }

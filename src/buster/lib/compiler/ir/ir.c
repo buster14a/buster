@@ -5361,7 +5361,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         bool valid = result_type && function_type && function_type->kind == IR_TYPE_FUNCTION && instruction->immediate_count == 0;
         if (start)
         {
-            valid &= function_type->is_variadic && result_type->kind == IR_TYPE_VA_LIST && instruction->operand_count == 0 &&
+            valid = valid && function_type->is_variadic && result_type->kind == IR_TYPE_VA_LIST && instruction->operand_count == 0 &&
                      instruction->result.value != IR_ID_UNDERLYING_INVALID;
         }
         else
@@ -5369,21 +5369,21 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
             IrValue* operand = instruction->operand_count == 1 ? &function->values[instruction->operands[0].value] : 0;
             IrType* pointer = operand ? ir_type_from_id(&program->types, operand->canonical_type) : 0;
             IrType* pointee = pointer && pointer->kind == IR_TYPE_POINTER ? ir_type_from_id(&program->types, pointer->element_type) : 0;
-            valid &= operand && pointer && pointee && pointee->kind == IR_TYPE_VA_LIST;
+            valid = valid && operand && pointer && pointee && pointee->kind == IR_TYPE_VA_LIST;
             if (end)
             {
-                valid &= result_type->kind == IR_TYPE_VOID && instruction->result.value == IR_ID_UNDERLYING_INVALID;
+                valid = valid && result_type->kind == IR_TYPE_VOID && instruction->result.value == IR_ID_UNDERLYING_INVALID;
             }
             else
             {
-                valid &= instruction->result.value != IR_ID_UNDERLYING_INVALID;
+                valid = valid && instruction->result.value != IR_ID_UNDERLYING_INVALID;
                 if (instruction->opcode == IR_OPCODE_VA_COPY)
                 {
-                    valid &= result_type->kind == IR_TYPE_VA_LIST;
+                    valid = valid && result_type->kind == IR_TYPE_VA_LIST;
                 }
                 else
                 {
-                    valid &= result_type->kind != IR_TYPE_VOID;
+                    valid = valid && result_type->kind != IR_TYPE_VOID;
                 }
             }
         }

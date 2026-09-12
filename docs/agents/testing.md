@@ -34,7 +34,9 @@
   `UEFI firmware boot` lane executes both firmware targets in every allocator
   and retains boot evidence; see [UEFI validation](../uefi-target.md#reference-firmware-execution-gate).
   Require the
-  aggregate `CI complete` result, not just the desktop names. The separate
+  aggregate `CI complete` result, not just the desktop names. It also requires
+  the independent `Clang analyzer shards` job and its coverage/failure controls;
+  see [analyzer sharding](../clang-analyze-shards.md). The separate
   `Linux x86-64 bootstrap evidence` check is required as well when the stronger
   repeated self-host audit is mandatory; `CI complete` does not aggregate it.
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups

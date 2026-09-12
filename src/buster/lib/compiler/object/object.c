@@ -449,6 +449,7 @@ BUSTER_GLOBAL_LOCAL ObjectAssemblyIndex object_assembly_build_index(Arena* arena
         u32 section = object->symbols[index].section;
         if (section < object->section_count)
         {
+            BUSTER_CHECK(result.symbols && result.original_symbols);
             u32 slot = result.sections[section].symbol_end++;
             result.symbols[slot] = result.original_symbols[slot] = index;
         }
@@ -456,7 +457,11 @@ BUSTER_GLOBAL_LOCAL ObjectAssemblyIndex object_assembly_build_index(Arena* arena
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         u32 section = object->relocations[index].section;
-        if (section < object->section_count) result.relocations[result.sections[section].relocation_end++] = index;
+        if (section < object->section_count)
+        {
+            BUSTER_CHECK(result.relocations);
+            result.relocations[result.sections[section].relocation_end++] = index;
+        }
     }
     u64 sort_position = arena->position;
     u32* temporary = 0;
@@ -470,6 +475,8 @@ BUSTER_GLOBAL_LOCAL ObjectAssemblyIndex object_assembly_build_index(Arena* arena
             u32 end = symbols ? range.symbol_end : range.relocation_end;
             u32 count = end - begin;
             if (count < 2) continue;
+            // A nonempty range was counted before allocating its index array.
+            BUSTER_CHECK(symbols ? result.symbols != 0 : result.relocations != 0);
             u32* indices = (symbols ? result.symbols : result.relocations) + begin;
             bool ordered = true;
             for (u32 index = 1; index < count && ordered; index += 1)
