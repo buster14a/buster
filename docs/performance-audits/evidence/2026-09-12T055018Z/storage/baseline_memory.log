@@ -1,0 +1,9 @@
+context_bytes=352 record_bytes=64
+symbols=0 arena_bytes=4 valid=1
+symbols=1 arena_bytes=520 valid=1
+symbols=8 arena_bytes=544 valid=1
+symbols=9 arena_bytes=1576 valid=1
+symbols=64 arena_bytes=7936 valid=1
+symbols=65 arena_bytes=16136 valid=1
+symbols=1024 arena_bytes=134656 valid=1
+symbols=10240 arena_bytes=2137600 valid=1

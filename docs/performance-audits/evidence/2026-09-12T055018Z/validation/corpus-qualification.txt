@@ -1,0 +1,15 @@
+tiny_startup: exit=0
+
+large_function: exit=1
+cc: error: eBPF function exceeds the 512-byte verifier stack limit
+
+many_functions: exit=0
+
+symbol_table: exit=1
+cc: error: eBPF function exceeds the 512-byte verifier stack limit
+
+control_flow: exit=1
+cc: error: eBPF function exceeds the 512-byte verifier stack limit
+
+backend_pressure: exit=1
+cc: error: eBPF function exceeds the 512-byte verifier stack limit

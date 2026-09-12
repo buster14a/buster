@@ -1,0 +1,70 @@
+BUSTER_BUILD_DIRECTORY: build
+BUSTER_BUILD_CONFIG: Debug
+BUSTER_CC: clang
+BUSTER_LINKER: DEFAULT
++ /usr/bin/cmake --warn-uninitialized -Werror=dev -B build -DBUSTER_CI=OFF -DCMAKE_C_COMPILER=clang -DBUSTER_FUZZ_AVAILABLE=OFF -DBUSTER_SANITIZE=OFF -DCMAKE_LINKER_TYPE=DEFAULT -DBUSTER_LTO=OFF -DBUSTER_TIME_TRACE=OFF -DBUSTER_INSTRUMENT=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_LINK_LIBC=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=ON -DBUSTER_DEVELOPER_TARGETS=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -G Ninja Multi-Config -DCMAKE_DEFAULT_BUILD_TYPE=Debug -DCMAKE_CONFIGURATION_TYPES=Debug;Release -DBUSTER_SINGLE_THREADED=OFF
+Warn about uninitialized values.
+-- The C compiler identification is Clang 18.1.3
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/clang - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- BUSTER_VULKAN_SDK: 
+-- BUSTER_SLANGC_EXECUTABLE: BUSTER_SLANGC_EXECUTABLE-NOTFOUND
+-- BUSTER_CI: OFF
+-- BUSTER_LINK_LIBC: ON
+-- BUSTER_OPTIMIZE: configuration-derived
+-- BUSTER_UNITY_BUILD: ON
+-- BUSTER_INCLUDE_TESTS: ON
+-- BUSTER_SANITIZE: OFF
+-- BUSTER_SANITIZER_REDUCED_DEBUG: OFF
+-- BUSTER_DEBUG_INFO: ON
+-- BUSTER_FRAME_POINTERS: ON
+-- BUSTER_TIME_TRACE: OFF
+-- BUSTER_INSTRUMENT: OFF
+-- BUSTER_FUZZ_AVAILABLE: OFF
+-- BUSTER_LTO: OFF
+-- BUSTER_CHECK_OPTIONAL_WARNINGS: ON
+-- BUSTER_DEVELOPER_TARGETS: ON
+-- BUSTER_REQUIRE_VULKAN_SDK: ON
+-- BUSTER_COMPILE_SHADERS: OFF
+-- BUSTER_USE_SLANG_SHADERS: OFF
+-- BUSTER_SINGLE_THREADED: OFF
+-- CMAKE_HOST_SYSTEM_PROCESSOR: x86_64
+-- CMAKE_SYSTEM_PROCESSOR: x86_64
+-- CMAKE_GENERATOR: Ninja Multi-Config
+-- CMAKE_CONFIGURATION_TYPES: Debug;Release
+-- CMAKE_DEFAULT_BUILD_TYPE: Debug
+-- CMAKE_BUILD_TYPE: 
+-- CMAKE_C_COMPILER_ID: Clang
+-- CMAKE_LINKER_TYPE: DEFAULT
+-- C_COMPILER_ZIG: OFF
+-- BUSTER_USE_VULKAN: OFF
+-- BUSTER_USE_D3D12: OFF
+-- BUSTER_USE_METAL: OFF
+-- CMAKE_COLOR_DIAGNOSTICS: ON
+-- CMAKE_EXPORT_COMPILE_COMMANDS: ON
+-- GDB: gdb_executable-NOTFOUND
+-- LLDB: lldb_executable-NOTFOUND
+-- Performing Test BUSTER_HAS_C_FLAG__Wexperimental_lifetime_safety
+-- Performing Test BUSTER_HAS_C_FLAG__Wexperimental_lifetime_safety - Failed
+-- Performing Test BUSTER_HAS_C_FLAG__Whigher_precision_for_complex_division
+-- Performing Test BUSTER_HAS_C_FLAG__Whigher_precision_for_complex_division - Failed
+-- Performing Test BUSTER_HAS_C_FLAG__Wimplicit_void_ptr_cast
+-- Performing Test BUSTER_HAS_C_FLAG__Wimplicit_void_ptr_cast - Failed
+-- Performing Test BUSTER_HAS_C_FLAG__Wshift_bool
+-- Performing Test BUSTER_HAS_C_FLAG__Wshift_bool - Failed
+-- Performing Test BUSTER_HAS_C_FLAG__Wthread_safety
+-- Performing Test BUSTER_HAS_C_FLAG__Wthread_safety - Success
+-- Performing Test BUSTER_HAS_C_FLAG__Wunique_object_duplication
+-- Performing Test BUSTER_HAS_C_FLAG__Wunique_object_duplication - Failed
+-- Skipping unsupported optional C compiler flags: -Wexperimental-lifetime-safety;-Whigher-precision-for-complex-division;-Wimplicit-void-ptr-cast;-Wshift-bool;-Wunique-object-duplication
+-- ide modules: OS;ENTRY_POINT;ARENA;INTEGER;STRING;FLOAT;COMPILER_C_FRONTEND;COMPILER_AARCH64_ENCODING;COMPILER_AARCH64_EXACT_BRIDGE;COMPILER_AARCH64_CONTROL_SEMANTICS;COMPILER_AARCH64_SYSTEM_REGISTERS;COMPILER_AARCH64_SEMANTICS;COMPILER_AARCH64_SYSTEM_SEMANTICS;COMPILER_AARCH64_SYNTAX;COMPILER_AARCH64_SEMANTIC_VM;COMPILER_AARCH64_DIRECT_SIMD;COMPILER_AARCH64_COMPLEX_SIMD;COMPILER_AARCH64_MEMORY_SEMANTICS;COMPILER_AARCH64_ALIAS_PROJECTION;COMPILER_ASSEMBLY;COMPILER_ASSEMBLY_UNIT;COMPILER_ASSEMBLY_METADATA;COMPILER_ASSEMBLY_COMPLETION_CENSUS;COMPILER_IR;COMPILER_DIAGNOSTIC;COMPILER_DEBUG;COMPILER_MACHINE;COMPILER_BOOTSTRAP_TRACE;COMPILER_CODEGEN;COMPILER_DWARF;COMPILER_CODEVIEW;COMPILER_PDB;COMPILER_OBJECT;COMPILER_JIT;COMPILER_LINK;COMPILER_WASM;COMPILER_GPU;COMPILER_LLVM_BITCODE;COMPILER_EBPF;COMPILER_DRIVER;SIMD;FILE;TARGET;TIME;HASH
+-- ide files: src/buster/apps/ide/ide.c src/buster/lib/os.c;src/buster/lib/entry_point.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/float.c;src/buster/lib/compiler/frontend/c/c_source.c;src/buster/lib/compiler/frontend/c/c_parse.c;src/buster/lib/compiler/frontend/c/c_gen.c;src/buster/lib/compiler/assembly/aarch64_encoding.c;src/buster/lib/compiler/assembly/aarch64_exact_bridge.c;src/buster/lib/compiler/assembly/aarch64_control_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_registers.c;src/buster/lib/compiler/assembly/aarch64_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_semantics.c;src/buster/lib/compiler/assembly/aarch64_syntax.c;src/buster/lib/compiler/assembly/aarch64_semantic_vm.c;src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_memory_semantics.c;src/buster/lib/compiler/assembly/aarch64_alias_projection.c;src/buster/lib/compiler/assembly/assembly.c;src/buster/lib/compiler/assembly/assembly_unit.c;src/buster/lib/compiler/assembly/x86_64_metadata.c;src/buster/lib/compiler/assembly/x86_64_completion_census.c;src/buster/lib/compiler/ir/ir.c;src/buster/lib/compiler/diagnostic.c;src/buster/lib/compiler/debug/debug.c;src/buster/lib/compiler/codegen/machine.c;src/buster/lib/compiler/codegen/bootstrap_trace.c;src/buster/lib/compiler/codegen/codegen.c;src/buster/lib/compiler/dwarf/dwarf.c;src/buster/lib/compiler/codeview/codeview.c;src/buster/lib/compiler/pdb/pdb.c;src/buster/lib/compiler/object/object.c;src/buster/lib/compiler/jit/jit.c;src/buster/lib/compiler/link/link.c;src/buster/lib/compiler/wasm/wasm.c;src/buster/lib/compiler/gpu/gpu.c;src/buster/lib/compiler/llvm/bitcode.c;src/buster/lib/compiler/ebpf/ebpf.c;src/buster/lib/compiler/driver/driver.c;src/buster/lib/simd.c;src/buster/lib/file.c;src/buster/lib/target.c;src/buster/lib/time.c;src/buster/lib/hash.c;src/buster/lib/x86_64.c
+-- No supported debugger found for ide_debug
+-- clang_analyze target disabled: /workspace/scratch/d28011d09620/buster-168-base641/build/build not found
+-- Configuring done (0.6s)
+-- Generating done (0.0s)
+-- Build files have been written to: /workspace/scratch/d28011d09620/buster-168-base641/build
+CMake generation (cc=clang, fuzz_available=OFF, sanitize=OFF) took 0.663719 seconds (663719000 nanoseconds)
