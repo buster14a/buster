@@ -4802,12 +4802,24 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_atomic_fence(MachineA64Selector* sel
 
 // The zero-byte row conservatively orders memory and invalidates condition
 // codes, including accepted forms whose clobber list omits one or both.
+BUSTER_GLOBAL_LOCAL u16 machine_a64_inline_effect_opcode(IrInstructionExtra extra)
+{
+    u16 effect_index = 0;
+    for (u32 index = 0; index < extra.clobber_count; index += 1)
+    {
+        effect_index |= string_equal(extra.clobbers[index], S8("memory")) ? 1u : 0u;
+        effect_index |= string_equal(extra.clobbers[index], S8("cc")) ? 2u : 0u;
+    }
+    return (u16)(MACHINE_A64_INLINE_EFFECTS_NONE + effect_index);
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_compiler_barrier(MachineA64Selector* selector, IrInstruction* instruction)
 {
     bool selected = machine_selection_is_compiler_barrier(selector->function, instruction);
     if (selected)
     {
-        machine_a64_select_row(selector, (MachineInstruction){.opcode = MACHINE_A64_COMPILER_BARRIER});
+        IrInstructionExtra extra = ir_instruction_extra(selector->function, ir_instruction_self_id(selector->function, instruction));
+        machine_a64_select_row(selector, (MachineInstruction){.opcode = machine_a64_inline_effect_opcode(extra)});
     }
     return selected;
 }
@@ -5158,7 +5170,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_assembly_identity(MachineA64Selector
     {
         if (!instruction->operand_count)
         {
-            machine_a64_select_row(selector, (MachineInstruction){.opcode = MACHINE_A64_COMPILER_BARRIER});
+            IrInstructionExtra extra = ir_instruction_extra(selector->function, ir_instruction_self_id(selector->function, instruction));
+            machine_a64_select_row(selector, (MachineInstruction){.opcode = machine_a64_inline_effect_opcode(extra)});
         }
         machine_a64_select_row(selector, (MachineInstruction){
             .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[plan.target_index].value))},
@@ -5176,7 +5189,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_hint(MachineA64Selector* sele
     bool selected = (nop || yield) && machine_selection_is_operand_free_assembly(selector->function, instruction);
     if (selected)
     {
-        machine_a64_select_row(selector, (MachineInstruction){.opcode = (u16)(nop ? MACHINE_A64_NOP : MACHINE_A64_YIELD)});
+        machine_a64_select_row(selector, (MachineInstruction){.payload = yield ? 2u : 1u, .opcode = machine_a64_inline_effect_opcode(extra)});
     }
     return selected;
 }
@@ -9061,6 +9074,23 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             case MACHINE_A64_YIELD:
                 machine_a64_emit(&encoder, 0xd503203fu);
                 break;
+            case MACHINE_A64_INLINE_EFFECTS_NONE:
+            case MACHINE_A64_INLINE_EFFECTS_MEMORY:
+            case MACHINE_A64_INLINE_EFFECTS_FLAGS:
+            case MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS:
+                if (instruction->payload == 1)
+                {
+                    machine_a64_emit(&encoder, 0xd503201fu);
+                }
+                else if (instruction->payload == 2)
+                {
+                    machine_a64_emit(&encoder, 0xd503203fu);
+                }
+                else if (instruction->payload)
+                {
+                    encoder.error = true;
+                }
+                break;
             case MACHINE_A64_INLINE_ASSEMBLY:
             {
                 if (instruction->payload >= function->inline_assembly_count)
@@ -9080,8 +9110,8 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                     MachineInlineAssemblyOperand const* operand = function->inline_assembly_operands + side_index;
                     if (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)
                     {
-                        u32 offset = placement->stack_slot_offsets[operand->stack_slot];
-                        machine_a64_emit_frame_memory(&encoder, operand->physical_register, machine_a64_frame_offset(frame_area, offset), 8, false);
+                        u32 operand_offset = placement->stack_slot_offsets[operand->stack_slot];
+                        machine_a64_emit_frame_memory(&encoder, operand->physical_register, machine_a64_frame_offset(frame_area, operand_offset), 8, false);
                     }
                 }
                 u32 assembly_start = encoder.count;
@@ -9114,8 +9144,8 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                         function->inline_assembly_operands + assembly->first_operand + operand_index;
                     if (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)
                     {
-                        u32 offset = placement->stack_slot_offsets[operand->stack_slot];
-                        machine_a64_emit_frame_memory(&encoder, operand->physical_register, machine_a64_frame_offset(frame_area, offset), 8, true);
+                        u32 operand_offset = placement->stack_slot_offsets[operand->stack_slot];
+                        machine_a64_emit_frame_memory(&encoder, operand->physical_register, machine_a64_frame_offset(frame_area, operand_offset), 8, true);
                     }
                 }
             }

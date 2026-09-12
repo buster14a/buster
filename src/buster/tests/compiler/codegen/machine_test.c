@@ -5331,7 +5331,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 289);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 297);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_X64_F80_BINARY] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_F80_NEGATE] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,

@@ -4422,14 +4422,27 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_scalar_store(MachineX64Selector* sel
     return selected;
 }
 
-// The zero-byte row conservatively orders memory and invalidates condition
-// codes, including accepted forms whose clobber list omits one or both.
+BUSTER_GLOBAL_LOCAL u16 machine_x64_inline_effect_opcode(IrInstructionExtra extra)
+{
+    u16 effect_index = 0;
+    for (u32 index = 0; index < extra.clobber_count; index += 1)
+    {
+        effect_index |= string_equal(extra.clobbers[index], S8("memory")) ? 1u : 0u;
+        effect_index |= string_equal(extra.clobbers[index], S8("cc")) ? 2u : 0u;
+    }
+    return (u16)(MACHINE_X64_INLINE_EFFECTS_NONE + effect_index);
+}
+
+// Empty templates emit no bytes, but their clobbers remain independent
+// scheduler facts: a plain side effect, a memory barrier, a flags definition,
+// or both.
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_compiler_barrier(MachineX64Selector* selector, IrInstruction* instruction)
 {
     bool selected = machine_selection_is_compiler_barrier(selector->function, instruction);
     if (selected)
     {
-        machine_x64_select_row(selector, (MachineInstruction){.opcode = MACHINE_X64_COMPILER_BARRIER});
+        IrInstructionExtra extra = ir_instruction_extra(selector->function, ir_instruction_self_id(selector->function, instruction));
+        machine_x64_select_row(selector, (MachineInstruction){.opcode = machine_x64_inline_effect_opcode(extra)});
     }
     return selected;
 }
@@ -4769,7 +4782,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_assembly_identity(MachineX64Selector
     {
         if (!instruction->operand_count)
         {
-            machine_x64_select_row(selector, (MachineInstruction){.opcode = MACHINE_X64_COMPILER_BARRIER});
+            IrInstructionExtra extra = ir_instruction_extra(selector->function, ir_instruction_self_id(selector->function, instruction));
+            machine_x64_select_row(selector, (MachineInstruction){.opcode = machine_x64_inline_effect_opcode(extra)});
         }
         machine_x64_select_row(selector, (MachineInstruction){
             .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_x64_select_block_entry(selector, instruction->targets[plan.target_index].value))},
@@ -4787,7 +4801,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_hint(MachineX64Selector* sele
     bool selected = (nop || pause) && machine_selection_is_operand_free_assembly(selector->function, instruction);
     if (selected)
     {
-        machine_x64_select_row(selector, (MachineInstruction){.opcode = (u16)(nop ? MACHINE_X64_NOP : MACHINE_X64_PAUSE)});
+        machine_x64_select_row(selector, (MachineInstruction){.payload = pause ? 2u : 1u, .opcode = machine_x64_inline_effect_opcode(extra)});
     }
     return selected;
 }
@@ -13913,6 +13927,24 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         (void)machine_x64_emit_metadata_instruction(&encoder, pause ? S8("PAUSE") : S8("NOP"), 0, 0,
                             (BusterX86MetadataFeatureInput){.names = machine_x64_pause_features, .count = pause ? 1u : 0u},
                             (BusterX86MetadataPhysicalAttributes){0}, 0);
+                    }
+                    break; case MACHINE_X64_INLINE_EFFECTS_NONE:
+                    case MACHINE_X64_INLINE_EFFECTS_MEMORY:
+                    case MACHINE_X64_INLINE_EFFECTS_FLAGS:
+                    case MACHINE_X64_INLINE_EFFECTS_MEMORY_FLAGS:
+                    {
+                        if (instruction->payload)
+                        {
+                            bool pause = instruction->payload == 2;
+                            bool valid_payload = instruction->payload == 1 || pause;
+                            encoder.overflow = !valid_payload || encoder.overflow;
+                            if (valid_payload)
+                            {
+                                (void)machine_x64_emit_metadata_instruction(&encoder, pause ? S8("PAUSE") : S8("NOP"), 0, 0,
+                                    (BusterX86MetadataFeatureInput){.names = machine_x64_pause_features, .count = pause ? 1u : 0u},
+                                    (BusterX86MetadataPhysicalAttributes){0}, 0);
+                            }
+                        }
                     }
                     break; case MACHINE_X64_INLINE_ASSEMBLY:
                     {
