@@ -505,3 +505,17 @@ runs and independent ELF inspection. Tests use temporary paths by default.
 Keep whole-process paired timing/PMU probes separate from these in-process
 replays. Compare identical saved objects/libraries, target and flags; require
 byte-identical baseline/candidate ELF images before interpreting a speedup.
+
+## QUALITY pin scratch replay
+
+`BUSTER_TEST_JOBS=1 BUSTER_QUALITY_SCRATCH_BENCH=1 build/Release/ide test --ci=1`
+adds seven measured full QUALITY placement replays after one warmup for the
+existing `wide_live_loop` fixture. The same selected MIR is used with 0, 4,096
+and 65,536 unused value IDs before its live values. `BENCH_QUALITY_SCRATCH`
+reports allocator nanoseconds, retained output-arena bytes, rows, values and
+accepted pins; construction, encoding and exact placement/byte comparisons
+are outside timing. Retained bytes exclude temporary scratch and are not RSS.
+The ordinary regression covers all six desktop targets and both frontend
+forms, including dirty scratch reuse and returning to compact IDs. Compare
+the same test harness with baseline and candidate allocators; use the native
+throughput harness separately for whole-process time/RSS.
