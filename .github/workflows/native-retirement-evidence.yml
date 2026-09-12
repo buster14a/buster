@@ -20,10 +20,16 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
+      - name: Check out evidence validation scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: validation
+          persist-credentials: false
       - name: Check out candidate implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: aa8ccf452641559e8caadba05ef22f377aa2cf3d
+          ref: 59b7167635cb549211263bf372f1796e7d3bf857
           path: candidate
           persist-credentials: false
       - name: Check out archived direct source
@@ -59,7 +65,7 @@ jobs:
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
-          --compiler-revision aa8ccf452641559e8caadba05ef22f377aa2cf3d
+          --compiler-revision 59b7167635cb549211263bf372f1796e7d3bf857
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --manifest-only --out evidence/manifest
@@ -69,7 +75,7 @@ jobs:
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
-          --compiler-revision aa8ccf452641559e8caadba05ef22f377aa2cf3d
+          --compiler-revision 59b7167635cb549211263bf372f1796e7d3bf857
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 0 --shard-count 4
@@ -80,7 +86,7 @@ jobs:
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
-          --compiler-revision aa8ccf452641559e8caadba05ef22f377aa2cf3d
+          --compiler-revision 59b7167635cb549211263bf372f1796e7d3bf857
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 1 --shard-count 4
@@ -91,7 +97,7 @@ jobs:
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
-          --compiler-revision aa8ccf452641559e8caadba05ef22f377aa2cf3d
+          --compiler-revision 59b7167635cb549211263bf372f1796e7d3bf857
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 2 --shard-count 4
@@ -102,16 +108,25 @@ jobs:
         run: >-
           "$RUNNER_TEMP/candidate-build" native_retirement_census
           --ide build/Release/ide
-          --compiler-revision aa8ccf452641559e8caadba05ef22f377aa2cf3d
+          --compiler-revision 59b7167635cb549211263bf372f1796e7d3bf857
           --baseline-ide ../reference/build/Release/ide
           --baseline-revision 3e912a3c5ce9b3e905f3096ff0a0d3e68d80e46e
           --shard-index 3 --shard-count 4
           --out evidence/census-integrated-3
+      - name: Join and independently validate every census row
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
+        working-directory: candidate
+        run: |
+          cp ../validation/docs/performance-audits/evidence/2026-09-12-retirement/join-census.py evidence/
+          cp ../validation/docs/performance-audits/evidence/2026-09-12-retirement/validate-census-v2.py evidence/
+          clang -O2 -fPIC -shared -Isrc src/buster/lib/hash.c -o evidence/libcensus_hash.so
+          python3 "$PWD/evidence/join-census.py" census-integrated 4
+          python3 "$PWD/evidence/validate-census-v2.py" census-integrated 4
       - name: Retain raw evidence and build recipes
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: native-retirement-aa8ccf4-${{ github.run_id }}
+          name: native-retirement-59b7167-${{ github.run_id }}
           path: |
             candidate/evidence/
             candidate/build/CMakeCache.txt
