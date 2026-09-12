@@ -2,6 +2,8 @@
 // framework is required. d_matrix owns option discovery, d_observe owns bounded
 // children/evidence, d_case_run compares observations, and d_reduce performs a
 // bounded iterative line reduction against independent host-compiler oracles.
+// d_case_lane dynamically admits complete cases into the persistent lane gang;
+// d_cases_run validates and publishes case-owned evidence in registry order.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <signal.h>
 
@@ -16,6 +18,21 @@ typedef struct DConfig DConfig;
 struct DConfig { String8 name; u32 allocator; u32 optimization; u32 promotion; };
 typedef struct DCase DCase;
 struct DCase { String8 name; String8 source; String8 host; bool reject; String8 include; bool require_zero; };
+BUSTER_GLOBAL_LOCAL DCase const d_builtin_cases[] = {
+    {S8("warning"), S8("tests/differential/warning.c"), {0}, false},
+    {S8("observables"), S8("tests/differential/observables.c"), {0}, false},
+    {S8("qualified-aggregate"), S8("tests/differential/qualified_aggregate.c"), S8("tests/differential/qualified_aggregate_host.c"), false, {0}, true},
+    {S8("abi"), S8("tests/differential/abi.c"), S8("tests/differential/abi_host.c"), false, {0}, true},
+    {S8("aligned-parameters"), S8("tests/differential/aligned.c"), S8("tests/differential/aligned_host.c"), false, {0}, true},
+    {S8("unsigned-switch"), S8("tests/differential/switch_unsigned.c"), S8("tests/differential/switch_unsigned_host.c"), false, {0}, true},
+    {S8("clear-cache"), S8("tests/differential/clear_cache.c"), S8("tests/differential/clear_cache_host.c"), false, {0}, true},
+    {S8("cpu-queries"), S8("tests/differential/cpu_queries.c"), S8("tests/differential/cpu_queries_host.c"), false, {0}, true},
+    {S8("native-variadic"), S8("tests/differential/native_variadic.c"), S8("tests/differential/native_variadic_host.c"), false, {0}, true},
+    {S8("va-list-places"), S8("tests/basic_c_va_list_places.c"), {0}, false, {0}, true},
+    {S8("native-aggregate"), S8("tests/differential/native_aggregate.c"), S8("tests/differential/native_aggregate_host.c"), false, {0}, true},
+    {S8("reject-type"), S8("tests/differential/reject_type.c"), {0}, true},
+    {S8("reject-syntax"), S8("tests/differential/reject_syntax.c"), {0}, true},
+};
 typedef enum DKind { D_EXIT, D_SIGNAL, D_TIMEOUT, D_SPAWN, D_WAIT } DKind;
 typedef struct DObservation DObservation;
 struct DObservation
@@ -38,6 +55,9 @@ struct DSettings
     String8 out;
     String8 include;
     FILE* report;
+    FILE* log;
+    OsMutexHandle* spawn_mutex;
+    u32 rows;
     u32 timeout_seconds;
     u32 reduce_limit;
     bool verify;
@@ -55,6 +75,13 @@ BUSTER_GLOBAL_LOCAL bool d_contains(String8 text, String8 part)
     return found;
 }
 
+BUSTER_GLOBAL_LOCAL String8 d_reference_compiler(Arena* arena, String8 file)
+{
+    bool explicit_path = d_contains(file, S8("/")) || d_contains(file, S8("\\"));
+    String8 result = explicit_path ? os_path_absolute(arena, file, true) : executable_resolve_in_path(arena, file);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool d_sanitizer(String8 text)
 {
     String8 names[] = {S8("AddressSanitizer"), S8("UndefinedBehaviorSanitizer"), S8("MemorySanitizer"),
@@ -64,16 +91,38 @@ BUSTER_GLOBAL_LOCAL bool d_sanitizer(String8 text)
     return found;
 }
 
+BUSTER_GLOBAL_LOCAL FILE* d_file_open(char const* path, bool write, bool update)
+{
+    // UCRT's N mode creates a non-inheritable descriptor atomically. A child
+    // retaining another lane's evidence writer would prevent its read-only
+    // hash/replay open on Windows even after the owning lane closed the file.
+#if BUSTER_WINDOWS
+    char const* mode = update ? "w+bN" : write ? "wbN" : "rbN";
+#else
+    char const* mode = update ? "w+b" : write ? "wb" : "rb";
+#endif
+    return fopen(path, mode);
+}
+
 BUSTER_GLOBAL_LOCAL void d_write(DSettings* settings, String8 path, String8 text)
 {
     String8 path_z = string_duplicate_arena(settings->arena, path, true);
-    FILE* file = fopen((char*)path_z.pointer, "wb");
+    FILE* file = d_file_open((char*)path_z.pointer, true, false);
     if (!file) { settings->io_failed = true; }
     else
     {
         if (text.length) { settings->io_failed |= fwrite(text.pointer, 1, (size_t)text.length, file) != text.length; }
         settings->io_failed |= fclose(file) != 0;
     }
+}
+
+BUSTER_GLOBAL_LOCAL void d_log(DSettings* settings, String8 text)
+{
+    if (settings->log)
+    {
+        settings->io_failed |= fwrite(text.pointer, 1, (size_t)text.length, settings->log) != text.length;
+    }
+    else { string_print(S8("{S8}"), text); }
 }
 
 BUSTER_GLOBAL_LOCAL bool d_normal(DObservation observation)
@@ -137,8 +186,13 @@ BUSTER_GLOBAL_LOCAL DObservation d_observe(DSettings* settings, SliceString8 com
     }
     d_write(settings, string_format(arena, S8("{S8}.argv"), prefix), (String8){.pointer = bytes, .length = size});
     u64 start = os_now_microseconds();
+    // Serialize pipe creation through closing each child's pipe ends. Otherwise
+    // a concurrent child can inherit another child's writer and delay its EOF.
+    // Child execution and deadline waits remain concurrent.
+    if (settings->spawn_mutex) { os_mutex_lock(settings->spawn_mutex); }
     ProcessSpawnResult spawn = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
         (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .use_process_environment = 1});
+    if (settings->spawn_mutex) { os_mutex_unlock(settings->spawn_mutex); }
     DObservation observation = {.kind = D_SPAWN};
     if (spawn.handle)
     {
@@ -488,7 +542,7 @@ BUSTER_GLOBAL_LOCAL void d_reduce(DSettings* settings, DCase test, DConfig confi
             input.length, best.length, trials, signature, (u32)confirmed));
     settings->io_failed |= !confirmed;
     settings->sanitize_oracle = saved_sanitizer;
-    string_print(S8("DIFFERENTIAL_REDUCE case={S8} bytes={u64}->{u64} trials={u32} confirmed={u32}\n"), test.name, input.length, best.length, trials, (u32)confirmed);
+    d_log(settings, string_format(arena, S8("DIFFERENTIAL_REDUCE case={S8} bytes={u64}->{u64} trials={u32} confirmed={u32}\n"), test.name, input.length, best.length, trials, (u32)confirmed));
 }
 
 BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* configs, u32 config_count)
@@ -516,7 +570,7 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
     u32 failures = trusted ? 0 : 1;
     DObservation diagnostics = {0};
     bool reduced = false;
-    if (!trusted) { string_print(S8("DIFFERENTIAL_FAIL case={S8} independent_oracle=invalid\n"), test.name); }
+    if (!trusted) { d_log(settings, string_format(arena, S8("DIFFERENTIAL_FAIL case={S8} independent_oracle=invalid\n"), test.name)); }
     String8 caller_object = {0};
     bool ready = trusted;
     if (trusted && test.host.length && !test.reject)
@@ -528,13 +582,14 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
         if (!ready)
         {
             failures += 1;
-            string_print(S8("DIFFERENTIAL_FAIL case={S8} caller_compile=invalid\n"), test.name);
+            d_log(settings, string_format(arena, S8("DIFFERENTIAL_FAIL case={S8} caller_compile=invalid\n"), test.name));
         }
     }
     for (u32 index = 0; ready && index < config_count; index += 1)
     {
         u64 scratch = arena->position;
         DConfig config = configs[index];
+        settings->rows += 1;
         DResult actual = d_execute(settings, test, config, false, false, path_join(arena, directory, config.name), caller_object);
         u32 failure = d_classify(actual, o0, test.reject);
         // Source paths are identical across the matrix; only the explicitly
@@ -546,7 +601,7 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
             failures += 1;
             d_write(settings, path_join(arena, path_join(arena, directory, config.name), S8("failure.txt")),
                 string_format(arena, S8("version=1 signature={u32} oracle_exit={u32} candidate_exit={u32}\n"), failure, o0.run.status, actual.run.status));
-            string_print(S8("DIFFERENTIAL_FAIL case={S8} config={S8} signature={u32}\n"), test.name, config.name, failure);
+            d_log(settings, string_format(arena, S8("DIFFERENTIAL_FAIL case={S8} config={S8} signature={u32}\n"), test.name, config.name, failure));
             if (!reduced && !test.reject && failure < 32 && settings->reduce_limit)
             {
                 d_reduce(settings, test, config, failure, path_join(arena, directory, S8("reduction")));
@@ -557,7 +612,7 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
         // reclaimed after writing their byte-exact files and status records.
         if (index) { arena_set_position(arena, scratch); }
     }
-    string_print(S8("DIFFERENTIAL_CASE name={S8} configurations={u32} failures={u32}\n"), test.name, ready ? config_count : 0, failures);
+    d_log(settings, string_format(arena, S8("DIFFERENTIAL_CASE name={S8} configurations={u32} failures={u32}\n"), test.name, ready ? config_count : 0, failures));
     return failures;
 }
 
@@ -616,11 +671,286 @@ BUSTER_GLOBAL_LOCAL bool d_create_output(Arena* arena, String8 path)
     return created;
 }
 
+typedef struct DCaseRecord DCaseRecord;
+struct DCaseRecord
+{
+    u32 failures;
+    u32 rows;
+    u32 completed;
+    bool io_failed;
+    u64 report_hash;
+    u64 report_size;
+    u64 log_hash;
+    u64 log_size;
+};
+typedef struct DCaseWork DCaseWork;
+struct DCaseWork
+{
+    DSettings settings;
+    DCase* tests;
+    DConfig* configs;
+    DCaseRecord* records;
+    u32 count;
+    u32 config_count;
+    AtomicU64 next;
+    bool self_test;
+};
+
+BUSTER_GLOBAL_LOCAL bool d_jobs(u32 requested, u32 cpus, String8 quota_text, u32* jobs)
+{
+    u32 quota = UINT32_MAX;
+    bool valid = requested > 0 && requested <= 64;
+    if (quota_text.length) { valid &= d_number(quota_text, &quota) && quota > 0; }
+    if (valid)
+    {
+        *jobs = BUSTER_MIN(requested, BUSTER_MAX(cpus, 1U));
+        *jobs = BUSTER_MIN(*jobs, quota);
+#if BUSTER_SINGLE_THREADED
+        *jobs = 1;
+#endif
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL String8 d_case_record_text(Arena* arena, DCase test, DCaseRecord record, u32 count)
+{
+    return string_format(arena, S8("version=1 case={S8} configurations={u32} rows={u32} failures={u32} io_failed={u32} completed={u32}\n"),
+        test.name, count, record.rows, record.failures, (u32)record.io_failed, record.completed);
+}
+
+BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
+{
+    DCaseWork* work = argument;
+    Arena* arena = arena_create((ArenaCreation){0});
+    u64 start = arena->position;
+    for (;;)
+    {
+        u64 index = atomic_u64_increment(&work->next);
+        if (index >= work->count) { break; }
+        DCase test = work->tests[index];
+        DCaseRecord* record = work->records + index;
+        DSettings settings = work->settings;
+        settings.arena = arena;
+        settings.report = 0;
+        settings.log = 0;
+        settings.rows = 0;
+        String8 directory = path_join(arena, settings.out, test.name);
+        bool claimed = d_create_output(arena, directory);
+        if (!claimed) { settings.io_failed = true; }
+        else
+        {
+            String8 report_path = string_format_z(arena, S8("{S8}/processes.tsv"), directory);
+            String8 log_path = string_format_z(arena, S8("{S8}/case.log"), directory);
+            settings.report = d_file_open((char*)report_path.pointer, true, false);
+            settings.log = d_file_open((char*)log_path.pointer, true, false);
+            if (!settings.report || !settings.log) { settings.io_failed = true; }
+            if (!settings.io_failed)
+            {
+                if (work->self_test)
+                {
+                    String8 argv[] = {program_state->input.arguments.pointer[0], S8("test_differential"), S8("--self-test-child"), test.source};
+                    if (test.host.length) { argv[0] = test.host; }
+                    DObservation observed = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv), path_join(arena, directory, S8("child")));
+                    record->failures = observed.kind != D_EXIT || observed.status != 7 ||
+                        !string_equal(observed.output, S8("a\0b")) || !string_equal(observed.error, S8("child stderr\n"));
+                    settings.rows = 1;
+                    d_log(&settings, string_format(arena, S8("case={S8}\n"), test.name));
+                }
+                else { record->failures = d_case_run(&settings, test, work->configs, work->config_count); }
+            }
+            if (settings.report) { settings.io_failed |= fclose(settings.report) != 0; }
+            if (settings.log) { settings.io_failed |= fclose(settings.log) != 0; }
+            settings.io_failed |= !build_artifact_fanout_hash_file(arena, report_path, &record->report_hash, &record->report_size);
+            settings.io_failed |= !build_artifact_fanout_hash_file(arena, log_path, &record->log_hash, &record->log_size);
+        }
+        record->rows = settings.rows;
+        record->io_failed = settings.io_failed;
+        record->completed += 1;
+        if (claimed)
+        {
+            d_write(&settings, path_join(arena, directory, S8("result.txt")), d_case_record_text(arena, test, *record, work->config_count));
+            record->io_failed |= settings.io_failed;
+        }
+        record->io_failed |= !arena_set_position_and_decommit(arena, start);
+    }
+    BUSTER_CHECK(arena_destroy(arena, 1));
+}
+
+// Reopen and hash each completed stream before ordered publication. Missing,
+// truncated, duplicated or unwritten case evidence is never a passing slot.
+BUSTER_GLOBAL_LOCAL bool d_case_stream(DSettings* settings, String8 path, u64 expected_hash, u64 expected_size, FILE* output)
+{
+    u64 hash = 0, size = 0;
+    bool valid = build_artifact_fanout_hash_file(settings->arena, path, &hash, &size) && hash == expected_hash && size == expected_size;
+    if (valid)
+    {
+        String8 path_z = string_duplicate_arena(settings->arena, path, true);
+        FILE* input = d_file_open((char*)path_z.pointer, false, false);
+        valid = input != 0;
+        if (input)
+        {
+            u8 buffer[16384];
+            u64 copied = 0;
+            size_t length;
+            while ((length = fread(buffer, 1, sizeof(buffer), input)) != 0)
+            {
+                copied += length;
+                if (output) { valid &= fwrite(buffer, 1, length, output) == length; }
+            }
+            valid &= !ferror(input) && copied == expected_size;
+            valid &= fclose(input) == 0;
+        }
+    }
+    if (output) { valid &= fflush(output) == 0; }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL u32 d_cases_collect(DCaseWork* work)
+{
+    DSettings* settings = &work->settings;
+    Arena* arena = settings->arena;
+    u32 failures = 0;
+    for (u32 index = 0; index < work->count; index += 1)
+    {
+        u64 scratch = arena->position;
+        DCaseRecord record = work->records[index];
+        String8 directory = path_join(arena, settings->out, work->tests[index].name);
+        bool valid = record.completed == 1 && !record.io_failed && (record.failures || record.rows == work->config_count);
+        String8 expected = d_case_record_text(arena, work->tests[index], record, work->config_count);
+        u64 expected_hash = 0, expected_size = 0;
+        String8 result_path = path_join(arena, directory, S8("result.txt"));
+        valid &= build_artifact_fanout_hash_file(arena, result_path, &expected_hash, &expected_size) && expected_size == expected.length;
+        if (valid)
+        {
+            ByteSlice bytes = file_read(arena, result_path, (FileReadOptions){0});
+            valid = string_equal(expected, (String8){.pointer = (char8*)bytes.pointer, .length = bytes.length});
+        }
+        // Inspect both streams even when the case failed; preserve its evidence.
+        valid &= d_case_stream(settings, path_join(arena, directory, S8("processes.tsv")), record.report_hash, record.report_size, settings->report);
+        valid &= d_case_stream(settings, path_join(arena, directory, S8("case.log")), record.log_hash, record.log_size, settings->log ? settings->log : stdout);
+        failures += record.failures + !valid;
+        arena_set_position(arena, scratch);
+    }
+    return failures;
+}
+
+BUSTER_GLOBAL_LOCAL u32 d_cases_run(DSettings* settings, DCase* tests, u32 count, DConfig* configs, u32 config_count, u32 jobs)
+{
+    DCaseWork work = {.settings = *settings, .tests = tests, .count = count, .configs = configs, .config_count = config_count};
+    work.records = arena_allocate_zeroed(settings->arena, DCaseRecord, count);
+    work.settings.spawn_mutex = os_mutex_create();
+    u32 failures = 1;
+    if (work.settings.spawn_mutex)
+    {
+        lane_run(BUSTER_MIN(jobs, count), &d_case_lane, &work);
+        os_mutex_destroy(work.settings.spawn_mutex);
+        failures = d_cases_collect(&work);
+    }
+    return failures;
+}
+
+BUSTER_GLOBAL_LOCAL u32 d_workers_self_test(Arena* arena, String8 root)
+{
+    u32 errors = 0, jobs = 0;
+    errors += !d_jobs(4, 2, S8("3"), &jobs) || jobs != (BUSTER_SINGLE_THREADED ? 1 : 2);
+    errors += !d_jobs(4, 8, S8("1"), &jobs) || jobs != 1;
+    errors += d_jobs(0, 8, S8(""), &jobs) || d_jobs(65, 8, S8(""), &jobs);
+    errors += d_jobs(4, 8, S8("0"), &jobs) || d_jobs(4, 8, S8("2x"), &jobs);
+    errors += d_jobs(4, 8, S8("4294967296"), &jobs);
+    for (u32 pass = 0; pass < 3; pass += 1)
+    {
+        u32 pass_errors = errors;
+        DCase tests[] = {{.name = S8("first"), .source = S8("exit")},
+                         {.name = S8("second"), .source = S8("exit")},
+                         {.name = S8("third"), .source = S8("exit")},
+                         {.name = S8("fourth"), .source = S8("exit")},
+                         {.name = S8("fifth"), .source = S8("exit")},
+                         {.name = S8("sixth"), .source = S8("exit")}};
+        DCaseRecord records[BUSTER_ARRAY_LENGTH(tests)] = {0};
+        DCaseWork work = {.settings = {.arena = arena, .timeout_seconds = 1}, .tests = tests, .records = records,
+                         .count = BUSTER_ARRAY_LENGTH(tests), .config_count = 1, .self_test = true};
+        work.settings.out = path_join(arena, root, string_format(arena, S8("workers-{u32}"), pass));
+        errors += !d_create_output(arena, work.settings.out);
+        String8 report = string_format_z(arena, S8("{S8}/processes.tsv"), work.settings.out);
+        String8 log = string_format_z(arena, S8("{S8}/case.log"), work.settings.out);
+        work.settings.report = d_file_open((char*)report.pointer, true, false);
+        work.settings.log = d_file_open((char*)log.pointer, true, true);
+        work.settings.spawn_mutex = os_mutex_create();
+        if (!work.settings.report || !work.settings.log || !work.settings.spawn_mutex) { errors += 1; }
+        else
+        {
+            if (pass == 2)
+            {
+                tests[0].source = S8("timeout");
+                tests[1].source = S8("crash");
+                tests[2].source = S8("sanitizer");
+                tests[3].host = path_join(arena, work.settings.out, S8("missing-program"));
+                // Both duplicate directory claims must not count as success.
+                tests[5].name = tests[4].name;
+            }
+            u32 worker_jobs = 1;
+            errors += !d_jobs(pass ? 4 : 1, os_get_logical_thread_count(), os_get_environment_variable(S8("BUSTER_TEST_JOBS")), &worker_jobs);
+            lane_run(worker_jobs, &d_case_lane, &work);
+            u32 failures = d_cases_collect(&work);
+            errors += pass == 2 ? failures < 5 : failures != 0;
+            if (pass != 2 && failures)
+            {
+                for (u32 index = 0; index < work.count; index += 1)
+                {
+                    string_print(S8("DIFFERENTIAL_SELF_TEST_RECORD pass={u32} case={S8} rows={u32} failures={u32} io_failed={u32} report_bytes={u64} log_bytes={u64}\n"),
+                        pass, tests[index].name, records[index].rows, records[index].failures, (u32)records[index].io_failed, records[index].report_size, records[index].log_size);
+                }
+            }
+            for (u32 index = 0; index < work.count; index += 1) { errors += records[index].completed != 1; }
+            if (pass != 2)
+            {
+                // Inspect through the owning stream: a second OS open with
+                // read-only sharing conflicts with the live writer on Windows.
+                errors += fseek(work.settings.log, 0, SEEK_SET) != 0;
+                char8 output[256];
+                size_t output_length = fread(output, 1, sizeof(output), work.settings.log);
+                errors += ferror(work.settings.log) != 0;
+                errors += !string_equal((String8){.pointer = output, .length = output_length},
+                    S8("case=first\ncase=second\ncase=third\ncase=fourth\ncase=fifth\ncase=sixth\n"));
+                errors += fseek(work.settings.log, 0, SEEK_END) != 0;
+                records[0].completed = 0;
+                errors += d_cases_collect(&work) == 0;
+                records[0].completed = 2;
+                errors += d_cases_collect(&work) == 0;
+                records[0].completed = 1;
+                records[0].rows = 0;
+                errors += d_cases_collect(&work) == 0;
+                records[0].rows = 1;
+                String8 first = path_join(arena, work.settings.out, tests[0].name);
+                d_write(&work.settings, path_join(arena, first, S8("case.log")), S8("truncated"));
+                errors += d_cases_collect(&work) == 0;
+                errors += !os_file_delete(path_join(arena, first, S8("result.txt")));
+                errors += d_cases_collect(&work) == 0;
+                // A real evidence write into a directory fails closed.
+                DSettings broken = work.settings;
+                d_write(&broken, first, S8("cannot write"));
+                errors += !broken.io_failed;
+            }
+        }
+        if (work.settings.report) { errors += fclose(work.settings.report) != 0; }
+        if (work.settings.log) { errors += fclose(work.settings.log) != 0; }
+        if (work.settings.spawn_mutex) { os_mutex_destroy(work.settings.spawn_mutex); }
+        if (errors != pass_errors)
+        {
+            string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL workers_pass={u32} failures={u32}\n"), pass, errors - pass_errors);
+        }
+    }
+    return errors;
+}
+
 BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
 {
+    String8 self = os_path_absolute(arena, program_state->input.arguments.pointer[0], true);
+    u32 path_errors = !self.length || !string_equal(d_reference_compiler(arena, self), self);
     DObservation normal = {.kind = D_EXIT};
     DObservation other = normal;
-    u32 errors = d_difference(normal, other) != 0;
+    u32 errors = path_errors + (d_difference(normal, other) != 0);
+    if (path_errors) { string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL explicit_compiler_path\n")); }
     other.status = 7; errors += d_difference(normal, other) != 2;
     other = normal; other.kind = D_TIMEOUT; errors += d_difference(normal, other) != 1;
     other.kind = D_SIGNAL; other.status = 11; errors += d_normal(other);
@@ -708,6 +1038,7 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         caller_compile.kind = (DKind)kind;
         errors += d_caller_ready(caller_compile, true, false);
     }
+    if (errors) { string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL pure_controls={u32}\n"), errors); }
     String8 directory = string_format_z(arena, S8("build/differential-self-test-{u64}"), os_now_microseconds());
     if (!d_create_output(arena, directory)) { errors += 1; }
     else
@@ -715,12 +1046,17 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         String8 modes[] = {S8("exit"), S8("sanitizer"), S8("timeout"), S8("crash")};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
         {
+            u32 before_child = errors;
             String8 argv[] = {program_state->input.arguments.pointer[0], S8("test_differential"), S8("--self-test-child"), modes[index]};
             DObservation child = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv), path_join(arena, directory, modes[index]));
             if (index == 0) { errors += child.kind != D_EXIT || child.status != 7 || !string_equal(child.output, S8("a\0b")) || !string_equal(child.error, S8("child stderr\n")); }
             if (index == 1) { errors += child.kind != D_EXIT || child.status != 0 || !child.sanitizer || d_success(child); }
             if (index == 2) { errors += child.kind != D_TIMEOUT; }
             if (index == 3) { errors += child.kind != D_SIGNAL; }
+            if (errors != before_child)
+            {
+                string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL child={S8} kind={u32} status={u32} raw={u32}\n"), modes[index], (u32)child.kind, child.status, child.raw_status);
+            }
         }
         DConfig config = {.allocator = 0};
         DObservation telemetry = {.output = S8("warning\nCODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=none\n")};
@@ -764,6 +1100,8 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         errors += d_prepare_caller(&missing_caller, caller_case, directory).length != 0;
         errors += path_exists(arena, stale_object) || missing_caller.io_failed;
         errors += d_create_output(arena, directory); // Never reuse existing output.
+        if (errors) { string_print(S8("DIFFERENTIAL_SELF_TEST_FAIL before_workers={u32}\n"), errors); }
+        errors += d_workers_self_test(arena, directory);
     }
     errors += settings.io_failed;
     string_print(S8("DIFFERENTIAL_SELF_TEST failures={u32} configurations={u32}\n"), errors, count);
@@ -777,7 +1115,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
     DCase custom = {.name = S8("custom")};
     bool list = false, self_test = false, valid = true;
     String8 child_mode = {0};
-    u32 generated = 4, seed = 1;
+    u32 generated = 4, seed = 1, requested_jobs = 1, jobs = 1;
     for (u64 index = 0; index < arguments.length; index += 1)
     {
         String8 arg = arguments.pointer[index];
@@ -798,6 +1136,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
             else if (string_equal(arg, S8("--host"))) { custom.host = value; }
             else if (string_equal(arg, S8("--include"))) { settings.include = value; }
             else if (string_equal(arg, S8("--generated"))) { valid &= d_number(value, &generated) && generated <= 10000; }
+            else if (string_equal(arg, S8("--jobs"))) { valid &= d_number(value, &requested_jobs); }
             else if (string_equal(arg, S8("--seed"))) { valid &= d_number(value, &seed); }
             else if (string_equal(arg, S8("--minimize"))) { valid &= d_number(value, &settings.reduce_limit) && settings.reduce_limit <= 10000; }
             else if (string_equal(arg, S8("--timeout"))) { valid &= d_number(value, &settings.timeout_seconds) && settings.timeout_seconds > 0 && settings.timeout_seconds <= 3600; }
@@ -806,13 +1145,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
     }
     if (child_mode.length) { d_self_test_child(child_mode); valid = false; }
     valid &= !(custom.host.length && custom.reject) && (!(custom.host.length || custom.reject) || custom.source.length);
+    valid &= d_jobs(requested_jobs, os_get_logical_thread_count(), os_get_environment_variable(S8("BUSTER_TEST_JOBS")), &jobs);
+    u32 total_cases = custom.source.length ? 1 : (u32)BUSTER_ARRAY_LENGTH(d_builtin_cases) + generated;
+    jobs = BUSTER_MIN(jobs, total_cases);
     u32 count = d_matrix(0, 0);
     DConfig* configs = arena_allocate(arena, DConfig, count);
     d_matrix(configs, count);
     u32 failures = 0;
     if (!valid)
     {
-        string_print(S8("usage: test_differential [--ide path] [--cc clang-or-gcc] [--out new-directory] [--source C-file [--host fixed-C-file] [--reject]] [--include dir] [--generated N] [--seed N] [--minimize N] [--timeout seconds] [--sanitize-oracle] [--no-verify] [--list-configurations] [--self-test]\n"));
+        string_print(S8("usage: test_differential [--ide path] [--cc clang-or-gcc] [--out new-directory] [--source C-file [--host fixed-C-file] [--reject]] [--include dir] [--generated N] [--seed N] [--minimize N] [--timeout seconds] [--jobs 1..64] [--sanitize-oracle] [--no-verify] [--list-configurations] [--self-test]\n"));
         failures = 1;
     }
     else if (self_test) { failures = d_self_test(arena); }
@@ -828,7 +1170,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
         if (!list)
         {
             settings.ide = os_path_absolute(arena, settings.ide, true);
-            settings.cc = executable_resolve_in_path(arena, settings.cc);
+            settings.cc = d_reference_compiler(arena, settings.cc);
             if (!path_exists(arena, settings.ide) || !settings.cc.length || !d_create_output(arena, settings.out))
             {
                 string_print(S8("error: compiler missing or output directory already exists (refusing stale evidence)\n"));
@@ -838,13 +1180,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
             {
                 settings.out = os_path_absolute(arena, settings.out, true);
                 String8 report = string_format_z(arena, S8("{S8}/processes.tsv"), settings.out);
-                settings.report = fopen((char*)report.pointer, "wb");
+                settings.report = d_file_open((char*)report.pointer, true, false);
                 if (!settings.report) { failures = 1; }
                 else
                 {
-                    fprintf(settings.report, "prefix\tkind_0exit_1signal_2timeout_3spawn_4wait\tstatus\traw_status\tsanitizer\telapsed_us\n");
+                    settings.io_failed |= fprintf(settings.report, "prefix\tkind_0exit_1signal_2timeout_3spawn_4wait\tstatus\traw_status\tsanitizer\telapsed_us\n") < 0;
                     String8 manifest = string_format(arena, S8("version=1\nide={S8}\ncc={S8}\nconfigurations={u32}\nseed={u32}\ngenerated={u32}\nverify={u32}\nsanitize_oracle={u32}\n"),
                         settings.ide, settings.cc, count, seed, custom.source.length ? 0 : generated, (u32)settings.verify, (u32)settings.sanitize_oracle);
+                    manifest = string_format(arena, S8("{S8}jobs_requested={u32} jobs_effective={u32} cases={u32}\n"), manifest, requested_jobs, jobs, total_cases);
                     u64 ide_hash = 0, ide_size = 0, cc_hash = 0, cc_size = 0;
                     settings.io_failed |= !build_artifact_fanout_hash_file(arena, settings.ide, &ide_hash, &ide_size);
                     settings.io_failed |= !build_artifact_fanout_hash_file(arena, settings.cc, &cc_hash, &cc_size);
@@ -863,34 +1206,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                     {
                         custom.source = os_path_absolute(arena, custom.source, true);
                         if (custom.host.length) { custom.host = os_path_absolute(arena, custom.host, true); }
-                        failures += d_case_run(&settings, custom, configs, count);
+                        failures += d_cases_run(&settings, &custom, 1, configs, count, jobs);
                     }
                     else
                     {
-                        DCase tests[] = {
-                            {S8("warning"), S8("tests/differential/warning.c"), {0}, false},
-                            {S8("observables"), S8("tests/differential/observables.c"), {0}, false},
-                            {S8("qualified-aggregate"), S8("tests/differential/qualified_aggregate.c"), S8("tests/differential/qualified_aggregate_host.c"), false, {0}, true},
-                            {S8("abi"), S8("tests/differential/abi.c"), S8("tests/differential/abi_host.c"), false, {0}, true},
-                            {S8("aligned-parameters"), S8("tests/differential/aligned.c"), S8("tests/differential/aligned_host.c"), false, {0}, true},
-                            {S8("unsigned-switch"), S8("tests/differential/switch_unsigned.c"), S8("tests/differential/switch_unsigned_host.c"), false, {0}, true},
-                            {S8("clear-cache"), S8("tests/differential/clear_cache.c"), S8("tests/differential/clear_cache_host.c"), false, {0}, true},
-                            {S8("cpu-queries"), S8("tests/differential/cpu_queries.c"), S8("tests/differential/cpu_queries_host.c"), false, {0}, true},
-                            {S8("native-variadic"), S8("tests/differential/native_variadic.c"), S8("tests/differential/native_variadic_host.c"), false, {0}, true},
-                            {S8("va-list-places"), S8("tests/basic_c_va_list_places.c"), {0}, false, {0}, true},
-                            {S8("native-aggregate"), S8("tests/differential/native_aggregate.c"), S8("tests/differential/native_aggregate_host.c"), false, {0}, true},
-                            {S8("reject-type"), S8("tests/differential/reject_type.c"), {0}, true},
-                            {S8("reject-syntax"), S8("tests/differential/reject_syntax.c"), {0}, true},
-                        };
-                        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(tests); index += 1)
-                        {
-                            u64 scratch = arena->position;
-                            failures += d_case_run(&settings, tests[index], configs, count);
-                            arena_set_position(arena, scratch);
-                        }
+                        u32 case_count = (u32)BUSTER_ARRAY_LENGTH(d_builtin_cases) + generated;
+                        DCase* cases = arena_allocate(arena, DCase, case_count);
+                        memcpy(cases, d_builtin_cases, sizeof(d_builtin_cases));
                         for (u32 index = 0; index < generated; index += 1)
                         {
-                            u64 scratch = arena->position;
                             seed = seed * 1664525U + 1013904223U;
                             String8 name = string_format(arena, S8("seed-{u32}"), seed);
                             String8 source = path_join(arena, settings.out, string_format(arena, S8("{S8}.c"), name));
@@ -899,9 +1223,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                             String8 prefix = S8("extern int printf(const char *, ...);\nunsigned mix(unsigned x, unsigned n) {\n unsigned a=x, b=x^1234567u;\n for(unsigned i=0;i<n;i++){ unsigned t=a; a=(b+(i*17u))^(a>>3); b=(t<<5)|(t>>27); if(a&1u) b^=a; else a+=b; }\n return a^b;\n}\nint main(void) { unsigned x=mix(");
                             String8 suffix = S8("u,31u); printf(\"%u\\n\",x); return (int)(x&127u); }\n");
                             d_write(&settings, source, string_format(arena, S8("{S8}{u32}{S8}"), prefix, seed, suffix));
-                            failures += d_case_run(&settings, (DCase){.name = name, .source = source}, configs, count);
-                            arena_set_position(arena, scratch);
+                            cases[BUSTER_ARRAY_LENGTH(d_builtin_cases) + index] = (DCase){.name = name, .source = source};
                         }
+                        failures += d_cases_run(&settings, cases, case_count, configs, count, jobs);
                     }
                     settings.io_failed |= fclose(settings.report) != 0;
                     d_write(&settings, path_join(arena, settings.out, S8("summary.txt")),

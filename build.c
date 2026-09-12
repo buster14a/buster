@@ -27,7 +27,11 @@
 //   process_arguments, main                      command dispatch
 
 #define BUSTER_UNITY_BUILD 1
+// TCC's bootstrap headers/atomics retain the serial fallback. Hosted Clang
+// drivers can opt into the existing lane gang with test_differential --jobs.
+#if defined(__TINYC__) && !defined(BUSTER_SINGLE_THREADED)
 #define BUSTER_SINGLE_THREADED 1
+#endif
 #include <buster/lib/base.h>
 #include <buster/lib/os.h>
 #include <buster/lib/entry_point.h>

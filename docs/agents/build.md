@@ -283,6 +283,11 @@ signing or device execution; those remain the regular Android mobile CI gates.
 Do not run two configurations' packaging concurrently in one build directory:
 the existing APK and staging paths are shared.
 
+The Clang/GCC build-driver binary now leaves the existing lane implementation
+available for opt-in `test_differential --jobs N`. The default remains one case
+worker; other build workflows never dispatch a lane gang. TCC still defines
+`BUSTER_SINGLE_THREADED=1` for its bootstrap headers/atomics. An explicit
+`-DBUSTER_SINGLE_THREADED=1` preserves the same worker loop in serial builds.
 ## UEFI firmware execution
 
 `build/build test_uefi <built-ide> <fresh-output-directory>` boots both UEFI

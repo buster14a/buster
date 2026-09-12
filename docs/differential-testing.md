@@ -281,3 +281,47 @@ The `va-list-places` case keeps all lists within one translation unit and checks
 builtin aliases, member/index/dereference destinations, independent copies and
 side-effect counts against Clang at O0/O2. It exercises frontend list handling
 without exchanging public list objects across the AArch64 compiler boundary.
+
+## Bounded case workers
+
+`--jobs N` accepts 1 through 64 and defaults to one. The effective count is
+capped by the logical CPU count, the case count and a positive decimal
+`BUSTER_TEST_JOBS` quota when supplied. Invalid limits fail before running the
+corpus. TCC-bootstrapped and explicitly `BUSTER_SINGLE_THREADED=1` drivers retain
+one lane; the manifest records requested and effective limits. Clang/GCC-built
+drivers use the existing persistent lane gang. Other build commands do not
+start that gang.
+
+A lane dynamically claims one complete case at a time. Each case keeps the
+entire configuration cross product, independent O0/O2 references, fresh fixed
+caller object and per-case first-mismatch reduction budget. Generated inputs
+and seeds are prepared in corpus order before dispatch. Every lane owns its
+arena, diagnostics, process log and evidence-error state. The arena's committed
+scratch is released between cases. Spawn setup is serialized through closing
+the child's pipe ends, preventing another concurrently launched child from
+inheriting a capture writer; process execution and deadline waits overlap.
+
+Each case exclusively claims its directory and writes `processes.tsv`,
+`case.log` and a completion `result.txt`. After all lanes finish, the driver
+checks one completion per case, full row counts for passing cases, the exact
+completion record and the saved process/log sizes and hashes. It then merges
+process records and prints diagnostics in corpus order. Missing, duplicate,
+truncated or unwritable evidence fails the aggregate. Failed child launch,
+crash, timeout and recovering sanitizer reports retain their existing failure
+semantics. No test is dropped when another case fails.
+
+The existing self-test runs this same worker and collection path with real
+children at one and multiple lanes (respecting the quota), checks ordered binary
+observations, and injects crashes, deadlines, failed launches, duplicate case
+directories, missing/duplicate completion records and damaged evidence.
+
+Each admitted case launches at most one compiler, linker or program at once;
+the compiler's own default remains one worker. `--jobs` is a CPU admission
+limit, not a RAM estimator. Budget up to N simultaneous child peaks and N
+case arenas when selecting it. Default hosted policy stays at one pending the
+matched platform timing/RSS acceptance in #408. For local comparison, use new
+output directories for each of `--jobs 1`, `--jobs 2` and `--jobs 4`, with the
+same compiler, corpus, sanitizer policy and quota. Normalize only the output
+root and `elapsed_us` when comparing process records; argv paths also contain
+the output root. Source, observations, configuration sets and case order must
+match exactly.

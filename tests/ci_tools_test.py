@@ -437,13 +437,22 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("needs: [lint, test, native, mobile, uefi]", text)
         self.assertIn("github.run_id", text.split("concurrency:", 1)[1].split("permissions:", 1)[0])
 
+    def test_windows_runs_native_worker_controls_before_the_combination_matrix(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        block = text.split("      - name: Combination matrix (Windows)", 1)[1].split("      - name:", 1)[0]
+        control = block.index("test_differential --self-test")
+        self.assertLess(control, block.index("test_all_combinations_ci"))
+        self.assertIn("differential-self-test.log", block)
+        self.assertIn("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", block[control:])
+
     def test_native_suites_are_independent_and_keep_all_four_unix_runners(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         desktop = text.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
         native = text.split("\n  native:", 1)[1].split("\n  mobile:", 1)[0]
         self.assertNotIn("needs:", native)
         self.assertNotIn("test_mode_matrix", desktop)
-        self.assertNotIn("test_differential", desktop)
+        self.assertNotIn("test_differential", desktop.replace("test_differential --self-test", ""))
+        self.assertEqual(desktop.count("test_differential --self-test"), 1)
         self.assertNotIn("test_all_combinations_ci", native)
         self.assertIn("fail-fast: false", native)
         self.assertNotIn("actions/download-artifact", native)
