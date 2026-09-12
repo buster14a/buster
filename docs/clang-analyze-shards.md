@@ -119,6 +119,8 @@ RSS**. Windows reports zero for unavailable RSS. Compare wall time and the same
 eligible TU count alongside these memory/concurrency limits; no platform-wide
 speedup follows from a single hosted-runner sample. CI retains the revision,
 Clang version, database, CMake cache, manifest, shard reports and logs.
+The initial complete comparison and its measurement limits are recorded in
+[the CI performance audit](performance-audits/2026-09-12T192036Z.md).
 
 ## Split-analysis contracts
 
