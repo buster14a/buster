@@ -7,7 +7,7 @@ on:
     branches: [codex/36-failure-diagnostics]
 
 concurrency:
-  group: retirement-evidence-${{ github.ref }}
+  group: retirement-evidence-with-strict-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -136,3 +136,54 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           compression-level: 6
+
+  strict_differential:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Strict MIR differential with sanitized oracle
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 59b7167635cb549211263bf372f1796e7d3bf857
+          persist-credentials: false
+      - name: Build and freeze hosted Clang compiler
+        run: |
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/strict-build"
+          "$RUNNER_TEMP/strict-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/strict-build" build --config Release -t ide
+          mkdir -p evidence/strict-binary
+          cp build/Release/ide evidence/strict-binary/ide
+          chmod 555 evidence/strict-binary/ide
+          git rev-parse HEAD HEAD^{tree} > evidence/strict-binary/source.txt
+          sha256sum evidence/strict-binary/ide > evidence/strict-binary/sha256.txt
+          cp build/CMakeCache.txt build/compile_commands.json evidence/strict-binary/
+      - name: Validate differential harness
+        run: '"$RUNNER_TEMP/strict-build" test_differential --self-test'
+      - name: Execute every strict configuration with sanitizer enabled
+        run: >-
+          "$RUNNER_TEMP/strict-build" test_differential
+          --ide "$PWD/evidence/strict-binary/ide" --cc clang
+          --strict-mir --sanitize-oracle --out evidence/strict-differential
+      - name: Bundle and verify full strict evidence
+        id: strict_bundle
+        if: ${{ !cancelled() }}
+        run: python3 tools/ci_pack_evidence.py --source evidence --output "$RUNNER_TEMP/strict-upload"
+      - name: Retain strict evidence
+        if: ${{ !cancelled() && steps.strict_bundle.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: strict-retirement-59b7167-${{ github.run_id }}
+          path: ${{ runner.temp }}/strict-upload/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain raw strict evidence after packaging failure
+        if: ${{ !cancelled() && steps.strict_bundle.outcome != 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: strict-retirement-59b7167-raw-${{ github.run_id }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
