@@ -1,5 +1,6 @@
 #pragma once
 
+#include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 
 typedef struct CodegenBuffer CodegenBuffer;

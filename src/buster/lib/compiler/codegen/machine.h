@@ -1146,6 +1146,7 @@ typedef struct MachineFunction MachineFunction;
 #define MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY (1u << 0)
 #define MACHINE_INLINE_ASSEMBLY_EFFECT_FLAGS (1u << 1)
 #define MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR (1u << 2)
+#define MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP (1u << 3)
 
 // One operand of a closed inline-assembly transaction. `stack_slot` owns the
 // value image (or the address for a memory operand); the encoder transfers it
