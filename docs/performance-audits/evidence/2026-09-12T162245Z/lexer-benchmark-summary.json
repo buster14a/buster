@@ -1,0 +1,20 @@
+{
+  "0": {
+    "baseline": 1371768.5,
+    "candidate": 1381414.0,
+    "median_paired_ratio": 1.0281533445866151
+  },
+  "1": {
+    "baseline": 6729369.0,
+    "candidate": 6754015.5,
+    "median_paired_ratio": 1.0068824989085003
+  },
+  "binaries": {
+    "baseline": "141c0d7d63640c37841fe7ef7f8176bc886f01575fbc0d3f41f4df02f4d417c4",
+    "candidate": "acf88010eef980a33c4182e9da7b69e36080bef0025230a090710293f9339f58"
+  },
+  "input_sha256": "7f930ebda53ab297b4c98fa564d4d052f169e227f9c1f98bd2aa90a22b861111",
+  "input_bytes": 1346688,
+  "cpu": 0,
+  "candidate_source_sha256": "827a01443f006c0b4ffca62d74fae4c202b8f52b425a12e070acae82ebfea0b8"
+}
